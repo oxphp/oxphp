@@ -26,6 +26,7 @@ All settings are via environment variables:
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html` | Filesystem path to serve files from |
 | `INDEX_FILE` | *(unset)* | Routing mode selector |
+| `WORKER_THREADS` | `0` | Tokio worker thread count (`0` = auto-detect CPU cores) |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 
 ## Build

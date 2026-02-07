@@ -1,7 +1,20 @@
+:root {
+    --rust-orange: #B7472A;
+    --php-purple: #777BB4;
+}
+
 body {
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, San Francisco, Segoe UI, Roboto, Helvetica Neue, sans-serif;
     max-width: 640px;
     margin: 2rem auto;
     padding: 0 1rem;
     color: #333;
+}
+
+.logo-rust {
+    color: var(--rust-orange);
+}
+
+.logo-php {
+    color: var(--php-purple);
 }

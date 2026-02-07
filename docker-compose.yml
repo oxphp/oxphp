@@ -12,4 +12,6 @@ services:
       - DOCUMENT_ROOT=/var/www/html
       # Tracing verbosity: error, warn, info, debug, trace (default: info)
       - LOG_LEVEL=debug
+      # Tokio worker thread count, 0 = auto-detect CPU cores (default: 0)
+      - WORKER_THREADS=0
     restart: unless-stopped

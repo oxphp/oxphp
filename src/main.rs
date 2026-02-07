@@ -8,15 +8,26 @@ use oxphp::config;
 use oxphp::server;
 use oxphp::types;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), types::BoxError> {
+fn main() -> Result<(), types::BoxError> {
     let config = config::Config::from_env()?;
 
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if config.worker_threads > 0 {
+        builder.worker_threads(config.worker_threads);
+    }
+    builder.enable_all();
+
+    let runtime = builder.build()?;
+    runtime.block_on(async_main(config))
+}
+
+async fn async_main(config: config::Config) -> Result<(), types::BoxError> {
     logging::init(&config.log_level)?;
 
     tracing::info!(
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
+        worker_threads = config.worker_threads,
         "OxPHP HTTP server starting"
     );
 

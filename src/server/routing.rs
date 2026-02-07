@@ -21,6 +21,7 @@ pub enum RouteResult {
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
     document_root: PathBuf,
+    canonical_root: Option<PathBuf>,
     index_file: Option<String>,
     index_file_path: Option<PathBuf>,
     index_file_is_php: bool,
@@ -28,7 +29,23 @@ pub struct RouteConfig {
 
 impl RouteConfig {
     /// Create route config from server config.
+    ///
+    /// Attempts to canonicalize the document root at startup for symlink escape
+    /// protection. Falls back to the original path with a warning if
+    /// canonicalization fails (e.g. path does not exist yet).
     pub fn new(config: &ServerConfig) -> Self {
+        let canonical_root = match std::fs::canonicalize(&config.document_root) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    document_root = %config.document_root.display(),
+                    error = %e,
+                    "Could not canonicalize document_root; symlink escape protection disabled"
+                );
+                None
+            }
+        };
+
         let index_file_path = config
             .index_file
             .as_ref()
@@ -42,6 +59,7 @@ impl RouteConfig {
 
         Self {
             document_root: config.document_root.clone(),
+            canonical_root,
             index_file: config.index_file.clone(),
             index_file_path,
             index_file_is_php,
@@ -49,7 +67,64 @@ impl RouteConfig {
     }
 
     /// Resolve a URI path to a route result using the file cache.
+    ///
+    /// After the inner resolution, validates that the resolved path does not
+    /// escape the document root via symlinks.
     pub async fn resolve_request(
+        &self,
+        uri_path: &str,
+        file_cache: &Arc<FileCache>,
+    ) -> RouteResult {
+        let result = self.resolve_request_inner(uri_path, file_cache).await;
+
+        // Validate resolved path stays within document root
+        match &result {
+            RouteResult::Serve(path) | RouteResult::Execute(path) => {
+                if !self.validate_path(path, file_cache).await {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Blocked request: resolved path escapes document root"
+                    );
+                    return RouteResult::NotFound;
+                }
+            }
+            RouteResult::NotFound => {}
+        }
+
+        result
+    }
+
+    /// Check that a resolved path is within the canonical document root.
+    /// Results are cached in the file cache to avoid repeated `realpath(3)` syscalls.
+    async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
+        let canonical_root = match &self.canonical_root {
+            Some(root) => root,
+            None => return true, // canonicalization disabled, skip check
+        };
+
+        let cache_key = path.to_string_lossy().to_string();
+
+        // Check cache first
+        if let Some(cached) = file_cache.get_canonical(&cache_key) {
+            return match cached {
+                Some(canonical_path) => canonical_path.starts_with(canonical_root),
+                None => true, // file didn't exist at cache time; serve() will 404
+            };
+        }
+
+        // Cache miss — perform canonicalization
+        let result = tokio::fs::canonicalize(path).await.ok();
+        let valid = match &result {
+            Some(canonical_path) => canonical_path.starts_with(canonical_root),
+            None => true, // file doesn't exist; serve() will return 404
+        };
+
+        file_cache.insert_canonical(cache_key, result);
+        valid
+    }
+
+    /// Inner route resolution logic (no path validation).
+    async fn resolve_request_inner(
         &self,
         uri_path: &str,
         file_cache: &Arc<FileCache>,
@@ -310,6 +385,55 @@ mod tests {
         // %2e%2e = ".."
         let result = rc.resolve_request("/%2e%2e/etc/passwd", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
+    }
+
+    // --- Symlink escape test ---
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_escape_blocked() {
+        use std::os::unix::fs::symlink;
+
+        let dir = setup_test_dir();
+        // Create a symlink inside document_root pointing outside it
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join("secret.txt"), "secret data").unwrap();
+        symlink(target.path(), dir.path().join("escape")).unwrap();
+
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/escape/secret.txt", &cache).await;
+        assert!(
+            matches!(result, RouteResult::NotFound),
+            "Symlink escape should be blocked"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_symlink_escape_cached_on_second_request() {
+        use std::os::unix::fs::symlink;
+
+        let dir = setup_test_dir();
+        let target = TempDir::new().unwrap();
+        fs::write(target.path().join("secret.txt"), "secret data").unwrap();
+        symlink(target.path(), dir.path().join("escape")).unwrap();
+
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+
+        // First request: cache miss, canonicalize, block
+        let result1 = rc.resolve_request("/escape/secret.txt", &cache).await;
+        assert!(matches!(result1, RouteResult::NotFound));
+
+        // Second request: should hit the canonical cache, still blocked
+        let result2 = rc.resolve_request("/escape/secret.txt", &cache).await;
+        assert!(matches!(result2, RouteResult::NotFound));
+
+        // Verify the canonical path was cached
+        let escaped_path = dir.path().join("escape/secret.txt");
+        let cached = cache.get_canonical(&escaped_path.to_string_lossy());
+        assert!(cached.is_some(), "Canonical path should be cached");
     }
 
     // --- Subdirectory tests ---
