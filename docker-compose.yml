@@ -1,0 +1,15 @@
+services:
+  oxphp:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./www:/var/www/html:ro
+    environment:
+      # Address and port the server binds to (default: 0.0.0.0:8080)
+      - LISTEN_ADDR=0.0.0.0:8080
+      # Filesystem path to serve files from (default: /var/www/html)
+      - DOCUMENT_ROOT=/var/www/html
+      # Tracing verbosity: error, warn, info, debug, trace (default: info)
+      - LOG_LEVEL=debug
+    restart: unless-stopped
