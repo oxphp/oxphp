@@ -12,26 +12,39 @@ use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpStream;
 
 use crate::config::ServerConfig;
+use crate::executor::ScriptExecutor;
 use crate::server::response::static_file::FileCache;
 use crate::server::routing::RouteConfig;
+
+/// RAII guard that decrements the active connection counter on drop,
+/// even if the connection handler panics.
+struct ConnectionGuard<'a>(&'a AtomicUsize);
+
+impl Drop for ConnectionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Core HTTP server managing connections, routing, and shutdown.
 pub struct Server {
     route_config: RouteConfig,
     file_cache: Arc<FileCache>,
+    executor: Arc<dyn ScriptExecutor>,
     active_connections: AtomicUsize,
     shutdown: AtomicBool,
 }
 
 impl Server {
     /// Create a new server from configuration.
-    pub fn new(config: &ServerConfig) -> Self {
+    pub fn new(config: &ServerConfig, executor: Arc<dyn ScriptExecutor>) -> Self {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
 
         Self {
             route_config,
             file_cache,
+            executor,
             active_connections: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
         }
@@ -39,12 +52,18 @@ impl Server {
 
     /// Signal the server to stop accepting new connections.
     pub fn shutdown(&self) {
+        self.executor.shutdown();
         self.shutdown.store(true, Ordering::SeqCst);
     }
 
     /// Returns true if shutdown has been initiated.
     pub fn is_shutdown(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// Returns the number of currently active connections.
+    pub fn active_connections(&self) -> usize {
+        self.active_connections.load(Ordering::SeqCst)
     }
 
     /// Handle a single TCP connection (may serve multiple HTTP requests via keep-alive).
@@ -58,21 +77,25 @@ impl Server {
         }
 
         self.active_connections.fetch_add(1, Ordering::SeqCst);
+        let _guard = ConnectionGuard(&self.active_connections);
 
         let io = TokioIo::new(stream);
         let route_config = self.route_config.clone();
         let file_cache = Arc::clone(&self.file_cache);
+        let executor = Arc::clone(&self.executor);
 
         let service = service_fn(move |req| {
             let route_config = route_config.clone();
             let file_cache = Arc::clone(&file_cache);
-            async move { connection::handle_request(req, &route_config, &file_cache, remote_addr).await }
+            let executor = Arc::clone(&executor);
+            async move {
+                connection::handle_request(req, &route_config, &file_cache, &executor, remote_addr)
+                    .await
+            }
         });
 
         let builder = Builder::new(hyper_util::rt::TokioExecutor::new());
         let result = builder.serve_connection(io, service).await;
-
-        self.active_connections.fetch_sub(1, Ordering::SeqCst);
 
         if let Err(e) = result {
             return Err(format!("connection error: {e}").into());

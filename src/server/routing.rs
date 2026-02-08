@@ -20,11 +20,14 @@ pub enum RouteResult {
 /// Routing configuration derived from server config.
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
-    document_root: PathBuf,
+    document_root: Arc<PathBuf>,
     canonical_root: Option<PathBuf>,
     index_file: Option<String>,
     index_file_path: Option<PathBuf>,
     index_file_is_php: bool,
+    /// Pre-computed root index paths to avoid `join()` on every `/` request.
+    root_index_php: PathBuf,
+    root_index_html: PathBuf,
 }
 
 impl RouteConfig {
@@ -57,13 +60,33 @@ impl RouteConfig {
             .map(|f| f.ends_with(".php"))
             .unwrap_or(false);
 
+        let root_index_php = config.document_root.join("index.php");
+        let root_index_html = config.document_root.join("index.html");
+
         Self {
-            document_root: config.document_root.clone(),
+            document_root: Arc::new(config.document_root.clone()),
             canonical_root,
             index_file: config.index_file.clone(),
             index_file_path,
             index_file_is_php,
+            root_index_php,
+            root_index_html,
         }
+    }
+
+    /// Returns the canonical document root, if canonicalization succeeded at startup.
+    pub fn canonical_root(&self) -> Option<&Path> {
+        self.canonical_root.as_deref()
+    }
+
+    /// Returns the document root path.
+    pub fn document_root(&self) -> &Path {
+        &self.document_root
+    }
+
+    /// Returns a shared reference to the document root (cheap clone via Arc).
+    pub fn document_root_arc(&self) -> Arc<PathBuf> {
+        Arc::clone(&self.document_root)
     }
 
     /// Resolve a URI path to a route result using the file cache.
@@ -153,9 +176,9 @@ impl RouteConfig {
         // 5. Resolve file path
         let file_path = self.document_root.join(sanitized.trim_start_matches('/'));
 
-        // 6. Root path "/" → resolve with index file
+        // 6. Root path "/" → use pre-computed index paths (no alloc)
         if uri_path == "/" {
-            return self.resolve_index(&self.document_root, file_cache).await;
+            return self.resolve_root_index(file_cache).await;
         }
 
         // 7. Trailing slash → directory mode
@@ -186,7 +209,26 @@ impl RouteConfig {
         RouteResult::NotFound
     }
 
-    /// Resolve index file for a directory (tries index.php, then index.html).
+    /// Resolve root `/` using pre-computed index paths (zero allocation).
+    async fn resolve_root_index(&self, file_cache: &Arc<FileCache>) -> RouteResult {
+        if file_cache
+            .is_file(&self.root_index_php.to_string_lossy())
+            .await
+        {
+            return RouteResult::Execute(self.root_index_php.clone());
+        }
+
+        if file_cache
+            .is_file(&self.root_index_html.to_string_lossy())
+            .await
+        {
+            return RouteResult::Serve(self.root_index_html.clone());
+        }
+
+        RouteResult::NotFound
+    }
+
+    /// Resolve index file for a subdirectory (tries index.php, then index.html).
     async fn resolve_index(&self, dir: &Path, file_cache: &Arc<FileCache>) -> RouteResult {
         let php_index = dir.join("index.php");
         if file_cache.is_file(&php_index.to_string_lossy()).await {

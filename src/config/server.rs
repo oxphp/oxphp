@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 /// Server-specific configuration loaded from environment variables.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub document_root: PathBuf,

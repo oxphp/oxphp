@@ -3,11 +3,13 @@ mod server;
 pub use server::ServerConfig;
 
 /// Top-level application configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Config {
     pub server: ServerConfig,
     pub log_level: String,
     pub worker_threads: usize,
+    pub executor_type: String,
+    pub max_connections: usize,
 }
 
 impl Config {
@@ -15,11 +17,18 @@ impl Config {
         let server = ServerConfig::from_env()?;
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let worker_threads = parse_worker_threads();
+        let executor_type = std::env::var("EXECUTOR").unwrap_or_else(|_| "sapi".to_string());
+        let max_connections = std::env::var("MAX_CONNECTIONS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10_000);
 
         Ok(Self {
             server,
             log_level,
             worker_threads,
+            executor_type,
+            max_connections,
         })
     }
 }

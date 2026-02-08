@@ -12,7 +12,9 @@ async fn start_server(document_root: &std::path::Path, index_file: Option<&str>)
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = Arc::new(oxphp::server::Server::new(&config));
+    let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
+        Arc::new(oxphp::executor::stub::StubExecutor::new());
+    let server = Arc::new(oxphp::server::Server::new(&config, executor));
 
     tokio::spawn(async move {
         loop {

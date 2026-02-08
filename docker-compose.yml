@@ -11,7 +11,11 @@ services:
       # Filesystem path to serve files from (default: /var/www/html)
       - DOCUMENT_ROOT=/var/www/html
       # Tracing verbosity: error, warn, info, debug, trace (default: info)
-      - LOG_LEVEL=debug
+      - LOG_LEVEL=trace
       # Tokio worker thread count, 0 = auto-detect CPU cores (default: 0)
       - WORKER_THREADS=0
+      # Executor type: sapi (PHP execution) or stub (benchmark mode)
+      - EXECUTOR=sapi
+      # Number of PHP worker threads (default: CPU count)
+      # - PHP_WORKERS=4
     restart: unless-stopped

@@ -1,8 +1,60 @@
-# Build stage
-FROM rust:1.85-alpine AS builder
+# ══════════════════════════════════════════════════════════════
+# Stage 1: Build bridge library (plain Alpine + gcc)
+# ══════════════════════════════════════════════════════════════
+FROM alpine:3.21 AS bridge-builder
 
-# Install build dependencies
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache gcc musl-dev make
+
+WORKDIR /build
+COPY ext/bridge/ ./
+
+RUN make && make install
+
+# ══════════════════════════════════════════════════════════════
+# Stage 2: Build PHP extension (needs phpize + bridge headers)
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-alpine AS ext-builder
+
+RUN apk add --no-cache gcc musl-dev make autoconf
+
+# Install bridge library (needed for linking)
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
+
+WORKDIR /build/ext
+COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
+COPY ext/bridge/oxphp_bridge.h ./bridge/
+
+RUN phpize && \
+    ./configure --enable-oxphp-sapi && \
+    make && \
+    make install
+
+# ══════════════════════════════════════════════════════════════
+# Stage 3: Build Rust binary in PHP ZTS image
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-alpine AS builder
+
+# Install Rust and build dependencies
+RUN apk add --no-cache \
+    rust \
+    cargo \
+    musl-dev \
+    pkgconfig \
+    readline-dev \
+    ncurses-dev \
+    curl-dev \
+    oniguruma-dev \
+    sqlite-dev \
+    argon2-dev \
+    libxml2-dev \
+    zlib-dev \
+    openssl-dev \
+    gnu-libiconv-dev
+
+# Install bridge library (needed for Rust linking)
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
@@ -16,30 +68,73 @@ RUN mkdir src && \
     cargo build --release && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
-# Copy real source
+# Copy real source and build script
 COPY src ./src
+COPY build.rs ./
 
-# Build release binary
-RUN cargo build --release
+# Build release binary with PHP feature
+RUN cargo build --release --features php
 
-# Runtime stage
+# ══════════════════════════════════════════════════════════════
+# Stage 4: Runtime
+# ══════════════════════════════════════════════════════════════
 FROM alpine:3.21
 
-# Install runtime dependencies
-RUN apk add --no-cache libgcc
+RUN apk add --no-cache \
+    libgcc \
+    libxml2 \
+    sqlite-libs \
+    libcurl \
+    oniguruma \
+    argon2-libs \
+    zlib \
+    ncurses-libs \
+    readline \
+    gnu-libiconv \
+    # ld-linux compat symlink — Rust binary built on Alpine references /lib/ld-linux-*
+    # but bare Alpine only has /lib/ld-musl-*
+    && MUSL_LD=$(ls /lib/ld-musl-*.so.1 | head -1) \
+    && case "$(uname -m)" in \
+        x86_64)  ln -sf "$MUSL_LD" /lib/ld-linux-x86-64.so.2 ;; \
+        aarch64) ln -sf "$MUSL_LD" /lib/ld-linux-aarch64.so.1 ;; \
+       esac
 
 # Create www-data user (UID 82, compatible with nginx/apache)
 # Alpine 3.21 already has www-data group (GID 82), so add user to existing group
 RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
 
-# Create web root
-RUN mkdir -p /var/www/html && chown www-data:www-data /var/www/html
+# Copy PHP runtime
+COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
+COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
+
+# Copy bridge library
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+
+# Copy PHP extension
+COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
+
+# PHP configuration
+RUN mkdir -p /usr/local/etc/php && \
+    echo "opcache.enable=1" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.jit=tracing" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.jit_buffer_size=64M" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.validate_timestamps=0" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.memory_consumption=128" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.interned_strings_buffer=16" >> /usr/local/etc/php/php.ini && \
+    echo "opcache.max_accelerated_files=10000" >> /usr/local/etc/php/php.ini && \
+    echo "extension=oxphp_sapi.so" >> /usr/local/etc/php/php.ini
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
+# Create web root
+RUN mkdir -p /var/www/html && chown www-data:www-data /var/www/html
+
 # Copy default web files
 COPY --chown=www-data:www-data www/ /var/www/html/
+
+# Ensure libphp.so and liboxphp_bridge.so are found at runtime
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 USER www-data
 

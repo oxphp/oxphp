@@ -24,6 +24,7 @@ serde_json = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
 
 # Streaming response bodies
 tokio-util = { version = "0.7", features = ["io"] }
@@ -31,6 +32,12 @@ futures-util = "0.3"
 
 # URL decoding
 percent-encoding = "2"
+
+# Lock-free bounded channel for worker pool
+crossbeam-channel = "0.5"
+
+[features]
+php = []
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
