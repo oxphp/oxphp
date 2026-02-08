@@ -180,6 +180,19 @@ extern "C" {
     pub static mut sapi_module: sapi_module_struct;
 }
 
+/// PHP 8.4 zend_error_cb signature:
+///   void (*)(int type, zend_string *error_filename, uint32_t error_lineno, zend_string *message)
+pub type ZendErrorCbT = unsafe extern "C" fn(
+    type_: c_int,
+    error_filename: *const zend_string,
+    error_lineno: c_uint,
+    message: *const zend_string,
+);
+
+extern "C" {
+    pub static mut zend_error_cb: ZendErrorCbT;
+}
+
 extern "C" {
     // zend_error — PHP's error handler (php_error is a macro: #define php_error zend_error)
     // Used as sapi_error callback — MUST be set to avoid NULL dereference.

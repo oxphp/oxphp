@@ -50,6 +50,11 @@ impl SapiExecutor {
             panic!("php_module_startup() failed with code {startup_result}");
         }
 
+        // 4. Install structured error logging callback (must be after php_module_startup)
+        unsafe {
+            sapi::install_error_cb();
+        }
+
         let queue_capacity = std::env::var("QUEUE_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())

@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::CString;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -386,6 +387,103 @@ unsafe extern "C" fn oxphp_log_message(message: *const c_char, _syslog_type: c_i
     tracing::warn!(php_message = %msg.to_string_lossy(), "PHP log");
 }
 
+// ─── Structured Error Logging via zend_error_cb ─────────────
+
+/// Stores the original zend_error_cb so we can delegate after logging.
+static ORIGINAL_ERROR_CB: OnceLock<ZendErrorCbT> = OnceLock::new();
+
+/// Install our structured error callback, saving the original.
+/// Must be called AFTER php_module_startup() (which sets the default zend_error_cb).
+///
+/// # Safety
+/// Must only be called once, from the main thread, after PHP module startup.
+pub unsafe fn install_error_cb() {
+    let original = crate::php::bindings::zend_error_cb;
+    if ORIGINAL_ERROR_CB.set(original).is_err() {
+        return;
+    }
+    crate::php::bindings::zend_error_cb = oxphp_error_cb;
+}
+
+/// Map PHP error type constant to (tracing level, human-readable name).
+/// PHP uses bitmask values; uncaught exceptions may have high bits set (e.g. 0x1000001).
+fn error_type_str(error_type: c_int) -> (&'static str, &'static str) {
+    // Match the low 15 bits — PHP's standard E_* constants live in 1..16384
+    match error_type & 0x7FFF {
+        1 => ("error", "E_ERROR"),
+        2 => ("warn", "E_WARNING"),
+        4 => ("error", "E_PARSE"),
+        8 => ("info", "E_NOTICE"),
+        16 => ("error", "E_CORE_ERROR"),
+        32 => ("warn", "E_CORE_WARNING"),
+        64 => ("error", "E_COMPILE_ERROR"),
+        128 => ("warn", "E_COMPILE_WARNING"),
+        256 => ("error", "E_USER_ERROR"),
+        512 => ("warn", "E_USER_WARNING"),
+        1024 => ("info", "E_USER_NOTICE"),
+        2048 => ("info", "E_STRICT"),
+        4096 => ("error", "E_RECOVERABLE_ERROR"),
+        8192 => ("info", "E_DEPRECATED"),
+        16384 => ("info", "E_USER_DEPRECATED"),
+        _ => ("warn", "E_UNKNOWN"),
+    }
+}
+
+unsafe extern "C" fn oxphp_error_cb(
+    type_: c_int,
+    error_filename: *const zend_string,
+    error_lineno: c_uint,
+    message: *const zend_string,
+) {
+    // Extract strings from zend_string pointers
+    let file = if error_filename.is_null() {
+        std::borrow::Cow::Borrowed("unknown")
+    } else {
+        (*error_filename).to_str_lossy()
+    };
+
+    let msg = if message.is_null() {
+        std::borrow::Cow::Borrowed("(no message)")
+    } else {
+        (*message).to_str_lossy()
+    };
+
+    let (level, type_name) = error_type_str(type_);
+
+    match level {
+        "error" => {
+            tracing::error!(
+                php_error_type = type_name,
+                php_file = %file,
+                php_line = error_lineno,
+                "PHP: {msg}"
+            );
+        }
+        "warn" => {
+            tracing::warn!(
+                php_error_type = type_name,
+                php_file = %file,
+                php_line = error_lineno,
+                "PHP: {msg}"
+            );
+        }
+        _ => {
+            tracing::info!(
+                php_error_type = type_name,
+                php_file = %file,
+                php_line = error_lineno,
+                "PHP: {msg}"
+            );
+        }
+    }
+
+    // Delegate to original callback for PHP's standard error handling
+    // (display_errors output, user error handlers, fatal abort, etc.)
+    if let Some(&original) = ORIGINAL_ERROR_CB.get() {
+        original(type_, error_filename, error_lineno, message);
+    }
+}
+
 // ─── Request Time (for OPcache) ─────────────────────────────
 
 unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_result {
@@ -417,4 +515,42 @@ pub fn clear_buffers() {
     OUTPUT_BUFFER.with(|buf| buf.borrow_mut().clear());
     HEADERS_BUFFER.with(|buf| buf.borrow_mut().clear());
     STATUS_CODE.with(|sc| *sc.borrow_mut() = 200);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_type_str_known_types() {
+        assert_eq!(error_type_str(1), ("error", "E_ERROR"));
+        assert_eq!(error_type_str(2), ("warn", "E_WARNING"));
+        assert_eq!(error_type_str(4), ("error", "E_PARSE"));
+        assert_eq!(error_type_str(8), ("info", "E_NOTICE"));
+        assert_eq!(error_type_str(16), ("error", "E_CORE_ERROR"));
+        assert_eq!(error_type_str(32), ("warn", "E_CORE_WARNING"));
+        assert_eq!(error_type_str(64), ("error", "E_COMPILE_ERROR"));
+        assert_eq!(error_type_str(128), ("warn", "E_COMPILE_WARNING"));
+        assert_eq!(error_type_str(256), ("error", "E_USER_ERROR"));
+        assert_eq!(error_type_str(512), ("warn", "E_USER_WARNING"));
+        assert_eq!(error_type_str(1024), ("info", "E_USER_NOTICE"));
+        assert_eq!(error_type_str(2048), ("info", "E_STRICT"));
+        assert_eq!(error_type_str(4096), ("error", "E_RECOVERABLE_ERROR"));
+        assert_eq!(error_type_str(8192), ("info", "E_DEPRECATED"));
+        assert_eq!(error_type_str(16384), ("info", "E_USER_DEPRECATED"));
+    }
+
+    #[test]
+    fn error_type_str_unknown() {
+        assert_eq!(error_type_str(0), ("warn", "E_UNKNOWN"));
+        assert_eq!(error_type_str(-1), ("warn", "E_UNKNOWN"));
+        assert_eq!(error_type_str(99999), ("warn", "E_UNKNOWN"));
+    }
+
+    #[test]
+    fn error_type_str_bitmask_high_bits() {
+        // PHP uncaught exceptions may set high bits (e.g. 0x1000001 = E_ERROR with flag)
+        assert_eq!(error_type_str(0x1000001), ("error", "E_ERROR"));
+        assert_eq!(error_type_str(0x1000002), ("warn", "E_WARNING"));
+    }
 }
