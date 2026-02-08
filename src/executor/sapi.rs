@@ -6,7 +6,8 @@ use crossbeam_channel::{self, TrySendError};
 use http::{HeaderName, HeaderValue};
 
 use crate::executor::ScriptExecutor;
-use crate::php::{bindings, sapi};
+use crate::php::bindings;
+use crate::php::sapi;
 use crate::types::{ScriptRequest, ScriptResponse};
 
 struct WorkerRequest {
@@ -42,31 +43,11 @@ impl SapiExecutor {
             bindings::sapi_startup(&mut module);
         }
 
-        // sapi_startup() sets ini_entries = NULL — restore on both local and global
-        // so php_module_startup() sees them regardless of whether it re-copies module
-        unsafe {
-            sapi::restore_ini_entries_on(&mut module);
-        }
-
         // 3. Start the PHP engine (PHP 8.4: 2 arguments)
         let startup_result =
             unsafe { bindings::php_module_startup(&mut module, std::ptr::null_mut()) };
         if startup_result != 0 {
             panic!("php_module_startup() failed with code {startup_result}");
-        }
-
-        // 4. Override zend_write to route PHP output directly to our ub_write callback.
-        // PHP's default php_output_write() buffers output internally and doesn't reliably
-        // flush through sapi_module.ub_write on ZTS Alpine builds.
-        unsafe {
-            bindings::zend_write = sapi::oxphp_ub_write_export();
-        }
-
-        // 5. Override zend_error_cb to capture error messages in our output buffer.
-        // PHP's error display path (php_error_cb → php_printf → php_output_write) uses
-        // the same broken output layer. Our callback writes errors directly to the buffer.
-        unsafe {
-            sapi::install_error_cb();
         }
 
         let queue_capacity = std::env::var("QUEUE_CAPACITY")

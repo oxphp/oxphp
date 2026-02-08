@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::ffi::CString;
-use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::os::raw::{c_char, c_int, c_void};
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -9,23 +8,6 @@ use http::header;
 
 use crate::php::bindings::*;
 use crate::types::ScriptRequest;
-
-/// Custom INI entries for the OxPHP SAPI.
-/// Note: sapi_startup() sets ini_entries = NULL on the module struct,
-/// so restore_ini_entries() must be called after sapi_startup().
-const INI_ENTRIES: &[u8] = concat!(
-    "html_errors=0\n",
-    "register_argc_argv=0\n",
-    "implicit_flush=1\n",
-    "output_buffering=0\n",
-    "max_execution_time=0\n",
-    "max_input_time=-1\n",
-    "display_errors=1\n",
-    "error_reporting=32767\n",
-    "log_errors=1\n",
-    "\0"
-)
-.as_bytes();
 
 thread_local! {
     static OUTPUT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
@@ -172,8 +154,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
         startup: Some(oxphp_startup),
         shutdown: Some(oxphp_shutdown),
 
-        activate: None,
-        deactivate: None,
+        activate: Some(oxphp_activate),
+        deactivate: Some(oxphp_deactivate),
 
         ub_write: Some(oxphp_ub_write),
         flush: Some(oxphp_flush),
@@ -210,7 +192,7 @@ pub fn build_sapi_module() -> sapi_module_struct {
         ini_defaults: None,
         phpinfo_as_text: 1,
 
-        ini_entries: INI_ENTRIES.as_ptr() as *const c_char,
+        ini_entries: std::ptr::null(),
 
         additional_functions: std::ptr::null(),
         input_filter_init: None,
@@ -283,12 +265,22 @@ unsafe extern "C" fn oxphp_shutdown(_module: *mut sapi_module_struct) -> c_int {
     0 // SUCCESS
 }
 
-// ─── Output Capture ─────────────────────────────────────────
+// ─── Request Lifecycle ──────────────────────────────────────
 
-/// Return the ub_write function pointer for use as zend_write override.
-pub fn oxphp_ub_write_export() -> crate::php::bindings::ZendWriteFuncT {
-    oxphp_ub_write
+/// Called by PHP at the start of each request (during php_request_startup).
+/// Clears per-request state so the output handler chain starts clean.
+unsafe extern "C" fn oxphp_activate() -> c_int {
+    HEADERS_BUFFER.with(|h| h.borrow_mut().clear());
+    STATUS_CODE.with(|s| *s.borrow_mut() = 200);
+    0 // SUCCESS
 }
+
+/// Called by PHP at the end of each request (during php_request_shutdown).
+unsafe extern "C" fn oxphp_deactivate() -> c_int {
+    0 // SUCCESS
+}
+
+// ─── Output Capture ─────────────────────────────────────────
 
 unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> usize {
     if str.is_null() || str_length == 0 {
@@ -305,16 +297,31 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 }
 
 unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
-    // No-op in Phase 2
+    // No-op: output is collected in ub_write buffer
 }
 
 // ─── Header Handling ────────────────────────────────────────
 
 unsafe extern "C" fn oxphp_header_handler(
     sapi_header: *mut sapi_header_struct,
-    _op: sapi_header_op_enum,
+    op: sapi_header_op_enum,
     _sapi_headers: *mut sapi_headers_struct,
 ) -> c_int {
+    match op {
+        sapi_header_op_enum::SAPI_HEADER_DELETE_ALL => {
+            HEADERS_BUFFER.with(|buf| buf.borrow_mut().clear());
+            return 0;
+        }
+        sapi_header_op_enum::SAPI_HEADER_SET_STATUS => {
+            let code = sapi_header as usize as u16;
+            if (100..600).contains(&code) {
+                STATUS_CODE.with(|sc| *sc.borrow_mut() = code);
+            }
+            return 0;
+        }
+        _ => {}
+    }
+
     if sapi_header.is_null() {
         return 0;
     }
@@ -329,13 +336,29 @@ unsafe extern "C" fn oxphp_header_handler(
     let header_bytes = std::slice::from_raw_parts(header_ptr as *const u8, header_len);
     let header_str = String::from_utf8_lossy(header_bytes);
 
-    if let Some(colon_pos) = header_str.find(':') {
-        let name = header_str[..colon_pos].trim().to_string();
-        let value = header_str[colon_pos + 1..].trim().to_string();
+    match op {
+        sapi_header_op_enum::SAPI_HEADER_DELETE => {
+            let name = header_str.trim();
+            HEADERS_BUFFER.with(|buf| {
+                buf.borrow_mut()
+                    .retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+            });
+        }
+        sapi_header_op_enum::SAPI_HEADER_REPLACE | sapi_header_op_enum::SAPI_HEADER_ADD => {
+            if let Some(colon_pos) = header_str.find(':') {
+                let name = header_str[..colon_pos].trim().to_string();
+                let value = header_str[colon_pos + 1..].trim().to_string();
 
-        HEADERS_BUFFER.with(|buf| {
-            buf.borrow_mut().push((name, value));
-        });
+                HEADERS_BUFFER.with(|buf| {
+                    let mut headers = buf.borrow_mut();
+                    if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
+                        headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+                    }
+                    headers.push((name, value));
+                });
+            }
+        }
+        _ => {}
     }
 
     0
@@ -350,7 +373,7 @@ unsafe extern "C" fn oxphp_send_headers(sapi_headers: *mut sapi_headers_struct) 
             });
         }
     }
-    0
+    1 // SAPI_HEADER_SENT_SUCCESSFULLY
 }
 
 // ─── Logging ────────────────────────────────────────────────
@@ -363,80 +386,6 @@ unsafe extern "C" fn oxphp_log_message(message: *const c_char, _syslog_type: c_i
     tracing::warn!(php_message = %msg.to_string_lossy(), "PHP log");
 }
 
-// ─── Error Callback ─────────────────────────────────────────
-
-/// Saved original zend_error_cb (php_error_cb from php_module_startup).
-static ORIGINAL_ERROR_CB: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
-
-/// Install our custom error callback.
-/// Must be called AFTER php_module_startup() (which sets zend_error_cb to php_error_cb).
-///
-/// PHP's error display path: php_error_cb → php_printf → php_output_write → output layer.
-/// The output layer is broken on ZTS Alpine (never calls sapi_module.ub_write).
-/// Our callback writes error messages directly to the output buffer, bypassing the broken path.
-pub unsafe fn install_error_cb() {
-    if let Some(cb) = zend_error_cb {
-        ORIGINAL_ERROR_CB.store(cb as *mut c_void, Ordering::Release);
-    }
-    zend_error_cb = Some(oxphp_error_cb);
-}
-
-unsafe extern "C" fn oxphp_error_cb(
-    type_: c_int,
-    error_filename: *const zend_string,
-    error_lineno: c_uint,
-    message: *const zend_string,
-) {
-    // Write the formatted error message directly to our output buffer FIRST.
-    // We do this before calling the original because the original may call
-    // zend_bailout() for fatal errors (longjmp that skips our code after).
-    let type_str = error_type_str(type_);
-    let filename = if !error_filename.is_null() {
-        (*error_filename).to_str_lossy()
-    } else {
-        "Unknown".into()
-    };
-    let msg = if !message.is_null() {
-        (*message).to_str_lossy()
-    } else {
-        "".into()
-    };
-
-    let formatted = format!("\n{type_str}: {msg} in {filename} on line {error_lineno}\n");
-
-    OUTPUT_BUFFER.with(|buf| {
-        buf.borrow_mut().extend_from_slice(formatted.as_bytes());
-    });
-
-    // Call the original php_error_cb for logging, user error handlers, fatal error handling, etc.
-    let original = ORIGINAL_ERROR_CB.load(Ordering::Acquire);
-    if !original.is_null() {
-        let original_fn: ZendErrorCbT = std::mem::transmute(original);
-        original_fn(type_, error_filename, error_lineno, message);
-    }
-}
-
-fn error_type_str(type_: c_int) -> &'static str {
-    match type_ {
-        1 => "Fatal error",
-        2 => "Warning",
-        4 => "Parse error",
-        8 => "Notice",
-        16 => "Core error",
-        32 => "Core warning",
-        64 => "Compile error",
-        128 => "Compile warning",
-        256 => "User error",
-        512 => "User warning",
-        1024 => "User notice",
-        2048 => "Strict standards",
-        4096 => "Recoverable error",
-        8192 => "Deprecated",
-        16384 => "User deprecated",
-        _ => "Unknown error",
-    }
-}
-
 // ─── Request Time (for OPcache) ─────────────────────────────
 
 unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_result {
@@ -447,20 +396,6 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
             .unwrap_or(0.0);
     }
     0 // SUCCESS
-}
-
-// ─── INI Entries ────────────────────────────────────────────
-
-/// Restore custom INI entries on the global sapi_module.
-/// Must be called AFTER sapi_startup() (which sets ini_entries = NULL)
-/// and BEFORE php_module_startup() (which reads ini_entries).
-/// Restore custom INI entries on both the local module and the global sapi_module.
-/// sapi_startup() sets ini_entries = NULL; php_module_startup() may re-copy from the
-/// local module to global, so both must be set.
-pub unsafe fn restore_ini_entries_on(module: &mut sapi_module_struct) {
-    let ptr = INI_ENTRIES.as_ptr() as *const c_char;
-    module.ini_entries = ptr;
-    sapi_module.ini_entries = ptr;
 }
 
 // ─── Buffer Access ──────────────────────────────────────────

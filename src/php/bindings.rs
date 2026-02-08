@@ -180,23 +180,6 @@ extern "C" {
     pub static mut sapi_module: sapi_module_struct;
 }
 
-// zend_write function pointer — set by php_module_startup() to php_output_write
-pub type ZendWriteFuncT = unsafe extern "C" fn(str: *const c_char, str_length: usize) -> usize;
-extern "C" {
-    pub static mut zend_write: ZendWriteFuncT;
-}
-
-// zend_error_cb — PHP's error callback function pointer
-pub type ZendErrorCbT = unsafe extern "C" fn(
-    type_: c_int,
-    error_filename: *const zend_string,
-    error_lineno: c_uint,
-    message: *const zend_string,
-);
-extern "C" {
-    pub static mut zend_error_cb: Option<ZendErrorCbT>;
-}
-
 extern "C" {
     // zend_error — PHP's error handler (php_error is a macro: #define php_error zend_error)
     // Used as sapi_error callback — MUST be set to avoid NULL dereference.
