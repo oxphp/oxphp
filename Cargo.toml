@@ -36,6 +36,14 @@ percent-encoding = "2"
 # Lock-free bounded channel for worker pool
 crossbeam-channel = "0.5"
 
+# Concurrent hash map for rate limiting
+dashmap = "6"
+
+# TLS
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2"
+
 [features]
 php = []
 

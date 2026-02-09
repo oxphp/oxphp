@@ -1,10 +1,15 @@
 pub mod connection;
+pub mod error_pages;
+pub mod internal;
+pub mod rate_limit;
 pub mod response;
 pub mod routing;
+pub mod tls;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -13,16 +18,18 @@ use tokio::net::TcpStream;
 
 use crate::config::ServerConfig;
 use crate::executor::ScriptExecutor;
+use crate::metrics::Metrics;
+use crate::server::error_pages::ErrorPages;
+use crate::server::rate_limit::RateLimiter;
 use crate::server::response::static_file::FileCache;
 use crate::server::routing::RouteConfig;
 
-/// RAII guard that decrements the active connection counter on drop,
-/// even if the connection handler panics.
-struct ConnectionGuard<'a>(&'a AtomicUsize);
+/// RAII guard that calls `Metrics::connection_closed()` on drop.
+struct ConnectionGuard(Arc<Metrics>);
 
-impl Drop for ConnectionGuard<'_> {
+impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.connection_closed();
     }
 }
 
@@ -31,13 +38,25 @@ pub struct Server {
     route_config: RouteConfig,
     file_cache: Arc<FileCache>,
     executor: Arc<dyn ScriptExecutor>,
-    active_connections: AtomicUsize,
+    metrics: Arc<Metrics>,
+    rate_limiter: Option<Arc<RateLimiter>>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    error_pages: Option<Arc<ErrorPages>>,
+    request_timeout: Duration,
+    header_read_timeout: Duration,
     shutdown: AtomicBool,
 }
 
 impl Server {
     /// Create a new server from configuration.
-    pub fn new(config: &ServerConfig, executor: Arc<dyn ScriptExecutor>) -> Self {
+    pub fn new(
+        config: &ServerConfig,
+        executor: Arc<dyn ScriptExecutor>,
+        metrics: Arc<Metrics>,
+        rate_limiter: Option<Arc<RateLimiter>>,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        error_pages: Option<Arc<ErrorPages>>,
+    ) -> Self {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
 
@@ -45,9 +64,18 @@ impl Server {
             route_config,
             file_cache,
             executor,
-            active_connections: AtomicUsize::new(0),
+            metrics,
+            rate_limiter,
+            tls_acceptor,
+            error_pages,
+            request_timeout: config.request_timeout,
+            header_read_timeout: config.header_read_timeout,
             shutdown: AtomicBool::new(false),
         }
+    }
+
+    pub fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     /// Signal the server to stop accepting new connections.
@@ -63,7 +91,7 @@ impl Server {
 
     /// Returns the number of currently active connections.
     pub fn active_connections(&self) -> usize {
-        self.active_connections.load(Ordering::SeqCst)
+        self.metrics.active_connections()
     }
 
     /// Handle a single TCP connection (may serve multiple HTTP requests via keep-alive).
@@ -76,30 +104,65 @@ impl Server {
             return Ok(());
         }
 
-        self.active_connections.fetch_add(1, Ordering::SeqCst);
-        let _guard = ConnectionGuard(&self.active_connections);
+        self.metrics.connection_opened();
+        let _guard = ConnectionGuard(Arc::clone(&self.metrics));
 
-        let io = TokioIo::new(stream);
         let route_config = self.route_config.clone();
         let file_cache = Arc::clone(&self.file_cache);
         let executor = Arc::clone(&self.executor);
+        let metrics = Arc::clone(&self.metrics);
+        let rate_limiter = self.rate_limiter.clone();
+        let error_pages = self.error_pages.clone();
+        let request_timeout = self.request_timeout;
 
         let service = service_fn(move |req| {
             let route_config = route_config.clone();
             let file_cache = Arc::clone(&file_cache);
             let executor = Arc::clone(&executor);
+            let metrics = Arc::clone(&metrics);
+            let rate_limiter = rate_limiter.clone();
+            let error_pages = error_pages.clone();
             async move {
-                connection::handle_request(req, &route_config, &file_cache, &executor, remote_addr)
-                    .await
+                connection::handle_request(
+                    req,
+                    &route_config,
+                    &file_cache,
+                    &executor,
+                    remote_addr,
+                    &metrics,
+                    rate_limiter.as_deref(),
+                    error_pages.as_deref(),
+                    request_timeout,
+                )
+                .await
             }
         });
 
-        let builder = Builder::new(hyper_util::rt::TokioExecutor::new());
-        let result = builder.serve_connection(io, service).await;
+        let mut builder = Builder::new(hyper_util::rt::TokioExecutor::new());
 
-        if let Err(e) = result {
-            return Err(format!("connection error: {e}").into());
+        // Apply timeouts — header_read_timeout requires a timer to be set
+        builder.http1().timer(hyper_util::rt::TokioTimer::new());
+        if self.header_read_timeout > Duration::ZERO {
+            builder
+                .http1()
+                .header_read_timeout(self.header_read_timeout);
         }
+
+        if let Some(ref acceptor) = self.tls_acceptor {
+            let tls_stream = acceptor.accept(stream).await?;
+            let io = TokioIo::new(tls_stream);
+            let result = builder.serve_connection(io, service).await;
+            if let Err(e) = result {
+                return Err(format!("connection error: {e}").into());
+            }
+        } else {
+            let io = TokioIo::new(stream);
+            let result = builder.serve_connection(io, service).await;
+            if let Err(e) = result {
+                return Err(format!("connection error: {e}").into());
+            }
+        }
+
         Ok(())
     }
 }

@@ -149,7 +149,7 @@ pub fn clear_request_data() {
 /// All string pointers use `b"...\0"` byte literals which have `'static` lifetime.
 pub fn build_sapi_module() -> sapi_module_struct {
     sapi_module_struct {
-        name: b"oxphp\0".as_ptr() as *mut c_char,
+        name: b"cli-server\0".as_ptr() as *mut c_char,
         pretty_name: b"OxPHP\0".as_ptr() as *mut c_char,
 
         startup: Some(oxphp_startup),

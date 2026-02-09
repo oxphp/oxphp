@@ -276,11 +276,11 @@ mod tests {
     }
 
     fn make_config(dir: &Path, index_file: Option<&str>) -> RouteConfig {
-        let config = ServerConfig {
-            listen_addr: "0.0.0.0:8080".to_string(),
-            document_root: dir.to_path_buf(),
-            index_file: index_file.map(|s| s.to_string()),
-        };
+        let config = ServerConfig::new(
+            "0.0.0.0:8080".to_string(),
+            dir.to_path_buf(),
+            index_file.map(|s| s.to_string()),
+        );
         RouteConfig::new(&config)
     }
 

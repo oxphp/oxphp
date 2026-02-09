@@ -3,19 +3,41 @@ services:
     build: .
     ports:
       - "8080:8080"
+      - "9090:9090"
     volumes:
       - ./www:/var/www/html:ro
+      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./certs:/etc/ssl/oxphp:ro
     environment:
-      # Address and port the server binds to (default: 0.0.0.0:8080)
+      # Server
       - LISTEN_ADDR=0.0.0.0:8080
-      # Filesystem path to serve files from (default: /var/www/html)
       - DOCUMENT_ROOT=/var/www/html
-      # Tracing verbosity: error, warn, info, debug, trace (default: info)
-      - LOG_LEVEL=trace
-      # Tokio worker thread count, 0 = auto-detect CPU cores (default: 0)
+      # - INDEX_FILE=index.php
       - WORKER_THREADS=0
-      # Executor type: sapi (PHP execution) or stub (benchmark mode)
       - EXECUTOR=sapi
-      # Number of PHP worker threads (default: CPU count)
       # - PHP_WORKERS=4
+      # - QUEUE_CAPACITY=512
+
+      # Logging
+      - LOG_LEVEL=info
+
+      # Internal server (health/metrics/config)
+      - INTERNAL_ADDR=0.0.0.0:9090
+
+      # Timeouts
+      - HEADER_TIMEOUT_SECS=5
+      - IDLE_TIMEOUT_SECS=60
+      - REQUEST_TIMEOUT_SECS=120
+      - DRAIN_TIMEOUT_SECS=30
+
+      # Rate limiting (0 = off)
+      # - RATE_LIMIT=0
+      # - RATE_WINDOW=60
+
+      # TLS
+      - TLS_CERT=/etc/ssl/oxphp/server.pem
+      - TLS_KEY=/etc/ssl/oxphp/server.key
+
+      # Custom error pages
+      # - ERROR_PAGES_DIR=/var/www/errors
     restart: unless-stopped

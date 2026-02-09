@@ -114,15 +114,9 @@ COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 
 # PHP configuration
-RUN mkdir -p /usr/local/etc/php && \
-    echo "opcache.enable=1" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.jit=tracing" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.jit_buffer_size=64M" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.validate_timestamps=0" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.memory_consumption=128" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.interned_strings_buffer=16" >> /usr/local/etc/php/php.ini && \
-    echo "opcache.max_accelerated_files=10000" >> /usr/local/etc/php/php.ini && \
-    echo "extension=oxphp_sapi.so" >> /usr/local/etc/php/php.ini
+RUN mkdir -p /usr/local/etc/php/conf.d
+COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp

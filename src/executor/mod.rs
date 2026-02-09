@@ -8,6 +8,11 @@ pub trait ScriptExecutor: Send + Sync {
     fn execute(&self, request: ScriptRequest) -> tokio::sync::oneshot::Receiver<ScriptResponse>;
 
     fn shutdown(&self);
+
+    /// Check if the executor is healthy and can accept requests.
+    fn is_healthy(&self) -> bool {
+        true
+    }
 }
 
 /// Create executor based on `EXECUTOR` env var.

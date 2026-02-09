@@ -10,6 +10,13 @@ pub struct Config {
     pub worker_threads: usize,
     pub executor_type: String,
     pub max_connections: usize,
+    pub drain_timeout_secs: u64,
+    pub internal_addr: Option<String>,
+    pub rate_limit: u32,
+    pub rate_window: u64,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
+    pub error_pages_dir: Option<String>,
 }
 
 impl Config {
@@ -22,6 +29,22 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10_000);
+        let drain_timeout_secs = std::env::var("DRAIN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(30);
+        let internal_addr = std::env::var("INTERNAL_ADDR").ok();
+        let rate_limit = std::env::var("RATE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let rate_window = std::env::var("RATE_WINDOW")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        let tls_cert = std::env::var("TLS_CERT").ok();
+        let tls_key = std::env::var("TLS_KEY").ok();
+        let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
 
         Ok(Self {
             server,
@@ -29,6 +52,34 @@ impl Config {
             worker_threads,
             executor_type,
             max_connections,
+            drain_timeout_secs,
+            internal_addr,
+            rate_limit,
+            rate_window,
+            tls_cert,
+            tls_key,
+            error_pages_dir,
+        })
+    }
+
+    /// Serialize configuration to JSON for the `/config` internal endpoint.
+    /// Sensitive values (TLS paths) are redacted.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "listen_addr": self.server.listen_addr,
+            "document_root": self.server.document_root.display().to_string(),
+            "index_file": self.server.index_file,
+            "worker_threads": self.worker_threads,
+            "executor_type": self.executor_type,
+            "max_connections": self.max_connections,
+            "drain_timeout_secs": self.drain_timeout_secs,
+            "header_timeout_secs": self.server.header_read_timeout.as_secs(),
+            "idle_timeout_secs": self.server.idle_timeout.as_secs(),
+            "request_timeout_secs": self.server.request_timeout.as_secs(),
+            "rate_limit": self.rate_limit,
+            "rate_window": self.rate_window,
+            "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
+            "error_pages_dir": self.error_pages_dir,
         })
     }
 }

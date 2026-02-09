@@ -1,5 +1,6 @@
 mod logging;
 
+use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -7,6 +8,7 @@ use tokio::sync::Semaphore;
 
 use oxphp::config;
 use oxphp::executor;
+use oxphp::metrics::Metrics;
 use oxphp::server;
 use oxphp::types;
 
@@ -42,12 +44,90 @@ async fn async_main(
         "OxPHP HTTP server starting"
     );
 
+    // Initialize metrics
+    let metrics = Arc::new(Metrics::new(config.worker_threads));
+
+    // Initialize optional rate limiter
+    let rate_limiter = if config.rate_limit > 0 {
+        let limiter = Arc::new(server::rate_limit::RateLimiter::new(
+            config.rate_limit,
+            config.rate_window,
+        ));
+        tracing::info!(
+            rate_limit = config.rate_limit,
+            rate_window = config.rate_window,
+            "Rate limiting enabled"
+        );
+        // Spawn background cleanup task
+        let limiter_ref = Arc::clone(&limiter);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                limiter_ref.cleanup();
+            }
+        });
+        Some(limiter)
+    } else {
+        None
+    };
+
+    // Initialize optional TLS
+    let tls_acceptor = match (&config.tls_cert, &config.tls_key) {
+        (Some(cert), Some(key)) => {
+            let acceptor = server::tls::load_tls_config(Path::new(cert), Path::new(key))?;
+            tracing::info!("TLS enabled");
+            Some(acceptor)
+        }
+        _ => None,
+    };
+
+    // Initialize optional error pages
+    let error_pages = match &config.error_pages_dir {
+        Some(dir) => match server::error_pages::ErrorPages::load(Path::new(dir)) {
+            Ok(pages) => {
+                tracing::info!(dir = dir, "Custom error pages loaded");
+                Some(Arc::new(pages))
+            }
+            Err(e) => {
+                tracing::warn!(dir = dir, error = %e, "Failed to load error pages");
+                None
+            }
+        },
+        None => None,
+    };
+
     let listener = TcpListener::bind(&config.server.listen_addr).await?;
     let local_addr = listener.local_addr()?;
 
     tracing::info!(addr = %local_addr, "Server listening");
 
-    let server = Arc::new(server::Server::new(&config.server, executor));
+    // Spawn internal server if configured (before Server::new consumes executor)
+    let internal_handle = if let Some(ref internal_addr) = config.internal_addr {
+        let metrics_ref = Arc::clone(&metrics);
+        let config_ref = Arc::new(config::Config::from_env()?);
+        let executor_ref = Arc::clone(&executor);
+        let addr = internal_addr.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) =
+                server::internal::run_internal_server(&addr, metrics_ref, config_ref, executor_ref)
+                    .await
+            {
+                tracing::error!(error = %e, "Internal server error");
+            }
+        }))
+    } else {
+        None
+    };
+
+    let server = Arc::new(server::Server::new(
+        &config.server,
+        executor,
+        Arc::clone(&metrics),
+        rate_limiter,
+        tls_acceptor,
+        error_pages,
+    ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
     // Spawn graceful shutdown handler
@@ -97,7 +177,8 @@ async fn async_main(
             active_connections = active,
             "Draining in-flight connections"
         );
-        let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let drain_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(config.drain_timeout_secs);
         loop {
             let remaining = server.active_connections();
             if remaining == 0 {
@@ -113,6 +194,11 @@ async fn async_main(
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+
+    // Abort internal server task
+    if let Some(handle) = internal_handle {
+        handle.abort();
     }
 
     tracing::info!("Server stopped");

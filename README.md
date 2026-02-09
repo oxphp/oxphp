@@ -8,9 +8,17 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
 - **Structured error logging** — PHP errors routed through `tracing` with `php_error_type`, `php_file`, `php_line` fields
 - **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
+- **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
 - **3 routing modes** — Traditional, Framework (`index.php`), SPA (`index.html`)
 - **LRU file cache** for static files (in-memory for files ≤1MB, streaming for larger)
 - **Bounded request queue** with 503 backpressure when full
+- **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
+- **Configurable timeouts** — header read, request, and keep-alive
+- **Prometheus metrics** at `/metrics` on internal server
+- **Health check** endpoint at `/health` for K8s readiness probes
+- **Request ID** generation + pass-through (`X-Request-ID` header)
+- **Access logging** via structured JSON tracing
+- **Custom error pages** — pre-loaded at startup, zero I/O on hot path
 - **JSON structured logging** via tracing
 - **Path traversal protection** with symlink escape detection
 - **Non-root container** execution as www-data (UID 82)
@@ -34,7 +42,17 @@ All settings are via environment variables:
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | CPU count | Number of PHP worker threads |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 503 when full |
+| `DRAIN_TIMEOUT_SECS` | `30` | Graceful shutdown drain timeout in seconds |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
+| `INTERNAL_ADDR` | *(unset)* | Internal server address for health/metrics/config (e.g. `0.0.0.0:9090`) |
+| `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
+| `RATE_WINDOW` | `60` | Rate limit window in seconds |
+| `HEADER_TIMEOUT_SECS` | `5` | Header read timeout (Slowloris protection) |
+| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive idle timeout |
+| `REQUEST_TIMEOUT_SECS` | `120` | Overall request timeout; 0 = disabled |
+| `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
+| `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
+| `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
 
 ## Architecture
 
@@ -67,6 +85,16 @@ All settings are via environment variables:
 - **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread
 - Workers receive requests via `crossbeam::bounded`, respond via `oneshot::Sender`
 
+### Internal Server
+
+When `INTERNAL_ADDR` is set, a lightweight HTTP server starts on a separate port:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | JSON health status (uptime, requests, connections) |
+| `GET /metrics` | Prometheus text format metrics |
+| `GET /config` | JSON runtime configuration (TLS paths redacted) |
+
 ## Build
 
 ```bash
@@ -86,7 +114,7 @@ DOCUMENT_ROOT=./www ./target/release/oxphp
 ## Development
 
 ```bash
-# Full verification (host, 47 tests)
+# Full verification (host, 66 tests)
 cargo fmt -- --check && cargo clippy -- -D warnings && cargo test
 
 # Docker smoke test
@@ -95,6 +123,11 @@ curl http://localhost:8080/
 curl "http://localhost:8080/test_superglobals.php?foo=bar"
 curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
 curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+
+# Internal server
+INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
+curl http://localhost:9090/health
+curl http://localhost:9090/metrics
 ```
 
 ## License
