@@ -153,12 +153,17 @@ async fn async_main(
         None
     };
 
+    if config.compression {
+        tracing::info!("Brotli compression enabled");
+    }
+
     let server = Arc::new(server::Server::new(
         &config.server,
         executor,
         Arc::clone(&metrics),
         dispatcher,
         tls_acceptor,
+        config.compression,
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 

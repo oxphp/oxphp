@@ -52,6 +52,7 @@ async fn start_server_with_options(
         metrics,
         Arc::new(dispatcher),
         None,
+        false, // compression disabled in tests
     ));
 
     tokio::spawn(async move {

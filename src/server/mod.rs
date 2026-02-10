@@ -1,3 +1,4 @@
+pub mod compression;
 pub mod connection;
 pub mod error_pages;
 pub mod internal;
@@ -42,6 +43,7 @@ pub struct Server {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     request_timeout: Duration,
     header_read_timeout: Duration,
+    compression_enabled: bool,
     shutdown: AtomicBool,
 }
 
@@ -53,6 +55,7 @@ impl Server {
         metrics: Arc<Metrics>,
         dispatcher: Arc<EventDispatcher>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        compression_enabled: bool,
     ) -> Self {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
@@ -66,6 +69,7 @@ impl Server {
             tls_acceptor,
             request_timeout: config.request_timeout,
             header_read_timeout: config.header_read_timeout,
+            compression_enabled,
             shutdown: AtomicBool::new(false),
         }
     }
@@ -109,6 +113,7 @@ impl Server {
         let metrics = Arc::clone(&self.metrics);
         let dispatcher = Arc::clone(&self.dispatcher);
         let request_timeout = self.request_timeout;
+        let compression_enabled = self.compression_enabled;
 
         let service = service_fn(move |req| {
             let route_config = route_config.clone();
@@ -126,6 +131,7 @@ impl Server {
                     &metrics,
                     &dispatcher,
                     request_timeout,
+                    compression_enabled,
                 )
                 .await
             }

@@ -11,6 +11,7 @@ use hyper::body::Incoming;
 use crate::events::{EventDispatcher, RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ScriptExecutor;
 use crate::metrics::Metrics;
+use crate::server::compression;
 use crate::server::response::static_file::{self, FileCache};
 use crate::server::routing::{RouteConfig, RouteResult};
 use crate::types::{full_body, ResponseBody, ScriptRequest};
@@ -26,6 +27,7 @@ pub struct RequestContext<'a> {
     pub metrics: &'a Metrics,
     pub dispatcher: &'a EventDispatcher,
     pub request_timeout: Duration,
+    pub compression_enabled: bool,
 }
 
 /// Handle a single HTTP request with event-driven pipeline.
@@ -39,6 +41,7 @@ pub async fn handle_request(
     metrics: &Metrics,
     dispatcher: &EventDispatcher,
     request_timeout: Duration,
+    compression_enabled: bool,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let ctx = RequestContext {
         route_config,
@@ -47,6 +50,7 @@ pub async fn handle_request(
         metrics,
         dispatcher,
         request_timeout,
+        compression_enabled,
     };
     handle_request_with_ctx(req, &ctx, remote_addr).await
 }
@@ -62,6 +66,17 @@ async fn handle_request_with_ctx(
     // Cache method/path strings once — moved (not cloned) through the pipeline
     let method_str = parts.method.to_string();
     let path_str = parts.uri.path().to_string();
+
+    // Extract Accept-Encoding before parts are consumed by the pipeline
+    let accept_encoding = if ctx.compression_enabled {
+        parts
+            .headers
+            .get(http::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+    } else {
+        None
+    };
 
     // ── RequestReceived event ──
     // Handlers: RequestIdGenerator (-100), RateLimitHandler (-50), MetricsRequestHandler (0)
@@ -143,6 +158,12 @@ async fn handle_request_with_ctx(
     };
     ctx.dispatcher.dispatch(&mut building_event);
     let response = building_event.response;
+
+    // ── Brotli compression (after error pages, before metrics/logging) ──
+    let response = match accept_encoding {
+        Some(ref ae) => compression::maybe_compress(response, ae).await,
+        None => response,
+    };
 
     // ── RequestComplete event ──
     // Handlers: MetricsResponseHandler (0), AccessLogHandler (100)

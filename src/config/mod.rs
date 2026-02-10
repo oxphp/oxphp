@@ -17,6 +17,7 @@ pub struct Config {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub error_pages_dir: Option<String>,
+    pub compression: bool,
 }
 
 impl Config {
@@ -45,6 +46,9 @@ impl Config {
         let tls_cert = std::env::var("TLS_CERT").ok();
         let tls_key = std::env::var("TLS_KEY").ok();
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
+        let compression = std::env::var("COMPRESSION")
+            .map(|v| v != "false" && v != "0" && v != "off")
+            .unwrap_or(true);
 
         Ok(Self {
             server,
@@ -59,6 +63,7 @@ impl Config {
             tls_cert,
             tls_key,
             error_pages_dir,
+            compression,
         })
     }
 
@@ -80,6 +85,7 @@ impl Config {
             "rate_window": self.rate_window,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
+            "compression": self.compression,
         })
     }
 }
