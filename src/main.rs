@@ -7,7 +7,9 @@ use tokio::signal;
 use tokio::sync::Semaphore;
 
 use oxphp::config;
+use oxphp::events::EventDispatcher;
 use oxphp::executor;
+use oxphp::handlers;
 use oxphp::metrics::Metrics;
 use oxphp::server;
 use oxphp::types;
@@ -97,6 +99,37 @@ async fn async_main(
         None => None,
     };
 
+    // ── Build event dispatcher ──
+    let mut dispatcher = EventDispatcher::new();
+
+    // Always registered handlers
+    dispatcher.on(handlers::request_id::RequestIdGenerator);
+    dispatcher.on(handlers::metrics::MetricsRequestHandler::new(Arc::clone(
+        &metrics,
+    )));
+    dispatcher.on(handlers::metrics::MetricsResponseHandler::new(Arc::clone(
+        &metrics,
+    )));
+    dispatcher.on(handlers::server_header::ServerHeaderHandler);
+    dispatcher.on(handlers::access_log::AccessLogHandler);
+
+    // Conditional handlers
+    if let Some(ref limiter) = rate_limiter {
+        dispatcher.on(handlers::rate_limit::RateLimitHandler::new(Arc::clone(
+            limiter,
+        )));
+        tracing::info!("Rate limit handler registered");
+    }
+    if let Some(ref pages) = error_pages {
+        dispatcher.on(handlers::error_pages::ErrorPagesHandler::new(Arc::clone(
+            pages,
+        )));
+        tracing::info!("Error pages handler registered");
+    }
+
+    dispatcher.freeze();
+    let dispatcher = Arc::new(dispatcher);
+
     let listener = TcpListener::bind(&config.server.listen_addr).await?;
     let local_addr = listener.local_addr()?;
 
@@ -124,9 +157,8 @@ async fn async_main(
         &config.server,
         executor,
         Arc::clone(&metrics),
-        rate_limiter,
+        dispatcher,
         tls_acceptor,
-        error_pages,
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 

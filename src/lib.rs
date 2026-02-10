@@ -1,5 +1,7 @@
 pub mod config;
+pub mod events;
 pub mod executor;
+pub mod handlers;
 pub mod metrics;
 #[cfg(feature = "php")]
 pub mod php;

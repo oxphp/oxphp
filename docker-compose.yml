@@ -35,8 +35,8 @@ services:
       # - RATE_WINDOW=60
 
       # TLS
-      - TLS_CERT=/etc/ssl/oxphp/server.pem
-      - TLS_KEY=/etc/ssl/oxphp/server.key
+#      - TLS_CERT=/etc/ssl/oxphp/server.pem
+#      - TLS_KEY=/etc/ssl/oxphp/server.key
 
       # Custom error pages
       # - ERROR_PAGES_DIR=/var/www/errors

@@ -17,10 +17,9 @@ use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpStream;
 
 use crate::config::ServerConfig;
+use crate::events::EventDispatcher;
 use crate::executor::ScriptExecutor;
 use crate::metrics::Metrics;
-use crate::server::error_pages::ErrorPages;
-use crate::server::rate_limit::RateLimiter;
 use crate::server::response::static_file::FileCache;
 use crate::server::routing::RouteConfig;
 
@@ -39,9 +38,8 @@ pub struct Server {
     file_cache: Arc<FileCache>,
     executor: Arc<dyn ScriptExecutor>,
     metrics: Arc<Metrics>,
-    rate_limiter: Option<Arc<RateLimiter>>,
+    dispatcher: Arc<EventDispatcher>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    error_pages: Option<Arc<ErrorPages>>,
     request_timeout: Duration,
     header_read_timeout: Duration,
     shutdown: AtomicBool,
@@ -53,9 +51,8 @@ impl Server {
         config: &ServerConfig,
         executor: Arc<dyn ScriptExecutor>,
         metrics: Arc<Metrics>,
-        rate_limiter: Option<Arc<RateLimiter>>,
+        dispatcher: Arc<EventDispatcher>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-        error_pages: Option<Arc<ErrorPages>>,
     ) -> Self {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
@@ -65,9 +62,8 @@ impl Server {
             file_cache,
             executor,
             metrics,
-            rate_limiter,
+            dispatcher,
             tls_acceptor,
-            error_pages,
             request_timeout: config.request_timeout,
             header_read_timeout: config.header_read_timeout,
             shutdown: AtomicBool::new(false),
@@ -111,8 +107,7 @@ impl Server {
         let file_cache = Arc::clone(&self.file_cache);
         let executor = Arc::clone(&self.executor);
         let metrics = Arc::clone(&self.metrics);
-        let rate_limiter = self.rate_limiter.clone();
-        let error_pages = self.error_pages.clone();
+        let dispatcher = Arc::clone(&self.dispatcher);
         let request_timeout = self.request_timeout;
 
         let service = service_fn(move |req| {
@@ -120,8 +115,7 @@ impl Server {
             let file_cache = Arc::clone(&file_cache);
             let executor = Arc::clone(&executor);
             let metrics = Arc::clone(&metrics);
-            let rate_limiter = rate_limiter.clone();
-            let error_pages = error_pages.clone();
+            let dispatcher = Arc::clone(&dispatcher);
             async move {
                 connection::handle_request(
                     req,
@@ -130,8 +124,7 @@ impl Server {
                     &executor,
                     remote_addr,
                     &metrics,
-                    rate_limiter.as_deref(),
-                    error_pages.as_deref(),
+                    &dispatcher,
                     request_timeout,
                 )
                 .await

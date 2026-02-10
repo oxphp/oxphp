@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::time::Duration;
 
+use oxphp::events::EventDispatcher;
+
 /// Start the server on a random port and return the bound address.
 async fn start_server(document_root: &std::path::Path, index_file: Option<&str>) -> SocketAddr {
     start_server_with_options(document_root, index_file, None).await
@@ -25,12 +27,30 @@ async fn start_server_with_options(
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
     let metrics = Arc::new(oxphp::metrics::Metrics::new(1));
+
+    // Build dispatcher with standard handlers
+    let mut dispatcher = EventDispatcher::new();
+    dispatcher.on(oxphp::handlers::request_id::RequestIdGenerator);
+    dispatcher.on(oxphp::handlers::metrics::MetricsRequestHandler::new(
+        Arc::clone(&metrics),
+    ));
+    dispatcher.on(oxphp::handlers::metrics::MetricsResponseHandler::new(
+        Arc::clone(&metrics),
+    ));
+    dispatcher.on(oxphp::handlers::server_header::ServerHeaderHandler);
+    dispatcher.on(oxphp::handlers::access_log::AccessLogHandler);
+    if let Some(ref limiter) = rate_limiter {
+        dispatcher.on(oxphp::handlers::rate_limit::RateLimitHandler::new(
+            Arc::clone(limiter),
+        ));
+    }
+    dispatcher.freeze();
+
     let server = Arc::new(oxphp::server::Server::new(
         &config,
         executor,
         metrics,
-        rate_limiter,
-        None,
+        Arc::new(dispatcher),
         None,
     ));
 
