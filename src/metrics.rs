@@ -16,7 +16,6 @@ pub struct Metrics {
     requests_by_method: [AtomicU64; 9],
     responses_by_status_class: [AtomicU64; 5],
     total_response_time_us: AtomicU64,
-    worker_count: usize,
     busy_workers: AtomicUsize,
 }
 
@@ -47,8 +46,14 @@ fn status_class_index(status: u16) -> usize {
     }
 }
 
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Metrics {
-    pub fn new(worker_count: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             start_time: Instant::now(),
             total_requests: AtomicU64::new(0),
@@ -58,7 +63,6 @@ impl Metrics {
             requests_by_method: std::array::from_fn(|_| AtomicU64::new(0)),
             responses_by_status_class: std::array::from_fn(|_| AtomicU64::new(0)),
             total_response_time_us: AtomicU64::new(0),
-            worker_count,
             busy_workers: AtomicUsize::new(0),
         }
     }
@@ -198,10 +202,6 @@ impl Metrics {
             self.total_response_time_us.load(Ordering::Relaxed)
         );
 
-        let _ = writeln!(out, "# HELP oxphp_workers Total PHP worker threads.");
-        let _ = writeln!(out, "# TYPE oxphp_workers gauge");
-        let _ = writeln!(out, "oxphp_workers {}", self.worker_count);
-
         let _ = writeln!(
             out,
             "# HELP oxphp_busy_workers Currently busy worker threads."
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_record_request() {
-        let m = Metrics::new(4);
+        let m = Metrics::new();
         m.record_request(&Method::GET);
         m.record_request(&Method::GET);
         m.record_request(&Method::POST);
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_record_response() {
-        let m = Metrics::new(4);
+        let m = Metrics::new();
         m.record_response(200, Duration::from_micros(500));
         m.record_response(404, Duration::from_micros(100));
         m.record_response(500, Duration::from_micros(200));
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_connections() {
-        let m = Metrics::new(4);
+        let m = Metrics::new();
         m.connection_opened();
         m.connection_opened();
         assert_eq!(m.active_connections(), 2);
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_queue_metrics() {
-        let m = Metrics::new(4);
+        let m = Metrics::new();
         m.request_queued();
         m.request_queued();
         assert_eq!(m.pending_requests.load(Ordering::Relaxed), 2);
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_to_prometheus() {
-        let m = Metrics::new(4);
+        let m = Metrics::new();
         m.record_request(&Method::GET);
         m.record_response(200, Duration::from_micros(1000));
 
@@ -303,6 +303,5 @@ mod tests {
         assert!(output.contains("oxphp_requests_by_method_total{method=\"GET\"} 1"));
         assert!(output.contains("oxphp_responses_by_status_total{status=\"2xx\"} 1"));
         assert!(output.contains("oxphp_response_time_us_total 1000"));
-        assert!(output.contains("oxphp_workers 4"));
     }
 }

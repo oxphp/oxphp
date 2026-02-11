@@ -22,13 +22,9 @@ fn main() -> Result<(), types::BoxError> {
     let executor: std::sync::Arc<dyn executor::ScriptExecutor> =
         std::sync::Arc::from(executor::create_executor());
 
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    if config.worker_threads > 0 {
-        builder.worker_threads(config.worker_threads);
-    }
-    builder.enable_all();
-
-    let runtime = builder.build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     runtime.block_on(async_main(config, executor))
 }
 
@@ -41,13 +37,12 @@ async fn async_main(
     tracing::info!(
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
-        worker_threads = config.worker_threads,
         executor = %config.executor_type,
         "OxPHP HTTP server starting"
     );
 
     // Initialize metrics
-    let metrics = Arc::new(Metrics::new(config.worker_threads));
+    let metrics = Arc::new(Metrics::new());
 
     // Initialize optional rate limiter
     let rate_limiter = if config.rate_limit > 0 {

@@ -26,7 +26,7 @@ async fn start_server_with_options(
     let addr = listener.local_addr().unwrap();
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
-    let metrics = Arc::new(oxphp::metrics::Metrics::new(1));
+    let metrics = Arc::new(oxphp::metrics::Metrics::new());
 
     // Build dispatcher with standard handlers
     let mut dispatcher = EventDispatcher::new();
@@ -214,7 +214,7 @@ async fn test_internal_server_health() {
     let addr = listener.local_addr().unwrap();
     drop(listener); // free the port for internal server
 
-    let metrics = Arc::new(oxphp::metrics::Metrics::new(2));
+    let metrics = Arc::new(oxphp::metrics::Metrics::new());
     let config = Arc::new(oxphp::config::Config::from_env().unwrap());
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
@@ -242,7 +242,7 @@ async fn test_internal_server_metrics() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let metrics = Arc::new(oxphp::metrics::Metrics::new(4));
+    let metrics = Arc::new(oxphp::metrics::Metrics::new());
     let config = Arc::new(oxphp::config::Config::from_env().unwrap());
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
@@ -260,5 +260,5 @@ async fn test_internal_server_metrics() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("oxphp_requests_total"));
-    assert!(body.contains("oxphp_workers 4"));
+    assert!(body.contains("oxphp_busy_workers"));
 }

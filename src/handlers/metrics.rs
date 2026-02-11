@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_metrics_request_handler() {
-        let metrics = Arc::new(Metrics::new(4));
+        let metrics = Arc::new(Metrics::new());
         let handler = MetricsRequestHandler::new(Arc::clone(&metrics));
 
         let (parts, _) = http::Request::builder()
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_metrics_response_handler() {
-        let metrics = Arc::new(Metrics::new(4));
+        let metrics = Arc::new(Metrics::new());
         let handler = MetricsResponseHandler::new(Arc::clone(&metrics));
 
         let mut event = RequestComplete {
