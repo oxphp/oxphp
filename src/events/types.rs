@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -84,6 +85,8 @@ pub struct RequestReceived {
     pub request_id: String,
     /// Set by a handler to short-circuit the pipeline with an early response.
     pub early_response: Option<Response<ResponseBody>>,
+    /// Plugin metadata accumulated from plugin handlers.
+    pub metadata: HashMap<String, String>,
 }
 
 impl Event for RequestReceived {

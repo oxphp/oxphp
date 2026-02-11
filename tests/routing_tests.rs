@@ -219,10 +219,17 @@ async fn test_internal_server_health() {
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
 
+    let plugin_manager = Arc::new(oxphp::plugin::PluginManager::new());
     let addr_str = addr.to_string();
     tokio::spawn(async move {
-        let _ = oxphp::server::internal::run_internal_server(&addr_str, metrics, config, executor)
-            .await;
+        let _ = oxphp::server::internal::run_internal_server(
+            &addr_str,
+            metrics,
+            config,
+            executor,
+            plugin_manager,
+        )
+        .await;
     });
 
     // Give internal server time to start
@@ -247,10 +254,17 @@ async fn test_internal_server_metrics() {
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
         Arc::new(oxphp::executor::stub::StubExecutor::new());
 
+    let plugin_manager = Arc::new(oxphp::plugin::PluginManager::new());
     let addr_str = addr.to_string();
     tokio::spawn(async move {
-        let _ = oxphp::server::internal::run_internal_server(&addr_str, metrics, config, executor)
-            .await;
+        let _ = oxphp::server::internal::run_internal_server(
+            &addr_str,
+            metrics,
+            config,
+            executor,
+            plugin_manager,
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(50)).await;

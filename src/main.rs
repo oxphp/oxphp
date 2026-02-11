@@ -11,6 +11,7 @@ use oxphp::events::EventDispatcher;
 use oxphp::executor;
 use oxphp::handlers;
 use oxphp::metrics::Metrics;
+use oxphp::plugin::PluginManager;
 use oxphp::server;
 use oxphp::types;
 
@@ -122,8 +123,17 @@ async fn async_main(
         tracing::info!("Error pages handler registered");
     }
 
+    // ── Plugin system ──
+    let mut plugin_manager = PluginManager::new();
+    // Built-in plugins registered here, gated by Cargo features:
+    // #[cfg(feature = "plugin-example")]
+    // plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
+
+    plugin_manager.init_all(&mut dispatcher)?;
+
     dispatcher.freeze();
     let dispatcher = Arc::new(dispatcher);
+    let plugin_manager = Arc::new(plugin_manager);
 
     let listener = TcpListener::bind(&config.server.listen_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -135,11 +145,17 @@ async fn async_main(
         let metrics_ref = Arc::clone(&metrics);
         let config_ref = Arc::new(config::Config::from_env()?);
         let executor_ref = Arc::clone(&executor);
+        let pm_ref = Arc::clone(&plugin_manager);
         let addr = internal_addr.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) =
-                server::internal::run_internal_server(&addr, metrics_ref, config_ref, executor_ref)
-                    .await
+            if let Err(e) = server::internal::run_internal_server(
+                &addr,
+                metrics_ref,
+                config_ref,
+                executor_ref,
+                pm_ref,
+            )
+            .await
             {
                 tracing::error!(error = %e, "Internal server error");
             }
@@ -162,11 +178,16 @@ async fn async_main(
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
+    // Notify plugins that server is ready
+    plugin_manager.on_ready_all();
+
     // Spawn graceful shutdown handler
     let server_ref = Arc::clone(&server);
+    let pm_shutdown = Arc::clone(&plugin_manager);
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("Received shutdown signal, draining connections");
+        pm_shutdown.shutdown_all();
         server_ref.shutdown();
     });
 

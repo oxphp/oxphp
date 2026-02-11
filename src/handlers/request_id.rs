@@ -59,6 +59,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_id: String::new(),
             early_response: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 

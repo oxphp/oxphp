@@ -85,6 +85,7 @@ async fn handle_request_with_ctx(
         remote_addr,
         request_id: String::new(),
         early_response: None,
+        metadata: std::collections::HashMap::new(),
     };
     ctx.dispatcher.dispatch(&mut received_event);
 
@@ -110,7 +111,8 @@ async fn handle_request_with_ctx(
         return Ok(early_resp);
     }
 
-    let parts = received_event.parts;
+    let mut parts = received_event.parts;
+    crate::plugin::cookies::strip_plugin_cookies(&mut parts);
     let uri = parts.uri.clone();
 
     // Apply request timeout if configured
@@ -288,6 +290,7 @@ mod tests {
             remote_addr: SocketAddr::new(std::net::Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_id: String::new(),
             early_response: None,
+            metadata: std::collections::HashMap::new(),
         };
 
         handler.handle(&mut event);
@@ -315,6 +318,7 @@ mod tests {
                     ),
                     request_id: String::new(),
                     early_response: None,
+                    metadata: std::collections::HashMap::new(),
                 };
 
                 handler.handle(&mut event);
