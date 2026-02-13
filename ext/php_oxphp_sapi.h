@@ -15,11 +15,15 @@
 extern zend_module_entry oxphp_sapi_module_entry;
 #define phpext_oxphp_sapi_ptr &oxphp_sapi_module_entry
 
+PHP_MINIT_FUNCTION(oxphp_sapi);
+
 PHP_FUNCTION(oxphp_request_id);
 PHP_FUNCTION(oxphp_worker_id);
 PHP_FUNCTION(oxphp_server_info);
 PHP_FUNCTION(oxphp_request_heartbeat);
 PHP_FUNCTION(oxphp_finish_request);
 PHP_FUNCTION(oxphp_is_streaming);
+
+ZEND_FUNCTION(oxphp_plugin_dispatch);
 
 #endif /* PHP_OXPHP_SAPI_H */

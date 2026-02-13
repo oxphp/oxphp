@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
 
@@ -7,13 +8,16 @@ use crate::events::{EventHandler, Priority, Propagation, RequestReceived};
 static REQUEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// Generate a request ID: `{timestamp_hex:08x}{counter:08x}` (16 hex chars).
+/// Uses pre-sized String to avoid format!'s grow-realloc pattern.
 fn generate_request_id() -> String {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
     let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{ts:08x}{counter:08x}")
+    let mut id = String::with_capacity(16);
+    write!(id, "{ts:08x}{counter:08x}").unwrap();
+    id
 }
 
 /// Generates a request ID or preserves an incoming `X-Request-ID` header.

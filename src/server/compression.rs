@@ -17,16 +17,9 @@ const BROTLI_QUALITY: i32 = 4;
 /// Brotli window size. 20 = 1 MB window — good for typical web responses.
 const BROTLI_WINDOW: i32 = 20;
 
-/// Try to compress a response with brotli. Called only when Accept-Encoding is present.
-/// The caller must check for None accept_encoding before calling to avoid async overhead.
-pub async fn maybe_compress(
-    response: Response<ResponseBody>,
-    accept_encoding: &str,
-) -> Response<ResponseBody> {
-    if !accepts_brotli(accept_encoding) {
-        return response;
-    }
-
+/// Try to compress a response with brotli. Called only when the client accepts brotli.
+/// The caller must verify `accepts_brotli()` before calling.
+pub async fn maybe_compress(response: Response<ResponseBody>) -> Response<ResponseBody> {
     // Check Content-Type
     let content_type = response
         .headers()
@@ -94,7 +87,7 @@ pub async fn maybe_compress(
     response
 }
 
-fn accepts_brotli(accept_encoding: &str) -> bool {
+pub(crate) fn accepts_brotli(accept_encoding: &str) -> bool {
     accept_encoding.split(',').any(|enc| {
         let name = enc.trim().split(';').next().unwrap_or("").trim();
         name == "br"
@@ -235,7 +228,7 @@ mod tests {
         let body = "a".repeat(500); // >256 bytes, compressible
         let response = build_response("text/html", body.as_bytes());
 
-        let result = maybe_compress(response, "gzip, br").await;
+        let result = maybe_compress(response).await;
 
         assert_eq!(
             result.headers().get(header::CONTENT_ENCODING).unwrap(),
@@ -259,21 +252,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skip_when_no_brotli_support() {
-        let body = "x".repeat(500);
-        let response = build_response("text/html", body.as_bytes());
-
-        let result = maybe_compress(response, "gzip, deflate").await;
-
-        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
-    }
-
-    #[tokio::test]
     async fn test_skip_non_compressible_type() {
         let body = vec![0u8; 500];
         let response = build_response("image/png", &body);
 
-        let result = maybe_compress(response, "br").await;
+        let result = maybe_compress(response).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }
@@ -282,7 +265,7 @@ mod tests {
     async fn test_skip_small_body() {
         let response = build_response("text/html", b"<h1>Hi</h1>");
 
-        let result = maybe_compress(response, "br").await;
+        let result = maybe_compress(response).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }
@@ -297,7 +280,7 @@ mod tests {
             .body(full_body(Bytes::from(body)))
             .unwrap();
 
-        let result = maybe_compress(response, "br").await;
+        let result = maybe_compress(response).await;
 
         assert_eq!(
             result.headers().get(header::CONTENT_ENCODING).unwrap(),
@@ -315,7 +298,7 @@ mod tests {
             .body(full_body(Bytes::from(body)))
             .unwrap();
 
-        let result = maybe_compress(response, "br").await;
+        let result = maybe_compress(response).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }

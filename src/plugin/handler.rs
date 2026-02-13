@@ -134,7 +134,10 @@ impl<'a> PluginResponseActions<'a> {
 
     /// Add a response header. Dangerous headers are silently blocked.
     pub fn add_header(&mut self, name: &str, value: HeaderValue) {
-        if BLOCKED_RESPONSE_HEADERS.contains(&name.to_lowercase().as_str()) {
+        if BLOCKED_RESPONSE_HEADERS
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(name))
+        {
             tracing::warn!(plugin = self.plugin_name, header = name, "Blocked header");
             return;
         }

@@ -61,6 +61,9 @@ WORKDIR /build
 # Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./
 
+# Extra Cargo features beyond defaults (e.g. "plugin-debug")
+ARG CARGO_FEATURES=""
+
 # Create dummy source to cache dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
@@ -72,8 +75,12 @@ RUN mkdir src && \
 COPY src ./src
 COPY build.rs ./
 
-# Build release binary with PHP feature
-RUN cargo build --release --features php
+# Build release binary (default features include php)
+RUN if [ -n "${CARGO_FEATURES}" ]; then \
+        cargo build --release --features "${CARGO_FEATURES}"; \
+    else \
+        cargo build --release; \
+    fi
 
 # ══════════════════════════════════════════════════════════════
 # Stage 4: Runtime

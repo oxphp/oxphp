@@ -16,6 +16,80 @@ pub enum PhpValue {
 }
 
 impl PhpValue {
+    /// Convert to a serde_json::Value for cross-boundary serialization.
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            PhpValue::Null => serde_json::Value::Null,
+            PhpValue::Bool(b) => serde_json::Value::Bool(*b),
+            PhpValue::Int(n) => serde_json::json!(*n),
+            PhpValue::Float(f) => serde_json::json!(*f),
+            PhpValue::String(s) => serde_json::Value::String(s.clone()),
+            PhpValue::Array(arr) => {
+                if arr.is_list() {
+                    serde_json::Value::Array(arr.values().map(|v| v.to_json_value()).collect())
+                } else {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in arr.iter() {
+                        let key = match k {
+                            PhpArrayKey::Int(n) => n.to_string(),
+                            PhpArrayKey::String(s) => s.clone(),
+                        };
+                        map.insert(key, v.to_json_value());
+                    }
+                    serde_json::Value::Object(map)
+                }
+            }
+            PhpValue::Object(obj) => {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "__php_class".to_string(),
+                    serde_json::Value::String(obj.class_name.clone()),
+                );
+                for (k, v) in obj.properties() {
+                    map.insert(k.to_string(), v.to_json_value());
+                }
+                serde_json::Value::Object(map)
+            }
+        }
+    }
+
+    /// Convert from a serde_json::Value (deserialization from JSON envelope).
+    pub fn from_json_value(v: &serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Null => PhpValue::Null,
+            serde_json::Value::Bool(b) => PhpValue::Bool(*b),
+            serde_json::Value::Number(n) => {
+                // as_i64() returns None for u64 values > i64::MAX; these become Float,
+                // matching PHP's lack of unsigned 64-bit integers.
+                if let Some(i) = n.as_i64() {
+                    PhpValue::Int(i)
+                } else {
+                    PhpValue::Float(n.as_f64().unwrap_or(0.0))
+                }
+            }
+            serde_json::Value::String(s) => PhpValue::String(s.clone()),
+            serde_json::Value::Array(arr) => PhpValue::Array(PhpArray::from_vec(
+                arr.iter().map(PhpValue::from_json_value).collect(),
+            )),
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(class)) = map.get("__php_class") {
+                    let props: Vec<(&str, PhpValue)> = map
+                        .iter()
+                        .filter(|(k, _)| *k != "__php_class")
+                        .map(|(k, v)| (k.as_str(), PhpValue::from_json_value(v)))
+                        .collect();
+                    PhpValue::Object(PhpObject::new(class, props))
+                } else {
+                    let pairs: Vec<(&str, PhpValue)> = map
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), PhpValue::from_json_value(v)))
+                        .collect();
+                    PhpValue::Array(PhpArray::from_pairs(pairs))
+                }
+            }
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             PhpValue::Null => "null",
@@ -354,8 +428,7 @@ where
 
 /// Stored definition of a plugin-registered PHP function.
 /// Fields are pub for the SAPI bridge to register these as real PHP functions
-/// via `zend_register_functions` (wired in Phase 8).
-#[allow(dead_code)]
+/// via `zend_register_functions`.
 pub struct PluginPhpFunctionDef {
     /// Full function name: `oxphp_{plugin}_{name}`
     pub name: String,
@@ -383,12 +456,72 @@ impl PhpCallContext {
     }
 
     /// Call an existing PHP function by name with arguments.
-    /// TODO(phase-8): wire to `zend_call_function()` / `call_user_function()` via bridge FFI.
-    /// Currently returns an error — the SAPI bridge doesn't support outbound PHP calls yet.
-    pub fn call_function(&self, name: &str, _args: &[PhpValue]) -> Result<PhpValue, PhpError> {
-        Err(PhpError::CallFailed(format!(
-            "call_function not yet implemented for {name}"
-        )))
+    /// Uses the bridge FFI to invoke `call_user_function` on the current PHP worker thread.
+    pub fn call_function(&self, name: &str, args: &[PhpValue]) -> Result<PhpValue, PhpError> {
+        #[cfg(feature = "php")]
+        {
+            use std::ffi::{CStr, CString};
+
+            // Serialize args to JSON array
+            let json_args: Vec<serde_json::Value> =
+                args.iter().map(|a| a.to_json_value()).collect();
+            let json_str = serde_json::to_string(&json_args)
+                .map_err(|e| PhpError::CallFailed(format!("failed to serialize args: {e}")))?;
+
+            let c_name = CString::new(name).map_err(|_| {
+                PhpError::CallFailed("function name contains null byte".to_string())
+            })?;
+            let c_args = CString::new(json_str)
+                .map_err(|_| PhpError::CallFailed("JSON args contain null byte".to_string()))?;
+
+            let result_ptr = unsafe {
+                crate::php::bindings::oxphp_bridge_call_php(c_name.as_ptr(), c_args.as_ptr())
+            };
+
+            if result_ptr.is_null() {
+                return Err(PhpError::CallFailed(format!(
+                    "bridge call_php returned NULL for {name}"
+                )));
+            }
+
+            // SAFETY: copy the string before freeing — must handle UTF-8 error
+            // without leaking result_ptr.
+            let result_cstr = unsafe { CStr::from_ptr(result_ptr) };
+            let result_str = match result_cstr.to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    unsafe { crate::php::bindings::oxphp_bridge_free_string(result_ptr) };
+                    return Err(PhpError::CallFailed("invalid UTF-8 in result".to_string()));
+                }
+            };
+            unsafe { crate::php::bindings::oxphp_bridge_free_string(result_ptr) };
+
+            // Parse JSON envelope: {"ok": value} or {"err": "message"}
+            let envelope: serde_json::Value = serde_json::from_str(&result_str).map_err(|e| {
+                PhpError::CallFailed(format!("failed to parse result envelope: {e}"))
+            })?;
+
+            if let Some(err) = envelope.get("err") {
+                return Err(PhpError::CallFailed(
+                    err.as_str().unwrap_or("unknown error").to_string(),
+                ));
+            }
+
+            match envelope.get("ok") {
+                Some(val) => Ok(PhpValue::from_json_value(val)),
+                None => Err(PhpError::CallFailed(
+                    "envelope missing both 'ok' and 'err'".to_string(),
+                )),
+            }
+        }
+
+        #[cfg(not(feature = "php"))]
+        {
+            let _ = args;
+            Err(PhpError::CallFailed(format!(
+                "call_function requires php feature: {name}"
+            )))
+        }
     }
 
     /// Create a PHP array from Rust data.
@@ -661,6 +794,121 @@ mod tests {
             got: "int",
         };
         assert_eq!(e.to_string(), "Type error: expected string, got int");
+    }
+
+    // ── PhpValue JSON serialization ──
+
+    #[test]
+    fn test_php_value_to_json_primitives() {
+        assert_eq!(PhpValue::Null.to_json_value(), serde_json::Value::Null);
+        assert_eq!(
+            PhpValue::Bool(true).to_json_value(),
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(PhpValue::Int(42).to_json_value(), serde_json::json!(42));
+        assert_eq!(
+            PhpValue::Float(3.14).to_json_value(),
+            serde_json::json!(3.14)
+        );
+        assert_eq!(
+            PhpValue::String("hello".into()).to_json_value(),
+            serde_json::Value::String("hello".into())
+        );
+    }
+
+    #[test]
+    fn test_php_value_to_json_array_list() {
+        let arr = PhpArray::from_vec(vec![PhpValue::Int(1), PhpValue::Int(2)]);
+        let json = PhpValue::Array(arr).to_json_value();
+        assert_eq!(json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn test_php_value_to_json_array_dict() {
+        let arr = PhpArray::from_pairs([("a", PhpValue::Int(1)), ("b", PhpValue::Int(2))]);
+        let json = PhpValue::Array(arr).to_json_value();
+        assert_eq!(json, serde_json::json!({"a": 1, "b": 2}));
+    }
+
+    #[test]
+    fn test_php_value_to_json_object() {
+        let obj = PhpObject::new("Foo", [("x", PhpValue::Int(1))]);
+        let json = PhpValue::Object(obj).to_json_value();
+        assert_eq!(json, serde_json::json!({"__php_class": "Foo", "x": 1}));
+    }
+
+    #[test]
+    fn test_php_value_from_json_primitives() {
+        assert_eq!(
+            PhpValue::from_json_value(&serde_json::Value::Null),
+            PhpValue::Null
+        );
+        assert_eq!(
+            PhpValue::from_json_value(&serde_json::json!(true)),
+            PhpValue::Bool(true)
+        );
+        assert_eq!(
+            PhpValue::from_json_value(&serde_json::json!(42)),
+            PhpValue::Int(42)
+        );
+        assert_eq!(
+            PhpValue::from_json_value(&serde_json::json!(3.14)),
+            PhpValue::Float(3.14)
+        );
+        assert_eq!(
+            PhpValue::from_json_value(&serde_json::json!("hello")),
+            PhpValue::String("hello".into())
+        );
+    }
+
+    #[test]
+    fn test_php_value_from_json_array() {
+        let json = serde_json::json!([1, 2, 3]);
+        let val = PhpValue::from_json_value(&json);
+        let arr = val.as_array().unwrap();
+        assert!(arr.is_list());
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_php_value_from_json_object_as_array() {
+        let json = serde_json::json!({"key": "value"});
+        let val = PhpValue::from_json_value(&json);
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.get("key"), Some(&PhpValue::String("value".into())));
+    }
+
+    #[test]
+    fn test_php_value_from_json_object_with_class() {
+        let json = serde_json::json!({"__php_class": "Foo", "x": 1});
+        let val = PhpValue::from_json_value(&json);
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.class_name, "Foo");
+        assert_eq!(obj.get("x"), Some(&PhpValue::Int(1)));
+    }
+
+    #[test]
+    fn test_php_value_json_roundtrip() {
+        // Test list array (order-preserved)
+        let list = PhpValue::Array(PhpArray::from_vec(vec![
+            PhpValue::Int(1),
+            PhpValue::String("hello".into()),
+            PhpValue::Bool(true),
+        ]));
+        let json = list.to_json_value();
+        let restored = PhpValue::from_json_value(&json);
+        assert_eq!(list, restored);
+
+        // Test dict array (individual key lookup, since JSON objects don't preserve order)
+        let dict = PhpArray::from_pairs([
+            ("name", PhpValue::String("test".into())),
+            ("count", PhpValue::Int(42)),
+        ]);
+        let json = PhpValue::Array(dict).to_json_value();
+        let restored = PhpValue::from_json_value(&json);
+        let arr = restored.as_array().unwrap();
+        assert_eq!(arr.get("name"), Some(&PhpValue::String("test".into())));
+        assert_eq!(arr.get("count"), Some(&PhpValue::Int(42)));
     }
 
     // ── PluginPhpFunction closure adapter ──

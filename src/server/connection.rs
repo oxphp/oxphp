@@ -67,16 +67,13 @@ async fn handle_request_with_ctx(
     let method_str = parts.method.to_string();
     let path_str = parts.uri.path().to_string();
 
-    // Extract Accept-Encoding before parts are consumed by the pipeline
-    let accept_encoding = if ctx.compression_enabled {
-        parts
+    // Check brotli support before parts are consumed by the pipeline (no alloc)
+    let supports_brotli = ctx.compression_enabled
+        && parts
             .headers
             .get(http::header::ACCEPT_ENCODING)
             .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-    } else {
-        None
-    };
+            .is_some_and(compression::accepts_brotli);
 
     // ── RequestReceived event ──
     // Handlers: RequestIdGenerator (-100), RateLimitHandler (-50), MetricsRequestHandler (0)
@@ -113,7 +110,6 @@ async fn handle_request_with_ctx(
 
     let mut parts = received_event.parts;
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
-    let uri = parts.uri.clone();
 
     // Apply request timeout if configured
     let result = if ctx.request_timeout > Duration::ZERO {
@@ -127,7 +123,7 @@ async fn handle_request_with_ctx(
             Err(_) => {
                 tracing::warn!(
                     request_id = %request_id,
-                    uri = %uri,
+                    path = %path_str,
                     timeout_secs = ctx.request_timeout.as_secs(),
                     "Request timeout"
                 );
@@ -144,7 +140,7 @@ async fn handle_request_with_ctx(
     let response = match result {
         Ok(resp) => resp,
         Err(e) => {
-            tracing::error!(error = %e, uri = %uri, request_id = %request_id, "Internal server error");
+            tracing::error!(error = %e, path = %path_str, request_id = %request_id, "Internal server error");
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(full_body(Bytes::from_static(b"500 Internal Server Error")))
@@ -162,9 +158,10 @@ async fn handle_request_with_ctx(
     let response = building_event.response;
 
     // ── Brotli compression (after error pages, before metrics/logging) ──
-    let response = match accept_encoding {
-        Some(ref ae) => compression::maybe_compress(response, ae).await,
-        None => response,
+    let response = if supports_brotli {
+        compression::maybe_compress(response).await
+    } else {
+        response
     };
 
     // ── RequestComplete event ──

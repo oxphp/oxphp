@@ -123,6 +123,12 @@ impl PluginManager {
         &self.php_functions
     }
 
+    /// Take plugin PHP function definitions (empties the internal vec).
+    /// Call after init_all(), before wrapping manager in Arc.
+    pub fn take_php_functions(&mut self) -> Vec<PluginPhpFunctionDef> {
+        std::mem::take(&mut self.php_functions)
+    }
+
     /// Validate dependencies and return topological init order (Kahn's algorithm).
     /// Checks that all required deps exist while building the adjacency graph.
     fn resolve_init_order(&self) -> Result<Vec<usize>, PluginError> {

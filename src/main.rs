@@ -16,22 +16,40 @@ use oxphp::server;
 use oxphp::types;
 
 fn main() -> Result<(), types::BoxError> {
-    let config = config::Config::from_env()?;
+    let config = Arc::new(config::Config::from_env()?);
 
-    // Create executor BEFORE Tokio runtime — PHP TSRM init must happen
-    // on the main thread before any async runtime signal handling.
+    // Initialize plugins BEFORE PHP startup so MINIT can register plugin
+    // functions with Zend (OPcache needs them at compile time).
+    let mut dispatcher = EventDispatcher::new();
+    let mut plugin_manager = PluginManager::new();
+    #[cfg(feature = "plugin-debug")]
+    plugin_manager.add(Box::new(oxphp::plugins::debug::DebugPlugin::new()));
+    plugin_manager.init_all(&mut dispatcher)?;
+
+    #[cfg(feature = "php")]
+    {
+        let php_fns = plugin_manager.take_php_functions();
+        if !php_fns.is_empty() {
+            oxphp::php::sapi::register_plugin_functions(php_fns);
+        }
+    }
+
+    // Create executor AFTER plugin functions are on the bridge —
+    // php_module_startup() (MINIT) registers them with Zend.
     let executor: std::sync::Arc<dyn executor::ScriptExecutor> =
         std::sync::Arc::from(executor::create_executor());
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async_main(config, executor))
+    runtime.block_on(async_main(config, executor, dispatcher, plugin_manager))
 }
 
 async fn async_main(
-    config: config::Config,
+    config: Arc<config::Config>,
     executor: Arc<dyn executor::ScriptExecutor>,
+    mut dispatcher: EventDispatcher,
+    plugin_manager: PluginManager,
 ) -> Result<(), types::BoxError> {
     let _log_guard = logging::init(&config.log_level)?;
 
@@ -95,8 +113,7 @@ async fn async_main(
         None => None,
     };
 
-    // ── Build event dispatcher ──
-    let mut dispatcher = EventDispatcher::new();
+    // ── Register built-in event handlers ──
 
     // Always registered handlers
     dispatcher.on(handlers::request_id::RequestIdGenerator);
@@ -123,14 +140,6 @@ async fn async_main(
         tracing::info!("Error pages handler registered");
     }
 
-    // ── Plugin system ──
-    let mut plugin_manager = PluginManager::new();
-    // Built-in plugins registered here, gated by Cargo features:
-    // #[cfg(feature = "plugin-example")]
-    // plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
-
-    plugin_manager.init_all(&mut dispatcher)?;
-
     dispatcher.freeze();
     let dispatcher = Arc::new(dispatcher);
     let plugin_manager = Arc::new(plugin_manager);
@@ -143,7 +152,7 @@ async fn async_main(
     // Spawn internal server if configured (before Server::new consumes executor)
     let internal_handle = if let Some(ref internal_addr) = config.internal_addr {
         let metrics_ref = Arc::clone(&metrics);
-        let config_ref = Arc::new(config::Config::from_env()?);
+        let config_ref = Arc::clone(&config);
         let executor_ref = Arc::clone(&executor);
         let pm_ref = Arc::clone(&plugin_manager);
         let addr = internal_addr.clone();

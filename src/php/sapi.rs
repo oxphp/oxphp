@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -7,7 +7,8 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use http::header;
 
-use crate::php::bindings::*;
+use crate::php::bindings::{self, *};
+use crate::plugin::php::{PhpCallContext, PhpValue, PluginPhpFunctionDef};
 use crate::types::ScriptRequest;
 
 thread_local! {
@@ -43,7 +44,13 @@ pub fn set_request_data(req: &ScriptRequest) {
 
     // CGI/1.1 standard variables
     add("REQUEST_METHOD", req.method.as_str());
-    add("REQUEST_URI", &req.uri.to_string());
+    add(
+        "REQUEST_URI",
+        req.uri
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/"),
+    );
     add("QUERY_STRING", &req.query_string);
     add("SERVER_PROTOCOL", "HTTP/1.1");
 
@@ -515,6 +522,107 @@ pub fn clear_buffers() {
     OUTPUT_BUFFER.with(|buf| buf.borrow_mut().clear());
     HEADERS_BUFFER.with(|buf| buf.borrow_mut().clear());
     STATUS_CODE.with(|sc| *sc.borrow_mut() = 200);
+}
+
+// ─── Plugin PHP Function Bridge ─────────────────────────────
+
+/// Global registry of plugin PHP function definitions.
+/// Set once from main.rs after plugin_manager.init_all().
+static PLUGIN_FUNCTIONS: OnceLock<Vec<PluginPhpFunctionDef>> = OnceLock::new();
+
+/// Register plugin functions on the bridge and store handlers for dispatch.
+/// Called from main.rs after plugin_manager.init_all().
+pub fn register_plugin_functions(fns: Vec<PluginPhpFunctionDef>) {
+    for f in &fns {
+        let name = match CString::new(f.name.as_str()) {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(name = f.name, "Skipping plugin fn with NUL in name");
+                continue;
+            }
+        };
+        let required = f.params.iter().filter(|p| p.required).count() as c_int;
+        let total = f.params.len() as c_int;
+        unsafe {
+            bindings::oxphp_bridge_register_plugin_fn(name.as_ptr(), required, total);
+        }
+    }
+    unsafe {
+        bindings::oxphp_bridge_set_dispatch_fn(Some(dispatch_callback));
+    }
+    let count = fns.len();
+    PLUGIN_FUNCTIONS.set(fns).ok();
+    tracing::info!(count, "Plugin PHP functions registered on bridge");
+}
+
+/// Dispatch callback invoked from C extension via bridge.
+///
+/// # Safety
+/// Called from C code. `name` and `json_args` must be valid C strings.
+unsafe extern "C" fn dispatch_callback(
+    name: *const c_char,
+    json_args: *const c_char,
+) -> *mut c_char {
+    let name_str = match CStr::from_ptr(name).to_str() {
+        Ok(s) => s,
+        Err(_) => return make_error_envelope("invalid UTF-8 in function name"),
+    };
+
+    let args_str = match CStr::from_ptr(json_args).to_str() {
+        Ok(s) => s,
+        Err(_) => return make_error_envelope("invalid UTF-8 in json_args"),
+    };
+
+    let fns = match PLUGIN_FUNCTIONS.get() {
+        Some(f) => f,
+        None => return make_error_envelope("plugin functions not initialized"),
+    };
+
+    let func_def = match fns.iter().find(|f| f.name == name_str) {
+        Some(f) => f,
+        None => {
+            return make_error_envelope(&format!("function not found: {name_str}"));
+        }
+    };
+
+    // Deserialize JSON args → Vec<PhpValue>
+    let args: Vec<PhpValue> = match serde_json::from_str::<serde_json::Value>(args_str) {
+        Ok(serde_json::Value::Array(arr)) => arr.iter().map(PhpValue::from_json_value).collect(),
+        Ok(_) => return make_error_envelope("json_args must be an array"),
+        Err(e) => return make_error_envelope(&format!("JSON parse error: {e}")),
+    };
+
+    // Catch panics — unwinding through extern "C" is an abort on Rust 2021.
+    let ctx = PhpCallContext::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        func_def.handler.handle(&ctx, &args)
+    }));
+
+    match result {
+        Ok(Ok(value)) => {
+            let json_val = value.to_json_value();
+            let envelope = serde_json::json!({ "ok": json_val });
+            let envelope_str = envelope.to_string();
+            match CString::new(envelope_str) {
+                Ok(c_str) => bindings::oxphp_bridge_strdup(c_str.as_ptr()),
+                Err(_) => make_error_envelope("result contains null byte"),
+            }
+        }
+        Ok(Err(e)) => make_error_envelope(&e.to_string()),
+        Err(_) => make_error_envelope("handler panicked"),
+    }
+}
+
+/// Create an error envelope string, allocated via bridge strdup.
+unsafe fn make_error_envelope(msg: &str) -> *mut c_char {
+    let envelope = serde_json::json!({ "err": msg });
+    let s = envelope.to_string();
+    // NUL bytes in error messages are impossible (JSON-encoded string escapes them),
+    // but handle defensively to avoid UB.
+    let c_str = CString::new(s).unwrap_or_else(|_| {
+        CString::new("{\"err\":\"error message contained null byte\"}").unwrap()
+    });
+    bindings::oxphp_bridge_strdup(c_str.as_ptr())
 }
 
 #[cfg(test)]

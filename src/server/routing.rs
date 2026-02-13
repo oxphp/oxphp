@@ -28,6 +28,9 @@ pub struct RouteConfig {
     /// Pre-computed root index paths to avoid `join()` on every `/` request.
     root_index_php: PathBuf,
     root_index_html: PathBuf,
+    /// Pre-computed string keys for cache lookups (avoids `to_string_lossy()` per request).
+    root_index_php_key: String,
+    root_index_html_key: String,
 }
 
 impl RouteConfig {
@@ -62,6 +65,8 @@ impl RouteConfig {
 
         let root_index_php = config.document_root.join("index.php");
         let root_index_html = config.document_root.join("index.html");
+        let root_index_php_key = root_index_php.to_string_lossy().into_owned();
+        let root_index_html_key = root_index_html.to_string_lossy().into_owned();
 
         Self {
             document_root: Arc::new(config.document_root.clone()),
@@ -71,6 +76,8 @@ impl RouteConfig {
             index_file_is_php,
             root_index_php,
             root_index_html,
+            root_index_php_key,
+            root_index_html_key,
         }
     }
 
@@ -209,19 +216,13 @@ impl RouteConfig {
         RouteResult::NotFound
     }
 
-    /// Resolve root `/` using pre-computed index paths (zero allocation).
+    /// Resolve root `/` using pre-computed index paths and string keys (zero allocation).
     async fn resolve_root_index(&self, file_cache: &Arc<FileCache>) -> RouteResult {
-        if file_cache
-            .is_file(&self.root_index_php.to_string_lossy())
-            .await
-        {
+        if file_cache.is_file(&self.root_index_php_key).await {
             return RouteResult::Execute(self.root_index_php.clone());
         }
 
-        if file_cache
-            .is_file(&self.root_index_html.to_string_lossy())
-            .await
-        {
+        if file_cache.is_file(&self.root_index_html_key).await {
             return RouteResult::Serve(self.root_index_html.clone());
         }
 

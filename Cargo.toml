@@ -50,8 +50,13 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2"
 
+# Base64 encoding (optional — used by debug plugin)
+base64 = { version = "0.22", optional = true }
+
 [features]
+default = ["php"]
 php = []
+plugin-debug = ["base64"]
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

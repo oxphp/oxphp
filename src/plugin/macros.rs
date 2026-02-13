@@ -244,7 +244,7 @@ macro_rules! php_args {
 #[macro_export]
 macro_rules! php_function {
     // Required params only
-    ($ctx:expr, $name:expr,
+    ($ctx:ident, $name:expr,
      fn($($param:ident : $ptype:ty),* $(,)?) -> $ret:ty $body:block
     ) => {
         $ctx.register_php_function(
@@ -252,6 +252,8 @@ macro_rules! php_function {
             vec![$( $crate::plugin::PhpParam::required(stringify!($param), $crate::plugin::macros::php_type_of::<$ptype>()) ),*],
             $crate::plugin::macros::php_type_of::<$ret>(),
             |__ctx: &$crate::plugin::PhpCallContext, __args: &[$crate::plugin::PhpValue]| -> Result<$crate::plugin::PhpValue, $crate::plugin::PhpError> {
+                #[allow(unused_variables)]
+                let $ctx = __ctx;
                 let mut __idx = 0usize;
                 $(
                     let $param: $ptype = $crate::plugin::macros::php_extract_arg::<$ptype>(__args, __idx, stringify!($param))?;
@@ -265,7 +267,7 @@ macro_rules! php_function {
     };
 
     // With optional params (? suffix)
-    ($ctx:expr, $name:expr,
+    ($ctx:ident, $name:expr,
      fn($($req_param:ident : $req_type:ty),* $(,)?
         $(; $opt_param:ident ?: $opt_type:ty = $opt_default:expr),* $(,)?
      ) -> $ret:ty $body:block
@@ -278,6 +280,8 @@ macro_rules! php_function {
             ],
             $crate::plugin::macros::php_type_of::<$ret>(),
             |__ctx: &$crate::plugin::PhpCallContext, __args: &[$crate::plugin::PhpValue]| -> Result<$crate::plugin::PhpValue, $crate::plugin::PhpError> {
+                #[allow(unused_variables)]
+                let $ctx = __ctx;
                 let mut __idx = 0usize;
                 $(
                     let $req_param = $crate::plugin::macros::php_extract_arg::<$req_type>(__args, __idx, stringify!($req_param))?;

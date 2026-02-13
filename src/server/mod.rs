@@ -35,7 +35,7 @@ impl Drop for ConnectionGuard {
 
 /// Core HTTP server managing connections, routing, and shutdown.
 pub struct Server {
-    route_config: RouteConfig,
+    route_config: Arc<RouteConfig>,
     file_cache: Arc<FileCache>,
     executor: Arc<dyn ScriptExecutor>,
     metrics: Arc<Metrics>,
@@ -61,7 +61,7 @@ impl Server {
         let file_cache = Arc::new(FileCache::new(200));
 
         Self {
-            route_config,
+            route_config: Arc::new(route_config),
             file_cache,
             executor,
             metrics,
@@ -107,7 +107,7 @@ impl Server {
         self.metrics.connection_opened();
         let _guard = ConnectionGuard(Arc::clone(&self.metrics));
 
-        let route_config = self.route_config.clone();
+        let route_config = Arc::clone(&self.route_config);
         let file_cache = Arc::clone(&self.file_cache);
         let executor = Arc::clone(&self.executor);
         let metrics = Arc::clone(&self.metrics);
@@ -116,7 +116,7 @@ impl Server {
         let compression_enabled = self.compression_enabled;
 
         let service = service_fn(move |req| {
-            let route_config = route_config.clone();
+            let route_config = Arc::clone(&route_config);
             let file_cache = Arc::clone(&file_cache);
             let executor = Arc::clone(&executor);
             let metrics = Arc::clone(&metrics);
