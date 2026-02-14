@@ -4,7 +4,7 @@ services:
       context: .
       args:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-         CARGO_FEATURES: "plugin-debug"
+         CARGO_FEATURES: ""
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -39,13 +39,13 @@ services:
       # - RATE_WINDOW=60
 
       # TLS
-#      - TLS_CERT=/etc/ssl/oxphp/server.pem
-#      - TLS_KEY=/etc/ssl/oxphp/server.key
+      # - TLS_CERT=/etc/ssl/oxphp/server.pem
+      # - TLS_KEY=/etc/ssl/oxphp/server.key
 
       # Custom error pages
       # - ERROR_PAGES_DIR=/var/www/errors
 
       # Debug plugin (requires CARGO_FEATURES: "plugin-debug")
-      - DEBUG_VERBOSE=false
-      - DEBUG_INTERNAL_AUTH=admin:secret
+      # - DEBUG_VERBOSE=false
+      # - DEBUG_INTERNAL_AUTH=admin:secret
     restart: unless-stopped
