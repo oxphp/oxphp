@@ -18,6 +18,7 @@ impl ErrorPagesHandler {
 }
 
 impl EventHandler<ResponseBuilding> for ErrorPagesHandler {
+    #[inline]
     fn handle(&self, event: &mut ResponseBuilding) -> Propagation {
         let status = event.response.status().as_u16();
         if status >= 400 {

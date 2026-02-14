@@ -58,6 +58,10 @@ default = ["php"]
 php = []
 plugin-debug = ["base64"]
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"

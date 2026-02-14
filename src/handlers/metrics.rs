@@ -16,6 +16,7 @@ impl MetricsRequestHandler {
 }
 
 impl EventHandler<RequestReceived> for MetricsRequestHandler {
+    #[inline]
     fn handle(&self, event: &mut RequestReceived) -> Propagation {
         self.metrics.record_request(&event.parts.method);
         Propagation::Continue
@@ -38,6 +39,7 @@ impl MetricsResponseHandler {
 }
 
 impl EventHandler<RequestComplete> for MetricsResponseHandler {
+    #[inline]
     fn handle(&self, event: &mut RequestComplete) -> Propagation {
         self.metrics.record_response(event.status, event.duration);
         Propagation::Continue

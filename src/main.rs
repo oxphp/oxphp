@@ -18,6 +18,9 @@ use oxphp::types;
 fn main() -> Result<(), types::BoxError> {
     let config = Arc::new(config::Config::from_env()?);
 
+    // Create metrics early — needed by executor for worker metrics
+    let metrics = Arc::new(Metrics::new());
+
     // Initialize plugins BEFORE PHP startup so MINIT can register plugin
     // functions with Zend (OPcache needs them at compile time).
     let mut dispatcher = EventDispatcher::new();
@@ -37,17 +40,24 @@ fn main() -> Result<(), types::BoxError> {
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
     let executor: std::sync::Arc<dyn executor::ScriptExecutor> =
-        std::sync::Arc::from(executor::create_executor());
+        std::sync::Arc::from(executor::create_executor(Arc::clone(&metrics)));
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async_main(config, executor, dispatcher, plugin_manager))
+    runtime.block_on(async_main(
+        config,
+        executor,
+        metrics,
+        dispatcher,
+        plugin_manager,
+    ))
 }
 
 async fn async_main(
     config: Arc<config::Config>,
     executor: Arc<dyn executor::ScriptExecutor>,
+    metrics: Arc<Metrics>,
     mut dispatcher: EventDispatcher,
     plugin_manager: PluginManager,
 ) -> Result<(), types::BoxError> {
@@ -60,8 +70,8 @@ async fn async_main(
         "OxPHP HTTP server starting"
     );
 
-    // Initialize metrics
-    let metrics = Arc::new(Metrics::new());
+    // Start dynamic worker scale manager if configured
+    executor.start_scale_manager();
 
     // Initialize optional rate limiter
     let rate_limiter = if config.rate_limit > 0 {

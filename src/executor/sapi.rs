@@ -1,11 +1,14 @@
 use std::ffi::CString;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
-use crossbeam_channel::{self, TrySendError};
+use crossbeam_channel::{self, RecvTimeoutError, TrySendError};
 use http::{HeaderName, HeaderValue};
 
 use crate::executor::ScriptExecutor;
+use crate::metrics::Metrics;
 use crate::php::bindings;
 use crate::php::sapi;
 use crate::types::{ScriptRequest, ScriptResponse};
@@ -15,21 +18,134 @@ struct WorkerRequest {
     response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
 }
 
+/// Worker scaling mode parsed from `PHP_WORKERS` env var.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkerMode {
+    /// Fixed number of workers.
+    Static(usize),
+    /// Dynamic scaling between min and max.
+    Dynamic { min: usize, max: usize },
+}
+
+impl WorkerMode {
+    /// Initial worker count: exact for static, min for dynamic.
+    pub fn worker_count(&self) -> usize {
+        match self {
+            WorkerMode::Static(n) => *n,
+            WorkerMode::Dynamic { min, .. } => *min,
+        }
+    }
+}
+
+/// Per-worker state for the managed worker pool.
+struct ManagedWorker {
+    /// Not read at runtime; kept so debug-printing `workers` shows which ID each slot holds.
+    #[allow(dead_code)]
+    id: usize,
+    handle: std::thread::JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+    last_active: Arc<AtomicU64>,
+}
+
+/// Controls whether the worker loop uses blocking `recv()` or `recv_timeout()`.
+/// Static mode workers sleep via futex with zero CPU cost; dynamic mode workers
+/// must wake periodically to check their per-worker shutdown flag.
+#[derive(Clone, Copy)]
+enum WorkerLoopMode {
+    /// Blocking recv — exits only when channel closes (sender dropped).
+    Static,
+    /// Timeout-based recv — checks `shutdown` flag between timeouts.
+    Dynamic,
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Parse `PHP_WORKERS` env var into a `WorkerMode`.
+///
+/// Formats:
+/// - `""` or `"0"` → Static(cpu_count * 2)
+/// - `"N"` → Static(N)
+/// - `"MIN:MAX"` → Dynamic { min, max }
+/// - `"0:0"` → Dynamic { min: cpu/2 (min 2), max: cpu*2 }
+fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
+    let cpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    if let Some((left, right)) = val.split_once(':') {
+        if left.is_empty() || right.is_empty() {
+            return Err(format!(
+                "invalid PHP_WORKERS: '{val}' (both MIN and MAX required)"
+            ));
+        }
+        let min_raw: usize = left.parse().map_err(|_| format!("invalid MIN: '{left}'"))?;
+        let max_raw: usize = right
+            .parse()
+            .map_err(|_| format!("invalid MAX: '{right}'"))?;
+        let min = if min_raw == 0 {
+            (cpu / 2).max(2)
+        } else {
+            min_raw
+        };
+        let max = if max_raw == 0 { cpu * 2 } else { max_raw };
+        if min > max {
+            return Err(format!("PHP_WORKERS: min ({min}) > max ({max})"));
+        }
+        Ok(WorkerMode::Dynamic { min, max })
+    } else {
+        let n: usize = val
+            .parse()
+            .map_err(|_| format!("invalid PHP_WORKERS: '{val}'"))?;
+        let count = if n == 0 { cpu * 2 } else { n };
+        Ok(WorkerMode::Static(count))
+    }
+}
+
 pub struct SapiExecutor {
     request_tx: Option<crossbeam_channel::Sender<WorkerRequest>>,
-    workers: Vec<std::thread::JoinHandle<()>>,
+    request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    workers: Arc<Mutex<Vec<ManagedWorker>>>,
+    mode: WorkerMode,
+    global_shutdown: Arc<AtomicBool>,
+    metrics: Arc<Metrics>,
+    idle_timeout_sec: u64,
 }
 
 impl SapiExecutor {
-    pub fn new() -> Self {
-        let worker_count = std::env::var("PHP_WORKERS")
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        let mode = std::env::var("PHP_WORKERS")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(|v| {
+                if v.is_empty() {
+                    None
+                } else {
+                    match parse_php_workers(&v) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            tracing::error!("{e}");
+                            None
+                        }
+                    }
+                }
+            })
             .unwrap_or_else(|| {
-                std::thread::available_parallelism()
+                let cpu = std::thread::available_parallelism()
                     .map(|n| n.get())
-                    .unwrap_or(4)
+                    .unwrap_or(4);
+                WorkerMode::Static(cpu * 2)
             });
+
+        let idle_timeout_sec: u64 = std::env::var("PHP_WORKERS_IDLE_SEC")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+
+        let initial_count = mode.worker_count();
 
         // 1. TSRM must be initialized first for ZTS builds
         if !unsafe { bindings::php_tsrm_startup() } {
@@ -58,33 +174,63 @@ impl SapiExecutor {
         let queue_capacity = std::env::var("QUEUE_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(worker_count * 128);
+            .unwrap_or(initial_count * 128);
 
         let (request_tx, request_rx) = crossbeam_channel::bounded(queue_capacity);
 
-        let mut workers = Vec::with_capacity(worker_count);
-        for i in 0..worker_count {
-            let rx = request_rx.clone();
+        let loop_mode = match &mode {
+            WorkerMode::Static(_) => WorkerLoopMode::Static,
+            WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
+        };
 
-            let handle = std::thread::Builder::new()
-                .name(format!("php-worker-{i}"))
-                .spawn(move || {
-                    worker_thread(rx);
-                })
-                .expect("failed to spawn PHP worker thread");
+        let mut managed_workers = Vec::with_capacity(initial_count);
+        for i in 0..initial_count {
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let last_active = Arc::new(AtomicU64::new(now_millis()));
+            let handle = spawn_worker(
+                i,
+                request_rx.clone(),
+                Arc::clone(&shutdown),
+                Arc::clone(&last_active),
+                loop_mode,
+            );
+            managed_workers.push(ManagedWorker {
+                id: i,
+                handle,
+                shutdown,
+                last_active,
+            });
+        }
 
-            workers.push(handle);
+        // Set initial metrics
+        metrics.set_workers_current(initial_count);
+        match &mode {
+            WorkerMode::Static(n) => {
+                metrics.set_workers_min(*n);
+                metrics.set_workers_max(*n);
+            }
+            WorkerMode::Dynamic { min, max } => {
+                metrics.set_workers_min(*min);
+                metrics.set_workers_max(*max);
+            }
         }
 
         tracing::info!(
-            workers = worker_count,
+            mode = ?mode,
+            workers = initial_count,
             queue_capacity,
+            idle_timeout_sec,
             "PHP worker pool started"
         );
 
         Self {
             request_tx: Some(request_tx),
-            workers,
+            request_rx,
+            workers: Arc::new(Mutex::new(managed_workers)),
+            mode,
+            global_shutdown: Arc::new(AtomicBool::new(false)),
+            metrics,
+            idle_timeout_sec,
         }
     }
 }
@@ -130,19 +276,50 @@ impl ScriptExecutor for SapiExecutor {
     fn shutdown(&self) {
         // No-op: cleanup handled in Drop
     }
+
+    fn start_scale_manager(&self) {
+        if let WorkerMode::Dynamic { min, max } = self.mode {
+            let workers = Arc::clone(&self.workers);
+            let request_rx = self.request_rx.clone();
+            let global_shutdown = Arc::clone(&self.global_shutdown);
+            let metrics = Arc::clone(&self.metrics);
+            let idle_timeout_sec = self.idle_timeout_sec;
+
+            tokio::spawn(async move {
+                run_scale_manager(
+                    workers,
+                    request_rx,
+                    min,
+                    max,
+                    idle_timeout_sec,
+                    global_shutdown,
+                    metrics,
+                )
+                .await;
+            });
+
+            tracing::info!(min, max, "Scale manager started");
+        }
+    }
 }
 
 impl Drop for SapiExecutor {
     fn drop(&mut self) {
-        // 1. Drop sender to close channel — workers will exit their recv loop
+        // 1. Signal scale manager to stop
+        self.global_shutdown.store(true, Ordering::Relaxed);
+
+        // 2. Drop sender to close channel — workers will exit their recv loop
         self.request_tx.take();
 
-        // 2. Join all worker threads
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
+        // 3. Signal each worker to shut down and join
+        if let Ok(mut workers) = self.workers.lock() {
+            for worker in workers.drain(..) {
+                worker.shutdown.store(true, Ordering::Relaxed);
+                let _ = worker.handle.join();
+            }
         }
 
-        // 3. PHP shutdown after all workers are done
+        // 4. PHP shutdown after all workers are done
         unsafe {
             bindings::php_module_shutdown();
             bindings::sapi_shutdown();
@@ -151,7 +328,27 @@ impl Drop for SapiExecutor {
     }
 }
 
-fn worker_thread(request_rx: crossbeam_channel::Receiver<WorkerRequest>) {
+fn spawn_worker(
+    id: usize,
+    rx: crossbeam_channel::Receiver<WorkerRequest>,
+    shutdown: Arc<AtomicBool>,
+    last_active: Arc<AtomicU64>,
+    loop_mode: WorkerLoopMode,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("php-worker-{id}"))
+        .spawn(move || {
+            worker_thread(rx, shutdown, last_active, loop_mode);
+        })
+        .expect("failed to spawn PHP worker thread")
+}
+
+fn worker_thread(
+    request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    shutdown: Arc<AtomicBool>,
+    last_active: Arc<AtomicU64>,
+    loop_mode: WorkerLoopMode,
+) {
     let thread_name = std::thread::current()
         .name()
         .unwrap_or("php-worker")
@@ -164,12 +361,136 @@ fn worker_thread(request_rx: crossbeam_channel::Receiver<WorkerRequest>) {
 
     tracing::info!(worker = %thread_name, "PHP worker thread started");
 
-    while let Ok(wr) = request_rx.recv() {
-        let response = execute_request(&wr.script);
-        let _ = wr.response_tx.send(response);
+    match loop_mode {
+        WorkerLoopMode::Static => {
+            // Blocking recv — zero CPU while idle, exits when channel closes.
+            while let Ok(wr) = request_rx.recv() {
+                let response = execute_request(&wr.script);
+                let _ = wr.response_tx.send(response);
+            }
+        }
+        WorkerLoopMode::Dynamic => {
+            // Timeout-based recv — wakes every 200ms to check shutdown flag.
+            // Stores last_active timestamp for the scale manager's idle detection.
+            loop {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                match request_rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(wr) => {
+                        last_active.store(now_millis(), Ordering::Relaxed);
+                        let response = execute_request(&wr.script);
+                        let _ = wr.response_tx.send(response);
+                    }
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
     }
 
     tracing::info!(worker = %thread_name, "PHP worker thread stopped");
+}
+
+async fn run_scale_manager(
+    workers: Arc<Mutex<Vec<ManagedWorker>>>,
+    request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    min: usize,
+    max: usize,
+    idle_timeout_sec: u64,
+    global_shutdown: Arc<AtomicBool>,
+    metrics: Arc<Metrics>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    let mut last_scale_up = Instant::now();
+    let mut last_scale_down = Instant::now();
+    let idle_timeout_ms = idle_timeout_sec * 1000;
+    let mut next_id = max; // start IDs above initial range to avoid collisions
+
+    loop {
+        interval.tick().await;
+        if global_shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let mut workers_guard = workers.lock().unwrap();
+        let now = now_millis();
+
+        // Clean up exited workers
+        workers_guard.retain(|w| !w.handle.is_finished());
+        let total = workers_guard.len();
+
+        // Count idle workers (last_active > 200ms ago)
+        let idle_count = workers_guard
+            .iter()
+            .filter(|w| now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > 200)
+            .count();
+
+        // Update metrics
+        metrics.set_workers_current(total);
+        metrics.set_workers_idle(idle_count);
+
+        // Scale-up: no idle workers and under max
+        let needs_scale_up =
+            idle_count == 0 && total < max && last_scale_up.elapsed() >= Duration::from_millis(500);
+
+        if needs_scale_up {
+            // Prepare Arcs inside lock, but drop lock before spawning the OS thread
+            // to avoid blocking the Tokio runtime during thread creation (~10-50μs).
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let last_active = Arc::new(AtomicU64::new(now));
+            let spawn_shutdown = Arc::clone(&shutdown);
+            let spawn_last_active = Arc::clone(&last_active);
+            let spawn_rx = request_rx.clone();
+            let spawn_id = next_id;
+            drop(workers_guard);
+
+            let handle = spawn_worker(
+                spawn_id,
+                spawn_rx,
+                spawn_shutdown,
+                spawn_last_active,
+                WorkerLoopMode::Dynamic,
+            );
+
+            // Re-lock to insert
+            let mut workers_guard = workers.lock().unwrap();
+            workers_guard.push(ManagedWorker {
+                id: next_id,
+                handle,
+                shutdown,
+                last_active,
+            });
+            next_id += 1;
+            last_scale_up = Instant::now();
+            metrics.worker_spawned();
+            metrics.set_workers_current(workers_guard.len());
+            tracing::info!(
+                id = next_id - 1,
+                total = workers_guard.len(),
+                "Scale-up: spawned worker"
+            );
+            continue;
+        }
+
+        // Scale-down: retire workers idle longer than threshold
+        if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
+            if let Some(pos) = workers_guard.iter().position(|w| {
+                now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
+            }) {
+                let worker = workers_guard.remove(pos);
+                worker.shutdown.store(true, Ordering::Relaxed);
+                // Join in background thread to avoid blocking the async runtime
+                std::thread::spawn(move || {
+                    let _ = worker.handle.join();
+                });
+                last_scale_down = Instant::now();
+                metrics.worker_retired();
+                metrics.set_workers_current(total - 1);
+                tracing::info!(total = total - 1, "Scale-down: retired worker");
+            }
+        }
+    }
 }
 
 /// RAII guard that clears SAPI request data on drop (even on panic).
@@ -236,5 +557,153 @@ fn execute_request(request: &ScriptRequest) -> ScriptResponse {
         headers,
         body,
         execution_time_us: start.elapsed().as_micros() as u64,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to get cpu count for assertions
+    fn cpu_count() -> usize {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+    }
+
+    // ── parse_php_workers tests ──
+
+    #[test]
+    fn test_parse_static_explicit() {
+        assert_eq!(parse_php_workers("8").unwrap(), WorkerMode::Static(8));
+    }
+
+    #[test]
+    fn test_parse_static_one() {
+        assert_eq!(parse_php_workers("1").unwrap(), WorkerMode::Static(1));
+    }
+
+    #[test]
+    fn test_parse_static_zero_auto() {
+        let cpu = cpu_count();
+        assert_eq!(parse_php_workers("0").unwrap(), WorkerMode::Static(cpu * 2));
+    }
+
+    #[test]
+    fn test_parse_dynamic_explicit() {
+        assert_eq!(
+            parse_php_workers("2:16").unwrap(),
+            WorkerMode::Dynamic { min: 2, max: 16 }
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_min_equals_max() {
+        assert_eq!(
+            parse_php_workers("4:4").unwrap(),
+            WorkerMode::Dynamic { min: 4, max: 4 }
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_zero_min_auto() {
+        let cpu = cpu_count();
+        let expected_min = (cpu / 2).max(2);
+        assert_eq!(
+            parse_php_workers("0:16").unwrap(),
+            WorkerMode::Dynamic {
+                min: expected_min,
+                max: 16
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_zero_max_auto() {
+        let cpu = cpu_count();
+        assert_eq!(
+            parse_php_workers("2:0").unwrap(),
+            WorkerMode::Dynamic {
+                min: 2,
+                max: cpu * 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_both_zero() {
+        let cpu = cpu_count();
+        let expected_min = (cpu / 2).max(2);
+        let expected_max = cpu * 2;
+        assert_eq!(
+            parse_php_workers("0:0").unwrap(),
+            WorkerMode::Dynamic {
+                min: expected_min,
+                max: expected_max
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_min_greater_than_max_error() {
+        let result = parse_php_workers("10:5");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("min (10) > max (5)"));
+    }
+
+    #[test]
+    fn test_parse_invalid_number_error() {
+        assert!(parse_php_workers("abc").is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_min_error() {
+        let result = parse_php_workers("abc:10");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid MIN"));
+    }
+
+    #[test]
+    fn test_parse_invalid_max_error() {
+        let result = parse_php_workers("2:xyz");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid MAX"));
+    }
+
+    #[test]
+    fn test_parse_empty_side_error() {
+        assert!(parse_php_workers(":10").is_err());
+        assert!(parse_php_workers("10:").is_err());
+        assert!(parse_php_workers(":").is_err());
+    }
+
+    #[test]
+    fn test_parse_large_values() {
+        assert_eq!(
+            parse_php_workers("1:1000").unwrap(),
+            WorkerMode::Dynamic { min: 1, max: 1000 }
+        );
+    }
+
+    // ── WorkerMode tests ──
+
+    #[test]
+    fn test_worker_mode_count_static() {
+        assert_eq!(WorkerMode::Static(8).worker_count(), 8);
+    }
+
+    #[test]
+    fn test_worker_mode_count_dynamic() {
+        assert_eq!(WorkerMode::Dynamic { min: 2, max: 16 }.worker_count(), 2);
+    }
+
+    // ── now_millis test ──
+
+    #[test]
+    fn test_now_millis_reasonable() {
+        let ms = now_millis();
+        // Should be after 2020 and before 2100
+        assert!(ms > 1_577_836_800_000); // 2020-01-01
+        assert!(ms < 4_102_444_800_000); // 2100-01-01
     }
 }

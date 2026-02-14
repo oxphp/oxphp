@@ -5,6 +5,7 @@ use crate::events::{EventHandler, Priority, Propagation};
 pub struct AccessLogHandler;
 
 impl EventHandler<RequestComplete> for AccessLogHandler {
+    #[inline]
     fn handle(&self, event: &mut RequestComplete) -> Propagation {
         tracing::info!(
             target: "access_log",

@@ -17,6 +17,7 @@ impl RateLimitHandler {
 }
 
 impl EventHandler<RequestReceived> for RateLimitHandler {
+    #[inline]
     fn handle(&self, event: &mut RequestReceived) -> Propagation {
         if let Some(resp) = self
             .limiter

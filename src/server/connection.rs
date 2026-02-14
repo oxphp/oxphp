@@ -63,10 +63,6 @@ async fn handle_request_with_ctx(
     let start = Instant::now();
     let (parts, body) = req.into_parts();
 
-    // Cache method/path strings once — moved (not cloned) through the pipeline
-    let method_str = parts.method.to_string();
-    let path_str = parts.uri.path().to_string();
-
     // Check brotli support before parts are consumed by the pipeline (no alloc)
     let supports_brotli = ctx.compression_enabled
         && parts
@@ -94,11 +90,11 @@ async fn handle_request_with_ctx(
         let status = early_resp.status().as_u16();
         let elapsed = start.elapsed();
 
-        // Dispatch RequestComplete for the early response
+        // Dispatch RequestComplete for the early response — allocate strings only here
         let mut complete_event = RequestComplete {
             request_id,
-            method: method_str,
-            path: path_str,
+            method: received_event.parts.method.to_string(),
+            path: received_event.parts.uri.path().to_string(),
             status,
             duration: elapsed,
             remote_addr,
@@ -109,6 +105,9 @@ async fn handle_request_with_ctx(
     }
 
     let mut parts = received_event.parts;
+    // Defer string allocations to just before they're needed (after early response check)
+    let method_str = parts.method.to_string();
+    let path_str = parts.uri.path().to_string();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
     // Apply request timeout if configured

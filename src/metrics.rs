@@ -17,6 +17,12 @@ pub struct Metrics {
     responses_by_status_class: [AtomicU64; 5],
     total_response_time_us: AtomicU64,
     busy_workers: AtomicUsize,
+    workers_current: AtomicUsize,
+    workers_min: AtomicUsize,
+    workers_max: AtomicUsize,
+    workers_idle: AtomicUsize,
+    workers_spawned_total: AtomicU64,
+    workers_retired_total: AtomicU64,
 }
 
 const METHOD_LABELS: [&str; 9] = [
@@ -64,6 +70,12 @@ impl Metrics {
             responses_by_status_class: std::array::from_fn(|_| AtomicU64::new(0)),
             total_response_time_us: AtomicU64::new(0),
             busy_workers: AtomicUsize::new(0),
+            workers_current: AtomicUsize::new(0),
+            workers_min: AtomicUsize::new(0),
+            workers_max: AtomicUsize::new(0),
+            workers_idle: AtomicUsize::new(0),
+            workers_spawned_total: AtomicU64::new(0),
+            workers_retired_total: AtomicU64::new(0),
         }
     }
 
@@ -98,6 +110,34 @@ impl Metrics {
 
     pub fn request_dropped(&self) {
         self.dropped_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_workers_current(&self, n: usize) {
+        self.workers_current.store(n, Ordering::Relaxed);
+    }
+
+    pub fn set_workers_min(&self, n: usize) {
+        self.workers_min.store(n, Ordering::Relaxed);
+    }
+
+    pub fn set_workers_max(&self, n: usize) {
+        self.workers_max.store(n, Ordering::Relaxed);
+    }
+
+    pub fn set_workers_idle(&self, n: usize) {
+        self.workers_idle.store(n, Ordering::Relaxed);
+    }
+
+    pub fn worker_spawned(&self) {
+        self.workers_spawned_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn worker_retired(&self) {
+        self.workers_retired_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn workers_current(&self) -> usize {
+        self.workers_current.load(Ordering::Relaxed)
     }
 
     pub fn uptime(&self) -> Duration {
@@ -213,6 +253,66 @@ impl Metrics {
             self.busy_workers.load(Ordering::Relaxed)
         );
 
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_workers_current Current number of worker threads."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_workers_current gauge");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_current {}",
+            self.workers_current.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(out, "# HELP oxphp_workers_min Minimum worker thread count.");
+        let _ = writeln!(out, "# TYPE oxphp_workers_min gauge");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_min {}",
+            self.workers_min.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(out, "# HELP oxphp_workers_max Maximum worker thread count.");
+        let _ = writeln!(out, "# TYPE oxphp_workers_max gauge");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_max {}",
+            self.workers_max.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_workers_idle Currently idle worker threads."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_workers_idle gauge");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_idle {}",
+            self.workers_idle.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_workers_spawned_total Total workers spawned."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_workers_spawned_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_spawned_total {}",
+            self.workers_spawned_total.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_workers_retired_total Total workers retired."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_workers_retired_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_workers_retired_total {}",
+            self.workers_retired_total.load(Ordering::Relaxed)
+        );
+
         out
     }
 }
@@ -290,6 +390,38 @@ mod tests {
         assert_eq!(m.pending_requests.load(Ordering::Relaxed), 1);
         m.request_dropped();
         assert_eq!(m.dropped_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_worker_metrics() {
+        let m = Metrics::new();
+        m.set_workers_current(4);
+        m.set_workers_min(2);
+        m.set_workers_max(16);
+        m.set_workers_idle(2);
+        m.worker_spawned();
+        m.worker_spawned();
+        m.worker_retired();
+
+        assert_eq!(m.workers_current(), 4);
+        assert_eq!(m.workers_min.load(Ordering::Relaxed), 2);
+        assert_eq!(m.workers_max.load(Ordering::Relaxed), 16);
+        assert_eq!(m.workers_idle.load(Ordering::Relaxed), 2);
+        assert_eq!(m.workers_spawned_total.load(Ordering::Relaxed), 2);
+        assert_eq!(m.workers_retired_total.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_worker_metrics_prometheus() {
+        let m = Metrics::new();
+        m.set_workers_current(8);
+        m.set_workers_min(2);
+        m.set_workers_max(16);
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_workers_current 8"));
+        assert!(output.contains("oxphp_workers_min 2"));
+        assert!(output.contains("oxphp_workers_max 16"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ static SERVER_HEADER_VALUE: LazyLock<HeaderValue> =
 pub struct ServerHeaderHandler;
 
 impl EventHandler<ResponseBuilding> for ServerHeaderHandler {
+    #[inline]
     fn handle(&self, event: &mut ResponseBuilding) -> Propagation {
         event
             .response

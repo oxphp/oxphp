@@ -24,6 +24,7 @@ fn generate_request_id() -> String {
 pub struct RequestIdGenerator;
 
 impl EventHandler<RequestReceived> for RequestIdGenerator {
+    #[inline]
     fn handle(&self, event: &mut RequestReceived) -> Propagation {
         // Honor incoming X-Request-ID header, or generate one
         let id = event

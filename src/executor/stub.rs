@@ -83,7 +83,8 @@ mod tests {
     #[test]
     fn test_create_executor_stub() {
         std::env::set_var("EXECUTOR", "stub");
-        let executor = crate::executor::create_executor();
+        let metrics = Arc::new(crate::metrics::Metrics::new());
+        let executor = crate::executor::create_executor(metrics);
         // Verify it works by executing a request
         let rx = executor.execute(make_request());
         // The StubExecutor sends the response synchronously, so try_recv works

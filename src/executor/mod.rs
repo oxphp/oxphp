@@ -2,6 +2,12 @@
 pub mod sapi;
 pub mod stub;
 
+#[cfg(feature = "php")]
+pub use sapi::WorkerMode;
+
+use std::sync::Arc;
+
+use crate::metrics::Metrics;
 use crate::types::{ScriptRequest, ScriptResponse};
 
 pub trait ScriptExecutor: Send + Sync {
@@ -13,11 +19,15 @@ pub trait ScriptExecutor: Send + Sync {
     fn is_healthy(&self) -> bool {
         true
     }
+
+    /// Start the scale manager if the executor supports dynamic scaling.
+    /// Called from async context (Tokio runtime). Default: no-op.
+    fn start_scale_manager(&self) {}
 }
 
 /// Create executor based on `EXECUTOR` env var.
 /// Returns `SapiExecutor` when compiled with `php` feature, otherwise `StubExecutor`.
-pub fn create_executor() -> Box<dyn ScriptExecutor> {
+pub fn create_executor(metrics: Arc<Metrics>) -> Box<dyn ScriptExecutor> {
     let executor_type = std::env::var("EXECUTOR")
         .unwrap_or_else(|_| "sapi".to_string())
         .to_lowercase();
@@ -31,10 +41,11 @@ pub fn create_executor() -> Box<dyn ScriptExecutor> {
             #[cfg(feature = "php")]
             {
                 tracing::info!("Creating SapiExecutor (PHP mode)");
-                Box::new(sapi::SapiExecutor::new())
+                Box::new(sapi::SapiExecutor::new(metrics))
             }
             #[cfg(not(feature = "php"))]
             {
+                let _ = metrics;
                 tracing::warn!("PHP feature not enabled, falling back to StubExecutor");
                 Box::new(stub::StubExecutor::new())
             }
