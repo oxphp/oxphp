@@ -24,6 +24,10 @@ jobs:
       contents: read
       packages: write
 
+    outputs:
+      digest-amd64: ${{ steps.digest.outputs.amd64 }}
+      digest-arm64: ${{ steps.digest.outputs.arm64 }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,28 +42,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract platform suffix
+      - name: Platform suffix
         id: platform
         run: echo "suffix=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
         env:
           PLATFORM: ${{ matrix.platform }}
 
-      - name: Build and push (per-platform)
+      - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.alpine-release
           platforms: ${{ matrix.platform }}
+          provenance: false
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${{ steps.platform.outputs.suffix }}
           cache-from: type=gha,scope=${{ steps.platform.outputs.suffix }}
           cache-to: type=gha,scope=${{ steps.platform.outputs.suffix }},mode=max
+
+      - name: Export digest
+        id: digest
+        run: echo "${{ steps.platform.outputs.suffix }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   manifest:
     needs: build
     runs-on: ubuntu-latest
 
     permissions:
+      contents: read
       packages: write
 
     steps:
