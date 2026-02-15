@@ -42,9 +42,7 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
                 if let Some(resp) = actions.early_response {
                     event.early_response = Some(resp);
                 }
-                for (key, value) in actions.metadata {
-                    event.metadata.insert(key, value);
-                }
+                event.metadata.extend(actions.metadata);
             }
             Err(_) => {
                 tracing::error!(plugin = %self.plugin_name, "Plugin request handler panicked");
@@ -129,7 +127,7 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let view = PluginCompleteView {
                 request_id: &event.request_id,
-                method: &event.method,
+                method: event.method.as_str(),
                 path: &event.path,
                 status: event.status,
                 duration: event.duration,
@@ -155,7 +153,6 @@ mod tests {
     use super::*;
     use crate::events::EventHandler;
     use bytes::Bytes;
-    use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -173,7 +170,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_id: "test123".to_string(),
             early_response: None,
-            metadata: HashMap::new(),
+            metadata: Vec::new(),
         }
     }
 
@@ -243,7 +240,7 @@ mod tests {
 
         let mut event = RequestComplete {
             request_id: "test123".into(),
-            method: "GET".into(),
+            method: http::Method::GET,
             path: "/test".into(),
             status: 200,
             duration: std::time::Duration::from_millis(10),
@@ -272,7 +269,10 @@ mod tests {
 
         let mut event = make_request_event();
         EventHandler::<RequestReceived>::handle(&wrapper, &mut event);
-        assert_eq!(event.metadata.get("user_id"), Some(&"42".to_string()));
+        assert!(event
+            .metadata
+            .iter()
+            .any(|(k, v)| k == "user_id" && v == "42"));
     }
 
     struct HeaderHandler;
@@ -338,7 +338,7 @@ mod tests {
 
         let mut event = RequestComplete {
             request_id: "req1".into(),
-            method: "GET".into(),
+            method: http::Method::GET,
             path: "/test".into(),
             status: 200,
             duration: std::time::Duration::from_millis(5),

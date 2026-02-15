@@ -35,15 +35,15 @@ impl Drop for ConnectionGuard {
 
 /// Core HTTP server managing connections, routing, and shutdown.
 pub struct Server {
-    route_config: Arc<RouteConfig>,
-    file_cache: Arc<FileCache>,
-    executor: Arc<dyn ScriptExecutor>,
-    metrics: Arc<Metrics>,
-    dispatcher: Arc<EventDispatcher>,
+    pub(crate) route_config: Arc<RouteConfig>,
+    pub(crate) file_cache: Arc<FileCache>,
+    pub(crate) executor: Arc<dyn ScriptExecutor>,
+    pub(crate) metrics: Arc<Metrics>,
+    pub(crate) dispatcher: Arc<EventDispatcher>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    request_timeout: Duration,
+    pub(crate) request_timeout: Duration,
     header_read_timeout: Duration,
-    compression_enabled: bool,
+    pub(crate) compression_enabled: bool,
     shutdown: AtomicBool,
 }
 
@@ -107,34 +107,10 @@ impl Server {
         self.metrics.connection_opened();
         let _guard = ConnectionGuard(Arc::clone(&self.metrics));
 
-        let route_config = Arc::clone(&self.route_config);
-        let file_cache = Arc::clone(&self.file_cache);
-        let executor = Arc::clone(&self.executor);
-        let metrics = Arc::clone(&self.metrics);
-        let dispatcher = Arc::clone(&self.dispatcher);
-        let request_timeout = self.request_timeout;
-        let compression_enabled = self.compression_enabled;
-
+        let server = Arc::clone(self); // 1 Arc clone for the connection
         let service = service_fn(move |req| {
-            let route_config = Arc::clone(&route_config);
-            let file_cache = Arc::clone(&file_cache);
-            let executor = Arc::clone(&executor);
-            let metrics = Arc::clone(&metrics);
-            let dispatcher = Arc::clone(&dispatcher);
-            async move {
-                connection::handle_request(
-                    req,
-                    &route_config,
-                    &file_cache,
-                    &executor,
-                    remote_addr,
-                    &metrics,
-                    &dispatcher,
-                    request_timeout,
-                    compression_enabled,
-                )
-                .await
-            }
+            let server = Arc::clone(&server); // 1 Arc clone per request (was 10)
+            async move { connection::handle_request(req, &server, remote_addr).await }
         });
 
         let mut builder = Builder::new(hyper_util::rt::TokioExecutor::new());

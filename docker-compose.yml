@@ -18,6 +18,7 @@ services:
       - DOCUMENT_ROOT=/var/www/html
       # - INDEX_FILE=index.php
       - WORKER_THREADS=0
+      - TOKIO_WORKERS=4
       - EXECUTOR=sapi
       # PHP_WORKERS=0        # auto-detect (cpu*2, static)
       # PHP_WORKERS=8        # fixed 8 workers

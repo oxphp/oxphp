@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use http::request::Parts;
-use http::Response;
+use http::{Method, Response};
 
 use super::Event;
 use crate::types::ResponseBody;
@@ -86,7 +85,7 @@ pub struct RequestReceived {
     /// Set by a handler to short-circuit the pipeline with an early response.
     pub early_response: Option<Response<ResponseBody>>,
     /// Plugin metadata accumulated from plugin handlers.
-    pub metadata: HashMap<String, String>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl Event for RequestReceived {
@@ -110,7 +109,7 @@ impl Event for RouteResolved {
 /// Fired after the full request is complete (response sent).
 pub struct RequestComplete {
     pub request_id: String,
-    pub method: String,
+    pub method: Method,
     pub path: String,
     pub status: u16,
     pub duration: Duration,

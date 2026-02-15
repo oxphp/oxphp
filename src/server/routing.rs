@@ -218,6 +218,16 @@ impl RouteConfig {
 
     /// Resolve root `/` using pre-computed index paths and string keys (zero allocation).
     async fn resolve_root_index(&self, file_cache: &Arc<FileCache>) -> RouteResult {
+        // Framework/SPA mode: root goes to INDEX_FILE
+        if let Some(ref index_path) = self.index_file_path {
+            if self.index_file_is_php {
+                return RouteResult::Execute(index_path.clone());
+            } else {
+                return RouteResult::Serve(index_path.clone());
+            }
+        }
+
+        // Traditional mode: check index.php, then index.html
         if file_cache.is_file(&self.root_index_php_key).await {
             return RouteResult::Execute(self.root_index_php.clone());
         }
@@ -477,6 +487,27 @@ mod tests {
         let escaped_path = dir.path().join("escape/secret.txt");
         let cached = cache.get_canonical(&escaped_path.to_string_lossy());
         assert!(cached.is_some(), "Canonical path should be cached");
+    }
+
+    // --- Framework mode root with custom INDEX_FILE ---
+
+    #[tokio::test]
+    async fn test_framework_mode_root_uses_custom_index_file() {
+        let dir = setup_test_dir();
+        fs::write(dir.path().join("index.php"), "<?php echo 'index';").unwrap();
+        let rc = make_config(dir.path(), Some("index.php"));
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/", &cache).await;
+        match result {
+            RouteResult::Execute(path) => {
+                assert!(
+                    path.ends_with("index.php"),
+                    "Root should route to index.php, got {:?}",
+                    path
+                );
+            }
+            other => panic!("Expected Execute(index.php), got {:?}", other),
+        }
     }
 
     // --- Subdirectory tests ---

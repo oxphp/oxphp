@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod logging;
 
 use std::path::Path;
@@ -39,12 +42,24 @@ fn main() -> Result<(), types::BoxError> {
 
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
-    let executor: std::sync::Arc<dyn executor::ScriptExecutor> =
-        std::sync::Arc::from(executor::create_executor(Arc::clone(&metrics)));
+    let executor: Arc<dyn executor::ScriptExecutor> =
+        Arc::from(executor::create_executor(Arc::clone(&metrics)));
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
+    let tokio_workers: usize = std::env::var("TOKIO_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let runtime = if tokio_workers > 0 {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(tokio_workers)
+            .enable_all()
+            .build()?
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+    };
     runtime.block_on(async_main(
         config,
         executor,

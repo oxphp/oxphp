@@ -45,6 +45,9 @@ brotli = "7"
 # Error derives
 thiserror = "2"
 
+# Fast allocator
+mimalloc = "0.1"
+
 # TLS
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }

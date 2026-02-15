@@ -75,7 +75,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_id: "test".to_string(),
             early_response: None,
-            metadata: std::collections::HashMap::new(),
+            metadata: Vec::new(),
         };
 
         let result = handler.handle(&mut event);
@@ -90,7 +90,7 @@ mod tests {
 
         let mut event = RequestComplete {
             request_id: "test".to_string(),
-            method: "GET".to_string(),
+            method: http::Method::GET,
             path: "/".to_string(),
             status: 200,
             duration: Duration::from_micros(500),

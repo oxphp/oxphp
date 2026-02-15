@@ -15,10 +15,11 @@ thread_local! {
     static OUTPUT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
     static HEADERS_BUFFER: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
     static STATUS_CODE: RefCell<u16> = const { RefCell::new(200) };
-    static REQUEST_DATA: RefCell<Option<RequestData>> = const { RefCell::new(None) };
+    static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
+/// Reused across requests — `server_vars` Vec capacity is retained.
 struct RequestData {
     /// Pre-built $_SERVER key-value pairs as CStrings (must outlive php_request_shutdown).
     server_vars: Vec<(CString, CString)>,
@@ -28,126 +29,149 @@ struct RequestData {
     body: Bytes,
     /// How many bytes of body have been read so far.
     body_offset: usize,
+    /// Whether this slot has been populated for the current request.
+    active: bool,
+}
+
+impl RequestData {
+    fn new() -> Self {
+        Self {
+            server_vars: Vec::with_capacity(32),
+            cookie_string: None,
+            body: Bytes::new(),
+            body_offset: 0,
+            active: false,
+        }
+    }
+}
+
+/// Push a server variable, skipping entries with embedded null bytes.
+#[inline]
+fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
+    if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
+        vars.push((k, v));
+    }
 }
 
 /// Build request data from a ScriptRequest and store in thread-local.
+/// Reuses the existing Vec capacity from previous requests.
 /// Must be called BEFORE php_request_startup().
 pub fn set_request_data(req: &ScriptRequest) {
-    let mut server_vars = Vec::with_capacity(32);
+    REQUEST_DATA.with(|rd| {
+        let mut data = rd.borrow_mut();
 
-    // Helper to add a server var (skips entries with embedded null bytes)
-    let mut add = |key: &str, val: &str| {
-        if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
-            server_vars.push((k, v));
+        // Clear previous values but keep the Vec allocation
+        data.server_vars.clear();
+
+        let vars = &mut data.server_vars;
+
+        // CGI/1.1 standard variables
+        push_server_var(vars, "REQUEST_METHOD", req.method.as_str());
+        push_server_var(
+            vars,
+            "REQUEST_URI",
+            req.uri
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/"),
+        );
+        push_server_var(vars, "QUERY_STRING", &req.query_string);
+        push_server_var(vars, "SERVER_PROTOCOL", "HTTP/1.1");
+
+        // SCRIPT_NAME: URI path without query string
+        let path = req.uri.path();
+        push_server_var(vars, "SCRIPT_NAME", path);
+        push_server_var(vars, "PHP_SELF", path);
+
+        // SCRIPT_FILENAME: absolute filesystem path to the script
+        push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());
+
+        // DOCUMENT_ROOT
+        push_server_var(vars, "DOCUMENT_ROOT", &req.document_root.to_string_lossy());
+
+        // Server identification
+        push_server_var(vars, "SERVER_SOFTWARE", "OxPHP/0.1.0");
+        push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
+
+        // Connection info
+        push_server_var(vars, "REMOTE_ADDR", &req.remote_addr.ip().to_string());
+        push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
+
+        // SERVER_NAME and SERVER_PORT from Host header
+        if let Some(host) = req.headers.get(header::HOST) {
+            if let Ok(host_str) = host.to_str() {
+                if let Some(colon) = host_str.rfind(':') {
+                    push_server_var(vars, "SERVER_NAME", &host_str[..colon]);
+                    push_server_var(vars, "SERVER_PORT", &host_str[colon + 1..]);
+                } else {
+                    push_server_var(vars, "SERVER_NAME", host_str);
+                    push_server_var(vars, "SERVER_PORT", "80");
+                }
+            }
+        } else {
+            push_server_var(vars, "SERVER_NAME", "localhost");
+            push_server_var(vars, "SERVER_PORT", "80");
         }
-    };
 
-    // CGI/1.1 standard variables
-    add("REQUEST_METHOD", req.method.as_str());
-    add(
-        "REQUEST_URI",
-        req.uri
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/"),
-    );
-    add("QUERY_STRING", &req.query_string);
-    add("SERVER_PROTOCOL", "HTTP/1.1");
-
-    // SCRIPT_NAME: URI path without query string
-    let path = req.uri.path();
-    add("SCRIPT_NAME", path);
-    add("PHP_SELF", path);
-
-    // SCRIPT_FILENAME: absolute filesystem path to the script
-    add("SCRIPT_FILENAME", &req.script_path.to_string_lossy());
-
-    // DOCUMENT_ROOT
-    add("DOCUMENT_ROOT", &req.document_root.to_string_lossy());
-
-    // Server identification
-    add("SERVER_SOFTWARE", "OxPHP/0.1.0");
-    add("GATEWAY_INTERFACE", "CGI/1.1");
-
-    // Connection info
-    add("REMOTE_ADDR", &req.remote_addr.ip().to_string());
-    add("REMOTE_PORT", &req.remote_addr.port().to_string());
-
-    // SERVER_NAME and SERVER_PORT from Host header
-    if let Some(host) = req.headers.get(header::HOST) {
-        if let Ok(host_str) = host.to_str() {
-            if let Some(colon) = host_str.rfind(':') {
-                add("SERVER_NAME", &host_str[..colon]);
-                add("SERVER_PORT", &host_str[colon + 1..]);
-            } else {
-                add("SERVER_NAME", host_str);
-                add("SERVER_PORT", "80");
+        // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
+        if let Some(ct) = req.headers.get(header::CONTENT_TYPE) {
+            if let Ok(ct_str) = ct.to_str() {
+                push_server_var(vars, "CONTENT_TYPE", ct_str);
             }
         }
-    } else {
-        add("SERVER_NAME", "localhost");
-        add("SERVER_PORT", "80");
-    }
-
-    // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
-    if let Some(ct) = req.headers.get(header::CONTENT_TYPE) {
-        if let Ok(ct_str) = ct.to_str() {
-            add("CONTENT_TYPE", ct_str);
+        if let Some(cl) = req.headers.get(header::CONTENT_LENGTH) {
+            if let Ok(cl_str) = cl.to_str() {
+                push_server_var(vars, "CONTENT_LENGTH", cl_str);
+            }
         }
-    }
-    if let Some(cl) = req.headers.get(header::CONTENT_LENGTH) {
-        if let Ok(cl_str) = cl.to_str() {
-            add("CONTENT_LENGTH", cl_str);
+
+        // Extract cookie string for read_cookies callback
+        data.cookie_string = req
+            .headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| CString::new(s).ok());
+
+        // All request headers as HTTP_{UPPER_SNAKE_CASE}
+        // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
+        let mut header_buf = String::with_capacity(64);
+        for (name, value) in req.headers.iter() {
+            if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
+                continue;
+            }
+            let Ok(val_str) = value.to_str() else {
+                continue;
+            };
+
+            header_buf.clear();
+            header_buf.push_str("HTTP_");
+            for b in name.as_str().bytes() {
+                header_buf.push(if b == b'-' {
+                    '_'
+                } else {
+                    b.to_ascii_uppercase() as char
+                });
+            }
+            push_server_var(&mut data.server_vars, &header_buf, val_str);
         }
-    }
 
-    // Extract cookie string for read_cookies callback
-    let cookie_string = req
-        .headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| CString::new(s).ok());
-
-    // All request headers as HTTP_{UPPER_SNAKE_CASE}
-    // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
-    let mut header_buf = String::with_capacity(64);
-    for (name, value) in req.headers.iter() {
-        if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
-            continue;
-        }
-        let Ok(val_str) = value.to_str() else {
-            continue;
-        };
-
-        header_buf.clear();
-        header_buf.push_str("HTTP_");
-        for b in name.as_str().bytes() {
-            header_buf.push(if b == b'-' {
-                '_'
-            } else {
-                b.to_ascii_uppercase() as char
-            });
-        }
-        add(&header_buf, val_str);
-    }
-
-    let data = RequestData {
-        server_vars,
-        cookie_string,
-        body: req.body.clone(),
-        body_offset: 0,
-    };
-
-    REQUEST_DATA.with(|rd| {
-        *rd.borrow_mut() = Some(data);
+        data.body = req.body.clone();
+        data.body_offset = 0;
+        data.active = true;
     });
 }
 
 /// Clear request data from thread-local.
+/// Retains Vec capacity for reuse by the next request.
 /// Must be called AFTER php_request_shutdown().
 pub fn clear_request_data() {
     REQUEST_DATA.with(|rd| {
-        *rd.borrow_mut() = None;
+        let mut data = rd.borrow_mut();
+        data.server_vars.clear();
+        data.cookie_string = None;
+        data.body = Bytes::new();
+        data.body_offset = 0;
+        data.active = false;
     });
 }
 
@@ -213,8 +237,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
 /// Called by PHP during request startup to populate $_SERVER.
 unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_void) {
     REQUEST_DATA.with(|rd| {
-        let borrow = rd.borrow();
-        if let Some(data) = borrow.as_ref() {
+        let data = rd.borrow();
+        if data.active {
             for (key, value) in &data.server_vars {
                 php_register_variable_safe(
                     key.as_ptr(),
@@ -232,10 +256,10 @@ unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_vo
 /// We store the CString in RequestData, so it lives long enough.
 unsafe extern "C" fn oxphp_read_cookies() -> *mut c_char {
     REQUEST_DATA.with(|rd| {
-        let borrow = rd.borrow();
-        match borrow.as_ref().and_then(|d| d.cookie_string.as_ref()) {
-            Some(cs) => cs.as_ptr() as *mut c_char,
-            None => std::ptr::null_mut(),
+        let data = rd.borrow();
+        match data.cookie_string.as_ref() {
+            Some(cs) if data.active => cs.as_ptr() as *mut c_char,
+            _ => std::ptr::null_mut(),
         }
     })
 }
@@ -244,11 +268,10 @@ unsafe extern "C" fn oxphp_read_cookies() -> *mut c_char {
 /// Called repeatedly until it returns 0.
 unsafe extern "C" fn oxphp_read_post(buffer: *mut c_char, count_bytes: usize) -> usize {
     REQUEST_DATA.with(|rd| {
-        let mut borrow = rd.borrow_mut();
-        let data = match borrow.as_mut() {
-            Some(d) => d,
-            None => return 0,
-        };
+        let mut data = rd.borrow_mut();
+        if !data.active {
+            return 0;
+        }
 
         let remaining = data.body.len().saturating_sub(data.body_offset);
         if remaining == 0 {

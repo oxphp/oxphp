@@ -278,27 +278,37 @@ impl ScriptExecutor for SapiExecutor {
     }
 
     fn start_scale_manager(&self) {
-        if let WorkerMode::Dynamic { min, max } = self.mode {
-            let workers = Arc::clone(&self.workers);
-            let request_rx = self.request_rx.clone();
-            let global_shutdown = Arc::clone(&self.global_shutdown);
-            let metrics = Arc::clone(&self.metrics);
-            let idle_timeout_sec = self.idle_timeout_sec;
+        let workers = Arc::clone(&self.workers);
+        let request_rx = self.request_rx.clone();
+        let global_shutdown = Arc::clone(&self.global_shutdown);
+        let metrics = Arc::clone(&self.metrics);
 
-            tokio::spawn(async move {
-                run_scale_manager(
-                    workers,
-                    request_rx,
-                    min,
-                    max,
-                    idle_timeout_sec,
-                    global_shutdown,
-                    metrics,
-                )
-                .await;
-            });
-
-            tracing::info!(min, max, "Scale manager started");
+        match &self.mode {
+            WorkerMode::Static(target) => {
+                let target = *target;
+                tokio::spawn(async move {
+                    run_worker_monitor(workers, request_rx, target, global_shutdown, metrics).await;
+                });
+                tracing::info!(target, "Worker health monitor started");
+            }
+            WorkerMode::Dynamic { min, max } => {
+                let min = *min;
+                let max = *max;
+                let idle_timeout_sec = self.idle_timeout_sec;
+                tokio::spawn(async move {
+                    run_scale_manager(
+                        workers,
+                        request_rx,
+                        min,
+                        max,
+                        idle_timeout_sec,
+                        global_shutdown,
+                        metrics,
+                    )
+                    .await;
+                });
+                tracing::info!(min, max, "Scale manager started");
+            }
         }
     }
 }
@@ -365,8 +375,19 @@ fn worker_thread(
         WorkerLoopMode::Static => {
             // Blocking recv — zero CPU while idle, exits when channel closes.
             while let Ok(wr) = request_rx.recv() {
-                let response = execute_request(&wr.script);
-                let _ = wr.response_tx.send(response);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_request(&wr.script)
+                }));
+                match result {
+                    Ok(response) => {
+                        let _ = wr.response_tx.send(response);
+                    }
+                    Err(_) => {
+                        // wr.response_tx dropped → client gets 500
+                        tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
+                        break;
+                    }
+                }
             }
         }
         WorkerLoopMode::Dynamic => {
@@ -379,8 +400,18 @@ fn worker_thread(
                 match request_rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(wr) => {
                         last_active.store(now_millis(), Ordering::Relaxed);
-                        let response = execute_request(&wr.script);
-                        let _ = wr.response_tx.send(response);
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            execute_request(&wr.script)
+                        }));
+                        match result {
+                            Ok(response) => {
+                                let _ = wr.response_tx.send(response);
+                            }
+                            Err(_) => {
+                                tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
+                                break;
+                            }
+                        }
                     }
                     Err(RecvTimeoutError::Timeout) => continue,
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -390,6 +421,61 @@ fn worker_thread(
     }
 
     tracing::info!(worker = %thread_name, "PHP worker thread stopped");
+}
+
+/// Health monitor for static mode: detects dead workers and respawns to target count.
+async fn run_worker_monitor(
+    workers: Arc<Mutex<Vec<ManagedWorker>>>,
+    request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    target: usize,
+    global_shutdown: Arc<AtomicBool>,
+    metrics: Arc<Metrics>,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    let mut next_id = target; // IDs above initial range
+
+    loop {
+        interval.tick().await;
+        if global_shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let mut guard = workers.lock().unwrap();
+        let before = guard.len();
+        guard.retain(|w| !w.handle.is_finished());
+        let dead = before - guard.len();
+
+        if dead > 0 {
+            tracing::warn!(
+                dead,
+                remaining = guard.len(),
+                target,
+                "Dead workers detected, respawning"
+            );
+        }
+
+        while guard.len() < target {
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let last_active = Arc::new(AtomicU64::new(now_millis()));
+            let handle = spawn_worker(
+                next_id,
+                request_rx.clone(),
+                Arc::clone(&shutdown),
+                Arc::clone(&last_active),
+                WorkerLoopMode::Static,
+            );
+            guard.push(ManagedWorker {
+                id: next_id,
+                handle,
+                shutdown,
+                last_active,
+            });
+            next_id += 1;
+            metrics.worker_spawned();
+        }
+
+        metrics.set_workers_current(guard.len());
+    }
 }
 
 async fn run_scale_manager(
@@ -417,7 +503,35 @@ async fn run_scale_manager(
         let now = now_millis();
 
         // Clean up exited workers
+        let before = workers_guard.len();
         workers_guard.retain(|w| !w.handle.is_finished());
+        let dead = before - workers_guard.len();
+        let total = workers_guard.len();
+
+        if dead > 0 {
+            tracing::warn!(dead, remaining = total, "Dead workers detected, respawning");
+        }
+
+        // Respawn to maintain minimum (unconditional — dead worker recovery)
+        while workers_guard.len() < min {
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let last_active = Arc::new(AtomicU64::new(now));
+            let handle = spawn_worker(
+                next_id,
+                request_rx.clone(),
+                Arc::clone(&shutdown),
+                Arc::clone(&last_active),
+                WorkerLoopMode::Dynamic,
+            );
+            workers_guard.push(ManagedWorker {
+                id: next_id,
+                handle,
+                shutdown,
+                last_active,
+            });
+            next_id += 1;
+            metrics.worker_spawned();
+        }
         let total = workers_guard.len();
 
         // Count idle workers (last_active > 200ms ago)

@@ -37,7 +37,7 @@ mod tests {
         let handler = AccessLogHandler;
         let mut event = RequestComplete {
             request_id: "test123".to_string(),
-            method: "GET".to_string(),
+            method: http::Method::GET,
             path: "/".to_string(),
             status: 200,
             duration: Duration::from_micros(500),
