@@ -1,0 +1,310 @@
+---
+title: SAPI і мост
+description: Карыстальніцкі PHP SAPI OxPHP, бібліятэка C-моста з __thread TLS і API PHP-пашырэння
+---
+
+OxPHP выкарыстоўвае карыстальніцкі SAPI (Server API) для інтэграцыі з PHP, а не стандартны `php-embed` SAPI. Агульная бібліятэка C-моста забяспечвае механізм абмену станам запыту паміж бінарнікам Rust і PHP-пашырэннем. Гэтая старонка тлумачыць, чаму гэтая архітэктура існуе і як кампаненты ўзаемадзейнічаюць.
+
+## Чаму карыстальніцкі SAPI?
+
+Узровень SAPI ў PHP — гэта інтэрфейс паміж вэб-серверам і рухавіком PHP. Стандартныя SAPI (cli, fpm, embed) робяць здагадкі пра жыццёвы цыкл працэсу, якія не адпавядаюць мадэлі OxPHP:
+
+- **php-embed** чакае адзін запыт на працэс. Ён не падтрымлівае адначасовую апрацоўку запытаў на некалькіх патоках.
+- **php-fpm** — гэта асобны менеджар працэсаў. OxPHP ліквідуе патрэбу ў міжпрацэсавай камунікацыі.
+- **php-cli** не мае інтэграцыі з HTTP.
+
+OxPHP рэгіструе ўласны `sapi_module_struct` з назвай `"oxphp"`. Гэта дае поўны кантроль над:
+
+- Захопам вываду (перахоп буфера вываду PHP)
+- Апрацоўкай загалоўкаў (збор выклікаў `header()`)
+- `php://input` (прадастаўленне цела запыту)
+- Запаўненнем `$_SERVER` (усталёўка суперглабальных з дадзеных запыту на баку Rust)
+- Замерам часу запыту (праз `sapi_get_request_time`)
+
+## Праблема моста
+
+Калі бінарнік Rust OxPHP кампілюецца, ён звязваецца з `libphp.so`. PHP-пашырэнні загружаюцца `libphp.so` у час выканання праз `dlopen()`. Гэта стварае праблему бачнасці:
+
+```
+┌────────────────────┐         ┌───────────────────┐
+│  Rust Binary       │         │  libphp.so        │
+│                    │ links   │                   │
+│  thread_local! {   │────────▶│  dlopen() ───────▶│ oxphp_sapi.so
+│    // Rust TLS     │         │                   │  (PHP extension)
+│  }                 │         └───────────────────┘
+└────────────────────┘                             │
+                                                   │
+  Rust thread_local! vars are INVISIBLE            │
+  to dlopen'd shared libraries ──────────────────▶ │
+```
+
+Макрас `thread_local!` у Rust выкарыстоўвае ELF TLS або платформа-спецыфічны механізм, які разрашаецца ў час звязвання. Агульныя бібліятэкі, загружаныя праз `dlopen()` у час выканання, не могуць бачыць гэтыя сімвалы. Гэта азначае, што PHP-пашырэнне не можа напрамую чытаць дадзеныя запыту, якія Rust захоўвае ў патокалакальным сховішчы.
+
+## Бібліятэка моста
+
+Рашэнне — `liboxphp_bridge.so` — невялікая агульная бібліятэка C, з якой звязваюцца і бінарнік Rust, і PHP-пашырэнне. Яна выкарыстоўвае C `__thread` TLS, які бачны ўсім бібліятэкам, загружаным праз `dlopen`, у адной адраснай прасторы.
+
+```
+┌────────────────────┐
+│  Rust Binary       │──links──┐
+└────────────────────┘         │
+                               ▼
+                    ┌──────────────────────┐
+                    │  liboxphp_bridge.so  │
+                    │                      │
+                    │  static __thread     │
+                    │    oxphp_ctx_t ctx;  │
+                    │                      │
+                    │  static (global)     │
+                    │    plugin_functions  │
+                    │    dispatch_fn       │
+                    │    call_php_fn       │
+                    └──────────────────────┘
+                               ▲
+┌────────────────────┐         │
+│  oxphp_sapi.so     │──links──┘
+│  (PHP extension)   │
+└────────────────────┘
+```
+
+І бінарнік Rust, і PHP-пашырэнне выклікаюць функцыі ў `liboxphp_bridge.so` для чытання і запісу адной і той жа пераменнай `__thread`. Паколькі яны знаходзяцца ў адным працэсе і на адным патоку АС, яны дзеляць адзін і той жа TLS-слот.
+
+### Кантэкст моста
+
+Кантэкст запыту вызначаны ў `ext/bridge/oxphp_bridge.h`:
+
+```c
+typedef struct {
+    char request_id[65];    // Hex request ID (64 chars + null)
+    int32_t worker_id;      // Worker thread index
+    double request_time;    // Unix epoch, microseconds
+    bool stream_mode;       // Streaming mode active
+    bool headers_sent;      // Headers sent (streaming)
+    bool finished;          // oxphp_finish_request() called
+} oxphp_ctx_t;
+```
+
+### API моста
+
+Мост выстаўляе функцыі геттераў/сеттераў, якія працуюць з патокалакальнай пераменнай `__thread` `ctx`:
+
+| Функцыя | Прызначэнне |
+|---|---|
+| `oxphp_bridge_init_ctx()` | Нулявая ініцыялізацыя кантэксту (выклікаць перад `php_request_startup`) |
+| `oxphp_bridge_clear_ctx()` | Ачыстка кантэксту пасля завяршэння запыту |
+| `oxphp_bridge_get_ctx()` | Атрымаць паказальнік на структуру кантэксту |
+| `oxphp_bridge_set_request_id(id)` | Скапіраваць ідэнтыфікатар запыту (да 64 сімвалаў) |
+| `oxphp_bridge_get_request_id()` | Атрымаць паказальнік на ідэнтыфікатар запыту |
+| `oxphp_bridge_set_worker_id(id)` | Усталяваць індэкс патоку воркера |
+| `oxphp_bridge_set_request_time(time)` | Усталяваць час пачатку запыту |
+| `oxphp_bridge_get_request_time()` | Атрымаць час пачатку запыту |
+| `oxphp_bridge_set_stream_mode(mode)` | Уключыць/выключыць рэжым стрымінгу |
+| `oxphp_bridge_is_streaming()` | Праверыць, ці актыўны стрымінг |
+| `oxphp_bridge_set_finished(bool)` | Пазначыць запыт як завершаны |
+| `oxphp_bridge_is_finished()` | Праверыць, ці завершаны запыт |
+| `oxphp_bridge_set_headers_sent(bool)` | Пазначыць загалоўкі як адпраўленыя |
+| `oxphp_bridge_get_headers_sent()` | Праверыць, ці былі адпраўлены загалоўкі |
+
+Рэалізацыя ў `ext/bridge/oxphp_bridge.c` простая — кожная функцыя чытае або запісвае поле пераменнай `static __thread oxphp_ctx_t ctx`.
+
+### Крытычны інварыянт
+
+**`init_ctx()` і `set_request_time()` павінны быць выкліканы ДА `php_request_startup()`.**
+
+Апрацоўшчык RINIT OPcache чытае `sapi_get_request_time()` падчас `php_request_startup()`. Зваротны выклік `sapi_get_request_time` карыстальніцкага SAPI чытае з кантэксту моста. Калі мост вяртае 0 (неініцыялізаваны), праверка `file_update_protection` OPcache не праходзіць, што прыводзіць да 0% пападанняў у кэш.
+
+Правільны парадак выклікаў на кожным патоку воркера:
+
+```
+1. oxphp_bridge_init_ctx()
+2. oxphp_bridge_set_request_id(...)
+3. oxphp_bridge_set_request_time(...)
+4. sapi::set_request_data(request)    // server vars, cookies, body
+5. php_request_startup()              // triggers RINIT for all extensions
+6. php_execute_script(...)
+7. php_request_shutdown()
+8. oxphp_bridge_clear_ctx()
+```
+
+## Рэестр функцый плагінаў
+
+Мост таксама прадастаўляе **глабальны** (не `__thread`) рэестр функцый плагінаў. Гэта дазваляе плагінам Rust рэгістраваць функцыі, якія PHP-скрыпты могуць выклікаць, і PHP-функцыі, якія Rust можа выклікаць.
+
+### API рэестра
+
+| Функцыя | Прызначэнне |
+|---|---|
+| `oxphp_bridge_register_plugin_fn(name, required, total)` | Зарэгістраваць функцыю плагіна (выклікаецца Rust падчас запуску) |
+| `oxphp_bridge_get_plugin_fn_count()` | Атрымаць колькасць зарэгістраваных функцый плагінаў |
+| `oxphp_bridge_get_plugin_fn_name(index)` | Атрымаць назву функцыі плагіна па індэксе |
+| `oxphp_bridge_get_plugin_fn_required(index)` | Атрымаць колькасць абавязковых параметраў па індэксе |
+| `oxphp_bridge_get_plugin_fn_total(index)` | Атрымаць агульную колькасць параметраў па індэксе |
+| `oxphp_bridge_set_dispatch_fn(fn)` | Усталяваць зваротны выклік дыспетчарызацыі Rust |
+| `oxphp_bridge_get_dispatch_fn()` | Атрымаць зваротны выклік дыспетчарызацыі Rust |
+| `oxphp_bridge_set_call_php_fn(fn)` | Усталяваць зваротны выклік PHP |
+| `oxphp_bridge_get_call_php_fn()` | Атрымаць зваротны выклік PHP |
+| `oxphp_bridge_dispatch(name, json_args)` | Дыспетчарызаваць да апрацоўшчыка Rust |
+| `oxphp_bridge_call_php(name, json_args)` | Выклікаць PHP-функцыю з Rust |
+| `oxphp_bridge_strdup(s)` | Дубліраваць радок з дапамогай C `malloc` |
+| `oxphp_bridge_free_string(ptr)` | Вызваліць радок, алакаваны `strdup` |
+
+Рэестр глабальны (не для кожнага патоку), таму што ён запісваецца аднойчы з галоўнага патоку падчас запуску і чытаецца падчас MINIT — без канкурэнтнага доступу. Ён ніколі не вызваляецца; ён жыве на працягу ўсяго часу жыцця працэсу.
+
+### Фармат дадзеных для міжмяжовага абмену
+
+Усе выклікі функцый паміж межамі выкарыстоўваюць JSON-абалонку:
+
+- **Аргументы**: JSON-кадаваны масіў параметраў
+- **Паспяховы вынік**: `{"ok": value}`
+- **Вынік з памылкай**: `{"err": "message"}`
+
+Пара `oxphp_bridge_strdup`/`oxphp_bridge_free_string` выкарыстоўвае C `malloc`/`free`, каб пазбегнуць неадпаведнасці алакатараў паміж Rust і бібліятэкай C.
+
+## PHP-пашырэнне
+
+PHP-пашырэнне (`ext/oxphp_sapi.c`) выстаўляе сервер-спецыфічныя функцыі для PHP-скрыптоў. Яно звязваецца з `liboxphp_bridge.so` для чытання кантэксту моста.
+
+### Даступныя функцыі
+
+| Функцыя | Тып вяртання | Апісанне |
+|---|---|---|
+| `oxphp_request_id()` | `string` | Вяртае hex-ідэнтыфікатар запыту для бягучага запыту |
+| `oxphp_worker_id()` | `int` | Вяртае індэкс патоку воркера (з 0) |
+| `oxphp_server_info()` | `array` | Вяртае `sapi`, `version`, `worker_id`, `request_time` |
+| `oxphp_request_heartbeat(int $time = 10)` | `bool` | Запас для падаўжэння таймаўту (зараз вяртае `true`) |
+| `oxphp_finish_request()` | `bool` | Пазначае запыт як завершаны для фонавай апрацоўкі |
+| `oxphp_is_streaming()` | `bool` | Правярае, ці выкарыстоўвае бягучы запыт рэжым стрымінгу |
+
+### Функцыя дыспетчарызацыі плагінаў
+
+Пашырэнне таксама рэгіструе `oxphp_plugin_dispatch` — агульны апрацоўшчык для ўсіх зарэгістраваных функцый плагінаў. Калі PHP-скрыпт выклікае функцыю плагіна (напр., `oxphp_debug_info()`), рухавік Zend дыспетчарызуе да `oxphp_plugin_dispatch`, які:
+
+1. Чытае назву функцыі з `execute_data->func->common.function_name`
+2. Збірае ўсе аргументы ў масіў PHP і кадуе іх праз `json_encode`
+3. Выклікае `oxphp_bridge_dispatch(func_name, json_args)` для выкліку апрацоўшчыка Rust
+4. Разбірае JSON-абалонку выніку (`{"ok": value}` або `{"err": "message"}`)
+5. Вяртае значэнне `ok` або выдае папярэджанне для `err`
+
+### Выклік PHP з Rust
+
+Пашырэнне прадастаўляе `oxphp_sapi_call_php()` — зваротны выклік, які Rust можа выклікаць праз мост для выкліку PHP-функцый:
+
+1. Rust выклікае `oxphp_bridge_call_php(func_name, json_args)`
+2. Мост выклікае `call_php_fn`, які ўсталяваны ў `oxphp_sapi_call_php` падчас MINIT
+3. `oxphp_sapi_call_php` дэкадуе JSON-аргументы, выклікае `call_user_function()` і вяртае JSON-абалонку
+
+### Прыклад выкарыстання
+
+```php
+<?php
+// Get the request ID assigned by the server
+$requestId = oxphp_request_id();
+header("X-Debug-Worker: " . oxphp_worker_id());
+
+// Examine SAPI details
+$info = oxphp_server_info();
+// $info = [
+//     'sapi' => 'oxphp',
+//     'version' => '0.1.0',
+//     'worker_id' => 3,
+//     'request_time' => 1707609600.123456,
+// ]
+
+// Finish the response but continue processing
+oxphp_finish_request();
+// ... background work here (logging, cleanup, etc.)
+```
+
+### Рэгістрацыя пашырэння
+
+Пашырэнне рэгіструецца як стандартны модуль PHP з хукам MINIT, які наладжвае мост функцый плагінаў:
+
+```c
+zend_module_entry oxphp_sapi_module_entry = {
+    STANDARD_MODULE_HEADER,
+    "oxphp_sapi",
+    oxphp_sapi_functions,
+    PHP_MINIT(oxphp_sapi),  // sets call_php callback, registers plugin fns
+    NULL,                    // MSHUTDOWN
+    NULL,                    // RINIT
+    NULL,                    // RSHUTDOWN
+    PHP_MINFO(oxphp_sapi),
+    "0.1.0",
+    STANDARD_MODULE_PROPERTIES
+};
+```
+
+**MINIT** выконвае дзве задачы:
+
+1. Усталёўвае `oxphp_bridge_set_call_php_fn(oxphp_sapi_call_php)`, каб Rust мог выклікаць PHP-функцыі
+2. Чытае рэестр функцый плагінаў з моста і рэгіструе кожную функцыю ў Zend праз `zend_register_functions()` — гэта павінна адбыцца пры запуску модуля (а не пры запуску запыту), каб аптымізацыя `function_exists()` часу кампіляцыі OPcache магла бачыць функцыі
+
+## Зводка патоку дадзеных
+
+```
+Rust (Tokio task)                     PHP Worker Thread
+─────────────────                     ──────────────────
+ScriptRequest ──sync_channel──▶ recv()
+                                      │
+                                      ├── bridge::init_ctx()
+                                      ├── bridge::set_request_id()
+                                      ├── bridge::set_request_time()
+                                      ├── sapi::set_request_data()
+                                      │     ├── server vars → TLS
+                                      │     ├── cookies → TLS
+                                      │     └── body → TLS
+                                      │
+                                      ├── php_request_startup()
+                                      │     ├── RINIT for all extensions
+                                      │     └── OPcache reads request_time
+                                      │
+                                      ├── php_execute_script()
+                                      │     ├── PHP reads $_SERVER, $_GET, etc.
+                                      │     ├── PHP calls oxphp_request_id()
+                                      │     │     └── bridge::get_request_id()
+                                      │     ├── PHP calls plugin function
+                                      │     │     └── bridge::dispatch() → Rust
+                                      │     └── Output captured by SAPI
+                                      │
+                                      ├── php_request_shutdown()
+                                      │
+                                      ├── sapi::take_response()
+                                      │     ├── output buffer
+                                      │     ├── response headers
+                                      │     └── status code
+                                      │
+                                      └── bridge::clear_ctx()
+                                      │
+ScriptResponse ◀──oneshot──────────── tx.send()
+```
+
+## Зборка моста і пашырэння
+
+Бібліятэка моста і PHP-пашырэнне збіраюцца як частка Docker-вобраза. Для лакальнай распрацоўкі:
+
+```bash
+# Build the bridge library
+cd ext/bridge
+make
+sudo make install  # installs liboxphp_bridge.so
+
+# Build the PHP extension
+cd ext
+phpize
+./configure --enable-oxphp-sapi
+make
+sudo make install  # installs oxphp_sapi.so
+```
+
+Абодва артэфакты павінны быць даступны ў час выканання:
+- `liboxphp_bridge.so` у шляху пошуку бібліятэк (`LD_LIBRARY_PATH=/usr/local/lib`)
+- `oxphp_sapi.so` у каталогу пашырэнняў PHP (або загружаны праз `extension=oxphp_sapi.so` у `php.ini`)
+
+## Гл. таксама
+
+- [Агляд архітэктуры](./overview.md) — Карта кампанентаў і паслядоўнасць запуску
+- [Пул воркераў](./worker-pool.md) — Жыццёвы цыкл патоку воркера, які выклікае мост
+- [Жыццёвы цыкл запыту](./request-lifecycle.md) — Поўны канвеер запыту ад TCP да адказу
+- [Функцыі PHP](../php/functions.md) — Даведнік па функцыях, выклікальных з PHP
+- [Суперглабальныя](../php/superglobals.md) — Як запаўняюцца `$_SERVER`, `$_GET` і інш.
+- [OPcache](../php/opcache.md) — Інтэграцыя OPcache і інварыянт `request_time`

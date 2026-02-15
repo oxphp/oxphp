@@ -22,6 +22,10 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **JSON structured logging** via tracing
 - **Path traversal protection** with symlink escape detection
 - **Non-root container** execution as www-data (UID 82)
+- **mimalloc** allocator for lower allocation latency under contention
+- **Configurable Tokio runtime** — single-threaded (default) or multi-threaded via `TOKIO_WORKERS`
+- **Worker health monitoring** with automatic dead worker respawning
+- **Panic isolation** via `catch_unwind` — a PHP crash does not take down the server
 
 ## Quick Start
 
@@ -39,8 +43,10 @@ All settings are via environment variables:
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html` | Filesystem path to serve files from |
 | `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `index.php` = Framework, `index.html` = SPA |
+| `TOKIO_WORKERS` | `0` (single-threaded) | Tokio async I/O threads; `0` = single-threaded, `N` = multi-threaded |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
-| `PHP_WORKERS` | CPU count | Number of PHP worker threads |
+| `PHP_WORKERS` | `0` (CPU * 2) | Worker pool mode: `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
+| `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before retiring a dynamic worker (dynamic mode only) |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 503 when full |
 | `DRAIN_TIMEOUT_SECS` | `30` | Graceful shutdown drain timeout in seconds |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
@@ -53,13 +59,14 @@ All settings are via environment variables:
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
+| `COMPRESSION` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
 
 ## Architecture
 
 ```
                     ┌──────────────┐
-                    │  Tokio async │  single-threaded event loop
-                    │  HTTP server │  (hyper + hyper-util)
+                    │  Tokio async │  configurable: single- or multi-threaded
+                    │  HTTP server │  (hyper + hyper-util + mimalloc)
                     └──────┬───────┘
                            │
                     ┌──────▼───────┐
@@ -81,9 +88,10 @@ All settings are via environment variables:
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
 ```
 
-- **Single-threaded Tokio runtime** for all async I/O (TCP, HTTP)
-- **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread
+- **Configurable Tokio runtime** — single-threaded by default (`TOKIO_WORKERS=0`), multi-threaded for high-throughput workloads
+- **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread with `catch_unwind` isolation
 - Workers receive requests via `crossbeam::bounded`, respond via `oneshot::Sender`
+- **Worker health monitoring** — dead workers are automatically detected and respawned
 
 ### Internal Server
 
@@ -114,8 +122,8 @@ DOCUMENT_ROOT=./www ./target/release/oxphp
 ## Development
 
 ```bash
-# Full verification (host, 66 tests)
-cargo fmt -- --check && cargo clippy -- -D warnings && cargo test
+# Full verification (host, 203 tests)
+cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker smoke test
 docker compose build && docker compose up -d
@@ -129,6 +137,12 @@ INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
 curl http://localhost:9090/health
 curl http://localhost:9090/metrics
 ```
+
+## Documentation
+
+- [English](docs/en/)
+- [Русский](docs/ru/)
+- [Беларуская](docs/be/)
 
 ## License
 
