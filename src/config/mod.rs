@@ -17,6 +17,7 @@ pub struct Config {
     pub tls_key: Option<String>,
     pub error_pages_dir: Option<String>,
     pub compression: bool,
+    pub access_log: bool,
 }
 
 impl Config {
@@ -47,6 +48,9 @@ impl Config {
         let compression = std::env::var("COMPRESSION")
             .map(|v| v != "false" && v != "0" && v != "off")
             .unwrap_or(true);
+        let access_log = std::env::var("ACCESS_LOG")
+            .map(|v| v != "false" && v != "0" && v != "off")
+            .unwrap_or(true);
 
         Ok(Self {
             server,
@@ -61,6 +65,7 @@ impl Config {
             tls_key,
             error_pages_dir,
             compression,
+            access_log,
         })
     }
 
@@ -82,6 +87,7 @@ impl Config {
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
             "compression": self.compression,
+            "access_log": self.access_log,
         })
     }
 }

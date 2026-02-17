@@ -8,6 +8,7 @@ use http_body_util::{BodyExt, Limited};
 use hyper::body::Incoming;
 
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
+use crate::executor::ExecuteResult;
 use crate::server::compression;
 use crate::server::response::static_file;
 use crate::server::routing::RouteResult;
@@ -204,28 +205,33 @@ async fn dispatch_request(
             };
 
             server.metrics.request_queued();
-            let response_rx = server.executor.execute(script_request);
+            let execute_result = server.executor.execute(script_request);
 
-            match response_rx.await {
-                Ok(script_response) => {
+            let script_response = match execute_result {
+                ExecuteResult::Immediate(resp) => {
                     server.metrics.request_dequeued();
-
-                    let mut builder = Response::builder().status(script_response.status);
-
-                    for (name, value) in &script_response.headers {
-                        builder = builder.header(name, value);
+                    resp
+                }
+                ExecuteResult::Deferred(rx) => match rx.await {
+                    Ok(resp) => {
+                        server.metrics.request_dequeued();
+                        resp
                     }
+                    Err(_) => {
+                        server.metrics.request_dropped();
+                        return Ok(Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
+                            .unwrap());
+                    }
+                },
+            };
 
-                    builder.body(full_body(script_response.body)).unwrap()
-                }
-                Err(_) => {
-                    server.metrics.request_dropped();
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
-                        .unwrap()
-                }
+            let mut builder = Response::builder().status(script_response.status);
+            for (name, value) in &script_response.headers {
+                builder = builder.header(name, value);
             }
+            builder.body(full_body(script_response.body)).unwrap()
         }
         RouteResult::NotFound => Response::builder()
             .status(StatusCode::NOT_FOUND)

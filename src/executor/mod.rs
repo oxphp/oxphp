@@ -10,8 +10,17 @@ use std::sync::Arc;
 use crate::metrics::Metrics;
 use crate::types::{ScriptRequest, ScriptResponse};
 
+/// Result of executor dispatch. Stub returns `Immediate` (no channel overhead),
+/// SAPI returns `Deferred` (worker thread sends response via oneshot).
+pub enum ExecuteResult {
+    /// Response available immediately (no async wait needed).
+    Immediate(ScriptResponse),
+    /// Response will arrive via oneshot channel from a worker thread.
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+
 pub trait ScriptExecutor: Send + Sync {
-    fn execute(&self, request: ScriptRequest) -> tokio::sync::oneshot::Receiver<ScriptResponse>;
+    fn execute(&self, request: ScriptRequest) -> ExecuteResult;
 
     fn shutdown(&self);
 

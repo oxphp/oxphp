@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue};
 
-use crate::executor::ScriptExecutor;
+use crate::executor::{ExecuteResult, ScriptExecutor};
 use crate::types::{ScriptRequest, ScriptResponse};
 
 pub struct StubExecutor;
@@ -20,9 +20,8 @@ impl StubExecutor {
 }
 
 impl ScriptExecutor for StubExecutor {
-    fn execute(&self, _request: ScriptRequest) -> tokio::sync::oneshot::Receiver<ScriptResponse> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = tx.send(ScriptResponse {
+    fn execute(&self, _request: ScriptRequest) -> ExecuteResult {
+        ExecuteResult::Immediate(ScriptResponse {
             status: 200,
             headers: vec![(
                 HeaderName::from_static("content-type"),
@@ -30,8 +29,7 @@ impl ScriptExecutor for StubExecutor {
             )],
             body: Bytes::from_static(b"OK"),
             execution_time_us: 0,
-        });
-        rx
+        })
     }
 
     fn shutdown(&self) {
@@ -62,11 +60,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_stub_executor_returns_200() {
+    #[test]
+    fn test_stub_executor_returns_200() {
         let executor = StubExecutor::new();
-        let rx = executor.execute(make_request());
-        let response = rx.await.unwrap();
+        let result = executor.execute(make_request());
+        let response = match result {
+            ExecuteResult::Immediate(resp) => resp,
+            ExecuteResult::Deferred(_) => panic!("StubExecutor should return Immediate"),
+        };
         assert_eq!(response.status, 200);
         assert_eq!(response.body, &b"OK"[..]);
         assert_eq!(response.headers.len(), 1);
@@ -85,10 +86,11 @@ mod tests {
         std::env::set_var("EXECUTOR", "stub");
         let metrics = Arc::new(crate::metrics::Metrics::new());
         let executor = crate::executor::create_executor(metrics);
-        // Verify it works by executing a request
-        let rx = executor.execute(make_request());
-        // The StubExecutor sends the response synchronously, so try_recv works
-        let response = rx.blocking_recv().unwrap();
+        let result = executor.execute(make_request());
+        let response = match result {
+            ExecuteResult::Immediate(resp) => resp,
+            ExecuteResult::Deferred(rx) => rx.blocking_recv().unwrap(),
+        };
         assert_eq!(response.status, 200);
         std::env::remove_var("EXECUTOR");
     }

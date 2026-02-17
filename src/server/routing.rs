@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use percent_encoding::percent_decode_str;
 
 use crate::config::ServerConfig;
@@ -18,7 +19,7 @@ pub enum RouteResult {
 }
 
 /// Routing configuration derived from server config.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RouteConfig {
     document_root: Arc<PathBuf>,
     canonical_root: Option<PathBuf>,
@@ -31,6 +32,9 @@ pub struct RouteConfig {
     /// Pre-computed string keys for cache lookups (avoids `to_string_lossy()` per request).
     root_index_php_key: String,
     root_index_html_key: String,
+    /// Cache of resolved routes keyed by URI path.
+    /// After warmup, most requests hit this cache (single DashMap read).
+    route_cache: DashMap<String, RouteResult>,
 }
 
 impl RouteConfig {
@@ -78,6 +82,7 @@ impl RouteConfig {
             root_index_html,
             root_index_php_key,
             root_index_html_key,
+            route_cache: DashMap::new(),
         }
     }
 
@@ -98,28 +103,40 @@ impl RouteConfig {
 
     /// Resolve a URI path to a route result using the file cache.
     ///
-    /// After the inner resolution, validates that the resolved path does not
-    /// escape the document root via symlinks.
+    /// Checks the route cache first. On miss, resolves via the inner logic,
+    /// validates that the resolved path does not escape the document root
+    /// via symlinks, then caches the result.
     pub async fn resolve_request(
         &self,
         uri_path: &str,
         file_cache: &Arc<FileCache>,
     ) -> RouteResult {
+        // Fast path: check route cache
+        if let Some(cached) = self.route_cache.get(uri_path) {
+            return cached.value().clone();
+        }
+
         let result = self.resolve_request_inner(uri_path, file_cache).await;
 
         // Validate resolved path stays within document root
-        match &result {
+        let result = match &result {
             RouteResult::Serve(path) | RouteResult::Execute(path) => {
                 if !self.validate_path(path, file_cache).await {
                     tracing::warn!(
                         path = %path.display(),
                         "Blocked request: resolved path escapes document root"
                     );
-                    return RouteResult::NotFound;
+                    RouteResult::NotFound
+                } else {
+                    result
                 }
             }
-            RouteResult::NotFound => {}
-        }
+            RouteResult::NotFound => result,
+        };
+
+        // Cache the validated result
+        self.route_cache
+            .insert(uri_path.to_string(), result.clone());
 
         result
     }

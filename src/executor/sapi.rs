@@ -236,7 +236,7 @@ impl SapiExecutor {
 }
 
 impl ScriptExecutor for SapiExecutor {
-    fn execute(&self, request: ScriptRequest) -> tokio::sync::oneshot::Receiver<ScriptResponse> {
+    fn execute(&self, request: ScriptRequest) -> crate::executor::ExecuteResult {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         let worker_request = WorkerRequest {
@@ -253,7 +253,6 @@ impl ScriptExecutor for SapiExecutor {
                     (500, Bytes::from_static(b"PHP worker pool unavailable"))
                 }
             };
-            let (error_tx, error_rx) = tokio::sync::oneshot::channel();
             let mut headers = Vec::new();
             if status == 503 {
                 headers.push((
@@ -261,16 +260,15 @@ impl ScriptExecutor for SapiExecutor {
                     HeaderValue::from_static("1"),
                 ));
             }
-            let _ = error_tx.send(ScriptResponse {
+            return crate::executor::ExecuteResult::Immediate(ScriptResponse {
                 status,
                 headers,
                 body,
                 ..Default::default()
             });
-            return error_rx;
         }
 
-        response_rx
+        crate::executor::ExecuteResult::Deferred(response_rx)
     }
 
     fn shutdown(&self) {

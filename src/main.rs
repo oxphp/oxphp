@@ -149,7 +149,9 @@ async fn async_main(
         &metrics,
     )));
     dispatcher.on(handlers::server_header::ServerHeaderHandler);
-    dispatcher.on(handlers::access_log::AccessLogHandler);
+    if config.access_log {
+        dispatcher.on(handlers::access_log::AccessLogHandler);
+    }
 
     // Conditional handlers
     if let Some(ref limiter) = rate_limiter {

@@ -42,8 +42,9 @@ pub struct Server {
     pub(crate) dispatcher: Arc<EventDispatcher>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     pub(crate) request_timeout: Duration,
-    header_read_timeout: Duration,
     pub(crate) compression_enabled: bool,
+    /// Pre-configured HTTP builder reused across all connections.
+    http_builder: Builder<hyper_util::rt::TokioExecutor>,
     shutdown: AtomicBool,
 }
 
@@ -60,6 +61,17 @@ impl Server {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
 
+        // Pre-build the HTTP connection builder once — reused for every connection
+        let mut http_builder = Builder::new(hyper_util::rt::TokioExecutor::new());
+        http_builder
+            .http1()
+            .timer(hyper_util::rt::TokioTimer::new());
+        if config.header_read_timeout > Duration::ZERO {
+            http_builder
+                .http1()
+                .header_read_timeout(config.header_read_timeout);
+        }
+
         Self {
             route_config: Arc::new(route_config),
             file_cache,
@@ -68,8 +80,8 @@ impl Server {
             dispatcher,
             tls_acceptor,
             request_timeout: config.request_timeout,
-            header_read_timeout: config.header_read_timeout,
             compression_enabled,
+            http_builder,
             shutdown: AtomicBool::new(false),
         }
     }
@@ -113,26 +125,16 @@ impl Server {
             async move { connection::handle_request(req, &server, remote_addr).await }
         });
 
-        let mut builder = Builder::new(hyper_util::rt::TokioExecutor::new());
-
-        // Apply timeouts — header_read_timeout requires a timer to be set
-        builder.http1().timer(hyper_util::rt::TokioTimer::new());
-        if self.header_read_timeout > Duration::ZERO {
-            builder
-                .http1()
-                .header_read_timeout(self.header_read_timeout);
-        }
-
         if let Some(ref acceptor) = self.tls_acceptor {
             let tls_stream = acceptor.accept(stream).await?;
             let io = TokioIo::new(tls_stream);
-            let result = builder.serve_connection(io, service).await;
+            let result = self.http_builder.serve_connection(io, service).await;
             if let Err(e) = result {
                 return Err(format!("connection error: {e}").into());
             }
         } else {
             let io = TokioIo::new(stream);
-            let result = builder.serve_connection(io, service).await;
+            let result = self.http_builder.serve_connection(io, service).await;
             if let Err(e) = result {
                 return Err(format!("connection error: {e}").into());
             }
