@@ -175,23 +175,22 @@ The PHP extension (`ext/oxphp_sapi.c`) exposes server-specific functions to PHP 
 | `oxphp_finish_request()` | `bool` | Marks the request as finished for background processing |
 | `oxphp_is_streaming()` | `bool` | Checks if the current request uses streaming mode |
 
-### Plugin Dispatch Function
+### Native Plugin Dispatch
 
-The extension also registers `oxphp_plugin_dispatch` — a generic handler for all plugin-registered functions. When a PHP script calls a plugin function (e.g., `oxphp_debug_info()`), the Zend engine dispatches to `oxphp_plugin_dispatch`, which:
+The extension registers `oxphp_native_dispatch` — a zero-serialization handler for all plugin-registered functions. When a PHP script calls a plugin function (e.g., `oxphp_example_info()`), the Zend engine dispatches to `oxphp_native_dispatch`, which:
 
 1. Reads the function name from `execute_data->func->common.function_name`
-2. Collects all arguments into a PHP array and `json_encode`s them
-3. Calls `oxphp_bridge_dispatch(func_name, json_args)` to invoke the Rust handler
-4. Parses the JSON envelope result (`{"ok": value}` or `{"err": "message"}`)
-5. Returns the `ok` value or emits a warning for `err`
+2. Passes raw `zval*` pointers for arguments and return value directly to Rust via the bridge callback
+3. Rust reads/writes zvals through C accessor functions (`oxphp_arg_long`, `oxphp_ret_str`, etc.) — no serialization
+4. On error, emits a PHP `E_WARNING` and returns `NULL`
 
 ### Call PHP from Rust
 
-The extension provides `oxphp_sapi_call_php()` — a callback that Rust can invoke via the bridge to call PHP functions:
+The bridge provides `oxphp_call_php_native()` — a function that Rust can call to invoke PHP userland functions:
 
-1. Rust calls `oxphp_bridge_call_php(func_name, json_args)`
-2. The bridge invokes `call_php_fn`, which is set to `oxphp_sapi_call_php` during MINIT
-3. `oxphp_sapi_call_php` decodes the JSON args, calls `call_user_function()`, and returns a JSON envelope
+1. Rust calls `oxphp_call_php_native(func_name, args, argc, result)` with pre-built zval arguments
+2. The C side resolves the function via `zend_hash_str_find_ptr` and calls `zend_call_known_function` directly
+3. The result zval is owned by Rust and released via `zval_ptr_dtor` on drop
 
 ### Example Usage
 

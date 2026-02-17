@@ -45,6 +45,9 @@ brotli = "7"
 # Error derives
 thiserror = "2"
 
+# C standard library (calloc/free for call_php arg buffers)
+libc = "0.2"
+
 # Fast allocator
 mimalloc = "0.1"
 
@@ -53,13 +56,13 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2"
 
-# Base64 encoding (optional — used by debug plugin)
+# Base64 encoding (optional — used by example plugin)
 base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["php"]
 php = []
-plugin-debug = ["base64"]
+plugin-example = ["base64"]
 
 [profile.release]
 lto = "thin"

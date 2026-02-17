@@ -852,6 +852,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "mimalloc",
  "mime_guess",
  "percent-encoding",

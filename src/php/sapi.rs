@@ -8,13 +8,29 @@ use bytes::Bytes;
 use http::header;
 
 use crate::php::bindings::{self, *};
-use crate::plugin::php::{PhpCallContext, PhpValue, PluginPhpFunctionDef};
+use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
 use crate::types::ScriptRequest;
 
+/// Per-request response state consolidated in a single thread-local
+/// to avoid 3 separate TLS lookups + RefCell borrows on the hot path.
+struct ResponseBuffers {
+    output: Vec<u8>,
+    headers: Vec<(String, String)>,
+    status_code: u16,
+}
+
+impl ResponseBuffers {
+    fn new() -> Self {
+        Self {
+            output: Vec::with_capacity(8192),
+            headers: Vec::new(),
+            status_code: 200,
+        }
+    }
+}
+
 thread_local! {
-    static OUTPUT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
-    static HEADERS_BUFFER: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
-    static STATUS_CODE: RefCell<u16> = const { RefCell::new(200) };
+    static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
     static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
 }
 
@@ -301,8 +317,11 @@ unsafe extern "C" fn oxphp_shutdown(_module: *mut sapi_module_struct) -> c_int {
 /// Called by PHP at the start of each request (during php_request_startup).
 /// Clears per-request state so the output handler chain starts clean.
 unsafe extern "C" fn oxphp_activate() -> c_int {
-    HEADERS_BUFFER.with(|h| h.borrow_mut().clear());
-    STATUS_CODE.with(|s| *s.borrow_mut() = 200);
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        resp.headers.clear();
+        resp.status_code = 200;
+    });
     0 // SUCCESS
 }
 
@@ -320,8 +339,8 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 
     let data = std::slice::from_raw_parts(str as *const u8, str_length);
 
-    OUTPUT_BUFFER.with(|buf| {
-        buf.borrow_mut().extend_from_slice(data);
+    RESPONSE.with(|r| {
+        r.borrow_mut().output.extend_from_slice(data);
     });
 
     str_length
@@ -338,70 +357,67 @@ unsafe extern "C" fn oxphp_header_handler(
     op: sapi_header_op_enum,
     _sapi_headers: *mut sapi_headers_struct,
 ) -> c_int {
-    match op {
-        sapi_header_op_enum::SAPI_HEADER_DELETE_ALL => {
-            HEADERS_BUFFER.with(|buf| buf.borrow_mut().clear());
-            return 0;
-        }
-        sapi_header_op_enum::SAPI_HEADER_SET_STATUS => {
-            let code = sapi_header as usize as u16;
-            if (100..600).contains(&code) {
-                STATUS_CODE.with(|sc| *sc.borrow_mut() = code);
+    RESPONSE.with(|r| {
+        match op {
+            sapi_header_op_enum::SAPI_HEADER_DELETE_ALL => {
+                r.borrow_mut().headers.clear();
+                return 0;
             }
+            sapi_header_op_enum::SAPI_HEADER_SET_STATUS => {
+                let code = sapi_header as usize as u16;
+                if (100..600).contains(&code) {
+                    r.borrow_mut().status_code = code;
+                }
+                return 0;
+            }
+            _ => {}
+        }
+
+        if sapi_header.is_null() {
             return 0;
         }
-        _ => {}
-    }
 
-    if sapi_header.is_null() {
-        return 0;
-    }
+        let header_ptr = (*sapi_header).header;
+        let header_len = (*sapi_header).header_len;
 
-    let header_ptr = (*sapi_header).header;
-    let header_len = (*sapi_header).header_len;
+        if header_ptr.is_null() || header_len == 0 {
+            return 0;
+        }
 
-    if header_ptr.is_null() || header_len == 0 {
-        return 0;
-    }
+        let header_bytes = std::slice::from_raw_parts(header_ptr as *const u8, header_len);
+        let header_str = String::from_utf8_lossy(header_bytes);
 
-    let header_bytes = std::slice::from_raw_parts(header_ptr as *const u8, header_len);
-    let header_str = String::from_utf8_lossy(header_bytes);
-
-    match op {
-        sapi_header_op_enum::SAPI_HEADER_DELETE => {
-            let name = header_str.trim();
-            HEADERS_BUFFER.with(|buf| {
-                buf.borrow_mut()
+        match op {
+            sapi_header_op_enum::SAPI_HEADER_DELETE => {
+                let name = header_str.trim();
+                r.borrow_mut()
+                    .headers
                     .retain(|(n, _)| !n.eq_ignore_ascii_case(name));
-            });
-        }
-        sapi_header_op_enum::SAPI_HEADER_REPLACE | sapi_header_op_enum::SAPI_HEADER_ADD => {
-            if let Some(colon_pos) = header_str.find(':') {
-                let name = header_str[..colon_pos].trim().to_string();
-                let value = header_str[colon_pos + 1..].trim().to_string();
-
-                HEADERS_BUFFER.with(|buf| {
-                    let mut headers = buf.borrow_mut();
-                    if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
-                        headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
-                    }
-                    headers.push((name, value));
-                });
             }
-        }
-        _ => {}
-    }
+            sapi_header_op_enum::SAPI_HEADER_REPLACE | sapi_header_op_enum::SAPI_HEADER_ADD => {
+                if let Some(colon_pos) = header_str.find(':') {
+                    let name = header_str[..colon_pos].trim().to_string();
+                    let value = header_str[colon_pos + 1..].trim().to_string();
 
-    0
+                    let mut resp = r.borrow_mut();
+                    if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
+                        resp.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+                    }
+                    resp.headers.push((name, value));
+                }
+            }
+            _ => {}
+        }
+
+        0
+    })
 }
 
 unsafe extern "C" fn oxphp_send_headers(sapi_headers: *mut sapi_headers_struct) -> c_int {
     if !sapi_headers.is_null() {
         let code = (*sapi_headers).http_response_code;
         if code > 0 {
-            STATUS_CODE.with(|sc| {
-                *sc.borrow_mut() = code as u16;
-            });
+            RESPONSE.with(|r| r.borrow_mut().status_code = code as u16);
         }
     }
     1 // SAPI_HEADER_SENT_SUCCESSFULLY
@@ -528,34 +544,40 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
 
 // ─── Buffer Access ──────────────────────────────────────────
 
-/// Take output, headers, and status code in a single TLS lookup batch.
-/// Avoids 3 separate thread-local accesses + RefCell borrows.
+/// Take output, headers, and status code in a single TLS lookup + borrow.
 pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
-    let output = OUTPUT_BUFFER.with(|buf| std::mem::take(&mut *buf.borrow_mut()));
-    let headers = HEADERS_BUFFER.with(|buf| std::mem::take(&mut *buf.borrow_mut()));
-    let status = STATUS_CODE.with(|sc| {
-        let code = *sc.borrow();
-        *sc.borrow_mut() = 200;
-        code
-    });
-    (output, headers, status)
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        let output = std::mem::take(&mut resp.output);
+        let headers = std::mem::take(&mut resp.headers);
+        let status = resp.status_code;
+        resp.status_code = 200;
+        (output, headers, status)
+    })
 }
 
 pub fn clear_buffers() {
-    OUTPUT_BUFFER.with(|buf| buf.borrow_mut().clear());
-    HEADERS_BUFFER.with(|buf| buf.borrow_mut().clear());
-    STATUS_CODE.with(|sc| *sc.borrow_mut() = 200);
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        resp.output.clear();
+        resp.headers.clear();
+        resp.status_code = 200;
+    });
 }
 
-// ─── Plugin PHP Function Bridge ─────────────────────────────
+// ─── Native Plugin Function Bridge ──────────────────────────
 
-/// Global registry of plugin PHP function definitions.
+use std::collections::HashMap;
+
+/// Global registry of native plugin PHP function handlers, keyed by function name.
+/// O(1) lookup on every dispatch instead of O(n) linear scan.
 /// Set once from main.rs after plugin_manager.init_all().
-static PLUGIN_FUNCTIONS: OnceLock<Vec<PluginPhpFunctionDef>> = OnceLock::new();
+static NATIVE_DISPATCH_MAP: OnceLock<HashMap<String, Box<dyn PluginNativeFunction>>> =
+    OnceLock::new();
 
-/// Register plugin functions on the bridge and store handlers for dispatch.
+/// Register native plugin functions on the bridge and store handlers for dispatch.
 /// Called from main.rs after plugin_manager.init_all().
-pub fn register_plugin_functions(fns: Vec<PluginPhpFunctionDef>) {
+pub fn register_native_plugin_functions(fns: Vec<PluginNativeFunctionDef>) {
     for f in &fns {
         let name = match CString::new(f.name.as_str()) {
             Ok(n) => n,
@@ -571,81 +593,58 @@ pub fn register_plugin_functions(fns: Vec<PluginPhpFunctionDef>) {
         }
     }
     unsafe {
-        bindings::oxphp_bridge_set_dispatch_fn(Some(dispatch_callback));
+        bindings::oxphp_bridge_set_native_dispatch(Some(native_dispatch_callback));
     }
     let count = fns.len();
-    PLUGIN_FUNCTIONS.set(fns).ok();
-    tracing::info!(count, "Plugin PHP functions registered on bridge");
+    let map: HashMap<String, Box<dyn PluginNativeFunction>> =
+        fns.into_iter().map(|f| (f.name, f.handler)).collect();
+    NATIVE_DISPATCH_MAP.set(map).ok();
+    tracing::info!(count, "Native plugin PHP functions registered on bridge");
 }
 
-/// Dispatch callback invoked from C extension via bridge.
+/// Native dispatch callback invoked from C extension via bridge.
+/// Creates a NativeCall wrapper, finds the handler via HashMap, and invokes it.
 ///
 /// # Safety
-/// Called from C code. `name` and `json_args` must be valid C strings.
-unsafe extern "C" fn dispatch_callback(
+/// Called from C code. `name` must be a valid C string.
+/// `args` and `retval` must be valid zval pointers for the duration of the call.
+unsafe extern "C" fn native_dispatch_callback(
     name: *const c_char,
-    json_args: *const c_char,
-) -> *mut c_char {
-    let name_str = match CStr::from_ptr(name).to_str() {
-        Ok(s) => s,
-        Err(_) => return make_error_envelope("invalid UTF-8 in function name"),
+    args: *mut c_void,
+    argc: u32,
+    retval: *mut c_void,
+) -> c_int {
+    // Safety: function names are ASCII identifiers registered by our own code
+    // during startup — UTF-8 validation is unnecessary overhead on the hot path.
+    let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(name).to_bytes());
+
+    let map = match NATIVE_DISPATCH_MAP.get() {
+        Some(m) => m,
+        None => return -1,
     };
 
-    let args_str = match CStr::from_ptr(json_args).to_str() {
-        Ok(s) => s,
-        Err(_) => return make_error_envelope("invalid UTF-8 in json_args"),
-    };
-
-    let fns = match PLUGIN_FUNCTIONS.get() {
-        Some(f) => f,
-        None => return make_error_envelope("plugin functions not initialized"),
-    };
-
-    let func_def = match fns.iter().find(|f| f.name == name_str) {
-        Some(f) => f,
-        None => {
-            return make_error_envelope(&format!("function not found: {name_str}"));
-        }
-    };
-
-    // Deserialize JSON args → Vec<PhpValue>
-    let args: Vec<PhpValue> = match serde_json::from_str::<serde_json::Value>(args_str) {
-        Ok(serde_json::Value::Array(arr)) => arr.iter().map(PhpValue::from_json_value).collect(),
-        Ok(_) => return make_error_envelope("json_args must be an array"),
-        Err(e) => return make_error_envelope(&format!("JSON parse error: {e}")),
+    let handler = match map.get(name_str) {
+        Some(h) => h,
+        None => return -1,
     };
 
     // Catch panics — unwinding through extern "C" is an abort on Rust 2021.
-    let ctx = PhpCallContext::new();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        func_def.handler.handle(&ctx, &args)
+        let mut call = crate::bridge::call::NativeCall::new(args, argc, retval, None);
+        handler.handle(&mut call)
     }));
 
     match result {
-        Ok(Ok(value)) => {
-            let json_val = value.to_json_value();
-            let envelope = serde_json::json!({ "ok": json_val });
-            let envelope_str = envelope.to_string();
-            match CString::new(envelope_str) {
-                Ok(c_str) => bindings::oxphp_bridge_strdup(c_str.as_ptr()),
-                Err(_) => make_error_envelope("result contains null byte"),
-            }
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            tracing::warn!(func = name_str, error = %e, "Plugin function error");
+            -1
         }
-        Ok(Err(e)) => make_error_envelope(&e.to_string()),
-        Err(_) => make_error_envelope("handler panicked"),
+        Err(_) => {
+            tracing::error!(func = name_str, "Plugin function panicked");
+            -1
+        }
     }
-}
-
-/// Create an error envelope string, allocated via bridge strdup.
-unsafe fn make_error_envelope(msg: &str) -> *mut c_char {
-    let envelope = serde_json::json!({ "err": msg });
-    let s = envelope.to_string();
-    // NUL bytes in error messages are impossible (JSON-encoded string escapes them),
-    // but handle defensively to avoid UB.
-    let c_str = CString::new(s).unwrap_or_else(|_| {
-        CString::new("{\"err\":\"error message contained null byte\"}").unwrap()
-    });
-    bindings::oxphp_bridge_strdup(c_str.as_ptr())
 }
 
 #[cfg(test)]

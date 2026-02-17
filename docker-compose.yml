@@ -16,7 +16,7 @@ services:
       # Server
       - LISTEN_ADDR=0.0.0.0:8080
       - DOCUMENT_ROOT=/var/www/html
-      # - INDEX_FILE=index.php
+      - INDEX_FILE=bench.php
       - WORKER_THREADS=0
       - TOKIO_WORKERS=4
       - EXECUTOR=sapi
@@ -50,7 +50,7 @@ services:
       # Custom error pages
       # - ERROR_PAGES_DIR=/var/www/errors
 
-      # Debug plugin (requires CARGO_FEATURES: "plugin-debug")
-      # - DEBUG_VERBOSE=false
-      # - DEBUG_INTERNAL_AUTH=admin:secret
+      # Example plugin (requires CARGO_FEATURES: "plugin-example")
+      # - EXAMPLE_VERBOSE=false
+      # - EXAMPLE_INTERNAL_AUTH=admin:secret
     restart: unless-stopped

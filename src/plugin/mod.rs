@@ -14,10 +14,7 @@ pub use handler::{
     PluginResponseActions, PluginResponseHandler, PluginResponseView,
 };
 pub use manager::PluginManager;
-pub use php::{
-    PhpArray, PhpArrayKey, PhpCallContext, PhpError, PhpObject, PhpParam, PhpType, PhpValue,
-    PluginPhpFunction,
-};
+pub use php::{PhpError, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
 
 use std::any::Any;
 

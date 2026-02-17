@@ -64,7 +64,7 @@ Builds the Rust binary inside the same `php:8.4-zts-alpine` image. This is requi
 
 The stage uses a dependency caching trick: it first builds with a dummy `main.rs` to cache all dependency crates, then removes only the OxPHP-specific artifacts (`target/release/oxphp`, `deps/oxphp-*`, `.fingerprint/oxphp-*`) before copying the real source. This way, only the final binary is rebuilt on source changes.
 
-The `CARGO_FEATURES` build argument allows enabling optional Cargo features (such as `plugin-debug`) at build time without modifying the Dockerfile.
+The `CARGO_FEATURES` build argument allows enabling optional Cargo features (such as `plugin-example`) at build time without modifying the Dockerfile.
 
 **Artifacts:** `/build/target/release/oxphp`
 
@@ -104,7 +104,7 @@ services:
     build:
       context: .
       args:
-        # Extra Cargo features (space-separated), e.g. "plugin-debug"
+        # Extra Cargo features (space-separated), e.g. "plugin-example"
         CARGO_FEATURES: ""
     ports:
       - "8080:8080"   # Main HTTP server
@@ -156,7 +156,7 @@ services:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `CARGO_FEATURES` | `""` | Space-separated list of additional Cargo features to enable (e.g. `plugin-debug`) |
+| `CARGO_FEATURES` | `""` | Space-separated list of additional Cargo features to enable (e.g. `plugin-example`) |
 
 ### Environment Variables
 

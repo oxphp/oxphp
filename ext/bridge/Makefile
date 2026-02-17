@@ -1,6 +1,11 @@
 CC ?= gcc
-CFLAGS ?= -O2 -Wall -Wextra -fPIC
+CFLAGS ?= -O2 -Wall -Wextra -fPIC -D_GNU_SOURCE
 PREFIX ?= /usr/local
+
+# PHP include paths (needed for native zval accessor functions).
+# php-config must be on $PATH; empty on host-only builds without PHP.
+PHP_INCLUDES := $(shell php-config --includes 2>/dev/null)
+CFLAGS += $(PHP_INCLUDES)
 
 LIBNAME = liboxphp_bridge.so
 OBJECTS = oxphp_bridge.o

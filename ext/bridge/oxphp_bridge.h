@@ -92,10 +92,6 @@ bool oxphp_bridge_get_headers_sent(void);
 
 /* ─── Plugin Function Registry (global, NOT __thread) ─────────── */
 
-/** Function pointer types for cross-boundary dispatch. */
-typedef char* (*oxphp_dispatch_fn_t)(const char* func_name, const char* json_args);
-typedef char* (*oxphp_call_php_fn_t)(const char* func_name, const char* json_args);
-
 /** Register a plugin function (called by Rust after plugin init). */
 void oxphp_bridge_register_plugin_fn(const char* name, int required_params, int total_params);
 
@@ -111,29 +107,96 @@ int oxphp_bridge_get_plugin_fn_required(int index);
 /** Get plugin function total param count by index. */
 int oxphp_bridge_get_plugin_fn_total(int index);
 
-/** Set the Rust dispatch callback (called by Rust). */
-void oxphp_bridge_set_dispatch_fn(oxphp_dispatch_fn_t fn);
+/* ═══════════════════════════════════════════════════════════
+ *  Native Bridge API — Zero-Serialization Value Access
+ *  Rust reads/writes PHP zvals directly through these C helpers.
+ *  All zval pointers passed as void* (Rust doesn't know zval layout).
+ * ═══════════════════════════════════════════════════════════ */
 
-/** Get the Rust dispatch callback (called by extension). */
-oxphp_dispatch_fn_t oxphp_bridge_get_dispatch_fn(void);
+/* ── Type constants (stable across PHP versions) ── */
+#define OXPHP_TYPE_NULL     0
+#define OXPHP_TYPE_FALSE    1
+#define OXPHP_TYPE_TRUE     2
+#define OXPHP_TYPE_LONG     3
+#define OXPHP_TYPE_DOUBLE   4
+#define OXPHP_TYPE_STRING   5
+#define OXPHP_TYPE_ARRAY    6
+#define OXPHP_TYPE_OBJECT   7
+#define OXPHP_TYPE_RESOURCE 8
 
-/** Set the PHP call callback (called by extension MINIT). */
-void oxphp_bridge_set_call_php_fn(oxphp_call_php_fn_t fn);
+/* ── Type inspection ── */
+uint8_t oxphp_val_type(void *zv);
+uint8_t oxphp_val_arg_type(void *args, uint32_t idx);
 
-/** Get the PHP call callback (called by Rust). */
-oxphp_call_php_fn_t oxphp_bridge_get_call_php_fn(void);
+/* ── Scalar reading from args[idx] ── */
+int64_t oxphp_arg_long(void *args, uint32_t idx);
+double oxphp_arg_double(void *args, uint32_t idx);
+int oxphp_arg_bool(void *args, uint32_t idx);
+const uint8_t *oxphp_arg_str(void *args, uint32_t idx, size_t *out_len);
 
-/** Dispatch to Rust handler (NULL-checks + invokes dispatch_fn). */
-char* oxphp_bridge_dispatch(const char* name, const char* json_args);
+/* ── Array reading from args[idx] ── */
+uint32_t oxphp_arg_array_count(void *args, uint32_t idx);
+void *oxphp_arg_array(void *args, uint32_t idx);
 
-/** Call a PHP function from Rust (NULL-checks + invokes call_php_fn). */
-char* oxphp_bridge_call_php(const char* name, const char* json_args);
+/* ── Array iteration ── */
+typedef void (*oxphp_array_iter_fn)(
+    const uint8_t *key, size_t key_len, int64_t idx,
+    void *val, void *user_data
+);
+void oxphp_array_foreach(void *zv_array, oxphp_array_iter_fn cb, void *user_data);
 
-/** Duplicate a string using C malloc (for cross-boundary returns). */
-char* oxphp_bridge_strdup(const char* s);
+/* ── Direct value reading (from zval*, not from args array) ── */
+int64_t oxphp_val_long(void *zv);
+double  oxphp_val_double(void *zv);
+int     oxphp_val_bool(void *zv);
+const uint8_t *oxphp_val_str(void *zv, size_t *out_len);
+uint32_t oxphp_val_array_count(void *zv);
 
-/** Free a string allocated by oxphp_bridge_strdup. */
-void oxphp_bridge_free_string(char* ptr);
+/* ── Scalar writing (into return_value zval) ── */
+void oxphp_ret_null(void *retval);
+void oxphp_ret_bool(void *retval, int val);
+void oxphp_ret_long(void *retval, int64_t val);
+void oxphp_ret_double(void *retval, double val);
+void oxphp_ret_str(void *retval, const uint8_t *s, size_t len);
+
+/* ── Array writing ── */
+void oxphp_ret_array_init(void *retval, uint32_t size_hint);
+
+/* Keyed (associative) */
+void oxphp_arr_add_null(void *arr, const char *key, size_t klen);
+void oxphp_arr_add_bool(void *arr, const char *key, size_t klen, int val);
+void oxphp_arr_add_long(void *arr, const char *key, size_t klen, int64_t val);
+void oxphp_arr_add_double(void *arr, const char *key, size_t klen, double val);
+void oxphp_arr_add_str(void *arr, const char *key, size_t klen, const uint8_t *s, size_t slen);
+void *oxphp_arr_add_array(void *arr, const char *key, size_t klen, uint32_t size_hint);
+
+/* Indexed (push / append) */
+void oxphp_arr_push_null(void *arr);
+void oxphp_arr_push_bool(void *arr, int val);
+void oxphp_arr_push_long(void *arr, int64_t val);
+void oxphp_arr_push_double(void *arr, double val);
+void oxphp_arr_push_str(void *arr, const uint8_t *s, size_t len);
+void *oxphp_arr_push_array(void *arr, uint32_t size_hint);
+
+/* ── Native dispatch callback (C extension → Rust) ── */
+typedef int (*oxphp_native_dispatch_fn_t)(
+    const char *name, void *args, uint32_t argc, void *retval
+);
+void oxphp_bridge_set_native_dispatch(oxphp_native_dispatch_fn_t fn);
+oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void);
+
+/* ── Call PHP function from Rust (native, no serialization) ── */
+int oxphp_call_php_native(
+    const char *func_name, void *args, uint32_t argc, void *result
+);
+
+/* ── Zval lifecycle ── */
+
+/** Destroy a zval (decrement refcount, free if needed). */
+void oxphp_zval_dtor(void *zv);
+
+/** Return sizeof(zval) for the running PHP build. */
+size_t oxphp_zval_size(void);
 
 #ifdef __cplusplus
 }

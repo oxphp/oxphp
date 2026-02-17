@@ -7,7 +7,7 @@ use super::handler::{
     PluginCompleteHandler, PluginInternalHandler, PluginMetricsCollector, PluginRequestHandler,
     PluginResponseHandler,
 };
-use super::php::{PhpParam, PhpType, PluginPhpFunction, PluginPhpFunctionDef};
+use super::php::{PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
 use super::wrappers::{PluginCompleteWrapper, PluginRequestWrapper, PluginResponseWrapper};
 
 /// Restricted API passed to `Plugin::init()`.
@@ -20,7 +20,7 @@ pub struct PluginContext<'a> {
     config_values: &'a mut HashMap<String, serde_json::Value>,
     metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
     internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
-    php_functions: &'a mut Vec<PluginPhpFunctionDef>,
+    native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -33,7 +33,7 @@ impl<'a> PluginContext<'a> {
         config_values: &'a mut HashMap<String, serde_json::Value>,
         metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
-        php_functions: &'a mut Vec<PluginPhpFunctionDef>,
+        native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
     ) -> Self {
         Self {
             plugin_name,
@@ -43,7 +43,7 @@ impl<'a> PluginContext<'a> {
             config_values,
             metrics_collectors,
             internal_routes,
-            php_functions,
+            native_php_functions,
         }
     }
 
@@ -121,17 +121,17 @@ impl<'a> PluginContext<'a> {
             .insert(path.to_string(), Box::new(handler));
     }
 
-    /// Register a PHP function callable from PHP scripts.
+    /// Register a native PHP function (zero-serialization bridge).
     /// Function name is auto-prefixed: `oxphp_{plugin_name}_{name}`.
-    pub fn register_php_function(
+    pub fn register_function(
         &mut self,
         name: &str,
         params: Vec<PhpParam>,
         return_type: PhpType,
-        handler: impl PluginPhpFunction + 'static,
+        handler: impl PluginNativeFunction + 'static,
     ) {
         let full_name = format!("oxphp_{}_{}", self.plugin_name, name);
-        self.php_functions.push(PluginPhpFunctionDef {
+        self.native_php_functions.push(PluginNativeFunctionDef {
             name: full_name,
             plugin_name: self.plugin_name.clone(),
             params,
@@ -158,7 +158,7 @@ mod tests {
         config_values: &'a mut HashMap<String, serde_json::Value>,
         metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
-        php_functions: &'a mut Vec<PluginPhpFunctionDef>,
+        native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "test_plugin".into(),
@@ -168,13 +168,12 @@ mod tests {
             config_values,
             metrics_collectors,
             internal_routes,
-            php_functions,
+            native_php_functions,
         )
     }
 
     #[test]
     fn test_config_lookup_with_prefix() {
-        // Set env vars for the test (plugin name = "test_plugin" → prefix = "TEST_PLUGIN_")
         std::env::set_var("TEST_PLUGIN_API_KEY", "secret");
         std::env::set_var("_OXPHP_TEST_SHARED_KEY", "shared");
 
@@ -183,7 +182,7 @@ mod tests {
         let mut config = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
-        let mut php = Vec::new();
+        let mut native_php = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -191,7 +190,7 @@ mod tests {
             &mut config,
             &mut metrics,
             &mut routes,
-            &mut php,
+            &mut native_php,
         );
 
         assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
@@ -201,7 +200,6 @@ mod tests {
         );
         assert_eq!(ctx.config("MISSING"), None);
 
-        // Clean up
         std::env::remove_var("TEST_PLUGIN_API_KEY");
         std::env::remove_var("_OXPHP_TEST_SHARED_KEY");
     }
@@ -213,7 +211,7 @@ mod tests {
         let mut config = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
-        let mut php = Vec::new();
+        let mut native_php = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -221,7 +219,7 @@ mod tests {
             &mut config,
             &mut metrics,
             &mut routes,
-            &mut php,
+            &mut native_php,
         );
 
         assert_eq!(ctx.plugin_name(), "test_plugin");
@@ -234,7 +232,7 @@ mod tests {
         let mut config = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
-        let mut php = Vec::new();
+        let mut native_php = Vec::new();
 
         {
             let mut ctx = make_context(
@@ -243,7 +241,7 @@ mod tests {
                 &mut config,
                 &mut metrics,
                 &mut routes,
-                &mut php,
+                &mut native_php,
             );
 
             // Valid path
@@ -274,7 +272,7 @@ mod tests {
         let mut config = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
-        let mut php = Vec::new();
+        let mut native_php = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -282,7 +280,7 @@ mod tests {
             &mut config,
             &mut metrics,
             &mut routes,
-            &mut php,
+            &mut native_php,
         );
 
         ctx.register_service("my_pool", Box::new(42u32));
@@ -298,7 +296,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
-        let mut php = Vec::new();
+        let mut native_php = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -306,7 +304,7 @@ mod tests {
             &mut config_values,
             &mut metrics,
             &mut routes,
-            &mut php,
+            &mut native_php,
         );
 
         ctx.expose_config("verbose", serde_json::json!(true));
@@ -314,13 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn test_register_php_function() {
+    fn test_register_function() {
         let mut dispatcher = EventDispatcher::new();
         let mut services = HashMap::new();
         let mut config_values = HashMap::new();
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
-        let mut php_functions = Vec::new();
+        let mut native_php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -328,27 +326,19 @@ mod tests {
             &mut config_values,
             &mut metrics,
             &mut routes,
-            &mut php_functions,
+            &mut native_php_functions,
         );
 
-        fn test_handler(
-            _ctx: &crate::plugin::PhpCallContext,
-            _args: &[crate::plugin::PhpValue],
-        ) -> Result<crate::plugin::PhpValue, crate::plugin::PhpError> {
-            Ok(crate::plugin::PhpValue::Null)
-        }
-
-        ctx.register_php_function(
+        ctx.register_function(
             "echo_upper",
             vec![PhpParam::required("input", PhpType::String)],
             PhpType::String,
-            test_handler,
+            |_call: &mut crate::bridge::call::NativeCall| Ok(()),
         );
 
-        // Need to drop ctx before accessing php_functions
         drop(ctx);
 
-        assert_eq!(php_functions.len(), 1);
-        assert_eq!(php_functions[0].name, "oxphp_test_plugin_echo_upper");
+        assert_eq!(native_php_functions.len(), 1);
+        assert_eq!(native_php_functions[0].name, "oxphp_test_plugin_echo_upper");
     }
 }

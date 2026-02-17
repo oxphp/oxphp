@@ -143,7 +143,7 @@ src/
 │   ├── mod.rs               # PluginManager, Plugin trait, PluginContext
 │   └── cookies.rs           # Plugin cookie isolation
 ├── plugins/
-│   └── debug.rs             # Debug plugin [feature-gated: plugin-debug]
+│   └── example.rs           # Example plugin [feature-gated: plugin-example]
 └── php/                     # PHP FFI bindings [feature-gated]
     ├── bindings.rs
     └── sapi.rs

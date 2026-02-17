@@ -239,13 +239,16 @@ extern "C" {
 
     pub fn oxphp_bridge_register_plugin_fn(name: *const c_char, required: c_int, total: c_int);
 
-    pub fn oxphp_bridge_set_dispatch_fn(
-        f: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> *mut c_char>,
+    // ─── Native bridge dispatch ─────────────────────────────
+
+    pub fn oxphp_bridge_set_native_dispatch(
+        f: Option<unsafe extern "C" fn(*const c_char, *mut c_void, u32, *mut c_void) -> c_int>,
     );
 
-    pub fn oxphp_bridge_call_php(name: *const c_char, json_args: *const c_char) -> *mut c_char;
-
-    pub fn oxphp_bridge_strdup(s: *const c_char) -> *mut c_char;
-
-    pub fn oxphp_bridge_free_string(ptr: *mut c_char);
+    pub fn oxphp_call_php_native(
+        name: *const c_char,
+        args: *mut c_void,
+        argc: u32,
+        result: *mut c_void,
+    ) -> c_int;
 }

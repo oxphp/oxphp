@@ -28,15 +28,15 @@ fn main() -> Result<(), types::BoxError> {
     // functions with Zend (OPcache needs them at compile time).
     let mut dispatcher = EventDispatcher::new();
     let mut plugin_manager = PluginManager::new();
-    #[cfg(feature = "plugin-debug")]
-    plugin_manager.add(Box::new(oxphp::plugins::debug::DebugPlugin::new()));
+    #[cfg(feature = "plugin-example")]
+    plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
 
     #[cfg(feature = "php")]
     {
-        let php_fns = plugin_manager.take_php_functions();
-        if !php_fns.is_empty() {
-            oxphp::php::sapi::register_plugin_functions(php_fns);
+        let native_fns = plugin_manager.take_native_php_functions();
+        if !native_fns.is_empty() {
+            oxphp::php::sapi::register_native_plugin_functions(native_fns);
         }
     }
 

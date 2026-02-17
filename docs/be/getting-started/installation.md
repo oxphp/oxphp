@@ -37,10 +37,10 @@ docker compose up -d
 3. Збірае бінарны файл Rust у тым самым вобразе `php:8.4-zts-alpine`
 4. Капіруе толькі рантайм-артэфакты ў лёгкі вобраз Alpine
 
-Каб уключыць дадатковыя магчымасці, такія як плагін адладкі, перадайце `CARGO_FEATURES` як аргумент зборкі:
+Каб уключыць дадатковыя магчымасці, такія як плагін прыкладу, перадайце `CARGO_FEATURES` як аргумент зборкі:
 
 ```bash
-docker compose build --build-arg CARGO_FEATURES="plugin-debug"
+docker compose build --build-arg CARGO_FEATURES="plugin-example"
 ```
 
 Глядзіце [даведнік па Docker](/getting-started/docker/) для поўнага разбору стадый Dockerfile і канфігурацыі `docker-compose.yml`.
@@ -99,8 +99,8 @@ cargo test --no-default-features --lib
 # Усе тэсты (модульныя + інтэграцыйныя)
 cargo test --no-default-features
 
-# З плагінам адладкі
-cargo clippy --no-default-features --features plugin-debug -- -D warnings && cargo test --no-default-features --features plugin-debug
+# З плагінам прыкладу
+cargo clippy --no-default-features --features plugin-example -- -D warnings && cargo test --no-default-features --features plugin-example
 ```
 
 ## Праверка ўсталявання

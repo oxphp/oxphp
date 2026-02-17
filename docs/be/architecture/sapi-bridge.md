@@ -175,23 +175,22 @@ PHP-пашырэнне (`ext/oxphp_sapi.c`) выстаўляе сервер-сп
 | `oxphp_finish_request()` | `bool` | Пазначае запыт як завершаны для фонавай апрацоўкі |
 | `oxphp_is_streaming()` | `bool` | Правярае, ці выкарыстоўвае бягучы запыт рэжым стрымінгу |
 
-### Функцыя дыспетчарызацыі плагінаў
+### Натыўная дыспетчарызацыя плагінаў
 
-Пашырэнне таксама рэгіструе `oxphp_plugin_dispatch` — агульны апрацоўшчык для ўсіх зарэгістраваных функцый плагінаў. Калі PHP-скрыпт выклікае функцыю плагіна (напр., `oxphp_debug_info()`), рухавік Zend дыспетчарызуе да `oxphp_plugin_dispatch`, які:
+Пашырэнне рэгіструе `oxphp_native_dispatch` — апрацоўшчык з нулявой серыялізацыяй для ўсіх зарэгістраваных функцый плагінаў. Калі PHP-скрыпт выклікае функцыю плагіна (напр., `oxphp_example_info()`), рухавік Zend дыспетчарызуе да `oxphp_native_dispatch`, які:
 
 1. Чытае назву функцыі з `execute_data->func->common.function_name`
-2. Збірае ўсе аргументы ў масіў PHP і кадуе іх праз `json_encode`
-3. Выклікае `oxphp_bridge_dispatch(func_name, json_args)` для выкліку апрацоўшчыка Rust
-4. Разбірае JSON-абалонку выніку (`{"ok": value}` або `{"err": "message"}`)
-5. Вяртае значэнне `ok` або выдае папярэджанне для `err`
+2. Перадае ўказальнікі `zval*` на аргументы і вяртаемае значэнне напрамую ў Rust праз callback моста
+3. Rust чытае/піша zval'ы праз C-функцыі доступу (`oxphp_arg_long`, `oxphp_ret_str` і інш.) — без серыялізацыі
+4. Пры памылцы выдае PHP-папярэджанне `E_WARNING` і вяртае `NULL`
 
 ### Выклік PHP з Rust
 
-Пашырэнне прадастаўляе `oxphp_sapi_call_php()` — зваротны выклік, які Rust можа выклікаць праз мост для выкліку PHP-функцый:
+Мост прадастаўляе `oxphp_call_php_native()` — функцыю, якую Rust можа выклікаць для выкліку PHP-функцый:
 
-1. Rust выклікае `oxphp_bridge_call_php(func_name, json_args)`
-2. Мост выклікае `call_php_fn`, які ўсталяваны ў `oxphp_sapi_call_php` падчас MINIT
-3. `oxphp_sapi_call_php` дэкадуе JSON-аргументы, выклікае `call_user_function()` і вяртае JSON-абалонку
+1. Rust выклікае `oxphp_call_php_native(func_name, args, argc, result)` з падрыхтаванымі zval-аргументамі
+2. C-бок разрашае функцыю праз `zend_hash_str_find_ptr` і выклікае `zend_call_known_function` напрамую
+3. Вынік-zval належыць Rust і вызваляецца праз `zval_ptr_dtor` пры выдаленні
 
 ### Прыклад выкарыстання
 

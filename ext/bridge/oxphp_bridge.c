@@ -93,9 +93,6 @@ static oxphp_plugin_fn_entry_t *plugin_functions = NULL;
 static int plugin_function_count = 0;
 static int plugin_function_capacity = 0;
 
-static oxphp_dispatch_fn_t dispatch_fn = NULL;
-static oxphp_call_php_fn_t call_php_fn = NULL;
-
 void oxphp_bridge_register_plugin_fn(const char* name, int required_params, int total_params) {
     if (!name) return;
     if (plugin_function_count >= plugin_function_capacity) {
@@ -132,37 +129,212 @@ int oxphp_bridge_get_plugin_fn_total(int index) {
     return plugin_functions[index].total_params;
 }
 
-void oxphp_bridge_set_dispatch_fn(oxphp_dispatch_fn_t fn) {
-    dispatch_fn = fn;
+/* ═══════════════════════════════════════════════════════════
+ *  Native Bridge API — Zero-Serialization Value Access
+ * ═══════════════════════════════════════════════════════════ */
+
+#include "php.h"
+#include "Zend/zend_API.h"
+#include "Zend/zend_hash.h"
+
+/* ── Type mapping (branchless lookup table) ── */
+
+/* PHP IS_* constants → OXPHP_TYPE_* (max IS_* value is ~12, pad to 16). */
+static const uint8_t ztype_to_oxphp[16] = {
+    [IS_NULL]     = OXPHP_TYPE_NULL,
+    [IS_FALSE]    = OXPHP_TYPE_FALSE,
+    [IS_TRUE]     = OXPHP_TYPE_TRUE,
+    [IS_LONG]     = OXPHP_TYPE_LONG,
+    [IS_DOUBLE]   = OXPHP_TYPE_DOUBLE,
+    [IS_STRING]   = OXPHP_TYPE_STRING,
+    [IS_ARRAY]    = OXPHP_TYPE_ARRAY,
+    [IS_OBJECT]   = OXPHP_TYPE_OBJECT,
+    [IS_RESOURCE] = OXPHP_TYPE_RESOURCE,
+    /* remaining slots default to 0 = OXPHP_TYPE_NULL */
+};
+
+static inline uint8_t type_to_oxphp(uint8_t ztype) {
+    return (ztype < 16) ? ztype_to_oxphp[ztype] : OXPHP_TYPE_NULL;
 }
 
-oxphp_dispatch_fn_t oxphp_bridge_get_dispatch_fn(void) {
-    return dispatch_fn;
+uint8_t oxphp_val_type(void *zv) {
+    return type_to_oxphp(Z_TYPE_P((zval*)zv));
 }
 
-void oxphp_bridge_set_call_php_fn(oxphp_call_php_fn_t fn) {
-    call_php_fn = fn;
+uint8_t oxphp_val_arg_type(void *args, uint32_t idx) {
+    return type_to_oxphp(Z_TYPE_P(((zval*)args) + idx));
 }
 
-oxphp_call_php_fn_t oxphp_bridge_get_call_php_fn(void) {
-    return call_php_fn;
+/* ── Scalar reading from args[idx] ── */
+
+int64_t oxphp_arg_long(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    return Z_TYPE_P(z) == IS_LONG ? Z_LVAL_P(z) : 0;
 }
 
-char* oxphp_bridge_dispatch(const char* name, const char* json_args) {
-    if (!dispatch_fn) return NULL;
-    return dispatch_fn(name, json_args);
+double oxphp_arg_double(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) == IS_DOUBLE) return Z_DVAL_P(z);
+    if (Z_TYPE_P(z) == IS_LONG) return (double)Z_LVAL_P(z);
+    return 0.0;
 }
 
-char* oxphp_bridge_call_php(const char* name, const char* json_args) {
-    if (!call_php_fn) return NULL;
-    return call_php_fn(name, json_args);
+int oxphp_arg_bool(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) == IS_TRUE) return 1;
+    if (Z_TYPE_P(z) == IS_FALSE) return 0;
+    return zend_is_true(z);
 }
 
-char* oxphp_bridge_strdup(const char* s) {
-    if (!s) return NULL;
-    return strdup(s);
+const uint8_t *oxphp_arg_str(void *args, uint32_t idx, size_t *out_len) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) != IS_STRING) {
+        *out_len = 0;
+        return NULL;
+    }
+    *out_len = Z_STRLEN_P(z);
+    return (const uint8_t*)Z_STRVAL_P(z);
 }
 
-void oxphp_bridge_free_string(char* ptr) {
-    free(ptr);
+/* ── Array reading ── */
+
+uint32_t oxphp_arg_array_count(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) != IS_ARRAY) return 0;
+    return zend_hash_num_elements(Z_ARRVAL_P(z));
+}
+
+void *oxphp_arg_array(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) != IS_ARRAY) return NULL;
+    return z;
+}
+
+/* ── Array iteration ── */
+
+void oxphp_array_foreach(void *zv_array, oxphp_array_iter_fn cb, void *user_data) {
+    zval *arr = (zval*)zv_array;
+    if (Z_TYPE_P(arr) != IS_ARRAY) return;
+
+    HashTable *ht = Z_ARRVAL_P(arr);
+    zend_ulong num_idx;
+    zend_string *str_key;
+    zval *val;
+
+    ZEND_HASH_FOREACH_KEY_VAL(ht, num_idx, str_key, val) {
+        if (str_key) {
+            cb((const uint8_t*)ZSTR_VAL(str_key), ZSTR_LEN(str_key),
+               (int64_t)num_idx, val, user_data);
+        } else {
+            cb(NULL, 0, (int64_t)num_idx, val, user_data);
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+/* ── Direct value reading ── */
+
+int64_t oxphp_val_long(void *zv)  { return Z_TYPE_P((zval*)zv) == IS_LONG ? Z_LVAL_P((zval*)zv) : 0; }
+double  oxphp_val_double(void *zv){ return Z_TYPE_P((zval*)zv) == IS_DOUBLE ? Z_DVAL_P((zval*)zv) : 0.0; }
+int     oxphp_val_bool(void *zv)  { return zend_is_true((zval*)zv); }
+
+const uint8_t *oxphp_val_str(void *zv, size_t *out_len) {
+    if (Z_TYPE_P((zval*)zv) != IS_STRING) { *out_len = 0; return NULL; }
+    *out_len = Z_STRLEN_P((zval*)zv);
+    return (const uint8_t*)Z_STRVAL_P((zval*)zv);
+}
+
+uint32_t oxphp_val_array_count(void *zv) {
+    if (Z_TYPE_P((zval*)zv) != IS_ARRAY) return 0;
+    return zend_hash_num_elements(Z_ARRVAL_P((zval*)zv));
+}
+
+/* ── Value writing ── */
+
+void oxphp_ret_null(void *rv)                   { ZVAL_NULL((zval*)rv); }
+void oxphp_ret_bool(void *rv, int val)          { ZVAL_BOOL((zval*)rv, val); }
+void oxphp_ret_long(void *rv, int64_t val)      { ZVAL_LONG((zval*)rv, (zend_long)val); }
+void oxphp_ret_double(void *rv, double val)     { ZVAL_DOUBLE((zval*)rv, val); }
+
+void oxphp_ret_str(void *rv, const uint8_t *s, size_t len) {
+    ZVAL_STRINGL((zval*)rv, (const char*)s, len);
+}
+
+void oxphp_ret_array_init(void *rv, uint32_t size_hint) {
+    array_init_size((zval*)rv, size_hint);
+}
+
+/* ── Array builders (keyed) ── */
+
+void oxphp_arr_add_null(void *arr, const char *key, size_t klen) {
+    add_assoc_null_ex((zval*)arr, key, klen);
+}
+void oxphp_arr_add_bool(void *arr, const char *key, size_t klen, int val) {
+    add_assoc_bool_ex((zval*)arr, key, klen, val);
+}
+void oxphp_arr_add_long(void *arr, const char *key, size_t klen, int64_t val) {
+    add_assoc_long_ex((zval*)arr, key, klen, (zend_long)val);
+}
+void oxphp_arr_add_double(void *arr, const char *key, size_t klen, double val) {
+    add_assoc_double_ex((zval*)arr, key, klen, val);
+}
+void oxphp_arr_add_str(void *arr, const char *key, size_t klen, const uint8_t *s, size_t slen) {
+    add_assoc_stringl_ex((zval*)arr, key, klen, (const char*)s, slen);
+}
+
+void *oxphp_arr_add_array(void *arr, const char *key, size_t klen, uint32_t size_hint) {
+    zval sub;
+    array_init_size(&sub, size_hint);
+    /* Single hash op: insert and return the stored zval pointer. */
+    return zend_hash_str_update(Z_ARRVAL_P((zval*)arr), key, klen, &sub);
+}
+
+/* ── Array builders (indexed / push) ── */
+
+void oxphp_arr_push_null(void *arr)                { add_next_index_null((zval*)arr); }
+void oxphp_arr_push_bool(void *arr, int val)       { add_next_index_bool((zval*)arr, val); }
+void oxphp_arr_push_long(void *arr, int64_t val)   { add_next_index_long((zval*)arr, (zend_long)val); }
+void oxphp_arr_push_double(void *arr, double val)  { add_next_index_double((zval*)arr, val); }
+void oxphp_arr_push_str(void *arr, const uint8_t *s, size_t len) {
+    add_next_index_stringl((zval*)arr, (const char*)s, len);
+}
+
+void *oxphp_arr_push_array(void *arr, uint32_t size_hint) {
+    zval sub;
+    array_init_size(&sub, size_hint);
+    /* Single hash op: append and return the stored zval pointer. */
+    return zend_hash_next_index_insert(Z_ARRVAL_P((zval*)arr), &sub);
+}
+
+/* ── Native dispatch callback ── */
+
+static oxphp_native_dispatch_fn_t native_dispatch_fn = NULL;
+
+void oxphp_bridge_set_native_dispatch(oxphp_native_dispatch_fn_t fn) { native_dispatch_fn = fn; }
+oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void)    { return native_dispatch_fn; }
+
+/* ── PHP → Rust native call ── */
+
+int oxphp_call_php_native(const char *func_name, void *args, uint32_t argc, void *result) {
+    /* Resolve function entry directly — avoids ZVAL_STRING allocation +
+     * zval_ptr_dtor for the function name zval on every call. */
+    size_t name_len = strlen(func_name);
+    zend_function *fbc = zend_hash_str_find_ptr(CG(function_table), func_name, name_len);
+    if (!fbc) {
+        ZVAL_NULL((zval*)result);
+        return -1;
+    }
+
+    ZVAL_NULL((zval*)result);
+    zend_call_known_function(fbc, NULL, NULL, (zval*)result, argc, (zval*)args, NULL);
+    return 0;
+}
+
+/* ── Zval lifecycle ── */
+
+void oxphp_zval_dtor(void *zv) {
+    zval_ptr_dtor((zval*)zv);
+}
+
+size_t oxphp_zval_size(void) {
+    return sizeof(zval);
 }

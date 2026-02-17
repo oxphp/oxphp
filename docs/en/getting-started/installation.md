@@ -37,10 +37,10 @@ The multi-stage Dockerfile handles the complete build pipeline:
 3. Builds the Rust binary inside the same `php:8.4-zts-alpine` image
 4. Copies only runtime artifacts into a slim Alpine image
 
-To enable optional features like the debug plugin, pass `CARGO_FEATURES` as a build argument:
+To enable optional features like the example plugin, pass `CARGO_FEATURES` as a build argument:
 
 ```bash
-docker compose build --build-arg CARGO_FEATURES="plugin-debug"
+docker compose build --build-arg CARGO_FEATURES="plugin-example"
 ```
 
 See the [Docker guide](/getting-started/docker/) for a full walkthrough of the Dockerfile stages and `docker-compose.yml` configuration.
@@ -99,8 +99,8 @@ cargo test --no-default-features --lib
 # All tests (unit + integration)
 cargo test --no-default-features
 
-# With debug plugin
-cargo clippy --no-default-features --features plugin-debug -- -D warnings && cargo test --no-default-features --features plugin-debug
+# With example plugin
+cargo clippy --no-default-features --features plugin-example -- -D warnings && cargo test --no-default-features --features plugin-example
 ```
 
 ## Verifying the Installation

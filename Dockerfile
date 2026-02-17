@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
-# Stage 1: Build bridge library (plain Alpine + gcc)
+# Stage 1: Build bridge library (needs PHP headers for zval accessors)
 # ══════════════════════════════════════════════════════════════
-FROM alpine:3.21 AS bridge-builder
+FROM php:8.4-zts-alpine AS bridge-builder
 
 RUN apk add --no-cache gcc musl-dev make
 

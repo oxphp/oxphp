@@ -213,7 +213,7 @@ if (oxphp_is_streaming()) {
 
 Plugins can register custom PHP functions that are callable from your scripts. These functions are registered during PHP module initialization (`MINIT`) and dispatched through the C bridge to Rust handler code.
 
-Plugin functions accept variadic arguments. Arguments are serialized to JSON, dispatched to the Rust handler, and the return value is deserialized back to PHP. If the handler returns an error, a PHP `E_WARNING` is emitted and `NULL` is returned.
+Plugin functions use the native bridge for zero-serialization dispatch. Arguments and return values are passed as raw `zval` pointers — Rust reads and writes them directly through C accessor functions, with no JSON encoding overhead. If the handler returns an error, a PHP `E_WARNING` is emitted and `NULL` is returned.
 
 ```php
 <?php

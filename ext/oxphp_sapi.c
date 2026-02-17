@@ -1,8 +1,6 @@
 #include "php_oxphp_sapi.h"
 #include "oxphp_bridge.h"
-#include "ext/json/php_json.h"
 #include "Zend/zend_API.h"
-#include "zend_smart_str.h"
 #include <stdlib.h>
 
 /* {{{ oxphp_request_id(): string
@@ -84,178 +82,39 @@ PHP_FUNCTION(oxphp_is_streaming)
 }
 /* }}} */
 
-/* ─── Plugin function dispatch ─────────────────────────────── */
+/* ─── Native plugin function dispatch ─────────────────────── */
 
-/* {{{ oxphp_plugin_dispatch — generic handler for all plugin-registered functions */
-ZEND_FUNCTION(oxphp_plugin_dispatch)
+/* {{{ oxphp_native_dispatch — zero-serialization handler for plugin functions.
+ * Gets raw zval pointers and passes them directly to Rust via the native bridge.
+ * No JSON encode/decode — Rust reads/writes zvals through C accessor functions. */
+ZEND_FUNCTION(oxphp_native_dispatch)
 {
     /* Get the function name from the Zend execute_data */
     const char *func_name = ZSTR_VAL(execute_data->func->common.function_name);
 
-    /* Collect all arguments into a PHP array, then json_encode */
+    /* Get raw args pointer — zvals start at ZEND_CALL_ARG position 1 */
     uint32_t argc = ZEND_NUM_ARGS();
-    zval *args = NULL;
-    zval args_array;
+    zval *args = (argc > 0) ? ZEND_CALL_ARG(execute_data, 1) : NULL;
 
-    if (argc > 0) {
-        args = (zval *)safe_emalloc(argc, sizeof(zval), 0);
-        if (zend_get_parameters_array_ex(argc, args) == FAILURE) {
-            efree(args);
-            RETURN_NULL();
-        }
-    }
-
-    array_init_size(&args_array, argc);
-    for (uint32_t i = 0; i < argc; i++) {
-        zval copy;
-        ZVAL_COPY(&copy, &args[i]);
-        zend_hash_next_index_insert(Z_ARRVAL(args_array), &copy);
-    }
-    if (args) {
-        efree(args);
-    }
-
-    /* json_encode the args array */
-    smart_str json_args_buf = {0};
-    if (php_json_encode(&json_args_buf, &args_array, 0) == FAILURE) {
-        smart_str_free(&json_args_buf);
-        zval_ptr_dtor(&args_array);
-        php_error_docref(NULL, E_WARNING, "oxphp: failed to encode arguments for %s", func_name);
-        RETURN_NULL();
-    }
-    smart_str_0(&json_args_buf);
-    zval_ptr_dtor(&args_array);
-
-    if (!json_args_buf.s) {
-        php_error_docref(NULL, E_WARNING, "oxphp: empty args buffer for %s", func_name);
+    /* Dispatch to Rust via native bridge */
+    oxphp_native_dispatch_fn_t dispatch = oxphp_bridge_get_native_dispatch();
+    if (!dispatch) {
+        php_error_docref(NULL, E_WARNING, "oxphp: native dispatch not set for %s", func_name);
         RETURN_NULL();
     }
 
-    /* Dispatch to Rust via bridge */
-    char *result_json = oxphp_bridge_dispatch(func_name, ZSTR_VAL(json_args_buf.s));
-    smart_str_free(&json_args_buf);
-
-    if (!result_json) {
-        php_error_docref(NULL, E_WARNING, "oxphp: dispatch returned NULL for %s", func_name);
-        RETURN_NULL();
+    int rc = dispatch(func_name, args, argc, return_value);
+    if (rc != 0) {
+        php_error_docref(NULL, E_WARNING, "oxphp: dispatch failed for %s", func_name);
+        /* return_value may have been partially written — reset to null on error */
+        zval_ptr_dtor(return_value);
+        ZVAL_NULL(return_value);
     }
-
-    /* Parse the JSON envelope: {"ok": value} or {"err": "message"} */
-    zval envelope;
-    php_json_decode_ex(&envelope, result_json, strlen(result_json), PHP_JSON_OBJECT_AS_ARRAY, 512);
-    oxphp_bridge_free_string(result_json);
-
-    if (Z_TYPE(envelope) != IS_ARRAY) {
-        php_error_docref(NULL, E_WARNING, "oxphp: invalid dispatch result for %s", func_name);
-        zval_ptr_dtor(&envelope);
-        RETURN_NULL();
-    }
-
-    /* Check for error */
-    zval *err_val = zend_hash_str_find(Z_ARRVAL(envelope), "err", 3);
-    if (err_val) {
-        if (Z_TYPE_P(err_val) == IS_STRING) {
-            php_error_docref(NULL, E_WARNING, "oxphp %s: %s", func_name, Z_STRVAL_P(err_val));
-        }
-        zval_ptr_dtor(&envelope);
-        RETURN_NULL();
-    }
-
-    /* Extract "ok" value */
-    zval *ok_val = zend_hash_str_find(Z_ARRVAL(envelope), "ok", 2);
-    if (ok_val) {
-        ZVAL_COPY(return_value, ok_val);
-    }
-    zval_ptr_dtor(&envelope);
 }
 /* }}} */
 
-/* {{{ oxphp_sapi_call_php — called from Rust via bridge to invoke a PHP function */
-static char* oxphp_sapi_call_php(const char* func_name, const char* json_args)
-{
-    if (!func_name || !json_args) {
-        return oxphp_bridge_strdup("{\"err\":\"NULL argument to call_php\"}");
-    }
-
-    zval fname, retval;
-    ZVAL_STRING(&fname, func_name);
-
-    /* Decode json_args → PHP array of arguments */
-    zval decoded_args;
-    php_json_decode_ex(&decoded_args, json_args, strlen(json_args), PHP_JSON_OBJECT_AS_ARRAY, 512);
-
-    uint32_t argc = 0;
-    zval *argv = NULL;
-
-    if (Z_TYPE(decoded_args) == IS_ARRAY) {
-        argc = zend_hash_num_elements(Z_ARRVAL(decoded_args));
-        if (argc > 0) {
-            argv = (zval *)safe_emalloc(argc, sizeof(zval), 0);
-            uint32_t i = 0;
-            zval *val;
-            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(decoded_args), val) {
-                ZVAL_COPY(&argv[i], val);
-                i++;
-            } ZEND_HASH_FOREACH_END();
-        }
-    }
-
-    /* Call the PHP function */
-    ZVAL_UNDEF(&retval);
-    int call_result = call_user_function(CG(function_table), NULL, &fname, &retval, argc, argv);
-
-    /* Clean up args */
-    for (uint32_t i = 0; i < argc; i++) {
-        zval_ptr_dtor(&argv[i]);
-    }
-    if (argv) {
-        efree(argv);
-    }
-    zval_ptr_dtor(&decoded_args);
-    zval_ptr_dtor(&fname);
-
-    /* Build JSON envelope */
-    smart_str result_buf = {0};
-
-    if (call_result == FAILURE) {
-        /* Use json_encode for the error message to avoid JSON injection from func_name */
-        zval err_msg;
-        char err_buf[256];
-        snprintf(err_buf, sizeof(err_buf), "call_user_function failed for %.200s", func_name);
-        ZVAL_STRING(&err_msg, err_buf);
-        smart_str_appends(&result_buf, "{\"err\":");
-        php_json_encode(&result_buf, &err_msg, 0);
-        smart_str_appendc(&result_buf, '}');
-        zval_ptr_dtor(&err_msg);
-    } else {
-        /* Wrap result: {"ok": json_encode(retval)} */
-        smart_str_appends(&result_buf, "{\"ok\":");
-        smart_str val_buf = {0};
-        php_json_encode(&val_buf, &retval, 0);
-        smart_str_0(&val_buf);
-        if (val_buf.s) {
-            smart_str_append(&result_buf, val_buf.s);
-        } else {
-            smart_str_appends(&result_buf, "null");
-        }
-        smart_str_free(&val_buf);
-        smart_str_appendc(&result_buf, '}');
-    }
-
-    zval_ptr_dtor(&retval);
-    smart_str_0(&result_buf);
-
-    if (!result_buf.s) {
-        return oxphp_bridge_strdup("{\"err\":\"out of memory\"}");
-    }
-    char *out = oxphp_bridge_strdup(ZSTR_VAL(result_buf.s));
-    smart_str_free(&result_buf);
-    return out;
-}
-/* }}} */
-
-/* {{{ arginfo for generic plugin dispatch (variadic mixed) */
-ZEND_BEGIN_ARG_INFO_EX(arginfo_oxphp_plugin_dispatch, 0, 0, 0)
+/* {{{ arginfo for native plugin dispatch (variadic mixed) */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_oxphp_native_dispatch, 0, 0, 0)
     ZEND_ARG_VARIADIC_INFO(0, args)
 ZEND_END_ARG_INFO()
 /* }}} */
@@ -303,13 +162,11 @@ PHP_MINFO_FUNCTION(oxphp_sapi)
 }
 /* }}} */
 
-/* {{{ MINIT — set call_php callback + register plugin functions.
+/* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
  * compile-time optimization of function_exists('literal') can see them. */
 PHP_MINIT_FUNCTION(oxphp_sapi)
 {
-    oxphp_bridge_set_call_php_fn(oxphp_sapi_call_php);
-
     /* Register plugin functions (populated by Rust before php_module_startup) */
     int count = oxphp_bridge_get_plugin_fn_count();
     if (count > 0) {
@@ -318,8 +175,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         if (entries) {
             for (int i = 0; i < count; i++) {
                 entries[i].fname = oxphp_bridge_get_plugin_fn_name(i);
-                entries[i].handler = ZEND_FN(oxphp_plugin_dispatch);
-                entries[i].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_plugin_dispatch;
+                entries[i].handler = ZEND_FN(oxphp_native_dispatch);
+                entries[i].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
                 entries[i].num_args = (uint32_t)oxphp_bridge_get_plugin_fn_total(i);
                 entries[i].flags = 0;
             }
@@ -340,7 +197,7 @@ zend_module_entry oxphp_sapi_module_entry = {
     oxphp_sapi_functions,
     PHP_MINIT(oxphp_sapi),
     NULL,   /* MSHUTDOWN */
-    NULL,   /* RINIT — plugin functions registered in MINIT */
+    NULL,   /* RINIT */
     NULL,   /* RSHUTDOWN */
     PHP_MINFO(oxphp_sapi),
     PHP_OXPHP_SAPI_VERSION,

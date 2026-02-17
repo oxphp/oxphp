@@ -1,3 +1,4 @@
+pub(crate) mod bridge;
 pub mod config;
 pub mod events;
 pub mod executor;

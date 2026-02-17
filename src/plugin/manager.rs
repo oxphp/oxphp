@@ -5,7 +5,7 @@ use crate::events::EventDispatcher;
 
 use super::context::PluginContext;
 use super::handler::{PluginInternalHandler, PluginInternalRequest, PluginMetricsCollector};
-use super::php::PluginPhpFunctionDef;
+use super::php::PluginNativeFunctionDef;
 use super::{Plugin, PluginError, PluginHealth};
 use crate::types::ResponseBody;
 
@@ -16,7 +16,7 @@ pub struct PluginManager {
     config_values: HashMap<String, HashMap<String, serde_json::Value>>,
     metrics_collectors: Vec<Box<dyn PluginMetricsCollector>>,
     internal_routes: HashMap<String, Box<dyn PluginInternalHandler>>,
-    php_functions: Vec<PluginPhpFunctionDef>,
+    native_php_functions: Vec<PluginNativeFunctionDef>,
 }
 
 impl PluginManager {
@@ -27,7 +27,7 @@ impl PluginManager {
             config_values: HashMap::new(),
             metrics_collectors: Vec::new(),
             internal_routes: HashMap::new(),
-            php_functions: Vec::new(),
+            native_php_functions: Vec::new(),
         }
     }
 
@@ -61,7 +61,7 @@ impl PluginManager {
                 &mut plugin_config,
                 &mut self.metrics_collectors,
                 &mut self.internal_routes,
-                &mut self.php_functions,
+                &mut self.native_php_functions,
             );
 
             plugin.init(&mut ctx)?;
@@ -118,15 +118,10 @@ impl PluginManager {
         self.internal_routes.get(req.path).map(|h| h.handle(req))
     }
 
-    /// Get all plugin-registered PHP function definitions.
-    pub fn php_function_defs(&self) -> &[PluginPhpFunctionDef] {
-        &self.php_functions
-    }
-
-    /// Take plugin PHP function definitions (empties the internal vec).
+    /// Take native plugin PHP function definitions (empties the internal vec).
     /// Call after init_all(), before wrapping manager in Arc.
-    pub fn take_php_functions(&mut self) -> Vec<PluginPhpFunctionDef> {
-        std::mem::take(&mut self.php_functions)
+    pub fn take_native_php_functions(&mut self) -> Vec<PluginNativeFunctionDef> {
+        std::mem::take(&mut self.native_php_functions)
     }
 
     /// Validate dependencies and return topological init order (Kahn's algorithm).
@@ -435,12 +430,6 @@ mod tests {
             query: None,
         };
         assert!(manager.handle_internal_route(&req).is_none());
-    }
-
-    #[test]
-    fn test_php_function_defs_empty() {
-        let manager = PluginManager::new();
-        assert!(manager.php_function_defs().is_empty());
     }
 
     #[test]

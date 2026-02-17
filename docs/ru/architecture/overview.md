@@ -143,7 +143,7 @@ src/
 │   ├── mod.rs               # PluginManager, трейт Plugin, PluginContext
 │   └── cookies.rs           # Изоляция cookie плагинов
 ├── plugins/
-│   └── debug.rs             # Плагин отладки [за feature-гейтом: plugin-debug]
+│   └── example.rs           # Плагин примера [за feature-гейтом: plugin-example]
 └── php/                     # FFI-привязки PHP [за feature-гейтом]
     ├── bindings.rs
     └── sapi.rs
