@@ -33,6 +33,9 @@ futures-util = "0.3"
 # URL decoding
 percent-encoding = "2"
 
+# Socket options (SO_REUSEPORT)
+socket2 = { version = "0.5", features = ["all"] }
+
 # Lock-free bounded channel for worker pool
 crossbeam-channel = "0.5"
 

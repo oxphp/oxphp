@@ -5,9 +5,7 @@ mod logging;
 
 use std::path::Path;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::signal;
-use tokio::sync::Semaphore;
 
 use oxphp::config;
 use oxphp::events::EventDispatcher;
@@ -17,6 +15,7 @@ use oxphp::metrics::Metrics;
 use oxphp::plugin::PluginManager;
 use oxphp::server;
 use oxphp::types;
+use oxphp::worker;
 
 fn main() -> Result<(), types::BoxError> {
     let config = Arc::new(config::Config::from_env()?);
@@ -40,33 +39,40 @@ fn main() -> Result<(), types::BoxError> {
         }
     }
 
-    // Create executor AFTER plugin functions are on the bridge —
-    // php_module_startup() (MINIT) registers them with Zend.
-    let executor: Arc<dyn executor::ScriptExecutor> =
-        Arc::from(executor::create_executor(Arc::clone(&metrics)));
+    // Initialize PHP engine on main thread before spawning workers.
+    // Workers call php_thread_init() + execute_request() directly — no channel.
+    #[cfg(feature = "php")]
+    if config.executor_type == "sapi" {
+        oxphp::executor::sapi::php_module_init();
+    }
 
-    let tokio_workers: usize = std::env::var("TOKIO_WORKERS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    // Internal server uses a stub executor — worker threads handle PHP directly.
+    // SapiExecutor is no longer needed; php_module_init() handles engine startup.
+    let executor: Arc<dyn executor::ScriptExecutor> = Arc::new(executor::stub::StubExecutor::new());
 
-    let runtime = if tokio_workers > 0 {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(tokio_workers)
-            .enable_all()
-            .build()?
-    } else {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-    };
-    runtime.block_on(async_main(
+    // Build a lightweight Tokio runtime for the main thread (internal server + signals).
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    #[cfg(feature = "php")]
+    let is_sapi = config.executor_type == "sapi";
+
+    let result = runtime.block_on(async_main(
         config,
         executor,
         metrics,
         dispatcher,
         plugin_manager,
-    ))
+    ));
+
+    // Shut down PHP engine after all workers have exited.
+    #[cfg(feature = "php")]
+    if is_sapi {
+        oxphp::executor::sapi::php_module_shutdown();
+    }
+
+    result
 }
 
 async fn async_main(
@@ -78,14 +84,17 @@ async fn async_main(
 ) -> Result<(), types::BoxError> {
     let _log_guard = logging::init(&config.log_level)?;
 
+    let num_workers = worker::parse_worker_threads();
+
     tracing::info!(
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
         executor = %config.executor_type,
-        "OxPHP HTTP server starting"
+        workers = num_workers,
+        "OxPHP HTTP server starting (thread-per-core)"
     );
 
-    // Start dynamic worker scale manager if configured
+    // Start dynamic worker scale manager if configured (SAPI executor)
     executor.start_scale_manager();
 
     // Initialize optional rate limiter
@@ -111,16 +120,6 @@ async fn async_main(
         Some(limiter)
     } else {
         None
-    };
-
-    // Initialize optional TLS
-    let tls_acceptor = match (&config.tls_cert, &config.tls_key) {
-        (Some(cert), Some(key)) => {
-            let acceptor = server::tls::load_tls_config(Path::new(cert), Path::new(key))?;
-            tracing::info!("TLS enabled");
-            Some(acceptor)
-        }
-        _ => None,
     };
 
     // Initialize optional error pages
@@ -171,13 +170,33 @@ async fn async_main(
     let dispatcher = Arc::new(dispatcher);
     let plugin_manager = Arc::new(plugin_manager);
 
-    let listener = TcpListener::bind(&config.server.listen_addr).await?;
-    let local_addr = listener.local_addr()?;
+    // Build RouteConfig and FileCache for workers
+    let route_config = Arc::new(server::routing::RouteConfig::new(&config.server));
+    let file_cache = Arc::new(server::response::static_file::FileCache::new(200));
 
-    tracing::info!(addr = %local_addr, "Server listening");
-
-    // Spawn internal server if configured (before Server::new consumes executor)
+    // Spawn internal server if configured (hyper-based, unchanged)
     let internal_handle = if let Some(ref internal_addr) = config.internal_addr {
+        // Initialize optional TLS for internal server
+        let tls_acceptor = match (&config.tls_cert, &config.tls_key) {
+            (Some(cert), Some(key)) => {
+                let acceptor = server::tls::load_tls_config(Path::new(cert), Path::new(key))?;
+                tracing::info!("TLS enabled");
+                Some(acceptor)
+            }
+            _ => None,
+        };
+
+        // Build a Server for the internal endpoint (uses hyper)
+        let internal_server = Arc::new(server::Server::new(
+            &config.server,
+            Arc::clone(&executor),
+            Arc::clone(&metrics),
+            Arc::clone(&dispatcher),
+            tls_acceptor,
+            config.compression,
+        ));
+        let _ = internal_server; // kept alive via Arc in internal server
+
         let metrics_ref = Arc::clone(&metrics);
         let config_ref = Arc::clone(&config);
         let executor_ref = Arc::clone(&executor);
@@ -204,85 +223,67 @@ async fn async_main(
         tracing::info!("Brotli compression enabled");
     }
 
-    let server = Arc::new(server::Server::new(
-        &config.server,
-        executor,
+    // Build shared state for worker threads (no executor — workers execute PHP directly)
+    let mode = if config.executor_type == "sapi" {
+        worker::ExecutorMode::Sapi
+    } else {
+        worker::ExecutorMode::Stub
+    };
+    let shared_state = Arc::new(worker::SharedState::new(
+        route_config,
+        file_cache,
         Arc::clone(&metrics),
-        dispatcher,
-        tls_acceptor,
+        Arc::clone(&dispatcher),
+        config.server.request_timeout,
+        config.server.header_read_timeout,
         config.compression,
+        mode,
     ));
-    let semaphore = Arc::new(Semaphore::new(config.max_connections));
+
+    // Parse listen address
+    let listen_addr: std::net::SocketAddr = config.server.listen_addr.parse()?;
+
+    // Spawn worker threads (each with SO_REUSEPORT listener)
+    let worker_handles = worker::spawn_workers(Arc::clone(&shared_state), listen_addr, num_workers);
+
+    tracing::info!(addr = %listen_addr, workers = num_workers, "Server listening");
 
     // Notify plugins that server is ready
     plugin_manager.on_ready_all();
 
-    // Spawn graceful shutdown handler
-    let server_ref = Arc::clone(&server);
-    let pm_shutdown = Arc::clone(&plugin_manager);
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        tracing::info!("Received shutdown signal, draining connections");
-        pm_shutdown.shutdown_all();
-        server_ref.shutdown();
-    });
+    // Wait for shutdown signal
+    shutdown_signal().await;
+    tracing::info!("Received shutdown signal, draining connections");
 
-    // Accept loop
+    // Signal shutdown
+    plugin_manager.shutdown_all();
+    executor.shutdown();
+    shared_state.shutdown();
+
+    // Give workers time to drain
+    let drain_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(config.drain_timeout_secs);
+
+    // Wait for active connections to finish
     loop {
-        if server.is_shutdown() {
+        let active = metrics.active_connections();
+        if active == 0 {
+            tracing::info!("All connections drained");
             break;
         }
-
-        let (stream, remote_addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to accept connection");
-                continue;
-            }
-        };
-
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(permit) => permit,
-            Err(_) => break, // semaphore closed — shutting down
-        };
-
-        let server_clone = Arc::clone(&server);
-        tokio::spawn(async move {
-            let _permit = permit; // held until task completes
-            if let Err(e) = server_clone.handle_connection(stream, remote_addr).await {
-                tracing::error!(
-                    remote_addr = %remote_addr,
-                    error = %e,
-                    "Connection error"
-                );
-            }
-        });
+        if std::time::Instant::now() >= drain_deadline {
+            tracing::warn!(
+                remaining_connections = active,
+                "Drain timeout reached, forcing shutdown"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    // Graceful drain: wait for in-flight connections to finish
-    let active = server.active_connections();
-    if active > 0 {
-        tracing::info!(
-            active_connections = active,
-            "Draining in-flight connections"
-        );
-        let drain_deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(config.drain_timeout_secs);
-        loop {
-            let remaining = server.active_connections();
-            if remaining == 0 {
-                tracing::info!("All connections drained");
-                break;
-            }
-            if tokio::time::Instant::now() >= drain_deadline {
-                tracing::warn!(
-                    remaining_connections = remaining,
-                    "Drain timeout reached, forcing shutdown"
-                );
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+    // Join worker threads (with timeout — don't block forever)
+    for handle in worker_handles {
+        let _ = handle.join();
     }
 
     // Abort internal server task

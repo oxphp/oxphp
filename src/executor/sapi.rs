@@ -605,6 +605,54 @@ async fn run_scale_manager(
     }
 }
 
+/// Initialize the PHP engine on the main thread (TSRM + SAPI + module startup).
+/// Must be called once before any worker threads are spawned.
+/// After this, worker threads can call `php_thread_init()` + `execute_request()`.
+pub fn php_module_init() {
+    // 1. TSRM must be initialized first for ZTS builds
+    if !unsafe { bindings::php_tsrm_startup() } {
+        panic!("php_tsrm_startup() failed");
+    }
+
+    // 2. Build and register our SAPI module
+    let mut module = sapi::build_sapi_module();
+    unsafe {
+        bindings::sapi_startup(&mut module);
+    }
+
+    // 3. Start the PHP engine
+    let startup_result = unsafe { bindings::php_module_startup(&mut module, std::ptr::null_mut()) };
+    if startup_result != 0 {
+        panic!("php_module_startup() failed with code {startup_result}");
+    }
+
+    // 4. Install structured error logging callback (must be after php_module_startup)
+    unsafe {
+        sapi::install_error_cb();
+    }
+
+    tracing::info!("PHP engine initialized");
+}
+
+/// Shut down the PHP engine on the main thread.
+/// Must be called after all worker threads have exited.
+pub fn php_module_shutdown() {
+    unsafe {
+        bindings::php_module_shutdown();
+        bindings::sapi_shutdown();
+        bindings::tsrm_shutdown();
+    }
+    tracing::info!("PHP engine shut down");
+}
+
+/// Initialize PHP ZTS thread-local storage for the current thread.
+/// Must be called once per worker thread before `execute_request()`.
+pub fn php_thread_init() {
+    unsafe {
+        let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
+    }
+}
+
 /// RAII guard that clears SAPI request data on drop (even on panic).
 struct RequestDataGuard;
 
@@ -614,7 +662,7 @@ impl Drop for RequestDataGuard {
     }
 }
 
-fn execute_request(request: &ScriptRequest) -> ScriptResponse {
+pub(crate) fn execute_request(request: &ScriptRequest) -> ScriptResponse {
     let start = Instant::now();
 
     sapi::clear_buffers();
