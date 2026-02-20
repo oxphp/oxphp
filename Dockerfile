@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library (needs PHP headers for zval accessors)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine AS bridge-builder
+FROM php:8.4-zts-alpine3.23 AS bridge-builder
 
 RUN apk add --no-cache gcc musl-dev make
 
@@ -13,7 +13,7 @@ RUN make && make install
 # ══════════════════════════════════════════════════════════════
 # Stage 2: Build PHP extension (needs phpize + bridge headers)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine AS ext-builder
+FROM php:8.4-zts-alpine3.23 AS ext-builder
 
 RUN apk add --no-cache gcc musl-dev make autoconf
 
@@ -33,12 +33,13 @@ RUN phpize && \
 # ══════════════════════════════════════════════════════════════
 # Stage 3: Build Rust binary in PHP ZTS image
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine AS builder
+FROM php:8.4-zts-alpine3.23 AS builder
 
-# Install Rust and build dependencies
+# Install Rust + build dependencies
 RUN apk add --no-cache \
     rust \
     cargo \
+    gcc \
     musl-dev \
     pkgconfig \
     readline-dev \
@@ -85,7 +86,7 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
 # ══════════════════════════════════════════════════════════════
 # Stage 4: Runtime
 # ══════════════════════════════════════════════════════════════
-FROM alpine:3.21
+FROM alpine:3.23
 
 RUN apk add --no-cache \
     libgcc \
