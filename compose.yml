@@ -1,0 +1,123 @@
+services:
+  oxphp:
+    build:
+      context: .
+      args:
+        # Extra Cargo features (space-separated), e.g. "plugin-debug"
+         CARGO_FEATURES: ""
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - ./www:/var/www/html:ro
+      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./certs:/etc/ssl/oxphp:ro
+    environment:
+      # ── Server ────────────────────────────────────────────────────
+
+      # Address and port the server binds to.
+      - LISTEN_ADDR=0.0.0.0:8080
+
+      # Root directory for serving files and PHP scripts.
+      - DOCUMENT_ROOT=/var/www/html
+
+      # Front-controller file. Determines routing mode:
+      #   (unset)      — traditional: direct file mapping, / → index.php or index.html
+      #   index.php    — framework: all requests → index.php, direct .php access blocked
+      #   index.html   — SPA: missing files → index.html, .php still executes
+      - INDEX_FILE=index.php
+
+      # PHP executor backend.
+      #   sapi  — execute PHP via custom SAPI (default, requires php feature)
+      #   stub  — return static response without PHP (benchmarking)
+      # - EXECUTOR=sapi
+
+      # ── Tokio Runtime ─────────────────────────────────────────────
+
+      # Number of Tokio worker threads.
+      #   0  — single-threaded current_thread runtime (default, lowest overhead)
+      #   N  — multi-threaded runtime with N worker threads + work-stealing
+      # - TOKIO_WORKERS=0
+
+      # ── PHP Workers (only used when EXECUTOR=sapi with SapiExecutor) ──
+
+      # PHP worker thread count. Formats:
+      #   0        — auto-detect: cpu_count * 2, static pool
+      #   N        — fixed N worker threads
+      #   MIN:MAX  — dynamic pool: scales between MIN and MAX based on load
+      # - PHP_WORKERS=0
+
+      # Idle timeout in seconds before scaling down a dynamic worker (MIN:MAX mode).
+      # - PHP_WORKERS_IDLE_SEC=30
+
+      # Bounded channel capacity between HTTP and PHP workers.
+      # Requests beyond this limit get 503. Default: PHP_WORKERS * 128.
+      # - QUEUE_CAPACITY=0
+
+      # ── Connections ───────────────────────────────────────────────
+
+      # Maximum concurrent connections. New connections are rejected above this limit.
+      # - MAX_CONNECTIONS=10000
+
+      # Seconds to wait for in-flight connections to finish during graceful shutdown.
+      # - DRAIN_TIMEOUT_SECS=30
+
+      # ── Logging ───────────────────────────────────────────────────
+
+      # Log level filter: trace, debug, info, warn, error.
+      - LOG_LEVEL=info
+
+      # Enable/disable per-request access log (method, path, status, duration).
+      # Values: true/false, 1/0, on/off.
+      # - ACCESS_LOG=true
+
+      # ── Internal Server ───────────────────────────────────────────
+
+      # Address for the internal endpoints (/health, /metrics, /config).
+      # Unset = internal server disabled.
+      - INTERNAL_ADDR=0.0.0.0:9090
+
+      # ── Timeouts ──────────────────────────────────────────────────
+
+      # Max seconds to receive HTTP headers after connection is accepted.
+      - HEADER_TIMEOUT_SECS=5
+
+      # Max seconds a keep-alive connection can stay idle between requests.
+      - IDLE_TIMEOUT_SECS=60
+
+      # Max seconds for the entire request (including PHP execution). 0 = no limit.
+      - REQUEST_TIMEOUT_SECS=120
+
+      # ── Rate Limiting ─────────────────────────────────────────────
+
+      # Max requests per IP within the rate window. 0 = rate limiting disabled.
+      # - RATE_LIMIT=0
+
+      # Rate limiting window in seconds.
+      # - RATE_WINDOW=60
+
+      # ── TLS ───────────────────────────────────────────────────────
+
+      # Path to PEM-encoded TLS certificate. Both TLS_CERT and TLS_KEY must be set.
+      # - TLS_CERT=/etc/ssl/oxphp/server.pem
+
+      # Path to PEM-encoded TLS private key.
+      # - TLS_KEY=/etc/ssl/oxphp/server.key
+
+      # ── Response ──────────────────────────────────────────────────
+
+      # Enable Brotli compression for compressible responses.
+      # Values: true/false, 1/0, on/off.
+      # - COMPRESSION=true
+
+      # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
+      # - ERROR_PAGES_DIR=/var/www/errors
+
+      # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
+
+      # Enable verbose logging in the example plugin.
+      # - EXAMPLE_VERBOSE=false
+
+      # HTTP Basic auth credentials for example plugin internal routes (user:pass).
+      # - EXAMPLE_INTERNAL_AUTH=admin:secret
+    restart: unless-stopped
