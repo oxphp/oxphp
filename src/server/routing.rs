@@ -1,11 +1,44 @@
+use std::cell::UnsafeCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use percent_encoding::percent_decode_str;
 
 use crate::config::ServerConfig;
 use crate::server::response::static_file::FileCache;
+
+/// A HashMap wrapper that is `Send + Sync` but only safe when accessed from a single thread.
+///
+/// In production, `Server` is wrapped in `Rc` and used with `spawn_local` (single-thread tokio).
+/// In tests, `Server` is wrapped in `Arc` but each connection task runs on the same runtime
+/// and never accesses the same `Server` concurrently from multiple OS threads.
+#[derive(Debug)]
+struct ThreadLocalCache(UnsafeCell<HashMap<String, RouteResult>>);
+
+// SAFETY: Server instances are only accessed from a single thread at a time.
+// Production: Rc<Server> + spawn_local (current_thread runtime).
+// Tests: Arc<Server> but single-threaded access pattern.
+unsafe impl Send for ThreadLocalCache {}
+unsafe impl Sync for ThreadLocalCache {}
+
+impl ThreadLocalCache {
+    fn new() -> Self {
+        Self(UnsafeCell::new(HashMap::new()))
+    }
+
+    fn get(&self, key: &str) -> Option<RouteResult> {
+        // SAFETY: single-thread access guaranteed by architecture
+        unsafe { (*self.0.get()).get(key).cloned() }
+    }
+
+    fn insert(&self, key: String, value: RouteResult) {
+        // SAFETY: single-thread access guaranteed by architecture
+        unsafe {
+            (*self.0.get()).insert(key, value);
+        }
+    }
+}
 
 /// Result of route resolution.
 #[derive(Debug, Clone)]
@@ -33,8 +66,8 @@ pub struct RouteConfig {
     root_index_php_key: String,
     root_index_html_key: String,
     /// Cache of resolved routes keyed by URI path.
-    /// After warmup, most requests hit this cache (single DashMap read).
-    route_cache: DashMap<String, RouteResult>,
+    /// Per-thread (no concurrent access), so ThreadLocalCache instead of DashMap.
+    route_cache: ThreadLocalCache,
 }
 
 impl RouteConfig {
@@ -82,7 +115,7 @@ impl RouteConfig {
             root_index_html,
             root_index_php_key,
             root_index_html_key,
-            route_cache: DashMap::new(),
+            route_cache: ThreadLocalCache::new(),
         }
     }
 
@@ -106,14 +139,10 @@ impl RouteConfig {
     /// Checks the route cache first. On miss, resolves via the inner logic,
     /// validates that the resolved path does not escape the document root
     /// via symlinks, then caches the result.
-    pub async fn resolve_request(
-        &self,
-        uri_path: &str,
-        file_cache: &Arc<FileCache>,
-    ) -> RouteResult {
+    pub async fn resolve_request(&self, uri_path: &str, file_cache: &FileCache) -> RouteResult {
         // Fast path: check route cache
         if let Some(cached) = self.route_cache.get(uri_path) {
-            return cached.value().clone();
+            return cached;
         }
 
         let result = self.resolve_request_inner(uri_path, file_cache).await;
@@ -143,7 +172,7 @@ impl RouteConfig {
 
     /// Check that a resolved path is within the canonical document root.
     /// Results are cached in the file cache to avoid repeated `realpath(3)` syscalls.
-    async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
+    async fn validate_path(&self, path: &Path, file_cache: &FileCache) -> bool {
         let canonical_root = match &self.canonical_root {
             Some(root) => root,
             None => return true, // canonicalization disabled, skip check
@@ -171,11 +200,7 @@ impl RouteConfig {
     }
 
     /// Inner route resolution logic (no path validation).
-    async fn resolve_request_inner(
-        &self,
-        uri_path: &str,
-        file_cache: &Arc<FileCache>,
-    ) -> RouteResult {
+    async fn resolve_request_inner(&self, uri_path: &str, file_cache: &FileCache) -> RouteResult {
         // 1. Decode URI
         let decoded = match percent_decode_str(uri_path).decode_utf8() {
             Ok(s) => s.to_string(),
@@ -234,7 +259,7 @@ impl RouteConfig {
     }
 
     /// Resolve root `/` using pre-computed index paths and string keys (zero allocation).
-    async fn resolve_root_index(&self, file_cache: &Arc<FileCache>) -> RouteResult {
+    async fn resolve_root_index(&self, file_cache: &FileCache) -> RouteResult {
         // Framework/SPA mode: root goes to INDEX_FILE
         if let Some(ref index_path) = self.index_file_path {
             if self.index_file_is_php {
@@ -257,7 +282,7 @@ impl RouteConfig {
     }
 
     /// Resolve index file for a subdirectory (tries index.php, then index.html).
-    async fn resolve_index(&self, dir: &Path, file_cache: &Arc<FileCache>) -> RouteResult {
+    async fn resolve_index(&self, dir: &Path, file_cache: &FileCache) -> RouteResult {
         let php_index = dir.join("index.php");
         if file_cache.is_file(&php_index.to_string_lossy()).await {
             return RouteResult::Execute(php_index);
@@ -335,7 +360,7 @@ mod tests {
     async fn test_traditional_mode_static_file() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/style.css", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }
@@ -344,7 +369,7 @@ mod tests {
     async fn test_traditional_mode_php_file() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/index.php", &cache).await;
         assert!(matches!(result, RouteResult::Execute(_)));
     }
@@ -354,7 +379,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("index.html"), "hello").unwrap();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }
@@ -363,7 +388,7 @@ mod tests {
     async fn test_traditional_mode_root_resolves_index_php_first() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/", &cache).await;
         // index.php exists and is checked first
         assert!(matches!(result, RouteResult::Execute(_)));
@@ -373,7 +398,7 @@ mod tests {
     async fn test_traditional_mode_not_found() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/nonexistent.txt", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
     }
@@ -384,7 +409,7 @@ mod tests {
     async fn test_framework_mode_fallback_to_index_php() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.php"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/unknown/path", &cache).await;
         assert!(matches!(result, RouteResult::Execute(_)));
     }
@@ -393,7 +418,7 @@ mod tests {
     async fn test_framework_mode_blocks_direct_php_access() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.php"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/about.php", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
     }
@@ -402,7 +427,7 @@ mod tests {
     async fn test_framework_mode_blocks_direct_index_access() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.php"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/index.php", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
     }
@@ -411,7 +436,7 @@ mod tests {
     async fn test_framework_mode_serves_static_files() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.php"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/style.css", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }
@@ -422,7 +447,7 @@ mod tests {
     async fn test_spa_mode_fallback_to_index_html() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.html"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/unknown/path", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }
@@ -431,7 +456,7 @@ mod tests {
     async fn test_spa_mode_serves_existing_file() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), Some("index.html"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/style.css", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }
@@ -442,7 +467,7 @@ mod tests {
     async fn test_path_traversal_blocked() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/../etc/passwd", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
     }
@@ -451,7 +476,7 @@ mod tests {
     async fn test_percent_encoded_path() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         // %2e%2e = ".."
         let result = rc.resolve_request("/%2e%2e/etc/passwd", &cache).await;
         assert!(matches!(result, RouteResult::NotFound));
@@ -471,7 +496,7 @@ mod tests {
         symlink(target.path(), dir.path().join("escape")).unwrap();
 
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/escape/secret.txt", &cache).await;
         assert!(
             matches!(result, RouteResult::NotFound),
@@ -490,7 +515,7 @@ mod tests {
         symlink(target.path(), dir.path().join("escape")).unwrap();
 
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
 
         // First request: cache miss, canonicalize, block
         let result1 = rc.resolve_request("/escape/secret.txt", &cache).await;
@@ -513,7 +538,7 @@ mod tests {
         let dir = setup_test_dir();
         fs::write(dir.path().join("index.php"), "<?php echo 'index';").unwrap();
         let rc = make_config(dir.path(), Some("index.php"));
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/", &cache).await;
         match result {
             RouteResult::Execute(path) => {
@@ -533,7 +558,7 @@ mod tests {
     async fn test_subdirectory_file() {
         let dir = setup_test_dir();
         let rc = make_config(dir.path(), None);
-        let cache = Arc::new(FileCache::new(200));
+        let cache = FileCache::new(200);
         let result = rc.resolve_request("/sub/page.html", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
     }

@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::time::Duration;
 
@@ -51,19 +53,27 @@ async fn start_server_with_options(
         executor,
         metrics,
         Arc::new(dispatcher),
-        None,
         false, // compression disabled in tests
     ));
 
     tokio::spawn(async move {
+        let http = hyper::server::conn::http1::Builder::new();
         loop {
             let (stream, remote_addr) = match listener.accept().await {
                 Ok(conn) => conn,
                 Err(_) => break,
             };
             let server_clone = Arc::clone(&server);
+            let http = http.clone();
             tokio::spawn(async move {
-                let _ = server_clone.handle_connection(stream, remote_addr).await;
+                let service = service_fn(move |req| {
+                    let srv = Arc::clone(&server_clone);
+                    async move {
+                        oxphp::server::connection::handle_request(req, &srv, remote_addr).await
+                    }
+                });
+                let io = TokioIo::new(stream);
+                let _ = http.serve_connection(io, service).await;
             });
         }
     });

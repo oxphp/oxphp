@@ -1,9 +1,8 @@
 #[cfg(feature = "php")]
+pub mod inline;
+#[cfg(feature = "php")]
 pub mod sapi;
 pub mod stub;
-
-#[cfg(feature = "php")]
-pub use sapi::WorkerMode;
 
 use std::sync::Arc;
 
@@ -49,8 +48,9 @@ pub fn create_executor(metrics: Arc<Metrics>) -> Box<dyn ScriptExecutor> {
         _ => {
             #[cfg(feature = "php")]
             {
-                tracing::info!("Creating SapiExecutor (PHP mode)");
-                Box::new(sapi::SapiExecutor::new(metrics))
+                let _ = metrics;
+                tracing::info!("Creating InlineExecutor (PHP mode)");
+                Box::new(inline::InlineExecutor::new())
             }
             #[cfg(not(feature = "php"))]
             {

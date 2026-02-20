@@ -1,13 +1,14 @@
-use std::collections::HashMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::{header, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
+use lru::LruCache;
 use tokio_util::io::ReaderStream;
 
 use crate::types::{full_body, ResponseBody};
@@ -25,44 +26,21 @@ pub enum FileType {
     Dir,
 }
 
-/// Metadata cache entry with LRU timestamp.
-struct MetaEntry {
-    file_type: Option<FileType>,
-    last_used: u64,
-}
-
-/// Content cache entry with LRU timestamp.
-struct ContentEntry {
-    bytes: Bytes,
-    mime_type: Arc<str>,
-    last_used: u64,
-}
-
-/// Canonical path cache entry with LRU timestamp.
-struct CanonEntry {
-    path: Option<PathBuf>,
-    last_used: u64,
-}
-
 struct FileCacheInner {
-    /// Metadata cache: path → entry
-    meta: HashMap<String, MetaEntry>,
-    capacity: usize,
+    /// Metadata cache: path → file type (O(1) LRU eviction).
+    meta: LruCache<String, Option<FileType>>,
 
-    /// Content cache: path → entry
-    content: HashMap<String, ContentEntry>,
+    /// Content cache: path → (bytes, mime). Byte-budget eviction.
+    content: LruCache<String, (Bytes, Box<str>)>,
     content_total_bytes: usize,
 
-    /// Canonical path cache: path → entry
-    canonical: HashMap<String, CanonEntry>,
-
-    /// Monotonic counter incremented on every cache access.
-    counter: u64,
+    /// Canonical path cache: path → resolved canonical path.
+    canonical: LruCache<String, Option<PathBuf>>,
 }
 
 /// LRU file cache to reduce filesystem syscalls during routing,
 /// with an optional content cache for small files.
-/// Uses `Mutex<HashMap>` with counter-based LRU eviction.
+/// Uses `Mutex` + `lru::LruCache` for O(1) get/put/eviction.
 pub struct FileCache {
     inner: Mutex<FileCacheInner>,
 }
@@ -70,14 +48,15 @@ pub struct FileCache {
 impl FileCache {
     /// Create a new file cache with the given metadata entry capacity.
     pub fn new(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity).expect("cache capacity must be > 0");
+        // Content cache: capacity is managed by byte budget, use a large entry limit.
+        let content_cap = NonZeroUsize::new(10_000).unwrap();
         Self {
             inner: Mutex::new(FileCacheInner {
-                meta: HashMap::with_capacity(capacity),
-                capacity,
-                content: HashMap::new(),
+                meta: LruCache::new(cap),
+                content: LruCache::new(content_cap),
                 content_total_bytes: 0,
-                canonical: HashMap::with_capacity(capacity),
-                counter: 0,
+                canonical: LruCache::new(cap),
             }),
         }
     }
@@ -86,12 +65,9 @@ impl FileCache {
     pub async fn check(&self, path: &str) -> (Option<FileType>, bool) {
         // Check cache (short lock, no await inside)
         {
-            let mut guard = self.inner.lock().unwrap();
-            let inner = &mut *guard; // reborrow for field-level splitting
-            if let Some(entry) = inner.meta.get_mut(path) {
-                entry.last_used = inner.counter;
-                inner.counter += 1;
-                return (entry.file_type, true);
+            let mut inner = self.inner.lock().unwrap();
+            if let Some(&file_type) = inner.meta.get(path) {
+                return (file_type, true);
             }
         }
 
@@ -102,31 +78,10 @@ impl FileCache {
             _ => None,
         };
 
-        // Insert into cache with LRU eviction (short lock)
+        // Insert into cache (LruCache auto-evicts LRU when at capacity)
         {
             let mut inner = self.inner.lock().unwrap();
-
-            // Evict LRU entry if at capacity
-            if inner.meta.len() >= inner.capacity {
-                if let Some(lru_key) = inner
-                    .meta
-                    .iter()
-                    .min_by_key(|(_, e)| e.last_used)
-                    .map(|(k, _)| k.clone())
-                {
-                    inner.meta.remove(&lru_key);
-                }
-            }
-
-            let ts = inner.counter;
-            inner.counter += 1;
-            inner.meta.insert(
-                path.to_string(),
-                MetaEntry {
-                    file_type,
-                    last_used: ts,
-                },
-            );
+            inner.meta.put(path.to_string(), file_type);
         }
 
         (file_type, false)
@@ -144,105 +99,51 @@ impl FileCache {
     }
 
     /// Get cached file content and MIME type. Returns `None` on cache miss.
-    /// O(1) clone via `Bytes` Arc increment + `Arc<str>` bump.
-    pub fn get_content(&self, key: &str) -> Option<(Bytes, Arc<str>)> {
-        let mut guard = self.inner.lock().unwrap();
-        let inner = &mut *guard;
-        if let Some(entry) = inner.content.get_mut(key) {
-            entry.last_used = inner.counter;
-            inner.counter += 1;
-            Some((entry.bytes.clone(), entry.mime_type.clone()))
-        } else {
-            None
-        }
+    /// O(1) clone via `Bytes` refcount bump + `Box<str>` → `&str`.
+    pub fn get_content(&self, key: &str) -> Option<(Bytes, Box<str>)> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.content.get(key).map(|(b, m)| (b.clone(), m.clone()))
     }
 
     /// Insert file content into the cache. Skips files larger than MAX_CACHE_FILE_SIZE.
     /// Evicts LRU entries when total cache size exceeds MAX_CACHE_TOTAL_BYTES.
-    pub fn insert_content(&self, key: String, bytes: Bytes, mime_type: Arc<str>) {
+    pub fn insert_content(&self, key: String, bytes: Bytes, mime_type: Box<str>) {
         if bytes.len() > MAX_CACHE_FILE_SIZE {
             return;
         }
 
         let mut inner = self.inner.lock().unwrap();
 
-        // Evict LRU entries while over budget
+        // Remove old entry's bytes if re-inserting same key
+        if let Some((old_bytes, _)) = inner.content.pop(&key) {
+            inner.content_total_bytes -= old_bytes.len();
+        }
+
+        // Evict LRU entries until under byte budget
         while inner.content_total_bytes + bytes.len() > MAX_CACHE_TOTAL_BYTES {
-            if let Some(lru_key) = inner
-                .content
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone())
-            {
-                if let Some(evicted) = inner.content.remove(&lru_key) {
-                    inner.content_total_bytes -= evicted.bytes.len();
-                }
+            if let Some((_, (evicted_bytes, _))) = inner.content.pop_lru() {
+                inner.content_total_bytes -= evicted_bytes.len();
             } else {
                 break;
             }
         }
 
-        // Remove old entry if re-inserting same key
-        if let Some(old) = inner.content.remove(&key) {
-            inner.content_total_bytes -= old.bytes.len();
-        }
-
-        let ts = inner.counter;
-        inner.counter += 1;
         inner.content_total_bytes += bytes.len();
-        inner.content.insert(
-            key,
-            ContentEntry {
-                bytes,
-                mime_type,
-                last_used: ts,
-            },
-        );
+        inner.content.put(key, (bytes, mime_type));
     }
 
     /// Get a cached canonical path. Returns `None` on cache miss.
     /// The inner `Option<PathBuf>` distinguishes: `Some(path)` = canonicalization
     /// succeeded, `None` = file did not exist at cache time.
     pub fn get_canonical(&self, key: &str) -> Option<Option<PathBuf>> {
-        let mut guard = self.inner.lock().unwrap();
-        let inner = &mut *guard;
-        if let Some(entry) = inner.canonical.get_mut(key) {
-            entry.last_used = inner.counter;
-            inner.counter += 1;
-            Some(entry.path.clone())
-        } else {
-            None
-        }
+        let mut inner = self.inner.lock().unwrap();
+        inner.canonical.get(key).cloned()
     }
 
     /// Cache a canonical path result. Uses the same capacity as the metadata cache.
     pub fn insert_canonical(&self, key: String, canonical: Option<PathBuf>) {
         let mut inner = self.inner.lock().unwrap();
-
-        // Evict LRU entry if at capacity
-        if inner.canonical.len() >= inner.capacity {
-            if let Some(lru_key) = inner
-                .canonical
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| k.clone())
-            {
-                inner.canonical.remove(&lru_key);
-            }
-        }
-
-        // Remove old entry if re-inserting same key
-        inner.canonical.remove(&key);
-
-        let ts = inner.counter;
-        inner.counter += 1;
-        inner.canonical.insert(
-            key,
-            CanonEntry {
-                path: canonical,
-                last_used: ts,
-            },
-        );
+        inner.canonical.put(key, canonical);
     }
 }
 
@@ -278,7 +179,7 @@ pub async fn serve(
     }
 
     // Cache miss — compute MIME type
-    let mime_type: Arc<str> = mime_guess::from_path(file_path)
+    let mime_type: Box<str> = mime_guess::from_path(file_path)
         .first_or_octet_stream()
         .to_string()
         .into();
@@ -357,7 +258,6 @@ pub async fn serve(
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -432,9 +332,9 @@ mod tests {
         cache.check(&f3.to_string_lossy()).await;
 
         let inner = cache.inner.lock().unwrap();
-        assert!(inner.meta.contains_key(&f1.to_string_lossy().to_string()));
-        assert!(!inner.meta.contains_key(&f2.to_string_lossy().to_string()));
-        assert!(inner.meta.contains_key(&f3.to_string_lossy().to_string()));
+        assert!(inner.meta.contains(&f1.to_string_lossy().to_string()));
+        assert!(!inner.meta.contains(&f2.to_string_lossy().to_string()));
+        assert!(inner.meta.contains(&f3.to_string_lossy().to_string()));
     }
 
     #[tokio::test]
@@ -507,7 +407,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         fs::write(&file, "x").unwrap();
 
-        let cache = Arc::new(FileCache::new(10));
+        let cache = FileCache::new(10);
         assert!(cache.is_file(&file.to_string_lossy()).await);
         assert!(!cache.is_dir(&file.to_string_lossy()).await);
     }
@@ -555,7 +455,7 @@ mod tests {
         // Insert two entries that together exceed MAX_CACHE_TOTAL_BYTES
         // Use MAX_CACHE_FILE_SIZE entries to fill faster
         let data = Bytes::from(vec![0u8; MAX_CACHE_FILE_SIZE]);
-        let mime: Arc<str> = "application/octet-stream".into();
+        let mime: Box<str> = "application/octet-stream".into();
 
         let entries_to_fill = MAX_CACHE_TOTAL_BYTES / MAX_CACHE_FILE_SIZE;
         for i in 0..entries_to_fill {

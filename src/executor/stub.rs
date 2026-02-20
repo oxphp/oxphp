@@ -27,7 +27,7 @@ impl ScriptExecutor for StubExecutor {
                 HeaderName::from_static("content-type"),
                 HeaderValue::from_static("text/plain"),
             )],
-            body: Bytes::from_static(b"OK"),
+            body: Bytes::from_static(b"OxPHP Stub"),
             execution_time_us: 0,
         })
     }
@@ -69,7 +69,7 @@ mod tests {
             ExecuteResult::Deferred(_) => panic!("StubExecutor should return Immediate"),
         };
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, &b"OK"[..]);
+        assert_eq!(response.body, &b"OxPHP Stub"[..]);
         assert_eq!(response.headers.len(), 1);
         assert_eq!(response.headers[0].0, "content-type");
         assert_eq!(response.headers[0].1, "text/plain");

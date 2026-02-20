@@ -10,3 +10,4 @@ pub mod plugin;
 pub mod plugins;
 pub mod server;
 pub mod types;
+pub mod worker;

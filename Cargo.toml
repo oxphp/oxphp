@@ -42,6 +42,9 @@ dashmap = "6"
 # Compression
 brotli = "7"
 
+# LRU cache for file metadata/content
+lru = "0.12"
+
 # Error derives
 thiserror = "2"
 
@@ -50,6 +53,9 @@ libc = "0.2"
 
 # Fast allocator
 mimalloc = "0.1"
+
+# SO_REUSEPORT socket creation
+socket2 = { version = "0.5", features = ["all"] }
 
 # TLS
 tokio-rustls = "0.26"

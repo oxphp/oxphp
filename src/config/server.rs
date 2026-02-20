@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Server-specific configuration loaded from environment variables.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub listen_addr: String,
     pub document_root: PathBuf,

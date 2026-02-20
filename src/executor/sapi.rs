@@ -284,27 +284,46 @@ impl ScriptExecutor for SapiExecutor {
         match &self.mode {
             WorkerMode::Static(target) => {
                 let target = *target;
-                tokio::spawn(async move {
-                    run_worker_monitor(workers, request_rx, target, global_shutdown, metrics).await;
-                });
+                std::thread::Builder::new()
+                    .name("worker-monitor".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_time()
+                            .build()
+                            .expect("failed to build monitor runtime");
+                        rt.block_on(run_worker_monitor(
+                            workers,
+                            request_rx,
+                            target,
+                            global_shutdown,
+                            metrics,
+                        ));
+                    })
+                    .expect("failed to spawn worker monitor thread");
                 tracing::info!(target, "Worker health monitor started");
             }
             WorkerMode::Dynamic { min, max } => {
                 let min = *min;
                 let max = *max;
                 let idle_timeout_sec = self.idle_timeout_sec;
-                tokio::spawn(async move {
-                    run_scale_manager(
-                        workers,
-                        request_rx,
-                        min,
-                        max,
-                        idle_timeout_sec,
-                        global_shutdown,
-                        metrics,
-                    )
-                    .await;
-                });
+                std::thread::Builder::new()
+                    .name("scale-manager".into())
+                    .spawn(move || {
+                        let rt = tokio::runtime::Builder::new_current_thread()
+                            .enable_time()
+                            .build()
+                            .expect("failed to build scale manager runtime");
+                        rt.block_on(run_scale_manager(
+                            workers,
+                            request_rx,
+                            min,
+                            max,
+                            idle_timeout_sec,
+                            global_shutdown,
+                            metrics,
+                        ));
+                    })
+                    .expect("failed to spawn scale manager thread");
                 tracing::info!(min, max, "Scale manager started");
             }
         }
@@ -614,7 +633,7 @@ impl Drop for RequestDataGuard {
     }
 }
 
-fn execute_request(request: &ScriptRequest) -> ScriptResponse {
+pub(crate) fn execute_request(request: &ScriptRequest) -> ScriptResponse {
     let start = Instant::now();
 
     sapi::clear_buffers();
