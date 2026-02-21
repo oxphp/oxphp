@@ -1,111 +1,37 @@
 ---
 title: Docker
-description: Dockerfile stages, compose.yml reference, and deployment tips
+description: Docker image usage, compose.yml reference, and deployment tips
 ---
 
-OxPHP ships with a multi-stage Dockerfile that produces a minimal Alpine runtime image. This page explains each build stage, the `compose.yml` configuration, and common deployment considerations.
+OxPHP is distributed as a pre-built Docker image at `ghcr.io/oxphp/oxphp:nightly`. This page covers how to use the image, configure it with `compose.yml`, and common deployment considerations.
 
-## Dockerfile Stages
+## Using the Image
 
-The Dockerfile has four stages. Each stage builds one component and passes artifacts forward.
-
-### Stage 1: bridge-builder
+The simplest way to run OxPHP is to extend the base image with your application files:
 
 ```dockerfile
-FROM php:8.4-zts-alpine3.23 AS bridge-builder
-RUN apk add --no-cache gcc musl-dev make
-COPY ext/bridge/ ./
-RUN make && make install
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
 ```
 
-Compiles `liboxphp_bridge.so`, a small C shared library that provides `__thread` TLS variables shared between Rust and the PHP extension. This stage requires PHP headers, so it is based on the PHP ZTS Alpine image.
+The image includes:
 
-**Artifacts:** `/usr/local/lib/liboxphp_bridge.so`, `/usr/local/include/oxphp_bridge.h`
-
-### Stage 2: ext-builder
-
-```dockerfile
-FROM php:8.4-zts-alpine3.23 AS ext-builder
-RUN apk add --no-cache gcc musl-dev make autoconf
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
-COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
-COPY ext/bridge/oxphp_bridge.h ./bridge/
-RUN phpize && ./configure --enable-oxphp-sapi && make && make install
-```
-
-Builds the PHP extension (`oxphp_sapi.so`) using `phpize` from the PHP 8.4 ZTS image. The extension links against the bridge library and exposes functions like `oxphp_request_id()` and `oxphp_server_info()` to PHP userland.
-
-**Artifacts:** PHP extension `.so` file in `/usr/local/lib/php/extensions/`
-
-### Stage 3: builder
-
-```dockerfile
-FROM php:8.4-zts-alpine3.23 AS builder
-RUN apk add --no-cache gcc rust cargo musl-dev pkgconfig ...
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY Cargo.toml Cargo.lock ./
-
-ARG CARGO_FEATURES=""
-
-RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
-    cargo build --release && \
-    rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
-COPY src ./src
-COPY build.rs ./
-RUN if [ -n "${CARGO_FEATURES}" ]; then \
-        cargo build --release --features "${CARGO_FEATURES}"; \
-    else \
-        cargo build --release; \
-    fi
-```
-
-Builds the Rust binary inside the same `php:8.4-zts-alpine3.23` image. This is required because the binary links against `libphp.so` and `liboxphp_bridge.so` -- building in a separate image with a different musl version causes TLS corruption at runtime.
-
-The stage uses a dependency caching trick: it first builds with a dummy `main.rs` to cache all dependency crates, then removes only the OxPHP-specific artifacts (`target/release/oxphp`, `deps/oxphp-*`, `.fingerprint/oxphp-*`) before copying the real source. This way, only the final binary is rebuilt on source changes.
-
-The `CARGO_FEATURES` build argument allows enabling optional Cargo features (such as `plugin-example`) at build time without modifying the Dockerfile.
-
-**Artifacts:** `/build/target/release/oxphp`
-
-### Stage 4: runtime
-
-```dockerfile
-FROM alpine:3.23
-RUN apk add --no-cache libgcc libxml2 sqlite-libs libcurl oniguruma argon2-libs zlib ...
-COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
-ENV LD_LIBRARY_PATH=/usr/local/lib
-USER www-data
-EXPOSE 8080
-CMD ["oxphp"]
-```
-
-The final runtime image is based on `alpine:3.23`. It copies only what is needed:
-
-- `libphp.so` -- the PHP runtime library
-- `liboxphp_bridge.so` -- the C bridge library
-- PHP extension files
 - The `oxphp` binary
-- PHP configuration (`oxphp.ini`, extension loading)
-- Default web root contents (`/var/www/html/`)
+- PHP 8.4 ZTS runtime (`libphp.so`)
+- Bridge library (`liboxphp_bridge.so`)
+- PHP extension (`oxphp_sapi.so`) with `oxphp_request_id()`, `oxphp_server_info()`, and other functions
+- Alpine Linux base with minimal runtime dependencies
+- `www-data` user (UID 82, GID 82) for non-root execution
 
-The `www-data` user (UID 82, GID 82) runs the server process. Alpine 3.23 already has the `www-data` group pre-created, so the Dockerfile adds only the user.
-
-`LD_LIBRARY_PATH=/usr/local/lib` is set so the dynamic linker can find `libphp.so` and `liboxphp_bridge.so` at runtime.
+The default document root is `/var/www/html`. The server listens on port 8080. The `CMD` is `["oxphp"]`.
 
 ## compose.yml Reference
 
 ```yaml
 services:
   oxphp:
-    build:
-      context: .
-      args:
-        # Extra Cargo features (space-separated), e.g. "plugin-example"
-        CARGO_FEATURES: ""
+    build: .
     ports:
       - "8080:8080"   # Main HTTP server
       - "9090:9090"   # Internal server (health/metrics/config)
@@ -152,11 +78,20 @@ services:
     restart: unless-stopped
 ```
 
-### Build Arguments
+For development, you can mount your source directory as a volume instead of copying files into the image:
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `CARGO_FEATURES` | `""` | Space-separated list of additional Cargo features to enable (e.g. `plugin-example`) |
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:nightly
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./www:/var/www/html:ro
+    environment:
+      - LISTEN_ADDR=0.0.0.0:8080
+      - DOCUMENT_ROOT=/var/www/html
+```
 
 ### Environment Variables
 
@@ -201,19 +136,35 @@ services:
 | `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP configuration (OPcache, sessions). Mount as `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | TLS certificate and key files. Mount as `:ro` |
 
-## Alpine www-data User
+## PHP Configuration
 
-The runtime image runs as `www-data` (UID 82, GID 82) for compatibility with nginx and Apache conventions. Alpine 3.23 has the `www-data` group pre-created at GID 82 but does not include the user, so the Dockerfile creates it:
+To customize PHP settings (OPcache, JIT, sessions, etc.), create an `oxphp.ini` file and mount it into the container:
 
-```dockerfile
-RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
+```ini
+[opcache]
+opcache.enable=1
+opcache.jit=1255
+opcache.jit_buffer_size=64M
 ```
 
-If your application needs to write to specific directories (sessions, cache, uploads), ensure those directories are writable by UID 82.
+```yaml
+volumes:
+  - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+```
+
+See [OPcache](../php/opcache.md) for recommended settings.
+
+## Alpine www-data User
+
+The image runs as `www-data` (UID 82, GID 82) for compatibility with nginx and Apache conventions. If your application needs to write to specific directories (sessions, cache, uploads), ensure those directories are writable by UID 82.
+
+## Building from Source
+
+If you need to build OxPHP from source (for example, to enable custom Cargo features or modify the server), refer to the [Installation](installation.md) guide for source build instructions. The OxPHP repository includes a multi-stage Dockerfile that compiles the bridge library, PHP extension, and Rust binary from source.
 
 ## See Also
 
-- [Installation](/getting-started/installation/) -- build prerequisites and source build instructions
-- [Quick Start](/getting-started/quick-start/) -- get OxPHP running in under 5 minutes
-- [Configuration](/operations/configuration/) -- full environment variable reference
-- [Graceful Shutdown](/operations/graceful-shutdown/) -- drain behavior and timeout settings
+- [Installation](installation.md) -- source build prerequisites and instructions
+- [Quick Start](quick-start.md) -- get OxPHP running in under 5 minutes
+- [Configuration](../operations/configuration.md) -- full environment variable reference
+- [Graceful Shutdown](../operations/graceful-shutdown.md) -- drain behavior and timeout settings

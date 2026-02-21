@@ -1,0 +1,161 @@
+# OxPHP
+
+Асінхронны сервер PHP-прыкладанняў, напісаны на Rust. Замяняе nginx + PHP-FPM адным бінарным файлам, які апрацоўвае HTTP, выконвае PHP натыўна праз уласны SAPI і забяспечвае ўбудаваную назіральнасць.
+
+## Магчымасці
+
+- **Натыўнае выкананне PHP** праз уласны SAPI (`oxphp`) з пулам патокаў ZTS
+- **Поўная падтрымка супергеталальных зменных**: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
+- **Натыўны масток Rust↔PHP** — без серыялізацыі, праз прамы доступ да `zval` з дапамогай функцый-аксесараў на C
+- **Сістэма плагінаў** з тыпізаванай дыспетчарызацыяй падзей, упарадкаваннем па прыярытэце і рэгістрацыяй PHP-функцый
+- **Структураванае лагіраванне памылак** — памылкі PHP перадаюцца праз `tracing` з палямі `php_error_type`, `php_file`, `php_line`
+- **HTTP/1.1 + HTTP/2** з аўтавызначэннем (h2c) праз hyper
+- **TLS 1.3** з ALPN (h2 + http/1.1) праз rustls
+- **3 рэжымы маршрутызацыі** — Traditional, Framework (`index.php`), SPA (`index.html`)
+- **LRU-кэш статычных файлаў** (у памяці для файлаў ≤1 МБ, патокавая перадача для большых)
+- **Сціск Brotli** для тэкставых адказаў (дыяпазон 256 Б – 3 МБ)
+- **Абмежаваная чарга запытаў** з адмовай 503 пры перапаўненні
+- **Абмежаванне частоты запытаў па IP** з загалоўкамі `X-RateLimit-*` і адказамі 429
+- **Наладжвальныя тайм-аўты** — чытанне загалоўкаў, апрацоўка запыту і keep-alive
+- **Метрыкі Prometheus** на ўнутраным серверы па адрасе `/metrics`
+- **Праверка стану** па адрасе `/health` для probe-аў гатоўнасці Kubernetes
+- **Генерацыя ідэнтыфікатара запыту** і яго перадача (загаловак `X-Request-ID`)
+- **Лагіраванне доступу** праз структураваны JSON трэйсінг (уключаецца/выключаецца праз `ACCESS_LOG`)
+- **Карыстальніцкія старонкі памылак** — загружаюцца пры старце, без I/O на гарачым шляху
+- **Структураванае JSON-лагіраванне** праз tracing
+- **Абарона ад абходу шляху** з вызначэннем выхаду за межы праз сімвалічныя спасылкі
+- **Запуск кантэйнера без правоў root** ад імя www-data (UID 82)
+- **Алакатар mimalloc** для меншай затрымкі выдзялення памяці пад нагрузкай
+- **Наладжвальны runtime Tokio** — аднапатокавы (па змаўчанні) або шматпатокавы праз `TOKIO_WORKERS`
+- **Маніторынг стану воркераў** з аўтаматычным аднаўленнем аварыйна завершаных
+- **Ізаляцыя паніках** праз `catch_unwind` — збой PHP не прыводзіць да падзення сервера
+
+## Хуткі старт
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
+```
+
+```bash
+docker build -t my-app . && docker run -p 8080:8080 my-app
+curl http://localhost:8080/
+```
+
+## Канфігурацыя
+
+Усе параметры задаюцца праз зменныя асяроддзя:
+
+| Variable | Default | Апісанне |
+|---|---|---|
+| `LISTEN_ADDR` | `0.0.0.0:8080` | Адрас і порт для прывязкі |
+| `DOCUMENT_ROOT` | `/var/www/html` | Шлях у файлавай сістэме, з якога раздаюцца файлы |
+| `INDEX_FILE` | *(не зададзена)* | Рэжым маршрутызацыі: пуста = Traditional, `index.php` = Framework, `index.html` = SPA |
+| `TOKIO_WORKERS` | `0` (аднапатокавы) | Патокі асінхроннага I/O Tokio; `0` = аднапатокавы, `N` = шматпатокавы |
+| `EXECUTOR` | `sapi` | Выканаўца PHP: `sapi` (сапраўдны PHP) або `stub` (рэжым тэсціравання) |
+| `PHP_WORKERS` | `0` (CPU * 2) | Рэжым пула воркераў: `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне, `0` = аўта |
+| `PHP_WORKERS_IDLE_SEC` | `30` | Час прастою да завяршэння дынамічнага воркера (толькі ў дынамічным рэжыме) |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Памер абмежаванага канала; 503 пры перапаўненні |
+| `DRAIN_TIMEOUT_SECS` | `30` | Тайм-аўт плаўнага завяршэння ў секундах |
+| `LOG_LEVEL` | `info` | Узровень дэталізацыі трэйсінгу: `error`, `warn`, `info`, `debug`, `trace` |
+| `INTERNAL_ADDR` | *(не зададзена)* | Адрас унутранага сервера для health/metrics/config (напрыклад, `0.0.0.0:9090`) |
+| `RATE_LIMIT` | `0` (выключана) | Максімальная колькасць запытаў з аднаго IP за вакно |
+| `RATE_WINDOW` | `60` | Акно абмежавання частоты ў секундах |
+| `HEADER_TIMEOUT_SECS` | `5` | Тайм-аўт чытання загалоўкаў (абарона ад Slowloris) |
+| `IDLE_TIMEOUT_SECS` | `60` | Тайм-аўт прастою keep-alive злучэння |
+| `REQUEST_TIMEOUT_SECS` | `120` | Агульны тайм-аўт запыту; 0 = выключана |
+| `TLS_CERT` | *(не зададзена)* | Шлях да PEM-файла TLS-сертыфіката |
+| `TLS_KEY` | *(не зададзена)* | Шлях да PEM-файла прыватнага ключа TLS |
+| `ERROR_PAGES_DIR` | *(не зададзена)* | Дырэкторыя з карыстальніцкімі старонкамі памылак (`{status}.html`) |
+| `COMPRESSION` | `true` | Уключыць сціск Brotli; выключыць праз `false`, `0` або `off` |
+| `ACCESS_LOG` | `true` | Уключыць JSON-лог доступу па кожным запыце; выключыць праз `false`, `0` або `off` |
+| `MAX_CONNECTIONS` | `10000` | Максімальная колькасць адначасовых злучэнняў |
+
+## Архітэктура
+
+```
+                    ┌──────────────┐
+                    │  Tokio async │  configurable: single- or multi-threaded
+                    │  HTTP server │  (hyper + hyper-util + mimalloc)
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │Route dispatch│  static file / PHP / 404
+                    └──────┬───────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         Static file   PHP request   Not found
+         (LRU cache)   (channel)      (404)
+                           │
+                    ┌──────▼───────┐
+                    │Bounded queue │  crossbeam bounded channel
+                    │(backpressure)│  503 when full
+                    └──────┬───────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
+         (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+```
+
+- **Наладжвальны runtime Tokio** — аднапатокавы па змаўчанні (`TOKIO_WORKERS=0`), шматпатокавы для высокапрапускных нагрузак
+- **Шматпатокавы пул PHP-воркераў** на базе PHP ZTS; кожны воркер — гэта выдзелены паток АС з ізаляцыяй праз `catch_unwind`
+- Воркеры атрымліваюць запыты праз `crossbeam::bounded` і вяртаюць вынік праз `ExecuteResult` (неадкладна або адкладзена праз `oneshot`)
+- **Маніторынг стану воркераў** — аварыйна завершаныя воркеры аўтаматычна вызначаюцца і перазапускаюцца
+
+### Унутраны сервер
+
+Калі зададзена `INTERNAL_ADDR`, на асобным порце запускаецца лёгкі HTTP-сервер:
+
+| Endpoint | Апісанне |
+|----------|-------------|
+| `GET /health` | JSON-статус стану (uptime, запыты, злучэнні) |
+| `GET /metrics` | Метрыкі ў тэкставым фармаце Prometheus |
+| `GET /config` | JSON-канфігурацыя runtime (шляхі TLS рэдагуюцца) |
+
+## Зборка
+
+```bash
+# На хасце (без PHP — выконвае ўсе тэсты, без выканання PHP)
+cargo build --release
+
+# Docker (з PHP — поўная функцыянальнасць)
+docker compose build
+```
+
+### Лакальны запуск (толькі статычныя файлы)
+
+```bash
+DOCUMENT_ROOT=./www ./target/release/oxphp
+```
+
+## Распрацоўка
+
+```bash
+# Поўная праверка (хост, 157 тэстаў)
+cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
+
+# Дымавы тэст у Docker
+docker compose build && docker compose up -d
+curl http://localhost:8080/
+curl "http://localhost:8080/test_superglobals.php?foo=bar"
+curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
+curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+
+# Унутраны сервер
+INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
+curl http://localhost:9090/health
+curl http://localhost:9090/metrics
+```
+
+## Дакументацыя
+
+- [English](docs/en/)
+- [中文](docs/zh/)
+- [Русский](docs/ru/)
+- [Беларуская](docs/be/)
+
+## Ліцэнзія
+
+[AGPL-3.0](LICENSE)

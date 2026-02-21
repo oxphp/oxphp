@@ -6,18 +6,21 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 
 - **Native PHP execution** via custom SAPI (`oxphp`) with ZTS worker pool
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
+- **Native Rust↔PHP bridge** — zero-serialization via direct `zval` access through C accessor functions
+- **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
 - **Structured error logging** — PHP errors routed through `tracing` with `php_error_type`, `php_file`, `php_line` fields
 - **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
 - **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
 - **3 routing modes** — Traditional, Framework (`index.php`), SPA (`index.html`)
-- **LRU file cache** for static files (in-memory for files ≤1MB, streaming for larger)
+- **LRU file cache** for static files (in-memory for files ≤1 MB, streaming for larger)
+- **Brotli compression** for text responses (256 B – 3 MB range)
 - **Bounded request queue** with 503 backpressure when full
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
 - **Configurable timeouts** — header read, request, and keep-alive
 - **Prometheus metrics** at `/metrics` on internal server
 - **Health check** endpoint at `/health` for K8s readiness probes
 - **Request ID** generation + pass-through (`X-Request-ID` header)
-- **Access logging** via structured JSON tracing
+- **Access logging** via structured JSON tracing (togglable via `ACCESS_LOG`)
 - **Custom error pages** — pre-loaded at startup, zero I/O on hot path
 - **JSON structured logging** via tracing
 - **Path traversal protection** with symlink escape detection
@@ -29,8 +32,14 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 
 ## Quick Start
 
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
+```
+
 ```bash
-docker compose build && docker compose up -d
+docker build -t my-app . && docker run -p 8080:8080 my-app
 curl http://localhost:8080/
 ```
 
@@ -60,6 +69,8 @@ All settings are via environment variables:
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
 | `COMPRESSION` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
+| `ACCESS_LOG` | `true` | Enable per-request JSON access log; disable with `false`, `0`, or `off` |
+| `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 
 ## Architecture
 
@@ -90,7 +101,7 @@ All settings are via environment variables:
 
 - **Configurable Tokio runtime** — single-threaded by default (`TOKIO_WORKERS=0`), multi-threaded for high-throughput workloads
 - **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread with `catch_unwind` isolation
-- Workers receive requests via `crossbeam::bounded`, respond via `oneshot::Sender`
+- Workers receive requests via `crossbeam::bounded`, respond via `ExecuteResult` (immediate or deferred via `oneshot`)
 - **Worker health monitoring** — dead workers are automatically detected and respawned
 
 ### Internal Server
@@ -122,7 +133,7 @@ DOCUMENT_ROOT=./www ./target/release/oxphp
 ## Development
 
 ```bash
-# Full verification (host, 203 tests)
+# Full verification (host, 157 tests)
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker smoke test
@@ -141,6 +152,7 @@ curl http://localhost:9090/metrics
 ## Documentation
 
 - [English](docs/en/)
+- [中文](docs/zh/)
 - [Русский](docs/ru/)
 - [Беларуская](docs/be/)
 

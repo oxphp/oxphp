@@ -11,35 +11,32 @@ This guide walks you through running OxPHP with Docker and serving your first PH
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. Add a compose.yml
+## 2. Create a Dockerfile
 
-Create a minimal `compose.yml`:
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./www /var/www/html
+```
+
+## 3. Add a compose.yml
+
+Create a `compose.yml`:
 
 ```yaml
 services:
   oxphp:
-    image: oxphp:latest
     build: .
     ports:
       - "8080:8080"
       - "9090:9090"
-    volumes:
-      - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
       - DOCUMENT_ROOT=/var/www/html
       - INTERNAL_ADDR=0.0.0.0:9090
 ```
 
-If you do not have a local `Dockerfile`, clone the OxPHP repository and build from there:
-
-```bash
-git clone https://github.com/oxphp/oxphp.git
-cd oxphp
-docker compose build
-```
-
-## 3. Create a Test PHP File
+## 4. Create a Test PHP File
 
 ```bash
 mkdir -p www
@@ -61,13 +58,13 @@ echo "<p>Worker: {$info['worker_id']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-## 4. Start the Server
+## 5. Start the Server
 
 ```bash
 docker compose up -d
 ```
 
-## 5. Test Your Application
+## 6. Test Your Application
 
 Open your browser to `http://localhost:8080/` or use curl:
 
@@ -86,7 +83,7 @@ You should see output similar to:
 <p>Time: 2026-02-11T12:00:00+00:00</p>
 ```
 
-## 6. Check Server Health
+## 7. Check Server Health
 
 The internal server exposes health and metrics endpoints on port 9090:
 
@@ -101,7 +98,7 @@ curl http://localhost:9090/metrics
 curl http://localhost:9090/config
 ```
 
-## 7. View Logs
+## 8. View Logs
 
 ```bash
 docker compose logs -f oxphp
@@ -111,13 +108,13 @@ OxPHP outputs structured JSON logs. Each request produces an access log entry wi
 
 ## Next Steps
 
-- [Docker guide](/getting-started/docker/) -- Dockerfile stages, compose.yml reference, and volume mounts
-- [Configuration](/operations/configuration/) -- full list of environment variables
-- [Routing](/features/routing/) -- Traditional, Framework, and SPA routing modes
-- [PHP Integration](/php/functions/) -- available PHP extension functions
+- [Docker guide](docker.md) -- compose.yml reference, volume mounts, and deployment tips
+- [Configuration](../operations/configuration.md) -- full list of environment variables
+- [Routing](../features/routing.md) -- Traditional, Framework, and SPA routing modes
+- [PHP Integration](../php/functions.md) -- available PHP extension functions
 
 ## See Also
 
-- [Installation](/getting-started/installation/) -- build prerequisites and source build instructions
-- [Architecture Overview](/architecture/overview/) -- runtime model and component map
-- [Worker Pool](/architecture/worker-pool/) -- PHP worker thread scaling and queue behavior
+- [Installation](installation.md) -- source build instructions and prerequisites
+- [Architecture Overview](../architecture/overview.md) -- runtime model and component map
+- [Worker Pool](../architecture/worker-pool.md) -- PHP worker thread scaling and queue behavior

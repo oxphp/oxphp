@@ -11,35 +11,32 @@ description: Запусціце OxPHP менш чым за 5 хвілін
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. Дадайце compose.yml
+## 2. Стварыце Dockerfile
 
-Стварыце мінімальны `compose.yml`:
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./www /var/www/html
+```
+
+## 3. Дадайце compose.yml
+
+Стварыце `compose.yml`:
 
 ```yaml
 services:
   oxphp:
-    image: oxphp:latest
     build: .
     ports:
       - "8080:8080"
       - "9090:9090"
-    volumes:
-      - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
       - DOCUMENT_ROOT=/var/www/html
       - INTERNAL_ADDR=0.0.0.0:9090
 ```
 
-Калі ў вас няма лакальнага `Dockerfile`, кланіруйце рэпазіторый OxPHP і збярыце з яго:
-
-```bash
-git clone https://github.com/oxphp/oxphp.git
-cd oxphp
-docker compose build
-```
-
-## 3. Стварыце тэставы PHP-файл
+## 4. Стварыце тэставы PHP-файл
 
 ```bash
 mkdir -p www
@@ -61,21 +58,21 @@ echo "<p>Worker: {$info['worker_id']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-## 4. Запусціце сервер
+## 5. Запусціце сервер
 
 ```bash
 docker compose up -d
 ```
 
-## 5. Пратэстуйце ваш дадатак
+## 6. Пратэстуйце сваю праграму
 
-Адкрыйце браўзер на `http://localhost:8080/` або выкарыстайце curl:
+Адкрыйце браўзер па адрасе `http://localhost:8080/` або выкарыстоўвайце curl:
 
 ```bash
 curl http://localhost:8080/
 ```
 
-Вы павінны ўбачыць вывад, падобны да гэтага:
+Вы павінны ўбачыць вывад, падобны да наступнага:
 
 ```html
 <h1>OxPHP</h1>
@@ -86,12 +83,12 @@ curl http://localhost:8080/
 <p>Time: 2026-02-11T12:00:00+00:00</p>
 ```
 
-## 6. Праверце стан сервера
+## 7. Праверце здароўе сервера
 
-Унутраны сервер прадастаўляе эндпойнты стану і метрык на порце 9090:
+Унутраны сервер прадастаўляе эндпойнты здароўя і метрык на порце 9090:
 
 ```bash
-# Праверка стану -- вяртае 200 з {"status":"ok"}
+# Праверка здароўя — вяртае 200 з {"status":"ok"}
 curl http://localhost:9090/health
 
 # Метрыкі, сумяшчальныя з Prometheus
@@ -101,23 +98,23 @@ curl http://localhost:9090/metrics
 curl http://localhost:9090/config
 ```
 
-## 7. Прагляд логаў
+## 8. Прагляд журналаў
 
 ```bash
 docker compose logs -f oxphp
 ```
 
-OxPHP выводзіць структураваныя JSON-логі. Кожны запыт стварае запіс у логу доступу з метадам, шляхом, кодам стану, часам адказу і ідэнтыфікатарам запыту.
+OxPHP выводзіць структураваныя JSON-журналы. Кожны запыт стварае запіс у журнале доступу з метадам, шляхом, кодам стану, часам адказу і ідэнтыфікатарам запыту.
 
 ## Наступныя крокі
 
-- [Даведнік па Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік compose.yml і мантаванне тамоў
-- [Канфігурацыя](/operations/configuration/) -- поўны спіс зменных асяроддзя
-- [Маршрутызацыя](/features/routing/) -- традыцыйны, фрэймворкавы і SPA-рэжымы маршрутызацыі
-- [Інтэграцыя з PHP](/php/functions/) -- даступныя функцыі PHP-пашырэння
+- [Даведнік па Docker](docker.md) -- даведнік па compose.yml, мантаванне тамоў і парады па разгортванні
+- [Канфігурацыя](../operations/configuration.md) -- поўны спіс зменных асяроддзя
+- [Маршрутызацыя](../features/routing.md) -- традыцыйны, фрэймворкавы і SPA-рэжымы маршрутызацыі
+- [Інтэграцыя з PHP](../php/functions.md) -- даступныя функцыі PHP-пашырэння
 
-## Глядзіце таксама
+## Гл. таксама
 
-- [Усталяванне](/getting-started/installation/) -- перадумовы зборкі і інструкцыі па зборцы з зыходнікаў
-- [Агляд архітэктуры](/architecture/overview/) -- мадэль выканання і карта кампанентаў
-- [Пул воркераў](/architecture/worker-pool/) -- маштабаванне патокаў PHP-воркераў і паводзіны чаргі
+- [Усталяванне](installation.md) -- інструкцыі па зборцы з зыходных кодаў і папярэднія патрабаванні
+- [Агляд архітэктуры](../architecture/overview.md) -- мадэль выканання і карта кампанентаў
+- [Пул воркераў](../architecture/worker-pool.md) -- маштабаванне патокаў PHP-воркераў і паводзіны чаргі

@@ -39,8 +39,41 @@ OxPHP ліцэнзаваны на ўмовах [AGPL-3.0](https://www.gnu.org/li
 
 ## Дакументацыя
 
-- [Пачатак працы](/getting-started/installation/) -- усталяванне, хуткі старт і наладка Docker
-- [Архітэктура](/architecture/overview/) -- мадэль выканання, жыццёвы цыкл запыту і праектныя рашэнні
-- [Магчымасці](/features/routing/) -- маршрутызацыя, сціск, TLS, абмежаванне частаты запытаў і іншае
-- [Інтэграцыя з PHP](/php/functions/) -- уласны SAPI, суперглабалы і функцыі PHP-пашырэння
-- [Эксплуатацыя](/operations/configuration/) -- даведнік па канфігурацыі, маніторынг і разгортванне
+### Пачатак працы
+
+- [Усталяванне](getting-started/installation.md)
+- [Хуткі старт](getting-started/quick-start.md)
+- [Docker](getting-started/docker.md)
+
+### Архітэктура
+
+- [Агляд](architecture/overview.md) -- мадэль выканання і карта кампанентаў
+- [Жыццёвы цыкл запыту](architecture/request-lifecycle.md) -- пакрокавы пайплайн апрацоўкі запыту
+- [Пул воркераў](architecture/worker-pool.md) -- выкананне PHP: InlineExecutor, SapiExecutor, backpressure
+- [Сістэма падзей](architecture/event-system.md) -- тыпізаваныя падзеі і рэгістрацыя апрацоўшчыкаў
+- [SAPI і мост](architecture/sapi-bridge.md) -- уласны PHP SAPI і C-бібліятэка моста
+
+### Магчымасці
+
+- [Маршрутызацыя](features/routing.md) -- тры рэжымы маршрутызацыі (Traditional, Framework, SPA)
+- [Статычныя файлы](features/static-files.md) -- файлавы кэш, вызначэнне MIME, стрымінг
+- [Сціск](features/compression.md) -- сціск Brotli
+- [TLS](features/tls.md) -- наладка TLS праз rustls
+- [Абмежаванне частаты запытаў](features/rate-limiting.md) -- абмежаванне па IP
+- [Старонкі памылак](features/error-pages.md) -- карыстальніцкія HTML-старонкі памылак
+- [Ідэнтыфікатары запытаў](features/request-ids.md) -- генерацыя X-Request-ID
+- [Тайм-аўты](features/timeouts.md) -- тайм-аўты загалоўкаў, запытаў і прастою
+- [Лагіраванне доступу](features/access-logging.md) -- структураванае JSON-лагіраванне доступу
+
+### Інтэграцыя з PHP
+
+- [Функцыі PHP](php/functions.md) -- убудаваныя і плагінныя PHP-функцыі
+- [Суперглабалы](php/superglobals.md) -- $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES
+- [OPcache](php/opcache.md) -- наладка OPcache і JIT
+
+### Эксплуатацыя
+
+- [Канфігурацыя](operations/configuration.md) -- даведнік зменных асяроддзя
+- [Праверка стану](operations/health-checks.md) -- эндпоінты /health, /metrics, /config
+- [Метрыкі](operations/metrics.md) -- даведнік метрык Prometheus
+- [Плаўная спынка](operations/graceful-shutdown.md) -- паводзіны пры спынцы і тайм-аўты

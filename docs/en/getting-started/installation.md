@@ -1,14 +1,38 @@
 ---
 title: Installation
-description: How to install and build OxPHP
+description: How to install and run OxPHP
 ---
+
+## Docker Image (Recommended)
+
+OxPHP is distributed as a pre-built Docker image. Pull the latest nightly build:
+
+```bash
+docker pull ghcr.io/oxphp/oxphp:nightly
+```
+
+Create a `Dockerfile` in your project root:
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
+```
+
+Build and run:
+
+```bash
+docker build -t my-app .
+docker run -p 8080:8080 my-app
+```
+
+That's it. The image includes the Rust binary, PHP 8.4 ZTS runtime, bridge library, PHP extension, and all required dependencies. No build tools needed.
 
 ## Prerequisites
 
 **Docker (recommended):**
 
 - Docker Engine 20.10+ or Docker Desktop
-- Docker Compose v2
 
 **Source build (without PHP):**
 
@@ -20,30 +44,6 @@ description: How to install and build OxPHP
 - PHP 8.4 with ZTS (Zend Thread Safety) enabled
 - `libphp.so` available in the library search path
 - C compiler (gcc or clang) for the bridge library and PHP extension
-
-## Docker Build
-
-Docker is the primary build method. It produces a minimal Alpine image with the Rust binary, PHP runtime, bridge library, and PHP extension pre-configured.
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-The multi-stage Dockerfile handles the complete build pipeline:
-
-1. Compiles the C bridge library (`liboxphp_bridge.so`)
-2. Builds the PHP extension (`oxphp_sapi.so`) against PHP 8.4 ZTS
-3. Builds the Rust binary inside the same `php:8.4-zts-alpine` image
-4. Copies only runtime artifacts into a slim Alpine image
-
-To enable optional features like the example plugin, pass `CARGO_FEATURES` as a build argument:
-
-```bash
-docker compose build --build-arg CARGO_FEATURES="plugin-example"
-```
-
-See the [Docker guide](/getting-started/docker/) for a full walkthrough of the Dockerfile stages and `compose.yml` configuration.
 
 ## Source Build (Stub Executor)
 
@@ -126,6 +126,6 @@ curl http://localhost:9090/health
 
 ## See Also
 
-- [Quick Start](/getting-started/quick-start/) -- get OxPHP running in under 5 minutes
-- [Docker](/getting-started/docker/) -- Dockerfile stages, compose.yml reference, and deployment tips
-- [Configuration](/operations/configuration/) -- full list of environment variables
+- [Quick Start](quick-start.md) -- get OxPHP running in under 5 minutes
+- [Docker](docker.md) -- compose.yml reference, Dockerfile stages, and deployment tips
+- [Configuration](../operations/configuration.md) -- full list of environment variables

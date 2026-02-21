@@ -1,51 +1,51 @@
 ---
 title: Усталяванне
-description: Як усталяваць і сабраць OxPHP
+description: Як усталяваць і запусціць OxPHP
 ---
 
-## Перадумовы
+## Docker-выява (рэкамендуецца)
 
-**Docker (рэкамендавана):**
+OxPHP распаўсюджваецца як гатовая Docker-выява. Сцягніце апошні начны зборнік:
+
+```bash
+docker pull ghcr.io/oxphp/oxphp:nightly
+```
+
+Стварыце `Dockerfile` у каранёвым каталогу свайго праекта:
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
+```
+
+Зберыце і запусціце:
+
+```bash
+docker build -t my-app .
+docker run -p 8080:8080 my-app
+```
+
+Усё. Выява ўключае бінарны файл Rust, асяроддзе выканання PHP 8.4 ZTS, бібліятэку моста, PHP-пашырэнне і ўсе неабходныя залежнасці. Інструменты зборкі не патрэбны.
+
+## Папярэднія патрабаванні
+
+**Docker (рэкамендуецца):**
 
 - Docker Engine 20.10+ або Docker Desktop
-- Docker Compose v2
 
-**Зборка з зыходнікаў (без PHP):**
+**Зборка з зыходных кодаў (без PHP):**
 
 - Набор інструментаў Rust 1.75+ (рэкамендуецца `rustup`)
 
-**Зборка з зыходнікаў (з PHP):**
+**Зборка з зыходных кодаў (з PHP):**
 
 - Набор інструментаў Rust 1.75+
 - PHP 8.4 з уключаным ZTS (Zend Thread Safety)
-- `libphp.so` даступная ў шляху пошуку бібліятэк
-- Кампілятар C (gcc або clang) для бібліятэкі моста і PHP-пашырэння
+- `libphp.so`, даступная ў шляху пошуку бібліятэк
+- C-кампілятар (gcc або clang) для бібліятэкі моста і PHP-пашырэння
 
-## Зборка з Docker
-
-Docker -- гэта асноўны метад зборкі. Ён стварае мінімальны вобраз Alpine з бінарным файлам Rust, рантаймам PHP, бібліятэкай моста і папярэдне сканфігураваным PHP-пашырэннем.
-
-```bash
-docker compose build
-docker compose up -d
-```
-
-Шматстадыйны Dockerfile апрацоўвае поўны канвеер зборкі:
-
-1. Кампілюе бібліятэку моста на C (`liboxphp_bridge.so`)
-2. Збірае PHP-пашырэнне (`oxphp_sapi.so`) для PHP 8.4 ZTS
-3. Збірае бінарны файл Rust у тым самым вобразе `php:8.4-zts-alpine`
-4. Капіруе толькі рантайм-артэфакты ў лёгкі вобраз Alpine
-
-Каб уключыць дадатковыя магчымасці, такія як плагін прыкладу, перадайце `CARGO_FEATURES` як аргумент зборкі:
-
-```bash
-docker compose build --build-arg CARGO_FEATURES="plugin-example"
-```
-
-Глядзіце [даведнік па Docker](/getting-started/docker/) для поўнага разбору стадый Dockerfile і канфігурацыі `compose.yml`.
-
-## Зборка з зыходнікаў (Stub Executor)
+## Зборка з зыходных кодаў (Stub Executor)
 
 Каб сабраць OxPHP без падтрымкі PHP (толькі абслугоўванне статычных файлаў, карысна для распрацоўкі), выкарыстоўвайце `--no-default-features` для адключэння магчымасці `php`:
 
@@ -53,24 +53,24 @@ docker compose build --build-arg CARGO_FEATURES="plugin-example"
 cargo build --release --no-default-features
 ```
 
-Выніковы бінарны файл знаходзіцца ў `target/release/oxphp`. Ён выкарыстоўвае stub executor, які вяртае адказ-заглушку для PHP-запытаў.
+Выніковы бінарны файл знаходзіцца па шляху `target/release/oxphp`. Ён выкарыстоўвае stub executor, які вяртае адказ-загальнік для PHP-запытаў.
 
-**Заўвага:** Магчымасць `php` уключана па змаўчанні. Запуск `cargo build --release` без `--no-default-features` патрабуе наяўнасці `libphp.so` і бібліятэкі моста на хасце.
+**Заўвага:** Магчымасць `php` уключана па змаўчанні. Выкананне `cargo build --release` без `--no-default-features` патрабуе наяўнасці `libphp.so` і бібліятэкі моста на хасце.
 
-## Зборка з зыходнікаў (з PHP)
+## Зборка з зыходных кодаў (з PHP)
 
-Зборка з PHP патрабуе ўсталяванай на хасце `libphp.so` (зборка ZTS) і бібліятэкі моста:
+Зборка з PHP патрабуе ўсталёўкі `libphp.so` (зборка ZTS) і бібліятэкі моста на хасце:
 
 ```bash
-# Зборка і ўсталяванне бібліятэкі моста
+# Зборка і ўсталёўка бібліятэкі моста
 cd ext/bridge
 make && sudo make install
 
-# Зборка і ўсталяванне PHP-пашырэння
+# Зборка і ўсталёўка PHP-пашырэння
 cd ext
 phpize && ./configure --enable-oxphp-sapi && make && sudo make install
 
-# Зборка OxPHP з падтрымкай PHP (магчымасці па змаўчанні ўключаюць php)
+# Зборка OxPHP з падтрымкай PHP (магчымасць php уключана па змаўчанні)
 cargo build --release
 ```
 
@@ -83,14 +83,14 @@ export LD_LIBRARY_PATH=/usr/local/lib
 
 ### Сумяшчальнасць з Alpine
 
-Калі вы разгортваеце на Alpine Linux, бінарны файл Rust трэба збіраць у тым самым вобразе `php:8.4-zts-alpine`, які выкарыстоўваецца для рантайму PHP. Зборка ў іншым вобразе або з іншай libc (glibc супраць musl) выклікае пашкоджанне TLS падчас выканання. Пастаўлены Dockerfile апрацоўвае гэта правільна.
+Калі вы разгортваеце на Alpine Linux, неабходна сабраць бінарны файл Rust унутры той жа выявы `php:8.4-zts-alpine`, якая выкарыстоўваецца для асяроддзя выканання PHP. Зборка ў асобнай выяве або на іншым libc (glibc супраць musl) выклікае пашкоджанне TLS падчас выканання. Прыкладзены Dockerfile апрацоўвае гэта правільна.
 
 ## Запуск тэстаў
 
-Запуск набору тэстаў на хасце без PHP з адключэннем магчымасцяў па змаўчанні:
+Запусціце набор тэстаў на хасце без PHP, адключыўшы магчымасці па змаўчанні:
 
 ```bash
-# Усе праверкі (фарматаванне, лінтынг, тэсты)
+# Усе праверкі (фарматаванне, аналіз, тэсты)
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Толькі модульныя тэсты
@@ -99,33 +99,33 @@ cargo test --no-default-features --lib
 # Усе тэсты (модульныя + інтэграцыйныя)
 cargo test --no-default-features
 
-# З плагінам прыкладу
+# З прыкладным плагінам
 cargo clippy --no-default-features --features plugin-example -- -D warnings && cargo test --no-default-features --features plugin-example
 ```
 
-## Праверка ўсталявання
+## Праверка ўсталёўкі
 
-Пасля запуску OxPHP вы павінны ўбачыць структураваны JSON-лог:
+Пасля запуску OxPHP вы павінны ўбачыць структураваны JSON-вывад журнала:
 
 ```
 {"timestamp":"...","level":"INFO","message":"OxPHP HTTP server starting","listen_addr":"0.0.0.0:8080",...}
 {"timestamp":"...","level":"INFO","message":"Server listening","addr":"0.0.0.0:8080"}
 ```
 
-Праверце, што сервер адказвае:
+Праверце, ці адказвае сервер:
 
 ```bash
 curl http://localhost:8080/
 ```
 
-Калі вы наладзілі ўнутраны сервер, праверце эндпойнт стану:
+Калі вы наладзілі ўнутраны сервер, праверце эндпойнт здароўя:
 
 ```bash
 curl http://localhost:9090/health
 ```
 
-## Глядзіце таксама
+## Гл. таксама
 
-- [Хуткі старт](/getting-started/quick-start/) -- запусціце OxPHP менш чым за 5 хвілін
-- [Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік compose.yml і парады па разгортванні
-- [Канфігурацыя](/operations/configuration/) -- поўны спіс зменных асяроддзя
+- [Хуткі старт](quick-start.md) -- запусціце OxPHP менш чым за 5 хвілін
+- [Docker](docker.md) -- даведнік па compose.yml, этапы Dockerfile і парады па разгортванні
+- [Канфігурацыя](../operations/configuration.md) -- поўны спіс зменных асяроддзя

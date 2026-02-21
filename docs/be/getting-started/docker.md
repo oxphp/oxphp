@@ -1,111 +1,37 @@
 ---
 title: Docker
-description: Стадыі Dockerfile, даведнік compose.yml і парады па разгортванні
+description: Выкарыстанне Docker-выявы, даведнік па compose.yml і парады па разгортванні
 ---
 
-OxPHP пастаўляецца з шматстадыйным Dockerfile, які стварае мінімальны рантайм-вобраз Alpine. На гэтай старонцы тлумачыцца кожная стадыя зборкі, канфігурацыя `compose.yml` і тыповыя пытанні разгортвання.
+OxPHP распаўсюджваецца як гатовая Docker-выява па адрасе `ghcr.io/oxphp/oxphp:nightly`. На гэтай старонцы апісваецца, як выкарыстоўваць выяву, наладжваць яе з дапамогай `compose.yml` і распаўсюджаныя пытанні разгортвання.
 
-## Стадыі Dockerfile
+## Выкарыстанне выявы
 
-Dockerfile мае чатыры стадыі. Кожная стадыя збірае адзін кампанент і перадае артэфакты далей.
-
-### Стадыя 1: bridge-builder
+Самы просты спосаб запусціць OxPHP — пашырыць базавую выяву файламі вашай праграмы:
 
 ```dockerfile
-FROM php:8.4-zts-alpine3.23 AS bridge-builder
-RUN apk add --no-cache gcc musl-dev make
-COPY ext/bridge/ ./
-RUN make && make install
+FROM ghcr.io/oxphp/oxphp:nightly
+
+COPY --chown=www-data:www-data ./src /var/www/html
 ```
 
-Кампілюе `liboxphp_bridge.so` -- невялікую агульную бібліятэку на C, якая забяспечвае зменныя `__thread` TLS, агульныя паміж Rust і PHP-пашырэннем. Гэтая стадыя патрабуе загалоўкаў PHP, таму яна заснавана на вобразе PHP ZTS Alpine.
+Выява ўключае:
 
-**Артэфакты:** `/usr/local/lib/liboxphp_bridge.so`, `/usr/local/include/oxphp_bridge.h`
-
-### Стадыя 2: ext-builder
-
-```dockerfile
-FROM php:8.4-zts-alpine3.23 AS ext-builder
-RUN apk add --no-cache gcc musl-dev make autoconf
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
-COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
-COPY ext/bridge/oxphp_bridge.h ./bridge/
-RUN phpize && ./configure --enable-oxphp-sapi && make && make install
-```
-
-Збірае PHP-пашырэнне (`oxphp_sapi.so`) з дапамогай `phpize` з вобраза PHP 8.4 ZTS. Пашырэнне звязваецца з бібліятэкай моста і робіць даступнымі для PHP такія функцыі, як `oxphp_request_id()` і `oxphp_server_info()`.
-
-**Артэфакты:** файл `.so` PHP-пашырэння ў `/usr/local/lib/php/extensions/`
-
-### Стадыя 3: builder
-
-```dockerfile
-FROM php:8.4-zts-alpine3.23 AS builder
-RUN apk add --no-cache gcc rust cargo musl-dev pkgconfig ...
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY Cargo.toml Cargo.lock ./
-
-ARG CARGO_FEATURES=""
-
-RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs && \
-    cargo build --release && \
-    rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
-COPY src ./src
-COPY build.rs ./
-RUN if [ -n "${CARGO_FEATURES}" ]; then \
-        cargo build --release --features "${CARGO_FEATURES}"; \
-    else \
-        cargo build --release; \
-    fi
-```
-
-Збірае бінарны файл Rust у тым самым вобразе `php:8.4-zts-alpine3.23`. Гэта неабходна, таму што бінарны файл звязваецца з `libphp.so` і `liboxphp_bridge.so` -- зборка ў іншым вобразе з іншай версіяй musl выклікае пашкоджанне TLS падчас выканання.
-
-На гэтай стадыі выкарыстоўваецца прыём кэшавання залежнасцяў: спачатку адбываецца зборка з фіктыўным `main.rs` для кэшавання ўсіх крэйтаў залежнасцяў, потым выдаляюцца толькі артэфакты, спецыфічныя для OxPHP (`target/release/oxphp`, `deps/oxphp-*`, `.fingerprint/oxphp-*`), перш чым капіраваць рэальны зыходны код. Такім чынам, пры зменах зыходнага кода перазбіраецца толькі фінальны бінарны файл.
-
-Аргумент зборкі `CARGO_FEATURES` дазваляе ўключаць дадатковыя магчымасці Cargo (напрыклад, `plugin-example`) падчас зборкі без змены Dockerfile.
-
-**Артэфакты:** `/build/target/release/oxphp`
-
-### Стадыя 4: runtime
-
-```dockerfile
-FROM alpine:3.23
-RUN apk add --no-cache libgcc libxml2 sqlite-libs libcurl oniguruma argon2-libs zlib ...
-COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
-COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
-ENV LD_LIBRARY_PATH=/usr/local/lib
-USER www-data
-EXPOSE 8080
-CMD ["oxphp"]
-```
-
-Фінальны рантайм-вобраз заснаваны на `alpine:3.23`. Ён капіруе толькі неабходнае:
-
-- `libphp.so` -- бібліятэка рантайму PHP
-- `liboxphp_bridge.so` -- бібліятэка моста на C
-- Файлы PHP-пашырэння
 - Бінарны файл `oxphp`
-- Канфігурацыя PHP (`oxphp.ini`, загрузка пашырэнняў)
-- Змесціва вэб-кораня па змаўчанні (`/var/www/html/`)
+- Асяроддзе выканання PHP 8.4 ZTS (`libphp.so`)
+- Бібліятэку моста (`liboxphp_bridge.so`)
+- PHP-пашырэнне (`oxphp_sapi.so`) з функцыямі `oxphp_request_id()`, `oxphp_server_info()` і іншымі
+- Базавую сістэму Alpine Linux з мінімальнымі залежнасцямі выканання
+- Карыстальніка `www-data` (UID 82, GID 82) для выканання без прывілеяў root
 
-Карыстальнік `www-data` (UID 82, GID 82) запускае серверны працэс. Alpine 3.23 ужо мае папярэдне створаную групу `www-data`, таму Dockerfile дадае толькі карыстальніка.
+Каранёвы каталог дакументаў па змаўчанні — `/var/www/html`. Сервер слухае на порце 8080. `CMD` — `["oxphp"]`.
 
-`LD_LIBRARY_PATH=/usr/local/lib` зададзена, каб дынамічны кампаноўшчык мог знайсці `libphp.so` і `liboxphp_bridge.so` падчас выканання.
-
-## Даведнік compose.yml
+## Даведнік па compose.yml
 
 ```yaml
 services:
   oxphp:
-    build:
-      context: .
-      args:
-        # Дадатковыя магчымасці Cargo (праз прабел), напр. "plugin-example"
-        CARGO_FEATURES: ""
+    build: .
     ports:
       - "8080:8080"   # Асноўны HTTP-сервер
       - "9090:9090"   # Унутраны сервер (health/metrics/config)
@@ -123,7 +49,8 @@ services:
       # - PHP_WORKERS=2:16           # Дынамічны: маштабаванне паміж 2 і 16
       # - PHP_WORKERS_IDLE_SEC=30    # Тайм-аўт прастою для дынамічнага памяншэння
       # - QUEUE_CAPACITY=512         # Па змаўчанні: PHP_WORKERS * 128
-      # Лагіраванне
+
+      # Журналаванне
       - LOG_LEVEL=info
 
       # Унутраны сервер
@@ -151,24 +78,33 @@ services:
     restart: unless-stopped
 ```
 
-### Аргументы зборкі
+Для распрацоўкі можна замантаваць зыходны каталог як том замест капіравання файлаў у выяву:
 
-| Аргумент | Па змаўчанні | Апісанне |
-|----------|--------------|----------|
-| `CARGO_FEATURES` | `""` | Спіс дадатковых магчымасцяў Cargo праз прабел (напр. `plugin-example`) |
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:nightly
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./www:/var/www/html:ro
+    environment:
+      - LISTEN_ADDR=0.0.0.0:8080
+      - DOCUMENT_ROOT=/var/www/html
+```
 
 ### Зменныя асяроддзя
 
 | Зменная | Па змаўчанні | Апісанне |
-|---------|--------------|----------|
+|---------|-------------|----------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Адрас і порт асноўнага HTTP-сервера |
 | `DOCUMENT_ROOT` | `/var/www/html` | Каранёвы каталог для абслугоўвання файлаў |
 | `INDEX_FILE` | _(не зададзена)_ | Усталюйце `index.php` для фрэймворкавага рэжыму або `index.html` для SPA-рэжыму |
-| `EXECUTOR` | `sapi` | Тып PHP executor: `sapi` (рэальны PHP) або `stub` (заглушка) |
+| `EXECUTOR` | `sapi` | Тып PHP executor: `sapi` (рэальны PHP) або `stub` (загальнік) |
 | `PHP_WORKERS` | `0` (CPU * 2, статычны) | Рэжым пула воркераў. `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Тайм-аўт прастою перад выдаленнем дынамічнага воркера |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Памер абмежаванай чаргі запытаў. 503 вяртаецца, калі поўная |
-| `LOG_LEVEL` | `info` | Узровень лагіравання: `trace`, `debug`, `info`, `warn`, `error` |
+| `LOG_LEVEL` | `info` | Узровень журналавання: `trace`, `debug`, `info`, `warn`, `error` |
 | `MAX_CONNECTIONS` | `10000` | Максімальная колькасць адначасовых злучэнняў |
 | `INTERNAL_ADDR` | _(не зададзена)_ | Адрас унутранага сервера. Калі не зададзена, ён адключаны |
 | `HEADER_TIMEOUT_SECS` | `5` | Тайм-аўт чытання загалоўкаў запыту |
@@ -181,14 +117,14 @@ services:
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |
 | `COMPRESSION` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
-| `TOKIO_WORKERS` | `0` | Патокі асінхроннага рантайму Tokio (0 = аднапаточны) |
-| `ACCESS_LOG` | `true` | Уключыць JSON-лог доступу для кожнага запыту |
+| `TOKIO_WORKERS` | `0` | Патокі асінхроннага асяроддзя выканання Tokio (0 = аднапаточны) |
+| `ACCESS_LOG` | `true` | Уключыць JSON-журнал доступу для кожнага запыту |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Памер папярэдне выдзеленага пула слотаў адказу |
 
 ### Парты
 
 | Порт | Прызначэнне |
-|------|-------------|
+|------|------------|
 | `8080` | Асноўны HTTP-сервер (або HTTPS, калі наладжаны TLS) |
 | `9090` | Унутраны сервер: `/health`, `/metrics`, `/config` |
 
@@ -196,23 +132,39 @@ services:
 
 | Шлях на хасце | Шлях у кантэйнеры | Прызначэнне |
 |---------------|-------------------|-------------|
-| `./www` | `/var/www/html` | Файлы дадатку (PHP-скрыпты, статычныя рэсурсы). Мантуйце як `:ro` |
+| `./www` | `/var/www/html` | Файлы праграмы (PHP-скрыпты, статычныя рэсурсы). Мантуйце як `:ro` |
 | `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | Канфігурацыя PHP (OPcache, сесіі). Мантуйце як `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | Файлы сертыфіката і ключа TLS. Мантуйце як `:ro` |
 
-## Карыстальнік www-data у Alpine
+## Канфігурацыя PHP
 
-Рантайм-вобраз працуе ад імя `www-data` (UID 82, GID 82) для сумяшчальнасці з канвенцыямі nginx і Apache. Alpine 3.23 мае папярэдне створаную групу `www-data` з GID 82, але не ўключае карыстальніка, таму Dockerfile стварае яго:
+Каб наладзіць параметры PHP (OPcache, JIT, сесіі і г. д.), стварыце файл `oxphp.ini` і замантуйце яго ў кантэйнер:
 
-```dockerfile
-RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
+```ini
+[opcache]
+opcache.enable=1
+opcache.jit=1255
+opcache.jit_buffer_size=64M
 ```
 
-Калі ваш дадатак павінен пісаць у пэўныя каталогі (сесіі, кэш, загрузкі), пераканайцеся, што гэтыя каталогі даступныя для запісу карыстальніку з UID 82.
+```yaml
+volumes:
+  - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+```
 
-## Глядзіце таксама
+Гл. [OPcache](../php/opcache.md) для рэкамендаваных параметраў.
 
-- [Усталяванне](/getting-started/installation/) -- перадумовы зборкі і інструкцыі па зборцы з зыходнікаў
-- [Хуткі старт](/getting-started/quick-start/) -- запусціце OxPHP менш чым за 5 хвілін
-- [Канфігурацыя](/operations/configuration/) -- поўны даведнік па зменных асяроддзя
-- [Плаўная спынка](/operations/graceful-shutdown/) -- паводзіны завяршэння і налады тайм-аўтаў
+## Карыстальнік www-data у Alpine
+
+Выява выконваецца ад імя `www-data` (UID 82, GID 82) для сумяшчальнасці з канвенцыямі nginx і Apache. Калі вашай праграме патрэбны запіс у пэўныя каталогі (сесіі, кэш, загрузкі), пераканайцеся, што гэтыя каталогі даступныя для запісу карыстальніку з UID 82.
+
+## Зборка з зыходных кодаў
+
+Калі вам патрэбна сабраць OxPHP з зыходных кодаў (напрыклад, каб уключыць карыстальніцкія магчымасці Cargo або змяніць сервер), звярніцеся да даведніка [Усталяванне](installation.md) для атрымання інструкцый па зборцы. Рэпазіторый OxPHP уключае шматэтапны Dockerfile, які кампілюе бібліятэку моста, PHP-пашырэнне і бінарны файл Rust з зыходных кодаў.
+
+## Гл. таксама
+
+- [Усталяванне](installation.md) -- папярэднія патрабаванні і інструкцыі па зборцы з зыходных кодаў
+- [Хуткі старт](quick-start.md) -- запусціце OxPHP менш чым за 5 хвілін
+- [Канфігурацыя](../operations/configuration.md) -- поўны даведнік па зменных асяроддзя
+- [Плаўная спынка](../operations/graceful-shutdown.md) -- паводзіны завяршэння і налады тайм-аўтаў

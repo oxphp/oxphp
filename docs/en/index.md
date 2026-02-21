@@ -39,8 +39,41 @@ OxPHP is licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
 
 ## Documentation
 
-- [Getting Started](/getting-started/installation/) -- installation, quick start, and Docker setup
-- [Architecture](/architecture/overview/) -- runtime model, request lifecycle, and design decisions
-- [Features](/features/routing/) -- routing, compression, TLS, rate limiting, and more
-- [PHP Integration](/php/functions/) -- custom SAPI, superglobals, and PHP extension functions
-- [Operations](/operations/configuration/) -- configuration reference, monitoring, and deployment
+### Getting Started
+
+- [Installation](getting-started/installation.md)
+- [Quick Start](getting-started/quick-start.md)
+- [Docker](getting-started/docker.md)
+
+### Architecture
+
+- [Overview](architecture/overview.md) -- runtime model and component map
+- [Request Lifecycle](architecture/request-lifecycle.md) -- step-by-step request pipeline
+- [Worker Pool](architecture/worker-pool.md) -- PHP execution: InlineExecutor, SapiExecutor, backpressure
+- [Event System](architecture/event-system.md) -- typed events and handler registration
+- [SAPI and Bridge](architecture/sapi-bridge.md) -- custom PHP SAPI and C bridge library
+
+### Features
+
+- [Routing](features/routing.md) -- three routing modes (Traditional, Framework, SPA)
+- [Static Files](features/static-files.md) -- file cache, MIME detection, streaming
+- [Compression](features/compression.md) -- Brotli compression
+- [TLS](features/tls.md) -- TLS configuration via rustls
+- [Rate Limiting](features/rate-limiting.md) -- per-IP rate limiting
+- [Error Pages](features/error-pages.md) -- custom HTML error pages
+- [Request IDs](features/request-ids.md) -- X-Request-ID generation
+- [Timeouts](features/timeouts.md) -- header, request, and idle timeouts
+- [Access Logging](features/access-logging.md) -- structured JSON access log
+
+### PHP Integration
+
+- [PHP Functions](php/functions.md) -- built-in and plugin PHP functions
+- [Superglobals](php/superglobals.md) -- $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES
+- [OPcache](php/opcache.md) -- OPcache and JIT configuration
+
+### Operations
+
+- [Configuration](operations/configuration.md) -- environment variable reference
+- [Health Checks](operations/health-checks.md) -- /health, /metrics, /config endpoints
+- [Metrics](operations/metrics.md) -- Prometheus metrics reference
+- [Graceful Shutdown](operations/graceful-shutdown.md) -- drain behavior and timeouts

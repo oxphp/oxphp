@@ -39,8 +39,41 @@ OxPHP распространяется по лицензии [AGPL-3.0](https://
 
 ## Документация
 
-- [Начало работы](/getting-started/installation/) -- установка, быстрый старт и настройка Docker
-- [Архитектура](/architecture/overview/) -- модель выполнения, жизненный цикл запроса и проектные решения
-- [Возможности](/features/routing/) -- маршрутизация, сжатие, TLS, ограничение частоты запросов и другое
-- [Интеграция с PHP](/php/functions/) -- собственный SAPI, суперглобальные переменные и функции PHP-расширения
-- [Эксплуатация](/operations/configuration/) -- справочник по конфигурации, мониторинг и развёртывание
+### Начало работы
+
+- [Установка](getting-started/installation.md)
+- [Быстрый старт](getting-started/quick-start.md)
+- [Docker](getting-started/docker.md)
+
+### Архитектура
+
+- [Обзор](architecture/overview.md) -- модель выполнения и карта компонентов
+- [Жизненный цикл запроса](architecture/request-lifecycle.md) -- пошаговый пайплайн обработки запроса
+- [Пул воркеров](architecture/worker-pool.md) -- выполнение PHP: InlineExecutor, SapiExecutor, backpressure
+- [Система событий](architecture/event-system.md) -- типизированные события и регистрация обработчиков
+- [SAPI и мост](architecture/sapi-bridge.md) -- собственный PHP SAPI и C-библиотека моста
+
+### Возможности
+
+- [Маршрутизация](features/routing.md) -- три режима маршрутизации (Traditional, Framework, SPA)
+- [Статические файлы](features/static-files.md) -- файловый кеш, определение MIME, стриминг
+- [Сжатие](features/compression.md) -- сжатие Brotli
+- [TLS](features/tls.md) -- настройка TLS через rustls
+- [Ограничение частоты запросов](features/rate-limiting.md) -- ограничение по IP
+- [Страницы ошибок](features/error-pages.md) -- пользовательские HTML-страницы ошибок
+- [Идентификаторы запросов](features/request-ids.md) -- генерация X-Request-ID
+- [Таймауты](features/timeouts.md) -- таймауты заголовков, запросов и простоя
+- [Логирование доступа](features/access-logging.md) -- структурированный JSON-лог доступа
+
+### Интеграция с PHP
+
+- [Функции PHP](php/functions.md) -- встроенные и плагинные PHP-функции
+- [Суперглобалы](php/superglobals.md) -- $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES
+- [OPcache](php/opcache.md) -- настройка OPcache и JIT
+
+### Эксплуатация
+
+- [Конфигурация](operations/configuration.md) -- справочник переменных окружения
+- [Проверка состояния](operations/health-checks.md) -- эндпоинты /health, /metrics, /config
+- [Метрики](operations/metrics.md) -- справочник метрик Prometheus
+- [Плавная остановка](operations/graceful-shutdown.md) -- поведение при остановке и таймауты
