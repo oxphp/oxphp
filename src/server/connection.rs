@@ -15,8 +15,40 @@ use crate::server::routing::RouteResult;
 use crate::server::Server;
 use crate::types::{full_body, ResponseBody, ScriptRequest};
 
-/// Maximum POST body size (10 MB). Requests exceeding this are rejected with 413.
-const MAX_POST_BODY: usize = 10 * 1024 * 1024;
+/// Maximum request body size for POST/PUT/PATCH (10 MB).
+const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024;
+
+/// Returns true if the method defines semantics for a request body.
+/// Used in tests; hot path in dispatch_request inlines the check to reuse `is_query`.
+#[cfg(test)]
+fn method_expects_body(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) || is_query_method(method)
+}
+
+/// Returns true if the method is QUERY (draft-ietf-httpbis-safe-method-w-body).
+fn is_query_method(method: &Method) -> bool {
+    method.as_str() == "QUERY"
+}
+
+/// Parse Content-Length from raw bytes without UTF-8 validation.
+/// Content-Length is always ASCII digits — no need for `to_str()` + `parse()`.
+fn parse_content_length(bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() || bytes.len() > 20 {
+        return None;
+    }
+    let mut n: usize = 0;
+    for &b in bytes {
+        let d = b.wrapping_sub(b'0');
+        if d > 9 {
+            return None;
+        }
+        n = n.checked_mul(10)?.checked_add(d as usize)?;
+    }
+    Some(n)
+}
 
 /// Handle a single HTTP request with event-driven pipeline.
 pub async fn handle_request(
@@ -168,9 +200,41 @@ async fn dispatch_request(
             .await?
         }
         RouteResult::Execute(script_path) => {
-            // Skip body collection for methods that don't carry a payload
-            let body_bytes = if matches!(parts.method, Method::POST | Method::PUT | Method::PATCH) {
-                let limited = Limited::new(body, MAX_POST_BODY);
+            let is_query = is_query_method(&parts.method);
+
+            // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2
+            if is_query && !parts.headers.contains_key(http::header::CONTENT_TYPE) {
+                return Ok(Response::builder()
+                    .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                    .body(full_body(Bytes::from_static(
+                        b"415 Unsupported Media Type: QUERY requires Content-Type",
+                    )))?);
+            }
+
+            // Collect body for methods that carry a payload.
+            // QUERY uses a separate configurable limit (MAX_QUERY_BODY, default 512 KB).
+            let body_bytes = if is_query
+                || matches!(
+                    parts.method,
+                    Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+                ) {
+                let limit = if is_query {
+                    server.max_query_body
+                } else {
+                    MAX_REQUEST_BODY
+                };
+
+                // Early rejection via Content-Length header — zero I/O, no body read
+                if let Some(cl) = parts.headers.get(http::header::CONTENT_LENGTH) {
+                    if parse_content_length(cl.as_bytes()).is_some_and(|len| len > limit) {
+                        return Ok(Response::builder()
+                            .status(StatusCode::PAYLOAD_TOO_LARGE)
+                            .body(full_body(Bytes::from_static(b"413 Payload Too Large")))?);
+                    }
+                }
+
+                // Streaming limit — safety net for chunked transfers or lying Content-Length
+                let limited = Limited::new(body, limit);
                 match BodyExt::collect(limited).await {
                     Ok(collected) => collected.to_bytes(),
                     Err(e) => {
@@ -247,6 +311,53 @@ mod tests {
 
     use crate::events::EventHandler;
     use crate::handlers::request_id::RequestIdGenerator;
+
+    #[test]
+    fn test_method_expects_body_standard() {
+        assert!(method_expects_body(&Method::POST));
+        assert!(method_expects_body(&Method::PUT));
+        assert!(method_expects_body(&Method::PATCH));
+        assert!(method_expects_body(&Method::DELETE));
+    }
+
+    #[test]
+    fn test_method_expects_body_query() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+        assert!(method_expects_body(&query));
+        assert!(is_query_method(&query));
+    }
+
+    #[test]
+    fn test_method_no_body() {
+        assert!(!method_expects_body(&Method::GET));
+        assert!(!method_expects_body(&Method::HEAD));
+        assert!(!method_expects_body(&Method::OPTIONS));
+        assert!(!method_expects_body(&Method::TRACE));
+    }
+
+    #[test]
+    fn test_query_method_case_sensitive() {
+        let lowercase = Method::from_bytes(b"query").unwrap();
+        assert!(!is_query_method(&lowercase));
+        assert!(!method_expects_body(&lowercase));
+
+        let mixed = Method::from_bytes(b"Query").unwrap();
+        assert!(!is_query_method(&mixed));
+    }
+
+    #[test]
+    fn test_parse_content_length() {
+        assert_eq!(parse_content_length(b"0"), Some(0));
+        assert_eq!(parse_content_length(b"123"), Some(123));
+        assert_eq!(parse_content_length(b"524288"), Some(524288));
+        assert_eq!(parse_content_length(b"10485760"), Some(10_485_760));
+        assert_eq!(parse_content_length(b""), None);
+        assert_eq!(parse_content_length(b"abc"), None);
+        assert_eq!(parse_content_length(b"12 34"), None);
+        assert_eq!(parse_content_length(b"-1"), None);
+        // 21 digits — exceeds max length guard
+        assert_eq!(parse_content_length(b"123456789012345678901"), None);
+    }
 
     #[test]
     fn test_request_id_generation() {

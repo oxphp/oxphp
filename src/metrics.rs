@@ -13,7 +13,7 @@ pub struct Metrics {
     active_connections: AtomicUsize,
     pending_requests: AtomicUsize,
     dropped_requests: AtomicU64,
-    requests_by_method: [AtomicU64; 9],
+    requests_by_method: [AtomicU64; 10],
     responses_by_status_class: [AtomicU64; 5],
     total_response_time_us: AtomicU64,
     busy_workers: AtomicUsize,
@@ -25,8 +25,8 @@ pub struct Metrics {
     workers_retired_total: AtomicU64,
 }
 
-const METHOD_LABELS: [&str; 9] = [
-    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "OTHER",
+const METHOD_LABELS: [&str; 10] = [
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "QUERY", "OTHER",
 ];
 
 fn method_index(method: &Method) -> usize {
@@ -39,7 +39,8 @@ fn method_index(method: &Method) -> usize {
         Method::HEAD => 5,
         Method::OPTIONS => 6,
         Method::CONNECT => 7,
-        _ => 8,
+        _ if method.as_str() == "QUERY" => 8,
+        _ => 9,
     }
 }
 
@@ -331,7 +332,8 @@ mod tests {
         assert_eq!(method_index(&Method::HEAD), 5);
         assert_eq!(method_index(&Method::OPTIONS), 6);
         assert_eq!(method_index(&Method::CONNECT), 7);
-        assert_eq!(method_index(&Method::TRACE), 8);
+        assert_eq!(method_index(&Method::from_bytes(b"QUERY").unwrap()), 8);
+        assert_eq!(method_index(&Method::TRACE), 9); // OTHER
     }
 
     #[test]

@@ -52,7 +52,8 @@ async fn start_server_with_options(
         metrics,
         Arc::new(dispatcher),
         None,
-        false, // compression disabled in tests
+        false,      // compression disabled in tests
+        512 * 1024, // max_query_body: 512 KB
     ));
 
     tokio::spawn(async move {

@@ -36,6 +36,10 @@ class Response {
         return $clone;
     }
 
+    public function getBody(): string {
+        return $this->body;
+    }
+
     public function toArray(): array {
         return ['status' => $this->status, 'headers' => $this->headers, 'body_len' => strlen($this->body)];
     }
@@ -69,7 +73,7 @@ class UserRepository {
                 'name' => 'User ' . $i,
                 'email' => "user{$i}@example.com",
                 'role' => $i % 3 === 0 ? 'admin' : 'user',
-                'score' => random_int(0, 1000),
+//                 'score' => random_int(0, 1000),
             ];
         }
     }
@@ -111,8 +115,9 @@ $router->add('GET', '#^/api/users$#', function(Request $req): Response {
     return (new Response(200, json_encode(array_values($users))))->withHeader('Content-Type', 'application/json');
 });
 
-$request = new Request('GET', '/api/users', ['host' => 'localhost'], ['role' => 'admin']);
+$request = new Request('GET', '/api/users/100', ['host' => 'localhost'], ['role' => 'admin']);
 $response = $router->dispatch($request);
 
 header('Content-Type: application/json');
-echo json_encode($response->toArray());
+// echo json_encode($response->toArray());
+echo $response->getBody();

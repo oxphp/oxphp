@@ -43,6 +43,7 @@ pub struct Server {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     pub(crate) request_timeout: Duration,
     pub(crate) compression_enabled: bool,
+    pub(crate) max_query_body: usize,
     /// Pre-configured HTTP builder reused across all connections.
     http_builder: Builder<hyper_util::rt::TokioExecutor>,
     shutdown: AtomicBool,
@@ -57,6 +58,7 @@ impl Server {
         dispatcher: Arc<EventDispatcher>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         compression_enabled: bool,
+        max_query_body: usize,
     ) -> Self {
         let route_config = RouteConfig::new(config);
         let file_cache = Arc::new(FileCache::new(200));
@@ -81,6 +83,7 @@ impl Server {
             tls_acceptor,
             request_timeout: config.request_timeout,
             compression_enabled,
+            max_query_body,
             http_builder,
             shutdown: AtomicBool::new(false),
         }

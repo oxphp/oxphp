@@ -211,6 +211,7 @@ async fn async_main(
         dispatcher,
         tls_acceptor,
         config.compression,
+        config.max_query_body,
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 

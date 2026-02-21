@@ -18,6 +18,7 @@ pub struct Config {
     pub error_pages_dir: Option<String>,
     pub compression: bool,
     pub access_log: bool,
+    pub max_query_body: usize,
 }
 
 impl Config {
@@ -51,6 +52,10 @@ impl Config {
         let access_log = std::env::var("ACCESS_LOG")
             .map(|v| v != "false" && v != "0" && v != "off")
             .unwrap_or(true);
+        let max_query_body = std::env::var("MAX_QUERY_BODY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(512 * 1024);
 
         Ok(Self {
             server,
@@ -66,6 +71,7 @@ impl Config {
             error_pages_dir,
             compression,
             access_log,
+            max_query_body,
         })
     }
 
@@ -88,6 +94,7 @@ impl Config {
             "error_pages_dir": self.error_pages_dir,
             "compression": self.compression,
             "access_log": self.access_log,
+            "max_query_body": self.max_query_body,
         })
     }
 }
