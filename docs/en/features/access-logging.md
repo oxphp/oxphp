@@ -9,9 +9,15 @@ OxPHP emits a structured JSON log entry for every completed HTTP request. Logs a
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `ACCESS_LOG` | Enable per-request access logging | `true` |
 | `LOG_LEVEL` | Minimum log level (trace, debug, info, warn, error) | `info` |
 
+Access logging is enabled by default. When `ACCESS_LOG` is set to `false`, `0`, or `off`, the `AccessLogHandler` is not registered in the event dispatcher and no per-request access log entries are emitted.
+
 ```bash
+# Disable access logging
+ACCESS_LOG=false
+
 LOG_LEVEL=info
 ```
 

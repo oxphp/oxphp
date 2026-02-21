@@ -80,13 +80,13 @@ A request like `/%2e%2e/etc/passwd` is decoded to `/../etc/passwd`, sanitized to
 
 At startup, OxPHP canonicalizes the document root path. Every resolved file path is canonicalized and checked to ensure it remains within the document root. This blocks symlinks that point outside the served directory.
 
-Canonical path results are cached to avoid repeated `realpath(3)` syscalls. The cache shares the same LRU eviction as the metadata cache.
+Canonical path results are cached to avoid repeated `realpath(3)` syscalls. The canonical path cache has the same 200-entry capacity limit as the metadata cache, but is stored and evicted independently in its own HashMap.
 
 If the document root cannot be canonicalized at startup (for example, the directory does not exist yet), symlink protection is disabled and a warning is logged.
 
 ### TOCTOU mitigation
 
-The static file server re-canonicalizes the path at serve time, just before reading from disk. This mitigates time-of-check-to-time-of-use attacks where a symlink is swapped between route resolution and file read.
+The route cache caches validated `RouteResult` entries. TOCTOU re-canonicalization on every request is performed in `static_file::serve()`, just before reading from disk, not in the routing layer. This mitigates time-of-check-to-time-of-use attacks where a symlink is swapped between route resolution and file read.
 
 ## Configuration
 

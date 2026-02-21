@@ -112,7 +112,7 @@ if let Some(ref acceptor) = self.tls_acceptor {
 
 ### 3. Декомпозиция запроса
 
-В начале `handle_request_with_ctx()` запрос разделяется на части и тело:
+В начале `handle_request()` запрос разделяется на части и тело:
 
 ```rust
 let start = Instant::now();
@@ -131,7 +131,7 @@ let (parts, body) = req.into_parts();
 | -50 | `RateLimitHandler` | Проверяет скользящее окно по IP; устанавливает `early_response` при превышении лимита |
 | 0 | `MetricsRequestHandler` | Вызывает `metrics.record_request(&method)` |
 
-Событие `RequestReceived` включает поле `metadata: HashMap<String, String>`, которое обработчики плагинов могут использовать для прикрепления данных ключ-значение.
+Событие `RequestReceived` включает поле `metadata: Vec<(String, String)>`, которое обработчики плагинов могут использовать для прикрепления данных ключ-значение.
 
 Идентификатор запроса извлекается с помощью `std::mem::take` (перемещение без копирования):
 
@@ -165,7 +165,7 @@ if let Some(early_resp) = received_event.early_response {
 Если настроен `REQUEST_TIMEOUT_SECS` (ненулевое значение), оставшаяся часть конвейера оборачивается в `tokio::time::timeout`. При срабатывании тайм-аута возвращается 504 Gateway Timeout:
 
 ```rust
-match tokio::time::timeout(ctx.request_timeout, dispatch_request(...)).await {
+match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await {
     Ok(inner_result) => inner_result,
     Err(_) => Ok(Response::builder()
         .status(StatusCode::GATEWAY_TIMEOUT)
@@ -199,7 +199,7 @@ match tokio::time::timeout(ctx.request_timeout, dispatch_request(...)).await {
 
 ### 9b. Выполнение PHP
 
-Для результатов `Execute` тело запроса собирается с **лимитом 10 МБ** (`MAX_POST_BODY`). Если тело превышает этот лимит, немедленно возвращается ответ 413 Payload Too Large.
+Для результатов `Execute` тело запроса собирается с **лимитом 10 МБ** (`MAX_POST_BODY`). Сбор тела происходит только для запросов POST, PUT и PATCH — все остальные методы (GET, HEAD, DELETE и т.д.) получают пустой `Bytes` без чтения из потока тела. Если тело превышает этот лимит, немедленно возвращается ответ 413 Payload Too Large.
 
 ```rust
 const MAX_POST_BODY: usize = 10 * 1024 * 1024;
@@ -268,7 +268,7 @@ let response_rx = ctx.executor.execute(script_request);
 ```rust
 let mut complete_event = RequestComplete {
     request_id,    // move, no clone
-    method: method_str,
+    method,        // http::Method (moved, no clone)
     path: path_str,
     status,
     duration: elapsed,
@@ -297,7 +297,7 @@ let mut complete_event = RequestComplete {
 | Ошибка воркера PHP | 500 | Сломанный oneshot-канал |
 | Очередь заполнена | 503 | `SapiExecutor::execute()` через `try_send` |
 | Файл не найден | 404 | Разрешение маршрута |
-| Внутренняя ошибка | 500 | Универсальный обработчик в `handle_request_with_ctx` |
+| Внутренняя ошибка | 500 | Универсальный обработчик в `handle_request` |
 
 ## Бюджет аллокаций
 
@@ -305,7 +305,7 @@ let mut complete_event = RequestComplete {
 
 - **0 клонирований** `request_id` через большую часть конвейера (`std::mem::take`)
 - **1 клонирование** `request_id` в событии `ResponseBuilding` (нужен для повторного использования в `RequestComplete`)
-- **0 клонирований** `method_str` и `path_str` (перемещаются через конвейер)
+- **0 клонирований** `method` (`http::Method`) и `path_str` (перемещаются через конвейер)
 - Строки метода и пути **откладываются** до проверки раннего ответа — запросы, ограниченные по частоте, полностью избегают аллокации
 - `Accept-Encoding` проверяется неаллоцирующим вызовом `is_some_and`
 - `RouteConfig` использует предвычисленные индексные пути для корня `/`, чтобы избежать `PathBuf::join` на каждый запрос

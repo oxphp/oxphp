@@ -1,9 +1,9 @@
 ---
 title: Docker
-description: Стадыі Dockerfile, даведнік docker-compose.yml і парады па разгортванні
+description: Стадыі Dockerfile, даведнік compose.yml і парады па разгортванні
 ---
 
-OxPHP пастаўляецца з шматстадыйным Dockerfile, які стварае мінімальны рантайм-вобраз Alpine. На гэтай старонцы тлумачыцца кожная стадыя зборкі, канфігурацыя `docker-compose.yml` і тыповыя пытанні разгортвання.
+OxPHP пастаўляецца з шматстадыйным Dockerfile, які стварае мінімальны рантайм-вобраз Alpine. На гэтай старонцы тлумачыцца кожная стадыя зборкі, канфігурацыя `compose.yml` і тыповыя пытанні разгортвання.
 
 ## Стадыі Dockerfile
 
@@ -12,20 +12,20 @@ Dockerfile мае чатыры стадыі. Кожная стадыя збір�
 ### Стадыя 1: bridge-builder
 
 ```dockerfile
-FROM alpine:3.21 AS bridge-builder
+FROM php:8.4-zts-alpine3.23 AS bridge-builder
 RUN apk add --no-cache gcc musl-dev make
 COPY ext/bridge/ ./
 RUN make && make install
 ```
 
-Кампілюе `liboxphp_bridge.so` -- невялікую агульную бібліятэку на C, якая забяспечвае зменныя `__thread` TLS, агульныя паміж Rust і PHP-пашырэннем. Збіраецца на чыстым Alpine толькі з gcc -- без залежнасці ад PHP.
+Кампілюе `liboxphp_bridge.so` -- невялікую агульную бібліятэку на C, якая забяспечвае зменныя `__thread` TLS, агульныя паміж Rust і PHP-пашырэннем. Гэтая стадыя патрабуе загалоўкаў PHP, таму яна заснавана на вобразе PHP ZTS Alpine.
 
 **Артэфакты:** `/usr/local/lib/liboxphp_bridge.so`, `/usr/local/include/oxphp_bridge.h`
 
 ### Стадыя 2: ext-builder
 
 ```dockerfile
-FROM php:8.4-zts-alpine AS ext-builder
+FROM php:8.4-zts-alpine3.23 AS ext-builder
 RUN apk add --no-cache gcc musl-dev make autoconf
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
@@ -41,8 +41,8 @@ RUN phpize && ./configure --enable-oxphp-sapi && make && make install
 ### Стадыя 3: builder
 
 ```dockerfile
-FROM php:8.4-zts-alpine AS builder
-RUN apk add --no-cache rust cargo musl-dev pkgconfig ...
+FROM php:8.4-zts-alpine3.23 AS builder
+RUN apk add --no-cache gcc rust cargo musl-dev pkgconfig ...
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY Cargo.toml Cargo.lock ./
 
@@ -60,7 +60,7 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
     fi
 ```
 
-Збірае бінарны файл Rust у тым самым вобразе `php:8.4-zts-alpine`. Гэта неабходна, таму што бінарны файл звязваецца з `libphp.so` і `liboxphp_bridge.so` -- зборка ў іншым вобразе з іншай версіяй musl выклікае пашкоджанне TLS падчас выканання.
+Збірае бінарны файл Rust у тым самым вобразе `php:8.4-zts-alpine3.23`. Гэта неабходна, таму што бінарны файл звязваецца з `libphp.so` і `liboxphp_bridge.so` -- зборка ў іншым вобразе з іншай версіяй musl выклікае пашкоджанне TLS падчас выканання.
 
 На гэтай стадыі выкарыстоўваецца прыём кэшавання залежнасцяў: спачатку адбываецца зборка з фіктыўным `main.rs` для кэшавання ўсіх крэйтаў залежнасцяў, потым выдаляюцца толькі артэфакты, спецыфічныя для OxPHP (`target/release/oxphp`, `deps/oxphp-*`, `.fingerprint/oxphp-*`), перш чым капіраваць рэальны зыходны код. Такім чынам, пры зменах зыходнага кода перазбіраецца толькі фінальны бінарны файл.
 
@@ -71,7 +71,7 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
 ### Стадыя 4: runtime
 
 ```dockerfile
-FROM alpine:3.21
+FROM alpine:3.23
 RUN apk add --no-cache libgcc libxml2 sqlite-libs libcurl oniguruma argon2-libs zlib ...
 COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
@@ -83,7 +83,7 @@ EXPOSE 8080
 CMD ["oxphp"]
 ```
 
-Фінальны рантайм-вобраз заснаваны на `alpine:3.21`. Ён капіруе толькі неабходнае:
+Фінальны рантайм-вобраз заснаваны на `alpine:3.23`. Ён капіруе толькі неабходнае:
 
 - `libphp.so` -- бібліятэка рантайму PHP
 - `liboxphp_bridge.so` -- бібліятэка моста на C
@@ -92,11 +92,11 @@ CMD ["oxphp"]
 - Канфігурацыя PHP (`oxphp.ini`, загрузка пашырэнняў)
 - Змесціва вэб-кораня па змаўчанні (`/var/www/html/`)
 
-Карыстальнік `www-data` (UID 82, GID 82) запускае серверны працэс. Alpine 3.21 ужо мае папярэдне створаную групу `www-data`, таму Dockerfile дадае толькі карыстальніка.
+Карыстальнік `www-data` (UID 82, GID 82) запускае серверны працэс. Alpine 3.23 ужо мае папярэдне створаную групу `www-data`, таму Dockerfile дадае толькі карыстальніка.
 
 `LD_LIBRARY_PATH=/usr/local/lib` зададзена, каб дынамічны кампаноўшчык мог знайсці `libphp.so` і `liboxphp_bridge.so` падчас выканання.
 
-## Даведнік docker-compose.yml
+## Даведнік compose.yml
 
 ```yaml
 services:
@@ -181,6 +181,9 @@ services:
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |
 | `COMPRESSION` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
+| `TOKIO_WORKERS` | `0` | Патокі асінхроннага рантайму Tokio (0 = аднапаточны) |
+| `ACCESS_LOG` | `true` | Уключыць JSON-лог доступу для кожнага запыту |
+| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Памер папярэдне выдзеленага пула слотаў адказу |
 
 ### Парты
 
@@ -199,7 +202,7 @@ services:
 
 ## Карыстальнік www-data у Alpine
 
-Рантайм-вобраз працуе ад імя `www-data` (UID 82, GID 82) для сумяшчальнасці з канвенцыямі nginx і Apache. Alpine 3.21 мае папярэдне створаную групу `www-data` з GID 82, але не ўключае карыстальніка, таму Dockerfile стварае яго:
+Рантайм-вобраз працуе ад імя `www-data` (UID 82, GID 82) для сумяшчальнасці з канвенцыямі nginx і Apache. Alpine 3.23 мае папярэдне створаную групу `www-data` з GID 82, але не ўключае карыстальніка, таму Dockerfile стварае яго:
 
 ```dockerfile
 RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true

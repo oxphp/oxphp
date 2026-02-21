@@ -1,9 +1,9 @@
 ---
 title: Docker
-description: Dockerfile stages, docker-compose.yml reference, and deployment tips
+description: Dockerfile stages, compose.yml reference, and deployment tips
 ---
 
-OxPHP ships with a multi-stage Dockerfile that produces a minimal Alpine runtime image. This page explains each build stage, the `docker-compose.yml` configuration, and common deployment considerations.
+OxPHP ships with a multi-stage Dockerfile that produces a minimal Alpine runtime image. This page explains each build stage, the `compose.yml` configuration, and common deployment considerations.
 
 ## Dockerfile Stages
 
@@ -12,20 +12,20 @@ The Dockerfile has four stages. Each stage builds one component and passes artif
 ### Stage 1: bridge-builder
 
 ```dockerfile
-FROM alpine:3.21 AS bridge-builder
+FROM php:8.4-zts-alpine3.23 AS bridge-builder
 RUN apk add --no-cache gcc musl-dev make
 COPY ext/bridge/ ./
 RUN make && make install
 ```
 
-Compiles `liboxphp_bridge.so`, a small C shared library that provides `__thread` TLS variables shared between Rust and the PHP extension. This is built on plain Alpine with just gcc -- it has no PHP dependency.
+Compiles `liboxphp_bridge.so`, a small C shared library that provides `__thread` TLS variables shared between Rust and the PHP extension. This stage requires PHP headers, so it is based on the PHP ZTS Alpine image.
 
 **Artifacts:** `/usr/local/lib/liboxphp_bridge.so`, `/usr/local/include/oxphp_bridge.h`
 
 ### Stage 2: ext-builder
 
 ```dockerfile
-FROM php:8.4-zts-alpine AS ext-builder
+FROM php:8.4-zts-alpine3.23 AS ext-builder
 RUN apk add --no-cache gcc musl-dev make autoconf
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
@@ -41,8 +41,8 @@ Builds the PHP extension (`oxphp_sapi.so`) using `phpize` from the PHP 8.4 ZTS i
 ### Stage 3: builder
 
 ```dockerfile
-FROM php:8.4-zts-alpine AS builder
-RUN apk add --no-cache rust cargo musl-dev pkgconfig ...
+FROM php:8.4-zts-alpine3.23 AS builder
+RUN apk add --no-cache gcc rust cargo musl-dev pkgconfig ...
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY Cargo.toml Cargo.lock ./
 
@@ -60,7 +60,7 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
     fi
 ```
 
-Builds the Rust binary inside the same `php:8.4-zts-alpine` image. This is required because the binary links against `libphp.so` and `liboxphp_bridge.so` -- building in a separate image with a different musl version causes TLS corruption at runtime.
+Builds the Rust binary inside the same `php:8.4-zts-alpine3.23` image. This is required because the binary links against `libphp.so` and `liboxphp_bridge.so` -- building in a separate image with a different musl version causes TLS corruption at runtime.
 
 The stage uses a dependency caching trick: it first builds with a dummy `main.rs` to cache all dependency crates, then removes only the OxPHP-specific artifacts (`target/release/oxphp`, `deps/oxphp-*`, `.fingerprint/oxphp-*`) before copying the real source. This way, only the final binary is rebuilt on source changes.
 
@@ -71,7 +71,7 @@ The `CARGO_FEATURES` build argument allows enabling optional Cargo features (suc
 ### Stage 4: runtime
 
 ```dockerfile
-FROM alpine:3.21
+FROM alpine:3.23
 RUN apk add --no-cache libgcc libxml2 sqlite-libs libcurl oniguruma argon2-libs zlib ...
 COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
@@ -83,7 +83,7 @@ EXPOSE 8080
 CMD ["oxphp"]
 ```
 
-The final runtime image is based on `alpine:3.21`. It copies only what is needed:
+The final runtime image is based on `alpine:3.23`. It copies only what is needed:
 
 - `libphp.so` -- the PHP runtime library
 - `liboxphp_bridge.so` -- the C bridge library
@@ -92,11 +92,11 @@ The final runtime image is based on `alpine:3.21`. It copies only what is needed
 - PHP configuration (`oxphp.ini`, extension loading)
 - Default web root contents (`/var/www/html/`)
 
-The `www-data` user (UID 82, GID 82) runs the server process. Alpine 3.21 already has the `www-data` group pre-created, so the Dockerfile adds only the user.
+The `www-data` user (UID 82, GID 82) runs the server process. Alpine 3.23 already has the `www-data` group pre-created, so the Dockerfile adds only the user.
 
 `LD_LIBRARY_PATH=/usr/local/lib` is set so the dynamic linker can find `libphp.so` and `liboxphp_bridge.so` at runtime.
 
-## docker-compose.yml Reference
+## compose.yml Reference
 
 ```yaml
 services:
@@ -182,6 +182,9 @@ services:
 | `TLS_KEY` | _(unset)_ | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |
 | `COMPRESSION` | `true` | Enable Brotli compression. Set to `false`, `0`, or `off` to disable |
+| `TOKIO_WORKERS` | `0` | Tokio async runtime threads (0 = single-thread) |
+| `ACCESS_LOG` | `true` | Enable per-request JSON access log |
+| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Pre-allocated response slot pool size |
 
 ### Ports
 
@@ -200,7 +203,7 @@ services:
 
 ## Alpine www-data User
 
-The runtime image runs as `www-data` (UID 82, GID 82) for compatibility with nginx and Apache conventions. Alpine 3.21 has the `www-data` group pre-created at GID 82 but does not include the user, so the Dockerfile creates it:
+The runtime image runs as `www-data` (UID 82, GID 82) for compatibility with nginx and Apache conventions. Alpine 3.23 has the `www-data` group pre-created at GID 82 but does not include the user, so the Dockerfile creates it:
 
 ```dockerfile
 RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true

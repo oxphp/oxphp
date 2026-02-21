@@ -57,8 +57,7 @@ The solution is `liboxphp_bridge.so` — a small C shared library that both the 
                     │                      │
                     │  static (global)     │
                     │    plugin_functions  │
-                    │    dispatch_fn       │
-                    │    call_php_fn       │
+                    │    native_dispatch   │
                     └──────────────────────┘
                                ▲
 ┌────────────────────┐         │
@@ -139,26 +138,42 @@ The bridge also provides a **global** (not `__thread`) plugin function registry.
 | `oxphp_bridge_get_plugin_fn_name(index)` | Get plugin function name by index |
 | `oxphp_bridge_get_plugin_fn_required(index)` | Get required param count by index |
 | `oxphp_bridge_get_plugin_fn_total(index)` | Get total param count by index |
-| `oxphp_bridge_set_dispatch_fn(fn)` | Set the Rust dispatch callback |
-| `oxphp_bridge_get_dispatch_fn()` | Get the Rust dispatch callback |
-| `oxphp_bridge_set_call_php_fn(fn)` | Set the PHP call callback |
-| `oxphp_bridge_get_call_php_fn()` | Get the PHP call callback |
-| `oxphp_bridge_dispatch(name, json_args)` | Dispatch to Rust handler |
-| `oxphp_bridge_call_php(name, json_args)` | Call a PHP function from Rust |
-| `oxphp_bridge_strdup(s)` | Duplicate a string using C `malloc` |
-| `oxphp_bridge_free_string(ptr)` | Free a string allocated by `strdup` |
+| `oxphp_bridge_set_native_dispatch(fn)` | Set the Rust native dispatch callback |
+| `oxphp_bridge_get_native_dispatch()` | Get the Rust native dispatch callback |
 
 The registry is global (not per-thread) because it is written once from the main thread during startup and read during MINIT — no concurrent access. It is never freed; it lives for the entire process lifetime.
 
-### Cross-Boundary Data Format
+### Native Bridge: Zero-Serialization Cross-Boundary Calls
 
-All cross-boundary function calls use a JSON envelope:
+Rust and PHP communicate via direct `zval` pointer access — no JSON serialization. C accessor functions in `liboxphp_bridge.so` provide a safe, type-checked interface to read and write PHP values:
 
-- **Arguments**: JSON-encoded array of parameters
-- **Success result**: `{"ok": value}`
-- **Error result**: `{"err": "message"}`
+**Reading arguments (PHP → Rust):**
 
-The `oxphp_bridge_strdup`/`oxphp_bridge_free_string` pair uses C's `malloc`/`free` to avoid allocator mismatch between Rust and the C library.
+| Function | Purpose |
+|---|---|
+| `oxphp_val_type(zval*)` | Get the type of a zval (IS_LONG, IS_DOUBLE, IS_STRING, etc.) |
+| `oxphp_arg_long(zval*)` | Read a long integer argument |
+| `oxphp_arg_double(zval*)` | Read a double argument |
+| `oxphp_arg_str(zval*, len*)` | Read a string argument (pointer + length) |
+| `oxphp_arg_bool(zval*)` | Read a boolean argument |
+
+**Writing return values (Rust → PHP):**
+
+| Function | Purpose |
+|---|---|
+| `oxphp_ret_long(zval*, val)` | Write a long integer return value |
+| `oxphp_ret_double(zval*, val)` | Write a double return value |
+| `oxphp_ret_str(zval*, str, len)` | Write a string return value |
+| `oxphp_ret_bool(zval*, val)` | Write a boolean return value |
+| `oxphp_ret_null(zval*)` | Write a null return value |
+
+**Native dispatch flow:**
+
+`oxphp_bridge_set_native_dispatch(fn)` registers the Rust callback. When a PHP script calls a plugin function, `ZEND_FUNCTION(oxphp_native_dispatch)` in the extension invokes this callback, passing raw `zval*` pointers for arguments and the return value directly — no serialization occurs.
+
+**Calling PHP from Rust:**
+
+`oxphp_call_php_native(func_name, args, argc, result)` allows Rust to invoke PHP userland functions. The C side resolves the function via `zend_hash_str_find_ptr` and calls `zend_call_known_function` directly. The result zval is owned by Rust and released via `zval_ptr_dtor` on drop.
 
 ## PHP Extension
 
@@ -235,7 +250,7 @@ zend_module_entry oxphp_sapi_module_entry = {
 
 **MINIT** performs two tasks:
 
-1. Sets `oxphp_bridge_set_call_php_fn(oxphp_sapi_call_php)` so Rust can call PHP functions
+1. Sets `oxphp_bridge_set_native_dispatch(oxphp_native_dispatch)` so the bridge knows which function to call when plugin functions are invoked from PHP
 2. Reads the plugin function registry from the bridge and registers each function with Zend via `zend_register_functions()` — this must happen at module startup (not request startup) so OPcache's compile-time `function_exists()` optimization can see the functions
 
 ## Data Flow Summary
@@ -243,7 +258,7 @@ zend_module_entry oxphp_sapi_module_entry = {
 ```
 Rust (Tokio task)                     PHP Worker Thread
 ─────────────────                     ──────────────────
-ScriptRequest ──sync_channel──▶ recv()
+ScriptRequest ──crossbeam_channel::bounded──▶ recv()
                                       │
                                       ├── bridge::init_ctx()
                                       ├── bridge::set_request_id()

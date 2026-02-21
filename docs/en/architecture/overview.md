@@ -24,7 +24,7 @@ OxPHP is a single-binary HTTP server that replaces the traditional nginx + PHP-F
                     │                      │              │           │
                     └──────────────────────┼──────────────┼───────────┘
                          ScriptRequest     │              │
-                  (sync_channel + oneshot) │  ┌───────────┘
+              (crossbeam_channel + oneshot)│  ┌───────────┘
                                            │  │
                                            ▼  ▼
                     ┌──────────────────────┼──┼───────────────────────┐
@@ -39,7 +39,7 @@ OxPHP is a single-binary HTTP server that replaces the traditional nginx + PHP-F
 
 The **Tokio runtime** is configurable via `TOKIO_WORKERS`. When set to `0` (default), it uses `Builder::new_current_thread()` for a single-threaded async runtime. When set to `N`, it uses `Builder::new_multi_thread()` with N worker threads for higher throughput. It handles all asynchronous work: accepting TCP connections, TLS handshakes, HTTP parsing, routing, compression, and event dispatch. Each connection is a lightweight Tokio task. The process uses mimalloc as the global allocator for lower allocation latency under thread contention.
 
-The **PHP worker pool** is a set of dedicated OS threads. Each thread owns a PHP ZTS (Zend Thread Safety) interpreter instance. Workers receive `ScriptRequest` structs through a bounded `crossbeam_channel` and return `ScriptResponse` through a `tokio::sync::oneshot` channel.
+The **PHP worker pool** is a set of dedicated OS threads. Each thread owns a PHP ZTS (Zend Thread Safety) interpreter instance. Workers receive `ScriptRequest` structs through a bounded `crossbeam_channel::bounded` channel and return `ScriptResponse` through a `tokio::sync::oneshot` channel.
 
 ### Why Not Multi-Threaded PHP Inside Tokio?
 
@@ -93,7 +93,7 @@ PHP's C runtime is not async-safe. Functions like `php_request_startup()` and `p
 | **Server** | `src/server/mod.rs` | Owns the connection accept loop, hyper-util builder, shutdown flag |
 | **RouteConfig** | `src/server/routing.rs` | Resolves URI paths to `Serve`, `Execute`, or `NotFound` |
 | **FileCache** | `src/server/response/static_file.rs` | LRU cache for file metadata and canonical path lookups |
-| **ScriptExecutor** | `src/executor/mod.rs` | Trait for PHP execution backends (`SapiExecutor`, `StubExecutor`) |
+| **ScriptExecutor** | `src/executor/mod.rs` | Trait for PHP execution backends (`SapiExecutor`, `StubExecutor`); `execute()` returns `ExecuteResult` |
 | **Metrics** | `src/metrics.rs` | Lock-free atomic counters (Prometheus exposition format) |
 | **EventDispatcher** | `src/events/dispatcher.rs` | Typed, priority-ordered synchronous event dispatch |
 | **PluginManager** | `src/plugin/mod.rs` | Plugin lifecycle management with topological sort |
@@ -124,7 +124,7 @@ src/
 │   └── response/
 │       └── static_file.rs   # Static file serving with MIME detection and caching
 ├── executor/
-│   ├── mod.rs               # ScriptExecutor trait, create_executor() factory
+│   ├── mod.rs               # ScriptExecutor trait (execute() → ExecuteResult), create_executor() factory
 │   ├── stub.rs              # StubExecutor (returns 200 OK, for benchmarking)
 │   └── sapi.rs              # SapiExecutor (PHP ZTS worker pool) [feature-gated]
 ├── events/
@@ -140,8 +140,14 @@ src/
 │   ├── server_header.rs     # Adds Server and X-Request-ID headers
 │   └── access_log.rs        # Structured access log via tracing
 ├── plugin/
-│   ├── mod.rs               # PluginManager, Plugin trait, PluginContext
-│   └── cookies.rs           # Plugin cookie isolation
+│   ├── mod.rs               # Plugin trait
+│   ├── context.rs           # PluginContext
+│   ├── cookies.rs           # Plugin cookie isolation
+│   ├── handler.rs           # Handler traits
+│   ├── macros.rs            # Plugin helper macros
+│   ├── manager.rs           # PluginManager
+│   ├── php.rs               # PHP function registration
+│   └── wrappers.rs          # Event handler wrappers
 ├── plugins/
 │   └── example.rs           # Example plugin [feature-gated: plugin-example]
 └── php/                     # PHP FFI bindings [feature-gated]
@@ -158,6 +164,15 @@ The async and synchronous halves of OxPHP communicate through two channel types:
 | `crossbeam_channel::bounded` | Tokio → PHP worker | `ScriptRequest` | Bounded queue with backpressure (503 on full) |
 | `tokio::sync::oneshot` | PHP worker → Tokio | `ScriptResponse` | Single response per request |
 
+`ScriptExecutor::execute()` returns an `ExecuteResult` enum rather than a raw `oneshot::Receiver`. This allows the executor to return an error response immediately (without a worker thread) when the queue is full or the worker pool is unavailable:
+
+```rust
+pub enum ExecuteResult {
+    Immediate(ScriptResponse),
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+```
+
 This pattern allows the Tokio runtime to dispatch work to PHP workers without blocking and to await responses asynchronously. See [Worker Pool](./worker-pool.md) for details.
 
 ## Startup Sequence
@@ -171,7 +186,7 @@ This pattern allows the Tokio runtime to dispatch work to PHP workers without bl
 7. **Scale manager**: `executor.start_scale_manager()` spawns the worker scaling task (no-op in static mode). In static mode, a background health monitor detects and respawns dead workers
 8. **Rate limiter**: Optional, with background cleanup task
 9. **TLS**: Optional, loads certificate and key via `rustls`
-10. **Event dispatcher**: Built-in handlers registered, then `freeze()` sorts by priority
+10. **Event dispatcher**: Built-in handlers registered (note: `AccessLogHandler` is only registered when `config.access_log` is enabled), then `freeze()` sorts by priority
 11. **TCP listener**: Binds to the configured address
 12. **Internal server**: Optional `/health`, `/metrics`, `/config` on a separate port
 13. **Plugin ready**: `plugin_manager.on_ready_all()` notifies plugins that the server is listening

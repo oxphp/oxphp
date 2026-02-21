@@ -43,7 +43,7 @@ docker compose up -d
 docker compose build --build-arg CARGO_FEATURES="plugin-example"
 ```
 
-Глядзіце [даведнік па Docker](/getting-started/docker/) для поўнага разбору стадый Dockerfile і канфігурацыі `docker-compose.yml`.
+Глядзіце [даведнік па Docker](/getting-started/docker/) для поўнага разбору стадый Dockerfile і канфігурацыі `compose.yml`.
 
 ## Зборка з зыходнікаў (Stub Executor)
 
@@ -127,5 +127,5 @@ curl http://localhost:9090/health
 ## Глядзіце таксама
 
 - [Хуткі старт](/getting-started/quick-start/) -- запусціце OxPHP менш чым за 5 хвілін
-- [Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік docker-compose.yml і парады па разгортванні
+- [Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік compose.yml і парады па разгортванні
 - [Канфігурацыя](/operations/configuration/) -- поўны спіс зменных асяроддзя

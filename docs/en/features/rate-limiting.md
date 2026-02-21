@@ -22,7 +22,7 @@ Setting `RATE_LIMIT=0` disables rate limiting entirely. When disabled, the rate 
 
 ## How it works
 
-The rate limiter uses a `DashMap` (concurrent lock-free hash map) keyed by client IP address. Each entry stores a request count and the timestamp when the current window started.
+The rate limiter uses a `DashMap` (sharded concurrent hash map) keyed by client IP address. Each entry stores a request count and the timestamp when the current window started.
 
 ### Request flow
 

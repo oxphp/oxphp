@@ -11,9 +11,9 @@ This guide walks you through running OxPHP with Docker and serving your first PH
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. Add a docker-compose.yml
+## 2. Add a compose.yml
 
-Create a minimal `docker-compose.yml`:
+Create a minimal `compose.yml`:
 
 ```yaml
 services:
@@ -111,7 +111,7 @@ OxPHP outputs structured JSON logs. Each request produces an access log entry wi
 
 ## Next Steps
 
-- [Docker guide](/getting-started/docker/) -- Dockerfile stages, docker-compose.yml reference, and volume mounts
+- [Docker guide](/getting-started/docker/) -- Dockerfile stages, compose.yml reference, and volume mounts
 - [Configuration](/operations/configuration/) -- full list of environment variables
 - [Routing](/features/routing/) -- Traditional, Framework, and SPA routing modes
 - [PHP Integration](/php/functions/) -- available PHP extension functions

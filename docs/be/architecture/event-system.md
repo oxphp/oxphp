@@ -182,9 +182,9 @@ OxPHP вызначае 18 тыпаў падзей у `src/events/types.rs`, ар
 
 | Падзея | Назва | Палі | Апісанне |
 |---|---|---|---|
-| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata` | HTTP-запыт атрыманы, да маршрутызацыі |
+| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata: Vec<(String, String)>` | HTTP-запыт атрыманы, да маршрутызацыі |
 | `RouteResolved` | `request.route_resolved` | `request_id`, `path` | Маршрут разрашаны, да выканання |
-| `RequestComplete` | `request.complete` | `request_id`, `method`, `path`, `status`, `duration`, `remote_addr` | Запыт цалкам апрацаваны |
+| `RequestComplete` | `request.complete` | `request_id`, `method: Method`, `path`, `status`, `duration`, `remote_addr` | Запыт цалкам апрацаваны |
 
 ### PHP
 
@@ -235,7 +235,7 @@ pub struct RequestReceived {
     pub remote_addr: SocketAddr,
     pub request_id: String,
     pub early_response: Option<Response<ResponseBody>>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: Vec<(String, String)>,
 }
 ```
 
@@ -261,7 +261,7 @@ pub struct ResponseBuilding {
 ```rust
 pub struct RequestComplete {
     pub request_id: String,
-    pub method: String,
+    pub method: Method,  // http::Method
     pub path: String,
     pub status: u16,
     pub duration: Duration,
@@ -281,7 +281,7 @@ pub struct RequestComplete {
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Запісвае клас статусу адказу і працягласць |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Замяняе цела адказу на карыстальніцкі HTML (статус >= 400) |
 | `ServerHeaderHandler` | `ResponseBuilding` | 100 | Дадае загалоўкі `Server: OxPHP/{version}` і `X-Request-ID` |
-| `AccessLogHandler` | `RequestComplete` | 100 | Выводзіць структураваны JSON-лог доступу праз `tracing::info!` |
+| `AccessLogHandler` | `RequestComplete` | 100 | Выводзіць структураваны JSON-лог доступу праз `tracing::info!` (рэгіструецца толькі калі ўключаны `config.access_log`) |
 
 ### Дызайн прыярытэтаў
 
@@ -304,7 +304,6 @@ dispatcher.on(RequestIdGenerator);
 dispatcher.on(MetricsRequestHandler::new(...));
 dispatcher.on(MetricsResponseHandler::new(...));
 dispatcher.on(ServerHeaderHandler);
-dispatcher.on(AccessLogHandler);
 
 // Only if configured
 if let Some(ref limiter) = rate_limiter {
@@ -312,6 +311,9 @@ if let Some(ref limiter) = rate_limiter {
 }
 if let Some(ref pages) = error_pages {
     dispatcher.on(ErrorPagesHandler::new(Arc::clone(pages)));
+}
+if config.access_log {
+    dispatcher.on(AccessLogHandler);
 }
 
 dispatcher.freeze();

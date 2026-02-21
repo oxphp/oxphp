@@ -112,7 +112,7 @@ if let Some(ref acceptor) = self.tls_acceptor {
 
 ### 3. Request Decomposition
 
-At the start of `handle_request_with_ctx()`, the request is split into parts and body:
+At the start of `handle_request()`, the request is split into parts and body:
 
 ```rust
 let start = Instant::now();
@@ -131,7 +131,7 @@ The first event dispatch runs three handlers in priority order:
 | -50 | `RateLimitHandler` | Checks per-IP sliding window; sets `early_response` if limit exceeded |
 | 0 | `MetricsRequestHandler` | Calls `metrics.record_request(&method)` |
 
-The `RequestReceived` event includes a `metadata: HashMap<String, String>` field that plugin handlers can use to attach key-value data.
+The `RequestReceived` event includes a `metadata: Vec<(String, String)>` field that plugin handlers can use to attach key-value data.
 
 The request ID is extracted with `std::mem::take` (zero-copy move, no clone):
 
@@ -165,7 +165,7 @@ After the early response check, the pipeline:
 If `REQUEST_TIMEOUT_SECS` is configured (non-zero), the remaining pipeline is wrapped in `tokio::time::timeout`. If the timeout fires, a 504 Gateway Timeout is returned:
 
 ```rust
-match tokio::time::timeout(ctx.request_timeout, dispatch_request(...)).await {
+match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await {
     Ok(inner_result) => inner_result,
     Err(_) => Ok(Response::builder()
         .status(StatusCode::GATEWAY_TIMEOUT)
@@ -199,7 +199,7 @@ For `Serve` results, `static_file::serve()` reads the file from disk (with file 
 
 ### 9b. PHP Execution
 
-For `Execute` results, the request body is collected with a **10 MB limit** (`MAX_POST_BODY`). If the body exceeds this limit, a 413 Payload Too Large response is returned immediately.
+For `Execute` results, the request body is collected with a **10 MB limit** (`MAX_POST_BODY`). Body collection only occurs for POST, PUT, and PATCH requests — all other methods (GET, HEAD, DELETE, etc.) receive an empty `Bytes` without reading from the body stream. If the body exceeds this limit, a 413 Payload Too Large response is returned immediately.
 
 ```rust
 const MAX_POST_BODY: usize = 10 * 1024 * 1024;
@@ -268,7 +268,7 @@ The final event carries the complete request metadata:
 ```rust
 let mut complete_event = RequestComplete {
     request_id,    // move, no clone
-    method: method_str,
+    method,        // http::Method (moved, no clone)
     path: path_str,
     status,
     duration: elapsed,
@@ -297,7 +297,7 @@ Errors at each stage produce appropriate HTTP status codes:
 | PHP worker error | 500 | Broken oneshot channel |
 | Queue full | 503 | `SapiExecutor::execute()` via `try_send` |
 | File not found | 404 | Route resolution |
-| Internal error | 500 | Catch-all in `handle_request_with_ctx` |
+| Internal error | 500 | Catch-all in `handle_request` |
 
 ## Allocation Budget
 
@@ -305,7 +305,7 @@ The pipeline is designed to minimize allocations per request:
 
 - **0 clones** of `request_id` through most of the pipeline (`std::mem::take`)
 - **1 clone** of `request_id` at the `ResponseBuilding` event (needed for reuse in `RequestComplete`)
-- **0 clones** of `method_str` and `path_str` (moved through the pipeline)
+- **0 clones** of `method` (`http::Method`) and `path_str` (moved through the pipeline)
 - Method and path strings are **deferred** until after the early response check — rate-limited requests avoid the allocation entirely
 - `Accept-Encoding` is checked with a non-allocating `is_some_and` call
 - `RouteConfig` uses pre-computed index paths for the root `/` to avoid `PathBuf::join` on every request

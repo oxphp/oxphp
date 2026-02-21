@@ -57,8 +57,7 @@ OxPHP рэгіструе ўласны `sapi_module_struct` з назвай `"oxp
                     │                      │
                     │  static (global)     │
                     │    plugin_functions  │
-                    │    dispatch_fn       │
-                    │    call_php_fn       │
+                    │    native_dispatch   │
                     └──────────────────────┘
                                ▲
 ┌────────────────────┐         │
@@ -139,26 +138,42 @@ typedef struct {
 | `oxphp_bridge_get_plugin_fn_name(index)` | Атрымаць назву функцыі плагіна па індэксе |
 | `oxphp_bridge_get_plugin_fn_required(index)` | Атрымаць колькасць абавязковых параметраў па індэксе |
 | `oxphp_bridge_get_plugin_fn_total(index)` | Атрымаць агульную колькасць параметраў па індэксе |
-| `oxphp_bridge_set_dispatch_fn(fn)` | Усталяваць зваротны выклік дыспетчарызацыі Rust |
-| `oxphp_bridge_get_dispatch_fn()` | Атрымаць зваротны выклік дыспетчарызацыі Rust |
-| `oxphp_bridge_set_call_php_fn(fn)` | Усталяваць зваротны выклік PHP |
-| `oxphp_bridge_get_call_php_fn()` | Атрымаць зваротны выклік PHP |
-| `oxphp_bridge_dispatch(name, json_args)` | Дыспетчарызаваць да апрацоўшчыка Rust |
-| `oxphp_bridge_call_php(name, json_args)` | Выклікаць PHP-функцыю з Rust |
-| `oxphp_bridge_strdup(s)` | Дубліраваць радок з дапамогай C `malloc` |
-| `oxphp_bridge_free_string(ptr)` | Вызваліць радок, алакаваны `strdup` |
+| `oxphp_bridge_set_native_dispatch(fn)` | Усталяваць зваротны выклік натыўнай дыспетчарызацыі Rust |
+| `oxphp_bridge_get_native_dispatch()` | Атрымаць зваротны выклік натыўнай дыспетчарызацыі Rust |
 
 Рэестр глабальны (не для кожнага патоку), таму што ён запісваецца аднойчы з галоўнага патоку падчас запуску і чытаецца падчас MINIT — без канкурэнтнага доступу. Ён ніколі не вызваляецца; ён жыве на працягу ўсяго часу жыцця працэсу.
 
-### Фармат дадзеных для міжмяжовага абмену
+### Натыўны мост: выклікі паміж межамі без серыялізацыі
 
-Усе выклікі функцый паміж межамі выкарыстоўваюць JSON-абалонку:
+Rust і PHP камунікуюць праз прамы доступ да паказальнікаў `zval` — без JSON-серыялізацыі. C-функцыі доступу ў `liboxphp_bridge.so` забяспечваюць бяспечны, тыпізаваны інтэрфейс для чытання і запісу PHP-значэнняў:
 
-- **Аргументы**: JSON-кадаваны масіў параметраў
-- **Паспяховы вынік**: `{"ok": value}`
-- **Вынік з памылкай**: `{"err": "message"}`
+**Чытанне аргументаў (PHP → Rust):**
 
-Пара `oxphp_bridge_strdup`/`oxphp_bridge_free_string` выкарыстоўвае C `malloc`/`free`, каб пазбегнуць неадпаведнасці алакатараў паміж Rust і бібліятэкай C.
+| Функцыя | Прызначэнне |
+|---|---|
+| `oxphp_val_type(zval*)` | Атрымаць тып zval (IS_LONG, IS_DOUBLE, IS_STRING і інш.) |
+| `oxphp_arg_long(zval*)` | Прачытаць цэлалікавы аргумент |
+| `oxphp_arg_double(zval*)` | Прачытаць аргумент з плаваючай кропкай |
+| `oxphp_arg_str(zval*, len*)` | Прачытаць радковы аргумент (паказальнік + даўжыня) |
+| `oxphp_arg_bool(zval*)` | Прачытаць булевы аргумент |
+
+**Запіс вяртаемых значэнняў (Rust → PHP):**
+
+| Функцыя | Прызначэнне |
+|---|---|
+| `oxphp_ret_long(zval*, val)` | Запісаць цэлалікавае вяртаемае значэнне |
+| `oxphp_ret_double(zval*, val)` | Запісаць вяртаемае значэнне з плаваючай кропкай |
+| `oxphp_ret_str(zval*, str, len)` | Запісаць радковае вяртаемае значэнне |
+| `oxphp_ret_bool(zval*, val)` | Запісаць булевае вяртаемае значэнне |
+| `oxphp_ret_null(zval*)` | Запісаць null-вяртаемае значэнне |
+
+**Паток натыўнай дыспетчарызацыі:**
+
+`oxphp_bridge_set_native_dispatch(fn)` рэгіструе зваротны выклік Rust. Калі PHP-скрыпт выклікае функцыю плагіна, `ZEND_FUNCTION(oxphp_native_dispatch)` у пашырэнні выклікае гэты зваротны выклік, перадаючы сырыя паказальнікі `zval*` на аргументы і вяртаемае значэнне напрамую — без серыялізацыі.
+
+**Выклік PHP з Rust:**
+
+`oxphp_call_php_native(func_name, args, argc, result)` дазваляе Rust выклікаць PHP-функцыі прыкладнога ўзроўню. C-бок разрашае функцыю праз `zend_hash_str_find_ptr` і выклікае `zend_call_known_function` напрамую. Вынік-zval належыць Rust і вызваляецца праз `zval_ptr_dtor` пры выдаленні.
 
 ## PHP-пашырэнне
 
@@ -235,7 +250,7 @@ zend_module_entry oxphp_sapi_module_entry = {
 
 **MINIT** выконвае дзве задачы:
 
-1. Усталёўвае `oxphp_bridge_set_call_php_fn(oxphp_sapi_call_php)`, каб Rust мог выклікаць PHP-функцыі
+1. Усталёўвае `oxphp_bridge_set_native_dispatch(oxphp_native_dispatch)`, каб мост ведаў, якую функцыю выклікаць, калі функцыі плагінаў выклікаюцца з PHP
 2. Чытае рэестр функцый плагінаў з моста і рэгіструе кожную функцыю ў Zend праз `zend_register_functions()` — гэта павінна адбыцца пры запуску модуля (а не пры запуску запыту), каб аптымізацыя `function_exists()` часу кампіляцыі OPcache магла бачыць функцыі
 
 ## Зводка патоку дадзеных
@@ -243,7 +258,7 @@ zend_module_entry oxphp_sapi_module_entry = {
 ```
 Rust (Tokio task)                     PHP Worker Thread
 ─────────────────                     ──────────────────
-ScriptRequest ──sync_channel──▶ recv()
+ScriptRequest ──crossbeam_channel::bounded──▶ recv()
                                       │
                                       ├── bridge::init_ctx()
                                       ├── bridge::set_request_id()

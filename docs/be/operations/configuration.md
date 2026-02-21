@@ -31,6 +31,7 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 | Зменная | Па змаўчанні | Апісанне |
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Узровень дэталізацыі логаў. Адзін з: `trace`, `debug`, `info`, `warn`, `error` |
+| `ACCESS_LOG` | `true` | Уключыць пажадання JSON-лог доступу для кожнага запыту. Ілжывыя значэнні: `false`, `0`, `off` |
 
 ### Тайм-аўты
 
@@ -250,6 +251,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
+  "access_log": true,
   "plugins": {}
 }
 ```

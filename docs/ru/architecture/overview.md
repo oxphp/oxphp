@@ -24,7 +24,7 @@ OxPHP — это HTTP-сервер в виде единого бинарного
                     │                      │              │           │
                     └──────────────────────┼──────────────┼───────────┘
                          ScriptRequest     │              │
-                  (sync_channel + oneshot) │  ┌───────────┘
+              (crossbeam_channel + oneshot)│  ┌───────────┘
                                            │  │
                                            ▼  ▼
                     ┌──────────────────────┼──┼───────────────────────┐
@@ -93,7 +93,7 @@ C-среда выполнения PHP не является безопасной
 | **Server** | `src/server/mod.rs` | Управляет циклом приёма соединений, построителем hyper-util, флагом остановки |
 | **RouteConfig** | `src/server/routing.rs` | Разрешает URI-пути в `Serve`, `Execute` или `NotFound` |
 | **FileCache** | `src/server/response/static_file.rs` | LRU-кэш для метаданных файлов и поиска канонических путей |
-| **ScriptExecutor** | `src/executor/mod.rs` | Трейт для бэкендов выполнения PHP (`SapiExecutor`, `StubExecutor`) |
+| **ScriptExecutor** | `src/executor/mod.rs` | Трейт для бэкендов выполнения PHP (`SapiExecutor`, `StubExecutor`); `execute()` возвращает `ExecuteResult` |
 | **Metrics** | `src/metrics.rs` | Безблокировочные атомарные счётчики (формат экспозиции Prometheus) |
 | **EventDispatcher** | `src/events/dispatcher.rs` | Типизированная синхронная диспетчеризация событий с упорядочиванием по приоритету |
 | **PluginManager** | `src/plugin/mod.rs` | Управление жизненным циклом плагинов с топологической сортировкой |
@@ -124,7 +124,7 @@ src/
 │   └── response/
 │       └── static_file.rs   # Раздача статических файлов с определением MIME-типа и кэшированием
 ├── executor/
-│   ├── mod.rs               # Трейт ScriptExecutor, фабрика create_executor()
+│   ├── mod.rs               # Трейт ScriptExecutor (execute() → ExecuteResult), фабрика create_executor()
 │   ├── stub.rs              # StubExecutor (возвращает 200 OK, для бенчмарков)
 │   └── sapi.rs              # SapiExecutor (пул воркеров PHP ZTS) [за feature-гейтом]
 ├── events/
@@ -140,8 +140,14 @@ src/
 │   ├── server_header.rs     # Добавляет заголовки Server и X-Request-ID
 │   └── access_log.rs        # Структурированный лог доступа через tracing
 ├── plugin/
-│   ├── mod.rs               # PluginManager, трейт Plugin, PluginContext
-│   └── cookies.rs           # Изоляция cookie плагинов
+│   ├── mod.rs               # Трейт Plugin
+│   ├── context.rs           # PluginContext
+│   ├── cookies.rs           # Изоляция cookie плагинов
+│   ├── handler.rs           # Трейты обработчиков
+│   ├── macros.rs            # Вспомогательные макросы плагинов
+│   ├── manager.rs           # PluginManager
+│   ├── php.rs               # Регистрация PHP-функций
+│   └── wrappers.rs          # Обёртки обработчиков событий
 ├── plugins/
 │   └── example.rs           # Плагин примера [за feature-гейтом: plugin-example]
 └── php/                     # FFI-привязки PHP [за feature-гейтом]
@@ -158,6 +164,15 @@ src/
 | `crossbeam_channel::bounded` | Tokio → воркер PHP | `ScriptRequest` | Ограниченная очередь с обратным давлением (503 при заполнении) |
 | `tokio::sync::oneshot` | Воркер PHP → Tokio | `ScriptResponse` | Один ответ на запрос |
 
+`ScriptExecutor::execute()` возвращает перечисление `ExecuteResult`, а не сырой `oneshot::Receiver`. Это позволяет исполнителю немедленно вернуть ответ с ошибкой (без потока воркера), когда очередь заполнена или пул воркеров недоступен:
+
+```rust
+pub enum ExecuteResult {
+    Immediate(ScriptResponse),
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+```
+
 Этот паттерн позволяет среде выполнения Tokio отправлять работу воркерам PHP без блокировки и асинхронно ожидать ответы. Подробности см. в разделе [Пул воркеров](./worker-pool.md).
 
 ## Последовательность запуска
@@ -171,7 +186,7 @@ src/
 7. **Менеджер масштабирования**: `executor.start_scale_manager()` порождает задачу масштабирования воркеров (no-op в статическом режиме). В статическом режиме фоновый монитор здоровья обнаруживает и пересоздаёт упавшие воркеры
 8. **Ограничение частоты запросов**: Опционально, с фоновой задачей очистки
 9. **TLS**: Опционально, загружает сертификат и ключ через `rustls`
-10. **Диспетчер событий**: Встроенные обработчики зарегистрированы, затем `freeze()` сортирует по приоритету
+10. **Диспетчер событий**: Встроенные обработчики зарегистрированы (обратите внимание: `AccessLogHandler` регистрируется только когда `config.access_log` включён), затем `freeze()` сортирует по приоритету
 11. **TCP-слушатель**: Привязывается к настроенному адресу
 12. **Внутренний сервер**: Опциональные `/health`, `/metrics`, `/config` на отдельном порту
 13. **Готовность плагинов**: `plugin_manager.on_ready_all()` уведомляет плагины о том, что сервер слушает

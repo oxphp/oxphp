@@ -18,26 +18,30 @@ Both signals trigger the same shutdown sequence. The first signal received start
 
 ## Shutdown Sequence
 
-When a shutdown signal is received, the server executes these steps in order:
+When a shutdown signal is received, the signal handler spawns a task that runs the shutdown sequence concurrently with the still-running accept loop. The accept loop continues to process new connections until it observes the shutdown flag:
 
-1. **Shut down plugins** --- `PluginManager::shutdown_all()` is called, shutting down plugins in reverse priority order from initialization.
+1. **Spawn shutdown task** --- a Tokio task is spawned that calls `plugin_manager.shutdown_all()` followed by `server.shutdown()`. These two calls run sequentially inside the task, but the task itself runs concurrently with the accept loop.
 
-2. **Stop accepting connections** --- the `shutdown` flag is set via an `AtomicBool`, and the accept loop exits on the next iteration.
+2. **Shut down plugins** --- inside the spawned task, `PluginManager::shutdown_all()` is called first, shutting down plugins in reverse priority order from initialization.
 
-3. **Drain in-flight connections** --- the server waits for all active connections to complete, checking every 100ms.
+3. **Stop accepting connections** --- also inside the spawned task, `server.shutdown()` sets the `shutdown` flag via an `AtomicBool`. The accept loop exits on the next iteration after it observes this flag.
 
-4. **Enforce the drain timeout** --- if connections are still active after `DRAIN_TIMEOUT_SECS`, the server logs a warning and proceeds with shutdown. Remaining connections are dropped.
+4. **Drain in-flight connections** --- the server waits for all active connections to complete, checking every 100ms.
 
-5. **Abort the internal server** --- the health/metrics server task is cancelled.
+5. **Enforce the drain timeout** --- if connections are still active after `DRAIN_TIMEOUT_SECS`, the server logs a warning and proceeds with shutdown. Remaining connections are dropped.
 
-6. **Shut down the PHP executor** --- when the `SapiExecutor` is dropped, it closes the request channel, joins all worker threads, and calls `php_module_shutdown()`.
+6. **Abort the internal server** --- the health/metrics server task is cancelled.
 
-7. **Exit** --- the process exits with status 0.
+7. **Shut down the PHP executor** --- when the `SapiExecutor` is dropped, it closes the request channel, joins all worker threads, and calls `php_module_shutdown()`.
+
+8. **Exit** --- the process exits with status 0.
 
 ```
 SIGTERM received
-  ├── plugin_manager.shutdown_all() (reverse priority order)
-  ├── server.shutdown() (stop accepting new connections)
+  └── spawn shutdown task (runs concurrently with accept loop)
+        ├── plugin_manager.shutdown_all() (reverse priority order)
+        └── server.shutdown() (sets AtomicBool; accept loop exits on next check)
+accept loop exits after observing shutdown flag
   ├── drain loop (wait for active connections, 100ms poll)
   │   ├── all drained → "All connections drained"
   │   └── timeout reached → "Drain timeout reached, forcing shutdown"

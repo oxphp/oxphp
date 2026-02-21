@@ -103,6 +103,7 @@ curl http://localhost:9090/config
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
+  "access_log": true,
   "plugins": {}
 }
 ```

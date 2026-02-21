@@ -43,7 +43,7 @@ To enable optional features like the example plugin, pass `CARGO_FEATURES` as a 
 docker compose build --build-arg CARGO_FEATURES="plugin-example"
 ```
 
-See the [Docker guide](/getting-started/docker/) for a full walkthrough of the Dockerfile stages and `docker-compose.yml` configuration.
+See the [Docker guide](/getting-started/docker/) for a full walkthrough of the Dockerfile stages and `compose.yml` configuration.
 
 ## Source Build (Stub Executor)
 
@@ -127,5 +127,5 @@ curl http://localhost:9090/health
 ## See Also
 
 - [Quick Start](/getting-started/quick-start/) -- get OxPHP running in under 5 minutes
-- [Docker](/getting-started/docker/) -- Dockerfile stages, docker-compose.yml reference, and deployment tips
+- [Docker](/getting-started/docker/) -- Dockerfile stages, compose.yml reference, and deployment tips
 - [Configuration](/operations/configuration/) -- full list of environment variables

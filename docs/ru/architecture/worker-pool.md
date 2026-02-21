@@ -11,8 +11,7 @@ OxPHP выполняет PHP-скрипты в пуле выделенных п�
 
 ```rust
 pub trait ScriptExecutor: Send + Sync {
-    fn execute(&self, request: ScriptRequest)
-        -> tokio::sync::oneshot::Receiver<ScriptResponse>;
+    fn execute(&self, request: ScriptRequest) -> ExecuteResult;
 
     fn shutdown(&self);
 
@@ -26,12 +25,19 @@ pub trait ScriptExecutor: Send + Sync {
 
 | Метод | Назначение |
 |---|---|
-| `execute()` | Принимает запрос и возвращает oneshot-получатель для ответа |
+| `execute()` | Принимает запрос и возвращает `ExecuteResult` (немедленный или отложенный ответ) |
 | `shutdown()` | Сигнализирует исполнителю о прекращении приёма работы |
 | `is_healthy()` | Проверка состояния для внутренней точки `/health` |
-| `start_scale_manager()` | Запускает фоновую задачу масштабирования (no-op в статическом режиме и stub) |
+| `start_scale_manager()` | Запускает фоновую задачу масштабирования (no-op в stub; статический режим порождает монитор здоровья) |
 
-Трейт возвращает `oneshot::Receiver`, а не `Future`, что позволяет задаче Tokio вызвать `.await` для ответа без удержания ссылки на исполнитель.
+Трейт возвращает `ExecuteResult`, а не сырой `Future` или `oneshot::Receiver`. Это позволяет исполнителю немедленно вернуть ответ с ошибкой (например, 503 при заполненной очереди) без привлечения потока воркера, при этом поддерживая отложенный случай, когда задача Tokio ожидает `oneshot::Receiver` для ответа.
+
+```rust
+pub enum ExecuteResult {
+    Immediate(ScriptResponse),
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+```
 
 ## Типы данных
 
@@ -165,7 +171,9 @@ struct ManagedWorker {
 
 ### ScaleManager (динамический режим)
 
-Когда настроен `PHP_WORKERS=MIN:MAX`, исполнитель порождает асинхронную задачу ScaleManager через `start_scale_manager()`. ScaleManager работает в среде выполнения Tokio и проверяет утилизацию воркеров каждые 500 мс:
+В **статическом режиме** `start_scale_manager()` порождает задачу монитора здоровья воркеров, а не no-op. Монитор здоровья периодически проверяет наличие упавших воркеров (воркеров, чей поток ОС неожиданно завершился) и пересоздаёт их для поддержания заданного целевого количества. Это предотвращает постоянное уменьшение ёмкости пула из-за аварийного завершения воркера.
+
+Когда настроен `PHP_WORKERS=MIN:MAX`, `start_scale_manager()` вместо этого порождает задачу автоматического масштабирования ScaleManager. ScaleManager работает в среде выполнения Tokio и проверяет утилизацию воркеров каждые 500 мс:
 
 **Масштабирование вверх** (все условия должны быть выполнены):
 - Обнаружено ноль простаивающих воркеров (простаивающий = last_active > 200 мс назад)
@@ -197,7 +205,12 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
         TrySendError::Full(_) => (503, "Service Unavailable: queue full"),
         TrySendError::Disconnected(_) => (500, "PHP worker pool unavailable"),
     };
-    // Return error response immediately
+    return ExecuteResult::Immediate(ScriptResponse {
+        status,
+        headers: vec![],
+        body: Bytes::from_static(body.as_bytes()),
+        execution_time_us: 0,
+    });
 }
 ```
 
@@ -227,11 +240,8 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
 
 ```rust
 impl ScriptExecutor for StubExecutor {
-    fn execute(&self, _request: ScriptRequest)
-        -> tokio::sync::oneshot::Receiver<ScriptResponse>
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = tx.send(ScriptResponse {
+    fn execute(&self, _request: ScriptRequest) -> ExecuteResult {
+        ExecuteResult::Immediate(ScriptResponse {
             status: 200,
             headers: vec![(
                 HeaderName::from_static("content-type"),
@@ -239,8 +249,7 @@ impl ScriptExecutor for StubExecutor {
             )],
             body: Bytes::from_static(b"OK"),
             execution_time_us: 0,
-        });
-        rx
+        })
     }
 }
 ```

@@ -7,7 +7,7 @@ OPcache works out of the box with OxPHP. PHP scripts are compiled once and cache
 
 ## How It Works
 
-OxPHP uses a custom SAPI that identifies itself as `cli-server` to PHP. OPcache recognizes this SAPI name and enables acceleration automatically --- no special configuration is needed.
+OxPHP uses a custom SAPI that identifies itself as `cli-server` to PHP. OPcache recognizes this SAPI name, but it does not activate for the cli-server SAPI by default. The bundled `oxphp.ini` includes `opcache.enable_cli = 1`, which is what enables OPcache for this SAPI. Without that setting, OPcache would not activate regardless of other configuration.
 
 Because OxPHP uses PHP ZTS (Zend Thread Safety), all worker threads share the same OPcache shared memory segment. A script compiled by one worker is immediately available to all other workers. This gives you the compilation-once-execute-many behavior of OPcache with the concurrency of multiple worker threads.
 
@@ -63,7 +63,7 @@ OPcache's JIT compiler is supported when running PHP 8.0+. Enable it in your `ph
 
 ```ini
 opcache.enable=1
-opcache.jit=1255
+opcache.jit=tracing
 opcache.jit_buffer_size=64M
 ```
 
@@ -71,37 +71,33 @@ JIT provides the most benefit for CPU-intensive PHP code (math, loops, string pr
 
 ## Recommended Settings
 
-These `php.ini` settings are a good starting point for production use with OxPHP:
+These settings match the bundled `oxphp.ini` and are optimized for production container deployments where PHP files do not change at runtime:
 
 ```ini
 [opcache]
 opcache.enable=1
+opcache.enable_cli=1
 opcache.memory_consumption=128
 opcache.max_accelerated_files=10000
-opcache.validate_timestamps=1
-opcache.revalidate_freq=2
-opcache.file_update_protection=2
+opcache.validate_timestamps=0
+opcache.revalidate_freq=0
+opcache.file_update_protection=0
 opcache.save_comments=1
+opcache.jit=tracing
+opcache.jit_buffer_size=64M
 ```
 
 | Setting | Description |
 |---------|-------------|
+| `enable_cli` | Required to activate OPcache for the cli-server SAPI used by OxPHP. |
 | `memory_consumption` | Shared memory in MB for compiled scripts. Increase if `opcache_get_status()` shows low free memory. |
 | `max_accelerated_files` | Maximum number of cached scripts. Set higher than your total `.php` file count. |
-| `validate_timestamps` | When `1`, OPcache checks file modification times on disk. Set to `0` in production if you deploy by replacing the container image. |
+| `validate_timestamps` | When `0`, OPcache never checks the filesystem for changes after a script is cached. You must restart the container (or call `opcache_reset()`) to pick up code changes. |
 | `revalidate_freq` | Seconds between file modification checks. Only applies when `validate_timestamps=1`. |
-| `file_update_protection` | Seconds after file modification before caching. Prevents caching partially-written files during deployment. |
+| `file_update_protection` | Seconds after file modification before caching. Set to `0` in production to avoid the protection window. |
 | `save_comments` | Keep doc comments in cached scripts. Required by frameworks that use annotation-based routing (e.g., Symfony, Laravel). |
 
-### Production Optimization
-
-For container deployments where PHP files never change at runtime, disable timestamp validation for maximum performance:
-
-```ini
-opcache.validate_timestamps=0
-```
-
-This tells OPcache to never check the filesystem for changes after a script is cached. You must restart the container (or call `opcache_reset()`) to pick up code changes.
+These are production-optimized settings that assume PHP files are immutable for the lifetime of the container. For development, you may want to use `validate_timestamps=1` and `revalidate_freq=2` so that code changes take effect without restarting the server.
 
 ## ZTS and Shared Memory
 

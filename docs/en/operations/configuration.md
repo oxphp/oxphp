@@ -31,6 +31,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error` |
+| `ACCESS_LOG` | `true` | Enable per-request JSON access log. Falsy values: `false`, `0`, `off` |
 
 ### Timeouts
 
@@ -250,6 +251,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
+  "access_log": true,
   "plugins": {}
 }
 ```

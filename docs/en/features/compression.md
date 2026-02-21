@@ -28,10 +28,11 @@ The compression pipeline runs after the response is built and before it is sent 
 1. **Accept-Encoding check** -- parse the header, split on `,`, extract the encoding name before any `;` quality parameter, and look for `br`
 2. **Content-Type check** -- verify the response MIME type is in the compressible list
 3. **Already encoded check** -- skip if the response already has a `Content-Encoding` header
-4. **Size guard** -- skip if `Content-Length` or the body size hint is outside the 256 B to 3 MB range
-5. **Collect body** -- materialize the response body into memory
-6. **Runtime size check** -- verify the collected body is within range (for responses without an upfront size hint)
-7. **Compress** -- apply Brotli and discard the result if the compressed output is not smaller than the original
+4. **Content-Length guard** -- skip if the `Content-Length` header is present and outside the 256 B to 3 MB range
+5. **Body size hint guard** -- skip if the body size hint (when no `Content-Length` is present) is outside the 256 B to 3 MB range
+6. **Collect body** -- materialize the response body into memory
+7. **Runtime size check** -- verify the collected body is within range (for responses without an upfront size hint)
+8. **Compress** -- apply Brotli and discard the result if the compressed output is not smaller than the original
 
 ### Brotli parameters
 

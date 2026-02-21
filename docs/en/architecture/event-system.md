@@ -182,9 +182,9 @@ OxPHP defines 18 event types in `src/events/types.rs`, organized by lifecycle st
 
 | Event | Name | Fields | Description |
 |---|---|---|---|
-| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata` | HTTP request received, before routing |
+| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata: Vec<(String, String)>` | HTTP request received, before routing |
 | `RouteResolved` | `request.route_resolved` | `request_id`, `path` | Route resolved, before execution |
-| `RequestComplete` | `request.complete` | `request_id`, `method`, `path`, `status`, `duration`, `remote_addr` | Request fully processed |
+| `RequestComplete` | `request.complete` | `request_id`, `method: Method`, `path`, `status`, `duration`, `remote_addr` | Request fully processed |
 
 ### PHP
 
@@ -235,7 +235,7 @@ pub struct RequestReceived {
     pub remote_addr: SocketAddr,
     pub request_id: String,
     pub early_response: Option<Response<ResponseBody>>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: Vec<(String, String)>,
 }
 ```
 
@@ -261,7 +261,7 @@ Read-only event for logging and metrics. All fields are owned values:
 ```rust
 pub struct RequestComplete {
     pub request_id: String,
-    pub method: String,
+    pub method: Method,  // http::Method
     pub path: String,
     pub status: u16,
     pub duration: Duration,
@@ -281,7 +281,7 @@ Seven handlers ship with OxPHP, defined in `src/handlers/`:
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Records response status class and duration |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Replaces error response body with custom HTML (status >= 400) |
 | `ServerHeaderHandler` | `ResponseBuilding` | 100 | Adds `Server: OxPHP/{version}` and `X-Request-ID` headers |
-| `AccessLogHandler` | `RequestComplete` | 100 | Emits structured JSON access log via `tracing::info!` |
+| `AccessLogHandler` | `RequestComplete` | 100 | Emits structured JSON access log via `tracing::info!` (only registered when `config.access_log` is enabled) |
 
 ### Priority Design
 
@@ -304,7 +304,6 @@ dispatcher.on(RequestIdGenerator);
 dispatcher.on(MetricsRequestHandler::new(...));
 dispatcher.on(MetricsResponseHandler::new(...));
 dispatcher.on(ServerHeaderHandler);
-dispatcher.on(AccessLogHandler);
 
 // Only if configured
 if let Some(ref limiter) = rate_limiter {
@@ -312,6 +311,9 @@ if let Some(ref limiter) = rate_limiter {
 }
 if let Some(ref pages) = error_pages {
     dispatcher.on(ErrorPagesHandler::new(Arc::clone(pages)));
+}
+if config.access_log {
+    dispatcher.on(AccessLogHandler);
 }
 
 dispatcher.freeze();

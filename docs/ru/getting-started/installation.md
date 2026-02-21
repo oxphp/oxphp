@@ -43,7 +43,7 @@ docker compose up -d
 docker compose build --build-arg CARGO_FEATURES="plugin-example"
 ```
 
-См. [руководство по Docker](/getting-started/docker/) для подробного описания этапов Dockerfile и конфигурации `docker-compose.yml`.
+См. [руководство по Docker](/getting-started/docker/) для подробного описания этапов Dockerfile и конфигурации `compose.yml`.
 
 ## Сборка из исходников (Stub Executor)
 
@@ -127,5 +127,5 @@ curl http://localhost:9090/health
 ## Смотрите также
 
 - [Быстрый старт](/getting-started/quick-start/) -- запуск OxPHP менее чем за 5 минут
-- [Docker](/getting-started/docker/) -- этапы Dockerfile, описание docker-compose.yml и советы по развёртыванию
+- [Docker](/getting-started/docker/) -- этапы Dockerfile, описание compose.yml и советы по развёртыванию
 - [Конфигурация](/operations/configuration/) -- полный список переменных окружения

@@ -11,8 +11,7 @@ All PHP execution backends implement the `ScriptExecutor` trait defined in `src/
 
 ```rust
 pub trait ScriptExecutor: Send + Sync {
-    fn execute(&self, request: ScriptRequest)
-        -> tokio::sync::oneshot::Receiver<ScriptResponse>;
+    fn execute(&self, request: ScriptRequest) -> ExecuteResult;
 
     fn shutdown(&self);
 
@@ -26,12 +25,19 @@ pub trait ScriptExecutor: Send + Sync {
 
 | Method | Purpose |
 |---|---|
-| `execute()` | Accept a request and return a oneshot receiver for the response |
+| `execute()` | Accept a request and return an `ExecuteResult` (immediate or deferred response) |
 | `shutdown()` | Signal the executor to stop accepting work |
 | `is_healthy()` | Health check for the `/health` internal endpoint |
-| `start_scale_manager()` | Start the background scaling task (no-op in static mode and stub) |
+| `start_scale_manager()` | Start the background scaling task (no-op in stub; static mode spawns a health monitor) |
 
-The trait returns a `oneshot::Receiver` rather than a `Future`, which allows the Tokio task to `.await` the response without holding a reference to the executor.
+The trait returns `ExecuteResult` rather than a raw `Future` or `oneshot::Receiver`. This allows the executor to return an error response immediately (e.g., 503 when the queue is full) without involving a worker thread, while still supporting the deferred case where the Tokio task awaits a `oneshot::Receiver` for the response.
+
+```rust
+pub enum ExecuteResult {
+    Immediate(ScriptResponse),
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+```
 
 ## Data Types
 
@@ -165,7 +171,9 @@ Each worker thread:
 
 ### ScaleManager (Dynamic Mode)
 
-When `PHP_WORKERS=MIN:MAX` is configured, the executor spawns an async ScaleManager task via `start_scale_manager()`. The ScaleManager runs on the Tokio runtime and checks worker utilization every 500ms:
+In **static mode**, `start_scale_manager()` spawns a worker health monitor task rather than a no-op. The health monitor periodically checks for dead workers (workers whose OS thread has exited unexpectedly) and respawns them to maintain the configured target count. This prevents a crashed worker from permanently reducing pool capacity.
+
+When `PHP_WORKERS=MIN:MAX` is configured, `start_scale_manager()` instead spawns an auto-scaling ScaleManager task. The ScaleManager runs on the Tokio runtime and checks worker utilization every 500ms:
 
 **Scale-up** (all conditions must be true):
 - Zero idle workers detected (idle = last_active > 200ms ago)
@@ -197,7 +205,12 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
         TrySendError::Full(_) => (503, "Service Unavailable: queue full"),
         TrySendError::Disconnected(_) => (500, "PHP worker pool unavailable"),
     };
-    // Return error response immediately
+    return ExecuteResult::Immediate(ScriptResponse {
+        status,
+        headers: vec![],
+        body: Bytes::from_static(body.as_bytes()),
+        execution_time_us: 0,
+    });
 }
 ```
 
@@ -227,11 +240,8 @@ The `StubExecutor` (`src/executor/stub.rs`) is a zero-overhead testing and bench
 
 ```rust
 impl ScriptExecutor for StubExecutor {
-    fn execute(&self, _request: ScriptRequest)
-        -> tokio::sync::oneshot::Receiver<ScriptResponse>
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = tx.send(ScriptResponse {
+    fn execute(&self, _request: ScriptRequest) -> ExecuteResult {
+        ExecuteResult::Immediate(ScriptResponse {
             status: 200,
             headers: vec![(
                 HeaderName::from_static("content-type"),
@@ -239,8 +249,7 @@ impl ScriptExecutor for StubExecutor {
             )],
             body: Bytes::from_static(b"OK"),
             execution_time_us: 0,
-        });
-        rx
+        })
     }
 }
 ```

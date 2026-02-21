@@ -21,7 +21,7 @@ MIME types are determined from the file extension using the `mime_guess` crate. 
 
 ## File cache
 
-The file cache reduces filesystem syscalls during routing and serving. It uses a `Mutex<HashMap>` with counter-based LRU eviction and operates on three tiers:
+The file cache reduces filesystem syscalls during routing and serving. It uses a `Mutex<FileCacheInner>` wrapping three separate HashMaps (metadata, content, and canonical path caches) with counter-based LRU eviction and operates on three tiers:
 
 ### Metadata cache
 

@@ -31,6 +31,7 @@ OxPHP настраивается исключительно через пере�
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `LOG_LEVEL` | `info` | Уровень детализации логов. Один из: `trace`, `debug`, `info`, `warn`, `error` |
+| `ACCESS_LOG` | `true` | Включить JSON access log на каждый запрос. Отключающие значения: `false`, `0`, `off` |
 
 ### Таймауты
 
@@ -250,6 +251,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
+  "access_log": true,
   "plugins": {}
 }
 ```

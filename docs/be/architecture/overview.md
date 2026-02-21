@@ -24,7 +24,7 @@ OxPHP — гэта HTTP-сервер у выглядзе аднаго бінар
                     │                      │              │           │
                     └──────────────────────┼──────────────┼───────────┘
                          ScriptRequest     │              │
-                  (sync_channel + oneshot) │  ┌───────────┘
+              (crossbeam_channel + oneshot)│  ┌───────────┘
                                            │  │
                                            ▼  ▼
                     ┌──────────────────────┼──┼───────────────────────┐
@@ -39,7 +39,7 @@ OxPHP — гэта HTTP-сервер у выглядзе аднаго бінар
 
 **Рантайм Tokio** наладжваецца праз `TOKIO_WORKERS`. Пры значэнні `0` (па змаўчанні) выкарыстоўваецца `Builder::new_current_thread()` для аднапатоковага асінхроннага рантайму. Пры значэнні `N` выкарыстоўваецца `Builder::new_multi_thread()` з N працоўнымі патокамі для павышанай прапускной здольнасці. Ён апрацоўвае ўсю асінхронную працу: прыём TCP-злучэнняў, TLS-рукапацісканні, разбор HTTP, маршрутызацыю, кампрэсію і дыспетчарызацыю падзей. Кожнае злучэнне — гэта лёгкая задача Tokio. Працэс выкарыстоўвае mimalloc у якасці глабальнага алакатара для зніжэння затрымкі алакацый пры канкурэнтным доступе патокаў.
 
-**Пул воркераў PHP** — гэта набор вылучаных патокаў АС. Кожны паток валодае ўласным экзэмплярам інтэрпрэтатара PHP ZTS (Zend Thread Safety). Воркеры атрымліваюць структуры `ScriptRequest` праз абмежаваны `crossbeam_channel` і вяртаюць `ScriptResponse` праз канал `tokio::sync::oneshot`.
+**Пул воркераў PHP** — гэта набор вылучаных патокаў АС. Кожны паток валодае ўласным экзэмплярам інтэрпрэтатара PHP ZTS (Zend Thread Safety). Воркеры атрымліваюць структуры `ScriptRequest` праз абмежаваны `crossbeam_channel::bounded` і вяртаюць `ScriptResponse` праз канал `tokio::sync::oneshot`.
 
 ### Чаму не шматпатоковы PHP унутры Tokio?
 
@@ -93,7 +93,7 @@ C-рантайм PHP не з'яўляецца бяспечным для асін
 | **Server** | `src/server/mod.rs` | Валодае цыклам прыёму злучэнняў, зборшчыкам hyper-util, сцягом спынкі |
 | **RouteConfig** | `src/server/routing.rs` | Разрашае URI-шляхі ў `Serve`, `Execute` або `NotFound` |
 | **FileCache** | `src/server/response/static_file.rs` | LRU-кэш для метададзеных файлаў і пошуку кананічных шляхоў |
-| **ScriptExecutor** | `src/executor/mod.rs` | Трэйт для бэкендаў выканання PHP (`SapiExecutor`, `StubExecutor`) |
+| **ScriptExecutor** | `src/executor/mod.rs` | Трэйт для бэкендаў выканання PHP (`SapiExecutor`, `StubExecutor`); `execute()` вяртае `ExecuteResult` |
 | **Metrics** | `src/metrics.rs` | Безблакіроўкавыя атамарныя лічыльнікі (фармат Prometheus exposition) |
 | **EventDispatcher** | `src/events/dispatcher.rs` | Тыпізаваная сінхронная дыспетчарызацыя падзей з упарадкаваннем па прыярытэце |
 | **PluginManager** | `src/plugin/mod.rs` | Кіраванне жыццёвым цыклам плагінаў з тапалагічнай сартоўкай |
@@ -124,7 +124,7 @@ src/
 │   └── response/
 │       └── static_file.rs   # Аддача статычных файлаў з вызначэннем MIME і кэшаваннем
 ├── executor/
-│   ├── mod.rs               # Трэйт ScriptExecutor, фабрыка create_executor()
+│   ├── mod.rs               # Трэйт ScriptExecutor (execute() → ExecuteResult), фабрыка create_executor()
 │   ├── stub.rs              # StubExecutor (вяртае 200 OK, для бенчмаркаў)
 │   └── sapi.rs              # SapiExecutor (пул воркераў PHP ZTS) [feature-gated]
 ├── events/
@@ -140,8 +140,14 @@ src/
 │   ├── server_header.rs     # Дадаванне загалоўкаў Server і X-Request-ID
 │   └── access_log.rs        # Структураваны лог доступу праз tracing
 ├── plugin/
-│   ├── mod.rs               # PluginManager, трэйт Plugin, PluginContext
-│   └── cookies.rs           # Ізаляцыя cookies плагінаў
+│   ├── mod.rs               # Трэйт Plugin
+│   ├── context.rs           # PluginContext
+│   ├── cookies.rs           # Ізаляцыя cookies плагінаў
+│   ├── handler.rs           # Трэйты апрацоўшчыкаў
+│   ├── macros.rs            # Дапаможныя макрасы плагінаў
+│   ├── manager.rs           # PluginManager
+│   ├── php.rs               # Рэгістрацыя PHP-функцый
+│   └── wrappers.rs          # Абгорткі апрацоўшчыкаў падзей
 ├── plugins/
 │   └── example.rs           # Плагін прыкладу [feature-gated: plugin-example]
 └── php/                     # PHP FFI-звязкі [feature-gated]
@@ -158,6 +164,15 @@ src/
 | `crossbeam_channel::bounded` | Tokio → воркер PHP | `ScriptRequest` | Абмежаваная чарга са зваротным ціскам (503 пры запаўненні) |
 | `tokio::sync::oneshot` | Воркер PHP → Tokio | `ScriptResponse` | Адзін адказ на запыт |
 
+`ScriptExecutor::execute()` вяртае пералічэнне `ExecuteResult`, а не сырой `oneshot::Receiver`. Гэта дазваляе экзекутару вярнуць адказ з памылкай неадкладна (без патоку воркера), калі чарга запоўнена або пул воркераў недаступны:
+
+```rust
+pub enum ExecuteResult {
+    Immediate(ScriptResponse),
+    Deferred(tokio::sync::oneshot::Receiver<ScriptResponse>),
+}
+```
+
 Гэты шаблон дазваляе рантайму Tokio адпраўляць працу воркерам PHP без блакіровак і асінхронна чакаць адказаў. Падрабязнасці гл. у раздзеле [Пул воркераў](./worker-pool.md).
 
 ## Паслядоўнасць запуску
@@ -171,7 +186,7 @@ src/
 7. **Менеджар маштабавання**: `executor.start_scale_manager()` запускае задачу маштабавання воркераў (не робіць нічога ў статычным рэжыме). У статычным рэжыме фонавы манітор здароўя выяўляе і перазапускае ўпаўшых воркераў
 8. **Абмежавальнік хуткасці**: Апцыянальны, з фонавай задачай ачысткі
 9. **TLS**: Апцыянальны, загружае сертыфікат і ключ праз `rustls`
-10. **Дыспетчар падзей**: Рэгістрацыя ўбудаваных апрацоўшчыкаў, затым `freeze()` сартуе па прыярытэце
+10. **Дыспетчар падзей**: Рэгістрацыя ўбудаваных апрацоўшчыкаў (заўвага: `AccessLogHandler` рэгіструецца толькі калі ўключаны `config.access_log`), затым `freeze()` сартуе па прыярытэце
 11. **TCP-слухач**: Прывязваецца да сканфігураванага адраса
 12. **Унутраны сервер**: Апцыянальны `/health`, `/metrics`, `/config` на асобным порце
 13. **Гатоўнасць плагінаў**: `plugin_manager.on_ready_all()` апавяшчае плагіны, што сервер слухае

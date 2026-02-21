@@ -182,9 +182,9 @@ OxPHP определяет 18 типов событий в `src/events/types.rs`
 
 | Событие | Имя | Поля | Описание |
 |---|---|---|---|
-| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata` | HTTP-запрос получен, до маршрутизации |
+| `RequestReceived` | `request.received` | `parts`, `remote_addr`, `request_id`, `early_response`, `metadata: Vec<(String, String)>` | HTTP-запрос получен, до маршрутизации |
 | `RouteResolved` | `request.route_resolved` | `request_id`, `path` | Маршрут определён, до выполнения |
-| `RequestComplete` | `request.complete` | `request_id`, `method`, `path`, `status`, `duration`, `remote_addr` | Запрос полностью обработан |
+| `RequestComplete` | `request.complete` | `request_id`, `method: Method`, `path`, `status`, `duration`, `remote_addr` | Запрос полностью обработан |
 
 ### PHP
 
@@ -235,7 +235,7 @@ pub struct RequestReceived {
     pub remote_addr: SocketAddr,
     pub request_id: String,
     pub early_response: Option<Response<ResponseBody>>,
-    pub metadata: HashMap<String, String>,
+    pub metadata: Vec<(String, String)>,
 }
 ```
 
@@ -261,7 +261,7 @@ pub struct ResponseBuilding {
 ```rust
 pub struct RequestComplete {
     pub request_id: String,
-    pub method: String,
+    pub method: Method,  // http::Method
     pub path: String,
     pub status: u16,
     pub duration: Duration,
@@ -281,7 +281,7 @@ OxPHP поставляется с семью обработчиками, опр�
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Записывает класс статуса ответа и продолжительность |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Заменяет тело ответа пользовательским HTML (статус >= 400) |
 | `ServerHeaderHandler` | `ResponseBuilding` | 100 | Добавляет заголовки `Server: OxPHP/{version}` и `X-Request-ID` |
-| `AccessLogHandler` | `RequestComplete` | 100 | Выводит структурированный JSON-лог доступа через `tracing::info!` |
+| `AccessLogHandler` | `RequestComplete` | 100 | Выводит структурированный JSON-лог доступа через `tracing::info!` (регистрируется только когда `config.access_log` включён) |
 
 ### Проектирование приоритетов
 
@@ -304,7 +304,6 @@ dispatcher.on(RequestIdGenerator);
 dispatcher.on(MetricsRequestHandler::new(...));
 dispatcher.on(MetricsResponseHandler::new(...));
 dispatcher.on(ServerHeaderHandler);
-dispatcher.on(AccessLogHandler);
 
 // Only if configured
 if let Some(ref limiter) = rate_limiter {
@@ -312,6 +311,9 @@ if let Some(ref limiter) = rate_limiter {
 }
 if let Some(ref pages) = error_pages {
     dispatcher.on(ErrorPagesHandler::new(Arc::clone(pages)));
+}
+if config.access_log {
+    dispatcher.on(AccessLogHandler);
 }
 
 dispatcher.freeze();

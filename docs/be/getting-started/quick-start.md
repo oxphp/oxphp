@@ -11,9 +11,9 @@ description: Запусціце OxPHP менш чым за 5 хвілін
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. Дадайце docker-compose.yml
+## 2. Дадайце compose.yml
 
-Стварыце мінімальны `docker-compose.yml`:
+Стварыце мінімальны `compose.yml`:
 
 ```yaml
 services:
@@ -111,7 +111,7 @@ OxPHP выводзіць структураваныя JSON-логі. Кожны 
 
 ## Наступныя крокі
 
-- [Даведнік па Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік docker-compose.yml і мантаванне тамоў
+- [Даведнік па Docker](/getting-started/docker/) -- стадыі Dockerfile, даведнік compose.yml і мантаванне тамоў
 - [Канфігурацыя](/operations/configuration/) -- поўны спіс зменных асяроддзя
 - [Маршрутызацыя](/features/routing/) -- традыцыйны, фрэймворкавы і SPA-рэжымы маршрутызацыі
 - [Інтэграцыя з PHP](/php/functions/) -- даступныя функцыі PHP-пашырэння
