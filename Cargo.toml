@@ -28,6 +28,7 @@ tracing-appender = "0.2"
 
 # Streaming response bodies
 tokio-util = { version = "0.7", features = ["io"] }
+tokio-stream = "0.1"
 futures-util = "0.3"
 
 # URL decoding

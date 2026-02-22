@@ -13,7 +13,7 @@ use crate::server::compression;
 use crate::server::response::static_file;
 use crate::server::routing::RouteResult;
 use crate::server::Server;
-use crate::types::{full_body, ResponseBody, ScriptRequest};
+use crate::types::{full_body, stream_body, ResponseBody, ScriptRequest};
 
 /// Maximum request body size for POST/PUT/PATCH (10 MB).
 const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024;
@@ -295,7 +295,12 @@ async fn dispatch_request(
             for (name, value) in &script_response.headers {
                 builder = builder.header(name, value);
             }
-            builder.body(full_body(script_response.body)).unwrap()
+            if let Some(rx) = script_response.stream_rx {
+                // Streaming response: body arrives as chunks via mpsc channel
+                builder.body(stream_body(script_response.body, rx)).unwrap()
+            } else {
+                builder.body(full_body(script_response.body)).unwrap()
+            }
         }
         RouteResult::NotFound => Response::builder()
             .status(StatusCode::NOT_FOUND)

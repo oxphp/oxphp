@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers six built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers seven built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -204,8 +204,50 @@ if (oxphp_is_streaming()) {
 ```
 
 **Notes:**
-- Streaming mode is controlled by the server runtime, not by PHP code.
-- This function is primarily useful for scripts that need to adapt their output behavior depending on the transport mode.
+- Streaming mode is activated automatically when the `Content-Type: text/event-stream` header is set, or manually via `oxphp_stream_flush()`.
+- This function is useful for scripts that need to adapt their output behavior depending on the transport mode.
+
+---
+
+## `oxphp_stream_flush`
+
+Activates streaming mode (if not already active) and flushes the current output buffer to the client as a chunk. This is the primary function for implementing Server-Sent Events (SSE) in OxPHP.
+
+```php
+oxphp_stream_flush(): bool
+```
+
+**Parameters:** None.
+
+**Return value:** Returns `true` on success. Returns `false` if the request has already been finished via `oxphp_finish_request()`.
+
+**Example:**
+
+```php
+<?php
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache');
+
+for ($i = 0; $i < 10; $i++) {
+    echo "id: $i\n";
+    echo "data: " . json_encode(['counter' => $i, 'time' => microtime(true)]) . "\n\n";
+    oxphp_stream_flush();
+    sleep(1);
+}
+```
+
+**How it works:**
+
+1. On the first call, activates streaming mode via the C bridge (`oxphp_bridge_set_stream_mode`)
+2. Flushes all PHP output buffers (`php_output_flush_all`)
+3. Triggers the SAPI flush callback, which sends buffered output as an HTTP chunk to the client
+
+**Notes:**
+- Headers are sent to the client on the first flush. Subsequent calls only send body chunks.
+- You can also use native PHP `flush()` with `Content-Type: text/event-stream` — OxPHP auto-detects the SSE content type and activates streaming mode. In that case, call `ob_end_flush()` first to disable PHP's output buffering layer.
+- If `oxphp_finish_request()` was called before, this function returns `false` and does nothing.
+- The HTTP connection closes automatically when the PHP script ends and the streaming channel is closed.
+- Backpressure is applied via a bounded channel (capacity 64) — if the client is slow, `oxphp_stream_flush()` blocks until the client catches up.
 
 ---
 
@@ -249,6 +291,7 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [3] => oxphp_request_heartbeat
 //     [4] => oxphp_finish_request
 //     [5] => oxphp_is_streaming
+//     [6] => oxphp_stream_flush
 // )
 ```
 

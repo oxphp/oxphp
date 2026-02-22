@@ -659,6 +659,11 @@ fn execute_request(
     sapi::clear_buffers();
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
+
+    // Create streaming channel (cheap even if unused — no allocs until first send).
+    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+    sapi::set_stream_channel(chunk_tx, chunk_rx);
+
     let _guard = RequestDataGuard;
 
     // Set request_time BEFORE php_request_startup() — OPcache reads it during RINIT.
@@ -697,8 +702,10 @@ fn execute_request(
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
 
-    // If the response was already sent early via oxphp_finish_request(), we're done.
+    // If the response was already sent early (finish_request or streaming), we're done.
+    // Clear buffers to drop STREAM_TX (closes channel → ends stream on client side).
     if sapi::was_early_sent() {
+        sapi::clear_buffers();
         return None;
     }
 
@@ -715,6 +722,7 @@ fn execute_request(
         headers,
         body,
         execution_time_us: start.elapsed().as_micros() as u64,
+        stream_rx: None,
     })
 }
 

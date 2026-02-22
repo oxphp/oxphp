@@ -31,6 +31,8 @@ OxPHP 是一个用 Rust 编写的异步 PHP 应用服务器。它用单个二进
 - **优雅关闭**，支持可配置的排空超时
 - **OPcache + JIT** 开箱即用
 - **Worker 健康监控**，自动重启异常终止的 Worker
+- **SSE 流式传输** -- 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
+- **提前响应**，通过 `oxphp_finish_request()` -- 立即发送 HTTP 响应并继续后台处理
 - **Panic 隔离**，通过 `catch_unwind` 实现 -- PHP 崩溃不会导致服务器宕机
 
 ## 许可证

@@ -197,7 +197,7 @@ The routing process:
 
 For `Serve` results, `static_file::serve()` reads the file from disk (with file cache for metadata), detects the MIME type, and returns the response with appropriate `Content-Type` and `Content-Length` headers.
 
-### 9b. PHP Execution
+### 9b. PHP Execution (Buffered or Streaming)
 
 For `Execute` results, the request body is collected with a **10 MB limit** (`MAX_POST_BODY`). Body collection only occurs for POST, PUT, and PATCH requests — all other methods (GET, HEAD, DELETE, etc.) receive an empty `Bytes` without reading from the body stream. If the body exceeds this limit, a 413 Payload Too Large response is returned immediately.
 
@@ -238,6 +238,19 @@ let response_rx = ctx.executor.execute(script_request);
 ```
 
 The Tokio task awaits the `oneshot::Receiver`. When the PHP worker finishes, it sends back a `ScriptResponse` containing the status code, headers, body, and execution time. If the worker channel is broken, a 500 error is returned and `metrics.request_dropped()` is called.
+
+#### Streaming Responses (SSE)
+
+When PHP sets `Content-Type: text/event-stream` (auto-detected in the SAPI header handler) or calls `oxphp_stream_flush()`, the response switches to streaming mode:
+
+1. **Header delivery**: The SAPI consumes the `EARLY_TX` oneshot to send a `ScriptResponse` with `stream_rx: Some(receiver)` — headers are delivered to the Tokio side immediately.
+2. **Body chunks**: Each `flush()` or `oxphp_stream_flush()` drains the PHP output buffer and sends it as a `Bytes` chunk through a `tokio::sync::mpsc` channel (bounded, capacity 64).
+3. **StreamBody**: The connection layer wraps the channel receiver in a `StreamBody` for chunked HTTP delivery instead of using `full_body()`.
+4. **Stream end**: When the PHP script finishes, the worker drops the `STREAM_TX` sender, closing the channel. The `StreamBody` returns `None`, ending the HTTP response.
+
+Backpressure is applied naturally — if the client reads slowly, the bounded channel fills up and `blocking_send()` blocks the PHP worker thread until space is available.
+
+Streaming responses skip compression (Brotli) since `text/event-stream` is not a compressible content type.
 
 ### 10. ResponseBuilding Event
 

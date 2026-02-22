@@ -95,6 +95,36 @@ PHP_FUNCTION(oxphp_is_streaming)
 }
 /* }}} */
 
+/* {{{ oxphp_stream_flush(): bool
+ * Activate streaming mode (if not already active), flush PHP output buffers,
+ * and send buffered output as a chunk to the client.
+ * The first call also sends HTTP headers to the client. */
+PHP_FUNCTION(oxphp_stream_flush)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    /* If already finished, streaming is not possible */
+    if (oxphp_bridge_is_finished()) {
+        RETURN_FALSE;
+    }
+
+    /* Activate streaming mode on first call */
+    if (!oxphp_bridge_is_streaming()) {
+        oxphp_bridge_set_stream_mode(true);
+    }
+
+    /* Flush PHP output buffers → triggers ub_write for any buffered content */
+    if (php_output_get_level() > 0) {
+        php_output_flush_all();
+    }
+
+    /* Trigger SAPI flush → sends headers (first time) and chunk */
+    sapi_flush();
+
+    RETURN_TRUE;
+}
+/* }}} */
+
 /* ─── Native plugin function dispatch ─────────────────────── */
 
 /* {{{ oxphp_native_dispatch — zero-serialization handler for plugin functions.
@@ -151,6 +181,9 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_is_streaming, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_flush, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ function entries */
@@ -161,6 +194,7 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_request_heartbeat, arginfo_oxphp_request_heartbeat)
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
+    PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
     PHP_FE_END
 };
 /* }}} */

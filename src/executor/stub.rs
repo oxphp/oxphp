@@ -29,6 +29,7 @@ impl ScriptExecutor for StubExecutor {
             )],
             body: Bytes::from_static(b"OK"),
             execution_time_us: 0,
+            stream_rx: None,
         })
     }
 

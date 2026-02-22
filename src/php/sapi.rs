@@ -37,6 +37,10 @@ thread_local! {
     /// Holds the oneshot sender + request start time for early response delivery
     /// via `oxphp_finish_request()`. Set before script execution, consumed when early send triggers.
     static EARLY_TX: RefCell<Option<(Instant, oneshot::Sender<ScriptResponse>)>> = const { RefCell::new(None) };
+    /// Streaming body chunk sender — worker thread sends chunks via `blocking_send()`.
+    static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
+    /// Streaming body chunk receiver — taken once when streaming headers are sent.
+    static STREAM_RX: RefCell<Option<tokio::sync::mpsc::Receiver<Bytes>>> = const { RefCell::new(None) };
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -111,6 +115,15 @@ pub fn try_early_send() -> bool {
         return false;
     }
 
+    // If streaming is active, finish_request means "end the stream"
+    if unsafe { bindings::oxphp_bridge_is_streaming() } {
+        // Flush any remaining buffered output as a final chunk
+        flush_stream_chunk();
+        // Drop the sender to close the body channel → stream ends
+        close_stream();
+        return true;
+    }
+
     EARLY_TX.with(|slot| {
         let entry = slot.borrow_mut().take();
         if let Some((start, tx)) = entry {
@@ -122,6 +135,7 @@ pub fn try_early_send() -> bool {
                 headers,
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
+                stream_rx: None,
             });
             true
         } else {
@@ -138,6 +152,71 @@ pub fn was_early_sent() -> bool {
 /// Take the early sender from TLS (for panic recovery in the worker thread).
 pub fn take_early_tx() -> Option<(Instant, oneshot::Sender<ScriptResponse>)> {
     EARLY_TX.with(|slot| slot.borrow_mut().take())
+}
+
+/// Store the streaming channel halves in TLS.
+/// Called from the worker thread before script execution.
+pub fn set_stream_channel(
+    tx: tokio::sync::mpsc::Sender<Bytes>,
+    rx: tokio::sync::mpsc::Receiver<Bytes>,
+) {
+    STREAM_TX.with(|slot| {
+        *slot.borrow_mut() = Some(tx);
+    });
+    STREAM_RX.with(|slot| {
+        *slot.borrow_mut() = Some(rx);
+    });
+}
+
+/// Send streaming headers via the EARLY_TX oneshot.
+/// Takes EARLY_TX + STREAM_RX from TLS, builds a ScriptResponse with stream_rx,
+/// and sends it. Returns true if headers were sent.
+pub fn send_streaming_headers() -> bool {
+    EARLY_TX.with(|slot| {
+        let entry = slot.borrow_mut().take();
+        if let Some((start, tx)) = entry {
+            let stream_rx = STREAM_RX.with(|s| s.borrow_mut().take());
+            let (raw_output, raw_headers, status) = take_response();
+            let body = Bytes::from(raw_output);
+            let headers = parse_raw_headers(raw_headers);
+            let _ = tx.send(ScriptResponse {
+                status,
+                headers,
+                body,
+                execution_time_us: start.elapsed().as_micros() as u64,
+                stream_rx,
+            });
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Drain the output buffer and send it as a chunk via STREAM_TX.
+fn flush_stream_chunk() {
+    STREAM_TX.with(|slot| {
+        if let Some(tx) = slot.borrow().as_ref() {
+            let data = RESPONSE.with(|r| {
+                let mut resp = r.borrow_mut();
+                if resp.output.is_empty() {
+                    return None;
+                }
+                Some(Bytes::from(std::mem::take(&mut resp.output)))
+            });
+            if let Some(chunk) = data {
+                // blocking_send: blocks if channel full (backpressure)
+                let _ = tx.blocking_send(chunk);
+            }
+        }
+    });
+}
+
+/// Drop the STREAM_TX sender to close the body channel (signals stream end).
+fn close_stream() {
+    STREAM_TX.with(|slot| {
+        slot.borrow_mut().take();
+    });
 }
 
 /// Build request data from a ScriptRequest and store in thread-local.
@@ -488,13 +567,14 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
         return 0;
     }
 
-    // After early send, discard all subsequent output to avoid memory growth
-    // during background execution. Check FFI flag first (cheap __thread read)
-    // before the TLS RefCell borrow.
+    // After finish_request (non-streaming): discard output to avoid memory growth.
+    // After finish_request (streaming): also discard — stream is closed.
     if bindings::oxphp_bridge_is_finished() && was_early_sent() {
         return str_length;
     }
 
+    // In both streaming and buffered modes, buffer into RESPONSE.output.
+    // For streaming, the actual channel send happens in oxphp_flush (buffered-until-flush).
     let data = std::slice::from_raw_parts(str as *const u8, str_length);
 
     RESPONSE.with(|r| {
@@ -505,6 +585,16 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 }
 
 unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
+    // Streaming mode: send headers on first flush, then send buffered output as chunk.
+    if bindings::oxphp_bridge_is_streaming() {
+        if !bindings::oxphp_bridge_get_headers_sent() {
+            send_streaming_headers();
+            bindings::oxphp_bridge_set_headers_sent(true);
+        }
+        flush_stream_chunk();
+        return;
+    }
+
     // When oxphp_finish_request() sets the finished flag and calls sapi_flush(),
     // this triggers the early response send.
     try_early_send();
@@ -558,6 +648,13 @@ unsafe extern "C" fn oxphp_header_handler(
                 if let Some(colon_pos) = header_str.find(':') {
                     let name = header_str[..colon_pos].trim().to_string();
                     let value = header_str[colon_pos + 1..].trim().to_string();
+
+                    // Auto-detect SSE: enable streaming when PHP sets Content-Type: text/event-stream
+                    if name.eq_ignore_ascii_case("content-type")
+                        && value.contains("text/event-stream")
+                    {
+                        bindings::oxphp_bridge_set_stream_mode(true);
+                    }
 
                     let mut resp = r.borrow_mut();
                     if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
@@ -725,6 +822,13 @@ pub fn clear_buffers() {
     });
     // Drop any unconsumed early sender from a previous request.
     EARLY_TX.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    // Drop streaming channel halves from previous request.
+    STREAM_TX.with(|slot| {
+        slot.borrow_mut().take();
+    });
+    STREAM_RX.with(|slot| {
         slot.borrow_mut().take();
     });
 }

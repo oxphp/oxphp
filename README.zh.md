@@ -28,6 +28,8 @@
 - **mimalloc** 分配器 — 降低高并发下的内存分配延迟
 - **可配置 Tokio 运行时** — 默认单线程，可通过 `TOKIO_WORKERS` 切换为多线程
 - **工作线程健康监控** — 自动检测并重启崩溃的工作线程
+- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
+- **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
 - **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
 
 ## 快速开始

@@ -35,6 +35,7 @@ function layout(string $title, string $content): void {
         '/cookies' => 'Cookies',
         '/opcache'   => 'OPcache',
         '/functions' => 'Functions',
+        '/sse'       => 'SSE',
     ];
 
     $current = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);

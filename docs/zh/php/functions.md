@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了六个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了七个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -204,8 +204,50 @@ if (oxphp_is_streaming()) {
 ```
 
 **注意事项：**
-- 流模式由服务器运行时控制，而非 PHP 代码。
-- 此函数主要用于需要根据传输模式调整输出行为的脚本。
+- 当设置 `Content-Type: text/event-stream` 头时，流模式会自动激活，也可通过 `oxphp_stream_flush()` 手动激活。
+- 此函数适用于需要根据传输模式调整输出行为的脚本。
+
+---
+
+## `oxphp_stream_flush`
+
+激活流模式（如果尚未激活）并将当前输出缓冲区作为块刷新到客户端。这是在 OxPHP 中实现 Server-Sent Events (SSE) 的主要函数。
+
+```php
+oxphp_stream_flush(): bool
+```
+
+**参数：** 无。
+
+**返回值：** 成功时返回 `true`。如果请求已通过 `oxphp_finish_request()` 完成，返回 `false`。
+
+**示例：**
+
+```php
+<?php
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache');
+
+for ($i = 0; $i < 10; $i++) {
+    echo "id: $i\n";
+    echo "data: " . json_encode(['counter' => $i, 'time' => microtime(true)]) . "\n\n";
+    oxphp_stream_flush();
+    sleep(1);
+}
+```
+
+**工作原理：**
+
+1. 首次调用时，通过 C 桥接激活流模式（`oxphp_bridge_set_stream_mode`）
+2. 刷新所有 PHP 输出缓冲区（`php_output_flush_all`）
+3. 触发 SAPI flush 回调，将缓冲输出作为 HTTP 块发送到客户端
+
+**注意事项：**
+- 首次刷新时将头部发送到客户端。后续调用仅发送正文块。
+- 也可以使用原生 PHP `flush()` 配合 `Content-Type: text/event-stream` — OxPHP 会自动检测 SSE 内容类型并激活流模式。在这种情况下，先调用 `ob_end_flush()` 以禁用 PHP 的输出缓冲层。
+- 如果之前已调用 `oxphp_finish_request()`，此函数返回 `false` 且不执行任何操作。
+- 当 PHP 脚本结束且流通道关闭时，HTTP 连接会自动关闭。
+- 通过有界通道（容量 64）实现背压 — 如果客户端读取缓慢，`oxphp_stream_flush()` 会阻塞，直到客户端赶上。
 
 ---
 
@@ -249,6 +291,7 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [3] => oxphp_request_heartbeat
 //     [4] => oxphp_finish_request
 //     [5] => oxphp_is_streaming
+//     [6] => oxphp_stream_flush
 // )
 ```
 

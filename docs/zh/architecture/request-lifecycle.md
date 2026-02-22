@@ -197,7 +197,7 @@ match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await 
 
 对于 `Serve` 结果，`static_file::serve()` 从磁盘读取文件（使用文件缓存获取元数据），检测 MIME 类型，并返回带有适当 `Content-Type` 和 `Content-Length` 头的响应。
 
-### 9b. PHP 执行
+### 9b. PHP 执行（缓冲或流式）
 
 对于 `Execute` 结果，请求体以 **10 MB 限制**（`MAX_POST_BODY`）收集。仅对 POST、PUT 和 PATCH 请求进行体收集 — 所有其他方法（GET、HEAD、DELETE 等）接收空 `Bytes` 而不从 body 流读取。如果体超过此限制，立即返回 413 Payload Too Large 响应。
 
@@ -238,6 +238,19 @@ let response_rx = ctx.executor.execute(script_request);
 ```
 
 Tokio 任务等待 `oneshot::Receiver`。当 PHP 工作线程完成时，它发回包含状态码、头、体和执行时间的 `ScriptResponse`。如果工作线程 channel 断开，返回 500 错误并调用 `metrics.request_dropped()`。
+
+#### 流式响应（SSE）
+
+当 PHP 设置 `Content-Type: text/event-stream`（在 SAPI 头处理器中自动检测）或调用 `oxphp_stream_flush()` 时，响应切换到流模式：
+
+1. **头部传递**：SAPI 消费 `EARLY_TX` oneshot 发送带有 `stream_rx: Some(receiver)` 的 `ScriptResponse` — 头部立即传递到 Tokio 端。
+2. **正文块**：每次 `flush()` 或 `oxphp_stream_flush()` 清空 PHP 输出缓冲区，并通过 `tokio::sync::mpsc` 通道（有界，容量 64）将其作为 `Bytes` 块发送。
+3. **StreamBody**：连接层将通道接收器包装在 `StreamBody` 中进行分块 HTTP 传输，而非使用 `full_body()`。
+4. **流结束**：当 PHP 脚本结束时，工作线程丢弃 `STREAM_TX` 发送器，关闭通道。`StreamBody` 返回 `None`，结束 HTTP 响应。
+
+背压自然生效 — 如果客户端读取缓慢，有界通道会填满，`blocking_send()` 会阻塞 PHP 工作线程，直到有可用空间。
+
+流式响应跳过压缩（Brotli），因为 `text/event-stream` 不是可压缩的内容类型。
 
 ### 10. ResponseBuilding 事件
 

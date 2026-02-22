@@ -28,6 +28,8 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **mimalloc** allocator for lower allocation latency under contention
 - **Configurable Tokio runtime** — single-threaded (default) or multi-threaded via `TOKIO_WORKERS`
 - **Worker health monitoring** with automatic dead worker respawning
+- **SSE streaming** — real-time Server-Sent Events via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()`
+- **Early response** via `oxphp_finish_request()` — send the response immediately and continue background processing
 - **Panic isolation** via `catch_unwind` — a PHP crash does not take down the server
 
 ## Quick Start
