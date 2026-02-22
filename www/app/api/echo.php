@@ -1,0 +1,30 @@
+<?php
+
+json_response(200, [
+    'method'       => $_SERVER['REQUEST_METHOD'],
+    'uri'          => $_SERVER['REQUEST_URI'],
+    'path'         => parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH),
+    'query_string' => $_SERVER['QUERY_STRING'] ?? '',
+    'get'          => $_GET,
+    'post'         => $_POST,
+    'cookies'      => $_COOKIE,
+    'input'        => file_get_contents('php://input'),
+    'content_type' => $_SERVER['CONTENT_TYPE'] ?? null,
+    'headers'      => request_headers(),
+    'server'       => [
+        'REQUEST_METHOD'    => $_SERVER['REQUEST_METHOD'],
+        'REQUEST_URI'       => $_SERVER['REQUEST_URI'],
+        'QUERY_STRING'      => $_SERVER['QUERY_STRING'] ?? '',
+        'SERVER_SOFTWARE'   => $_SERVER['SERVER_SOFTWARE'] ?? '',
+        'SERVER_PROTOCOL'   => $_SERVER['SERVER_PROTOCOL'] ?? '',
+        'GATEWAY_INTERFACE' => $_SERVER['GATEWAY_INTERFACE'] ?? '',
+        'REMOTE_ADDR'       => $_SERVER['REMOTE_ADDR'] ?? '',
+        'REMOTE_PORT'       => $_SERVER['REMOTE_PORT'] ?? '',
+        'SERVER_NAME'       => $_SERVER['SERVER_NAME'] ?? '',
+        'SERVER_PORT'       => $_SERVER['SERVER_PORT'] ?? '',
+        'SCRIPT_NAME'       => $_SERVER['SCRIPT_NAME'] ?? '',
+        'SCRIPT_FILENAME'   => $_SERVER['SCRIPT_FILENAME'] ?? '',
+        'DOCUMENT_ROOT'     => $_SERVER['DOCUMENT_ROOT'] ?? '',
+        'PHP_SELF'          => $_SERVER['PHP_SELF'] ?? '',
+    ],
+]);
