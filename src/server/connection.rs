@@ -266,6 +266,7 @@ async fn dispatch_request(
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
+                timeout_us: server.request_timeout.as_micros() as u64,
             };
 
             server.metrics.request_queued();

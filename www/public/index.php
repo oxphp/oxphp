@@ -23,17 +23,17 @@ match (true) {
     $path === '/sse'       => require APP_ROOT . '/pages/sse.php',
 
     // JSON API
-    str_starts_with($path, '/api/echo')    => require APP_ROOT . '/api/echo.php',
-    $path === '/api/search'                => require APP_ROOT . '/api/search.php',
-    $path === '/api/upload'                => require APP_ROOT . '/api/upload.php',
-    str_starts_with($path, '/api/cookies') => require APP_ROOT . '/api/cookies.php',
-    $path === '/api/slow'                  => require APP_ROOT . '/api/slow.php',
+    str_starts_with($path, '/api/echo')       => require APP_ROOT . '/api/echo.php',
+    $path === '/api/search'                   => require APP_ROOT . '/api/search.php',
+    $path === '/api/upload'                   => require APP_ROOT . '/api/upload.php',
+    str_starts_with($path, '/api/cookies')    => require APP_ROOT . '/api/cookies.php',
+    $path === '/api/slow'                     => require APP_ROOT . '/api/slow.php',
     str_starts_with($path, '/api/sse-native') => require APP_ROOT . '/api/sse_native.php',
-    str_starts_with($path, '/api/sse')       => require APP_ROOT . '/api/sse.php',
-    $path === '/api/error'                 => require APP_ROOT . '/api/error.php',
-    $path === '/api/large'                 => require APP_ROOT . '/api/large.php',
-    $path === '/api/headers'               => require APP_ROOT . '/api/headers.php',
-    $path === '/api/info'                  => require APP_ROOT . '/api/info.php',
+    str_starts_with($path, '/api/sse')        => require APP_ROOT . '/api/sse.php',
+    $path === '/api/error'                    => require APP_ROOT . '/api/error.php',
+    $path === '/api/large'                    => require APP_ROOT . '/api/large.php',
+    $path === '/api/headers'                  => require APP_ROOT . '/api/headers.php',
+    $path === '/api/info'                     => require APP_ROOT . '/api/info.php',
 
     // Fallback
     default => json_response(404, ['error' => 'Not Found', 'path' => $_SERVER['REQUEST_URI']]),

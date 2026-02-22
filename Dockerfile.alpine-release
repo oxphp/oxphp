@@ -113,16 +113,18 @@ COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extens
 # PHP configuration
 RUN mkdir -p /usr/local/etc/php/conf.d
 COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+# Disable preloading — release image ships only a single index.php
+RUN sed -i '/^opcache.preload/d' /usr/local/etc/php/conf.d/oxphp.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
-# Create web root
-RUN mkdir -p /var/www/html && chown www-data:www-data /var/www/html
+# Create web root (DOCUMENT_ROOT = /var/www/html/public)
+RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
-# Copy only index.php as the default landing page
-COPY --chown=www-data:www-data www/index.php /var/www/html/
+# Copy welcome page as the default landing page
+COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index.php
 
 # Ensure libphp.so and liboxphp_bridge.so are found at runtime
 ENV LD_LIBRARY_PATH=/usr/local/lib

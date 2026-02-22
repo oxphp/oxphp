@@ -4,7 +4,9 @@ layout('Echo Tool', <<<'HTML'
 <div class="card">
     <div class="card-header">
         Send a Request
-        <div style="float:right;display:flex;gap:6px;flex-wrap:wrap">
+    </div>
+    <div class="card-body">
+        <div style="display: flex;gap: 6px;flex-wrap: wrap;margin-bottom: 20px;flex-direction: row;justify-content: flex-end;">
             <button class="btn btn-sm" onclick="echoPreset('get')">GET</button>
             <button class="btn btn-sm" onclick="echoPreset('post-json')">POST JSON</button>
             <button class="btn btn-sm" onclick="echoPreset('post-form')">POST Form</button>
@@ -12,8 +14,7 @@ layout('Echo Tool', <<<'HTML'
             <button class="btn btn-sm" onclick="echoPreset('put')">PUT</button>
             <button class="btn btn-sm" onclick="echoPreset('delete')">DELETE</button>
         </div>
-    </div>
-    <div class="card-body">
+
         <form id="echo-form">
             <div class="form-row">
                 <label>Method

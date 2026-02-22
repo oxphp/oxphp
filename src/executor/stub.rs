@@ -58,6 +58,7 @@ mod tests {
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/html")),
+            timeout_us: 0,
         }
     }
 

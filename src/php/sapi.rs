@@ -418,13 +418,30 @@ pub fn clear_request_data() {
             0,
         );
         bindings::oxphp_bridge_set_request_id(std::ptr::null());
+        // Reset deadline and cancellation flags so the next request on this worker
+        // doesn't inherit stale state from a timed-out or cancelled request.
+        bindings::oxphp_bridge_set_deadline(0);
+        bindings::oxphp_bridge_set_cancelled(false);
     }
+}
+
+// FFI declarations for the C bridge wrapper callbacks
+extern "C" {
+    fn oxphp_bridge_ub_write(str: *const c_char, str_length: usize) -> usize;
+    fn oxphp_bridge_flush(server_context: *mut c_void);
 }
 
 /// Build the custom SAPI module struct.
 ///
 /// All string pointers use `b"...\0"` byte literals which have `'static` lifetime.
 pub fn build_sapi_module() -> sapi_module_struct {
+    // Register Rust implementations with the bridge so the C wrappers can call them.
+    // The C wrappers check deadline/cancellation BEFORE calling Rust, and bailout
+    // from C (longjmp stays within C frames, never crosses Rust FFI).
+    unsafe {
+        bindings::oxphp_bridge_set_sapi_callbacks(Some(oxphp_ub_write), Some(oxphp_flush));
+    }
+
     sapi_module_struct {
         name: b"cli-server\0".as_ptr() as *mut c_char,
         pretty_name: b"OxPHP\0".as_ptr() as *mut c_char,
@@ -435,8 +452,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
         activate: Some(oxphp_activate),
         deactivate: Some(oxphp_deactivate),
 
-        ub_write: Some(oxphp_ub_write),
-        flush: Some(oxphp_flush),
+        ub_write: Some(oxphp_bridge_ub_write),
+        flush: Some(oxphp_bridge_flush),
         get_stat: None,
         getenv: None,
 
@@ -562,10 +579,31 @@ unsafe extern "C" fn oxphp_deactivate() -> c_int {
 
 // ─── Output Capture ─────────────────────────────────────────
 
+/// Check if the Tokio receiver was dropped (client disconnected / timeout fired).
+/// Sets the bridge cancellation flag so the C-level deadline check triggers bailout.
+/// Only logs once per request — subsequent calls are silent.
+unsafe fn check_client_disconnected() {
+    if bindings::oxphp_bridge_is_cancelled() {
+        return; // already flagged, don't log again
+    }
+    EARLY_TX.with(|slot| {
+        if let Some((_, tx)) = slot.borrow().as_ref() {
+            if tx.is_closed() {
+                tracing::warn!("Client disconnected, requesting PHP cancellation");
+                bindings::oxphp_bridge_set_cancelled(true);
+            }
+        }
+    });
+}
+
 unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> usize {
     if str.is_null() || str_length == 0 {
         return 0;
     }
+
+    // NOTE: no check_client_disconnected() here — it's too expensive for the hot path.
+    // Client disconnect detection happens in flush (infrequent) and via the C-level
+    // periodic deadline check (every 128 ub_write calls).
 
     // After finish_request (non-streaming): discard output to avoid memory growth.
     // After finish_request (streaming): also discard — stream is closed.
@@ -585,6 +623,8 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 }
 
 unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
+    check_client_disconnected();
+
     // Streaming mode: send headers on first flush, then send buffered output as chunk.
     if bindings::oxphp_bridge_is_streaming() {
         if !bindings::oxphp_bridge_get_headers_sent() {

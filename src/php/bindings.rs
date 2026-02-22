@@ -266,6 +266,18 @@ extern "C" {
     pub fn oxphp_bridge_set_headers_sent(sent: bool);
     pub fn oxphp_bridge_get_headers_sent() -> bool;
 
+    pub fn oxphp_bridge_set_deadline(deadline_us: i64);
+    pub fn oxphp_bridge_is_deadline_expired() -> bool;
+    pub fn oxphp_bridge_set_cancelled(cancelled: bool);
+    pub fn oxphp_bridge_is_cancelled() -> bool;
+
+    pub fn oxphp_execute_script_safe(file_handle: *mut c_void) -> c_int;
+
+    pub fn oxphp_bridge_set_sapi_callbacks(
+        ub_write: Option<unsafe extern "C" fn(*const c_char, usize) -> usize>,
+        flush: Option<unsafe extern "C" fn(*mut c_void)>,
+    );
+
     // ─── SAPI request_info ──────────────────────────────
 
     pub fn oxphp_bridge_set_request_info(

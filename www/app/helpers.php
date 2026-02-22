@@ -31,8 +31,8 @@ function layout(string $title, string $content): void {
     $nav_items = [
         '/'        => 'Dashboard',
         '/echo'    => 'Echo',
-        '/upload'  => 'Upload',
-        '/cookies' => 'Cookies',
+        '/upload'    => 'Upload',
+        '/cookies'   => 'Cookies',
         '/opcache'   => 'OPcache',
         '/functions' => 'Functions',
         '/sse'       => 'SSE',

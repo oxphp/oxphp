@@ -674,6 +674,15 @@ fn execute_request(
         bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
     }
 
+    // Set execution deadline for the cooperative watchdog.
+    if request.timeout_us > 0 {
+        let now_us = now.as_micros() as i64;
+        let deadline = now_us.saturating_add(request.timeout_us.min(i64::MAX as u64) as i64);
+        unsafe {
+            bindings::oxphp_bridge_set_deadline(deadline);
+        }
+    }
+
     if unsafe { bindings::php_request_startup() } != 0 {
         return Some(ScriptResponse {
             status: 500,
@@ -692,7 +701,12 @@ fn execute_request(
 
     file_handle.primary_script = true;
 
-    unsafe { bindings::php_execute_script(&mut file_handle) };
+    let script_ok = unsafe {
+        bindings::oxphp_execute_script_safe(&mut file_handle as *mut _ as *mut std::os::raw::c_void)
+    };
+    if script_ok == 0 {
+        tracing::warn!(path = %request.script_path.display(), "PHP script aborted via zend_bailout");
+    }
 
     unsafe {
         bindings::zend_destroy_file_handle(&mut file_handle);

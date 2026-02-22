@@ -1,6 +1,7 @@
 #include "oxphp_bridge.h"
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -64,6 +65,22 @@ void oxphp_bridge_set_finished(bool finished) {
 
 bool oxphp_bridge_is_finished(void) {
     return ctx.finished;
+}
+
+void oxphp_bridge_set_deadline(int64_t deadline_us) {
+    ctx.deadline_us = deadline_us;
+}
+
+int64_t oxphp_bridge_get_deadline(void) {
+    return ctx.deadline_us;
+}
+
+bool oxphp_bridge_is_deadline_expired(void) {
+    if (ctx.deadline_us == 0) return false;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    return now_us >= ctx.deadline_us;
 }
 
 void oxphp_bridge_set_headers_sent(bool sent) {
@@ -372,4 +389,103 @@ void oxphp_zval_dtor(void *zv) {
 
 size_t oxphp_zval_size(void) {
     return sizeof(zval);
+}
+
+void oxphp_bridge_set_cancelled(bool cancelled) {
+    ctx.cancelled = cancelled;
+}
+
+bool oxphp_bridge_is_cancelled(void) {
+    return ctx.cancelled;
+}
+
+/* ── Bailout wrapper ── */
+
+void oxphp_bridge_bailout(void) {
+    zend_bailout();
+}
+
+/* ── SAPI callback wrappers with cooperative deadline check ── */
+
+/*
+ * Global (not __thread) — set once at startup by build_sapi_module() BEFORE
+ * any worker threads are spawned, so no data race.  All workers share the
+ * same Rust function pointers; per-request state lives in __thread ctx.
+ */
+static oxphp_ub_write_fn_t rust_ub_write = NULL;
+static oxphp_flush_fn_t    rust_flush    = NULL;
+
+void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_fn_t flush) {
+    rust_ub_write = ub_write;
+    rust_flush    = flush;
+}
+
+/**
+ * Check deadline and cancellation, bailout if needed.
+ * Called from C — longjmp stays within C frames, never crosses Rust FFI.
+ */
+static inline void check_deadline_c(void) {
+    if (ctx.cancelled) {
+        zend_bailout();
+    }
+    if (ctx.deadline_us != 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+        if (now_us >= ctx.deadline_us) {
+            zend_bailout();
+        }
+    }
+}
+
+/**
+ * Fast check — only tests the cancelled flag (no syscall).
+ * Used on ub_write hot path between periodic full checks.
+ */
+static inline void check_cancelled_c(void) {
+    if (ctx.cancelled) {
+        zend_bailout();
+    }
+}
+
+/* Check interval for ub_write: every 128 calls do a full deadline check,
+ * otherwise only check the cancelled flag (a single bool read, no syscall). */
+#define DEADLINE_CHECK_INTERVAL 128
+
+size_t oxphp_bridge_ub_write(const char *str, size_t str_length) {
+    if (++ctx.write_count >= DEADLINE_CHECK_INTERVAL) {
+        ctx.write_count = 0;
+        check_deadline_c();
+    } else {
+        check_cancelled_c();
+    }
+    if (rust_ub_write) {
+        return rust_ub_write(str, str_length);
+    }
+    return 0;
+}
+
+void oxphp_bridge_flush(void *server_context) {
+    /* flush is infrequent — always do a full check. */
+    check_deadline_c();
+    if (rust_flush) {
+        rust_flush(server_context);
+    }
+}
+
+/* ── Safe script execution with zend_try ── */
+
+#include "main/php_main.h"  /* php_execute_script() */
+
+/* Takes void* to avoid exposing zend_file_handle in the Rust FFI bindings.
+ * Caller is responsible for passing a valid zend_file_handle pointer. */
+int oxphp_execute_script_safe(void *file_handle) {
+    int result = 0;
+    zend_try {
+        php_execute_script((zend_file_handle *)file_handle);
+        result = 1;  /* success */
+    } zend_catch {
+        result = 0;  /* bailout occurred */
+    } zend_end_try();
+    return result;
 }

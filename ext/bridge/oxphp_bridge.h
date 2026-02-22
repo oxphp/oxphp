@@ -37,6 +37,15 @@ typedef struct {
 
     /** Whether oxphp_finish_request() was called. */
     bool finished;
+
+    /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
+    int64_t deadline_us;
+
+    /** Whether cancellation has been requested (client disconnected). */
+    bool cancelled;
+
+    /** ub_write call counter for periodic deadline checks. */
+    uint32_t write_count;
 } oxphp_ctx_t;
 
 /**
@@ -83,6 +92,15 @@ void oxphp_bridge_set_finished(bool finished);
 
 /** Check if request is finished. */
 bool oxphp_bridge_is_finished(void);
+
+/** Set the execution deadline (Unix epoch, microseconds). 0 = no deadline. */
+void oxphp_bridge_set_deadline(int64_t deadline_us);
+
+/** Get the execution deadline. */
+int64_t oxphp_bridge_get_deadline(void);
+
+/** Check if the execution deadline has expired. */
+bool oxphp_bridge_is_deadline_expired(void);
 
 /** Mark headers as sent (streaming mode). */
 void oxphp_bridge_set_headers_sent(bool sent);
@@ -224,6 +242,37 @@ void oxphp_zval_dtor(void *zv);
 
 /** Return sizeof(zval) for the running PHP build. */
 size_t oxphp_zval_size(void);
+
+/** Trigger zend_bailout() — safely abort PHP execution from SAPI callbacks. */
+void oxphp_bridge_bailout(void);
+
+/* ── SAPI callback wrappers with cooperative deadline check ── */
+
+/**
+ * Register the Rust-side ub_write and flush implementations.
+ * The bridge provides wrapper functions that check the deadline BEFORE
+ * calling through to Rust, and call zend_bailout() from C if expired.
+ * This avoids longjmp crossing Rust FFI boundaries.
+ */
+typedef size_t (*oxphp_ub_write_fn_t)(const char *str, size_t str_length);
+typedef void   (*oxphp_flush_fn_t)(void *server_context);
+
+void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_fn_t flush);
+
+/** C wrapper for ub_write — checks deadline, then calls Rust impl. */
+size_t oxphp_bridge_ub_write(const char *str, size_t str_length);
+
+/** C wrapper for flush — checks deadline, then calls Rust impl. */
+void oxphp_bridge_flush(void *server_context);
+
+/** Set the cancellation flag (called from Rust when client disconnects). */
+void oxphp_bridge_set_cancelled(bool cancelled);
+
+/** Check if cancellation was requested. */
+bool oxphp_bridge_is_cancelled(void);
+
+/** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
+int oxphp_execute_script_safe(void *file_handle);
 
 #ifdef __cplusplus
 }

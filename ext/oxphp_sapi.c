@@ -3,6 +3,7 @@
 #include "oxphp_bridge.h"
 #include "Zend/zend_API.h"
 #include <stdlib.h>
+#include <time.h>
 
 /* {{{ oxphp_request_id(): string
  * Returns the hex request ID for the current request. */
@@ -43,7 +44,8 @@ PHP_FUNCTION(oxphp_server_info)
 /* }}} */
 
 /* {{{ oxphp_request_heartbeat(int $time = 10): bool
- * Placeholder for timeout extension. Currently a no-op that returns true. */
+ * Extend the execution deadline by $time seconds from now.
+ * Returns false if $time is non-positive or no deadline is set. */
 PHP_FUNCTION(oxphp_request_heartbeat)
 {
     zend_long time = 10;
@@ -53,7 +55,16 @@ PHP_FUNCTION(oxphp_request_heartbeat)
         Z_PARAM_LONG(time)
     ZEND_PARSE_PARAMETERS_END();
 
-    /* TODO: integrate with watchdog timer in future phase */
+    if (time <= 0) {
+        RETURN_FALSE;
+    }
+
+    /* Extend deadline by $time seconds from now */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+    oxphp_bridge_set_deadline(now_us + time * 1000000);
+
     RETURN_TRUE;
 }
 /* }}} */
