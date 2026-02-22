@@ -259,6 +259,7 @@ extern "C" {
     pub fn oxphp_bridge_set_request_id(id: *const c_char);
     pub fn oxphp_bridge_set_worker_id(id: i32);
     pub fn oxphp_bridge_set_request_time(time: f64);
+    pub fn oxphp_bridge_is_finished() -> bool;
 
     // ─── SAPI request_info ──────────────────────────────
 

@@ -1,4 +1,5 @@
 #include "php_oxphp_sapi.h"
+#include "SAPI.h"
 #include "oxphp_bridge.h"
 #include "Zend/zend_API.h"
 #include <stdlib.h>
@@ -58,7 +59,9 @@ PHP_FUNCTION(oxphp_request_heartbeat)
 /* }}} */
 
 /* {{{ oxphp_finish_request(): bool
- * Mark the request as finished — allows background processing. */
+ * Flush the HTTP response to the client immediately.
+ * PHP continues executing for background tasks (analytics, cleanup, etc.).
+ * Returns false if already called once in this request. */
 PHP_FUNCTION(oxphp_finish_request)
 {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -67,7 +70,17 @@ PHP_FUNCTION(oxphp_finish_request)
         RETURN_FALSE;
     }
 
+    /* 1. Flush all PHP output buffering layers — triggers ub_write for
+     *    any buffered content, landing it in the Rust RESPONSE buffer. */
+    php_output_end_all();
+
+    /* 2. Mark the request as finished so subsequent output is discarded. */
     oxphp_bridge_set_finished(true);
+
+    /* 3. Trigger oxphp_flush callback which calls try_early_send() in Rust,
+     *    snapshotting the current response and sending via oneshot channel. */
+    sapi_flush();
+
     RETURN_TRUE;
 }
 /* }}} */

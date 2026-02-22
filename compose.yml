@@ -19,13 +19,13 @@ services:
       - LISTEN_ADDR=0.0.0.0:8080
 
       # Root directory for serving files and PHP scripts.
-      # - DOCUMENT_ROOT=/var/www/html/public
+      - DOCUMENT_ROOT=/var/www/html/public
 
       # Front-controller file. Determines routing mode:
       #   (unset)      — traditional: direct file mapping, / → index.php or index.html
       #   index.php    — framework: all requests → index.php, direct .php access blocked
       #   index.html   — SPA: missing files → index.html, .php still executes
-      # - INDEX_FILE=index.php
+      - INDEX_FILE=index.php
 
       # PHP executor backend.
       #   sapi  — execute PHP via custom SAPI (default, requires php feature)

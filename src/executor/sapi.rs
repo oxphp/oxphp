@@ -381,19 +381,29 @@ fn worker_thread(
             // Blocking recv — zero CPU while idle, exits when channel closes.
             while let Ok(wr) = request_rx.recv() {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    execute_request(&wr.script)
+                    execute_request(&wr.script, wr.response_tx)
                 }));
                 match result {
-                    Ok(response) => {
-                        let _ = wr.response_tx.send(response);
+                    Ok(Some(response)) => {
+                        // Response not sent early — recover the sender from TLS.
+                        if let Some((_start, tx)) = sapi::take_early_tx() {
+                            let _ = tx.send(response);
+                        }
+                    }
+                    Ok(None) => {
+                        // Early send already happened via oxphp_finish_request().
                     }
                     Err(_) => {
                         tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
-                        let _ = wr.response_tx.send(ScriptResponse {
-                            status: 500,
-                            body: Bytes::from_static(b"Internal Server Error"),
-                            ..Default::default()
-                        });
+                        // Try to recover the sender from TLS for 500 response.
+                        if let Some((_start, tx)) = sapi::take_early_tx() {
+                            let _ = tx.send(ScriptResponse {
+                                status: 500,
+                                body: Bytes::from_static(b"Internal Server Error"),
+                                ..Default::default()
+                            });
+                        }
+                        // If tx was already consumed by early send, response was already sent.
                         break;
                     }
                 }
@@ -410,19 +420,26 @@ fn worker_thread(
                     Ok(wr) => {
                         last_active.store(now_millis(), Ordering::Relaxed);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            execute_request(&wr.script)
+                            execute_request(&wr.script, wr.response_tx)
                         }));
                         match result {
-                            Ok(response) => {
-                                let _ = wr.response_tx.send(response);
+                            Ok(Some(response)) => {
+                                if let Some((_start, tx)) = sapi::take_early_tx() {
+                                    let _ = tx.send(response);
+                                }
+                            }
+                            Ok(None) => {
+                                // Early send already happened.
                             }
                             Err(_) => {
                                 tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
-                                let _ = wr.response_tx.send(ScriptResponse {
-                                    status: 500,
-                                    body: Bytes::from_static(b"Internal Server Error"),
-                                    ..Default::default()
-                                });
+                                if let Some((_start, tx)) = sapi::take_early_tx() {
+                                    let _ = tx.send(ScriptResponse {
+                                        status: 500,
+                                        body: Bytes::from_static(b"Internal Server Error"),
+                                        ..Default::default()
+                                    });
+                                }
                                 break;
                             }
                         }
@@ -630,11 +647,18 @@ impl Drop for RequestDataGuard {
     }
 }
 
-fn execute_request(request: &ScriptRequest) -> ScriptResponse {
+/// Execute a PHP script. If `oxphp_finish_request()` was called during execution,
+/// the response is sent early via the `response_tx` oneshot and `None` is returned.
+/// Otherwise, the full `ScriptResponse` is returned for the caller to send.
+fn execute_request(
+    request: &ScriptRequest,
+    response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
+) -> Option<ScriptResponse> {
     let start = Instant::now();
 
     sapi::clear_buffers();
     sapi::set_request_data(request);
+    sapi::set_early_tx(start, response_tx);
     let _guard = RequestDataGuard;
 
     // Set request_time BEFORE php_request_startup() — OPcache reads it during RINIT.
@@ -646,11 +670,11 @@ fn execute_request(request: &ScriptRequest) -> ScriptResponse {
     }
 
     if unsafe { bindings::php_request_startup() } != 0 {
-        return ScriptResponse {
+        return Some(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"php_request_startup() failed"),
             ..Default::default()
-        };
+        });
     }
 
     let script_path_str = request.script_path.to_str().unwrap_or("");
@@ -673,27 +697,25 @@ fn execute_request(request: &ScriptRequest) -> ScriptResponse {
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
 
+    // If the response was already sent early via oxphp_finish_request(), we're done.
+    if sapi::was_early_sent() {
+        return None;
+    }
+
     // Single batched TLS lookup for all response data.
     let (raw_output, raw_headers, status) = sapi::take_response();
     let body = Bytes::from(raw_output);
 
     // Parse header strings into typed HeaderName/HeaderValue on the worker thread,
     // so the single-threaded Tokio runtime doesn't pay the parsing cost.
-    let headers = raw_headers
-        .into_iter()
-        .filter_map(|(name, value)| {
-            let hn = HeaderName::from_bytes(name.as_bytes()).ok()?;
-            let hv = HeaderValue::from_str(&value).ok()?;
-            Some((hn, hv))
-        })
-        .collect();
+    let headers = sapi::parse_raw_headers(raw_headers);
 
-    ScriptResponse {
+    Some(ScriptResponse {
         status,
         headers,
         body,
         execution_time_us: start.elapsed().as_micros() as u64,
-    }
+    })
 }
 
 #[cfg(test)]

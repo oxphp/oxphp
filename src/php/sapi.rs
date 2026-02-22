@@ -2,14 +2,16 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use bytes::Bytes;
 use http::header;
+use http::{HeaderName, HeaderValue};
+use tokio::sync::oneshot;
 
 use crate::php::bindings::{self, *};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
-use crate::types::ScriptRequest;
+use crate::types::{ScriptRequest, ScriptResponse};
 
 /// Per-request response state consolidated in a single thread-local
 /// to avoid 3 separate TLS lookups + RefCell borrows on the hot path.
@@ -32,6 +34,9 @@ impl ResponseBuffers {
 thread_local! {
     static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
     static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
+    /// Holds the oneshot sender + request start time for early response delivery
+    /// via `oxphp_finish_request()`. Set before script execution, consumed when early send triggers.
+    static EARLY_TX: RefCell<Option<(Instant, oneshot::Sender<ScriptResponse>)>> = const { RefCell::new(None) };
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -76,6 +81,63 @@ fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
     if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
         vars.push((k, v));
     }
+}
+
+/// Store a oneshot sender for early response delivery.
+/// Called from the worker thread before `execute_request()`.
+pub fn set_early_tx(start: Instant, tx: oneshot::Sender<ScriptResponse>) {
+    EARLY_TX.with(|slot| {
+        *slot.borrow_mut() = Some((start, tx));
+    });
+}
+
+/// Parse raw header strings into typed `HeaderName`/`HeaderValue` pairs.
+/// Shared between early send and normal response paths.
+pub fn parse_raw_headers(raw: Vec<(String, String)>) -> Vec<(HeaderName, HeaderValue)> {
+    raw.into_iter()
+        .filter_map(|(name, value)| {
+            let hn = HeaderName::from_bytes(name.as_bytes()).ok()?;
+            let hv = HeaderValue::from_str(&value).ok()?;
+            Some((hn, hv))
+        })
+        .collect()
+}
+
+/// Attempt to send the response early if `oxphp_bridge_is_finished()` is true
+/// and the sender hasn't been consumed yet. Returns true if response was sent.
+pub fn try_early_send() -> bool {
+    let finished = unsafe { bindings::oxphp_bridge_is_finished() };
+    if !finished {
+        return false;
+    }
+
+    EARLY_TX.with(|slot| {
+        let entry = slot.borrow_mut().take();
+        if let Some((start, tx)) = entry {
+            let (raw_output, raw_headers, status) = take_response();
+            let body = Bytes::from(raw_output);
+            let headers = parse_raw_headers(raw_headers);
+            let _ = tx.send(ScriptResponse {
+                status,
+                headers,
+                body,
+                execution_time_us: start.elapsed().as_micros() as u64,
+            });
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Returns true if the early sender has been consumed (response already sent).
+pub fn was_early_sent() -> bool {
+    EARLY_TX.with(|slot| slot.borrow().is_none())
+}
+
+/// Take the early sender from TLS (for panic recovery in the worker thread).
+pub fn take_early_tx() -> Option<(Instant, oneshot::Sender<ScriptResponse>)> {
+    EARLY_TX.with(|slot| slot.borrow_mut().take())
 }
 
 /// Build request data from a ScriptRequest and store in thread-local.
@@ -426,6 +488,13 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
         return 0;
     }
 
+    // After early send, discard all subsequent output to avoid memory growth
+    // during background execution. Check FFI flag first (cheap __thread read)
+    // before the TLS RefCell borrow.
+    if bindings::oxphp_bridge_is_finished() && was_early_sent() {
+        return str_length;
+    }
+
     let data = std::slice::from_raw_parts(str as *const u8, str_length);
 
     RESPONSE.with(|r| {
@@ -436,7 +505,9 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 }
 
 unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
-    // No-op: output is collected in ub_write buffer
+    // When oxphp_finish_request() sets the finished flag and calls sapi_flush(),
+    // this triggers the early response send.
+    try_early_send();
 }
 
 // ─── Header Handling ────────────────────────────────────────
@@ -651,6 +722,10 @@ pub fn clear_buffers() {
         resp.output.clear();
         resp.headers.clear();
         resp.status_code = 200;
+    });
+    // Drop any unconsumed early sender from a previous request.
+    EARLY_TX.with(|slot| {
+        slot.borrow_mut().take();
     });
 }
 
