@@ -133,7 +133,7 @@ h1 {
 }
 
 .table-kv td {
-    padding: 6px 0;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--color-border);
     font-size: 0.875rem;
 }

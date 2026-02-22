@@ -74,6 +74,22 @@ cleanup_temp_files();',
 }',
     ],
     [
+        'name'    => 'oxphp_stream_flush',
+        'sig'     => 'oxphp_stream_flush(): bool',
+        'params'  => [],
+        'return'  => 'bool — <code>true</code> on success, <code>false</code> if the request was already finished.',
+        'desc'    => 'Activates streaming mode and flushes the current output buffer to the client as an HTTP chunk. This is the primary function for implementing Server-Sent Events (SSE). On the first call it enables streaming via the C bridge; subsequent calls send buffered output. Native <code>flush()</code> also works if <code>Content-Type: text/event-stream</code> is set and output buffering is disabled.',
+        'example' => 'header("Content-Type: text/event-stream");
+header("Cache-Control: no-cache");
+
+for ($i = 0; $i < 10; $i++) {
+    echo "id: $i\n";
+    echo "data: " . json_encode(["counter" => $i]) . "\n\n";
+    oxphp_stream_flush();
+    sleep(1);
+}',
+    ],
+    [
         'name'    => 'oxphp_request_heartbeat',
         'sig'     => 'oxphp_request_heartbeat(int $time = 10): bool',
         'params'  => [
@@ -121,6 +137,7 @@ foreach ($functions as $fn) {
             'oxphp_server_info'       => '<pre class="fn-live-pre">' . h(json_encode(oxphp_server_info(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) . '</pre>',
             'oxphp_is_streaming'      => '<span class="mono">' . (oxphp_is_streaming() ? 'true' : 'false') . '</span>',
             'oxphp_request_heartbeat' => '<span class="mono">' . (oxphp_request_heartbeat() ? 'true' : 'false') . '</span>',
+            'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',
             'oxphp_finish_request'    => '<span class="mono dim">not called &mdash; would end response</span>',
             default                   => '',
         };
@@ -211,6 +228,7 @@ layout('Server Functions', <<<HTML
         opacity: 0.5;
         margin-top: 2px;
         line-height: 1.3;
+        padding: 6px 18px;
     }
 
     .fn-sidebar-count {
