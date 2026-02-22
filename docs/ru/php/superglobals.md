@@ -19,8 +19,8 @@ OxPHP заполняет все стандартные суперглобаль�
 | `SERVER_PROTOCOL` | Всегда `HTTP/1.1` | `HTTP/1.1` |
 | `SCRIPT_NAME` | Путь URI без query-строки | `/app` |
 | `PHP_SELF` | То же, что `SCRIPT_NAME` | `/app` |
-| `SCRIPT_FILENAME` | Абсолютный путь к скрипту в файловой системе | `/var/www/html/index.php` |
-| `DOCUMENT_ROOT` | Корневая директория веб-сервера | `/var/www/html` |
+| `SCRIPT_FILENAME` | Абсолютный путь к скрипту в файловой системе | `/var/www/html/public/index.php` |
+| `DOCUMENT_ROOT` | Корневая директория веб-сервера | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Идентификатор сервера | `OxPHP/0.1.0` |
 | `GATEWAY_INTERFACE` | Версия CGI | `CGI/1.1` |
 | `REMOTE_ADDR` | IP-адрес клиента | `172.17.0.1` |

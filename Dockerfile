@@ -130,7 +130,7 @@ RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
 # Create web root
-RUN mkdir -p /var/www/html && chown www-data:www-data /var/www/html
+RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
 # Copy default web files
 COPY --chown=www-data:www-data www/ /var/www/html/

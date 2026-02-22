@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 
 pub type zend_result = c_int;
 
@@ -251,4 +251,21 @@ extern "C" {
         argc: u32,
         result: *mut c_void,
     ) -> c_int;
+
+    // ─── Bridge context ─────────────────────────────────
+
+    pub fn oxphp_bridge_tsrm_update();
+    pub fn oxphp_bridge_init_ctx();
+    pub fn oxphp_bridge_set_request_id(id: *const c_char);
+    pub fn oxphp_bridge_set_worker_id(id: i32);
+    pub fn oxphp_bridge_set_request_time(time: f64);
+
+    // ─── SAPI request_info ──────────────────────────────
+
+    pub fn oxphp_bridge_set_request_info(
+        method: *const c_char,
+        query_string: *const c_char,
+        content_type: *const c_char,
+        content_length: c_long,
+    );
 }

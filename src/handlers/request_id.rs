@@ -1,22 +1,39 @@
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use crate::events::{EventHandler, Priority, Propagation, RequestReceived};
 
 /// Atomic counter for request ID generation.
-static REQUEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a request ID: `{timestamp_hex:08x}{counter:08x}` (16 hex chars).
-/// Uses pre-sized String to avoid format!'s grow-realloc pattern.
+/// Per-process unique identifier (lower 16 bits of PID XOR'd with startup nanos).
+/// Differentiates IDs across multiple instances (containers, replicas).
+static PROCESS_ID: OnceLock<u16> = OnceLock::new();
+
+fn process_id() -> u16 {
+    *PROCESS_ID.get_or_init(|| {
+        let pid = std::process::id() as u64;
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64;
+        (pid ^ nanos) as u16
+    })
+}
+
+/// Generate a request ID: `{timestamp:08x}{process:04x}{counter:08x}` (20 hex chars).
+/// Unique across processes and restarts via process_id component.
 fn generate_request_id() -> String {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut id = String::with_capacity(16);
-    write!(id, "{ts:08x}{counter:08x}").unwrap();
+    let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
+    let pid = process_id();
+    let mut id = String::with_capacity(20);
+    write!(id, "{ts:08x}{pid:04x}{counter:08x}").unwrap();
     id
 }
 
@@ -74,7 +91,7 @@ mod tests {
         let mut event = make_event();
         handler.handle(&mut event);
 
-        assert_eq!(event.request_id.len(), 16);
+        assert_eq!(event.request_id.len(), 20);
         assert!(event.request_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

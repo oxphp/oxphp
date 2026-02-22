@@ -12,7 +12,7 @@ The simplest way to run OxPHP is to extend the base image with your application 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 The image includes:
@@ -24,7 +24,7 @@ The image includes:
 - Alpine Linux base with minimal runtime dependencies
 - `www-data` user (UID 82, GID 82) for non-root execution
 
-The default document root is `/var/www/html`. The server listens on port 8080. The `CMD` is `["oxphp"]`.
+The default document root is `/var/www/html/public`. The server listens on port 8080. The `CMD` is `["oxphp"]`.
 
 ## compose.yml Reference
 
@@ -42,7 +42,7 @@ services:
     environment:
       # Server
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Enables Framework routing mode
       - EXECUTOR=sapi                # "sapi" or "stub"
       # - PHP_WORKERS=0              # Static: 0 = CPU*2, or fixed N
@@ -90,7 +90,7 @@ services:
       - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Environment Variables
@@ -98,7 +98,7 @@ services:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server |
-| `DOCUMENT_ROOT` | `/var/www/html` | Root directory for serving files |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files |
 | `INDEX_FILE` | _(unset)_ | Set to `index.php` for Framework mode or `index.html` for SPA mode |
 | `EXECUTOR` | `sapi` | PHP executor type: `sapi` (real PHP) or `stub` (placeholder) |
 | `PHP_WORKERS` | `0` (CPU * 2, static) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |

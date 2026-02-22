@@ -28,7 +28,7 @@ impl ServerConfig {
         let listen_addr =
             std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
         let document_root: PathBuf = std::env::var("DOCUMENT_ROOT")
-            .unwrap_or_else(|_| "/var/www/html".to_string())
+            .unwrap_or_else(|_| "/var/www/html/public".to_string())
             .into();
         let index_file = std::env::var("INDEX_FILE").ok();
 

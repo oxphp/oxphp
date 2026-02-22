@@ -19,8 +19,8 @@ OxPHP 填充所有标准 PHP 超全局变量，使现有 PHP 代码无需修改�
 | `SERVER_PROTOCOL` | 始终为 `HTTP/1.1` | `HTTP/1.1` |
 | `SCRIPT_NAME` | 不含查询字符串的 URI 路径 | `/app` |
 | `PHP_SELF` | 与 `SCRIPT_NAME` 相同 | `/app` |
-| `SCRIPT_FILENAME` | 脚本的绝对文件系统路径 | `/var/www/html/index.php` |
-| `DOCUMENT_ROOT` | Web 根目录 | `/var/www/html` |
+| `SCRIPT_FILENAME` | 脚本的绝对文件系统路径 | `/var/www/html/public/index.php` |
+| `DOCUMENT_ROOT` | Web 根目录 | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | 服务器标识 | `OxPHP/0.1.0` |
 | `GATEWAY_INTERFACE` | CGI 版本 | `CGI/1.1` |
 | `REMOTE_ADDR` | 客户端 IP 地址 | `172.17.0.1` |

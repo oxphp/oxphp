@@ -12,7 +12,7 @@ OxPHP распаўсюджваецца як гатовая Docker-выява п�
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 Выява ўключае:
@@ -24,7 +24,7 @@ COPY --chown=www-data:www-data ./src /var/www/html
 - Базавую сістэму Alpine Linux з мінімальнымі залежнасцямі выканання
 - Карыстальніка `www-data` (UID 82, GID 82) для выканання без прывілеяў root
 
-Каранёвы каталог дакументаў па змаўчанні — `/var/www/html`. Сервер слухае на порце 8080. `CMD` — `["oxphp"]`.
+Каранёвы каталог дакументаў па змаўчанні — `/var/www/html/public`. Сервер слухае на порце 8080. `CMD` — `["oxphp"]`.
 
 ## Даведнік па compose.yml
 
@@ -42,7 +42,7 @@ services:
     environment:
       # Сервер
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Уключае фрэймворкавы рэжым маршрутызацыі
       - EXECUTOR=sapi                # "sapi" або "stub"
       # - PHP_WORKERS=0              # Статычны: 0 = CPU*2, або фіксаванае N
@@ -90,7 +90,7 @@ services:
       - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Зменныя асяроддзя
@@ -98,7 +98,7 @@ services:
 | Зменная | Па змаўчанні | Апісанне |
 |---------|-------------|----------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Адрас і порт асноўнага HTTP-сервера |
-| `DOCUMENT_ROOT` | `/var/www/html` | Каранёвы каталог для абслугоўвання файлаў |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Каранёвы каталог для абслугоўвання файлаў |
 | `INDEX_FILE` | _(не зададзена)_ | Усталюйце `index.php` для фрэймворкавага рэжыму або `index.html` для SPA-рэжыму |
 | `EXECUTOR` | `sapi` | Тып PHP executor: `sapi` (рэальны PHP) або `stub` (загальнік) |
 | `PHP_WORKERS` | `0` (CPU * 2, статычны) | Рэжым пула воркераў. `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне |

@@ -16,7 +16,7 @@ docker pull ghcr.io/oxphp/oxphp:nightly
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 Соберите образ и запустите контейнер:

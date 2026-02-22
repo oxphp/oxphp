@@ -12,7 +12,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 主 HTTP 服务器的监听地址和端口 |
-| `DOCUMENT_ROOT` | `/var/www/html` | 文件和 PHP 脚本的根目录 |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 文件和 PHP 脚本的根目录 |
 | `INDEX_FILE` | *(空)* | 控制路由模式。参见[路由模式](#路由模式) |
 | `TOKIO_WORKERS` | `0` | Tokio 异步 I/O 线程数。`0` = 单线程运行时（默认），`N` = 使用 N 个工作线程的多线程运行时 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数。超过此限制的新连接将等待信号量许可 |
@@ -116,7 +116,7 @@ URL 直接映射到磁盘上的文件。这是经典 PHP 应用的标准行为�
 
 ```bash
 # 未设置 INDEX_FILE — 传统模式为默认模式
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### 框架模式

@@ -16,7 +16,7 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./www /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 ## 3. Add a compose.yml
@@ -32,7 +32,7 @@ services:
       - "9090:9090"
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       - INTERNAL_ADDR=0.0.0.0:9090
 ```
 
@@ -42,7 +42,7 @@ services:
 mkdir -p www
 ```
 
-Create `www/index.php`:
+Create `public/index.php`:
 
 ```php
 <?php

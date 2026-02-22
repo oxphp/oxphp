@@ -27,7 +27,7 @@ OxPHP 支持三种路由模式，通过单个环境变量进行控制。每种�
 
 ```bash
 # 不设置 INDEX_FILE —— 默认为传统模式
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### 框架模式
@@ -41,7 +41,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 禁止直接访问 `.php` 文件可以防止 URL 泄露，并确保所有 PHP 请求都通过框架的路由器处理。
@@ -57,7 +57,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ## 根路径解析
@@ -92,7 +92,7 @@ DOCUMENT_ROOT=/var/www/html
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `DOCUMENT_ROOT` | 提供文件的文件系统路径 | `/var/www/html` |
+| `DOCUMENT_ROOT` | 提供文件的文件系统路径 | `/var/www/html/public` |
 | `INDEX_FILE` | 索引文件名，控制路由模式 | *（未设置）* |
 
 ## 另请参阅

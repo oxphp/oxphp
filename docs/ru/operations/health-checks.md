@@ -90,7 +90,7 @@ curl http://localhost:9090/config
 ```json
 {
   "listen_addr": "0.0.0.0:8080",
-  "document_root": "/var/www/html",
+  "document_root": "/var/www/html/public",
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,

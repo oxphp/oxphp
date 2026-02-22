@@ -35,7 +35,7 @@
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 ```bash
@@ -50,7 +50,7 @@ curl http://localhost:8080/
 | 变量 | 默认值 | 描述 |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
-| `DOCUMENT_ROOT` | `/var/www/html` | 静态文件服务的根目录路径 |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
 | `INDEX_FILE` | *(未设置)* | 路由模式：空 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
 | `TOKIO_WORKERS` | `0`（单线程） | Tokio 异步 I/O 线程数；`0` = 单线程，`N` = 多线程 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
@@ -127,7 +127,7 @@ docker compose build
 ### 本地运行（仅静态文件）
 
 ```bash
-DOCUMENT_ROOT=./www ./target/release/oxphp
+DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
 ## 开发

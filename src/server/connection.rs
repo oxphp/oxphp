@@ -378,7 +378,7 @@ mod tests {
         };
 
         handler.handle(&mut event);
-        assert_eq!(event.request_id.len(), 16);
+        assert_eq!(event.request_id.len(), 20);
         assert!(event.request_id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 

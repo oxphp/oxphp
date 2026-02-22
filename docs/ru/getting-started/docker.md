@@ -12,7 +12,7 @@ OxPHP распространяется в виде готового Docker-об�
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 Образ включает:
@@ -24,7 +24,7 @@ COPY --chown=www-data:www-data ./src /var/www/html
 - Базовую систему Alpine Linux с минимальными зависимостями времени выполнения
 - Пользователя `www-data` (UID 82, GID 82) для запуска без прав root
 
-Корневая директория документов по умолчанию — `/var/www/html`. Сервер слушает на порту 8080. `CMD` — `["oxphp"]`.
+Корневая директория документов по умолчанию — `/var/www/html/public`. Сервер слушает на порту 8080. `CMD` — `["oxphp"]`.
 
 ## Справочник по compose.yml
 
@@ -42,7 +42,7 @@ services:
     environment:
       # Сервер
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Включает режим маршрутизации Framework
       - EXECUTOR=sapi                # "sapi" или "stub"
       # - PHP_WORKERS=0              # Статический: 0 = CPU*2, или фиксированное N
@@ -90,7 +90,7 @@ services:
       - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Переменные окружения
@@ -98,7 +98,7 @@ services:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Адрес и порт основного HTTP-сервера |
-| `DOCUMENT_ROOT` | `/var/www/html` | Корневая директория для раздачи файлов |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Корневая директория для раздачи файлов |
 | `INDEX_FILE` | _(unset)_ | Укажите `index.php` для режима Framework или `index.html` для SPA |
 | `EXECUTOR` | `sapi` | Тип PHP-исполнителя: `sapi` (настоящий PHP) или `stub` (заглушка) |
 | `PHP_WORKERS` | `0` (CPU * 2, static) | Режим пула воркеров. `N` = фиксированный пул, `MIN:MAX` = динамическое масштабирование |

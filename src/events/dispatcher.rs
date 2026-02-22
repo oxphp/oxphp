@@ -34,6 +34,13 @@ impl Hasher for TypeIdHasher {
     }
 }
 
+// TypeId hashes via write_u64 (8 bytes) or write_u128 (16 bytes).
+// Our hasher handles both, but verify TypeId is still a known size.
+const _: () = assert!(
+    std::mem::size_of::<TypeId>() == 8 || std::mem::size_of::<TypeId>() == 16,
+    "TypeId size changed — update TypeIdHasher"
+);
+
 type TypeIdMap<V> = HashMap<TypeId, V, BuildHasherDefault<TypeIdHasher>>;
 
 /// Type-erased synchronous handler function.

@@ -134,8 +134,17 @@ int oxphp_bridge_get_plugin_fn_total(int index) {
  * ═══════════════════════════════════════════════════════════ */
 
 #include "php.h"
+#include "SAPI.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_hash.h"
+
+/* Define thread-local TSRM cache for this compilation unit.
+ * SG()/CG()/EG() macros expand to use TSRMLS_CACHE (_tsrm_ls_cache).
+ * Each .so gets its own copy of this TLS variable.
+ * Must call oxphp_bridge_tsrm_update() on each worker thread after ts_resource_ex(). */
+#ifdef ZTS
+TSRMLS_CACHE_DEFINE()
+#endif
 
 /* ── Type mapping (branchless lookup table) ── */
 
@@ -327,6 +336,32 @@ int oxphp_call_php_native(const char *func_name, void *args, uint32_t argc, void
     ZVAL_NULL((zval*)result);
     zend_call_known_function(fbc, NULL, NULL, (zval*)result, argc, (zval*)args, NULL);
     return 0;
+}
+
+/* ── TSRM cache update ── */
+
+void oxphp_bridge_tsrm_update(void) {
+#ifdef ZTS
+    TSRMLS_CACHE_UPDATE();
+#endif
+}
+
+/* ── SAPI request_info ── */
+
+void oxphp_bridge_set_request_info(
+    const char *method,
+    const char *query_string,
+    const char *content_type,
+    long content_length
+) {
+    /* Set a non-NULL server_context — PHP checks this in sapi_activate()
+     * to decide whether to read POST data and cookies. Without it,
+     * $_POST/$_FILES/$_COOKIE are never populated. */
+    SG(server_context) = (void*)(method ? 1 : 0);
+    SG(request_info).request_method = method;
+    SG(request_info).query_string = (char*)query_string;
+    SG(request_info).content_type = content_type;
+    SG(request_info).content_length = content_length;
 }
 
 /* ── Zval lifecycle ── */

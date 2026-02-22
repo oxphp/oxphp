@@ -190,6 +190,33 @@ int oxphp_call_php_native(
     const char *func_name, void *args, uint32_t argc, void *result
 );
 
+/* ── TSRM cache ── */
+
+/**
+ * Update the TSRM thread-local cache in this shared library.
+ * Must be called on each worker thread after ts_resource_ex()
+ * and before any SG()/CG()/EG() macro usage from this library.
+ */
+void oxphp_bridge_tsrm_update(void);
+
+/* ── SAPI request_info ── */
+
+/**
+ * Set SG(request_info) fields BEFORE php_request_startup().
+ * PHP uses these to parse $_GET, $_POST, $_FILES, $_COOKIE.
+ *
+ * method: "GET", "POST", etc.
+ * query_string: raw query string (after '?'), or NULL.
+ * content_type: "multipart/form-data; boundary=...", etc., or NULL.
+ * content_length: value of Content-Length header, or 0 if absent.
+ */
+void oxphp_bridge_set_request_info(
+    const char *method,
+    const char *query_string,
+    const char *content_type,
+    long content_length
+);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */

@@ -346,12 +346,13 @@ fn spawn_worker(
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_thread(rx, shutdown, last_active, loop_mode);
+            worker_thread(id, rx, shutdown, last_active, loop_mode);
         })
         .expect("failed to spawn PHP worker thread")
 }
 
 fn worker_thread(
+    worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     shutdown: Arc<AtomicBool>,
     last_active: Arc<AtomicU64>,
@@ -365,6 +366,12 @@ fn worker_thread(
     // Initialize TSRM thread-local storage for this worker thread (required for ZTS)
     unsafe {
         let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
+        // Update the bridge library's TSRM cache so SG()/CG()/EG() macros work
+        // from liboxphp_bridge.so on this thread (each .so has its own _tsrm_ls_cache).
+        bindings::oxphp_bridge_tsrm_update();
+        // Initialize bridge TLS context and set the worker ID (once per thread).
+        bindings::oxphp_bridge_init_ctx();
+        bindings::oxphp_bridge_set_worker_id(worker_id as i32);
     }
 
     tracing::info!(worker = %thread_name, "PHP worker thread started");
@@ -381,8 +388,12 @@ fn worker_thread(
                         let _ = wr.response_tx.send(response);
                     }
                     Err(_) => {
-                        // wr.response_tx dropped → client gets 500
                         tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
+                        let _ = wr.response_tx.send(ScriptResponse {
+                            status: 500,
+                            body: Bytes::from_static(b"Internal Server Error"),
+                            ..Default::default()
+                        });
                         break;
                     }
                 }
@@ -407,6 +418,11 @@ fn worker_thread(
                             }
                             Err(_) => {
                                 tracing::error!(worker = %thread_name, "Worker panicked, exiting for respawn");
+                                let _ = wr.response_tx.send(ScriptResponse {
+                                    status: 500,
+                                    body: Bytes::from_static(b"Internal Server Error"),
+                                    ..Default::default()
+                                });
                                 break;
                             }
                         }
@@ -620,6 +636,14 @@ fn execute_request(request: &ScriptRequest) -> ScriptResponse {
     sapi::clear_buffers();
     sapi::set_request_data(request);
     let _guard = RequestDataGuard;
+
+    // Set request_time BEFORE php_request_startup() — OPcache reads it during RINIT.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    unsafe {
+        bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
+    }
 
     if unsafe { bindings::php_request_startup() } != 0 {
         return ScriptResponse {

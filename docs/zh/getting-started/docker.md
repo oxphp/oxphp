@@ -12,7 +12,7 @@ OxPHP 以预构建的 Docker 镜像形式发布，地址为 `ghcr.io/oxphp/oxphp
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 镜像包含：
@@ -24,7 +24,7 @@ COPY --chown=www-data:www-data ./src /var/www/html
 - 依赖极少的 Alpine Linux 基础系统
 - 用于非 root 执行的 `www-data` 用户（UID 82，GID 82）
 
-默认文档根目录为 `/var/www/html`。服务器监听 8080 端口。`CMD` 为 `["oxphp"]`。
+默认文档根目录为 `/var/www/html/public`。服务器监听 8080 端口。`CMD` 为 `["oxphp"]`。
 
 ## compose.yml 参考
 
@@ -42,7 +42,7 @@ services:
     environment:
       # 服务器
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # 启用 Framework 路由模式
       - EXECUTOR=sapi                # "sapi" 或 "stub"
       # - PHP_WORKERS=0              # 静态模式：0 = CPU*2，或固定数量 N
@@ -90,7 +90,7 @@ services:
       - ./www:/var/www/html:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### 环境变量
@@ -98,7 +98,7 @@ services:
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 主 HTTP 服务器的地址和端口 |
-| `DOCUMENT_ROOT` | `/var/www/html` | 提供文件服务的根目录 |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件服务的根目录 |
 | `INDEX_FILE` | _(未设置)_ | 设为 `index.php` 启用 Framework 模式，设为 `index.html` 启用 SPA 模式 |
 | `EXECUTOR` | `sapi` | PHP 执行器类型：`sapi`（真实 PHP）或 `stub`（占位符） |
 | `PHP_WORKERS` | `0`（CPU * 2，静态） | Worker 池模式。`N` = 固定池，`MIN:MAX` = 动态扩缩容 |

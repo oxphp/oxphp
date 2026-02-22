@@ -27,7 +27,7 @@ When `INDEX_FILE` is not set, OxPHP maps URLs directly to files on disk.
 
 ```bash
 # No INDEX_FILE set -- traditional mode is the default
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Framework mode
@@ -41,7 +41,7 @@ When `INDEX_FILE=index.php`, all requests that do not match an existing static f
 
 ```bash
 INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 Blocking direct `.php` access prevents URL leaks and enforces that all PHP requests go through the framework's router.
@@ -57,7 +57,7 @@ When `INDEX_FILE=index.html`, missing paths fall back to the HTML entry point. P
 
 ```bash
 INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ## Root path resolution
@@ -92,7 +92,7 @@ The route cache caches validated `RouteResult` entries. TOCTOU re-canonicalizati
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DOCUMENT_ROOT` | Filesystem path to serve files from | `/var/www/html` |
+| `DOCUMENT_ROOT` | Filesystem path to serve files from | `/var/www/html/public` |
 | `INDEX_FILE` | Index file name, controls routing mode | *(unset)* |
 
 ## See Also

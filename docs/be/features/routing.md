@@ -27,7 +27,7 @@ OxPHP падтрымлівае тры рэжымы маршрутызацыі, �
 
 ```bash
 # INDEX_FILE не зададзена -- традыцыйны рэжым па змаўчанні
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Рэжым фрэймворка
@@ -41,7 +41,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 Блакіроўка прамога доступу да `.php` прадухіляе ўцечкі URL і забяспечвае праходжанне ўсіх PHP-запытаў праз маршрутызатар фрэймворка.
@@ -57,7 +57,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ## Вызначэнне каранёвага шляху
@@ -92,7 +92,7 @@ DOCUMENT_ROOT=/var/www/html
 
 | Зменная | Апісанне | Змаўчанне |
 |---------|---------|-----------|
-| `DOCUMENT_ROOT` | Шлях у файлавай сістэме для аддачы файлаў | `/var/www/html` |
+| `DOCUMENT_ROOT` | Шлях у файлавай сістэме для аддачы файлаў | `/var/www/html/public` |
 | `INDEX_FILE` | Імя індэкснага файла, кіруе рэжымам маршрутызацыі | *(не зададзена)* |
 
 ## Глядзіце таксама

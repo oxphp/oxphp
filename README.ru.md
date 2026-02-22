@@ -35,7 +35,7 @@
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 ```bash
@@ -50,7 +50,7 @@ curl http://localhost:8080/
 | Переменная | По умолчанию | Описание |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Адрес и порт для прослушивания |
-| `DOCUMENT_ROOT` | `/var/www/html` | Путь в файловой системе для раздачи файлов |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Путь в файловой системе для раздачи файлов |
 | `INDEX_FILE` | *(не задано)* | Режим маршрутизации: пусто = Traditional, `index.php` = Framework, `index.html` = SPA |
 | `TOKIO_WORKERS` | `0` (однопоточный) | Потоки асинхронного I/O Tokio; `0` = однопоточный, `N` = многопоточный |
 | `EXECUTOR` | `sapi` | Исполнитель PHP: `sapi` (настоящий PHP) или `stub` (режим тестирования) |
@@ -127,7 +127,7 @@ docker compose build
 ### Локальный запуск (только статические файлы)
 
 ```bash
-DOCUMENT_ROOT=./www ./target/release/oxphp
+DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
 ## Разработка

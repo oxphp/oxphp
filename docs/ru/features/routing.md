@@ -27,7 +27,7 @@ OxPHP поддерживает три режима маршрутизации, �
 
 ```bash
 # INDEX_FILE не задана -- традиционный режим по умолчанию
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Режим фреймворка
@@ -41,7 +41,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 Блокировка прямого доступа к `.php` предотвращает утечку URL и обеспечивает прохождение всех PHP-запросов через маршрутизатор фреймворка.
@@ -57,7 +57,7 @@ DOCUMENT_ROOT=/var/www/html
 
 ```bash
 INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ## Разрешение корневого пути
@@ -92,7 +92,7 @@ DOCUMENT_ROOT=/var/www/html
 
 | Переменная | Описание | По умолчанию |
 |------------|----------|-------------|
-| `DOCUMENT_ROOT` | Путь к директории для обслуживания файлов | `/var/www/html` |
+| `DOCUMENT_ROOT` | Путь к директории для обслуживания файлов | `/var/www/html/public` |
 | `INDEX_FILE` | Имя индексного файла, определяет режим маршрутизации | *(не задано)* |
 
 ## Смотрите также

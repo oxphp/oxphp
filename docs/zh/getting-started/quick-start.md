@@ -16,7 +16,7 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./www /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 ## 3. 添加 compose.yml
@@ -32,17 +32,17 @@ services:
       - "9090:9090"
     environment:
       - LISTEN_ADDR=0.0.0.0:8080
-      - DOCUMENT_ROOT=/var/www/html
+      - DOCUMENT_ROOT=/var/www/html/public
       - INTERNAL_ADDR=0.0.0.0:9090
 ```
 
 ## 4. 创建测试 PHP 文件
 
 ```bash
-mkdir -p www
+mkdir -p public
 ```
 
-创建 `www/index.php`：
+创建 `public/index.php`：
 
 ```php
 <?php

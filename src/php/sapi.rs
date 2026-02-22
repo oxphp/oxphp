@@ -41,6 +41,12 @@ struct RequestData {
     server_vars: Vec<(CString, CString)>,
     /// Raw Cookie header string for read_cookies callback (must outlive request).
     cookie_string: Option<CString>,
+    /// Query string for SG(request_info) — must outlive php_request_shutdown.
+    query_string: Option<CString>,
+    /// Content-Type string for SG(request_info) — must outlive php_request_shutdown.
+    content_type_string: Option<CString>,
+    /// Request ID CString — must outlive php_request_shutdown.
+    request_id_cstr: Option<CString>,
     /// Request body for read_post callback.
     body: Bytes,
     /// How many bytes of body have been read so far.
@@ -54,6 +60,9 @@ impl RequestData {
         Self {
             server_vars: Vec::with_capacity(32),
             cookie_string: None,
+            query_string: None,
+            content_type_string: None,
+            request_id_cstr: None,
             body: Bytes::new(),
             body_offset: 0,
             active: false,
@@ -171,24 +180,104 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(&mut data.server_vars, &header_buf, val_str);
         }
 
+        // Strings for SG(request_info) — stored as CStrings so pointers
+        // remain valid through php_request_shutdown().
+        data.query_string = if req.query_string.is_empty() {
+            None
+        } else {
+            CString::new(req.query_string.as_str()).ok()
+        };
+
+        data.content_type_string = req
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| CString::new(s).ok());
+
         data.body = req.body.clone();
         data.body_offset = 0;
         data.active = true;
+
+        // Set request ID in bridge TLS so oxphp_request_id() returns it.
+        let rid_cstr = CString::new(req.request_id.as_str()).unwrap_or_default();
+        unsafe {
+            bindings::oxphp_bridge_set_request_id(rid_cstr.as_ptr());
+        }
+        data.request_id_cstr = Some(rid_cstr);
+
+        // Set SG(request_info) so PHP parses $_GET, $_POST, $_FILES, $_COOKIE.
+        // This MUST happen before php_request_startup().
+        let method_cstr = data
+            .server_vars
+            .iter()
+            .find(|(k, _)| k.as_bytes() == b"REQUEST_METHOD")
+            .map(|(_, v)| v.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        let qs_ptr = data
+            .query_string
+            .as_ref()
+            .map(|cs| cs.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        let ct_ptr = data
+            .content_type_string
+            .as_ref()
+            .map(|cs| cs.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        let content_length = req
+            .headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        unsafe {
+            bindings::oxphp_bridge_set_request_info(
+                method_cstr,
+                qs_ptr,
+                ct_ptr,
+                content_length as std::os::raw::c_long,
+            );
+        }
     });
 }
 
+/// Typical number of $_SERVER variables per request (~20 CGI vars + headers).
+/// If the Vec grows beyond 2x this, shrink it to avoid monotonic growth from
+/// anomalous requests with many headers.
+const SERVER_VARS_NORMAL_CAPACITY: usize = 64;
+
 /// Clear request data from thread-local.
-/// Retains Vec capacity for reuse by the next request.
+/// Retains Vec capacity for reuse by the next request, but shrinks if oversized.
 /// Must be called AFTER php_request_shutdown().
 pub fn clear_request_data() {
     REQUEST_DATA.with(|rd| {
         let mut data = rd.borrow_mut();
         data.server_vars.clear();
+        if data.server_vars.capacity() > SERVER_VARS_NORMAL_CAPACITY {
+            data.server_vars.shrink_to(SERVER_VARS_NORMAL_CAPACITY);
+        }
         data.cookie_string = None;
+        data.query_string = None;
+        data.content_type_string = None;
+        data.request_id_cstr = None;
         data.body = Bytes::new();
         data.body_offset = 0;
         data.active = false;
     });
+
+    // Clear SG(request_info) and bridge context so PHP doesn't hold stale references.
+    unsafe {
+        bindings::oxphp_bridge_set_request_info(
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        bindings::oxphp_bridge_set_request_id(std::ptr::null());
+    }
 }
 
 /// Build the custom SAPI module struct.

@@ -82,10 +82,25 @@ impl PluginManager {
     }
 
     /// Shutdown all plugins in reverse init order.
+    /// Catches panics and logs errors to ensure all plugins get a chance to shut down.
     pub fn shutdown_all(&self) {
+        let mut failures = 0usize;
         for plugin in self.plugins.iter().rev() {
-            plugin.shutdown();
-            tracing::info!(name = plugin.name(), "Plugin shutdown");
+            let name = plugin.name();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.shutdown();
+            })) {
+                Ok(()) => {
+                    tracing::info!(name, "Plugin shutdown");
+                }
+                Err(_) => {
+                    failures += 1;
+                    tracing::error!(name, "Plugin panicked during shutdown");
+                }
+            }
+        }
+        if failures > 0 {
+            tracing::warn!(failures, "Some plugins failed during shutdown");
         }
     }
 

@@ -12,7 +12,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server |
-| `DOCUMENT_ROOT` | `/var/www/html` | Root directory for serving files and PHP scripts |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `INDEX_FILE` | *(empty)* | Controls routing mode. See [Routing Modes](#routing-modes) |
 | `TOKIO_WORKERS` | `0` | Tokio async I/O threads. `0` = single-threaded runtime (default), `N` = multi-threaded runtime with N worker threads |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. New connections beyond this limit wait for a semaphore permit |
@@ -116,7 +116,7 @@ URLs map directly to files on disk. This is the standard behavior for classic PH
 
 ```bash
 # No INDEX_FILE set — traditional mode is the default
-DOCUMENT_ROOT=/var/www/html
+DOCUMENT_ROOT=/var/www/html/public
 ```
 
 ### Framework Mode

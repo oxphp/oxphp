@@ -35,7 +35,7 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:nightly
 
-COPY --chown=www-data:www-data ./src /var/www/html
+COPY --chown=www-data:www-data . /var/www/html
 ```
 
 ```bash
@@ -50,7 +50,7 @@ All settings are via environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
-| `DOCUMENT_ROOT` | `/var/www/html` | Filesystem path to serve files from |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
 | `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `index.php` = Framework, `index.html` = SPA |
 | `TOKIO_WORKERS` | `0` (single-threaded) | Tokio async I/O threads; `0` = single-threaded, `N` = multi-threaded |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
@@ -127,7 +127,7 @@ docker compose build
 ### Run locally (static files only)
 
 ```bash
-DOCUMENT_ROOT=./www ./target/release/oxphp
+DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
 ## Development

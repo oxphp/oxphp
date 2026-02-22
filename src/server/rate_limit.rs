@@ -7,6 +7,10 @@ use http::{HeaderValue, Response, StatusCode};
 
 use crate::types::{full_body, ResponseBody};
 
+/// Maximum number of tracked IPs before forced eviction.
+/// Prevents unbounded memory growth under IP rotation attacks.
+const MAX_TRACKED_IPS: usize = 100_000;
+
 pub struct RateLimiter {
     limits: DashMap<IpAddr, (u32, Instant)>,
     max_requests: u32,
@@ -28,6 +32,11 @@ impl RateLimiter {
         ip: IpAddr,
         request_id: &str,
     ) -> Option<Response<ResponseBody>> {
+        // Hard cap check BEFORE acquiring entry lock to prevent OOM under IP rotation
+        if self.limits.len() > MAX_TRACKED_IPS {
+            self.cleanup();
+        }
+
         let now = Instant::now();
         let mut entry = self.limits.entry(ip).or_insert((0, now));
         let (count, window_start) = entry.value_mut();

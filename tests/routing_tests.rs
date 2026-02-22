@@ -144,7 +144,7 @@ async fn test_request_id_header() {
         "Response should have x-request-id header"
     );
     let id_str = request_id.unwrap().to_str().unwrap();
-    assert_eq!(id_str.len(), 16);
+    assert_eq!(id_str.len(), 20);
     assert!(id_str.chars().all(|c| c.is_ascii_hexdigit()));
 }
 

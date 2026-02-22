@@ -19,8 +19,8 @@ The custom SAPI registers a full set of CGI/1.1 variables through the `register_
 | `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
 | `SCRIPT_NAME` | URI path without query string | `/app` |
 | `PHP_SELF` | Same as `SCRIPT_NAME` | `/app` |
-| `SCRIPT_FILENAME` | Absolute filesystem path to the script | `/var/www/html/index.php` |
-| `DOCUMENT_ROOT` | Web root directory | `/var/www/html` |
+| `SCRIPT_FILENAME` | Absolute filesystem path to the script | `/var/www/html/public/index.php` |
+| `DOCUMENT_ROOT` | Web root directory | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Server identifier | `OxPHP/0.1.0` |
 | `GATEWAY_INTERFACE` | CGI version | `CGI/1.1` |
 | `REMOTE_ADDR` | Client IP address | `172.17.0.1` |
