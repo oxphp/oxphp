@@ -1,8 +1,115 @@
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use http::Method;
+
+// ── Worker Mode Metrics ──────────────────────────────────────
+
+/// Per-worker stats shared between the worker thread and the metrics collector.
+pub struct WorkerStats {
+    pub memory_bytes: AtomicU64,
+    pub requests_done: AtomicU64,
+    /// Unix epoch milliseconds when the worker thread was spawned.
+    pub spawn_time_ms: AtomicU64,
+    pub active: AtomicBool,
+}
+
+impl Default for WorkerStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkerStats {
+    pub fn new() -> Self {
+        Self {
+            memory_bytes: AtomicU64::new(0),
+            requests_done: AtomicU64::new(0),
+            spawn_time_ms: AtomicU64::new(0),
+            active: AtomicBool::new(false),
+        }
+    }
+}
+
+/// Histogram bucket boundaries for request duration (microseconds).
+const DURATION_BUCKET_BOUNDS: [u64; 9] =
+    [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000];
+
+/// Global worker mode metrics shared across all worker threads.
+pub struct WorkerMetrics {
+    pub requests_handled_total: AtomicU64,
+    pub recycles_total: AtomicU64,
+    pub recycles_max_requests: AtomicU64,
+    pub recycles_max_memory: AtomicU64,
+    pub recycles_error: AtomicU64,
+    pub soft_resets_total: AtomicU64,
+    /// Histogram buckets: 9 bounded + 1 +Inf
+    pub duration_buckets: [AtomicU64; 10],
+    pub duration_sum_us: AtomicU64,
+    pub duration_count: AtomicU64,
+    /// Per-worker stats slots (indexed by worker_id % len).
+    pub slots: Box<[Arc<WorkerStats>]>,
+}
+
+impl WorkerMetrics {
+    pub fn new(max_workers: usize) -> Self {
+        let slots: Vec<Arc<WorkerStats>> = (0..max_workers)
+            .map(|_| Arc::new(WorkerStats::new()))
+            .collect();
+        Self {
+            requests_handled_total: AtomicU64::new(0),
+            recycles_total: AtomicU64::new(0),
+            recycles_max_requests: AtomicU64::new(0),
+            recycles_max_memory: AtomicU64::new(0),
+            recycles_error: AtomicU64::new(0),
+            soft_resets_total: AtomicU64::new(0),
+            duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            duration_sum_us: AtomicU64::new(0),
+            duration_count: AtomicU64::new(0),
+            slots: slots.into_boxed_slice(),
+        }
+    }
+
+    /// Record a request duration in the histogram.
+    /// Each value lands in exactly one bucket (the smallest bound >= duration_us).
+    /// Rendering accumulates for Prometheus cumulative output.
+    pub fn record_duration(&self, duration_us: u64) {
+        let mut placed = false;
+        for (i, &bound) in DURATION_BUCKET_BOUNDS.iter().enumerate() {
+            if duration_us <= bound {
+                self.duration_buckets[i].fetch_add(1, Ordering::Relaxed);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            // > 50_000us → +Inf bucket
+            self.duration_buckets[9].fetch_add(1, Ordering::Relaxed);
+        }
+        self.duration_sum_us
+            .fetch_add(duration_us, Ordering::Relaxed);
+        self.duration_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a worker recycle with reason.
+    pub fn record_recycle(&self, exit_reason: u8) {
+        self.recycles_total.fetch_add(1, Ordering::Relaxed);
+        match exit_reason {
+            1 => {
+                self.recycles_max_requests.fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.recycles_max_memory.fetch_add(1, Ordering::Relaxed);
+            }
+            3 => {
+                self.recycles_error.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {} // 0 = shutdown, not a recycle reason
+        }
+    }
+}
 
 /// Lock-free atomic metrics counters for the server.
 /// All operations use `Relaxed` ordering — counters are approximate and don't
@@ -23,6 +130,7 @@ pub struct Metrics {
     workers_idle: AtomicUsize,
     workers_spawned_total: AtomicU64,
     workers_retired_total: AtomicU64,
+    worker_metrics: std::sync::OnceLock<Arc<WorkerMetrics>>,
 }
 
 const METHOD_LABELS: [&str; 10] = [
@@ -77,6 +185,7 @@ impl Metrics {
             workers_idle: AtomicUsize::new(0),
             workers_spawned_total: AtomicU64::new(0),
             workers_retired_total: AtomicU64::new(0),
+            worker_metrics: std::sync::OnceLock::new(),
         }
     }
 
@@ -139,6 +248,14 @@ impl Metrics {
 
     pub fn workers_current(&self) -> usize {
         self.workers_current.load(Ordering::Relaxed)
+    }
+
+    pub fn set_worker_metrics(&self, wm: Arc<WorkerMetrics>) {
+        self.worker_metrics.set(wm).ok();
+    }
+
+    pub fn worker_metrics(&self) -> Option<&Arc<WorkerMetrics>> {
+        self.worker_metrics.get()
     }
 
     pub fn uptime(&self) -> Duration {
@@ -314,6 +431,142 @@ impl Metrics {
             self.workers_retired_total.load(Ordering::Relaxed)
         );
 
+        // ── Worker Mode Metrics ──
+        if let Some(wm) = self.worker_metrics.get() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_mode_enabled Whether worker mode is active."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_mode_enabled gauge");
+            let _ = writeln!(out, "oxphp_worker_mode_enabled 1");
+
+            let _ = writeln!(out, "# HELP oxphp_worker_requests_handled_total Total requests processed by worker mode.");
+            let _ = writeln!(out, "# TYPE oxphp_worker_requests_handled_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_worker_requests_handled_total {}",
+                wm.requests_handled_total.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_recycles_total Total worker recycles."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_recycles_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_worker_recycles_total {}",
+                wm.recycles_total.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_recycles_by_reason_total Worker recycles by reason."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_recycles_by_reason_total counter");
+            let max_req = wm.recycles_max_requests.load(Ordering::Relaxed);
+            let max_mem = wm.recycles_max_memory.load(Ordering::Relaxed);
+            let error = wm.recycles_error.load(Ordering::Relaxed);
+            if max_req > 0 {
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_recycles_by_reason_total{{reason=\"max_requests\"}} {max_req}"
+                );
+            }
+            if max_mem > 0 {
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_recycles_by_reason_total{{reason=\"max_memory\"}} {max_mem}"
+                );
+            }
+            if error > 0 {
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_recycles_by_reason_total{{reason=\"error\"}} {error}"
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_soft_resets_total Total soft resets between requests."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_soft_resets_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_worker_soft_resets_total {}",
+                wm.soft_resets_total.load(Ordering::Relaxed)
+            );
+
+            // Per-worker gauges
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_memory_bytes Current PHP heap per worker."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_memory_bytes gauge");
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_uptime_seconds Time since worker thread spawned."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_uptime_seconds gauge");
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_requests_count Requests handled by this worker instance."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_requests_count gauge");
+
+            for (i, slot) in wm.slots.iter().enumerate() {
+                if !slot.active.load(Ordering::Relaxed) {
+                    continue;
+                }
+                let mem = slot.memory_bytes.load(Ordering::Relaxed);
+                let reqs = slot.requests_done.load(Ordering::Relaxed);
+                let spawn = slot.spawn_time_ms.load(Ordering::Relaxed);
+                let uptime_s = now_ms.saturating_sub(spawn) / 1000;
+
+                let _ = writeln!(out, "oxphp_worker_memory_bytes{{worker=\"{i}\"}} {mem}");
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_uptime_seconds{{worker=\"{i}\"}} {uptime_s}"
+                );
+                let _ = writeln!(out, "oxphp_worker_requests_count{{worker=\"{i}\"}} {reqs}");
+            }
+
+            // Histogram
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_request_duration_us PHP execution time per request."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_request_duration_us histogram");
+            let mut cumulative = 0u64;
+            for (i, &bound) in DURATION_BUCKET_BOUNDS.iter().enumerate() {
+                cumulative += wm.duration_buckets[i].load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_request_duration_us_bucket{{le=\"{bound}\"}} {cumulative}"
+                );
+            }
+            cumulative += wm.duration_buckets[9].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "oxphp_worker_request_duration_us_bucket{{le=\"+Inf\"}} {cumulative}"
+            );
+            let _ = writeln!(
+                out,
+                "oxphp_worker_request_duration_us_sum {}",
+                wm.duration_sum_us.load(Ordering::Relaxed)
+            );
+            let _ = writeln!(
+                out,
+                "oxphp_worker_request_duration_us_count {}",
+                wm.duration_count.load(Ordering::Relaxed)
+            );
+        }
+
         out
     }
 }
@@ -437,5 +690,114 @@ mod tests {
         assert!(output.contains("oxphp_requests_by_method_total{method=\"GET\"} 1"));
         assert!(output.contains("oxphp_responses_by_status_total{status=\"2xx\"} 1"));
         assert!(output.contains("oxphp_response_time_us_total 1000"));
+    }
+
+    // ── WorkerMetrics tests ──
+
+    #[test]
+    fn test_worker_metrics_counters() {
+        let wm = WorkerMetrics::new(4);
+        wm.requests_handled_total.fetch_add(5, Ordering::Relaxed);
+        wm.soft_resets_total.fetch_add(5, Ordering::Relaxed);
+        assert_eq!(wm.requests_handled_total.load(Ordering::Relaxed), 5);
+        assert_eq!(wm.soft_resets_total.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_worker_metrics_recycle() {
+        let wm = WorkerMetrics::new(2);
+        wm.record_recycle(1); // max_requests
+        wm.record_recycle(2); // max_memory
+        wm.record_recycle(3); // error
+        wm.record_recycle(0); // shutdown — not counted as reason
+
+        assert_eq!(wm.recycles_total.load(Ordering::Relaxed), 4);
+        assert_eq!(wm.recycles_max_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(wm.recycles_max_memory.load(Ordering::Relaxed), 1);
+        assert_eq!(wm.recycles_error.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_worker_metrics_histogram_bucketing() {
+        let wm = WorkerMetrics::new(1);
+
+        // 50us → bucket[0] (le=100)
+        wm.record_duration(50);
+        // 200us → bucket[1] (le=250)
+        wm.record_duration(200);
+        // 100us → bucket[0] (le=100)
+        wm.record_duration(100);
+        // 60000us → bucket[9] (+Inf)
+        wm.record_duration(60000);
+
+        assert_eq!(wm.duration_buckets[0].load(Ordering::Relaxed), 2); // <=100
+        assert_eq!(wm.duration_buckets[1].load(Ordering::Relaxed), 1); // <=250
+        assert_eq!(wm.duration_buckets[9].load(Ordering::Relaxed), 1); // +Inf
+        assert_eq!(wm.duration_count.load(Ordering::Relaxed), 4);
+        assert_eq!(
+            wm.duration_sum_us.load(Ordering::Relaxed),
+            50 + 200 + 100 + 60000
+        );
+    }
+
+    #[test]
+    fn test_worker_metrics_per_worker_stats() {
+        let wm = WorkerMetrics::new(4);
+
+        // Simulate worker 0 activity
+        wm.slots[0].active.store(true, Ordering::Relaxed);
+        wm.slots[0].memory_bytes.store(2_000_000, Ordering::Relaxed);
+        wm.slots[0].requests_done.store(42, Ordering::Relaxed);
+        wm.slots[0].spawn_time_ms.store(1000, Ordering::Relaxed);
+
+        assert!(wm.slots[0].active.load(Ordering::Relaxed));
+        assert_eq!(wm.slots[0].memory_bytes.load(Ordering::Relaxed), 2_000_000);
+        assert_eq!(wm.slots[0].requests_done.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn test_worker_metrics_prometheus_output() {
+        let m = Metrics::new();
+        let wm = Arc::new(WorkerMetrics::new(2));
+
+        // Simulate some activity
+        wm.requests_handled_total.fetch_add(10, Ordering::Relaxed);
+        wm.recycles_total.fetch_add(1, Ordering::Relaxed);
+        wm.recycles_max_requests.fetch_add(1, Ordering::Relaxed);
+        wm.soft_resets_total.fetch_add(10, Ordering::Relaxed);
+        wm.slots[0].active.store(true, Ordering::Relaxed);
+        wm.slots[0].memory_bytes.store(1_048_576, Ordering::Relaxed);
+        wm.slots[0].requests_done.store(5, Ordering::Relaxed);
+
+        // Record some durations
+        wm.record_duration(150);
+        wm.record_duration(3000);
+
+        m.set_worker_metrics(wm);
+        let output = m.to_prometheus();
+
+        assert!(output.contains("oxphp_worker_mode_enabled 1"));
+        assert!(output.contains("oxphp_worker_requests_handled_total 10"));
+        assert!(output.contains("oxphp_worker_recycles_total 1"));
+        assert!(output.contains("oxphp_worker_recycles_by_reason_total{reason=\"max_requests\"} 1"));
+        assert!(output.contains("oxphp_worker_soft_resets_total 10"));
+        assert!(output.contains("oxphp_worker_memory_bytes{worker=\"0\"} 1048576"));
+        assert!(output.contains("oxphp_worker_requests_count{worker=\"0\"} 5"));
+        // Worker 1 is not active, so should not appear
+        assert!(!output.contains("worker=\"1\""));
+        // Histogram
+        assert!(output.contains("oxphp_worker_request_duration_us_bucket{le=\"100\"} 0"));
+        assert!(output.contains("oxphp_worker_request_duration_us_bucket{le=\"250\"} 1"));
+        assert!(output.contains("oxphp_worker_request_duration_us_bucket{le=\"+Inf\"} 2"));
+        assert!(output.contains("oxphp_worker_request_duration_us_sum 3150"));
+        assert!(output.contains("oxphp_worker_request_duration_us_count 2"));
+    }
+
+    #[test]
+    fn test_no_worker_metrics_no_output() {
+        let m = Metrics::new();
+        let output = m.to_prometheus();
+        assert!(!output.contains("oxphp_worker_mode_enabled"));
+        assert!(!output.contains("oxphp_worker_requests_handled"));
     }
 }

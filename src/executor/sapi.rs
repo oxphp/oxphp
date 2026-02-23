@@ -8,7 +8,7 @@ use crossbeam_channel::{self, RecvTimeoutError, TrySendError};
 use http::{HeaderName, HeaderValue};
 
 use crate::executor::ScriptExecutor;
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::bindings;
 use crate::php::sapi;
 use crate::php::sapi::WorkerIncomingRequest;
@@ -122,6 +122,7 @@ pub struct SapiExecutor {
     metrics: Arc<Metrics>,
     idle_timeout_sec: u64,
     worker_mode_config: Option<Arc<WorkerModeConfig>>,
+    worker_metrics: Option<Arc<WorkerMetrics>>,
 }
 
 impl SapiExecutor {
@@ -221,17 +222,31 @@ impl SapiExecutor {
             }
         }
 
+        // Create worker mode metrics if worker mode is active
+        let max_workers = match &mode {
+            WorkerMode::Static(n) => *n,
+            WorkerMode::Dynamic { max, .. } => *max,
+        };
+        let worker_metrics = worker_mode_config.as_ref().map(|_| {
+            let wm = Arc::new(WorkerMetrics::new(max_workers));
+            metrics.set_worker_metrics(Arc::clone(&wm));
+            wm
+        });
+
         let mut managed_workers = Vec::with_capacity(initial_count);
         for i in 0..initial_count {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
             let handle = if let Some(ref wmc) = worker_mode_config {
+                let stats = Arc::clone(&worker_metrics.as_ref().unwrap().slots[i]);
                 spawn_worker_mode(
                     i,
                     request_rx.clone(),
                     Arc::clone(&shutdown),
                     Arc::clone(&last_active),
                     wmc.clone(),
+                    stats,
+                    Arc::clone(worker_metrics.as_ref().unwrap()),
                 )
             } else {
                 spawn_worker(
@@ -291,6 +306,7 @@ impl SapiExecutor {
             metrics,
             idle_timeout_sec,
             worker_mode_config,
+            worker_metrics,
         }
     }
 }
@@ -341,13 +357,22 @@ impl ScriptExecutor for SapiExecutor {
         let global_shutdown = Arc::clone(&self.global_shutdown);
         let metrics = Arc::clone(&self.metrics);
         let wmc = self.worker_mode_config.clone();
+        let wm = self.worker_metrics.clone();
 
         match &self.mode {
             WorkerMode::Static(target) => {
                 let target = *target;
                 tokio::spawn(async move {
-                    run_worker_monitor(workers, request_rx, target, global_shutdown, metrics, wmc)
-                        .await;
+                    run_worker_monitor(
+                        workers,
+                        request_rx,
+                        target,
+                        global_shutdown,
+                        metrics,
+                        wmc,
+                        wm,
+                    )
+                    .await;
                 });
                 tracing::info!(target, "Worker health monitor started");
             }
@@ -365,6 +390,7 @@ impl ScriptExecutor for SapiExecutor {
                         global_shutdown,
                         metrics,
                         wmc,
+                        wm,
                     )
                     .await;
                 });
@@ -420,11 +446,13 @@ fn spawn_worker_mode(
     _shutdown: Arc<AtomicBool>, // kept for ManagedWorker interface; worker mode shuts down via channel closure
     last_active: Arc<AtomicU64>,
     config: Arc<WorkerModeConfig>,
+    stats: Arc<crate::metrics::WorkerStats>,
+    worker_metrics: Arc<WorkerMetrics>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_mode_thread(id, rx, last_active, config);
+            worker_mode_thread(id, rx, last_active, config, stats, worker_metrics);
         })
         .expect("failed to spawn PHP worker mode thread")
 }
@@ -437,6 +465,8 @@ fn worker_mode_thread(
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     last_active: Arc<AtomicU64>,
     config: Arc<WorkerModeConfig>,
+    stats: Arc<crate::metrics::WorkerStats>,
+    worker_metrics: Arc<WorkerMetrics>,
 ) {
     let thread_name = std::thread::current()
         .name()
@@ -456,9 +486,19 @@ fn worker_mode_thread(
         bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mb);
     }
 
-    // 3. Store channel receiver and last_active in thread-local for worker_wait_callback
+    // 3. Store channel receiver, last_active, and metrics in thread-local
     sapi::set_worker_rx(request_rx);
     sapi::set_worker_last_active(last_active);
+    sapi::set_worker_stats(Arc::clone(&stats));
+    sapi::set_worker_metrics(Arc::clone(&worker_metrics));
+
+    // Mark worker as active with spawn time
+    let spawn_ms = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    stats.spawn_time_ms.store(spawn_ms, Ordering::Relaxed);
+    stats.active.store(true, Ordering::Relaxed);
 
     tracing::info!(worker = %thread_name, file = %config.worker_file.display(), "Worker mode thread started");
 
@@ -527,13 +567,25 @@ fn worker_mode_thread(
         }
     }
 
+    // Read exit reason and record recycle metrics
+    let exit_reason = unsafe { bindings::oxphp_bridge_get_exit_reason() };
+    if exit_reason > 0 {
+        // Non-shutdown exit = recycle
+        worker_metrics.record_recycle(exit_reason);
+    }
+    stats.active.store(false, Ordering::Relaxed);
+
     // 6. Single php_request_shutdown for the entire worker lifetime
     unsafe {
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
     sapi::clear_request_data();
 
-    tracing::info!(worker = %thread_name, "Worker mode thread stopped");
+    tracing::info!(
+        worker = %thread_name,
+        exit_reason = exit_reason,
+        "Worker mode thread stopped"
+    );
 }
 
 fn worker_thread(
@@ -647,6 +699,7 @@ async fn run_worker_monitor(
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     worker_mode_config: Option<Arc<WorkerModeConfig>>,
+    worker_metrics: Option<Arc<WorkerMetrics>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut next_id = target; // IDs above initial range
@@ -675,12 +728,17 @@ async fn run_worker_monitor(
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
             let handle = if let Some(ref wmc) = worker_mode_config {
+                let wm = worker_metrics.as_ref().unwrap();
+                let slot_idx = next_id % wm.slots.len();
+                let stats = Arc::clone(&wm.slots[slot_idx]);
                 spawn_worker_mode(
                     next_id,
                     request_rx.clone(),
                     Arc::clone(&shutdown),
                     Arc::clone(&last_active),
                     wmc.clone(),
+                    stats,
+                    Arc::clone(wm),
                 )
             } else {
                 spawn_worker(
@@ -714,6 +772,7 @@ async fn run_scale_manager(
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     worker_mode_config: Option<Arc<WorkerModeConfig>>,
+    worker_metrics: Option<Arc<WorkerMetrics>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_scale_up = Instant::now();
@@ -745,12 +804,17 @@ async fn run_scale_manager(
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
             let handle = if let Some(ref wmc) = worker_mode_config {
+                let wm = worker_metrics.as_ref().unwrap();
+                let slot_idx = next_id % wm.slots.len();
+                let stats = Arc::clone(&wm.slots[slot_idx]);
                 spawn_worker_mode(
                     next_id,
                     request_rx.clone(),
                     Arc::clone(&shutdown),
                     Arc::clone(&last_active),
                     wmc.clone(),
+                    stats,
+                    Arc::clone(wm),
                 )
             } else {
                 spawn_worker(
@@ -796,10 +860,22 @@ async fn run_scale_manager(
             let spawn_rx = request_rx.clone();
             let spawn_id = next_id;
             let spawn_wmc = worker_mode_config.clone();
+            let spawn_wm = worker_metrics.clone();
             drop(workers_guard);
 
             let handle = if let Some(wmc) = spawn_wmc {
-                spawn_worker_mode(spawn_id, spawn_rx, spawn_shutdown, spawn_last_active, wmc)
+                let wm = spawn_wm.as_ref().unwrap();
+                let slot_idx = spawn_id % wm.slots.len();
+                let stats = Arc::clone(&wm.slots[slot_idx]);
+                spawn_worker_mode(
+                    spawn_id,
+                    spawn_rx,
+                    spawn_shutdown,
+                    spawn_last_active,
+                    wmc,
+                    stats,
+                    Arc::clone(wm),
+                )
             } else {
                 spawn_worker(
                     spawn_id,

@@ -410,6 +410,8 @@ void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mb)
     ctx.max_requests = max_requests;
     ctx.max_memory_bytes = max_memory_mb * 1024 * 1024;  /* pre-compute to avoid per-request mul */
     ctx.requests_done = 0;
+    ctx.exit_reason = 0;
+    ctx.current_memory_bytes = 0;
 }
 
 void oxphp_bridge_reset_request_ctx(void) {
@@ -447,6 +449,18 @@ void oxphp_bridge_set_cancelled(bool cancelled) {
 
 bool oxphp_bridge_is_cancelled(void) {
     return ctx.cancelled;
+}
+
+uint8_t oxphp_bridge_get_exit_reason(void) {
+    return ctx.exit_reason;
+}
+
+uint64_t oxphp_bridge_get_requests_done(void) {
+    return ctx.requests_done;
+}
+
+uint64_t oxphp_bridge_get_memory_usage(void) {
+    return ctx.current_memory_bytes;
 }
 
 /* ── Bailout wrapper ── */

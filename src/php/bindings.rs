@@ -289,6 +289,11 @@ extern "C" {
     pub fn oxphp_bridge_worker_wait() -> c_int;
     pub fn oxphp_bridge_worker_send_response() -> c_int;
 
+    // ─── Worker mode metrics ─────────────────────────────
+    pub fn oxphp_bridge_get_exit_reason() -> u8;
+    pub fn oxphp_bridge_get_requests_done() -> u64;
+    pub fn oxphp_bridge_get_memory_usage() -> u64;
+
     // ─── SAPI request_info ──────────────────────────────
 
     pub fn oxphp_bridge_set_request_info(

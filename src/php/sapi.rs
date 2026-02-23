@@ -10,6 +10,7 @@ use http::header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
+use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
 use crate::types::{ScriptRequest, ScriptResponse};
@@ -51,6 +52,12 @@ thread_local! {
     static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
     /// Worker mode: shared last_active timestamp for scale manager idle detection.
     static WORKER_LAST_ACTIVE: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
+    /// Worker mode: per-worker stats (memory, requests_done, uptime).
+    static WORKER_STATS: RefCell<Option<Arc<WorkerStats>>> = const { RefCell::new(None) };
+    /// Worker mode: global worker metrics (counters, histogram).
+    static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
+    /// Worker mode: request start time for duration histogram.
+    static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -971,6 +978,18 @@ pub fn set_worker_last_active(last_active: Arc<AtomicU64>) {
     });
 }
 
+pub fn set_worker_stats(stats: Arc<WorkerStats>) {
+    WORKER_STATS.with(|slot| {
+        *slot.borrow_mut() = Some(stats);
+    });
+}
+
+pub fn set_worker_metrics(wm: Arc<WorkerMetrics>) {
+    WORKER_METRICS_TLS.with(|slot| {
+        *slot.borrow_mut() = Some(wm);
+    });
+}
+
 /// Worker wait callback — called from C bridge when PHP calls oxphp_worker().
 /// Blocks on the crossbeam channel until a new request arrives.
 /// Populates SAPI TLS with the new request data.
@@ -1019,6 +1038,16 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
             let start = Instant::now();
             set_early_tx(start, req.response_tx);
 
+            // Store request start time for duration histogram
+            WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
+            // Increment soft_resets counter
+            WORKER_METRICS_TLS.with(|slot| {
+                if let Some(ref wm) = *slot.borrow() {
+                    wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+
             // Set request_time BEFORE superglobals are populated
             bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
 
@@ -1049,6 +1078,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         close_stream();
         // If early TX was already consumed by streaming headers, we're done
         if was_early_sent() {
+            record_worker_request_metrics();
             clear_buffers();
             return 0;
         }
@@ -1056,6 +1086,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // If response was already sent early (finish_request), we're done
     if was_early_sent() {
+        record_worker_request_metrics();
         clear_buffers();
         return 0;
     }
@@ -1077,10 +1108,43 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         }
     });
 
+    // Record worker mode metrics after response sent
+    record_worker_request_metrics();
+
     // Clean up for next request
     clear_buffers();
 
     0
+}
+
+/// Record per-request worker mode metrics (memory, requests_done, duration histogram).
+/// Called from worker_send_callback after each request.
+unsafe fn record_worker_request_metrics() {
+    // Read memory and requests_done from bridge.
+    // requests_done is read BEFORE C-side increment, so add 1.
+    let memory = bindings::oxphp_bridge_get_memory_usage();
+    let requests_done = bindings::oxphp_bridge_get_requests_done() + 1;
+
+    // Update per-worker stats
+    WORKER_STATS.with(|slot| {
+        if let Some(ref stats) = *slot.borrow() {
+            stats.memory_bytes.store(memory, Ordering::Relaxed);
+            stats.requests_done.store(requests_done, Ordering::Relaxed);
+        }
+    });
+
+    // Compute duration and update global metrics
+    let duration_us = WORKER_REQUEST_START
+        .with(|slot| slot.take().map(|start| start.elapsed().as_micros() as u64));
+
+    WORKER_METRICS_TLS.with(|slot| {
+        if let Some(ref wm) = *slot.borrow() {
+            wm.requests_handled_total.fetch_add(1, Ordering::Relaxed);
+            if let Some(dur) = duration_us {
+                wm.record_duration(dur);
+            }
+        }
+    });
 }
 
 /// Get the worker wait callback function pointer for registering with the bridge.
