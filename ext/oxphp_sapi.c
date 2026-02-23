@@ -245,7 +245,8 @@ PHP_FUNCTION(oxphp_worker)
     while (1) {
         /* 1. Wait for next request (blocks in Rust via channel recv) */
         if (oxphp_bridge_worker_wait() != 0) {
-            break; /* shutdown signal */
+            ctx->exit_reason = 0; /* shutdown */
+            break;
         }
 
         /* 2. Soft reset: cleans per-request state and repopulates superglobals.
@@ -271,7 +272,10 @@ PHP_FUNCTION(oxphp_worker)
         php_call_shutdown_functions();
         php_free_shutdown_functions();
 
-        /* 5. Send response back to HTTP layer */
+        /* 5. Capture memory usage before send (for Rust-side metrics) */
+        ctx->current_memory_bytes = (uint64_t)zend_memory_usage(0);
+
+        /* 5b. Send response back to HTTP layer */
         oxphp_bridge_worker_send_response();
 
         /* 6. Track completed requests (after response sent, so limits check sees current count) */
@@ -285,10 +289,19 @@ PHP_FUNCTION(oxphp_worker)
             gc_collect_cycles();
         }
 
-        /* 8. Check limits */
-        if (handler_failed) break;
-        if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) break;
-        if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) break;
+        /* 8. Check limits — set exit_reason before breaking */
+        if (handler_failed) {
+            ctx->exit_reason = 3; /* error */
+            break;
+        }
+        if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) {
+            ctx->exit_reason = 1; /* max_requests */
+            break;
+        }
+        if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
+            ctx->exit_reason = 2; /* max_memory */
+            break;
+        }
     }
 
     zend_fcc_dtor(&fcc);

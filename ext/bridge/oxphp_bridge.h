@@ -71,6 +71,12 @@ typedef struct {
     /** Max memory in bytes before worker recycle (0 = unlimited).
      *  Pre-computed from MB to avoid per-request multiplication. */
     uint64_t max_memory_bytes;
+
+    /** Exit reason for worker mode (0=shutdown, 1=max_requests, 2=max_memory, 3=error). */
+    uint8_t exit_reason;
+
+    /** Current PHP heap usage in bytes (updated after each request). */
+    uint64_t current_memory_bytes;
 } oxphp_ctx_t;
 
 /**
@@ -326,6 +332,17 @@ bool oxphp_bridge_is_cancelled(void);
 
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
+
+/* ─── Worker Mode Metrics Getters ─────────────────────────── */
+
+/** Get the exit reason for the last worker mode exit. */
+uint8_t oxphp_bridge_get_exit_reason(void);
+
+/** Get the number of requests completed by this worker. */
+uint64_t oxphp_bridge_get_requests_done(void);
+
+/** Get the current PHP memory usage (set after each request). */
+uint64_t oxphp_bridge_get_memory_usage(void);
 
 #ifdef __cplusplus
 }
