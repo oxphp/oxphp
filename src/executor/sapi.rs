@@ -11,12 +11,11 @@ use crate::executor::ScriptExecutor;
 use crate::metrics::Metrics;
 use crate::php::bindings;
 use crate::php::sapi;
+use crate::php::sapi::WorkerIncomingRequest;
 use crate::types::{ScriptRequest, ScriptResponse};
 
-struct WorkerRequest {
-    script: ScriptRequest,
-    response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
-}
+/// Alias for the channel message type used in both traditional and worker modes.
+type WorkerRequest = WorkerIncomingRequest;
 
 /// Worker scaling mode parsed from `PHP_WORKERS` env var.
 #[derive(Debug, Clone, PartialEq)]
@@ -106,6 +105,14 @@ fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
     }
 }
 
+/// Configuration for worker mode threads.
+/// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.
+struct WorkerModeConfig {
+    worker_file: std::path::PathBuf,
+    max_requests: u64,
+    max_memory_mb: u64,
+}
+
 pub struct SapiExecutor {
     request_tx: Option<crossbeam_channel::Sender<WorkerRequest>>,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
@@ -114,6 +121,7 @@ pub struct SapiExecutor {
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     idle_timeout_sec: u64,
+    worker_mode_config: Option<Arc<WorkerModeConfig>>,
 }
 
 impl SapiExecutor {
@@ -176,6 +184,26 @@ impl SapiExecutor {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(initial_count * 128);
 
+        // Parse worker mode config
+        let worker_mode_config = std::env::var("WORKER_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|path| {
+                let max_requests = std::env::var("WORKER_MAX_REQUESTS")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let max_memory_mb = std::env::var("WORKER_MAX_MEMORY")
+                    .ok()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                Arc::new(WorkerModeConfig {
+                    worker_file: std::path::PathBuf::from(path),
+                    max_requests,
+                    max_memory_mb,
+                })
+            });
+
         let (request_tx, request_rx) = crossbeam_channel::bounded(queue_capacity);
 
         let loop_mode = match &mode {
@@ -183,17 +211,37 @@ impl SapiExecutor {
             WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
         };
 
+        // Register worker callbacks once before spawning any worker mode threads
+        if worker_mode_config.is_some() {
+            unsafe {
+                bindings::oxphp_bridge_set_worker_callbacks(
+                    sapi::get_worker_wait_callback(),
+                    sapi::get_worker_send_callback(),
+                );
+            }
+        }
+
         let mut managed_workers = Vec::with_capacity(initial_count);
         for i in 0..initial_count {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
-            let handle = spawn_worker(
-                i,
-                request_rx.clone(),
-                Arc::clone(&shutdown),
-                Arc::clone(&last_active),
-                loop_mode,
-            );
+            let handle = if let Some(ref wmc) = worker_mode_config {
+                spawn_worker_mode(
+                    i,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    wmc.clone(),
+                )
+            } else {
+                spawn_worker(
+                    i,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    loop_mode,
+                )
+            };
             managed_workers.push(ManagedWorker {
                 id: i,
                 handle,
@@ -215,13 +263,24 @@ impl SapiExecutor {
             }
         }
 
-        tracing::info!(
-            mode = ?mode,
-            workers = initial_count,
-            queue_capacity,
-            idle_timeout_sec,
-            "PHP worker pool started"
-        );
+        if worker_mode_config.is_some() {
+            tracing::info!(
+                mode = ?mode,
+                workers = initial_count,
+                queue_capacity,
+                idle_timeout_sec,
+                worker_file = %worker_mode_config.as_ref().unwrap().worker_file.display(),
+                "PHP worker pool started (worker mode)"
+            );
+        } else {
+            tracing::info!(
+                mode = ?mode,
+                workers = initial_count,
+                queue_capacity,
+                idle_timeout_sec,
+                "PHP worker pool started"
+            );
+        }
 
         Self {
             request_tx: Some(request_tx),
@@ -231,6 +290,7 @@ impl SapiExecutor {
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_sec,
+            worker_mode_config,
         }
     }
 }
@@ -280,12 +340,14 @@ impl ScriptExecutor for SapiExecutor {
         let request_rx = self.request_rx.clone();
         let global_shutdown = Arc::clone(&self.global_shutdown);
         let metrics = Arc::clone(&self.metrics);
+        let wmc = self.worker_mode_config.clone();
 
         match &self.mode {
             WorkerMode::Static(target) => {
                 let target = *target;
                 tokio::spawn(async move {
-                    run_worker_monitor(workers, request_rx, target, global_shutdown, metrics).await;
+                    run_worker_monitor(workers, request_rx, target, global_shutdown, metrics, wmc)
+                        .await;
                 });
                 tracing::info!(target, "Worker health monitor started");
             }
@@ -302,6 +364,7 @@ impl ScriptExecutor for SapiExecutor {
                         idle_timeout_sec,
                         global_shutdown,
                         metrics,
+                        wmc,
                     )
                     .await;
                 });
@@ -349,6 +412,128 @@ fn spawn_worker(
             worker_thread(id, rx, shutdown, last_active, loop_mode);
         })
         .expect("failed to spawn PHP worker thread")
+}
+
+fn spawn_worker_mode(
+    id: usize,
+    rx: crossbeam_channel::Receiver<WorkerRequest>,
+    _shutdown: Arc<AtomicBool>, // kept for ManagedWorker interface; worker mode shuts down via channel closure
+    last_active: Arc<AtomicU64>,
+    config: Arc<WorkerModeConfig>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("php-worker-{id}"))
+        .spawn(move || {
+            worker_mode_thread(id, rx, last_active, config);
+        })
+        .expect("failed to spawn PHP worker mode thread")
+}
+
+/// Worker mode thread: runs a single PHP request context for the lifetime of the thread.
+/// The worker file calls `oxphp_worker()` which loops internally, receiving requests
+/// via the crossbeam channel and calling the PHP handler for each one.
+fn worker_mode_thread(
+    worker_id: usize,
+    request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    last_active: Arc<AtomicU64>,
+    config: Arc<WorkerModeConfig>,
+) {
+    let thread_name = std::thread::current()
+        .name()
+        .unwrap_or("php-worker")
+        .to_string();
+
+    // 1. Initialize TSRM thread-local storage (required for ZTS)
+    unsafe {
+        let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
+        bindings::oxphp_bridge_tsrm_update();
+        bindings::oxphp_bridge_init_ctx();
+        bindings::oxphp_bridge_set_worker_id(worker_id as i32);
+    }
+
+    // 2. Set worker mode TLS flags
+    unsafe {
+        bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mb);
+    }
+
+    // 3. Store channel receiver and last_active in thread-local for worker_wait_callback
+    sapi::set_worker_rx(request_rx);
+    sapi::set_worker_last_active(last_active);
+
+    tracing::info!(worker = %thread_name, file = %config.worker_file.display(), "Worker mode thread started");
+
+    // 4. Single php_request_startup for the entire worker lifetime.
+    //    Do NOT call oxphp_bridge_init_ctx() again — it would wipe worker_mode.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    unsafe {
+        bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
+        // Set minimal request info for the boot request
+        bindings::oxphp_bridge_set_request_info(
+            b"GET\0".as_ptr() as *const std::os::raw::c_char,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+    }
+
+    if unsafe { bindings::php_request_startup() } != 0 {
+        tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
+        return;
+    }
+
+    // 5. Execute worker file — this enters oxphp_worker() loop.
+    //    The loop blocks on recv() inside worker_wait_callback.
+    //    Returns when shutdown or limits reached.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let script_path_str = config.worker_file.to_str().unwrap_or("");
+        let script_path = CString::new(script_path_str).unwrap_or_default();
+
+        let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
+        unsafe {
+            bindings::zend_stream_init_filename(&mut file_handle, script_path.as_ptr());
+        }
+        file_handle.primary_script = true;
+
+        let script_ok = unsafe {
+            bindings::oxphp_execute_script_safe(
+                &mut file_handle as *mut _ as *mut std::os::raw::c_void,
+            )
+        };
+        if script_ok == 0 {
+            tracing::warn!(
+                worker = %thread_name,
+                path = %config.worker_file.display(),
+                "Worker script aborted via zend_bailout"
+            );
+        }
+
+        unsafe {
+            bindings::zend_destroy_file_handle(&mut file_handle);
+        }
+    }));
+
+    if result.is_err() {
+        tracing::error!(worker = %thread_name, "Worker mode thread panicked");
+        // Try to send 500 for any pending request
+        if let Some((_start, tx)) = sapi::take_early_tx() {
+            let _ = tx.send(ScriptResponse {
+                status: 500,
+                body: Bytes::from_static(b"Internal Server Error"),
+                ..Default::default()
+            });
+        }
+    }
+
+    // 6. Single php_request_shutdown for the entire worker lifetime
+    unsafe {
+        bindings::php_request_shutdown(std::ptr::null_mut());
+    }
+    sapi::clear_request_data();
+
+    tracing::info!(worker = %thread_name, "Worker mode thread stopped");
 }
 
 fn worker_thread(
@@ -461,6 +646,7 @@ async fn run_worker_monitor(
     target: usize,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
+    worker_mode_config: Option<Arc<WorkerModeConfig>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut next_id = target; // IDs above initial range
@@ -488,13 +674,23 @@ async fn run_worker_monitor(
         while guard.len() < target {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
-            let handle = spawn_worker(
-                next_id,
-                request_rx.clone(),
-                Arc::clone(&shutdown),
-                Arc::clone(&last_active),
-                WorkerLoopMode::Static,
-            );
+            let handle = if let Some(ref wmc) = worker_mode_config {
+                spawn_worker_mode(
+                    next_id,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    wmc.clone(),
+                )
+            } else {
+                spawn_worker(
+                    next_id,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    WorkerLoopMode::Static,
+                )
+            };
             guard.push(ManagedWorker {
                 id: next_id,
                 handle,
@@ -517,6 +713,7 @@ async fn run_scale_manager(
     idle_timeout_sec: u64,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
+    worker_mode_config: Option<Arc<WorkerModeConfig>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_scale_up = Instant::now();
@@ -547,13 +744,23 @@ async fn run_scale_manager(
         while workers_guard.len() < min {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
-            let handle = spawn_worker(
-                next_id,
-                request_rx.clone(),
-                Arc::clone(&shutdown),
-                Arc::clone(&last_active),
-                WorkerLoopMode::Dynamic,
-            );
+            let handle = if let Some(ref wmc) = worker_mode_config {
+                spawn_worker_mode(
+                    next_id,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    wmc.clone(),
+                )
+            } else {
+                spawn_worker(
+                    next_id,
+                    request_rx.clone(),
+                    Arc::clone(&shutdown),
+                    Arc::clone(&last_active),
+                    WorkerLoopMode::Dynamic,
+                )
+            };
             workers_guard.push(ManagedWorker {
                 id: next_id,
                 handle,
@@ -588,15 +795,20 @@ async fn run_scale_manager(
             let spawn_last_active = Arc::clone(&last_active);
             let spawn_rx = request_rx.clone();
             let spawn_id = next_id;
+            let spawn_wmc = worker_mode_config.clone();
             drop(workers_guard);
 
-            let handle = spawn_worker(
-                spawn_id,
-                spawn_rx,
-                spawn_shutdown,
-                spawn_last_active,
-                WorkerLoopMode::Dynamic,
-            );
+            let handle = if let Some(wmc) = spawn_wmc {
+                spawn_worker_mode(spawn_id, spawn_rx, spawn_shutdown, spawn_last_active, wmc)
+            } else {
+                spawn_worker(
+                    spawn_id,
+                    spawn_rx,
+                    spawn_shutdown,
+                    spawn_last_active,
+                    WorkerLoopMode::Dynamic,
+                )
+            };
 
             // Re-lock to insert
             let mut workers_guard = workers.lock().unwrap();
@@ -660,9 +872,8 @@ fn execute_request(
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 
-    // Create streaming channel (cheap even if unused — no allocs until first send).
-    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
-    sapi::set_stream_channel(chunk_tx, chunk_rx);
+    // Streaming channel is created lazily in send_streaming_headers() — no alloc
+    // for the vast majority of non-streaming requests.
 
     let _guard = RequestDataGuard;
 

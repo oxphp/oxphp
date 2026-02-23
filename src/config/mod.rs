@@ -1,5 +1,7 @@
 mod server;
 
+use std::path::PathBuf;
+
 pub use server::ServerConfig;
 
 /// Top-level application configuration.
@@ -19,6 +21,12 @@ pub struct Config {
     pub compression: bool,
     pub access_log: bool,
     pub max_query_body: usize,
+    /// Worker mode: PHP file that boots the application and calls oxphp_worker().
+    pub worker_file: Option<PathBuf>,
+    /// Max requests before recycling a worker (0 = unlimited).
+    pub worker_max_requests: u64,
+    /// Max memory (MB) before recycling a worker (0 = unlimited).
+    pub worker_max_memory_mb: u64,
 }
 
 impl Config {
@@ -57,6 +65,19 @@ impl Config {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(512 * 1024);
 
+        let worker_file = std::env::var("WORKER_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        let worker_max_requests = std::env::var("WORKER_MAX_REQUESTS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let worker_max_memory_mb = std::env::var("WORKER_MAX_MEMORY")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
         Ok(Self {
             server,
             log_level,
@@ -72,6 +93,9 @@ impl Config {
             compression,
             access_log,
             max_query_body,
+            worker_file,
+            worker_max_requests,
+            worker_max_memory_mb,
         })
     }
 
@@ -95,6 +119,10 @@ impl Config {
             "compression": self.compression,
             "access_log": self.access_log,
             "max_query_body": self.max_query_body,
+            "worker_mode": self.worker_file.is_some(),
+            "worker_file": self.worker_file.as_ref().map(|p| p.display().to_string()),
+            "worker_max_requests": self.worker_max_requests,
+            "worker_max_memory_mb": self.worker_max_memory_mb,
         })
     }
 }

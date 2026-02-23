@@ -54,6 +54,7 @@ async fn start_server_with_options(
         None,
         false,      // compression disabled in tests
         512 * 1024, // max_query_body: 512 KB
+        None,       // no worker mode
     ));
 
     tokio::spawn(async move {

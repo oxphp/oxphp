@@ -391,6 +391,56 @@ size_t oxphp_zval_size(void) {
     return sizeof(zval);
 }
 
+/* ─── Worker Mode ─────────────────────────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. All workers share the same callback pointers.
+ */
+static oxphp_worker_wait_fn_t rust_worker_wait = NULL;
+static oxphp_worker_send_fn_t rust_worker_send = NULL;
+
+void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn) {
+    rust_worker_wait = wait_fn;
+    rust_worker_send = send_fn;
+}
+
+void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mb) {
+    ctx.worker_mode = 1;
+    ctx.max_requests = max_requests;
+    ctx.max_memory_bytes = max_memory_mb * 1024 * 1024;  /* pre-compute to avoid per-request mul */
+    ctx.requests_done = 0;
+}
+
+void oxphp_bridge_reset_request_ctx(void) {
+    ctx.request_id[0] = '\0';
+    ctx.request_time = 0.0;
+    ctx.deadline_us = 0;
+    ctx.cancelled = false;
+    ctx.write_count = 0;
+    ctx.stream_mode = false;
+    ctx.headers_sent = false;
+    ctx.finished = false;
+    /* Note: requests_done is NOT incremented here — the caller (oxphp_worker loop)
+     * increments it explicitly after send_response, keeping the side effect visible. */
+}
+
+int oxphp_bridge_worker_wait(void) {
+    /* Callbacks are guaranteed non-NULL in worker mode (set once at startup).
+     * Use __builtin_expect to hint the branch predictor. */
+    if (__builtin_expect(rust_worker_wait != NULL, 1)) {
+        return rust_worker_wait();
+    }
+    return -1;
+}
+
+int oxphp_bridge_worker_send_response(void) {
+    if (__builtin_expect(rust_worker_send != NULL, 1)) {
+        return rust_worker_send();
+    }
+    return -1;
+}
+
 void oxphp_bridge_set_cancelled(bool cancelled) {
     ctx.cancelled = cancelled;
 }

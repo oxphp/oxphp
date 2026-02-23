@@ -18,13 +18,26 @@ extern "C" {
  * PHP extensions.
  */
 
-/** Per-request context stored in __thread TLS. */
+/** Per-request context stored in __thread TLS.
+ *
+ * Field ordering is cache-line optimized:
+ * - Hot fields (accessed every ub_write, ~per opcode) come first so they
+ *   share a single 64-byte cache line.
+ * - Warm fields (accessed once per request) follow.
+ * - Cold fields (worker-mode config, set once per thread) are last. */
 typedef struct {
-    /** Hex request ID (64 chars + null). */
-    char request_id[65];
+    /* ── Hot: accessed every ub_write (~per PHP opcode) ───── */
 
-    /** Worker thread index. */
-    int32_t worker_id;
+    /** ub_write call counter for periodic deadline checks. */
+    uint32_t write_count;
+
+    /** Whether cancellation has been requested (client disconnected). */
+    bool cancelled;
+
+    /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
+    int64_t deadline_us;
+
+    /* ── Warm: accessed once per request ─────────────────── */
 
     /** Request start time (Unix epoch, microseconds). */
     double request_time;
@@ -38,14 +51,26 @@ typedef struct {
     /** Whether oxphp_finish_request() was called. */
     bool finished;
 
-    /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
-    int64_t deadline_us;
+    /** Hex request ID (64 chars + null). */
+    char request_id[65];
 
-    /** Whether cancellation has been requested (client disconnected). */
-    bool cancelled;
+    /** Worker thread index. */
+    int32_t worker_id;
 
-    /** ub_write call counter for periodic deadline checks. */
-    uint32_t write_count;
+    /* ── Cold: worker mode config (set once per thread) ──── */
+
+    /** Whether this thread is in worker mode (persistent PHP process). */
+    int worker_mode;
+
+    /** Number of requests completed by this worker (worker mode). */
+    uint64_t requests_done;
+
+    /** Max requests before worker recycle (0 = unlimited). */
+    uint64_t max_requests;
+
+    /** Max memory in bytes before worker recycle (0 = unlimited).
+     *  Pre-computed from MB to avoid per-request multiplication. */
+    uint64_t max_memory_bytes;
 } oxphp_ctx_t;
 
 /**
@@ -264,6 +289,34 @@ size_t oxphp_bridge_ub_write(const char *str, size_t str_length);
 
 /** C wrapper for flush — checks deadline, then calls Rust impl. */
 void oxphp_bridge_flush(void *server_context);
+
+/* ─── Worker Mode ─────────────────────────────────────────── */
+
+/** Rust callback: blocks until next request arrives, returns 0 on success, -1 on shutdown. */
+typedef int (*oxphp_worker_wait_fn_t)(void);
+
+/** Rust callback: sends current response back to HTTP layer, returns 0 on success. */
+typedef int (*oxphp_worker_send_fn_t)(void);
+
+/** Register Rust worker callbacks (called once at init). */
+void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn);
+
+/** Set worker mode TLS flags for this thread. */
+void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mb);
+
+/**
+ * Reset per-request TLS fields between worker mode requests.
+ * Clears: request_id, request_time, deadline, cancelled, write_count,
+ *         stream_mode, headers_sent, finished.
+ * Increments: requests_done.
+ */
+void oxphp_bridge_reset_request_ctx(void);
+
+/** Call Rust worker_wait callback. Returns 0 (request ready) or -1 (shutdown). */
+int oxphp_bridge_worker_wait(void);
+
+/** Call Rust worker_send callback. Returns 0 on success. */
+int oxphp_bridge_worker_send_response(void);
 
 /** Set the cancellation flag (called from Rust when client disconnects). */
 void oxphp_bridge_set_cancelled(bool cancelled);

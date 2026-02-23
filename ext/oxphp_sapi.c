@@ -2,6 +2,9 @@
 #include "SAPI.h"
 #include "oxphp_bridge.h"
 #include "Zend/zend_API.h"
+#include "main/php_output.h"
+#include "main/php_main.h"
+#include "ext/standard/basic_functions.h"
 #include <stdlib.h>
 #include <time.h>
 
@@ -136,6 +139,163 @@ PHP_FUNCTION(oxphp_stream_flush)
 }
 /* }}} */
 
+/* ─── Worker Mode: soft reset between requests ─────────────── */
+
+/**
+ * Reset per-request PHP state without destroying the PHP heap.
+ * Called between worker mode requests to prevent response bleed.
+ */
+static void oxphp_soft_reset(void) {
+    /* 1. Output: discard all buffers, re-activate clean.
+     * Skip end_all if no output buffers exist (avoids iterating empty stack). */
+    if (php_output_get_level() > 0) {
+        php_output_end_all();
+    }
+    php_output_deactivate();
+    php_output_activate();
+
+    /* 2. SAPI headers: clear list, reset status to 200 */
+    zend_llist_clean(&SG(sapi_headers).headers);
+    SG(sapi_headers).http_response_code = 200;
+    SG(sapi_headers).send_default_content_type = 1;
+    SG(headers_sent) = 0;
+
+    /* 3. SAPI request state: allow POST re-read and cookie refresh.
+     * This replaces the heavyweight sapi_activate() — we only reset
+     * the fields needed for superglobal repopulation. */
+    SG(read_post_bytes) = 0;
+    SG(post_read) = 0;
+    SG(request_info).request_body = NULL;
+    SG(request_info).post_entry = NULL;
+    SG(request_info).current_user = NULL;
+    SG(request_info).current_user_length = 0;
+    SG(rfc1867_uploaded_files) = NULL;
+    /* Cookie data for PARSE_COOKIE callback. server_context was set by
+     * set_request_data() in worker_wait_callback. */
+    if (SG(server_context)) {
+        SG(request_info).cookie_data = sapi_module.read_cookies();
+    }
+
+    /* 4. Clear error state */
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+        PG(last_error_message) = NULL;
+    }
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+        PG(last_error_file) = NULL;
+    }
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+    PG(connection_status) = PHP_CONNECTION_NORMAL;
+
+    /* 5. Reset execution timer (max_execution_time) to prevent timeout across requests */
+    zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
+
+    /* 6. Destroy http_globals and repopulate superglobals.
+     * zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
+     * are simple string arrays that never contain cyclic refs, and _nogc avoids
+     * the cycle buffer insertion overhead on every request.
+     * zend_activate_auto_globals() fires non-JIT callbacks (_GET, _POST, _COOKIE, _FILES)
+     * which create new PG(http_globals) entries and zend_hash_update into EG(symbol_table),
+     * replacing the stale entries and releasing the old zvals properly.
+     * JIT globals (_SERVER, _ENV, _REQUEST) are re-armed but only _SERVER is forced
+     * here — $_ENV rarely changes between requests and $_REQUEST is a merge of
+     * _GET+_POST+_COOKIE that PHP can resolve lazily on first access. */
+    for (int i = 0; i < 6; i++) {
+        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
+        ZVAL_UNDEF(&PG(http_globals)[i]);
+    }
+    zend_activate_auto_globals();
+    zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+
+    /* Note: bridge TLS reset (request_id, request_time, deadline, etc.) is handled
+     * by worker_wait_callback BEFORE populating new request data, not here.
+     * This ensures the soft reset only touches PHP-level state. */
+}
+
+/* {{{ oxphp_worker(callable $handler): bool
+ * Enter worker mode loop. Calls $handler for each HTTP request.
+ * Between requests, a soft reset cleans per-request state without
+ * destroying the PHP heap (bootstrap state persists).
+ * Returns true on graceful shutdown, false if not in worker mode. */
+PHP_FUNCTION(oxphp_worker)
+{
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC(fci, fcc)
+    ZEND_PARSE_PARAMETERS_END();
+
+    oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
+    if (!ctx->worker_mode) {
+        php_error_docref(NULL, E_WARNING, "oxphp_worker() only available in worker mode");
+        RETURN_FALSE;
+    }
+
+    /* Prevent handler closure from being GC'd during worker lifetime */
+    zend_fcc_addref(&fcc);
+    zval retval;
+
+    /* GC cycle collection interval — trades p99 latency for memory.
+     * Every N requests, run a full mark-and-sweep to reclaim cyclic refs. */
+    #define WORKER_GC_INTERVAL 100
+
+    while (1) {
+        /* 1. Wait for next request (blocks in Rust via channel recv) */
+        if (oxphp_bridge_worker_wait() != 0) {
+            break; /* shutdown signal */
+        }
+
+        /* 2. Soft reset: cleans per-request state and repopulates superglobals.
+         * worker_wait_callback (Rust) already set SG(request_info) via
+         * set_request_data() before returning, so soft_reset can read
+         * cookies and POST data from the SAPI callbacks. */
+        oxphp_soft_reset();
+
+        /* 3. Call handler with zend_try protection */
+        int handler_failed = 0;
+        zend_try {
+            fci.retval = &retval;
+            fci.param_count = 0;
+            fci.params = NULL;
+            if (zend_call_function(&fci, &fcc) == SUCCESS) {
+                zval_ptr_dtor(&retval);
+            }
+        } zend_catch {
+            handler_failed = 1;
+        } zend_end_try();
+
+        /* 4. Run shutdown functions (register_shutdown_function support) */
+        php_call_shutdown_functions();
+        php_free_shutdown_functions();
+
+        /* 5. Send response back to HTTP layer */
+        oxphp_bridge_worker_send_response();
+
+        /* 6. Track completed requests (after response sent, so limits check sees current count) */
+        ctx->requests_done++;
+
+        /* 7. GC cycle collection — periodic, not per-request.
+         * Full cycle collection is expensive (~1ms+ with many objects).
+         * Running every WORKER_GC_INTERVAL requests avoids p99 spikes
+         * while still preventing cycle leaks in long-lived workers. */
+        if (ctx->requests_done % WORKER_GC_INTERVAL == 0) {
+            gc_collect_cycles();
+        }
+
+        /* 8. Check limits */
+        if (handler_failed) break;
+        if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) break;
+        if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) break;
+    }
+
+    zend_fcc_dtor(&fcc);
+    RETURN_TRUE;
+}
+/* }}} */
+
 /* ─── Native plugin function dispatch ─────────────────────── */
 
 /* {{{ oxphp_native_dispatch — zero-serialization handler for plugin functions.
@@ -195,6 +355,10 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_flush, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker, 0, 1, _IS_BOOL, 0)
+    ZEND_ARG_CALLABLE_INFO(0, handler, 0)
+ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ function entries */
@@ -206,6 +370,7 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
+    PHP_FE(oxphp_worker,            arginfo_oxphp_worker)
     PHP_FE_END
 };
 /* }}} */

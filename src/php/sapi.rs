@@ -1,7 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
 
 use bytes::Bytes;
@@ -31,6 +32,12 @@ impl ResponseBuffers {
     }
 }
 
+/// A pending worker-mode request received from the channel.
+pub struct WorkerIncomingRequest {
+    pub script: ScriptRequest,
+    pub response_tx: oneshot::Sender<ScriptResponse>,
+}
+
 thread_local! {
     static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
     static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
@@ -38,9 +45,12 @@ thread_local! {
     /// via `oxphp_finish_request()`. Set before script execution, consumed when early send triggers.
     static EARLY_TX: RefCell<Option<(Instant, oneshot::Sender<ScriptResponse>)>> = const { RefCell::new(None) };
     /// Streaming body chunk sender — worker thread sends chunks via `blocking_send()`.
+    /// Created lazily in `send_streaming_headers()` to avoid heap alloc for non-streaming requests.
     static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
-    /// Streaming body chunk receiver — taken once when streaming headers are sent.
-    static STREAM_RX: RefCell<Option<tokio::sync::mpsc::Receiver<Bytes>>> = const { RefCell::new(None) };
+    /// Worker mode: channel receiver for incoming requests.
+    static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
+    /// Worker mode: shared last_active timestamp for scale manager idle detection.
+    static WORKER_LAST_ACTIVE: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -154,28 +164,22 @@ pub fn take_early_tx() -> Option<(Instant, oneshot::Sender<ScriptResponse>)> {
     EARLY_TX.with(|slot| slot.borrow_mut().take())
 }
 
-/// Store the streaming channel halves in TLS.
-/// Called from the worker thread before script execution.
-pub fn set_stream_channel(
-    tx: tokio::sync::mpsc::Sender<Bytes>,
-    rx: tokio::sync::mpsc::Receiver<Bytes>,
-) {
-    STREAM_TX.with(|slot| {
-        *slot.borrow_mut() = Some(tx);
-    });
-    STREAM_RX.with(|slot| {
-        *slot.borrow_mut() = Some(rx);
-    });
-}
-
 /// Send streaming headers via the EARLY_TX oneshot.
-/// Takes EARLY_TX + STREAM_RX from TLS, builds a ScriptResponse with stream_rx,
-/// and sends it. Returns true if headers were sent.
+/// Creates the streaming channel on-demand (lazy — avoids heap alloc for non-streaming requests).
+/// Takes EARLY_TX from TLS, builds a ScriptResponse with stream_rx, and sends it.
+/// Stores the chunk sender in STREAM_TX for subsequent flush_stream_chunk() calls.
+/// Returns true if headers were sent.
 pub fn send_streaming_headers() -> bool {
     EARLY_TX.with(|slot| {
         let entry = slot.borrow_mut().take();
         if let Some((start, tx)) = entry {
-            let stream_rx = STREAM_RX.with(|s| s.borrow_mut().take());
+            // Create streaming channel on-demand — only when streaming actually starts.
+            // This avoids a heap allocation for the vast majority of non-streaming requests.
+            let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
+            STREAM_TX.with(|s| {
+                *s.borrow_mut() = Some(chunk_tx);
+            });
+
             let (raw_output, raw_headers, status) = take_response();
             let body = Bytes::from(raw_output);
             let headers = parse_raw_headers(raw_headers);
@@ -184,7 +188,7 @@ pub fn send_streaming_headers() -> bool {
                 headers,
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
-                stream_rx,
+                stream_rx: Some(chunk_rx),
             });
             true
         } else {
@@ -864,11 +868,8 @@ pub fn clear_buffers() {
     EARLY_TX.with(|slot| {
         slot.borrow_mut().take();
     });
-    // Drop streaming channel halves from previous request.
+    // Drop streaming sender from previous request (receiver was consumed by ScriptResponse).
     STREAM_TX.with(|slot| {
-        slot.borrow_mut().take();
-    });
-    STREAM_RX.with(|slot| {
         slot.borrow_mut().take();
     });
 }
@@ -953,6 +954,143 @@ unsafe extern "C" fn native_dispatch_callback(
             -1
         }
     }
+}
+
+// ─── Worker Mode Helpers ────────────────────────────────────
+
+/// Store the crossbeam receiver in thread-local for worker mode.
+pub fn set_worker_rx(rx: crossbeam_channel::Receiver<WorkerIncomingRequest>) {
+    WORKER_RX.with(|slot| {
+        *slot.borrow_mut() = Some(rx);
+    });
+}
+
+pub fn set_worker_last_active(last_active: Arc<AtomicU64>) {
+    WORKER_LAST_ACTIVE.with(|slot| {
+        *slot.borrow_mut() = Some(last_active);
+    });
+}
+
+/// Worker wait callback — called from C bridge when PHP calls oxphp_worker().
+/// Blocks on the crossbeam channel until a new request arrives.
+/// Populates SAPI TLS with the new request data.
+/// Returns 0 on success (request ready), -1 on shutdown (channel closed).
+///
+/// # Safety
+/// Called from C code via function pointer. Must only be called from a worker thread
+/// with WORKER_RX set.
+unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
+    let incoming = WORKER_RX.with(|slot| {
+        let rx = slot.borrow();
+        match rx.as_ref() {
+            Some(rx) => rx.recv().ok(),
+            None => None,
+        }
+    });
+
+    match incoming {
+        Some(req) => {
+            // Single syscall for both last_active and request_time (#6: avoid double syscall)
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default();
+
+            // Update last_active timestamp for dynamic scaling
+            WORKER_LAST_ACTIVE.with(|slot| {
+                if let Some(ref la) = *slot.borrow() {
+                    la.store(now.as_millis() as u64, Ordering::Relaxed);
+                }
+            });
+
+            // Clear previous response buffers
+            clear_buffers();
+
+            // Reset bridge TLS per-request fields (request_id, deadline, cancelled, etc.)
+            // before populating new request data.
+            bindings::oxphp_bridge_reset_request_ctx();
+
+            // Set up SAPI data for the new request — populates SG(request_info)
+            // with method, query_string, content_type, content_length, and stores
+            // server vars + cookie/body data in thread-local RequestData.
+            // The C-side soft_reset reads cookies and POST data via SAPI callbacks
+            // after this point.
+            set_request_data(&req.script);
+
+            let start = Instant::now();
+            set_early_tx(start, req.response_tx);
+
+            // Set request_time BEFORE superglobals are populated
+            bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
+
+            // Set execution deadline
+            if req.script.timeout_us > 0 {
+                let now_us = now.as_micros() as i64;
+                let deadline =
+                    now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
+                bindings::oxphp_bridge_set_deadline(deadline);
+            }
+
+            0 // success
+        }
+        None => -1, // channel closed = shutdown
+    }
+}
+
+/// Worker send response callback — called from C bridge after each handler invocation.
+/// Takes the accumulated response from SAPI output + headers and sends via oneshot.
+/// Returns 0 on success.
+///
+/// # Safety
+/// Called from C code via function pointer.
+unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
+    // If streaming was active, close the stream
+    if bindings::oxphp_bridge_is_streaming() {
+        flush_stream_chunk();
+        close_stream();
+        // If early TX was already consumed by streaming headers, we're done
+        if was_early_sent() {
+            clear_buffers();
+            return 0;
+        }
+    }
+
+    // If response was already sent early (finish_request), we're done
+    if was_early_sent() {
+        clear_buffers();
+        return 0;
+    }
+
+    // Take accumulated response and send via oneshot
+    let (raw_output, raw_headers, status) = take_response();
+    let body = Bytes::from(raw_output);
+    let headers = parse_raw_headers(raw_headers);
+
+    EARLY_TX.with(|slot| {
+        if let Some((start, tx)) = slot.borrow_mut().take() {
+            let _ = tx.send(ScriptResponse {
+                status,
+                headers,
+                body,
+                execution_time_us: start.elapsed().as_micros() as u64,
+                stream_rx: None,
+            });
+        }
+    });
+
+    // Clean up for next request
+    clear_buffers();
+
+    0
+}
+
+/// Get the worker wait callback function pointer for registering with the bridge.
+pub fn get_worker_wait_callback() -> Option<unsafe extern "C" fn() -> std::os::raw::c_int> {
+    Some(worker_wait_callback)
+}
+
+/// Get the worker send callback function pointer for registering with the bridge.
+pub fn get_worker_send_callback() -> Option<unsafe extern "C" fn() -> std::os::raw::c_int> {
+    Some(worker_send_callback)
 }
 
 #[cfg(test)]

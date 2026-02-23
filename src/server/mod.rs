@@ -17,6 +17,8 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpStream;
 
+use std::path::PathBuf;
+
 use crate::config::ServerConfig;
 use crate::events::EventDispatcher;
 use crate::executor::ScriptExecutor;
@@ -51,6 +53,7 @@ pub struct Server {
 
 impl Server {
     /// Create a new server from configuration.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &ServerConfig,
         executor: Arc<dyn ScriptExecutor>,
@@ -59,8 +62,12 @@ impl Server {
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         compression_enabled: bool,
         max_query_body: usize,
+        worker_file: Option<PathBuf>,
     ) -> Self {
-        let route_config = RouteConfig::new(config);
+        let mut route_config = RouteConfig::new(config);
+        if let Some(wf) = worker_file {
+            route_config.set_worker_file(wf);
+        }
         let file_cache = Arc::new(FileCache::new(200));
 
         // Pre-build the HTTP connection builder once — reused for every connection
