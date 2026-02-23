@@ -113,6 +113,18 @@ services:
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
       # - ERROR_PAGES_DIR=/var/www/errors
 
+      # ── Worker Mode ────────────────────────────────────────────────
+
+      # PHP file that boots the application and calls oxphp_worker().
+      # When set, workers use persistent mode (no php_request_shutdown between requests).
+      # - WORKER_FILE=/var/www/html/worker.php
+
+      # Max requests before recycling a worker (0 = unlimited).
+      # - WORKER_MAX_REQUESTS=0
+
+      # Max memory (MB) before recycling a worker (0 = unlimited).
+      # - WORKER_MAX_MEMORY=0
+
       # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
 
       # Enable verbose logging in the example plugin.

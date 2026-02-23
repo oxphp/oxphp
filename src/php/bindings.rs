@@ -278,6 +278,17 @@ extern "C" {
         flush: Option<unsafe extern "C" fn(*mut c_void)>,
     );
 
+    // ─── Worker mode ────────────────────────────────────
+
+    pub fn oxphp_bridge_set_worker_callbacks(
+        wait_fn: Option<unsafe extern "C" fn() -> c_int>,
+        send_fn: Option<unsafe extern "C" fn() -> c_int>,
+    );
+    pub fn oxphp_bridge_set_worker_mode(max_requests: u64, max_memory_mb: u64);
+    pub fn oxphp_bridge_reset_request_ctx();
+    pub fn oxphp_bridge_worker_wait() -> c_int;
+    pub fn oxphp_bridge_worker_send_response() -> c_int;
+
     // ─── SAPI request_info ──────────────────────────────
 
     pub fn oxphp_bridge_set_request_info(

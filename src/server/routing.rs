@@ -26,6 +26,9 @@ pub struct RouteConfig {
     index_file: Option<String>,
     index_file_path: Option<PathBuf>,
     index_file_is_php: bool,
+    /// Worker mode: pre-computed RouteResult for the worker file.
+    /// Avoids PathBuf::clone() heap allocation on every cache miss.
+    worker_route: Option<RouteResult>,
     /// Pre-computed root index paths to avoid `join()` on every `/` request.
     root_index_php: PathBuf,
     root_index_html: PathBuf,
@@ -78,6 +81,7 @@ impl RouteConfig {
             index_file: config.index_file.clone(),
             index_file_path,
             index_file_is_php,
+            worker_route: None,
             root_index_php,
             root_index_html,
             root_index_php_key,
@@ -101,6 +105,13 @@ impl RouteConfig {
         Arc::clone(&self.document_root)
     }
 
+    /// Set the worker file for worker mode routing.
+    /// When set, all unmatched requests route to this PHP file instead of 404.
+    /// Pre-computes the RouteResult to avoid PathBuf::clone() on every cache miss.
+    pub fn set_worker_file(&mut self, path: PathBuf) {
+        self.worker_route = Some(RouteResult::Execute(path));
+    }
+
     /// Resolve a URI path to a route result using the file cache.
     ///
     /// Checks the route cache first. On miss, resolves via the inner logic,
@@ -118,10 +129,16 @@ impl RouteConfig {
 
         let result = self.resolve_request_inner(uri_path, file_cache).await;
 
-        // Validate resolved path stays within document root
+        // Validate resolved path stays within document root.
+        // In worker mode, the worker file is an admin-configured trusted path
+        // that may live outside the document root — skip validation for it.
         let result = match &result {
             RouteResult::Serve(path) | RouteResult::Execute(path) => {
-                if !self.validate_path(path, file_cache).await {
+                let is_worker = self
+                    .worker_route
+                    .as_ref()
+                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf) if wf == path));
+                if !is_worker && !self.validate_path(path, file_cache).await {
                     tracing::warn!(
                         path = %path.display(),
                         "Blocked request: resolved path escapes document root"
@@ -220,7 +237,12 @@ impl RouteConfig {
             };
         }
 
-        // 9. File not found + INDEX_FILE set → fallback
+        // 9. Worker mode → all unmatched requests go to the worker
+        if let Some(ref wr) = self.worker_route {
+            return wr.clone();
+        }
+
+        // 10. File not found + INDEX_FILE set → fallback
         if let Some(ref index_path) = self.index_file_path {
             if self.index_file_is_php {
                 return RouteResult::Execute(index_path.clone());
@@ -229,7 +251,7 @@ impl RouteConfig {
             }
         }
 
-        // 10. Not found
+        // 11. Not found
         RouteResult::NotFound
     }
 
@@ -253,6 +275,11 @@ impl RouteConfig {
             return RouteResult::Serve(self.root_index_html.clone());
         }
 
+        // Worker mode: root goes to worker file
+        if let Some(ref wr) = self.worker_route {
+            return wr.clone();
+        }
+
         RouteResult::NotFound
     }
 
@@ -266,6 +293,11 @@ impl RouteConfig {
         let html_index = dir.join("index.html");
         if file_cache.is_file(&html_index.to_string_lossy()).await {
             return RouteResult::Serve(html_index);
+        }
+
+        // Worker mode: subdirectory without index goes to worker
+        if let Some(ref wr) = self.worker_route {
+            return wr.clone();
         }
 
         RouteResult::NotFound
