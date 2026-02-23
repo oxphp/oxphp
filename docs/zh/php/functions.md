@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了七个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了八个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -251,6 +251,74 @@ for ($i = 0; $i < 10; $i++) {
 
 ---
 
+## `oxphp_worker`
+
+进入持久化工作进程模式循环。对每个传入的 HTTP 请求调用提供的处理器回调。请求之间会进行软重置，清理每请求状态（超全局变量、输出缓冲区、`$_SESSION`），而不销毁 PHP 堆，因此引导状态（自动加载器、数据库连接、缓存配置）在请求间保持不变。
+
+```php
+oxphp_worker(callable $handler): bool
+```
+
+**参数：**
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `$handler` | `callable` | 每个 HTTP 请求调用一次的回调。不接收参数。 |
+
+**返回值：** 优雅关闭（服务器停止）时返回 `true`。如果未启用工作进程模式（即未设置 `WORKER_FILE`），立即返回 `false`。
+
+**示例：**
+
+```php
+<?php
+// worker.php — 持久化工作进程入口点
+
+// 引导：每个工作进程生命周期运行一次
+require __DIR__ . '/vendor/autoload.php';
+$db = new PDO('mysql:host=localhost;dbname=app', 'root', '');
+$config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
+
+// 在循环中处理请求
+oxphp_worker(function () use ($db, $config) {
+    $uri = $_SERVER['REQUEST_URI'];
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    // 路由并处理请求
+    if ($uri === '/api/users' && $method === 'GET') {
+        $users = $db->query('SELECT id, name FROM users')->fetchAll();
+        header('Content-Type: application/json');
+        echo json_encode($users);
+    } else {
+        http_response_code(404);
+        echo 'Not Found';
+    }
+});
+```
+
+**工作原理：**
+
+1. 处理器回调对从 Rust 层接收的每个 HTTP 请求被调用。
+2. 请求之间发生软重置：
+   - 超全局变量（`$_GET`、`$_POST`、`$_SERVER`、`$_COOKIE`、`$_FILES`）从新请求数据重新填充
+   - 输出缓冲区被清除
+   - HTTP 响应头被重置
+   - 通过 `register_shutdown_function()` 注册的关闭函数被调用并清除
+3. 垃圾收集定期运行（每 100 个请求），在不影响每请求延迟的情况下回收循环引用。
+4. 循环在以下情况退出：
+   - 服务器关闭（优雅关闭信号）
+   - 处理器抛出未捕获的异常或致命错误（退出原因：`error`）
+   - 工作进程达到 `WORKER_MAX_REQUESTS`（退出原因：`max_requests`）
+   - 工作进程超过 `WORKER_MAX_MEMORY`（退出原因：`max_memory`）
+
+**注意事项：**
+- 此函数仅在设置了 `WORKER_FILE` 时有效。从普通 PHP 脚本调用会触发 `E_WARNING` 并返回 `false`。
+- 在处理器闭包外声明的变量在请求间保持不变。用于数据库连接、配置和其他昂贵的初始化操作。
+- 处理器的 `use` 子句按引用或按值捕获变量，行为与平常相同。按引用捕获的变量在请求间共享状态。
+- 工作进程回收（通过 `WORKER_MAX_REQUESTS` 或 `WORKER_MAX_MEMORY`）会导致工作进程退出并重新生成，重新执行整个工作脚本（包括引导代码）。
+- 工作进程模式指标（`oxphp_worker_requests_handled_total`、`oxphp_worker_recycles_total` 等）在内部服务器运行时可通过 `/metrics` 端点获取。
+
+---
+
 ## 插件函数
 
 插件可以注册自定义 PHP 函数，供脚本调用。这些函数在 PHP 模块初始化（`MINIT`）期间注册，通过 C 桥接分发到 Rust 处理代码。
@@ -292,6 +360,7 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [4] => oxphp_finish_request
 //     [5] => oxphp_is_streaming
 //     [6] => oxphp_stream_flush
+//     [7] => oxphp_worker
 // )
 ```
 
@@ -301,3 +370,5 @@ print_r(get_extension_funcs('oxphp_sapi'));
 - [OPcache 兼容性](opcache.md) --- `request_time` 回调如何启用 OPcache
 - [请求 ID](/features/request-ids.md) --- 请求 ID 如何生成和传播
 - [SAPI 桥接](/architecture/sapi-bridge.md) --- 连接 Rust 和 PHP 的 C 桥接
+- [工作池](/architecture/worker-pool.md#worker-mode-persistent-php) --- 工作进程模式架构、回收和指标
+- [配置](/operations/configuration.md#worker-mode) --- `WORKER_FILE`、`WORKER_MAX_REQUESTS`、`WORKER_MAX_MEMORY`

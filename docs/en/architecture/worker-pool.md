@@ -195,6 +195,75 @@ The ScaleManager drops the Mutex lock before spawning new OS threads to avoid bl
 | `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before a dynamic worker is retired |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel capacity (uses initial count for dynamic) |
 
+## Worker Mode (Persistent PHP)
+
+Worker mode is an alternative execution model where PHP processes stay alive across requests, avoiding the overhead of `php_request_startup()` / `php_request_shutdown()` on every request. This is enabled by setting the `WORKER_FILE` environment variable.
+
+### How It Works
+
+Instead of the standard per-request lifecycle (startup → execute → shutdown), worker mode executes a single PHP script that calls `oxphp_worker()` with a handler callback. The handler is invoked for each request, and between requests a **soft reset** cleans per-request state without destroying the PHP heap:
+
+```
+Worker thread lifecycle:
+
+  php_request_startup()           ← runs ONCE
+  require worker.php              ← bootstrap: autoload, DB connect, config
+  oxphp_worker(function() {       ← enters worker loop
+      ┌─────────────────────────┐
+      │ wait for request        │ ← blocks on crossbeam channel
+      │ soft reset              │ ← repopulate superglobals, clear output
+      │ call handler()          │ ← execute user code
+      │ send response           │ ← response to HTTP layer
+      │ check limits            │ ← max_requests, max_memory
+      └─────────────────────────┘
+      │ loop back ↑             │
+  })
+  php_request_shutdown()          ← runs ONCE (on exit)
+```
+
+The soft reset between requests:
+- Repopulates `$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES` from the new request
+- Clears and resets output buffers
+- Resets HTTP response headers and status code
+- Calls and clears `register_shutdown_function()` handlers
+
+### Recycling
+
+Workers are recycled (exit and respawn) based on configurable limits:
+
+| Exit Reason | Trigger | Metric Label |
+|---|---|---|
+| `max_requests` | `WORKER_MAX_REQUESTS` reached | `reason="max_requests"` |
+| `max_memory` | `WORKER_MAX_MEMORY` (MiB) exceeded | `reason="max_memory"` |
+| `error` | Uncaught exception or fatal error in handler | `reason="error"` |
+| `shutdown` | Server graceful shutdown | *(not counted as recycle)* |
+
+When a worker exits for a non-shutdown reason, the health monitor (static mode) or scale manager (dynamic mode) respawns it automatically. The new worker re-executes the entire worker script, including bootstrap code.
+
+### Metrics
+
+Worker mode exposes dedicated Prometheus metrics for monitoring persistent worker health:
+
+- **`oxphp_worker_requests_handled_total`** — total requests processed across all workers
+- **`oxphp_worker_recycles_total`** / **`oxphp_worker_recycles_by_reason_total`** — recycle counts, globally and by reason
+- **`oxphp_worker_memory_bytes{worker="N"}`** — current PHP heap usage per worker
+- **`oxphp_worker_uptime_seconds{worker="N"}`** — time since each worker was spawned
+- **`oxphp_worker_request_duration_us`** — histogram of PHP handler execution time (excludes queue wait)
+
+See [Metrics](../operations/metrics.md#worker-mode) for the full reference and PromQL query examples.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `WORKER_FILE` | *(none)* | Path to the worker PHP script (relative to `DOCUMENT_ROOT`). Enables worker mode when set |
+| `WORKER_MAX_REQUESTS` | `0` | Maximum requests before recycling. `0` = no limit |
+| `WORKER_MAX_MEMORY` | `0` | Maximum memory (MiB) before recycling. `0` = no limit |
+
+### Routing Integration
+
+When `WORKER_FILE` is set, routing changes: non-static-file requests that don't match a file on disk are routed to the worker script instead of returning 404. Static files (CSS, JS, images) are still served directly from disk. This is similar to nginx's `try_files` directive.
+
 ## Bounded Queue and Backpressure
 
 The channel between Tokio and PHP workers uses `crossbeam_channel::bounded(QUEUE_CAPACITY)`. The executor calls `try_send()` (non-blocking) to enqueue requests:

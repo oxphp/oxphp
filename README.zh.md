@@ -30,6 +30,7 @@
 - **工作线程健康监控** — 自动检测并重启崩溃的工作线程
 - **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
 - **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
+- **工作进程模式** — 持久化 PHP 进程，请求间软重置，根据请求数或内存自动回收，并提供每工作进程的 Prometheus 指标
 - **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
 
 ## 快速开始
@@ -73,6 +74,9 @@ curl http://localhost:8080/
 | `COMPRESSION` | `true` | 启用 Brotli 压缩；设置为 `false`、`0` 或 `off` 可禁用 |
 | `ACCESS_LOG` | `true` | 启用每请求 JSON 访问日志；设置为 `false`、`0` 或 `off` 可禁用 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
+| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）；设置后启用持久化工作进程模式 |
+| `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数；`0` = 无限制 |
+| `WORKER_MAX_MEMORY` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）；`0` = 无限制 |
 
 ## 架构
 
@@ -105,6 +109,7 @@ curl http://localhost:8080/
 - **多线程 PHP 工作池** — 基于 PHP ZTS，每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
 - 工作线程通过 `crossbeam::bounded` 接收请求，通过 `ExecuteResult`（即时或经由 `oneshot` 延迟）返回结果
 - **工作线程健康监控** — 自动检测崩溃线程并重启
+- **工作进程模式** — 持久化 PHP 进程，请求间软重置；工作进程循环调用 `oxphp_worker($handler)`，保持引导状态（自动加载器、数据库连接）跨请求存活
 
 ### 内部服务器
 
@@ -135,7 +140,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ## 开发
 
 ```bash
-# 完整验证（宿主机，157 个测试）
+# 完整验证（宿主机，167 个测试）
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker 冒烟测试

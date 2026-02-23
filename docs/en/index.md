@@ -33,6 +33,7 @@ The server uses a configurable Tokio async runtime (single-threaded by default, 
 - **Worker health monitoring** with automatic dead worker respawning
 - **SSE streaming** -- real-time Server-Sent Events via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()`
 - **Early response** via `oxphp_finish_request()` -- send the HTTP response immediately and continue background processing
+- **Worker mode** -- persistent PHP processes with soft reset between requests, automatic recycling, and per-worker metrics
 - **Panic isolation** via `catch_unwind` -- a PHP crash does not take down the server
 
 ## License

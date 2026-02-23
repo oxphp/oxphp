@@ -443,6 +443,22 @@ docker run -p 8080:8080 \
                 </div>
             </div>
             <div class="card">
+                <div class="card-header">Worker Mode</div>
+                <div class="card-body">
+                    <table class="env-table">
+                        <thead><tr><th>Variable</th><th>Default</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>WORKER_FILE</code></td><td><em>(none)</em></td></tr>
+                            <tr><td><code>WORKER_MAX_REQUESTS</code></td><td><code>0</code> (unlimited)</td></tr>
+                            <tr><td><code>WORKER_MAX_MEMORY</code></td><td><code>0</code> (unlimited)</td></tr>
+                        </tbody>
+                    </table>
+                    <p style="margin-top: 12px; font-size: 0.8125rem; color: var(--color-muted)">
+                        Set <code>WORKER_FILE=../worker.php</code> for persistent PHP with soft reset between requests.
+                    </p>
+                </div>
+            </div>
+            <div class="card">
                 <div class="card-header">Timeouts</div>
                 <div class="card-body">
                     <table class="env-table">
@@ -528,6 +544,10 @@ docker run -p 8080:8080 \
             <div class="fn-item">
                 <code>oxphp_request_heartbeat(int $time = 10): bool</code>
                 <p>Extends the execution deadline by N seconds.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_worker(callable $handler): bool</code>
+                <p>Enters persistent worker loop. Calls handler per request with soft reset.</p>
             </div>
         </div>
 

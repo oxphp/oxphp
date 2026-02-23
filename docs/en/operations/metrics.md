@@ -67,6 +67,40 @@ Only methods and status classes with at least one recorded event are emitted. Ze
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired by the ScaleManager (dynamic mode only) |
 
+### Worker Mode
+
+These metrics are only emitted when worker mode is active (`WORKER_FILE` is set). They provide visibility into persistent PHP worker lifecycle, recycling, and per-request execution times.
+
+#### Global Counters
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_worker_mode_enabled` | gauge | Always `1` when worker mode is active |
+| `oxphp_worker_requests_handled_total` | counter | Total requests processed by persistent workers |
+| `oxphp_worker_recycles_total` | counter | Total worker recycles (worker exited and was respawned) |
+| `oxphp_worker_recycles_by_reason_total` | counter | Recycles broken down by reason. Labels: `reason="max_requests"`, `reason="max_memory"`, `reason="error"` |
+| `oxphp_worker_soft_resets_total` | counter | Total soft resets between requests (should equal `requests_handled_total`) |
+
+#### Per-Worker Gauges
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `oxphp_worker_memory_bytes` | gauge | `worker` | Current PHP heap usage in bytes for each worker |
+| `oxphp_worker_uptime_seconds` | gauge | `worker` | Seconds since the worker thread was spawned |
+| `oxphp_worker_requests_count` | gauge | `worker` | Requests handled by this specific worker instance |
+
+Per-worker metrics are indexed by worker slot (e.g., `worker="0"`, `worker="1"`). Only active workers emit values.
+
+#### Request Duration Histogram
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_worker_request_duration_us` | histogram | PHP handler execution time per request in microseconds |
+
+Bucket boundaries (microseconds): 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, +Inf.
+
+This histogram measures the time spent executing the PHP handler callback, excluding queue wait time. It helps identify slow requests and tail latency.
+
 ## Sample Output
 
 ```
@@ -132,6 +166,56 @@ oxphp_workers_spawned_total 12
 # HELP oxphp_workers_retired_total Total workers retired.
 # TYPE oxphp_workers_retired_total counter
 oxphp_workers_retired_total 4
+
+# HELP oxphp_worker_mode_enabled Whether worker mode is active.
+# TYPE oxphp_worker_mode_enabled gauge
+oxphp_worker_mode_enabled 1
+
+# HELP oxphp_worker_requests_handled_total Total requests processed by worker mode.
+# TYPE oxphp_worker_requests_handled_total counter
+oxphp_worker_requests_handled_total 48203
+
+# HELP oxphp_worker_recycles_total Total worker recycles.
+# TYPE oxphp_worker_recycles_total counter
+oxphp_worker_recycles_total 5
+
+# HELP oxphp_worker_recycles_by_reason_total Worker recycles by reason.
+# TYPE oxphp_worker_recycles_by_reason_total counter
+oxphp_worker_recycles_by_reason_total{reason="max_requests"} 4
+oxphp_worker_recycles_by_reason_total{reason="max_memory"} 1
+oxphp_worker_recycles_by_reason_total{reason="error"} 0
+
+# HELP oxphp_worker_soft_resets_total Total soft resets between requests.
+# TYPE oxphp_worker_soft_resets_total counter
+oxphp_worker_soft_resets_total 48203
+
+# HELP oxphp_worker_memory_bytes Current PHP heap per worker.
+# TYPE oxphp_worker_memory_bytes gauge
+# HELP oxphp_worker_uptime_seconds Time since worker thread spawned.
+# TYPE oxphp_worker_uptime_seconds gauge
+# HELP oxphp_worker_requests_count Requests handled by this worker instance.
+# TYPE oxphp_worker_requests_count gauge
+oxphp_worker_memory_bytes{worker="0"} 524288
+oxphp_worker_uptime_seconds{worker="0"} 3600
+oxphp_worker_requests_count{worker="0"} 6025
+oxphp_worker_memory_bytes{worker="1"} 491520
+oxphp_worker_uptime_seconds{worker="1"} 3600
+oxphp_worker_requests_count{worker="1"} 6030
+
+# HELP oxphp_worker_request_duration_us PHP execution time per request.
+# TYPE oxphp_worker_request_duration_us histogram
+oxphp_worker_request_duration_us_bucket{le="100"} 12050
+oxphp_worker_request_duration_us_bucket{le="250"} 30100
+oxphp_worker_request_duration_us_bucket{le="500"} 42000
+oxphp_worker_request_duration_us_bucket{le="1000"} 46500
+oxphp_worker_request_duration_us_bucket{le="2500"} 47800
+oxphp_worker_request_duration_us_bucket{le="5000"} 48100
+oxphp_worker_request_duration_us_bucket{le="10000"} 48180
+oxphp_worker_request_duration_us_bucket{le="25000"} 48200
+oxphp_worker_request_duration_us_bucket{le="50000"} 48203
+oxphp_worker_request_duration_us_bucket{le="+Inf"} 48203
+oxphp_worker_request_duration_us_sum 9640600
+oxphp_worker_request_duration_us_count 48203
 ```
 
 ## Prometheus Configuration
@@ -202,6 +286,36 @@ rate(oxphp_dropped_requests_total[5m])
 rate(oxphp_workers_spawned_total[5m]) * 60
 ```
 
+**Worker mode request rate:**
+
+```promql
+rate(oxphp_worker_requests_handled_total[5m])
+```
+
+**Worker recycle rate (recycles per minute):**
+
+```promql
+rate(oxphp_worker_recycles_total[5m]) * 60
+```
+
+**Worker mode p99 request duration (microseconds):**
+
+```promql
+histogram_quantile(0.99, rate(oxphp_worker_request_duration_us_bucket[5m]))
+```
+
+**Average worker memory usage (bytes):**
+
+```promql
+avg(oxphp_worker_memory_bytes)
+```
+
+**Worker error recycle rate:**
+
+```promql
+rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m])
+```
+
 ## Alerting Examples
 
 ```yaml
@@ -226,6 +340,33 @@ groups:
         annotations:
           summary: "OxPHP is dropping requests (503)"
 
+      - alert: OxPHPWorkerErrorRecycles
+        expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP workers are recycling due to errors"
+
+      - alert: OxPHPWorkerHighMemory
+        expr: oxphp_worker_memory_bytes > 134217728
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker memory exceeds 128 MiB"
+
+      - alert: OxPHPWorkerSlowRequests
+        expr: >
+          histogram_quantile(0.99,
+            rate(oxphp_worker_request_duration_us_bucket[5m])
+          ) > 50000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker p99 latency exceeds 50ms"
+
 ```
 
 ## Implementation Notes
@@ -244,6 +385,6 @@ Plugins can contribute additional metrics to the `/metrics` output. Plugin metri
 
 - [Health Checks](health-checks.md) --- the `/health` and `/config` endpoints on the internal server
 - [Configuration](configuration.md) --- `INTERNAL_ADDR` and other environment variables
-- [Worker Pool](/architecture/worker-pool.md) --- static and dynamic scaling that drives worker metrics
+- [Worker Pool](/architecture/worker-pool.md) --- static and dynamic scaling, worker mode, and recycling behavior
 - [Graceful Shutdown](graceful-shutdown.md) --- how connection draining affects `oxphp_active_connections`
 
