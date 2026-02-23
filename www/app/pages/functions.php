@@ -105,6 +105,31 @@ while (($row = fgetcsv($handle)) !== false) {
 }
 fclose($handle);',
     ],
+    [
+        'name'    => 'oxphp_worker',
+        'sig'     => 'oxphp_worker(callable $handler): bool',
+        'params'  => [
+            ['name' => '$handler', 'type' => 'callable', 'desc' => 'Callback invoked once per HTTP request. Receives no arguments.'],
+        ],
+        'return'  => 'bool — <code>true</code> on graceful shutdown, <code>false</code> if worker mode is not enabled.',
+        'desc'    => 'Enters the persistent worker mode loop. Calls the handler for each HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers) without destroying the PHP heap, so bootstrap state (autoloaders, DB connections) persists. Workers are recycled based on <code>WORKER_MAX_REQUESTS</code> and <code>WORKER_MAX_MEMORY</code> limits. Only available when <code>WORKER_FILE</code> is set.',
+        'example' => '// worker.php — persistent worker entry point
+require __DIR__ . "/vendor/autoload.php";
+$db = new PDO("mysql:host=localhost;dbname=app", "root", "");
+
+oxphp_worker(function () use ($db) {
+    $uri = $_SERVER["REQUEST_URI"];
+
+    if ($uri === "/api/users") {
+        $users = $db->query("SELECT id, name FROM users")->fetchAll();
+        header("Content-Type: application/json");
+        echo json_encode($users);
+    } else {
+        http_response_code(404);
+        echo "Not Found";
+    }
+});',
+    ],
 ];
 
 // ── Build function sections ──────────────────────────
@@ -139,6 +164,7 @@ foreach ($functions as $fn) {
             'oxphp_request_heartbeat' => '<span class="mono">' . (oxphp_request_heartbeat() ? 'true' : 'false') . '</span>',
             'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',
             'oxphp_finish_request'    => '<span class="mono dim">not called &mdash; would end response</span>',
+            'oxphp_worker'            => '<span class="mono dim">not called &mdash; enters worker loop</span>',
             default                   => '',
         };
         $live = '<div class="fn-live"><span class="fn-live-label">Live result</span>' . $val . '</div>';

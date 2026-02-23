@@ -63,6 +63,14 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | `INTERNAL_ADDR` | *(无)* | 内部服务器地址（健康检查、指标、配置）。未设置时不启动 |
 | `ERROR_PAGES_DIR` | *(无)* | 自定义错误页面 HTML 文件目录，文件名格式为 `{status}.html`（例如 `404.html`、`503.html`） |
 
+### 工作进程模式
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `WORKER_FILE` | *(无)* | PHP 工作脚本路径（相对于 `DOCUMENT_ROOT`）。设置后启用持久化工作进程模式，PHP 进程在请求间保持存活 |
+| `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` 表示不限制 |
+| `WORKER_MAX_MEMORY` | `0` | 工作进程回收前使用的最大内存（兆字节）。`0` 表示不限制 |
+
 ### 压缩
 
 | 变量 | 默认值 | 说明 |
@@ -216,6 +224,22 @@ services:
       timeout: 5s
       retries: 3
 ```
+
+### 工作进程模式（持久化 PHP）
+
+```bash
+LISTEN_ADDR=0.0.0.0:8080
+DOCUMENT_ROOT=/var/www/html/public
+WORKER_FILE=../worker.php
+PHP_WORKERS=8
+WORKER_MAX_REQUESTS=10000
+WORKER_MAX_MEMORY=128
+QUEUE_CAPACITY=1024
+LOG_LEVEL=warn
+INTERNAL_ADDR=127.0.0.1:9090
+```
+
+工作进程模式使 PHP 进程在请求间保持存活。工作脚本调用 `oxphp_worker()` 并传入处理器回调。当工作进程达到 `WORKER_MAX_REQUESTS` 或 `WORKER_MAX_MEMORY` 时自动回收。将两者均设为 `0` 可禁用回收。
 
 ### TLS 终止
 

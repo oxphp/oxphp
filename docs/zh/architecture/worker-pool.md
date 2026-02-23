@@ -195,6 +195,75 @@ ScaleManager 在生成新 OS 线程之前释放 Mutex 锁以避免阻塞 Tokio �
 | `PHP_WORKERS_IDLE_SEC` | `30` | 动态工作线程退役前的空闲超时 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界 channel 容量（动态模式使用初始数量） |
 
+## 工作进程模式（持久化 PHP）
+
+工作进程模式是一种替代执行模型，PHP 进程在请求间保持存活，避免每次请求都执行 `php_request_startup()` / `php_request_shutdown()` 的开销。通过设置 `WORKER_FILE` 环境变量启用。
+
+### 工作原理
+
+与标准的每请求生命周期（启动 → 执行 → 关闭）不同，工作进程模式执行一个调用 `oxphp_worker()` 并传入处理器回调的 PHP 脚本。处理器对每个请求被调用，请求之间进行**软重置**，在不销毁 PHP 堆的情况下清理每请求状态：
+
+```
+Worker thread lifecycle:
+
+  php_request_startup()           ← 仅运行一次
+  require worker.php              ← 引导：自动加载、数据库连接、配置
+  oxphp_worker(function() {       ← 进入工作循环
+      ┌─────────────────────────┐
+      │ wait for request        │ ← 阻塞在 crossbeam channel 上
+      │ soft reset              │ ← 重新填充超全局变量，清除输出
+      │ call handler()          │ ← 执行用户代码
+      │ send response           │ ← 响应发送到 HTTP 层
+      │ check limits            │ ← max_requests、max_memory
+      └─────────────────────────┘
+      │ loop back ↑             │
+  })
+  php_request_shutdown()          ← 仅运行一次（退出时）
+```
+
+请求之间的软重置：
+- 从新请求数据重新填充 `$_GET`、`$_POST`、`$_SERVER`、`$_COOKIE`、`$_FILES`
+- 清除并重置输出缓冲区
+- 重置 HTTP 响应头和状态码
+- 调用并清除 `register_shutdown_function()` 处理器
+
+### 回收
+
+工作进程根据可配置的限制被回收（退出并重新生成）：
+
+| 退出原因 | 触发条件 | 指标标签 |
+|---|---|---|
+| `max_requests` | 达到 `WORKER_MAX_REQUESTS` | `reason="max_requests"` |
+| `max_memory` | 超过 `WORKER_MAX_MEMORY`（MiB） | `reason="max_memory"` |
+| `error` | 处理器中的未捕获异常或致命错误 | `reason="error"` |
+| `shutdown` | 服务器优雅关闭 | *(不计为回收)* |
+
+当工作进程因非关闭原因退出时，健康监控器（静态模式）或 ScaleManager（动态模式）会自动重新生成它。新工作进程会重新执行整个工作脚本，包括引导代码。
+
+### 指标
+
+工作进程模式暴露专用的 Prometheus 指标用于监控持久化工作进程健康状况：
+
+- **`oxphp_worker_requests_handled_total`** — 所有工作进程处理的请求总数
+- **`oxphp_worker_recycles_total`** / **`oxphp_worker_recycles_by_reason_total`** — 回收计数（全局和按原因分类）
+- **`oxphp_worker_memory_bytes{worker="N"}`** — 每工作进程的当前 PHP 堆使用量
+- **`oxphp_worker_uptime_seconds{worker="N"}`** — 每工作进程生成后的时间
+- **`oxphp_worker_request_duration_us`** — PHP 处理器执行时间直方图（不包括队列等待时间）
+
+完整参考和 PromQL 查询示例请参见[指标](../operations/metrics.md#工作进程模式)。
+
+### 配置
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `WORKER_FILE` | *(无)* | 工作 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）。设置后启用工作进程模式 |
+| `WORKER_MAX_REQUESTS` | `0` | 回收前的最大请求数。`0` = 不限制 |
+| `WORKER_MAX_MEMORY` | `0` | 回收前的最大内存（MiB）。`0` = 不限制 |
+
+### 路由集成
+
+当设置了 `WORKER_FILE` 时，路由行为改变：不匹配磁盘文件的非静态文件请求将路由到工作脚本，而非返回 404。静态文件（CSS、JS、图片）仍直接从磁盘提供。这类似于 nginx 的 `try_files` 指令。
+
 ## 有界队列与背压
 
 Tokio 与 PHP 工作线程之间的 channel 使用 `crossbeam_channel::bounded(QUEUE_CAPACITY)`。执行器调用 `try_send()`（非阻塞）来入队请求：

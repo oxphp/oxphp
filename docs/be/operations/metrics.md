@@ -67,6 +67,40 @@ curl http://localhost:9090/metrics
 | `oxphp_workers_spawned_total` | counter | Агульная колькасць воркераў, створаных з моманту запуску (уключаючы пачатковых) |
 | `oxphp_workers_retired_total` | counter | Агульная колькасць воркераў, спісаных ScaleManager (толькі ў дынамічным рэжыме) |
 
+### Рэжым воркера
+
+Гэтыя метрыкі выводзяцца толькі калі рэжым воркера актыўны (усталяваны `WORKER_FILE`). Яны забяспечваюць бачнасць жыццёвага цыклу персістэнтных PHP-воркераў, рэцыклінгу і часу выканання кожнага запыту.
+
+#### Глабальныя лічыльнікі
+
+| Метрыка | Тып | Апісанне |
+|--------|------|-------------|
+| `oxphp_worker_mode_enabled` | gauge | Заўсёды `1`, калі рэжым воркера актыўны |
+| `oxphp_worker_requests_handled_total` | counter | Агульная колькасць запытаў, апрацаваных персістэнтнымі воркерамі |
+| `oxphp_worker_recycles_total` | counter | Агульная колькасць рэцыклінгаў воркераў (воркер завяршыўся і быў перазапушчаны) |
+| `oxphp_worker_recycles_by_reason_total` | counter | Рэцыклінгі ў разбіўцы па прычыне. Пазнакі: `reason="max_requests"`, `reason="max_memory"`, `reason="error"` |
+| `oxphp_worker_soft_resets_total` | counter | Агульная колькасць мяккіх скідаў паміж запытамі (павінна роўняцца `requests_handled_total`) |
+
+#### Gauge-метрыкі кожнага воркера
+
+| Метрыка | Тып | Пазнакі | Апісанне |
+|--------|------|--------|-------------|
+| `oxphp_worker_memory_bytes` | gauge | `worker` | Бягучае выкарыстанне PHP-кучы ў байтах для кожнага воркера |
+| `oxphp_worker_uptime_seconds` | gauge | `worker` | Секунды з моманту запуску патоку воркера |
+| `oxphp_worker_requests_count` | gauge | `worker` | Запыты, апрацаваныя гэтым канкрэтным экзэмплярам воркера |
+
+Метрыкі кожнага воркера індэксаваны па слоце воркера (напрыклад, `worker="0"`, `worker="1"`). Толькі актыўныя воркеры выводзяць значэнні.
+
+#### Гістаграма працягласці запытаў
+
+| Метрыка | Тып | Апісанне |
+|--------|------|-------------|
+| `oxphp_worker_request_duration_us` | histogram | Час выканання PHP-апрацоўшчыка на запыт у мікрасекундах |
+
+Межы бакетаў (мікрасекунды): 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, +Inf.
+
+Гэта гістаграма вымярае час, затрачаны на выкананне callback PHP-апрацоўшчыка, без уліку часу чакання ў чарзе. Яна дапамагае выяўляць павольныя запыты і хваставую затрымку.
+
 ## Прыклад вываду
 
 ```
@@ -132,6 +166,56 @@ oxphp_workers_spawned_total 12
 # HELP oxphp_workers_retired_total Total workers retired.
 # TYPE oxphp_workers_retired_total counter
 oxphp_workers_retired_total 4
+
+# HELP oxphp_worker_mode_enabled Whether worker mode is active.
+# TYPE oxphp_worker_mode_enabled gauge
+oxphp_worker_mode_enabled 1
+
+# HELP oxphp_worker_requests_handled_total Total requests processed by worker mode.
+# TYPE oxphp_worker_requests_handled_total counter
+oxphp_worker_requests_handled_total 48203
+
+# HELP oxphp_worker_recycles_total Total worker recycles.
+# TYPE oxphp_worker_recycles_total counter
+oxphp_worker_recycles_total 5
+
+# HELP oxphp_worker_recycles_by_reason_total Worker recycles by reason.
+# TYPE oxphp_worker_recycles_by_reason_total counter
+oxphp_worker_recycles_by_reason_total{reason="max_requests"} 4
+oxphp_worker_recycles_by_reason_total{reason="max_memory"} 1
+oxphp_worker_recycles_by_reason_total{reason="error"} 0
+
+# HELP oxphp_worker_soft_resets_total Total soft resets between requests.
+# TYPE oxphp_worker_soft_resets_total counter
+oxphp_worker_soft_resets_total 48203
+
+# HELP oxphp_worker_memory_bytes Current PHP heap per worker.
+# TYPE oxphp_worker_memory_bytes gauge
+# HELP oxphp_worker_uptime_seconds Time since worker thread spawned.
+# TYPE oxphp_worker_uptime_seconds gauge
+# HELP oxphp_worker_requests_count Requests handled by this worker instance.
+# TYPE oxphp_worker_requests_count gauge
+oxphp_worker_memory_bytes{worker="0"} 524288
+oxphp_worker_uptime_seconds{worker="0"} 3600
+oxphp_worker_requests_count{worker="0"} 6025
+oxphp_worker_memory_bytes{worker="1"} 491520
+oxphp_worker_uptime_seconds{worker="1"} 3600
+oxphp_worker_requests_count{worker="1"} 6030
+
+# HELP oxphp_worker_request_duration_us PHP execution time per request.
+# TYPE oxphp_worker_request_duration_us histogram
+oxphp_worker_request_duration_us_bucket{le="100"} 12050
+oxphp_worker_request_duration_us_bucket{le="250"} 30100
+oxphp_worker_request_duration_us_bucket{le="500"} 42000
+oxphp_worker_request_duration_us_bucket{le="1000"} 46500
+oxphp_worker_request_duration_us_bucket{le="2500"} 47800
+oxphp_worker_request_duration_us_bucket{le="5000"} 48100
+oxphp_worker_request_duration_us_bucket{le="10000"} 48180
+oxphp_worker_request_duration_us_bucket{le="25000"} 48200
+oxphp_worker_request_duration_us_bucket{le="50000"} 48203
+oxphp_worker_request_duration_us_bucket{le="+Inf"} 48203
+oxphp_worker_request_duration_us_sum 9640600
+oxphp_worker_request_duration_us_count 48203
 ```
 
 ## Канфігурацыя Prometheus
@@ -202,6 +286,36 @@ rate(oxphp_dropped_requests_total[5m])
 rate(oxphp_workers_spawned_total[5m]) * 60
 ```
 
+**Хуткасць запытаў у рэжыме воркера:**
+
+```promql
+rate(oxphp_worker_requests_handled_total[5m])
+```
+
+**Хуткасць рэцыклінгу воркераў (рэцыклінгі ў хвіліну):**
+
+```promql
+rate(oxphp_worker_recycles_total[5m]) * 60
+```
+
+**p99 працягласці запыту ў рэжыме воркера (мікрасекунды):**
+
+```promql
+histogram_quantile(0.99, rate(oxphp_worker_request_duration_us_bucket[5m]))
+```
+
+**Сярэдняе выкарыстанне памяці воркерам (байты):**
+
+```promql
+avg(oxphp_worker_memory_bytes)
+```
+
+**Хуткасць рэцыклінгу воркераў з-за памылак:**
+
+```promql
+rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m])
+```
+
 ## Прыклады алертаў
 
 ```yaml
@@ -226,6 +340,33 @@ groups:
         annotations:
           summary: "OxPHP is dropping requests (503)"
 
+      - alert: OxPHPWorkerErrorRecycles
+        expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP workers are recycling due to errors"
+
+      - alert: OxPHPWorkerHighMemory
+        expr: oxphp_worker_memory_bytes > 134217728
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker memory exceeds 128 MiB"
+
+      - alert: OxPHPWorkerSlowRequests
+        expr: >
+          histogram_quantile(0.99,
+            rate(oxphp_worker_request_duration_us_bucket[5m])
+          ) > 50000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker p99 latency exceeds 50ms"
+
 ```
 
 ## Заўвагі па рэалізацыі
@@ -244,5 +385,5 @@ groups:
 
 - [Праверкі стану](health-checks.md) --- канчатковыя кропкі `/health` і `/config` на ўнутраным серверы
 - [Канфігурацыя](configuration.md) --- `INTERNAL_ADDR` і іншыя зменныя асяроддзя
-- [Пул воркераў](/be/architecture/worker-pool.md) --- статычнае і дынамічнае маштабаванне, якое кіруе метрыкамі воркераў
+- [Пул воркераў](/be/architecture/worker-pool.md) --- статычнае і дынамічнае маштабаванне, рэжым воркера і паводзіны рэцыклінгу
 - [Плаўная спынка](graceful-shutdown.md) --- як адвод злучэнняў уплывае на `oxphp_active_connections`

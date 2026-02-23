@@ -67,6 +67,40 @@ curl http://localhost:9090/metrics
 | `oxphp_workers_spawned_total` | counter | 自启动以来创建的工作线程总数（包括初始工作线程） |
 | `oxphp_workers_retired_total` | counter | 被 ScaleManager 回收的工作线程总数（仅动态模式） |
 
+### 工作进程模式
+
+以下指标仅在工作进程模式激活时（设置了 `WORKER_FILE`）输出。它们提供对持久化 PHP 工作进程生命周期、回收和每请求执行时间的可见性。
+
+#### 全局计数器
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_worker_mode_enabled` | gauge | 工作进程模式激活时始终为 `1` |
+| `oxphp_worker_requests_handled_total` | counter | 持久化工作进程处理的请求总数 |
+| `oxphp_worker_recycles_total` | counter | 工作进程回收总数（工作进程退出并被重新生成） |
+| `oxphp_worker_recycles_by_reason_total` | counter | 按原因分类的回收数。标签：`reason="max_requests"`、`reason="max_memory"`、`reason="error"` |
+| `oxphp_worker_soft_resets_total` | counter | 请求之间的软重置总数（应等于 `requests_handled_total`） |
+
+#### 每工作进程 Gauge
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `oxphp_worker_memory_bytes` | gauge | `worker` | 每个工作进程的当前 PHP 堆使用量（字节） |
+| `oxphp_worker_uptime_seconds` | gauge | `worker` | 工作线程生成后的秒数 |
+| `oxphp_worker_requests_count` | gauge | `worker` | 此工作进程实例处理的请求数 |
+
+每工作进程指标按工作槽索引（例如 `worker="0"`、`worker="1"`）。仅活跃的工作进程输出值。
+
+#### 请求耗时直方图
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_worker_request_duration_us` | histogram | 每请求的 PHP 处理器执行时间（微秒） |
+
+桶边界（微秒）：100、250、500、1000、2500、5000、10000、25000、50000、+Inf。
+
+此直方图测量执行 PHP 处理器回调所花费的时间，不包括队列等待时间。有助于识别慢请求和尾部延迟。
+
 ## 示例输出
 
 ```
@@ -132,6 +166,56 @@ oxphp_workers_spawned_total 12
 # HELP oxphp_workers_retired_total Total workers retired.
 # TYPE oxphp_workers_retired_total counter
 oxphp_workers_retired_total 4
+
+# HELP oxphp_worker_mode_enabled Whether worker mode is active.
+# TYPE oxphp_worker_mode_enabled gauge
+oxphp_worker_mode_enabled 1
+
+# HELP oxphp_worker_requests_handled_total Total requests processed by worker mode.
+# TYPE oxphp_worker_requests_handled_total counter
+oxphp_worker_requests_handled_total 48203
+
+# HELP oxphp_worker_recycles_total Total worker recycles.
+# TYPE oxphp_worker_recycles_total counter
+oxphp_worker_recycles_total 5
+
+# HELP oxphp_worker_recycles_by_reason_total Worker recycles by reason.
+# TYPE oxphp_worker_recycles_by_reason_total counter
+oxphp_worker_recycles_by_reason_total{reason="max_requests"} 4
+oxphp_worker_recycles_by_reason_total{reason="max_memory"} 1
+oxphp_worker_recycles_by_reason_total{reason="error"} 0
+
+# HELP oxphp_worker_soft_resets_total Total soft resets between requests.
+# TYPE oxphp_worker_soft_resets_total counter
+oxphp_worker_soft_resets_total 48203
+
+# HELP oxphp_worker_memory_bytes Current PHP heap per worker.
+# TYPE oxphp_worker_memory_bytes gauge
+# HELP oxphp_worker_uptime_seconds Time since worker thread spawned.
+# TYPE oxphp_worker_uptime_seconds gauge
+# HELP oxphp_worker_requests_count Requests handled by this worker instance.
+# TYPE oxphp_worker_requests_count gauge
+oxphp_worker_memory_bytes{worker="0"} 524288
+oxphp_worker_uptime_seconds{worker="0"} 3600
+oxphp_worker_requests_count{worker="0"} 6025
+oxphp_worker_memory_bytes{worker="1"} 491520
+oxphp_worker_uptime_seconds{worker="1"} 3600
+oxphp_worker_requests_count{worker="1"} 6030
+
+# HELP oxphp_worker_request_duration_us PHP execution time per request.
+# TYPE oxphp_worker_request_duration_us histogram
+oxphp_worker_request_duration_us_bucket{le="100"} 12050
+oxphp_worker_request_duration_us_bucket{le="250"} 30100
+oxphp_worker_request_duration_us_bucket{le="500"} 42000
+oxphp_worker_request_duration_us_bucket{le="1000"} 46500
+oxphp_worker_request_duration_us_bucket{le="2500"} 47800
+oxphp_worker_request_duration_us_bucket{le="5000"} 48100
+oxphp_worker_request_duration_us_bucket{le="10000"} 48180
+oxphp_worker_request_duration_us_bucket{le="25000"} 48200
+oxphp_worker_request_duration_us_bucket{le="50000"} 48203
+oxphp_worker_request_duration_us_bucket{le="+Inf"} 48203
+oxphp_worker_request_duration_us_sum 9640600
+oxphp_worker_request_duration_us_count 48203
 ```
 
 ## Prometheus 配置
@@ -202,6 +286,36 @@ rate(oxphp_dropped_requests_total[5m])
 rate(oxphp_workers_spawned_total[5m]) * 60
 ```
 
+**工作进程模式请求速率：**
+
+```promql
+rate(oxphp_worker_requests_handled_total[5m])
+```
+
+**工作进程回收速率（每分钟回收数）：**
+
+```promql
+rate(oxphp_worker_recycles_total[5m]) * 60
+```
+
+**工作进程模式 p99 请求耗时（微秒）：**
+
+```promql
+histogram_quantile(0.99, rate(oxphp_worker_request_duration_us_bucket[5m]))
+```
+
+**平均工作进程内存使用量（字节）：**
+
+```promql
+avg(oxphp_worker_memory_bytes)
+```
+
+**工作进程错误回收速率：**
+
+```promql
+rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m])
+```
+
 ## 告警示例
 
 ```yaml
@@ -226,6 +340,33 @@ groups:
         annotations:
           summary: "OxPHP is dropping requests (503)"
 
+      - alert: OxPHPWorkerErrorRecycles
+        expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP workers are recycling due to errors"
+
+      - alert: OxPHPWorkerHighMemory
+        expr: oxphp_worker_memory_bytes > 134217728
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker memory exceeds 128 MiB"
+
+      - alert: OxPHPWorkerSlowRequests
+        expr: >
+          histogram_quantile(0.99,
+            rate(oxphp_worker_request_duration_us_bucket[5m])
+          ) > 50000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP worker p99 latency exceeds 50ms"
+
 ```
 
 ## 实现说明
@@ -244,5 +385,5 @@ groups:
 
 - [健康检查](health-checks.md) --- 内部服务器的 `/health` 和 `/config` 端点
 - [配置](configuration.md) --- `INTERNAL_ADDR` 及其他环境变量
-- [工作池](/architecture/worker-pool.md) --- 驱动工作线程指标的静态和动态伸缩
+- [工作池](/architecture/worker-pool.md) --- 静态和动态伸缩、工作进程模式和回收行为
 - [优雅关闭](graceful-shutdown.md) --- 连接排空如何影响 `oxphp_active_connections`

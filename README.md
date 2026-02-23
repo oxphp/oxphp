@@ -30,6 +30,7 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **Worker health monitoring** with automatic dead worker respawning
 - **SSE streaming** — real-time Server-Sent Events via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()`
 - **Early response** via `oxphp_finish_request()` — send the response immediately and continue background processing
+- **Worker mode** — persistent PHP processes with soft reset, automatic recycling by request count or memory, and per-worker Prometheus metrics
 - **Panic isolation** via `catch_unwind` — a PHP crash does not take down the server
 
 ## Quick Start
@@ -73,6 +74,9 @@ All settings are via environment variables:
 | `COMPRESSION` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
 | `ACCESS_LOG` | `true` | Enable per-request JSON access log; disable with `false`, `0`, or `off` |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
+| `WORKER_FILE` | *(unset)* | Path to worker PHP script (relative to `DOCUMENT_ROOT`); enables persistent worker mode |
+| `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling; `0` = no limit |
+| `WORKER_MAX_MEMORY` | `0` (unlimited) | Max memory (MiB) per worker before recycling; `0` = no limit |
 
 ## Architecture
 
@@ -105,6 +109,7 @@ All settings are via environment variables:
 - **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread with `catch_unwind` isolation
 - Workers receive requests via `crossbeam::bounded`, respond via `ExecuteResult` (immediate or deferred via `oneshot`)
 - **Worker health monitoring** — dead workers are automatically detected and respawned
+- **Worker mode** — persistent PHP with soft reset between requests; workers call `oxphp_worker($handler)` in a loop, keeping bootstrap state (autoloaders, DB connections) alive across requests
 
 ### Internal Server
 
@@ -135,7 +140,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ## Development
 
 ```bash
-# Full verification (host, 157 tests)
+# Full verification (host, 167 tests)
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker smoke test

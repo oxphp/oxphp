@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers seven built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers eight built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -251,6 +251,74 @@ for ($i = 0; $i < 10; $i++) {
 
 ---
 
+## `oxphp_worker`
+
+Enters the persistent worker mode loop. Calls the provided handler callback for each incoming HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers, `$_SESSION`) without destroying the PHP heap, so bootstrap state (autoloaders, database connections, cached config) persists across requests.
+
+```php
+oxphp_worker(callable $handler): bool
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `$handler` | `callable` | A callback invoked once per HTTP request. Receives no arguments. |
+
+**Return value:** Returns `true` on graceful shutdown (server stopping). Returns `false` immediately if worker mode is not enabled (i.e., `WORKER_FILE` is not set).
+
+**Example:**
+
+```php
+<?php
+// worker.php — persistent worker entry point
+
+// Bootstrap: runs once per worker lifetime
+require __DIR__ . '/vendor/autoload.php';
+$db = new PDO('mysql:host=localhost;dbname=app', 'root', '');
+$config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
+
+// Handle requests in a loop
+oxphp_worker(function () use ($db, $config) {
+    $uri = $_SERVER['REQUEST_URI'];
+    $method = $_SERVER['REQUEST_METHOD'];
+
+    // Route and handle the request
+    if ($uri === '/api/users' && $method === 'GET') {
+        $users = $db->query('SELECT id, name FROM users')->fetchAll();
+        header('Content-Type: application/json');
+        echo json_encode($users);
+    } else {
+        http_response_code(404);
+        echo 'Not Found';
+    }
+});
+```
+
+**How it works:**
+
+1. The handler callback is called for each HTTP request received from the Rust layer.
+2. Between requests, a soft reset occurs:
+   - Superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`) are repopulated with the new request data
+   - Output buffers are cleared
+   - HTTP response headers are reset
+   - Shutdown functions registered with `register_shutdown_function()` are called and cleared
+3. Garbage collection runs periodically (every 100 requests) to reclaim cyclic references without impacting per-request latency.
+4. The loop exits when:
+   - The server shuts down (graceful shutdown signal)
+   - The handler throws an uncaught exception or fatal error (exit reason: `error`)
+   - The worker hits `WORKER_MAX_REQUESTS` (exit reason: `max_requests`)
+   - The worker exceeds `WORKER_MAX_MEMORY` (exit reason: `max_memory`)
+
+**Notes:**
+- This function only works when `WORKER_FILE` is set. Calling it from a regular PHP script emits an `E_WARNING` and returns `false`.
+- Variables declared outside the handler closure persist across requests. Use this for database connections, configuration, and other expensive initialization.
+- The handler's `use` clause captures variables by reference or value as usual. Variables captured by reference share state across requests.
+- Worker recycling (via `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY`) causes the worker process to exit and respawn, which re-executes the entire worker script including bootstrap.
+- Worker mode metrics (`oxphp_worker_requests_handled_total`, `oxphp_worker_recycles_total`, etc.) are available on the `/metrics` endpoint when the internal server is running.
+
+---
+
 ## Plugin Functions
 
 Plugins can register custom PHP functions that are callable from your scripts. These functions are registered during PHP module initialization (`MINIT`) and dispatched through the C bridge to Rust handler code.
@@ -292,6 +360,7 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [4] => oxphp_finish_request
 //     [5] => oxphp_is_streaming
 //     [6] => oxphp_stream_flush
+//     [7] => oxphp_worker
 // )
 ```
 
@@ -301,3 +370,5 @@ print_r(get_extension_funcs('oxphp_sapi'));
 - [OPcache Compatibility](opcache.md) --- how the `request_time` callback enables OPcache
 - [Request IDs](/features/request-ids.md) --- how request IDs are generated and propagated
 - [SAPI Bridge](/architecture/sapi-bridge.md) --- the C bridge that connects Rust and PHP
+- [Worker Pool](/architecture/worker-pool.md#worker-mode-persistent-php) --- worker mode architecture, recycling, and metrics
+- [Configuration](/operations/configuration.md#worker-mode) --- `WORKER_FILE`, `WORKER_MAX_REQUESTS`, `WORKER_MAX_MEMORY`
