@@ -67,9 +67,9 @@ services:
       # Log level filter: trace, debug, info, warn, error.
       - LOG_LEVEL=info
 
-      # Enable/disable per-request access log (method, path, status, duration).
-      # Values: true/false, 1/0, on/off.
-      # - ACCESS_LOG=true
+      # Per-request access log (method, path, status, duration).
+      # Values: "all" (every request), "error" (4xx/5xx only), empty/unset = off.
+      # - ACCESS_LOG=all
 
       # ── Internal Server ───────────────────────────────────────────
 

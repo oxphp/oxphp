@@ -38,7 +38,9 @@ async fn start_server_with_options(
         Arc::clone(&metrics),
     ));
     dispatcher.on(oxphp::handlers::server_header::ServerHeaderHandler);
-    dispatcher.on(oxphp::handlers::access_log::AccessLogHandler);
+    dispatcher.on(oxphp::handlers::access_log::AccessLogHandler::new(
+        oxphp::config::AccessLogLevel::All,
+    ));
     if let Some(ref limiter) = rate_limiter {
         dispatcher.on(oxphp::handlers::rate_limit::RateLimitHandler::new(
             Arc::clone(limiter),

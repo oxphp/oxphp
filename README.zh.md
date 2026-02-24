@@ -20,7 +20,7 @@
 - **Prometheus 指标** — 通过内部服务器 `/metrics` 端点暴露
 - **健康检查**端点 `/health`，支持 K8s 就绪探针
 - **请求 ID** 生成与透传（`X-Request-ID` 请求头）
-- **访问日志** — 通过结构化 JSON tracing 输出（可通过 `ACCESS_LOG` 开关控制）
+- **访问日志** — 通过结构化 JSON tracing 输出（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
 - **自定义错误页面** — 启动时预加载，热路径零 I/O
 - **JSON 结构化日志** — 基于 tracing
 - **路径穿越防护** — 包含符号链接逃逸检测
@@ -72,7 +72,7 @@ curl http://localhost:8080/
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
 | `COMPRESSION` | `true` | 启用 Brotli 压缩；设置为 `false`、`0` 或 `off` 可禁用 |
-| `ACCESS_LOG` | `true` | 启用每请求 JSON 访问日志；设置为 `false`、`0` 或 `off` 可禁用 |
+| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）；设置后启用持久化工作进程模式 |
 | `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数；`0` = 无限制 |
