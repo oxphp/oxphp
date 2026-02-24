@@ -149,8 +149,10 @@ async fn async_main(
         &metrics,
     )));
     dispatcher.on(handlers::server_header::ServerHeaderHandler);
-    if config.access_log {
-        dispatcher.on(handlers::access_log::AccessLogHandler);
+    if config.access_log != oxphp::config::AccessLogLevel::Off {
+        dispatcher.on(handlers::access_log::AccessLogHandler::new(
+            config.access_log,
+        ));
     }
 
     // Conditional handlers
@@ -252,11 +254,20 @@ async fn async_main(
         tokio::spawn(async move {
             let _permit = permit; // held until task completes
             if let Err(e) = server_clone.handle_connection(stream, remote_addr).await {
-                tracing::error!(
-                    remote_addr = %remote_addr,
-                    error = %e,
-                    "Connection error"
-                );
+                let msg = e.to_string();
+                if msg.contains("timeout") {
+                    tracing::warn!(
+                        remote_addr = %remote_addr,
+                        error = %e,
+                        "Connection timeout"
+                    );
+                } else {
+                    tracing::error!(
+                        remote_addr = %remote_addr,
+                        error = %e,
+                        "Connection error"
+                    );
+                }
             }
         });
     }

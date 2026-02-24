@@ -20,7 +20,7 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **Prometheus metrics** at `/metrics` on internal server
 - **Health check** endpoint at `/health` for K8s readiness probes
 - **Request ID** generation + pass-through (`X-Request-ID` header)
-- **Access logging** via structured JSON tracing (togglable via `ACCESS_LOG`)
+- **Access logging** via structured JSON tracing (levels: `all`, `error`, off via `ACCESS_LOG`)
 - **Custom error pages** — pre-loaded at startup, zero I/O on hot path
 - **JSON structured logging** via tracing
 - **Path traversal protection** with symlink escape detection
@@ -72,7 +72,7 @@ All settings are via environment variables:
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
 | `COMPRESSION` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
-| `ACCESS_LOG` | `true` | Enable per-request JSON access log; disable with `false`, `0`, or `off` |
+| `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all` (every request), `error` (4xx/5xx only), empty/unset = off |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script (relative to `DOCUMENT_ROOT`); enables persistent worker mode |
 | `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling; `0` = no limit |

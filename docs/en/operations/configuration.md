@@ -31,7 +31,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LOG_LEVEL` | `info` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error` |
-| `ACCESS_LOG` | `true` | Enable per-request JSON access log. Falsy values: `false`, `0`, `off` |
+| `ACCESS_LOG` | *(off)* | Per-request JSON access log. Values: `all` (every request), `error` (4xx/5xx only), empty/unset = off |
 
 ### Timeouts
 

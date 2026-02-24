@@ -118,7 +118,7 @@ services:
 | `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |
 | `COMPRESSION` | `true` | Enable Brotli compression. Set to `false`, `0`, or `off` to disable |
 | `TOKIO_WORKERS` | `0` | Tokio async runtime threads (0 = single-thread) |
-| `ACCESS_LOG` | `true` | Enable per-request JSON access log |
+| `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all`, `error` (4xx/5xx only), empty = off |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Pre-allocated response slot pool size |
 
 ### Ports

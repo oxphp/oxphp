@@ -9,16 +9,24 @@ OxPHP emits a structured JSON log entry for every completed HTTP request. Logs a
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ACCESS_LOG` | Enable per-request access logging | `true` |
+| `ACCESS_LOG` | Access log level: `all`, `error`, or empty/unset (off) | *(off)* |
 | `LOG_LEVEL` | Minimum log level (trace, debug, info, warn, error) | `info` |
 
-Access logging is enabled by default. When `ACCESS_LOG` is set to `false`, `0`, or `off`, the `AccessLogHandler` is not registered in the event dispatcher and no per-request access log entries are emitted.
+Access logging is disabled by default. Set `ACCESS_LOG` to control verbosity:
+
+- **`all`** — log every completed request (method, path, status, duration)
+- **`error`** — only log error responses (HTTP status >= 400: 404, 403, 500, etc.)
+- **empty/unset** — no access log entries
 
 ```bash
-# Disable access logging
-ACCESS_LOG=false
+# Log all requests
+ACCESS_LOG=all
 
-LOG_LEVEL=info
+# Log only errors (4xx/5xx)
+ACCESS_LOG=error
+
+# Disable access logging (default)
+# ACCESS_LOG=
 ```
 
 The `RUST_LOG` environment variable is also supported and takes precedence over `LOG_LEVEL` when set. This follows the standard `tracing`/`env_filter` convention.

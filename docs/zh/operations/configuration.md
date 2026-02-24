@@ -31,7 +31,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `LOG_LEVEL` | `info` | 日志级别。可选值：`trace`、`debug`、`info`、`warn`、`error` |
-| `ACCESS_LOG` | `true` | 启用按请求的 JSON 访问日志。假值：`false`、`0`、`off` |
+| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志。值：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
 
 ### 超时
 

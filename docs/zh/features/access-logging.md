@@ -9,16 +9,24 @@ OxPHP 为每个完成的 HTTP 请求生成结构化的 JSON 日志条目。日�
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `ACCESS_LOG` | 启用每请求访问日志 | `true` |
+| `ACCESS_LOG` | 访问日志级别：`all`、`error` 或 空/未设置（关闭） | *(关闭)* |
 | `LOG_LEVEL` | 最低日志级别（trace、debug、info、warn、error） | `info` |
 
-访问日志默认启用。当 `ACCESS_LOG` 设置为 `false`、`0` 或 `off` 时，`AccessLogHandler` 不会注册到事件分发器中，不会产生每请求的访问日志条目。
+访问日志默认关闭。设置 `ACCESS_LOG` 控制日志详细程度：
+
+- **`all`** — 记录每个完成的请求（方法、路径、状态码、耗时）
+- **`error`** — 仅记录错误响应（HTTP 状态码 >= 400：404、403、500 等）
+- **空/未设置** — 不记录访问日志
 
 ```bash
-# 禁用访问日志
-ACCESS_LOG=false
+# 记录所有请求
+ACCESS_LOG=all
 
-LOG_LEVEL=info
+# 仅记录错误（4xx/5xx）
+ACCESS_LOG=error
+
+# 关闭访问日志（默认）
+# ACCESS_LOG=
 ```
 
 `RUST_LOG` 环境变量也受支持，设置后优先于 `LOG_LEVEL`。这遵循标准的 `tracing`/`env_filter` 约定。
