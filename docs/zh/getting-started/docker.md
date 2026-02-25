@@ -45,7 +45,7 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # 启用 Framework 路由模式
       - EXECUTOR=sapi                # "sapi" 或 "stub"
-      # - PHP_WORKERS=0              # 静态模式：0 = CPU*2，或固定数量 N
+      # - PHP_WORKERS=0              # 静态模式：0 = CPU/2（最少 1），或固定数量 N
       # - PHP_WORKERS=2:16           # 动态模式：在 2 到 16 之间扩缩容
       # - PHP_WORKERS_IDLE_SEC=30    # 动态缩容的空闲超时时间
       # - QUEUE_CAPACITY=512         # 默认值：PHP_WORKERS * 128
@@ -101,7 +101,7 @@ services:
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件服务的根目录 |
 | `INDEX_FILE` | _(未设置)_ | 设为 `index.php` 启用 Framework 模式，设为 `index.html` 启用 SPA 模式 |
 | `EXECUTOR` | `sapi` | PHP 执行器类型：`sapi`（真实 PHP）或 `stub`（占位符） |
-| `PHP_WORKERS` | `0`（CPU * 2，静态） | Worker 池模式。`N` = 固定池，`MIN:MAX` = 动态扩缩容 |
+| `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | Worker 池模式。`N` = 固定池，`MIN:MAX` = 动态扩缩容 |
 | `PHP_WORKERS_IDLE_SEC` | `30` | 动态 worker 退出前的空闲超时时间 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界请求队列大小。队列满时返回 503 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error` |
@@ -117,7 +117,7 @@ services:
 | `TLS_KEY` | _(未设置)_ | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | _(未设置)_ | 包含 `{status}.html` 错误页面文件的目录 |
 | `COMPRESSION` | `true` | 启用 Brotli 压缩。设为 `false`、`0` 或 `off` 可禁用 |
-| `TOKIO_WORKERS` | `0` | Tokio 异步运行时线程数（0 = 单线程） |
+| `TOKIO_WORKERS` | `0` | Tokio 异步运行时线程数（0 = CPU / 2，最少 1） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`、`error`（仅 4xx/5xx）、空 = 关闭 |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | 预分配的响应槽池大小 |
 

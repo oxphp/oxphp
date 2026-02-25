@@ -45,7 +45,7 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Уключае фрэймворкавы рэжым маршрутызацыі
       - EXECUTOR=sapi                # "sapi" або "stub"
-      # - PHP_WORKERS=0              # Статычны: 0 = CPU*2, або фіксаванае N
+      # - PHP_WORKERS=0              # Статычны: 0 = CPU/2 (мін. 1), або фіксаванае N
       # - PHP_WORKERS=2:16           # Дынамічны: маштабаванне паміж 2 і 16
       # - PHP_WORKERS_IDLE_SEC=30    # Тайм-аўт прастою для дынамічнага памяншэння
       # - QUEUE_CAPACITY=512         # Па змаўчанні: PHP_WORKERS * 128
@@ -101,7 +101,7 @@ services:
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Каранёвы каталог для абслугоўвання файлаў |
 | `INDEX_FILE` | _(не зададзена)_ | Усталюйце `index.php` для фрэймворкавага рэжыму або `index.html` для SPA-рэжыму |
 | `EXECUTOR` | `sapi` | Тып PHP executor: `sapi` (рэальны PHP) або `stub` (загальнік) |
-| `PHP_WORKERS` | `0` (CPU * 2, статычны) | Рэжым пула воркераў. `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне |
+| `PHP_WORKERS` | `0` (CPU / 2, мін. 1, статычны) | Рэжым пула воркераў. `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Тайм-аўт прастою перад выдаленнем дынамічнага воркера |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Памер абмежаванай чаргі запытаў. 503 вяртаецца, калі поўная |
 | `LOG_LEVEL` | `info` | Узровень журналавання: `trace`, `debug`, `info`, `warn`, `error` |
@@ -117,7 +117,7 @@ services:
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |
 | `COMPRESSION` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
-| `TOKIO_WORKERS` | `0` | Патокі асінхроннага асяроддзя выканання Tokio (0 = аднапаточны) |
+| `TOKIO_WORKERS` | `0` (CPU / 2, мін. 1) | Патокі асінхроннага асяроддзя выканання Tokio (0 = аўта, 1 = аднапаточны) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступу: `all`, `error` (толькі 4xx/5xx), пустое = выкл. |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Памер папярэдне выдзеленага пула слотаў адказу |
 

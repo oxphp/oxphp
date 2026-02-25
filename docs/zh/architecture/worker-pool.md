@@ -108,10 +108,10 @@ Each worker:
 | 格式 | 模式 | 示例 | 行为 |
 |--------|------|---------|----------|
 | `N` | 静态 | `PHP_WORKERS=8` | 固定 8 个工作线程 |
-| `0` 或未设置 | 静态 | `PHP_WORKERS=0` | 固定 CPU 数量 * 2 个工作线程 |
+| `0` 或未设置 | 静态 | `PHP_WORKERS=0` | 固定 CPU / 2（最少 1）个工作线程 |
 | `MIN:MAX` | 动态 | `PHP_WORKERS=2:16` | 从 MIN 开始，负载下扩展到 MAX |
 | `MIN:0` | 动态 | `PHP_WORKERS=2:0` | MIN 明确指定，MAX 自动检测（CPU 数量 * 2） |
-| `0:0` | 动态 | `PHP_WORKERS=0:0` | MIN 自动（CPU/2，最少 2），MAX 自动（CPU * 2） |
+| `0:0` | 动态 | `PHP_WORKERS=0:0` | MIN 自动（CPU/4，最少 1），MAX 自动（CPU * 2） |
 
 **静态模式**下，池大小在启动后不会改变。工作线程使用阻塞 `recv()` 循环，空闲时零 CPU 开销。
 
@@ -191,7 +191,7 @@ ScaleManager 在生成新 OS 线程之前释放 Mutex 锁以避免阻塞 Tokio �
 
 | 变量 | 默认值 | 描述 |
 |---|---|---|
-| `PHP_WORKERS` | `0`（CPU 数量 * 2，静态） | 工作线程池模式。`N` 为静态，`MIN:MAX` 为动态 |
+| `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作线程池模式。`N` 为静态，`MIN:MAX` 为动态 |
 | `PHP_WORKERS_IDLE_SEC` | `30` | 动态工作线程退役前的空闲超时 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界 channel 容量（动态模式使用初始数量） |
 

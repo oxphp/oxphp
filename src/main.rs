@@ -45,12 +45,15 @@ fn main() -> Result<(), types::BoxError> {
     let executor: Arc<dyn executor::ScriptExecutor> =
         Arc::from(executor::create_executor(Arc::clone(&metrics)));
 
+    let cpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
     let tokio_workers: usize = std::env::var("TOKIO_WORKERS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or((cpu / 2).max(1));
 
-    let runtime = if tokio_workers > 0 {
+    let runtime = if tokio_workers > 1 {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(tokio_workers)
             .enable_all()

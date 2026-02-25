@@ -14,7 +14,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 主 HTTP 服务器的监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 文件和 PHP 脚本的根目录 |
 | `INDEX_FILE` | *(空)* | 控制路由模式。参见[路由模式](#路由模式) |
-| `TOKIO_WORKERS` | `0` | Tokio 异步 I/O 线程数。`0` = 单线程运行时（默认），`N` = 使用 N 个工作线程的多线程运行时 |
+| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | Tokio 异步 I/O 线程数。`0` = 自动检测（CPU / 2，最少 1），`1` = 单线程运行时，`N` = 使用 N 个工作线程的多线程运行时 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数。超过此限制的新连接将等待信号量许可 |
 
 ### PHP 执行
@@ -22,7 +22,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `EXECUTOR` | `sapi` | PHP 执行器类型。`sapi` 为真实 PHP 执行，`stub` 为占位响应（用于基准测试） |
-| `PHP_WORKERS` | `0`（CPU 核数 * 2，静态） | 工作池模式。设置 `N` 为固定池，或 `MIN:MAX` 为动态伸缩。参见[工作线程模式](#工作线程模式) |
+| `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作池模式。设置 `N` 为固定池，或 `MIN:MAX` 为动态伸缩。参见[工作线程模式](#工作线程模式) |
 | `PHP_WORKERS_IDLE_SEC` | `30` | 动态工作线程空闲超过此秒数后被回收。仅在动态模式下生效 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | PHP 队列中等待的最大请求数。队列满时，新的 PHP 请求将收到 `503 Service Unavailable` 响应。动态模式下使用初始工作线程数计算 |
 
@@ -87,7 +87,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 
 ```bash
 PHP_WORKERS=8      # 固定 8 个工作线程
-PHP_WORKERS=0      # 自动检测：CPU 核数 * 2
+PHP_WORKERS=0      # 自动检测：CPU / 2（最少 1）
 ```
 
 工作线程在启动时创建，之后不会改变。每个工作线程使用阻塞 `recv()`，空闲时 CPU 开销为零。
@@ -99,7 +99,7 @@ PHP_WORKERS=0      # 自动检测：CPU 核数 * 2
 ```bash
 PHP_WORKERS=2:16       # 在 2 到 16 个工作线程之间伸缩
 PHP_WORKERS=4:0        # 最少 4 个，最多自动检测（CPU * 2）
-PHP_WORKERS=0:0        # 两者均自动检测（最少 CPU/2（至少 2），最多 CPU*2）
+PHP_WORKERS=0:0        # 两者均自动检测（最少 CPU/4（至少 1），最多 CPU*2）
 ```
 
 ScaleManager 每 500ms 运行一次：

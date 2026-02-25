@@ -37,7 +37,7 @@ OxPHP 是一个单二进制 HTTP 服务器，替代传统的 nginx + PHP-FPM 技
                     └─────────────────────────────────────────────────┘
 ```
 
-**Tokio 运行时** 通过 `TOKIO_WORKERS` 进行配置。设为 `0`（默认）时使用 `Builder::new_current_thread()` 创建单线程异步运行时；设为 `N` 时使用 `Builder::new_multi_thread()` 创建 N 个工作线程以获得更高吞吐量。它处理所有异步工作：接受 TCP 连接、TLS 握手、HTTP 解析、路由、压缩和事件分发。每个连接是一个轻量级 Tokio 任务。进程使用 mimalloc 作为全局分配器，在线程竞争下降低分配延迟。
+**Tokio 运行时** 通过 `TOKIO_WORKERS` 进行配置。设为 `0`（默认）时自动检测 CPU / 2（最少 1）个工作线程；设为 `1` 时使用 `Builder::new_current_thread()` 创建单线程异步运行时；设为 `N`（N > 1）时使用 `Builder::new_multi_thread()` 创建 N 个工作线程以获得更高吞吐量。它处理所有异步工作：接受 TCP 连接、TLS 握手、HTTP 解析、路由、压缩和事件分发。每个连接是一个轻量级 Tokio 任务。进程使用 mimalloc 作为全局分配器，在线程竞争下降低分配延迟。
 
 **PHP 工作线程池** 是一组专用 OS 线程。每个线程拥有一个 PHP ZTS（Zend 线程安全）解释器实例。工作线程通过有界 `crossbeam_channel::bounded` channel 接收 `ScriptRequest` 结构体，并通过 `tokio::sync::oneshot` channel 返回 `ScriptResponse`。
 
@@ -182,7 +182,7 @@ pub enum ExecuteResult {
 3. **插件管理器**：`PluginManager::new()` 创建管理器，添加插件，然后 `init_all()` 在分发器上注册插件事件处理器并填充 bridge 插件函数注册表
 4. **插件 PHP 函数**：插件函数传递给 `sapi::register_plugin_functions()`，以便在 PHP 引擎启动前填充 bridge 注册表
 5. **执行器**：`create_executor(metrics)` 初始化 TSRM，注册 SAPI 模块，启动 `php_module_startup()`（触发 MINIT — 向 Zend 注册插件函数），解析 `PHP_WORKERS` 模式，生成初始 PHP 工作线程
-6. **Tokio 运行时**：由 `TOKIO_WORKERS` 配置 — `0` 创建单线程运行时，`N` 创建 N 个工作线程的多线程运行时
+6. **Tokio 运行时**：由 `TOKIO_WORKERS` 配置 — `0` 自动检测（CPU / 2，最少 1），`1` 创建单线程运行时，`N` 创建 N 个工作线程的多线程运行时
 7. **伸缩管理器**：`executor.start_scale_manager()` 启动工作线程伸缩任务（静态模式下无操作）。静态模式下，后台健康监控器检测并重启崩溃的工作线程
 8. **限流器**：可选，带后台清理任务
 9. **TLS**：可选，通过 `rustls` 加载证书和密钥

@@ -67,10 +67,10 @@ fn now_millis() -> u64 {
 /// Parse `PHP_WORKERS` env var into a `WorkerMode`.
 ///
 /// Formats:
-/// - `""` or `"0"` → Static(cpu_count * 2)
+/// - `""` or `"0"` → Static(cpu/2, min 1)
 /// - `"N"` → Static(N)
 /// - `"MIN:MAX"` → Dynamic { min, max }
-/// - `"0:0"` → Dynamic { min: cpu/2 (min 2), max: cpu*2 }
+/// - `"0:0"` → Dynamic { min: cpu/4 (min 1), max: cpu*2 }
 fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
     let cpu = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -87,7 +87,7 @@ fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
             .parse()
             .map_err(|_| format!("invalid MAX: '{right}'"))?;
         let min = if min_raw == 0 {
-            (cpu / 2).max(2)
+            (cpu / 4).max(1)
         } else {
             min_raw
         };
@@ -100,7 +100,7 @@ fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
         let n: usize = val
             .parse()
             .map_err(|_| format!("invalid PHP_WORKERS: '{val}'"))?;
-        let count = if n == 0 { cpu * 2 } else { n };
+        let count = if n == 0 { (cpu / 2).max(1) } else { n };
         Ok(WorkerMode::Static(count))
     }
 }
@@ -146,7 +146,7 @@ impl SapiExecutor {
                 let cpu = std::thread::available_parallelism()
                     .map(|n| n.get())
                     .unwrap_or(4);
-                WorkerMode::Static(cpu * 2)
+                WorkerMode::Static((cpu / 2).max(1))
             });
 
         let idle_timeout_sec: u64 = std::env::var("PHP_WORKERS_IDLE_SEC")
@@ -1053,7 +1053,10 @@ mod tests {
     #[test]
     fn test_parse_static_zero_auto() {
         let cpu = cpu_count();
-        assert_eq!(parse_php_workers("0").unwrap(), WorkerMode::Static(cpu * 2));
+        assert_eq!(
+            parse_php_workers("0").unwrap(),
+            WorkerMode::Static((cpu / 2).max(1))
+        );
     }
 
     #[test]
@@ -1075,7 +1078,7 @@ mod tests {
     #[test]
     fn test_parse_dynamic_zero_min_auto() {
         let cpu = cpu_count();
-        let expected_min = (cpu / 2).max(2);
+        let expected_min = (cpu / 4).max(1);
         assert_eq!(
             parse_php_workers("0:16").unwrap(),
             WorkerMode::Dynamic {
@@ -1100,7 +1103,7 @@ mod tests {
     #[test]
     fn test_parse_dynamic_both_zero() {
         let cpu = cpu_count();
-        let expected_min = (cpu / 2).max(2);
+        let expected_min = (cpu / 4).max(1);
         let expected_max = cpu * 2;
         assert_eq!(
             parse_php_workers("0:0").unwrap(),

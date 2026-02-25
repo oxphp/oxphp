@@ -35,14 +35,15 @@ services:
       # ── Tokio Runtime ─────────────────────────────────────────────
 
       # Number of Tokio worker threads.
-      #   0  — single-threaded current_thread runtime (default, lowest overhead)
+      #   0  — auto-detect: CPU / 2 (min 1), multi-threaded (default)
+      #   1  — single-threaded current_thread runtime (lowest overhead)
       #   N  — multi-threaded runtime with N worker threads + work-stealing
       # - TOKIO_WORKERS=0
 
       # ── PHP Workers (only used when EXECUTOR=sapi with SapiExecutor) ──
 
       # PHP worker thread count. Formats:
-      #   0        — auto-detect: cpu_count * 2, static pool
+      #   0        — auto-detect: CPU / 2 (min 1), static pool
       #   N        — fixed N worker threads
       #   MIN:MAX  — dynamic pool: scales between MIN and MAX based on load
       # - PHP_WORKERS=0

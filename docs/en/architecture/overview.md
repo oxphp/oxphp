@@ -37,7 +37,7 @@ OxPHP is a single-binary HTTP server that replaces the traditional nginx + PHP-F
                     └─────────────────────────────────────────────────┘
 ```
 
-The **Tokio runtime** is configurable via `TOKIO_WORKERS`. When set to `0` (default), it uses `Builder::new_current_thread()` for a single-threaded async runtime. When set to `N`, it uses `Builder::new_multi_thread()` with N worker threads for higher throughput. It handles all asynchronous work: accepting TCP connections, TLS handshakes, HTTP parsing, routing, compression, and event dispatch. Each connection is a lightweight Tokio task. The process uses mimalloc as the global allocator for lower allocation latency under thread contention.
+The **Tokio runtime** is configurable via `TOKIO_WORKERS`. When set to `0` or unset (default), it auto-detects to CPU/2 (min 1). When set to `1`, it uses `Builder::new_current_thread()` for a single-threaded async runtime. When set to `N` (>1), it uses `Builder::new_multi_thread()` with N worker threads for higher throughput. It handles all asynchronous work: accepting TCP connections, TLS handshakes, HTTP parsing, routing, compression, and event dispatch. Each connection is a lightweight Tokio task. The process uses mimalloc as the global allocator for lower allocation latency under thread contention.
 
 The **PHP worker pool** is a set of dedicated OS threads. Each thread owns a PHP ZTS (Zend Thread Safety) interpreter instance. Workers receive `ScriptRequest` structs through a bounded `crossbeam_channel::bounded` channel and return `ScriptResponse` through a `tokio::sync::oneshot` channel.
 
@@ -182,7 +182,7 @@ This pattern allows the Tokio runtime to dispatch work to PHP workers without bl
 3. **Plugin manager**: `PluginManager::new()` creates the manager, plugins are added, then `init_all()` registers plugin event handlers on the dispatcher and populates the bridge plugin function registry
 4. **Plugin PHP functions**: Plugin functions are passed to `sapi::register_plugin_functions()` so the bridge registry is populated before PHP engine startup
 5. **Executor**: `create_executor(metrics)` initializes TSRM, registers the SAPI module, starts `php_module_startup()` (which triggers MINIT — registering plugin functions with Zend), parses `PHP_WORKERS` mode, and spawns initial PHP worker threads
-6. **Tokio runtime**: Configured by `TOKIO_WORKERS` — `0` creates a single-threaded runtime, `N` creates a multi-threaded runtime with N workers
+6. **Tokio runtime**: Configured by `TOKIO_WORKERS` — `0` auto-detects to CPU/2 (min 1), `1` creates a single-threaded runtime, `N` creates a multi-threaded runtime with N workers
 7. **Scale manager**: `executor.start_scale_manager()` spawns the worker scaling task (no-op in static mode). In static mode, a background health monitor detects and respawns dead workers
 8. **Rate limiter**: Optional, with background cleanup task
 9. **TLS**: Optional, loads certificate and key via `rustls`

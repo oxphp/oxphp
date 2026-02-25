@@ -45,7 +45,7 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Enables Framework routing mode
       - EXECUTOR=sapi                # "sapi" or "stub"
-      # - PHP_WORKERS=0              # Static: 0 = CPU*2, or fixed N
+      # - PHP_WORKERS=0              # Static: 0 = CPU/2, or fixed N
       # - PHP_WORKERS=2:16           # Dynamic: scale between 2 and 16
       # - PHP_WORKERS_IDLE_SEC=30    # Idle timeout for dynamic scale-down
       # - QUEUE_CAPACITY=512         # Default: PHP_WORKERS * 128
@@ -101,7 +101,7 @@ services:
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files |
 | `INDEX_FILE` | _(unset)_ | Set to `index.php` for Framework mode or `index.html` for SPA mode |
 | `EXECUTOR` | `sapi` | PHP executor type: `sapi` (real PHP) or `stub` (placeholder) |
-| `PHP_WORKERS` | `0` (CPU * 2, static) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |
+| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before a dynamic worker is retired |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded request queue size. 503 returned when full |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
@@ -117,7 +117,7 @@ services:
 | `TLS_KEY` | _(unset)_ | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |
 | `COMPRESSION` | `true` | Enable Brotli compression. Set to `false`, `0`, or `off` to disable |
-| `TOKIO_WORKERS` | `0` | Tokio async runtime threads (0 = single-thread) |
+| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async runtime threads (0 = auto) |
 | `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all`, `error` (4xx/5xx only), empty = off |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Pre-allocated response slot pool size |
 

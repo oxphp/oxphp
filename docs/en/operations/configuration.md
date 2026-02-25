@@ -14,7 +14,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `INDEX_FILE` | *(empty)* | Controls routing mode. See [Routing Modes](#routing-modes) |
-| `TOKIO_WORKERS` | `0` | Tokio async I/O threads. `0` = single-threaded runtime (default), `N` = multi-threaded runtime with N worker threads |
+| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async I/O threads. `0` = auto (CPU/2), `1` = single-threaded runtime, `N` = multi-threaded runtime with N worker threads |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. New connections beyond this limit wait for a semaphore permit |
 
 ### PHP Execution
@@ -22,7 +22,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EXECUTOR` | `sapi` | PHP executor type. `sapi` for real PHP execution, `stub` for a placeholder response (benchmarking) |
-| `PHP_WORKERS` | `0` (CPU count * 2, static) | Worker pool mode. Set `N` for a fixed pool, or `MIN:MAX` for dynamic scaling. See [Worker Modes](#worker-modes) |
+| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. Set `N` for a fixed pool, or `MIN:MAX` for dynamic scaling. See [Worker Modes](#worker-modes) |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Seconds a dynamic worker must be idle before it is retired. Only applies in dynamic mode |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Maximum requests waiting in the PHP queue. When full, new PHP requests receive a `503 Service Unavailable` response. Uses initial worker count for dynamic mode |
 
@@ -87,7 +87,7 @@ Set `PHP_WORKERS` to a number (or leave unset/`0` for auto-detection):
 
 ```bash
 PHP_WORKERS=8      # Fixed 8 workers
-PHP_WORKERS=0      # Auto-detect: CPU count * 2
+PHP_WORKERS=0      # Auto-detect: CPU / 2 (min 1)
 ```
 
 Workers are spawned at startup and never change. Each worker uses a blocking `recv()` with zero CPU overhead when idle.
@@ -99,7 +99,7 @@ Set `PHP_WORKERS` to `MIN:MAX` to enable auto-scaling:
 ```bash
 PHP_WORKERS=2:16       # Scale between 2 and 16 workers
 PHP_WORKERS=4:0        # 4 minimum, auto-detect maximum (CPU * 2)
-PHP_WORKERS=0:0        # Auto-detect both (CPU/2 min (min 2), CPU*2 max)
+PHP_WORKERS=0:0        # Auto-detect both (CPU/4 min (min 1), CPU*2 max)
 ```
 
 The ScaleManager runs every 500ms and:

@@ -26,7 +26,7 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **Path traversal protection** with symlink escape detection
 - **Non-root container** execution as www-data (UID 82)
 - **mimalloc** allocator for lower allocation latency under contention
-- **Configurable Tokio runtime** — single-threaded (default) or multi-threaded via `TOKIO_WORKERS`
+- **Configurable Tokio runtime** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
 - **Worker health monitoring** with automatic dead worker respawning
 - **SSE streaming** — real-time Server-Sent Events via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()`
 - **Early response** via `oxphp_finish_request()` — send the response immediately and continue background processing
@@ -55,9 +55,9 @@ All settings are via environment variables:
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
 | `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `index.php` = Framework, `index.html` = SPA |
-| `TOKIO_WORKERS` | `0` (single-threaded) | Tokio async I/O threads; `0` = single-threaded, `N` = multi-threaded |
+| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async I/O threads; `0` = auto, `1` = single-threaded, `N` = multi-threaded with N threads |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
-| `PHP_WORKERS` | `0` (CPU * 2) | Worker pool mode: `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
+| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode: `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before retiring a dynamic worker (dynamic mode only) |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 503 when full |
 | `DRAIN_TIMEOUT_SECS` | `30` | Graceful shutdown drain timeout in seconds |
@@ -105,7 +105,7 @@ All settings are via environment variables:
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
 ```
 
-- **Configurable Tokio runtime** — single-threaded by default (`TOKIO_WORKERS=0`), multi-threaded for high-throughput workloads
+- **Configurable Tokio runtime** — multi-threaded by default (CPU/2, min 1), tunable via `TOKIO_WORKERS`
 - **Multi-threaded PHP worker pool** using PHP ZTS, each worker is a dedicated OS thread with `catch_unwind` isolation
 - Workers receive requests via `crossbeam::bounded`, respond via `ExecuteResult` (immediate or deferred via `oneshot`)
 - **Worker health monitoring** — dead workers are automatically detected and respawned
