@@ -64,7 +64,7 @@ services:
 
       # 限流（0 = 禁用）
       # - RATE_LIMIT=100
-      # - RATE_WINDOW=60
+      # - RATE_WINDOW_SECS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -112,7 +112,7 @@ services:
 | `REQUEST_TIMEOUT_SECS` | `120` | 最大请求处理时间。设为 0 则禁用超时 |
 | `DRAIN_TIMEOUT_SECS` | `30` | 关机期间进行中连接的宽限期 |
 | `RATE_LIMIT` | `0` | 每个 IP 每窗口期的最大请求数。0 表示禁用限流 |
-| `RATE_WINDOW` | `60` | 限流窗口时长（秒） |
+| `RATE_WINDOW_SECS` | `60` | 限流窗口时长（秒） |
 | `TLS_CERT` | _(未设置)_ | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | _(未设置)_ | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | _(未设置)_ | 包含 `{status}.html` 错误页面文件的目录 |

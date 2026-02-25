@@ -47,7 +47,7 @@ $features = [
     ['HTTP Methods',  'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, QUERY'],
     ['Routing',       'Framework mode (front controller)'],
     ['Compression',   'Brotli (auto, Accept-Encoding: br)'],
-    ['Rate Limiting', 'Per-IP sliding window (RATE_LIMIT / RATE_WINDOW)'],
+    ['Rate Limiting', 'Per-IP sliding window (RATE_LIMIT / RATE_WINDOW_SECS)'],
     ['Request IDs',   'X-Request-ID (auto-generated or pass-through)'],
     ['Timeouts',      'REQUEST_TIMEOUT_SECS, HEADER_TIMEOUT_SECS, IDLE_TIMEOUT_SECS'],
     ['TLS',           'TLS_CERT + TLS_KEY (native rustls)'],

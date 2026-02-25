@@ -47,7 +47,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `RATE_LIMIT` | `0` | 每个 IP 地址在时间窗口内的最大请求数。`0` 表示禁用速率限制 |
-| `RATE_WINDOW` | `60` | 速率限制窗口时长（秒） |
+| `RATE_WINDOW_SECS` | `60` | 速率限制窗口时长（秒） |
 
 ### TLS
 
@@ -169,7 +169,7 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW=60
+RATE_WINDOW_SECS=60
 HEADER_TIMEOUT_SECS=5
 IDLE_TIMEOUT_SECS=30
 REQUEST_TIMEOUT_SECS=60
@@ -190,7 +190,7 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW=60
+RATE_WINDOW_SECS=60
 HEADER_TIMEOUT_SECS=5
 IDLE_TIMEOUT_SECS=30
 REQUEST_TIMEOUT_SECS=60
@@ -271,7 +271,7 @@ curl -s http://localhost:9090/config | jq .
   "idle_timeout_secs": 60,
   "request_timeout_secs": 120,
   "rate_limit": 100,
-  "rate_window": 60,
+  "rate_window_secs": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,

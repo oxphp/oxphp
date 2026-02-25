@@ -64,7 +64,7 @@ curl http://localhost:8080/
 | `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
 | `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
-| `RATE_WINDOW` | `60` | 限流时间窗口（秒） |
+| `RATE_WINDOW_SECS` | `60` | 限流时间窗口（秒） |
 | `HEADER_TIMEOUT_SECS` | `5` | 请求头读取超时（Slowloris 防护） |
 | `IDLE_TIMEOUT_SECS` | `60` | Keep-alive 空闲超时 |
 | `REQUEST_TIMEOUT_SECS` | `120` | 整体请求超时；`0` 表示禁用 |

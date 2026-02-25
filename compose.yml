@@ -95,7 +95,7 @@ services:
       # - RATE_LIMIT=0
 
       # Rate limiting window in seconds.
-      # - RATE_WINDOW=60
+      # - RATE_WINDOW_SECS=60
 
       # ── TLS ───────────────────────────────────────────────────────
 

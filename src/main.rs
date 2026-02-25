@@ -95,11 +95,11 @@ async fn async_main(
     let rate_limiter = if config.rate_limit > 0 {
         let limiter = Arc::new(server::rate_limit::RateLimiter::new(
             config.rate_limit,
-            config.rate_window,
+            config.rate_window_secs,
         ));
         tracing::info!(
             rate_limit = config.rate_limit,
-            rate_window = config.rate_window,
+            rate_window_secs = config.rate_window_secs,
             "Rate limiting enabled"
         );
         // Spawn background cleanup task

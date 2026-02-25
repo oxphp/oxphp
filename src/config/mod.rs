@@ -37,7 +37,7 @@ pub struct Config {
     pub drain_timeout_secs: u64,
     pub internal_addr: Option<String>,
     pub rate_limit: u32,
-    pub rate_window: u64,
+    pub rate_window_secs: u64,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub error_pages_dir: Option<String>,
@@ -70,7 +70,7 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
-        let rate_window = std::env::var("RATE_WINDOW")
+        let rate_window_secs = std::env::var("RATE_WINDOW_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
@@ -118,7 +118,7 @@ impl Config {
             drain_timeout_secs,
             internal_addr,
             rate_limit,
-            rate_window,
+            rate_window_secs,
             tls_cert,
             tls_key,
             error_pages_dir,
@@ -145,7 +145,7 @@ impl Config {
             "idle_timeout_secs": self.server.idle_timeout.as_secs(),
             "request_timeout_secs": self.server.request_timeout.as_secs(),
             "rate_limit": self.rate_limit,
-            "rate_window": self.rate_window,
+            "rate_window_secs": self.rate_window_secs,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
             "compression": self.compression,
