@@ -9,7 +9,7 @@ OxPHP is an asynchronous PHP application server written in Rust. It replaces ngi
 
 Traditional PHP deployments require a web server (nginx or Apache), a process manager (PHP-FPM), and separate tooling for metrics, rate limiting, and TLS termination. OxPHP collapses this stack into a single binary with no external dependencies at runtime beyond the PHP runtime library.
 
-The server uses a configurable Tokio async runtime (single-threaded by default, multi-threaded via `TOKIO_WORKERS`) for all I/O and a pool of dedicated OS threads for PHP execution via Zend Thread Safety (ZTS). This architecture keeps the async event loop free of blocking PHP calls while scaling PHP execution across all available cores. The mimalloc allocator provides lower allocation latency under contention.
+The server uses a configurable Tokio async runtime (multi-threaded by default with CPU/2 threads, tunable via `TOKIO_WORKERS`) for all I/O and a pool of dedicated OS threads for PHP execution via Zend Thread Safety (ZTS). This architecture keeps the async event loop free of blocking PHP calls while scaling PHP execution across all available cores. The mimalloc allocator provides lower allocation latency under contention.
 
 ## Features
 

@@ -26,7 +26,7 @@
 - **路径穿越防护** — 包含符号链接逃逸检测
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
 - **mimalloc** 分配器 — 降低高并发下的内存分配延迟
-- **可配置 Tokio 运行时** — 默认单线程，可通过 `TOKIO_WORKERS` 切换为多线程
+- **可配置 Tokio 运行时** — 默认自动（CPU / 2，最少 1），可通过 `TOKIO_WORKERS` 调整
 - **工作线程健康监控** — 自动检测并重启崩溃的工作线程
 - **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
 - **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
@@ -55,9 +55,9 @@ curl http://localhost:8080/
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
 | `INDEX_FILE` | *(未设置)* | 路由模式：空 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
-| `TOKIO_WORKERS` | `0`（单线程） | Tokio 异步 I/O 线程数；`0` = 单线程，`N` = 多线程 |
+| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | Tokio 异步 I/O 线程数；`0` = 自动，`1` = 单线程，`N` = 多线程 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
-| `PHP_WORKERS` | `0`（CPU * 2） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
+| `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
 | `PHP_WORKERS_IDLE_SEC` | `30` | 动态模式下，工作线程的空闲超时时间（仅动态模式有效） |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 503 |
 | `DRAIN_TIMEOUT_SECS` | `30` | 优雅关闭的排空等待超时（秒） |
@@ -105,7 +105,7 @@ curl http://localhost:8080/
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
 ```
 
-- **可配置 Tokio 运行时** — 默认单线程（`TOKIO_WORKERS=0`），高吞吐场景可切换为多线程
+- **可配置 Tokio 运行时** — 默认自动（`TOKIO_WORKERS=0`，CPU / 2，最少 1），`1` = 单线程，高吞吐场景可设为更大值
 - **多线程 PHP 工作池** — 基于 PHP ZTS，每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
 - 工作线程通过 `crossbeam::bounded` 接收请求，通过 `ExecuteResult`（即时或经由 `oneshot` 延迟）返回结果
 - **工作线程健康监控** — 自动检测崩溃线程并重启

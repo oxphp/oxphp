@@ -108,10 +108,10 @@ The `PHP_WORKERS` environment variable controls the worker pool mode:
 | Format | Mode | Example | Behavior |
 |--------|------|---------|----------|
 | `N` | Static | `PHP_WORKERS=8` | Fixed pool of 8 workers |
-| `0` or unset | Static | `PHP_WORKERS=0` | Fixed pool of CPU count * 2 workers |
+| `0` or unset | Static | `PHP_WORKERS=0` | Fixed pool of CPU / 2 workers (min 1) |
 | `MIN:MAX` | Dynamic | `PHP_WORKERS=2:16` | Starts at MIN, scales up to MAX under load |
 | `MIN:0` | Dynamic | `PHP_WORKERS=2:0` | MIN explicit, MAX auto-detected (CPU count * 2) |
-| `0:0` | Dynamic | `PHP_WORKERS=0:0` | MIN auto (CPU/2, min 2), MAX auto (CPU * 2) |
+| `0:0` | Dynamic | `PHP_WORKERS=0:0` | MIN auto (CPU/4, min 1), MAX auto (CPU * 2) |
 
 In **static mode**, the pool size never changes after startup. Workers use a blocking `recv()` loop with zero CPU overhead when idle.
 
@@ -191,7 +191,7 @@ The ScaleManager drops the Mutex lock before spawning new OS threads to avoid bl
 
 | Variable | Default | Description |
 |---|---|---|
-| `PHP_WORKERS` | `0` (CPU count * 2, static) | Worker pool mode. `N` for static, `MIN:MAX` for dynamic |
+| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` for static, `MIN:MAX` for dynamic |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before a dynamic worker is retired |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel capacity (uses initial count for dynamic) |
 

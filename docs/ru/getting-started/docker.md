@@ -45,7 +45,7 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       # - INDEX_FILE=index.php       # Включает режим маршрутизации Framework
       - EXECUTOR=sapi                # "sapi" или "stub"
-      # - PHP_WORKERS=0              # Статический: 0 = CPU*2, или фиксированное N
+      # - PHP_WORKERS=0              # Статический: 0 = CPU/2 (мин 1), или фиксированное N
       # - PHP_WORKERS=2:16           # Динамический: масштабирование от 2 до 16
       # - PHP_WORKERS_IDLE_SEC=30    # Таймаут простоя для динамического уменьшения
       # - QUEUE_CAPACITY=512         # По умолчанию: PHP_WORKERS * 128
@@ -101,7 +101,7 @@ services:
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневая директория для раздачи файлов |
 | `INDEX_FILE` | _(unset)_ | Укажите `index.php` для режима Framework или `index.html` для SPA |
 | `EXECUTOR` | `sapi` | Тип PHP-исполнителя: `sapi` (настоящий PHP) или `stub` (заглушка) |
-| `PHP_WORKERS` | `0` (CPU * 2, static) | Режим пула воркеров. `N` = фиксированный пул, `MIN:MAX` = динамическое масштабирование |
+| `PHP_WORKERS` | `0` (CPU / 2, мин. 1, static) | Режим пула воркеров. `N` = фиксированный пул, `MIN:MAX` = динамическое масштабирование |
 | `PHP_WORKERS_IDLE_SEC` | `30` | Таймаут простоя до завершения динамического воркера |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Размер ограниченной очереди запросов. При переполнении возвращается 503 |
 | `LOG_LEVEL` | `info` | Уровень логирования: `trace`, `debug`, `info`, `warn`, `error` |
@@ -117,7 +117,7 @@ services:
 | `TLS_KEY` | _(unset)_ | Путь к PEM-файлу приватного TLS-ключа |
 | `ERROR_PAGES_DIR` | _(unset)_ | Директория с файлами страниц ошибок `{status}.html` |
 | `COMPRESSION` | `true` | Включить сжатие Brotli. Установите `false`, `0` или `off` для отключения |
-| `TOKIO_WORKERS` | `0` | Потоки асинхронного рантайма Tokio (0 = однопоточный) |
+| `TOKIO_WORKERS` | `0` | Потоки асинхронного рантайма Tokio (0 = авто CPU/2, 1 = однопоточный) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступа: `all` (все), `error` (4xx/5xx), пустое = выкл. |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Размер пула предварительно выделенных слотов ответа |
 
