@@ -47,7 +47,7 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 | Зменная | Па змаўчанні | Апісанне |
 |----------|---------|-------------|
 | `RATE_LIMIT` | `0` | Максімальная колькасць запытаў на IP-адрас за часовае акно. `0` адключае абмежаванне хуткасці |
-| `RATE_WINDOW` | `60` | Працягласць акна абмежавання хуткасці ў секундах |
+| `RATE_WINDOW_SECS` | `60` | Працягласць акна абмежавання хуткасці ў секундах |
 
 ### TLS
 
@@ -169,7 +169,7 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW=60
+RATE_WINDOW_SECS=60
 HEADER_TIMEOUT_SECS=5
 IDLE_TIMEOUT_SECS=30
 REQUEST_TIMEOUT_SECS=60
@@ -190,7 +190,7 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW=60
+RATE_WINDOW_SECS=60
 HEADER_TIMEOUT_SECS=5
 IDLE_TIMEOUT_SECS=30
 REQUEST_TIMEOUT_SECS=60
@@ -271,7 +271,7 @@ curl -s http://localhost:9090/config | jq .
   "idle_timeout_secs": 60,
   "request_timeout_secs": 120,
   "rate_limit": 100,
-  "rate_window": 60,
+  "rate_window_secs": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,

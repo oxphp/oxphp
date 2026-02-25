@@ -64,7 +64,7 @@ All settings are via environment variables:
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(unset)* | Internal server address for health/metrics/config (e.g. `0.0.0.0:9090`) |
 | `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
-| `RATE_WINDOW` | `60` | Rate limit window in seconds |
+| `RATE_WINDOW_SECS` | `60` | Rate limit window in seconds |
 | `HEADER_TIMEOUT_SECS` | `5` | Header read timeout (Slowloris protection) |
 | `IDLE_TIMEOUT_SECS` | `60` | Keep-alive idle timeout |
 | `REQUEST_TIMEOUT_SECS` | `120` | Overall request timeout; 0 = disabled |

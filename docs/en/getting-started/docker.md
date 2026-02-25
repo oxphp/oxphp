@@ -64,7 +64,7 @@ services:
 
       # Rate limiting (0 = disabled)
       # - RATE_LIMIT=100
-      # - RATE_WINDOW=60
+      # - RATE_WINDOW_SECS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -112,7 +112,7 @@ services:
 | `REQUEST_TIMEOUT_SECS` | `120` | Maximum request processing time. 0 disables the timeout |
 | `DRAIN_TIMEOUT_SECS` | `30` | Grace period for in-flight connections during shutdown |
 | `RATE_LIMIT` | `0` | Max requests per IP per window. 0 disables rate limiting |
-| `RATE_WINDOW` | `60` | Rate limiting window in seconds |
+| `RATE_WINDOW_SECS` | `60` | Rate limiting window in seconds |
 | `TLS_CERT` | _(unset)_ | Path to TLS certificate PEM file |
 | `TLS_KEY` | _(unset)_ | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |

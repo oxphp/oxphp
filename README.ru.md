@@ -64,7 +64,7 @@ curl http://localhost:8080/
 | `LOG_LEVEL` | `info` | Детализация логов: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(не задано)* | Адрес внутреннего сервера для health/metrics/config (например `0.0.0.0:9090`) |
 | `RATE_LIMIT` | `0` (выкл) | Максимум запросов с одного IP за окно |
-| `RATE_WINDOW` | `60` | Размер окна ограничения частоты запросов (секунды) |
+| `RATE_WINDOW_SECS` | `60` | Размер окна ограничения частоты запросов (секунды) |
 | `HEADER_TIMEOUT_SECS` | `5` | Таймаут чтения заголовков (защита от Slowloris) |
 | `IDLE_TIMEOUT_SECS` | `60` | Таймаут простоя keep-alive соединения |
 | `REQUEST_TIMEOUT_SECS` | `120` | Общий таймаут запроса; 0 = отключён |

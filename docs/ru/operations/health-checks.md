@@ -99,7 +99,7 @@ curl http://localhost:9090/config
   "idle_timeout_secs": 60,
   "request_timeout_secs": 120,
   "rate_limit": 100,
-  "rate_window": 60,
+  "rate_window_secs": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,

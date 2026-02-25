@@ -482,7 +482,7 @@ docker run -p 8080:8080 \
                         <thead><tr><th>Variable</th><th>Default</th></tr></thead>
                         <tbody>
                             <tr><td><code>RATE_LIMIT</code></td><td><code>0</code> (off)</td></tr>
-                            <tr><td><code>RATE_WINDOW</code></td><td><code>60</code> sec</td></tr>
+                            <tr><td><code>RATE_WINDOW_SECS</code></td><td><code>60</code> sec</td></tr>
                             <tr><td><code>TLS_CERT</code></td><td><em>(none)</em></td></tr>
                             <tr><td><code>TLS_KEY</code></td><td><em>(none)</em></td></tr>
                         </tbody>
