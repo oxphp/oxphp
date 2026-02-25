@@ -1,0 +1,114 @@
+name: oxphp
+arch: ${ARCH}
+version: ${VERSION}
+release: 1
+epoch: 0
+section: web
+priority: optional
+maintainer: OxPHP <oxphp@users.noreply.github.com>
+description: |
+  Asynchronous PHP application server written in Rust.
+  Replaces nginx + PHP-FPM with a single binary that handles HTTP,
+  executes PHP natively via a custom ZTS SAPI, and provides built-in
+  observability (metrics, health checks, access logging).
+vendor: OxPHP
+homepage: https://github.com/oxphp/oxphp
+license: AGPL-3.0
+
+# Runtime dependencies (package names work on both Debian and Ubuntu)
+depends:
+  - libxml2
+  - libsqlite3-0
+  - libcurl4
+  - libonig5
+  - libargon2-1
+  - zlib1g
+  - libreadline8
+  - libssl3
+
+# RPM-specific overrides
+rpm:
+  group: Applications/Internet
+
+overrides:
+  rpm:
+    depends:
+      - libxml2
+      - sqlite-libs
+      - libcurl
+      - oniguruma
+      - libargon2
+      - zlib
+      - readline
+      - openssl-libs
+
+contents:
+  # Binary
+  - src: staging/usr/bin/oxphp
+    dst: /usr/bin/oxphp
+    file_info:
+      mode: 0755
+
+  # PHP runtime (vendored ZTS build)
+  - src: staging/usr/lib/oxphp/libphp.so
+    dst: /usr/lib/oxphp/libphp.so
+    file_info:
+      mode: 0755
+
+  # Bridge library
+  - src: staging/usr/lib/oxphp/liboxphp_bridge.so
+    dst: /usr/lib/oxphp/liboxphp_bridge.so
+    file_info:
+      mode: 0755
+
+  # PHP extensions
+  - src: staging/usr/lib/oxphp/extensions/
+    dst: /usr/lib/oxphp/extensions/
+
+  # PHP configuration (compile-time paths baked into libphp.so)
+  # Base production php.ini
+  - src: staging/usr/local/etc/php/php.ini
+    dst: /usr/local/etc/php/php.ini
+    type: "config|noreplace"
+    file_info:
+      mode: 0644
+
+  # Extension loading (extension_dir + zend_extension + extension)
+  - src: staging/usr/local/etc/php/conf.d/extension.ini
+    dst: /usr/local/etc/php/conf.d/extension.ini
+    type: "config|noreplace"
+    file_info:
+      mode: 0644
+
+  # OxPHP server configuration
+  - src: dist/oxphp.env
+    dst: /etc/oxphp/oxphp.env
+    type: "config|noreplace"
+    file_info:
+      mode: 0640
+      owner: root
+      group: www-data
+
+  # systemd service
+  - src: dist/oxphp.service
+    dst: /lib/systemd/system/oxphp.service
+    file_info:
+      mode: 0644
+
+  # Linker config — so /usr/lib/oxphp/ is in ld.so search path
+  - src: staging/etc/ld.so.conf.d/oxphp.conf
+    dst: /etc/ld.so.conf.d/oxphp.conf
+    file_info:
+      mode: 0644
+
+  # Web root directory
+  - dst: /var/www/html/public
+    type: dir
+    file_info:
+      mode: 0755
+      owner: www-data
+      group: www-data
+
+scripts:
+  postinstall: dist/postinstall.sh
+  preremove: dist/preremove.sh

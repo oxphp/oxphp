@@ -1,0 +1,146 @@
+# ══════════════════════════════════════════════════════════════
+# Stage 1: Build bridge library (needs PHP headers for zval accessors)
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-bookworm AS bridge-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY ext/bridge/ ./
+
+RUN make && make install && \
+    strip --strip-debug /usr/local/lib/liboxphp_bridge.so
+
+# ══════════════════════════════════════════════════════════════
+# Stage 2: Build PHP extension (needs phpize + bridge headers)
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-bookworm AS ext-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev make autoconf \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install bridge library (needed for linking)
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
+
+WORKDIR /build/ext
+COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
+COPY ext/bridge/oxphp_bridge.h ./bridge/
+
+RUN phpize && \
+    ./configure --enable-oxphp-sapi && \
+    make && \
+    make install && \
+    find /usr/local/lib/php/extensions -name 'oxphp_sapi.so' -exec strip --strip-debug {} +
+
+# ══════════════════════════════════════════════════════════════
+# Stage 3: Build Rust binary in PHP ZTS image
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-bookworm AS builder
+
+# Install Rust via rustup (Debian repos have outdated versions)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    gcc libc6-dev pkg-config \
+    libreadline-dev libncurses-dev \
+    libcurl4-openssl-dev libonig-dev \
+    libsqlite3-dev libargon2-dev \
+    libxml2-dev zlib1g-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install bridge library (needed for Rust linking)
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
+
+WORKDIR /build
+
+# Copy dependency files first (layer caching)
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source to cache dependencies
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    touch src/lib.rs && \
+    cargo build --release && \
+    rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
+
+# Copy real source and build script
+COPY src ./src
+COPY build.rs ./
+
+RUN cargo build --release && \
+    strip /build/target/release/oxphp && \
+    strip --strip-debug /usr/local/lib/libphp.so && \
+    find /usr/local/lib/php/extensions -name '*.so' -exec strip --strip-debug {} +
+
+# ══════════════════════════════════════════════════════════════
+# Stage 4: Runtime
+# ══════════════════════════════════════════════════════════════
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libxml2 \
+    libsqlite3-0 \
+    libcurl4 \
+    libonig5 \
+    libargon2-1 \
+    zlib1g \
+    libreadline8 \
+    libssl3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create www-data user if not already present (Debian usually has it)
+RUN id www-data 2>/dev/null || useradd -r -u 82 -g www-data -s /usr/sbin/nologin www-data
+
+# Copy PHP runtime (already stripped in builder)
+COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
+
+# Copy OPcache from builder
+COPY --from=builder /usr/local/lib/php/extensions/ /tmp/php-ext/
+RUN mkdir -p /usr/local/lib/php/extensions && \
+    find /tmp/php-ext -name 'opcache.so' -exec cp {} /usr/local/lib/php/extensions/ \; && \
+    rm -rf /tmp/php-ext
+
+# Copy bridge library (already stripped in bridge-builder)
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+
+# Copy OxPHP SAPI extension
+COPY --from=ext-builder /usr/local/lib/php/extensions/ /tmp/ext/
+RUN find /tmp/ext -name 'oxphp_sapi.so' -exec cp {} /usr/local/lib/php/extensions/ \; && \
+    rm -rf /tmp/ext
+
+# PHP configuration — use production php.ini from the PHP image as base
+COPY --from=builder /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini
+
+RUN mkdir -p /usr/local/etc/php/conf.d
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
+
+# Update linker cache so libphp.so and liboxphp_bridge.so are found
+RUN ldconfig
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
+
+# Create web root (DOCUMENT_ROOT = /var/www/html/public)
+RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
+
+# Copy welcome page as the default landing page
+COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index.php
+
+# Ensure libphp.so and liboxphp_bridge.so are found at runtime
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+USER www-data
+
+EXPOSE 8080
+
+CMD ["oxphp"]

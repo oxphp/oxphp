@@ -1,8 +1,9 @@
-name: Nightly Build
+name: Docker Images
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 env:
   REGISTRY: ghcr.io
@@ -24,10 +25,6 @@ jobs:
       contents: read
       packages: write
 
-    outputs:
-      digest-amd64: ${{ steps.digest.outputs.amd64 }}
-      digest-arm64: ${{ steps.digest.outputs.arm64 }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,8 +45,8 @@ jobs:
         env:
           PLATFORM: ${{ matrix.platform }}
 
-      - name: Build and push
-        id: build
+      - name: Build and push Alpine
+        id: build-alpine
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -58,12 +55,21 @@ jobs:
           provenance: false
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${{ steps.platform.outputs.suffix }}
-          cache-from: type=gha,scope=${{ steps.platform.outputs.suffix }}
-          cache-to: type=gha,scope=${{ steps.platform.outputs.suffix }},mode=max
+          cache-from: type=gha,scope=alpine-${{ steps.platform.outputs.suffix }}
+          cache-to: type=gha,scope=alpine-${{ steps.platform.outputs.suffix }},mode=max
 
-      - name: Export digest
-        id: digest
-        run: echo "${{ steps.platform.outputs.suffix }}=${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+      - name: Build and push Bookworm
+        id: build-bookworm
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.bookworm-release
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-bookworm-${{ steps.platform.outputs.suffix }}
+          cache-from: type=gha,scope=bookworm-${{ steps.platform.outputs.suffix }}
+          cache-to: type=gha,scope=bookworm-${{ steps.platform.outputs.suffix }},mode=max
 
   manifest:
     needs: build
@@ -81,10 +87,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and push multi-arch manifest
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Alpine manifests ──
+      - name: Create Alpine nightly manifest
+        if: steps.version.outputs.is_release != 'true'
         run: |
           docker buildx imagetools create \
             -t "$REGISTRY/$IMAGE_NAME:nightly" \
             -t "$REGISTRY/$IMAGE_NAME:sha-${{ github.sha }}" \
             "$REGISTRY/$IMAGE_NAME:nightly-amd64" \
             "$REGISTRY/$IMAGE_NAME:nightly-arm64"
+
+      - name: Create Alpine release manifest
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t "$REGISTRY/$IMAGE_NAME:${{ steps.version.outputs.version }}" \
+            -t "$REGISTRY/$IMAGE_NAME:latest" \
+            "$REGISTRY/$IMAGE_NAME:nightly-amd64" \
+            "$REGISTRY/$IMAGE_NAME:nightly-arm64"
+
+      # ── Bookworm manifests ──
+      - name: Create Bookworm nightly manifest
+        if: steps.version.outputs.is_release != 'true'
+        run: |
+          docker buildx imagetools create \
+            -t "$REGISTRY/$IMAGE_NAME:nightly-bookworm" \
+            -t "$REGISTRY/$IMAGE_NAME:bookworm-sha-${{ github.sha }}" \
+            "$REGISTRY/$IMAGE_NAME:nightly-bookworm-amd64" \
+            "$REGISTRY/$IMAGE_NAME:nightly-bookworm-arm64"
+
+      - name: Create Bookworm release manifest
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          docker buildx imagetools create \
+            -t "$REGISTRY/$IMAGE_NAME:${{ steps.version.outputs.version }}-bookworm" \
+            -t "$REGISTRY/$IMAGE_NAME:bookworm" \
+            "$REGISTRY/$IMAGE_NAME:nightly-bookworm-amd64" \
+            "$REGISTRY/$IMAGE_NAME:nightly-bookworm-arm64"
+
+      # Note: per-arch tags (nightly-amd64, nightly-arm64, etc.) remain as
+      # intermediate artifacts. GHCR doesn't support simple tag deletion via CLI.
+      # They are overwritten on each push and share layers with the manifest tags.

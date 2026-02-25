@@ -1,0 +1,157 @@
+# ══════════════════════════════════════════════════════════════
+# Dockerfile.pkg — Build .deb and .rpm packages for OxPHP
+#
+# Usage:
+#   docker build -f Dockerfile.pkg --build-arg VERSION=0.1.0 --output=./packages .
+#
+# Output in ./packages/:
+#   oxphp_0.1.0_arm64.deb
+#   oxphp-0.1.0-1.aarch64.rpm
+# ══════════════════════════════════════════════════════════════
+
+# ── Stage 1: Build bridge library ─────────────────────────────
+FROM php:8.4-zts-bookworm AS bridge-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY ext/bridge/ ./
+
+RUN make && make install && \
+    strip --strip-debug /usr/local/lib/liboxphp_bridge.so
+
+# ── Stage 2: Build PHP extension ──────────────────────────────
+FROM php:8.4-zts-bookworm AS ext-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev make autoconf \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
+
+WORKDIR /build/ext
+COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
+COPY ext/bridge/oxphp_bridge.h ./bridge/
+
+RUN phpize && \
+    ./configure --enable-oxphp-sapi && \
+    make && \
+    make install && \
+    find /usr/local/lib/php/extensions -name 'oxphp_sapi.so' -exec strip --strip-debug {} +
+
+# ── Stage 3: Build Rust binary ────────────────────────────────
+FROM php:8.4-zts-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    gcc libc6-dev pkg-config \
+    libreadline-dev libncurses-dev \
+    libcurl4-openssl-dev libonig-dev \
+    libsqlite3-dev libargon2-dev \
+    libxml2-dev zlib1g-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    touch src/lib.rs && \
+    cargo build --release && \
+    rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
+
+COPY src ./src
+COPY build.rs ./
+
+RUN cargo build --release && \
+    strip /build/target/release/oxphp && \
+    strip --strip-debug /usr/local/lib/libphp.so && \
+    find /usr/local/lib/php/extensions -name '*.so' -exec strip --strip-debug {} +
+
+# ── Stage 4: Assemble staging tree + run nfpm ─────────────────
+FROM debian:bookworm-slim AS packager
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install nfpm
+# TODO: add checksum verification for supply-chain hardening
+ARG NFPM_VERSION=2.45.0
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -sL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${ARCH}.deb" \
+      -o /tmp/nfpm.deb && \
+    dpkg -i /tmp/nfpm.deb && \
+    rm /tmp/nfpm.deb
+
+WORKDIR /pkg
+
+# Copy nfpm config and dist scripts
+COPY nfpm.yaml ./
+COPY dist/ ./dist/
+
+# Assemble staging tree matching nfpm.yaml paths
+RUN mkdir -p staging/usr/bin \
+             staging/usr/lib/oxphp/extensions \
+             staging/usr/local/etc/php/conf.d \
+             staging/etc/oxphp \
+             staging/etc/ld.so.conf.d
+
+# Binary
+COPY --from=builder /build/target/release/oxphp staging/usr/bin/oxphp
+
+# Vendored PHP runtime
+COPY --from=builder /usr/local/lib/libphp.so staging/usr/lib/oxphp/libphp.so
+
+# OPcache extension from PHP build
+COPY --from=builder /usr/local/lib/php/extensions/ /tmp/php-ext/
+RUN find /tmp/php-ext -name 'opcache.so' -exec cp {} staging/usr/lib/oxphp/extensions/ \; && \
+    rm -rf /tmp/php-ext
+
+# Bridge library
+COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so staging/usr/lib/oxphp/liboxphp_bridge.so
+
+# OxPHP SAPI extension
+COPY --from=ext-builder /usr/local/lib/php/extensions/ /tmp/ext/
+RUN find /tmp/ext -name 'oxphp_sapi.so' -exec cp {} staging/usr/lib/oxphp/extensions/ \; && \
+    rm -rf /tmp/ext
+
+# PHP production config (base)
+COPY --from=builder /usr/local/etc/php/php.ini-production staging/usr/local/etc/php/php.ini
+
+# Extension loading config (points to vendored path)
+RUN printf 'extension_dir=/usr/lib/oxphp/extensions\nzend_extension=/usr/lib/oxphp/extensions/opcache.so\nextension=oxphp_sapi.so\n' \
+    > staging/usr/local/etc/php/conf.d/extension.ini
+
+# Linker config
+RUN echo '/usr/lib/oxphp' > staging/etc/ld.so.conf.d/oxphp.conf
+
+# Detect architecture for nfpm
+RUN DPKG_ARCH=$(dpkg --print-architecture) && \
+    case "$DPKG_ARCH" in \
+      amd64)  NFPM_ARCH=amd64 ;; \
+      arm64)  NFPM_ARCH=arm64 ;; \
+      *)      NFPM_ARCH=$DPKG_ARCH ;; \
+    esac && \
+    echo "ARCH=$NFPM_ARCH" > /tmp/build-env
+
+# Build .deb and .rpm
+ARG VERSION=0.0.0-dev
+RUN mkdir -p /out && . /tmp/build-env && \
+    VERSION=$VERSION ARCH=$ARCH nfpm package -p deb -t /out/ && \
+    VERSION=$VERSION ARCH=$ARCH nfpm package -p rpm -t /out/
+
+# ── Stage 5: Output ──────────────────────────────────────────
+FROM scratch
+COPY --from=packager /out/ /
