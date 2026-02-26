@@ -69,7 +69,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 |----------|---------|-------------|
 | `WORKER_FILE` | *(none)* | Path to the PHP worker script (relative to `DOCUMENT_ROOT`). When set, enables persistent worker mode where PHP processes stay alive across requests |
 | `WORKER_MAX_REQUESTS` | `0` | Maximum requests a worker handles before recycling. `0` disables the limit |
-| `WORKER_MAX_MEMORY` | `0` | Maximum memory (in megabytes) a worker may use before recycling. `0` disables the limit |
+| `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory (in megabytes) a worker may use before recycling. `0` disables the limit |
 
 ### Compression
 
@@ -233,13 +233,13 @@ DOCUMENT_ROOT=/var/www/html/public
 WORKER_FILE=../worker.php
 PHP_WORKERS=8
 WORKER_MAX_REQUESTS=10000
-WORKER_MAX_MEMORY=128
+WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-Worker mode keeps PHP processes alive across requests. The worker script calls `oxphp_worker()` with a handler callback. Workers are automatically recycled when they hit `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY`. Set both to `0` to disable recycling.
+Worker mode keeps PHP processes alive across requests. The worker script calls `oxphp_worker()` with a handler callback. Workers are automatically recycled when they hit `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY_MIB`. Set both to `0` to disable recycling.
 
 ### TLS Termination
 

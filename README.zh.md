@@ -76,7 +76,7 @@ curl http://localhost:8080/
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）；设置后启用持久化工作进程模式 |
 | `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数；`0` = 无限制 |
-| `WORKER_MAX_MEMORY` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）；`0` = 无限制 |
+| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）；`0` = 无限制 |
 
 ## 架构
 

@@ -124,7 +124,7 @@ services:
       # - WORKER_MAX_REQUESTS=0
 
       # Max memory (MB) before recycling a worker (0 = unlimited).
-      # - WORKER_MAX_MEMORY=0
+      # - WORKER_MAX_MEMORY_MIB=0
 
       # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
 

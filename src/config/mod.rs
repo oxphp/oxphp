@@ -49,7 +49,7 @@ pub struct Config {
     /// Max requests before recycling a worker (0 = unlimited).
     pub worker_max_requests: u64,
     /// Max memory (MB) before recycling a worker (0 = unlimited).
-    pub worker_max_memory_mb: u64,
+    pub worker_max_memory_mib: u64,
 }
 
 impl Config {
@@ -105,7 +105,7 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
-        let worker_max_memory_mb = std::env::var("WORKER_MAX_MEMORY")
+        let worker_max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
@@ -127,7 +127,7 @@ impl Config {
             max_query_body,
             worker_file,
             worker_max_requests,
-            worker_max_memory_mb,
+            worker_max_memory_mib,
         })
     }
 
@@ -154,7 +154,7 @@ impl Config {
             "worker_mode": self.worker_file.is_some(),
             "worker_file": self.worker_file.as_ref().map(|p| p.display().to_string()),
             "worker_max_requests": self.worker_max_requests,
-            "worker_max_memory_mb": self.worker_max_memory_mb,
+            "worker_max_memory_mib": self.worker_max_memory_mib,
         })
     }
 }

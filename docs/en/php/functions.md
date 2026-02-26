@@ -308,13 +308,13 @@ oxphp_worker(function () use ($db, $config) {
    - The server shuts down (graceful shutdown signal)
    - The handler throws an uncaught exception or fatal error (exit reason: `error`)
    - The worker hits `WORKER_MAX_REQUESTS` (exit reason: `max_requests`)
-   - The worker exceeds `WORKER_MAX_MEMORY` (exit reason: `max_memory`)
+   - The worker exceeds `WORKER_MAX_MEMORY_MIB` (exit reason: `max_memory`)
 
 **Notes:**
 - This function only works when `WORKER_FILE` is set. Calling it from a regular PHP script emits an `E_WARNING` and returns `false`.
 - Variables declared outside the handler closure persist across requests. Use this for database connections, configuration, and other expensive initialization.
 - The handler's `use` clause captures variables by reference or value as usual. Variables captured by reference share state across requests.
-- Worker recycling (via `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY`) causes the worker process to exit and respawn, which re-executes the entire worker script including bootstrap.
+- Worker recycling (via `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY_MIB`) causes the worker process to exit and respawn, which re-executes the entire worker script including bootstrap.
 - Worker mode metrics (`oxphp_worker_requests_handled_total`, `oxphp_worker_recycles_total`, etc.) are available on the `/metrics` endpoint when the internal server is running.
 
 ---
@@ -371,4 +371,4 @@ print_r(get_extension_funcs('oxphp_sapi'));
 - [Request IDs](/features/request-ids.md) --- how request IDs are generated and propagated
 - [SAPI Bridge](/architecture/sapi-bridge.md) --- the C bridge that connects Rust and PHP
 - [Worker Pool](/architecture/worker-pool.md#worker-mode-persistent-php) --- worker mode architecture, recycling, and metrics
-- [Configuration](/operations/configuration.md#worker-mode) --- `WORKER_FILE`, `WORKER_MAX_REQUESTS`, `WORKER_MAX_MEMORY`
+- [Configuration](/operations/configuration.md#worker-mode) --- `WORKER_FILE`, `WORKER_MAX_REQUESTS`, `WORKER_MAX_MEMORY_MIB`

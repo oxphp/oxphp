@@ -308,13 +308,13 @@ oxphp_worker(function () use ($db, $config) {
    - 服务器关闭（优雅关闭信号）
    - 处理器抛出未捕获的异常或致命错误（退出原因：`error`）
    - 工作进程达到 `WORKER_MAX_REQUESTS`（退出原因：`max_requests`）
-   - 工作进程超过 `WORKER_MAX_MEMORY`（退出原因：`max_memory`）
+   - 工作进程超过 `WORKER_MAX_MEMORY_MIB`（退出原因：`max_memory`）
 
 **注意事项：**
 - 此函数仅在设置了 `WORKER_FILE` 时有效。从普通 PHP 脚本调用会触发 `E_WARNING` 并返回 `false`。
 - 在处理器闭包外声明的变量在请求间保持不变。用于数据库连接、配置和其他昂贵的初始化操作。
 - 处理器的 `use` 子句按引用或按值捕获变量，行为与平常相同。按引用捕获的变量在请求间共享状态。
-- 工作进程回收（通过 `WORKER_MAX_REQUESTS` 或 `WORKER_MAX_MEMORY`）会导致工作进程退出并重新生成，重新执行整个工作脚本（包括引导代码）。
+- 工作进程回收（通过 `WORKER_MAX_REQUESTS` 或 `WORKER_MAX_MEMORY_MIB`）会导致工作进程退出并重新生成，重新执行整个工作脚本（包括引导代码）。
 - 工作进程模式指标（`oxphp_worker_requests_handled_total`、`oxphp_worker_recycles_total` 等）在内部服务器运行时可通过 `/metrics` 端点获取。
 
 ---
@@ -371,4 +371,4 @@ print_r(get_extension_funcs('oxphp_sapi'));
 - [请求 ID](/features/request-ids.md) --- 请求 ID 如何生成和传播
 - [SAPI 桥接](/architecture/sapi-bridge.md) --- 连接 Rust 和 PHP 的 C 桥接
 - [工作池](/architecture/worker-pool.md#worker-mode-persistent-php) --- 工作进程模式架构、回收和指标
-- [配置](/operations/configuration.md#worker-mode) --- `WORKER_FILE`、`WORKER_MAX_REQUESTS`、`WORKER_MAX_MEMORY`
+- [配置](/operations/configuration.md#worker-mode) --- `WORKER_FILE`、`WORKER_MAX_REQUESTS`、`WORKER_MAX_MEMORY_MIB`
