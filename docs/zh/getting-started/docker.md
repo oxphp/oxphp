@@ -47,7 +47,7 @@ services:
       - EXECUTOR=sapi                # "sapi" 或 "stub"
       # - PHP_WORKERS=0              # 静态模式：0 = CPU/2（最少 1），或固定数量 N
       # - PHP_WORKERS=2:16           # 动态模式：在 2 到 16 之间扩缩容
-      # - PHP_WORKERS_IDLE_SEC=30    # 动态缩容的空闲超时时间
+      # - PHP_WORKERS_IDLE_SECONDS=30    # 动态缩容的空闲超时时间
       # - QUEUE_CAPACITY=512         # 默认值：PHP_WORKERS * 128
 
       # 日志
@@ -57,14 +57,14 @@ services:
       - INTERNAL_ADDR=0.0.0.0:9090
 
       # 超时（秒）
-      - HEADER_TIMEOUT_SECS=5
-      - IDLE_TIMEOUT_SECS=60
-      - REQUEST_TIMEOUT_SECS=120
-      - DRAIN_TIMEOUT_SECS=30
+      - HEADER_TIMEOUT_SECONDS=5
+      - IDLE_TIMEOUT_SECONDS=60
+      - REQUEST_TIMEOUT_SECONDS=120
+      - DRAIN_TIMEOUT_SECONDS=30
 
       # 限流（0 = 禁用）
       # - RATE_LIMIT=100
-      # - RATE_WINDOW_SECS=60
+      # - RATE_WINDOW_SECONDS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -102,17 +102,17 @@ services:
 | `INDEX_FILE` | _(未设置)_ | 设为 `index.php` 启用 Framework 模式，设为 `index.html` 启用 SPA 模式 |
 | `EXECUTOR` | `sapi` | PHP 执行器类型：`sapi`（真实 PHP）或 `stub`（占位符） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | Worker 池模式。`N` = 固定池，`MIN:MAX` = 动态扩缩容 |
-| `PHP_WORKERS_IDLE_SEC` | `30` | 动态 worker 退出前的空闲超时时间 |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态 worker 退出前的空闲超时时间 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界请求队列大小。队列满时返回 503 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error` |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `INTERNAL_ADDR` | _(未设置)_ | 内部服务器地址。未设置则禁用 |
-| `HEADER_TIMEOUT_SECS` | `5` | 读取请求头的超时时间 |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive 空闲超时时间 |
-| `REQUEST_TIMEOUT_SECS` | `120` | 最大请求处理时间。设为 0 则禁用超时 |
-| `DRAIN_TIMEOUT_SECS` | `30` | 关机期间进行中连接的宽限期 |
+| `HEADER_TIMEOUT_SECONDS` | `5` | 读取请求头的超时时间 |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive 空闲超时时间 |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 最大请求处理时间。设为 0 则禁用超时 |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 关机期间进行中连接的宽限期 |
 | `RATE_LIMIT` | `0` | 每个 IP 每窗口期的最大请求数。0 表示禁用限流 |
-| `RATE_WINDOW_SECS` | `60` | 限流窗口时长（秒） |
+| `RATE_WINDOW_SECONDS` | `60` | 限流窗口时长（秒） |
 | `TLS_CERT` | _(未设置)_ | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | _(未设置)_ | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | _(未设置)_ | 包含 `{status}.html` 错误页面文件的目录 |

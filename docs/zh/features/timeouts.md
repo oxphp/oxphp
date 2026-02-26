@@ -9,17 +9,17 @@ OxPHP 通过可配置的超时来防护慢速客户端和失控请求。每个�
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `HEADER_TIMEOUT_SECS` | TCP 连接后接收 HTTP 头的最大时间 | `5` |
-| `IDLE_TIMEOUT_SECS` | Keep-alive 连接上请求之间的最大空闲时间 | `60` |
-| `REQUEST_TIMEOUT_SECS` | 请求处理的最大总时间（包括 PHP 执行） | `120` |
+| `HEADER_TIMEOUT_SECONDS` | TCP 连接后接收 HTTP 头的最大时间 | `5` |
+| `IDLE_TIMEOUT_SECONDS` | Keep-alive 连接上请求之间的最大空闲时间 | `60` |
+| `REQUEST_TIMEOUT_SECONDS` | 请求处理的最大总时间（包括 PHP 执行） | `120` |
 
 ```bash
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=60
-REQUEST_TIMEOUT_SECS=120
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=60
+REQUEST_TIMEOUT_SECONDS=120
 ```
 
-设置 `HEADER_TIMEOUT_SECS=0` 将跳过向 hyper 注册头部读取超时。设置 `REQUEST_TIMEOUT_SECS=0` 将完全禁用请求超时。
+设置 `HEADER_TIMEOUT_SECONDS=0` 将跳过向 hyper 注册头部读取超时。设置 `REQUEST_TIMEOUT_SECONDS=0` 将完全禁用请求超时。
 
 ## 超时类型
 
@@ -33,7 +33,7 @@ REQUEST_TIMEOUT_SECS=120
 
 ### 空闲超时
 
-用于控制 keep-alive 连接在请求之间可以保持空闲的时间。`IDLE_TIMEOUT_SECS` 变量从环境中读取并包含在 `/config` 内部端点中，但 hyper-util 的 HTTP/1.1 构建器没有暴露 `keep_alive_timeout` 设置。此超时目前不在连接层强制执行。
+用于控制 keep-alive 连接在请求之间可以保持空闲的时间。`IDLE_TIMEOUT_SECONDS` 变量从环境中读取并包含在 `/config` 内部端点中，但 hyper-util 的 HTTP/1.1 构建器没有暴露 `keep_alive_timeout` 设置。此超时目前不在连接层强制执行。
 
 ### 请求超时
 
@@ -50,13 +50,13 @@ REQUEST_TIMEOUT_SECS=120
 ```
 TCP connect (+ TLS handshake if enabled)
   |
-  +-- [HEADER_TIMEOUT_SECS] --> headers received
+  +-- [HEADER_TIMEOUT_SECONDS] --> headers received
   |                               |
-  |                               +-- [REQUEST_TIMEOUT_SECS] --> response sent
+  |                               +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
   |                                                                |
   |                                                                +-- next request or close
   |                                                                     |
-  |                                                                     +-- [HEADER_TIMEOUT_SECS] --> ...
+  |                                                                     +-- [HEADER_TIMEOUT_SECONDS] --> ...
 ```
 
 在 keep-alive 连接上，头部超时和请求超时对每个请求独立应用。

@@ -33,25 +33,25 @@ impl ServerConfig {
         let index_file = std::env::var("INDEX_FILE").ok();
 
         let header_read_timeout = Duration::from_secs(
-            std::env::var("HEADER_TIMEOUT_SECS")
+            std::env::var("HEADER_TIMEOUT_SECONDS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(5),
         );
         let idle_timeout = Duration::from_secs(
-            std::env::var("IDLE_TIMEOUT_SECS")
+            std::env::var("IDLE_TIMEOUT_SECONDS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(60),
         );
-        let request_timeout_secs = std::env::var("REQUEST_TIMEOUT_SECS")
+        let request_timeout_seconds = std::env::var("REQUEST_TIMEOUT_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(120);
-        let request_timeout = if request_timeout_secs == 0 {
+        let request_timeout = if request_timeout_seconds == 0 {
             Duration::ZERO
         } else {
-            Duration::from_secs(request_timeout_secs)
+            Duration::from_secs(request_timeout_seconds)
         };
 
         Ok(Self {

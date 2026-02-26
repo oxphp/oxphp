@@ -434,7 +434,7 @@ docker run -p 8080:8080 \
                         <tbody>
                             <tr><td><code>PHP_WORKERS</code></td><td><code>0</code> (auto: cpu&times;2)</td></tr>
                             <tr><td><code>QUEUE_CAPACITY</code></td><td>workers &times; 128</td></tr>
-                            <tr><td><code>PHP_WORKERS_IDLE_SEC</code></td><td><code>30</code></td></tr>
+                            <tr><td><code>PHP_WORKERS_IDLE_SECONDS</code></td><td><code>30</code></td></tr>
                         </tbody>
                     </table>
                     <p style="margin-top: 12px; font-size: 0.8125rem; color: var(--color-muted)">
@@ -464,10 +464,10 @@ docker run -p 8080:8080 \
                     <table class="env-table">
                         <thead><tr><th>Variable</th><th>Default</th></tr></thead>
                         <tbody>
-                            <tr><td><code>REQUEST_TIMEOUT_SECS</code></td><td><code>120</code></td></tr>
-                            <tr><td><code>HEADER_TIMEOUT_SECS</code></td><td><code>5</code></td></tr>
-                            <tr><td><code>IDLE_TIMEOUT_SECS</code></td><td><code>60</code></td></tr>
-                            <tr><td><code>DRAIN_TIMEOUT_SECS</code></td><td><code>30</code></td></tr>
+                            <tr><td><code>REQUEST_TIMEOUT_SECONDS</code></td><td><code>120</code></td></tr>
+                            <tr><td><code>HEADER_TIMEOUT_SECONDS</code></td><td><code>5</code></td></tr>
+                            <tr><td><code>IDLE_TIMEOUT_SECONDS</code></td><td><code>60</code></td></tr>
+                            <tr><td><code>DRAIN_TIMEOUT_SECONDS</code></td><td><code>30</code></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -482,7 +482,7 @@ docker run -p 8080:8080 \
                         <thead><tr><th>Variable</th><th>Default</th></tr></thead>
                         <tbody>
                             <tr><td><code>RATE_LIMIT</code></td><td><code>0</code> (off)</td></tr>
-                            <tr><td><code>RATE_WINDOW_SECS</code></td><td><code>60</code> sec</td></tr>
+                            <tr><td><code>RATE_WINDOW_SECONDS</code></td><td><code>60</code> sec</td></tr>
                             <tr><td><code>TLS_CERT</code></td><td><em>(none)</em></td></tr>
                             <tr><td><code>TLS_KEY</code></td><td><em>(none)</em></td></tr>
                         </tbody>

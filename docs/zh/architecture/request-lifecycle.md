@@ -162,7 +162,7 @@ if let Some(early_resp) = received_event.early_response {
 
 ### 7. 请求超时
 
-如果配置了 `REQUEST_TIMEOUT_SECS`（非零），则剩余管道被包装在 `tokio::time::timeout` 中。超时触发时返回 504 Gateway Timeout：
+如果配置了 `REQUEST_TIMEOUT_SECONDS`（非零），则剩余管道被包装在 `tokio::time::timeout` 中。超时触发时返回 504 Gateway Timeout：
 
 ```rust
 match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await {

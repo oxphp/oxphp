@@ -58,16 +58,16 @@ All settings are via environment variables:
 | `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async I/O threads; `0` = auto, `1` = single-threaded, `N` = multi-threaded with N threads |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode: `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before retiring a dynamic worker (dynamic mode only) |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before retiring a dynamic worker (dynamic mode only) |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 503 when full |
-| `DRAIN_TIMEOUT_SECS` | `30` | Graceful shutdown drain timeout in seconds |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Graceful shutdown drain timeout in seconds |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(unset)* | Internal server address for health/metrics/config (e.g. `0.0.0.0:9090`) |
 | `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
-| `RATE_WINDOW_SECS` | `60` | Rate limit window in seconds |
-| `HEADER_TIMEOUT_SECS` | `5` | Header read timeout (Slowloris protection) |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive idle timeout |
-| `REQUEST_TIMEOUT_SECS` | `120` | Overall request timeout; 0 = disabled |
+| `RATE_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Header read timeout (Slowloris protection) |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Overall request timeout; 0 = disabled |
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |

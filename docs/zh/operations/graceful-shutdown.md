@@ -28,7 +28,7 @@ OxPHP 监听两个关闭信号：
 
 4. **排空进行中的连接** --- 服务器等待所有活跃连接完成，每 100ms 检查一次。
 
-5. **强制执行排空超时** --- 如果在 `DRAIN_TIMEOUT_SECS` 之后仍有连接活跃，服务器记录警告并继续关闭。剩余连接将被丢弃。
+5. **强制执行排空超时** --- 如果在 `DRAIN_TIMEOUT_SECONDS` 之后仍有连接活跃，服务器记录警告并继续关闭。剩余连接将被丢弃。
 
 6. **中止内部服务器** --- 健康检查/指标服务器任务被取消。
 
@@ -54,18 +54,18 @@ OxPHP 监听两个关闭信号：
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `DRAIN_TIMEOUT_SECS` | `30` | 等待进行中连接完成的最大秒数 |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 等待进行中连接完成的最大秒数 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数（由 Tokio 信号量强制执行） |
 
 ### 选择排空超时
 
-将 `DRAIN_TIMEOUT_SECS` 设置为可以容纳最慢预期请求的值：
+将 `DRAIN_TIMEOUT_SECONDS` 设置为可以容纳最慢预期请求的值：
 
 - **API 服务器**（快速响应）：`10`--`15` 秒
 - **应用程序**（文件上传或长查询）：`30`--`60` 秒
 - **批处理**端点：匹配最长预期操作时间
 
-在 Kubernetes 中，将 `DRAIN_TIMEOUT_SECS` 设置为小于 Pod 的 `terminationGracePeriodSeconds`，以确保排空在 kubelet 发送 `SIGKILL` 之前完成：
+在 Kubernetes 中，将 `DRAIN_TIMEOUT_SECONDS` 设置为小于 Pod 的 `terminationGracePeriodSeconds`，以确保排空在 kubelet 发送 `SIGKILL` 之前完成：
 
 ```yaml
 spec:
@@ -73,7 +73,7 @@ spec:
   containers:
     - name: oxphp
       env:
-        - name: DRAIN_TIMEOUT_SECS
+        - name: DRAIN_TIMEOUT_SECONDS
           value: "30"
 ```
 
@@ -125,7 +125,7 @@ services:
   oxphp:
     stop_grace_period: 45s
     environment:
-      DRAIN_TIMEOUT_SECS: "30"
+      DRAIN_TIMEOUT_SECONDS: "30"
 ```
 
 ## Kubernetes
@@ -167,11 +167,11 @@ lifecycle:
 {"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
 ```
 
-你可以利用这些日志消息设置告警，如果服务器经常触发排空超时，可能表明需要增大 `DRAIN_TIMEOUT_SECS` 或调查长时间运行的请求。
+你可以利用这些日志消息设置告警，如果服务器经常触发排空超时，可能表明需要增大 `DRAIN_TIMEOUT_SECONDS` 或调查长时间运行的请求。
 
 ## 另请参阅
 
-- [配置](configuration.md) --- `DRAIN_TIMEOUT_SECS`、`MAX_CONNECTIONS` 及其他环境变量
+- [配置](configuration.md) --- `DRAIN_TIMEOUT_SECONDS`、`MAX_CONNECTIONS` 及其他环境变量
 - [健康检查](health-checks.md) --- 就绪探针如何与优雅关闭交互
 - [指标](metrics.md) --- `oxphp_active_connections` 在排空期间跟踪连接数
 - [工作池](/architecture/worker-pool.md) --- PHP 工作线程如何关闭和等待结束

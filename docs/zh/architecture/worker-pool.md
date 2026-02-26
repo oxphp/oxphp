@@ -182,7 +182,7 @@ struct ManagedWorker {
 
 **缩容**（所有条件必须为真）：
 - 当前工作线程数量高于 MIN
-- 某个工作线程空闲时间超过 `PHP_WORKERS_IDLE_SEC`（默认 30 秒）
+- 某个工作线程空闲时间超过 `PHP_WORKERS_IDLE_SECONDS`（默认 30 秒）
 - 距上次缩容至少 5 秒
 
 ScaleManager 在生成新 OS 线程之前释放 Mutex 锁以避免阻塞 Tokio 运行时。退役的工作线程在后台线程中被 join。
@@ -192,7 +192,7 @@ ScaleManager 在生成新 OS 线程之前释放 Mutex 锁以避免阻塞 Tokio �
 | 变量 | 默认值 | 描述 |
 |---|---|---|
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作线程池模式。`N` 为静态，`MIN:MAX` 为动态 |
-| `PHP_WORKERS_IDLE_SEC` | `30` | 动态工作线程退役前的空闲超时 |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作线程退役前的空闲超时 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界 channel 容量（动态模式使用初始数量） |
 
 ## 工作进程模式（持久化 PHP）

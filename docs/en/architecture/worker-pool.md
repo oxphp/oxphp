@@ -182,7 +182,7 @@ When `PHP_WORKERS=MIN:MAX` is configured, `start_scale_manager()` instead spawns
 
 **Scale-down** (all conditions must be true):
 - Current worker count is above MIN
-- A worker has been idle longer than `PHP_WORKERS_IDLE_SEC` (default 30s)
+- A worker has been idle longer than `PHP_WORKERS_IDLE_SECONDS` (default 30s)
 - At least 5 seconds since the last scale-down
 
 The ScaleManager drops the Mutex lock before spawning new OS threads to avoid blocking the Tokio runtime. Retired workers are joined in a background thread.
@@ -192,7 +192,7 @@ The ScaleManager drops the Mutex lock before spawning new OS threads to avoid bl
 | Variable | Default | Description |
 |---|---|---|
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` for static, `MIN:MAX` for dynamic |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before a dynamic worker is retired |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before a dynamic worker is retired |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel capacity (uses initial count for dynamic) |
 
 ## Worker Mode (Persistent PHP)

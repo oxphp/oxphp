@@ -47,7 +47,7 @@ services:
       - EXECUTOR=sapi                # "sapi" or "stub"
       # - PHP_WORKERS=0              # Static: 0 = CPU/2, or fixed N
       # - PHP_WORKERS=2:16           # Dynamic: scale between 2 and 16
-      # - PHP_WORKERS_IDLE_SEC=30    # Idle timeout for dynamic scale-down
+      # - PHP_WORKERS_IDLE_SECONDS=30    # Idle timeout for dynamic scale-down
       # - QUEUE_CAPACITY=512         # Default: PHP_WORKERS * 128
 
       # Logging
@@ -57,14 +57,14 @@ services:
       - INTERNAL_ADDR=0.0.0.0:9090
 
       # Timeouts (seconds)
-      - HEADER_TIMEOUT_SECS=5
-      - IDLE_TIMEOUT_SECS=60
-      - REQUEST_TIMEOUT_SECS=120
-      - DRAIN_TIMEOUT_SECS=30
+      - HEADER_TIMEOUT_SECONDS=5
+      - IDLE_TIMEOUT_SECONDS=60
+      - REQUEST_TIMEOUT_SECONDS=120
+      - DRAIN_TIMEOUT_SECONDS=30
 
       # Rate limiting (0 = disabled)
       # - RATE_LIMIT=100
-      # - RATE_WINDOW_SECS=60
+      # - RATE_WINDOW_SECONDS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -102,17 +102,17 @@ services:
 | `INDEX_FILE` | _(unset)_ | Set to `index.php` for Framework mode or `index.html` for SPA mode |
 | `EXECUTOR` | `sapi` | PHP executor type: `sapi` (real PHP) or `stub` (placeholder) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Idle timeout before a dynamic worker is retired |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before a dynamic worker is retired |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded request queue size. 503 returned when full |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `INTERNAL_ADDR` | _(unset)_ | Address for internal server. Unset disables it |
-| `HEADER_TIMEOUT_SECS` | `5` | Timeout for reading request headers |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive idle timeout |
-| `REQUEST_TIMEOUT_SECS` | `120` | Maximum request processing time. 0 disables the timeout |
-| `DRAIN_TIMEOUT_SECS` | `30` | Grace period for in-flight connections during shutdown |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Timeout for reading request headers |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum request processing time. 0 disables the timeout |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Grace period for in-flight connections during shutdown |
 | `RATE_LIMIT` | `0` | Max requests per IP per window. 0 disables rate limiting |
-| `RATE_WINDOW_SECS` | `60` | Rate limiting window in seconds |
+| `RATE_WINDOW_SECONDS` | `60` | Rate limiting window in seconds |
 | `TLS_CERT` | _(unset)_ | Path to TLS certificate PEM file |
 | `TLS_KEY` | _(unset)_ | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |

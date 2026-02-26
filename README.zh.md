@@ -58,16 +58,16 @@ curl http://localhost:8080/
 | `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | Tokio 异步 I/O 线程数；`0` = 自动，`1` = 单线程，`N` = 多线程 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
-| `PHP_WORKERS_IDLE_SEC` | `30` | 动态模式下，工作线程的空闲超时时间（仅动态模式有效） |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下，工作线程的空闲超时时间（仅动态模式有效） |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 503 |
-| `DRAIN_TIMEOUT_SECS` | `30` | 优雅关闭的排空等待超时（秒） |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时（秒） |
 | `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
 | `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
-| `RATE_WINDOW_SECS` | `60` | 限流时间窗口（秒） |
-| `HEADER_TIMEOUT_SECS` | `5` | 请求头读取超时（Slowloris 防护） |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive 空闲超时 |
-| `REQUEST_TIMEOUT_SECS` | `120` | 整体请求超时；`0` 表示禁用 |
+| `RATE_WINDOW_SECONDS` | `60` | 限流时间窗口（秒） |
+| `HEADER_TIMEOUT_SECONDS` | `5` | 请求头读取超时（Slowloris 防护） |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive 空闲超时 |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 整体请求超时；`0` 表示禁用 |
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |

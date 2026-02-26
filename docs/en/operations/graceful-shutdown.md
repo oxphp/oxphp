@@ -28,7 +28,7 @@ When a shutdown signal is received, the signal handler spawns a task that runs t
 
 4. **Drain in-flight connections** --- the server waits for all active connections to complete, checking every 100ms.
 
-5. **Enforce the drain timeout** --- if connections are still active after `DRAIN_TIMEOUT_SECS`, the server logs a warning and proceeds with shutdown. Remaining connections are dropped.
+5. **Enforce the drain timeout** --- if connections are still active after `DRAIN_TIMEOUT_SECONDS`, the server logs a warning and proceeds with shutdown. Remaining connections are dropped.
 
 6. **Abort the internal server** --- the health/metrics server task is cancelled.
 
@@ -54,18 +54,18 @@ accept loop exits after observing shutdown flag
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECS` | `30` | Maximum seconds to wait for in-flight connections to complete |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections to complete |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections (enforced by a Tokio semaphore) |
 
 ### Choosing a Drain Timeout
 
-Set `DRAIN_TIMEOUT_SECS` to accommodate your slowest expected request:
+Set `DRAIN_TIMEOUT_SECONDS` to accommodate your slowest expected request:
 
 - **API servers** with fast responses: `10`--`15` seconds
 - **Applications** with file uploads or long queries: `30`--`60` seconds
 - **Batch processing** endpoints: match your longest expected operation
 
-In Kubernetes, set `DRAIN_TIMEOUT_SECS` to less than the pod's `terminationGracePeriodSeconds` to ensure the drain completes before the kubelet sends `SIGKILL`:
+In Kubernetes, set `DRAIN_TIMEOUT_SECONDS` to less than the pod's `terminationGracePeriodSeconds` to ensure the drain completes before the kubelet sends `SIGKILL`:
 
 ```yaml
 spec:
@@ -73,7 +73,7 @@ spec:
   containers:
     - name: oxphp
       env:
-        - name: DRAIN_TIMEOUT_SECS
+        - name: DRAIN_TIMEOUT_SECONDS
           value: "30"
 ```
 
@@ -125,7 +125,7 @@ services:
   oxphp:
     stop_grace_period: 45s
     environment:
-      DRAIN_TIMEOUT_SECS: "30"
+      DRAIN_TIMEOUT_SECONDS: "30"
 ```
 
 ## Kubernetes
@@ -167,11 +167,11 @@ If the drain timeout is reached before all connections finish:
 {"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
 ```
 
-You can use these log messages to set up alerts if the server regularly hits the drain timeout, which may indicate `DRAIN_TIMEOUT_SECS` needs to be increased or long-running requests need investigation.
+You can use these log messages to set up alerts if the server regularly hits the drain timeout, which may indicate `DRAIN_TIMEOUT_SECONDS` needs to be increased or long-running requests need investigation.
 
 ## See Also
 
-- [Configuration](configuration.md) --- `DRAIN_TIMEOUT_SECS`, `MAX_CONNECTIONS`, and other environment variables
+- [Configuration](configuration.md) --- `DRAIN_TIMEOUT_SECONDS`, `MAX_CONNECTIONS`, and other environment variables
 - [Health Checks](health-checks.md) --- how readiness probes interact with graceful shutdown
 - [Metrics](metrics.md) --- `oxphp_active_connections` tracks connections during drain
 - [Worker Pool](/architecture/worker-pool.md) --- how PHP workers shut down and join

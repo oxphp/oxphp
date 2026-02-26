@@ -197,7 +197,7 @@ pub enum ExecuteResult {
 1. SIGTERM 或 Ctrl+C 触发 `shutdown_signal()`
 2. `plugin_manager.shutdown_all()` 通知插件，然后 `server.shutdown()` 设置原子关闭标志并调用 `executor.shutdown()`
 3. 接受循环在 `is_shutdown()` 时中断
-4. 排空阶段：最多等待 `drain_timeout_secs`（默认 30 秒）让进行中的连接完成
+4. 排空阶段：最多等待 `drain_timeout_seconds`（默认 30 秒）让进行中的连接完成
 5. 内部服务器任务被中止
 6. `SapiExecutor::drop()` 释放 channel 发送端，等待所有工作线程结束，然后依次调用 `php_module_shutdown()`、`sapi_shutdown()` 和 `tsrm_shutdown()`
 

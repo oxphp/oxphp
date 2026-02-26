@@ -23,7 +23,7 @@ OxPHP настраивается исключительно через пере�
 |------------|--------------|----------|
 | `EXECUTOR` | `sapi` | Тип PHP-исполнителя. `sapi` для реального выполнения PHP, `stub` для заглушки ответа (бенчмаркинг) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1, статический) | Режим пула воркеров. Укажите `N` для фиксированного пула или `MIN:MAX` для динамического масштабирования. См. [Режимы воркеров](#режимы-воркеров) |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Секунды бездействия динамического воркера до его вывода из пула. Применяется только в динамическом режиме |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Секунды бездействия динамического воркера до его вывода из пула. Применяется только в динамическом режиме |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Максимальное количество запросов в очереди PHP. При заполнении новые PHP-запросы получают ответ `503 Service Unavailable`. Использует начальное количество воркеров для динамического режима |
 
 ### Логирование
@@ -37,17 +37,17 @@ OxPHP настраивается исключительно через пере�
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `HEADER_TIMEOUT_SECS` | `5` | Максимальное время ожидания заголовков запроса после TCP-соединения в секундах |
-| `IDLE_TIMEOUT_SECS` | `60` | Таймаут бездействия keep-alive. Соединения без активности в течение этого времени закрываются |
-| `REQUEST_TIMEOUT_SECS` | `120` | Максимальное время всего цикла запрос-ответ в секундах. Установите `0` для отключения |
-| `DRAIN_TIMEOUT_SECS` | `30` | Максимальное время ожидания завершения текущих соединений при плавной остановке в секундах |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Максимальное время ожидания заголовков запроса после TCP-соединения в секундах |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Таймаут бездействия keep-alive. Соединения без активности в течение этого времени закрываются |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Максимальное время всего цикла запрос-ответ в секундах. Установите `0` для отключения |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Максимальное время ожидания завершения текущих соединений при плавной остановке в секундах |
 
 ### Ограничение частоты запросов
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `RATE_LIMIT` | `0` | Максимальное количество запросов с одного IP-адреса за временное окно. `0` отключает ограничение частоты |
-| `RATE_WINDOW_SECS` | `60` | Длительность окна ограничения частоты в секундах |
+| `RATE_WINDOW_SECONDS` | `60` | Длительность окна ограничения частоты в секундах |
 
 ### TLS
 
@@ -104,7 +104,7 @@ PHP_WORKERS=0:0        # Автоопределение обоих (CPU/4 мин
 
 ScaleManager запускается каждые 500 мс и:
 - **Масштабирует вверх**, когда все воркеры заняты и пул ниже MAX (задержка 500 мс)
-- **Масштабирует вниз**, когда воркер простаивает дольше `PHP_WORKERS_IDLE_SEC` и пул выше MIN (задержка 5 с)
+- **Масштабирует вниз**, когда воркер простаивает дольше `PHP_WORKERS_IDLE_SECONDS` и пул выше MIN (задержка 5 с)
 
 Динамические воркеры используют `recv_timeout(200ms)` для периодической проверки флага завершения.
 
@@ -169,11 +169,11 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -184,17 +184,17 @@ LISTEN_ADDR=0.0.0.0:8080
 DOCUMENT_ROOT=/var/www/html/public
 INDEX_FILE=index.php
 PHP_WORKERS=4:32
-PHP_WORKERS_IDLE_SEC=60
+PHP_WORKERS_IDLE_SECONDS=60
 QUEUE_CAPACITY=512
 LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -211,7 +211,7 @@ services:
       DOCUMENT_ROOT: "/var/www/html/public"
       INDEX_FILE: "index.php"
       PHP_WORKERS: "4"             # Или "2:16" для динамического масштабирования
-      # PHP_WORKERS_IDLE_SEC: "30" # Таймаут бездействия (только динамический режим)
+      # PHP_WORKERS_IDLE_SECONDS: "30" # Таймаут бездействия (только динамический режим)
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
@@ -266,12 +266,12 @@ curl -s http://localhost:9090/config | jq .
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,
-  "drain_timeout_secs": 30,
-  "header_timeout_secs": 5,
-  "idle_timeout_secs": 60,
-  "request_timeout_secs": 120,
+  "drain_timeout_seconds": 30,
+  "header_timeout_seconds": 5,
+  "idle_timeout_seconds": 60,
+  "request_timeout_seconds": 120,
   "rate_limit": 100,
-  "rate_window_secs": 60,
+  "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
@@ -287,7 +287,7 @@ curl -s http://localhost:9090/config | jq .
 - [Маршрутизация](/features/routing.md) --- подробное объяснение трёх режимов маршрутизации
 - [Проверки состояния](health-checks.md) --- эндпоинты `/health`, `/metrics` и `/config` внутреннего сервера
 - [Метрики](metrics.md) --- справочник метрик, совместимых с Prometheus
-- [Плавная остановка](graceful-shutdown.md) --- как `DRAIN_TIMEOUT_SECS` влияет на последовательность остановки
+- [Плавная остановка](graceful-shutdown.md) --- как `DRAIN_TIMEOUT_SECONDS` влияет на последовательность остановки
 - [TLS](/features/tls.md) --- конфигурация TLS и требования к сертификатам
 - [Ограничение частоты запросов](/features/rate-limiting.md) --- подробности ограничения частоты запросов по IP
 - [Пул воркеров](/architecture/worker-pool.md) --- архитектура статического и динамического пула воркеров

@@ -162,7 +162,7 @@ if let Some(early_resp) = received_event.early_response {
 
 ### 7. Тайм-аут запроса
 
-Если настроен `REQUEST_TIMEOUT_SECS` (ненулевое значение), оставшаяся часть конвейера оборачивается в `tokio::time::timeout`. При срабатывании тайм-аута возвращается 504 Gateway Timeout:
+Если настроен `REQUEST_TIMEOUT_SECONDS` (ненулевое значение), оставшаяся часть конвейера оборачивается в `tokio::time::timeout`. При срабатывании тайм-аута возвращается 504 Gateway Timeout:
 
 ```rust
 match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await {
