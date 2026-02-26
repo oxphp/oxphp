@@ -109,7 +109,7 @@ services:
 
       # Enable Brotli compression for compressible responses.
       # Values: true/false, 1/0, on/off.
-      # - COMPRESSION=true
+      # - COMPRESSION_ENABLED=true
 
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
       # - ERROR_PAGES_DIR=/var/www/errors

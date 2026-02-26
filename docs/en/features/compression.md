@@ -9,12 +9,12 @@ OxPHP compresses HTTP responses using Brotli when the client supports it and the
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `COMPRESSION` | Enable Brotli compression | `true` |
+| `COMPRESSION_ENABLED` | Enable Brotli compression | `true` |
 
 To disable compression:
 
 ```bash
-COMPRESSION=false
+COMPRESSION_ENABLED=false
 ```
 
 The values `false`, `0`, and `off` all disable compression. Any other value (or not setting the variable at all) enables it.
