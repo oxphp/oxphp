@@ -96,7 +96,7 @@ for ($i = 0; $i < 10; $i++) {
             ['name' => '$time', 'type' => 'int', 'default' => '10', 'desc' => 'Seconds to extend the timeout by.'],
         ],
         'return'  => 'bool — Always <code>true</code>.',
-        'desc'    => 'Signals that the script is still alive and extends the request timeout. Call periodically in long-running loops to prevent the server from killing the request due to <code>REQUEST_TIMEOUT_SECS</code>.',
+        'desc'    => 'Signals that the script is still alive and extends the request timeout. Call periodically in long-running loops to prevent the server from killing the request due to <code>REQUEST_TIMEOUT_SECONDS</code>.',
         'example' => '// Process large CSV import without hitting timeout
 $handle = fopen("large_import.csv", "r");
 while (($row = fgetcsv($handle)) !== false) {

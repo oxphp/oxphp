@@ -47,7 +47,7 @@ services:
       - EXECUTOR=sapi                # "sapi" або "stub"
       # - PHP_WORKERS=0              # Статычны: 0 = CPU/2 (мін. 1), або фіксаванае N
       # - PHP_WORKERS=2:16           # Дынамічны: маштабаванне паміж 2 і 16
-      # - PHP_WORKERS_IDLE_SEC=30    # Тайм-аўт прастою для дынамічнага памяншэння
+      # - PHP_WORKERS_IDLE_SECONDS=30    # Тайм-аўт прастою для дынамічнага памяншэння
       # - QUEUE_CAPACITY=512         # Па змаўчанні: PHP_WORKERS * 128
 
       # Журналаванне
@@ -57,14 +57,14 @@ services:
       - INTERNAL_ADDR=0.0.0.0:9090
 
       # Тайм-аўты (секунды)
-      - HEADER_TIMEOUT_SECS=5
-      - IDLE_TIMEOUT_SECS=60
-      - REQUEST_TIMEOUT_SECS=120
-      - DRAIN_TIMEOUT_SECS=30
+      - HEADER_TIMEOUT_SECONDS=5
+      - IDLE_TIMEOUT_SECONDS=60
+      - REQUEST_TIMEOUT_SECONDS=120
+      - DRAIN_TIMEOUT_SECONDS=30
 
       # Абмежаванне частаты запытаў (0 = выключана)
       # - RATE_LIMIT=100
-      # - RATE_WINDOW_SECS=60
+      # - RATE_WINDOW_SECONDS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -102,17 +102,17 @@ services:
 | `INDEX_FILE` | _(не зададзена)_ | Усталюйце `index.php` для фрэймворкавага рэжыму або `index.html` для SPA-рэжыму |
 | `EXECUTOR` | `sapi` | Тып PHP executor: `sapi` (рэальны PHP) або `stub` (загальнік) |
 | `PHP_WORKERS` | `0` (CPU / 2, мін. 1, статычны) | Рэжым пула воркераў. `N` = фіксаваны пул, `MIN:MAX` = дынамічнае маштабаванне |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Тайм-аўт прастою перад выдаленнем дынамічнага воркера |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Тайм-аўт прастою перад выдаленнем дынамічнага воркера |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Памер абмежаванай чаргі запытаў. 503 вяртаецца, калі поўная |
 | `LOG_LEVEL` | `info` | Узровень журналавання: `trace`, `debug`, `info`, `warn`, `error` |
 | `MAX_CONNECTIONS` | `10000` | Максімальная колькасць адначасовых злучэнняў |
 | `INTERNAL_ADDR` | _(не зададзена)_ | Адрас унутранага сервера. Калі не зададзена, ён адключаны |
-| `HEADER_TIMEOUT_SECS` | `5` | Тайм-аўт чытання загалоўкаў запыту |
-| `IDLE_TIMEOUT_SECS` | `60` | Тайм-аўт прастою keep-alive |
-| `REQUEST_TIMEOUT_SECS` | `120` | Максімальны час апрацоўкі запыту. 0 адключае тайм-аўт |
-| `DRAIN_TIMEOUT_SECS` | `30` | Перыяд чакання для незавершаных злучэнняў падчас спынкі |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Тайм-аўт чытання загалоўкаў запыту |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Тайм-аўт прастою keep-alive |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Максімальны час апрацоўкі запыту. 0 адключае тайм-аўт |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Перыяд чакання для незавершаных злучэнняў падчас спынкі |
 | `RATE_LIMIT` | `0` | Максімальная колькасць запытаў на IP за акно. 0 адключае абмежаванне |
-| `RATE_WINDOW_SECS` | `60` | Акно абмежавання частаты запытаў у секундах |
+| `RATE_WINDOW_SECONDS` | `60` | Акно абмежавання частаты запытаў у секундах |
 | `TLS_CERT` | _(не зададзена)_ | Шлях да файла сертыфіката TLS у фармаце PEM |
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |

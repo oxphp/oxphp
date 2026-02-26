@@ -23,7 +23,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 |----------|---------|-------------|
 | `EXECUTOR` | `sapi` | PHP executor type. `sapi` for real PHP execution, `stub` for a placeholder response (benchmarking) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. Set `N` for a fixed pool, or `MIN:MAX` for dynamic scaling. See [Worker Modes](#worker-modes) |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Seconds a dynamic worker must be idle before it is retired. Only applies in dynamic mode |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker must be idle before it is retired. Only applies in dynamic mode |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Maximum requests waiting in the PHP queue. When full, new PHP requests receive a `503 Service Unavailable` response. Uses initial worker count for dynamic mode |
 
 ### Logging
@@ -37,17 +37,17 @@ OxPHP is configured entirely through environment variables. There are no configu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HEADER_TIMEOUT_SECS` | `5` | Maximum seconds to wait for request headers after TCP connection |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive idle timeout. Connections with no activity for this duration are closed |
-| `REQUEST_TIMEOUT_SECS` | `120` | Maximum seconds for the entire request-response cycle. Set to `0` to disable |
-| `DRAIN_TIMEOUT_SECS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to wait for request headers after TCP connection |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout. Connections with no activity for this duration are closed |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum seconds for the entire request-response cycle. Set to `0` to disable |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
 
 ### Rate Limiting
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RATE_LIMIT` | `0` | Maximum requests per IP address per time window. `0` disables rate limiting |
-| `RATE_WINDOW_SECS` | `60` | Rate limit window duration in seconds |
+| `RATE_WINDOW_SECONDS` | `60` | Rate limit window duration in seconds |
 
 ### TLS
 
@@ -104,7 +104,7 @@ PHP_WORKERS=0:0        # Auto-detect both (CPU/4 min (min 1), CPU*2 max)
 
 The ScaleManager runs every 500ms and:
 - **Scales up** when all workers are busy and the pool is below MAX (500ms cooldown)
-- **Scales down** when a worker has been idle longer than `PHP_WORKERS_IDLE_SEC` and the pool is above MIN (5s cooldown)
+- **Scales down** when a worker has been idle longer than `PHP_WORKERS_IDLE_SECONDS` and the pool is above MIN (5s cooldown)
 
 Dynamic workers use `recv_timeout(200ms)` to allow periodic shutdown-flag checks.
 
@@ -169,11 +169,11 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -184,17 +184,17 @@ LISTEN_ADDR=0.0.0.0:8080
 DOCUMENT_ROOT=/var/www/html/public
 INDEX_FILE=index.php
 PHP_WORKERS=4:32
-PHP_WORKERS_IDLE_SEC=60
+PHP_WORKERS_IDLE_SECONDS=60
 QUEUE_CAPACITY=512
 LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -211,7 +211,7 @@ services:
       DOCUMENT_ROOT: "/var/www/html/public"
       INDEX_FILE: "index.php"
       PHP_WORKERS: "4"             # Or "2:16" for dynamic scaling
-      # PHP_WORKERS_IDLE_SEC: "30" # Idle timeout (dynamic mode only)
+      # PHP_WORKERS_IDLE_SECONDS: "30" # Idle timeout (dynamic mode only)
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
@@ -266,12 +266,12 @@ curl -s http://localhost:9090/config | jq .
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,
-  "drain_timeout_secs": 30,
-  "header_timeout_secs": 5,
-  "idle_timeout_secs": 60,
-  "request_timeout_secs": 120,
+  "drain_timeout_seconds": 30,
+  "header_timeout_seconds": 5,
+  "idle_timeout_seconds": 60,
+  "request_timeout_seconds": 120,
   "rate_limit": 100,
-  "rate_window_secs": 60,
+  "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
@@ -287,7 +287,7 @@ TLS key and certificate paths are not included in the output. The `tls_enabled` 
 - [Routing](/features/routing.md) --- detailed explanation of the three routing modes
 - [Health Checks](health-checks.md) --- the internal server's `/health`, `/metrics`, and `/config` endpoints
 - [Metrics](metrics.md) --- Prometheus-compatible metrics reference
-- [Graceful Shutdown](graceful-shutdown.md) --- how `DRAIN_TIMEOUT_SECS` affects the shutdown sequence
+- [Graceful Shutdown](graceful-shutdown.md) --- how `DRAIN_TIMEOUT_SECONDS` affects the shutdown sequence
 - [TLS](/features/tls.md) --- TLS configuration and certificate requirements
 - [Rate Limiting](/features/rate-limiting.md) --- per-IP rate limiting details
 - [Worker Pool](/architecture/worker-pool.md) --- static and dynamic worker pool architecture

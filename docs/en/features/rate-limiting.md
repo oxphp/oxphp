@@ -10,12 +10,12 @@ OxPHP includes a built-in per-IP rate limiter that rejects excess requests with 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `RATE_LIMIT` | Maximum requests per IP per window | `0` (disabled) |
-| `RATE_WINDOW_SECS` | Window duration in seconds | `60` |
+| `RATE_WINDOW_SECONDS` | Window duration in seconds | `60` |
 
 ```bash
 # Allow 100 requests per IP per 60-second window
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
+RATE_WINDOW_SECONDS=60
 ```
 
 Setting `RATE_LIMIT=0` disables rate limiting entirely. When disabled, the rate limit handler is not registered in the event dispatcher and adds zero overhead.
@@ -64,7 +64,7 @@ The handler always returns `Propagation::Continue` so that metrics and access lo
 
 ## Cleanup
 
-A background Tokio task runs every 60 seconds and removes entries whose window expired more than `2 * RATE_WINDOW_SECS` seconds ago. This prevents the `DashMap` from growing indefinitely when clients send a burst of requests and then disappear.
+A background Tokio task runs every 60 seconds and removes entries whose window expired more than `2 * RATE_WINDOW_SECONDS` seconds ago. This prevents the `DashMap` from growing indefinitely when clients send a burst of requests and then disappear.
 
 ## Limitations
 

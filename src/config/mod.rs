@@ -34,10 +34,10 @@ pub struct Config {
     pub log_level: String,
     pub executor_type: String,
     pub max_connections: usize,
-    pub drain_timeout_secs: u64,
+    pub drain_timeout_seconds: u64,
     pub internal_addr: Option<String>,
     pub rate_limit: u32,
-    pub rate_window_secs: u64,
+    pub rate_window_seconds: u64,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub error_pages_dir: Option<String>,
@@ -61,7 +61,7 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10_000);
-        let drain_timeout_secs = std::env::var("DRAIN_TIMEOUT_SECS")
+        let drain_timeout_seconds = std::env::var("DRAIN_TIMEOUT_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30);
@@ -70,7 +70,7 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
-        let rate_window_secs = std::env::var("RATE_WINDOW_SECS")
+        let rate_window_seconds = std::env::var("RATE_WINDOW_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
@@ -115,10 +115,10 @@ impl Config {
             log_level,
             executor_type,
             max_connections,
-            drain_timeout_secs,
+            drain_timeout_seconds,
             internal_addr,
             rate_limit,
-            rate_window_secs,
+            rate_window_seconds,
             tls_cert,
             tls_key,
             error_pages_dir,
@@ -140,12 +140,12 @@ impl Config {
             "index_file": self.server.index_file,
             "executor_type": self.executor_type,
             "max_connections": self.max_connections,
-            "drain_timeout_secs": self.drain_timeout_secs,
-            "header_timeout_secs": self.server.header_read_timeout.as_secs(),
-            "idle_timeout_secs": self.server.idle_timeout.as_secs(),
-            "request_timeout_secs": self.server.request_timeout.as_secs(),
+            "drain_timeout_seconds": self.drain_timeout_seconds,
+            "header_timeout_seconds": self.server.header_read_timeout.as_secs(),
+            "idle_timeout_seconds": self.server.idle_timeout.as_secs(),
+            "request_timeout_seconds": self.server.request_timeout.as_secs(),
             "rate_limit": self.rate_limit,
-            "rate_window_secs": self.rate_window_secs,
+            "rate_window_seconds": self.rate_window_seconds,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
             "compression": self.compression,

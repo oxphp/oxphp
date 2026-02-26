@@ -197,7 +197,7 @@ This pattern allows the Tokio runtime to dispatch work to PHP workers without bl
 1. SIGTERM or Ctrl+C triggers `shutdown_signal()`
 2. `plugin_manager.shutdown_all()` notifies plugins, then `server.shutdown()` sets the atomic shutdown flag and calls `executor.shutdown()`
 3. The accept loop breaks on `is_shutdown()`
-4. Drain phase: waits up to `drain_timeout_secs` (default 30) for in-flight connections
+4. Drain phase: waits up to `drain_timeout_seconds` (default 30) for in-flight connections
 5. Internal server task is aborted
 6. `SapiExecutor::drop()` drops the channel sender, joins all worker threads, then calls `php_module_shutdown()`, `sapi_shutdown()`, and `tsrm_shutdown()`
 

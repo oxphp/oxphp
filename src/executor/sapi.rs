@@ -120,7 +120,7 @@ pub struct SapiExecutor {
     mode: WorkerMode,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    idle_timeout_sec: u64,
+    idle_timeout_seconds: u64,
     worker_mode_config: Option<Arc<WorkerModeConfig>>,
     worker_metrics: Option<Arc<WorkerMetrics>>,
 }
@@ -149,7 +149,7 @@ impl SapiExecutor {
                 WorkerMode::Static((cpu / 2).max(1))
             });
 
-        let idle_timeout_sec: u64 = std::env::var("PHP_WORKERS_IDLE_SEC")
+        let idle_timeout_seconds: u64 = std::env::var("PHP_WORKERS_IDLE_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
@@ -283,7 +283,7 @@ impl SapiExecutor {
                 mode = ?mode,
                 workers = initial_count,
                 queue_capacity,
-                idle_timeout_sec,
+                idle_timeout_seconds,
                 worker_file = %worker_mode_config.as_ref().unwrap().worker_file.display(),
                 "PHP worker pool started (worker mode)"
             );
@@ -292,7 +292,7 @@ impl SapiExecutor {
                 mode = ?mode,
                 workers = initial_count,
                 queue_capacity,
-                idle_timeout_sec,
+                idle_timeout_seconds,
                 "PHP worker pool started"
             );
         }
@@ -304,7 +304,7 @@ impl SapiExecutor {
             mode,
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
-            idle_timeout_sec,
+            idle_timeout_seconds,
             worker_mode_config,
             worker_metrics,
         }
@@ -379,14 +379,14 @@ impl ScriptExecutor for SapiExecutor {
             WorkerMode::Dynamic { min, max } => {
                 let min = *min;
                 let max = *max;
-                let idle_timeout_sec = self.idle_timeout_sec;
+                let idle_timeout_seconds = self.idle_timeout_seconds;
                 tokio::spawn(async move {
                     run_scale_manager(
                         workers,
                         request_rx,
                         min,
                         max,
-                        idle_timeout_sec,
+                        idle_timeout_seconds,
                         global_shutdown,
                         metrics,
                         wmc,
@@ -768,7 +768,7 @@ async fn run_scale_manager(
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     min: usize,
     max: usize,
-    idle_timeout_sec: u64,
+    idle_timeout_seconds: u64,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     worker_mode_config: Option<Arc<WorkerModeConfig>>,
@@ -777,7 +777,7 @@ async fn run_scale_manager(
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_scale_up = Instant::now();
     let mut last_scale_down = Instant::now();
-    let idle_timeout_ms = idle_timeout_sec * 1000;
+    let idle_timeout_ms = idle_timeout_seconds * 1000;
     let mut next_id = max; // start IDs above initial range to avoid collisions
 
     loop {

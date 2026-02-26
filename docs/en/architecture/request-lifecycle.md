@@ -162,7 +162,7 @@ After the early response check, the pipeline:
 
 ### 7. Request Timeout
 
-If `REQUEST_TIMEOUT_SECS` is configured (non-zero), the remaining pipeline is wrapped in `tokio::time::timeout`. If the timeout fires, a 504 Gateway Timeout is returned:
+If `REQUEST_TIMEOUT_SECONDS` is configured (non-zero), the remaining pipeline is wrapped in `tokio::time::timeout`. If the timeout fires, a 504 Gateway Timeout is returned:
 
 ```rust
 match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await {

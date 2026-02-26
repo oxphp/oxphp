@@ -47,7 +47,7 @@ services:
       - EXECUTOR=sapi                # "sapi" или "stub"
       # - PHP_WORKERS=0              # Статический: 0 = CPU/2 (мин 1), или фиксированное N
       # - PHP_WORKERS=2:16           # Динамический: масштабирование от 2 до 16
-      # - PHP_WORKERS_IDLE_SEC=30    # Таймаут простоя для динамического уменьшения
+      # - PHP_WORKERS_IDLE_SECONDS=30    # Таймаут простоя для динамического уменьшения
       # - QUEUE_CAPACITY=512         # По умолчанию: PHP_WORKERS * 128
 
       # Логирование
@@ -57,14 +57,14 @@ services:
       - INTERNAL_ADDR=0.0.0.0:9090
 
       # Таймауты (в секундах)
-      - HEADER_TIMEOUT_SECS=5
-      - IDLE_TIMEOUT_SECS=60
-      - REQUEST_TIMEOUT_SECS=120
-      - DRAIN_TIMEOUT_SECS=30
+      - HEADER_TIMEOUT_SECONDS=5
+      - IDLE_TIMEOUT_SECONDS=60
+      - REQUEST_TIMEOUT_SECONDS=120
+      - DRAIN_TIMEOUT_SECONDS=30
 
       # Ограничение частоты запросов (0 = отключено)
       # - RATE_LIMIT=100
-      # - RATE_WINDOW_SECS=60
+      # - RATE_WINDOW_SECONDS=60
 
       # TLS
       # - TLS_CERT=/etc/ssl/oxphp/server.pem
@@ -102,17 +102,17 @@ services:
 | `INDEX_FILE` | _(unset)_ | Укажите `index.php` для режима Framework или `index.html` для SPA |
 | `EXECUTOR` | `sapi` | Тип PHP-исполнителя: `sapi` (настоящий PHP) или `stub` (заглушка) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1, static) | Режим пула воркеров. `N` = фиксированный пул, `MIN:MAX` = динамическое масштабирование |
-| `PHP_WORKERS_IDLE_SEC` | `30` | Таймаут простоя до завершения динамического воркера |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | Таймаут простоя до завершения динамического воркера |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Размер ограниченной очереди запросов. При переполнении возвращается 503 |
 | `LOG_LEVEL` | `info` | Уровень логирования: `trace`, `debug`, `info`, `warn`, `error` |
 | `MAX_CONNECTIONS` | `10000` | Максимальное число одновременных соединений |
 | `INTERNAL_ADDR` | _(unset)_ | Адрес внутреннего сервера. Если не задан — сервер отключён |
-| `HEADER_TIMEOUT_SECS` | `5` | Таймаут чтения заголовков запроса |
-| `IDLE_TIMEOUT_SECS` | `60` | Таймаут простоя keep-alive |
-| `REQUEST_TIMEOUT_SECS` | `120` | Максимальное время обработки запроса. 0 отключает таймаут |
-| `DRAIN_TIMEOUT_SECS` | `30` | Период ожидания активных соединений при завершении работы |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Таймаут чтения заголовков запроса |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Таймаут простоя keep-alive |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Максимальное время обработки запроса. 0 отключает таймаут |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Период ожидания активных соединений при завершении работы |
 | `RATE_LIMIT` | `0` | Максимум запросов с одного IP за окно. 0 отключает ограничение |
-| `RATE_WINDOW_SECS` | `60` | Окно ограничения частоты запросов в секундах |
+| `RATE_WINDOW_SECONDS` | `60` | Окно ограничения частоты запросов в секундах |
 | `TLS_CERT` | _(unset)_ | Путь к PEM-файлу TLS-сертификата |
 | `TLS_KEY` | _(unset)_ | Путь к PEM-файлу приватного TLS-ключа |
 | `ERROR_PAGES_DIR` | _(unset)_ | Директория с файлами страниц ошибок `{status}.html` |

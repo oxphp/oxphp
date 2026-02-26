@@ -9,17 +9,17 @@ OxPHP прымяняе наладжвальныя тайм-аўты для аб�
 
 | Пераменная | Апісанне | Па змаўчанні |
 |------------|----------|--------------|
-| `HEADER_TIMEOUT_SECS` | Максімальны час для атрымання HTTP-загалоўкаў пасля TCP-злучэння | `5` |
-| `IDLE_TIMEOUT_SECS` | Максімальны час прастою паміж запытамі на keep-alive злучэнні | `60` |
-| `REQUEST_TIMEOUT_SECS` | Максімальны агульны час апрацоўкі запыту (уключаючы выкананне PHP) | `120` |
+| `HEADER_TIMEOUT_SECONDS` | Максімальны час для атрымання HTTP-загалоўкаў пасля TCP-злучэння | `5` |
+| `IDLE_TIMEOUT_SECONDS` | Максімальны час прастою паміж запытамі на keep-alive злучэнні | `60` |
+| `REQUEST_TIMEOUT_SECONDS` | Максімальны агульны час апрацоўкі запыту (уключаючы выкананне PHP) | `120` |
 
 ```bash
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=60
-REQUEST_TIMEOUT_SECS=120
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=60
+REQUEST_TIMEOUT_SECONDS=120
 ```
 
-Усталяванне `HEADER_TIMEOUT_SECS=0` прапускае рэгістрацыю тайм-аўту чытання загалоўкаў у hyper. Усталяванне `REQUEST_TIMEOUT_SECS=0` цалкам адключае тайм-аўт запыту.
+Усталяванне `HEADER_TIMEOUT_SECONDS=0` прапускае рэгістрацыю тайм-аўту чытання загалоўкаў у hyper. Усталяванне `REQUEST_TIMEOUT_SECONDS=0` цалкам адключае тайм-аўт запыту.
 
 ## Тыпы тайм-аўтаў
 
@@ -33,7 +33,7 @@ REQUEST_TIMEOUT_SECS=120
 
 ### Тайм-аўт прастою
 
-Зарэзерваваны для кантролю таго, як доўга keep-alive злучэнне можа заставацца неактыўным паміж запытамі. Пераменная `IDLE_TIMEOUT_SECS` чытаецца з асяроддзя і ўключаецца ў ўнутраную канчатковую кропку `/config`, але канструктар HTTP/1.1 hyper-util не прадастаўляе наладку `keep_alive_timeout`. Гэты тайм-аўт у цяперашні час не прымяняецца на ўзроўні злучэння.
+Зарэзерваваны для кантролю таго, як доўга keep-alive злучэнне можа заставацца неактыўным паміж запытамі. Пераменная `IDLE_TIMEOUT_SECONDS` чытаецца з асяроддзя і ўключаецца ў ўнутраную канчатковую кропку `/config`, але канструктар HTTP/1.1 hyper-util не прадастаўляе наладку `keep_alive_timeout`. Гэты тайм-аўт у цяперашні час не прымяняецца на ўзроўні злучэння.
 
 ### Тайм-аўт запыту
 
@@ -50,13 +50,13 @@ REQUEST_TIMEOUT_SECS=120
 ```
 TCP connect (+ TLS handshake if enabled)
   |
-  +-- [HEADER_TIMEOUT_SECS] --> headers received
+  +-- [HEADER_TIMEOUT_SECONDS] --> headers received
   |                               |
-  |                               +-- [REQUEST_TIMEOUT_SECS] --> response sent
+  |                               +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
   |                                                                |
   |                                                                +-- next request or close
   |                                                                     |
-  |                                                                     +-- [HEADER_TIMEOUT_SECS] --> ...
+  |                                                                     +-- [HEADER_TIMEOUT_SECONDS] --> ...
 ```
 
 На keep-alive злучэнні тайм-аўт загалоўкаў і тайм-аўт запыту прымяняюцца да кожнага запыту індывідуальна.

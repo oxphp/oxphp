@@ -23,7 +23,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 |------|--------|------|
 | `EXECUTOR` | `sapi` | PHP 执行器类型。`sapi` 为真实 PHP 执行，`stub` 为占位响应（用于基准测试） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作池模式。设置 `N` 为固定池，或 `MIN:MAX` 为动态伸缩。参见[工作线程模式](#工作线程模式) |
-| `PHP_WORKERS_IDLE_SEC` | `30` | 动态工作线程空闲超过此秒数后被回收。仅在动态模式下生效 |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作线程空闲超过此秒数后被回收。仅在动态模式下生效 |
 | `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | PHP 队列中等待的最大请求数。队列满时，新的 PHP 请求将收到 `503 Service Unavailable` 响应。动态模式下使用初始工作线程数计算 |
 
 ### 日志
@@ -37,17 +37,17 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `HEADER_TIMEOUT_SECS` | `5` | TCP 连接建立后等待请求头的最大秒数 |
-| `IDLE_TIMEOUT_SECS` | `60` | Keep-alive 空闲超时。超过此时间无活动的连接将被关闭 |
-| `REQUEST_TIMEOUT_SECS` | `120` | 整个请求-响应周期的最大秒数。设为 `0` 可禁用 |
-| `DRAIN_TIMEOUT_SECS` | `30` | 优雅关闭期间等待进行中连接完成的最大秒数 |
+| `HEADER_TIMEOUT_SECONDS` | `5` | TCP 连接建立后等待请求头的最大秒数 |
+| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive 空闲超时。超过此时间无活动的连接将被关闭 |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 整个请求-响应周期的最大秒数。设为 `0` 可禁用 |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭期间等待进行中连接完成的最大秒数 |
 
 ### 速率限制
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `RATE_LIMIT` | `0` | 每个 IP 地址在时间窗口内的最大请求数。`0` 表示禁用速率限制 |
-| `RATE_WINDOW_SECS` | `60` | 速率限制窗口时长（秒） |
+| `RATE_WINDOW_SECONDS` | `60` | 速率限制窗口时长（秒） |
 
 ### TLS
 
@@ -104,7 +104,7 @@ PHP_WORKERS=0:0        # 两者均自动检测（最少 CPU/4（至少 1），�
 
 ScaleManager 每 500ms 运行一次：
 - 当所有工作线程都在忙碌且池大小低于 MAX 时**扩容**（500ms 冷却期）
-- 当工作线程空闲超过 `PHP_WORKERS_IDLE_SEC` 且池大小高于 MIN 时**缩容**（5s 冷却期）
+- 当工作线程空闲超过 `PHP_WORKERS_IDLE_SECONDS` 且池大小高于 MIN 时**缩容**（5s 冷却期）
 
 动态工作线程使用 `recv_timeout(200ms)` 以便定期检查关闭标志。
 
@@ -169,11 +169,11 @@ LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -184,17 +184,17 @@ LISTEN_ADDR=0.0.0.0:8080
 DOCUMENT_ROOT=/var/www/html/public
 INDEX_FILE=index.php
 PHP_WORKERS=4:32
-PHP_WORKERS_IDLE_SEC=60
+PHP_WORKERS_IDLE_SECONDS=60
 QUEUE_CAPACITY=512
 LOG_LEVEL=warn
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
-RATE_WINDOW_SECS=60
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=30
-REQUEST_TIMEOUT_SECS=60
-DRAIN_TIMEOUT_SECS=30
+RATE_WINDOW_SECONDS=60
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=30
+REQUEST_TIMEOUT_SECONDS=60
+DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION=true
 ```
 
@@ -211,7 +211,7 @@ services:
       DOCUMENT_ROOT: "/var/www/html/public"
       INDEX_FILE: "index.php"
       PHP_WORKERS: "4"             # Or "2:16" for dynamic scaling
-      # PHP_WORKERS_IDLE_SEC: "30" # Idle timeout (dynamic mode only)
+      # PHP_WORKERS_IDLE_SECONDS: "30" # Idle timeout (dynamic mode only)
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
@@ -266,12 +266,12 @@ curl -s http://localhost:9090/config | jq .
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,
-  "drain_timeout_secs": 30,
-  "header_timeout_secs": 5,
-  "idle_timeout_secs": 60,
-  "request_timeout_secs": 120,
+  "drain_timeout_seconds": 30,
+  "header_timeout_seconds": 5,
+  "idle_timeout_seconds": 60,
+  "request_timeout_seconds": 120,
   "rate_limit": 100,
-  "rate_window_secs": 60,
+  "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression": true,
@@ -287,7 +287,7 @@ curl -s http://localhost:9090/config | jq .
 - [路由](/features/routing.md) --- 三种路由模式的详细说明
 - [健康检查](health-checks.md) --- 内部服务器的 `/health`、`/metrics` 和 `/config` 端点
 - [指标](metrics.md) --- Prometheus 兼容指标参考
-- [优雅关闭](graceful-shutdown.md) --- `DRAIN_TIMEOUT_SECS` 如何影响关闭流程
+- [优雅关闭](graceful-shutdown.md) --- `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程
 - [TLS](/features/tls.md) --- TLS 配置和证书要求
 - [速率限制](/features/rate-limiting.md) --- 按 IP 速率限制详情
 - [工作池](/architecture/worker-pool.md) --- 静态和动态工作池架构

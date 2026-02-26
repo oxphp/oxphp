@@ -95,11 +95,11 @@ async fn async_main(
     let rate_limiter = if config.rate_limit > 0 {
         let limiter = Arc::new(server::rate_limit::RateLimiter::new(
             config.rate_limit,
-            config.rate_window_secs,
+            config.rate_window_seconds,
         ));
         tracing::info!(
             rate_limit = config.rate_limit,
-            rate_window_secs = config.rate_window_secs,
+            rate_window_seconds = config.rate_window_seconds,
             "Rate limiting enabled"
         );
         // Spawn background cleanup task
@@ -282,8 +282,8 @@ async fn async_main(
             active_connections = active,
             "Draining in-flight connections"
         );
-        let drain_deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(config.drain_timeout_secs);
+        let drain_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(config.drain_timeout_seconds);
         loop {
             let remaining = server.active_connections();
             if remaining == 0 {

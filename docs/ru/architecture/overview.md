@@ -197,7 +197,7 @@ pub enum ExecuteResult {
 1. SIGTERM или Ctrl+C активирует `shutdown_signal()`
 2. `plugin_manager.shutdown_all()` уведомляет плагины, затем `server.shutdown()` устанавливает атомарный флаг остановки и вызывает `executor.shutdown()`
 3. Цикл приёма прерывается при `is_shutdown()`
-4. Фаза дренажа: ожидание до `drain_timeout_secs` (по умолчанию 30) для завершения текущих соединений
+4. Фаза дренажа: ожидание до `drain_timeout_seconds` (по умолчанию 30) для завершения текущих соединений
 5. Задача внутреннего сервера прерывается
 6. `SapiExecutor::drop()` закрывает отправитель канала, дожидается завершения всех потоков воркеров, затем вызывает `php_module_shutdown()`, `sapi_shutdown()` и `tsrm_shutdown()`
 

@@ -9,17 +9,17 @@ OxPHP enforces configurable timeouts to protect against slow clients and runaway
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `HEADER_TIMEOUT_SECS` | Maximum time to receive HTTP headers after TCP connect | `5` |
-| `IDLE_TIMEOUT_SECS` | Maximum idle time between requests on a keep-alive connection | `60` |
-| `REQUEST_TIMEOUT_SECS` | Maximum total time for request handling (including PHP execution) | `120` |
+| `HEADER_TIMEOUT_SECONDS` | Maximum time to receive HTTP headers after TCP connect | `5` |
+| `IDLE_TIMEOUT_SECONDS` | Maximum idle time between requests on a keep-alive connection | `60` |
+| `REQUEST_TIMEOUT_SECONDS` | Maximum total time for request handling (including PHP execution) | `120` |
 
 ```bash
-HEADER_TIMEOUT_SECS=5
-IDLE_TIMEOUT_SECS=60
-REQUEST_TIMEOUT_SECS=120
+HEADER_TIMEOUT_SECONDS=5
+IDLE_TIMEOUT_SECONDS=60
+REQUEST_TIMEOUT_SECONDS=120
 ```
 
-Setting `HEADER_TIMEOUT_SECS=0` skips registering the header read timeout with hyper. Setting `REQUEST_TIMEOUT_SECS=0` disables the request timeout entirely.
+Setting `HEADER_TIMEOUT_SECONDS=0` skips registering the header read timeout with hyper. Setting `REQUEST_TIMEOUT_SECONDS=0` disables the request timeout entirely.
 
 ## Timeout types
 
@@ -33,7 +33,7 @@ This protects against slowloris-style attacks where a client sends headers one b
 
 ### Idle timeout
 
-Reserved for controlling how long a keep-alive connection can remain idle between requests. The `IDLE_TIMEOUT_SECS` variable is read from the environment and included in the `/config` internal endpoint, but hyper-util's HTTP/1.1 builder does not expose a `keep_alive_timeout` setting. This timeout is not currently enforced at the connection level.
+Reserved for controlling how long a keep-alive connection can remain idle between requests. The `IDLE_TIMEOUT_SECONDS` variable is read from the environment and included in the `/config` internal endpoint, but hyper-util's HTTP/1.1 builder does not expose a `keep_alive_timeout` setting. This timeout is not currently enforced at the connection level.
 
 ### Request timeout
 
@@ -50,13 +50,13 @@ The header read timeout and request timeout cover different phases of a request:
 ```
 TCP connect (+ TLS handshake if enabled)
   |
-  +-- [HEADER_TIMEOUT_SECS] --> headers received
+  +-- [HEADER_TIMEOUT_SECONDS] --> headers received
   |                               |
-  |                               +-- [REQUEST_TIMEOUT_SECS] --> response sent
+  |                               +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
   |                                                                |
   |                                                                +-- next request or close
   |                                                                     |
-  |                                                                     +-- [HEADER_TIMEOUT_SECS] --> ...
+  |                                                                     +-- [HEADER_TIMEOUT_SECONDS] --> ...
 ```
 
 On a keep-alive connection, the header timeout and request timeout apply to each request individually.

@@ -17,5 +17,5 @@ if (!empty($_GET['finish'])) {
 usleep($ms * 1000);
 json_response(200, [
     'slept_ms' => $ms,
-    'note'     => 'Use REQUEST_TIMEOUT_SECS to test 504 Gateway Timeout.',
+    'note'     => 'Use REQUEST_TIMEOUT_SECONDS to test 504 Gateway Timeout.',
 ]);
