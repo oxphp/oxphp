@@ -234,7 +234,7 @@ Workers are recycled (exit and respawn) based on configurable limits:
 | Exit Reason | Trigger | Metric Label |
 |---|---|---|
 | `max_requests` | `WORKER_MAX_REQUESTS` reached | `reason="max_requests"` |
-| `max_memory` | `WORKER_MAX_MEMORY` (MiB) exceeded | `reason="max_memory"` |
+| `max_memory` | `WORKER_MAX_MEMORY_MIB` (MiB) exceeded | `reason="max_memory"` |
 | `error` | Uncaught exception or fatal error in handler | `reason="error"` |
 | `shutdown` | Server graceful shutdown | *(not counted as recycle)* |
 
@@ -258,7 +258,7 @@ See [Metrics](../operations/metrics.md#worker-mode) for the full reference and P
 |---|---|---|
 | `WORKER_FILE` | *(none)* | Path to the worker PHP script (relative to `DOCUMENT_ROOT`). Enables worker mode when set |
 | `WORKER_MAX_REQUESTS` | `0` | Maximum requests before recycling. `0` = no limit |
-| `WORKER_MAX_MEMORY` | `0` | Maximum memory (MiB) before recycling. `0` = no limit |
+| `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory (MiB) before recycling. `0` = no limit |
 
 ### Routing Integration
 

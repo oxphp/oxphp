@@ -110,7 +110,7 @@ fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
 struct WorkerModeConfig {
     worker_file: std::path::PathBuf,
     max_requests: u64,
-    max_memory_mb: u64,
+    max_memory_mib: u64,
 }
 
 pub struct SapiExecutor {
@@ -194,14 +194,14 @@ impl SapiExecutor {
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
-                let max_memory_mb = std::env::var("WORKER_MAX_MEMORY")
+                let max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
                 Arc::new(WorkerModeConfig {
                     worker_file: std::path::PathBuf::from(path),
                     max_requests,
-                    max_memory_mb,
+                    max_memory_mib,
                 })
             });
 
@@ -483,7 +483,7 @@ fn worker_mode_thread(
 
     // 2. Set worker mode TLS flags
     unsafe {
-        bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mb);
+        bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mib);
     }
 
     // 3. Store channel receiver, last_active, and metrics in thread-local

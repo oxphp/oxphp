@@ -308,7 +308,7 @@ typedef int (*oxphp_worker_send_fn_t)(void);
 void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn);
 
 /** Set worker mode TLS flags for this thread. */
-void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mb);
+void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib);
 
 /**
  * Reset per-request TLS fields between worker mode requests.

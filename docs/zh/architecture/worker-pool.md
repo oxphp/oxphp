@@ -234,7 +234,7 @@ Worker thread lifecycle:
 | 退出原因 | 触发条件 | 指标标签 |
 |---|---|---|
 | `max_requests` | 达到 `WORKER_MAX_REQUESTS` | `reason="max_requests"` |
-| `max_memory` | 超过 `WORKER_MAX_MEMORY`（MiB） | `reason="max_memory"` |
+| `max_memory` | 超过 `WORKER_MAX_MEMORY_MIB`（MiB） | `reason="max_memory"` |
 | `error` | 处理器中的未捕获异常或致命错误 | `reason="error"` |
 | `shutdown` | 服务器优雅关闭 | *(不计为回收)* |
 
@@ -258,7 +258,7 @@ Worker thread lifecycle:
 |---|---|---|
 | `WORKER_FILE` | *(无)* | 工作 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）。设置后启用工作进程模式 |
 | `WORKER_MAX_REQUESTS` | `0` | 回收前的最大请求数。`0` = 不限制 |
-| `WORKER_MAX_MEMORY` | `0` | 回收前的最大内存（MiB）。`0` = 不限制 |
+| `WORKER_MAX_MEMORY_MIB` | `0` | 回收前的最大内存（MiB）。`0` = 不限制 |
 
 ### 路由集成
 

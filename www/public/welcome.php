@@ -450,7 +450,7 @@ docker run -p 8080:8080 \
                         <tbody>
                             <tr><td><code>WORKER_FILE</code></td><td><em>(none)</em></td></tr>
                             <tr><td><code>WORKER_MAX_REQUESTS</code></td><td><code>0</code> (unlimited)</td></tr>
-                            <tr><td><code>WORKER_MAX_MEMORY</code></td><td><code>0</code> (unlimited)</td></tr>
+                            <tr><td><code>WORKER_MAX_MEMORY_MIB</code></td><td><code>0</code> (unlimited)</td></tr>
                         </tbody>
                     </table>
                     <p style="margin-top: 12px; font-size: 0.8125rem; color: var(--color-muted)">

@@ -405,10 +405,10 @@ void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_wor
     rust_worker_send = send_fn;
 }
 
-void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mb) {
+void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib) {
     ctx.worker_mode = 1;
     ctx.max_requests = max_requests;
-    ctx.max_memory_bytes = max_memory_mb * 1024 * 1024;  /* pre-compute to avoid per-request mul */
+    ctx.max_memory_bytes = max_memory_mib * 1024 * 1024;  /* pre-compute to avoid per-request mul */
     ctx.requests_done = 0;
     ctx.exit_reason = 0;
     ctx.current_memory_bytes = 0;

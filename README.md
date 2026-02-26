@@ -76,7 +76,7 @@ All settings are via environment variables:
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script (relative to `DOCUMENT_ROOT`); enables persistent worker mode |
 | `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling; `0` = no limit |
-| `WORKER_MAX_MEMORY` | `0` (unlimited) | Max memory (MiB) per worker before recycling; `0` = no limit |
+| `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling; `0` = no limit |
 
 ## Architecture
 
