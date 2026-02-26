@@ -75,7 +75,7 @@ OxPHP настраивается исключительно через пере�
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `COMPRESSION` | `true` | Включить сжатие Brotli для сжимаемых типов ответов. Отключить значением `false`, `0` или `off` |
+| `COMPRESSION_ENABLED` | `true` | Включить сжатие Brotli для сжимаемых типов ответов. Отключить значением `false`, `0` или `off` |
 
 ## Режимы воркеров
 
@@ -174,7 +174,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Laravel продакшен (динамический пул)
@@ -195,7 +195,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Docker Compose
@@ -215,7 +215,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION: "true"
+      COMPRESSION_ENABLED: "true"
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -274,7 +274,7 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression": true,
+  "compression_enabled": true,
   "access_log": true,
   "plugins": {}
 }

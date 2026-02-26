@@ -77,7 +77,7 @@ impl Config {
         let tls_cert = std::env::var("TLS_CERT").ok();
         let tls_key = std::env::var("TLS_KEY").ok();
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
-        let compression = std::env::var("COMPRESSION")
+        let compression = std::env::var("COMPRESSION_ENABLED")
             .map(|v| v != "false" && v != "0" && v != "off")
             .unwrap_or(true);
         let access_log = match std::env::var("ACCESS_LOG").as_deref() {
@@ -148,7 +148,7 @@ impl Config {
             "rate_window_seconds": self.rate_window_seconds,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
-            "compression": self.compression,
+            "compression_enabled": self.compression,
             "access_log": self.access_log.to_string(),
             "max_query_body": self.max_query_body,
             "worker_mode": self.worker_file.is_some(),

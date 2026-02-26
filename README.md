@@ -71,7 +71,7 @@ All settings are via environment variables:
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
-| `COMPRESSION` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
+| `COMPRESSION_ENABLED` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
 | `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all` (every request), `error` (4xx/5xx only), empty/unset = off |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script (relative to `DOCUMENT_ROOT`); enables persistent worker mode |

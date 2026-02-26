@@ -75,7 +75,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `COMPRESSION` | `true` | 对可压缩的响应类型启用 Brotli 压缩。使用 `false`、`0` 或 `off` 禁用 |
+| `COMPRESSION_ENABLED` | `true` | 对可压缩的响应类型启用 Brotli 压缩。使用 `false`、`0` 或 `off` 禁用 |
 
 ## 工作线程模式
 
@@ -174,7 +174,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Laravel 生产环境（动态池）
@@ -195,7 +195,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Docker Compose
@@ -215,7 +215,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION: "true"
+      COMPRESSION_ENABLED: "true"
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -274,7 +274,7 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression": true,
+  "compression_enabled": true,
   "access_log": true,
   "plugins": {}
 }

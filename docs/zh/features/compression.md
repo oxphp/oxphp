@@ -9,12 +9,12 @@ description: 针对可压缩响应类型的 Brotli 压缩
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `COMPRESSION` | 启用 Brotli 压缩 | `true` |
+| `COMPRESSION_ENABLED` | 启用 Brotli 压缩 | `true` |
 
 禁用压缩：
 
 ```bash
-COMPRESSION=false
+COMPRESSION_ENABLED=false
 ```
 
 `false`、`0` 和 `off` 均可禁用压缩。其他任何值（或不设置该变量）均表示启用。

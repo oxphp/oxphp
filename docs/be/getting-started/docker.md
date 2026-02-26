@@ -74,7 +74,7 @@ services:
       # - ERROR_PAGES_DIR=/var/www/errors
 
       # Сціск (па змаўчанні: true)
-      # - COMPRESSION=true
+      # - COMPRESSION_ENABLED=true
     restart: unless-stopped
 ```
 
@@ -116,7 +116,7 @@ services:
 | `TLS_CERT` | _(не зададзена)_ | Шлях да файла сертыфіката TLS у фармаце PEM |
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |
-| `COMPRESSION` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
+| `COMPRESSION_ENABLED` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
 | `TOKIO_WORKERS` | `0` (CPU / 2, мін. 1) | Патокі асінхроннага асяроддзя выканання Tokio (0 = аўта, 1 = аднапаточны) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступу: `all`, `error` (толькі 4xx/5xx), пустое = выкл. |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Памер папярэдне выдзеленага пула слотаў адказу |

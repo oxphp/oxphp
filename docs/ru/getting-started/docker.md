@@ -74,7 +74,7 @@ services:
       # - ERROR_PAGES_DIR=/var/www/errors
 
       # Сжатие (по умолчанию: true)
-      # - COMPRESSION=true
+      # - COMPRESSION_ENABLED=true
     restart: unless-stopped
 ```
 
@@ -116,7 +116,7 @@ services:
 | `TLS_CERT` | _(unset)_ | Путь к PEM-файлу TLS-сертификата |
 | `TLS_KEY` | _(unset)_ | Путь к PEM-файлу приватного TLS-ключа |
 | `ERROR_PAGES_DIR` | _(unset)_ | Директория с файлами страниц ошибок `{status}.html` |
-| `COMPRESSION` | `true` | Включить сжатие Brotli. Установите `false`, `0` или `off` для отключения |
+| `COMPRESSION_ENABLED` | `true` | Включить сжатие Brotli. Установите `false`, `0` или `off` для отключения |
 | `TOKIO_WORKERS` | `0` | Потоки асинхронного рантайма Tokio (0 = авто CPU/2, 1 = однопоточный) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступа: `all` (все), `error` (4xx/5xx), пустое = выкл. |
 | `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Размер пула предварительно выделенных слотов ответа |

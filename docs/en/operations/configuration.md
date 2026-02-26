@@ -75,7 +75,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COMPRESSION` | `true` | Enable Brotli compression for compressible response types. Disable with `false`, `0`, or `off` |
+| `COMPRESSION_ENABLED` | `true` | Enable Brotli compression for compressible response types. Disable with `false`, `0`, or `off` |
 
 ## Worker Modes
 
@@ -174,7 +174,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Laravel Production (dynamic pool)
@@ -195,7 +195,7 @@ HEADER_TIMEOUT_SECONDS=5
 IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION=true
+COMPRESSION_ENABLED=true
 ```
 
 ### Docker Compose
@@ -215,7 +215,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION: "true"
+      COMPRESSION_ENABLED: "true"
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -274,7 +274,7 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression": true,
+  "compression_enabled": true,
   "access_log": true,
   "plugins": {}
 }

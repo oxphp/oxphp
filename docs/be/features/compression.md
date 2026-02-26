@@ -9,12 +9,12 @@ OxPHP сціскае HTTP-адказы з дапамогай Brotli, калі к
 
 | Зменная | Апісанне | Змаўчанне |
 |---------|---------|-----------|
-| `COMPRESSION` | Уключыць Brotli-сціск | `true` |
+| `COMPRESSION_ENABLED` | Уключыць Brotli-сціск | `true` |
 
 Каб адключыць сціск:
 
 ```bash
-COMPRESSION=false
+COMPRESSION_ENABLED=false
 ```
 
 Значэнні `false`, `0` і `off` адключаюць сціск. Любое іншае значэнне (або адсутнасць зменнай) уключае яго.
