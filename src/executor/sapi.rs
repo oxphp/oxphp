@@ -109,6 +109,7 @@ fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
 /// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.
 struct WorkerModeConfig {
     worker_file: std::path::PathBuf,
+    document_root: std::path::PathBuf,
     max_requests: u64,
     max_memory_mib: u64,
 }
@@ -198,8 +199,12 @@ impl SapiExecutor {
                     .ok()
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
+                // Same env var and default as ServerConfig::from_env().
+                let document_root = std::env::var("DOCUMENT_ROOT")
+                    .unwrap_or_else(|_| "/var/www/html/public".to_string());
                 Arc::new(WorkerModeConfig {
                     worker_file: std::path::PathBuf::from(path),
+                    document_root: std::path::PathBuf::from(document_root),
                     max_requests,
                     max_memory_mib,
                 })
@@ -518,6 +523,11 @@ fn worker_mode_thread(
             0,
         );
     }
+
+    // Populate $_SERVER with boot-phase values so the worker script
+    // can access SCRIPT_FILENAME, DOCUMENT_ROOT, etc. during bootstrap.
+    // Without this, frameworks like Symfony abort early on empty $_SERVER.
+    sapi::set_boot_server_vars(&config.worker_file, &config.document_root);
 
     if unsafe { bindings::php_request_startup() } != 0 {
         tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
