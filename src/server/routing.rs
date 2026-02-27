@@ -300,6 +300,15 @@ impl RouteConfig {
             return wr.clone();
         }
 
+        // Framework/SPA mode: fallback to INDEX_FILE
+        if let Some(ref index_path) = self.index_file_path {
+            if self.index_file_is_php {
+                return RouteResult::Execute(index_path.clone());
+            } else {
+                return RouteResult::Serve(index_path.clone());
+            }
+        }
+
         RouteResult::NotFound
     }
 }
@@ -552,6 +561,27 @@ mod tests {
                 assert!(
                     path.ends_with("index.php"),
                     "Root should route to index.php, got {:?}",
+                    path
+                );
+            }
+            other => panic!("Expected Execute(index.php), got {:?}", other),
+        }
+    }
+
+    // --- Framework mode trailing slash fallback ---
+
+    #[tokio::test]
+    async fn test_framework_mode_trailing_slash_falls_back_to_index_php() {
+        let dir = setup_test_dir();
+        let rc = make_config(dir.path(), Some("index.php"));
+        let cache = Arc::new(FileCache::new(200));
+        // /_profiler/ has trailing slash, no _profiler/index.php exists
+        let result = rc.resolve_request("/_profiler/", &cache).await;
+        match result {
+            RouteResult::Execute(path) => {
+                assert!(
+                    path.ends_with("index.php"),
+                    "Should fallback to index.php, got {:?}",
                     path
                 );
             }
