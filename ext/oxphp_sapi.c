@@ -209,6 +209,26 @@ static void oxphp_soft_reset(void) {
     zend_activate_auto_globals();
     zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
 
+    /* 7. Inject REQUEST_TIME and REQUEST_TIME_FLOAT into $_SERVER.
+     * In normal mode php_request_startup() does this internally, but in worker
+     * mode we skip php_request_startup() per request — the soft reset rebuilds
+     * $_SERVER from scratch via register_server_variables which doesn't include
+     * these. Read the current request time from bridge TLS (set by
+     * worker_wait_callback before this function runs). */
+    {
+        double rt = oxphp_bridge_get_request_time();
+        zval *server = &PG(http_globals)[TRACK_VARS_SERVER];
+        if (Z_TYPE_P(server) == IS_ARRAY && rt > 0.0) {
+            zval zt;
+            ZVAL_LONG(&zt, (zend_long)rt);
+            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME", sizeof("REQUEST_TIME") - 1, &zt);
+
+            zval zf;
+            ZVAL_DOUBLE(&zf, rt);
+            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME_FLOAT", sizeof("REQUEST_TIME_FLOAT") - 1, &zf);
+        }
+    }
+
     /* Note: bridge TLS reset (request_id, request_time, deadline, etc.) is handled
      * by worker_wait_callback BEFORE populating new request data, not here.
      * This ensures the soft reset only touches PHP-level state. */

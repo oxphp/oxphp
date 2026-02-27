@@ -96,12 +96,42 @@ impl RequestData {
     }
 }
 
+const SERVER_SOFTWARE: &str = "OxPHP/0.1.0";
+
 /// Push a server variable, skipping entries with embedded null bytes.
 #[inline]
 fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
     if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
         vars.push((k, v));
     }
+}
+
+/// Set minimal $_SERVER variables for the worker mode boot phase.
+/// Called once before php_request_startup() so the worker script
+/// sees SCRIPT_FILENAME, DOCUMENT_ROOT, etc. during bootstrap.
+pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::path::Path) {
+    REQUEST_DATA.with(|rd| {
+        let mut data = rd.borrow_mut();
+        data.server_vars.clear();
+
+        let vars = &mut data.server_vars;
+        push_server_var(vars, "SCRIPT_FILENAME", &script_path.to_string_lossy());
+        push_server_var(vars, "DOCUMENT_ROOT", &document_root.to_string_lossy());
+        push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
+        push_server_var(vars, "SERVER_PROTOCOL", "HTTP/1.1");
+        push_server_var(vars, "REQUEST_METHOD", "GET");
+        push_server_var(vars, "REQUEST_URI", "/");
+        push_server_var(vars, "SCRIPT_NAME", "/");
+        push_server_var(vars, "PHP_SELF", "/");
+        push_server_var(vars, "SERVER_NAME", "localhost");
+        push_server_var(vars, "SERVER_PORT", "80");
+        push_server_var(vars, "REMOTE_ADDR", "127.0.0.1");
+        push_server_var(vars, "REMOTE_PORT", "0");
+        push_server_var(vars, "QUERY_STRING", "");
+        push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
+
+        data.active = true;
+    });
 }
 
 /// Store a oneshot sender for early response delivery.
@@ -267,7 +297,7 @@ pub fn set_request_data(req: &ScriptRequest) {
         push_server_var(vars, "DOCUMENT_ROOT", &req.document_root.to_string_lossy());
 
         // Server identification
-        push_server_var(vars, "SERVER_SOFTWARE", "OxPHP/0.1.0");
+        push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
         push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
 
         // Connection info
