@@ -112,9 +112,6 @@ COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extens
 
 # PHP configuration
 RUN mkdir -p /usr/local/etc/php/conf.d
-COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
-# Disable preloading — release image ships only a single index.php
-RUN sed -i '/^opcache.preload/d' /usr/local/etc/php/conf.d/oxphp.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Copy binary from builder

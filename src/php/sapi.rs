@@ -496,7 +496,7 @@ pub fn build_sapi_module() -> sapi_module_struct {
         get_target_gid: None,
         input_filter: None,
         ini_defaults: None,
-        phpinfo_as_text: 1,
+        phpinfo_as_text: 0,
 
         ini_entries: std::ptr::null(),
 
