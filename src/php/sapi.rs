@@ -98,6 +98,19 @@ impl RequestData {
 
 const SERVER_SOFTWARE: &str = "OxPHP/0.1.0";
 
+/// Snapshot of process environment variables captured once at startup.
+/// Avoids per-request `std::env::vars()` overhead (mutex, UTF-8 validation,
+/// allocations) and eliminates a potential data race with PHP `putenv()`.
+static ENV_SNAPSHOT: OnceLock<Vec<(CString, CString)>> = OnceLock::new();
+
+fn env_snapshot() -> &'static [(CString, CString)] {
+    ENV_SNAPSHOT.get_or_init(|| {
+        std::env::vars()
+            .filter_map(|(k, v)| Some((CString::new(k).ok()?, CString::new(v).ok()?)))
+            .collect()
+    })
+}
+
 /// Push a server variable, skipping entries with embedded null bytes.
 #[inline]
 fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
@@ -115,6 +128,12 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
         data.server_vars.clear();
 
         let vars = &mut data.server_vars;
+
+        // Import process environment variables first so CGI vars can override them.
+        for (key, val) in env_snapshot() {
+            vars.push((key.clone(), val.clone()));
+        }
+
         push_server_var(vars, "SCRIPT_FILENAME", &script_path.to_string_lossy());
         push_server_var(vars, "DOCUMENT_ROOT", &document_root.to_string_lossy());
         push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
@@ -271,6 +290,11 @@ pub fn set_request_data(req: &ScriptRequest) {
         data.server_vars.clear();
 
         let vars = &mut data.server_vars;
+
+        // Import process environment variables first so CGI/HTTP vars can override them.
+        for (key, val) in env_snapshot() {
+            vars.push((key.clone(), val.clone()));
+        }
 
         // CGI/1.1 standard variables
         push_server_var(vars, "REQUEST_METHOD", req.method.as_str());
