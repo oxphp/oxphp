@@ -81,10 +81,21 @@ async fn async_main(
 ) -> Result<(), types::BoxError> {
     let _log_guard = logging::init(&config.log_level)?;
 
+    let mode = if config.worker_file.is_some() {
+        "worker"
+    } else {
+        match config.server.index_file.as_deref() {
+            Some("index.php") => "framework",
+            Some("index.html") => "spa",
+            _ => "traditional",
+        }
+    };
+
     tracing::info!(
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
         executor = %config.executor_type,
+        mode = mode,
         "OxPHP HTTP server starting"
     );
 
