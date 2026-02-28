@@ -75,6 +75,9 @@ typedef struct {
     /** Exit reason for worker mode (0=shutdown, 1=max_requests, 2=max_memory, 3=error). */
     uint8_t exit_reason;
 
+    /** Consecutive handler errors (bailout). Resets on success, worker exits at threshold. */
+    uint32_t consecutive_errors;
+
     /** Current PHP heap usage in bytes (updated after each request). */
     uint64_t current_memory_bytes;
 } oxphp_ctx_t;

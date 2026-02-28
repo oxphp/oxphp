@@ -2,6 +2,7 @@
 #include "SAPI.h"
 #include "oxphp_bridge.h"
 #include "Zend/zend_API.h"
+#include "Zend/zend_exceptions.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "ext/standard/basic_functions.h"
@@ -146,6 +147,15 @@ PHP_FUNCTION(oxphp_stream_flush)
  * Called between worker mode requests to prevent response bleed.
  */
 static void oxphp_soft_reset(void) {
+    /* 0. Clear stale engine state from previous bailout or exit/die.
+     * Without this, a leftover UnwindExit exception or unclean_shutdown flag
+     * would corrupt subsequent requests. */
+    CG(unclean_shutdown) = 0;
+    if (EG(exception)) {
+        OBJ_RELEASE(EG(exception));
+        EG(exception) = NULL;
+    }
+
     /* 1. Output: discard all buffers, re-activate clean.
      * Skip end_all if no output buffers exist (avoids iterating empty stack). */
     if (php_output_get_level() > 0) {
@@ -241,6 +251,7 @@ PHP_FUNCTION(oxphp_worker)
     /* GC cycle collection interval — trades p99 latency for memory.
      * Every N requests, run a full mark-and-sweep to reclaim cyclic refs. */
     #define WORKER_GC_INTERVAL 100
+    #define WORKER_MAX_CONSECUTIVE_ERRORS 3
 
     while (1) {
         /* 1. Wait for next request (blocks in Rust via channel recv) */
@@ -255,8 +266,13 @@ PHP_FUNCTION(oxphp_worker)
          * cookies and POST data from the SAPI callbacks. */
         oxphp_soft_reset();
 
-        /* 3. Call handler with zend_try protection */
+        /* 3. Call handler with zend_try protection.
+         * Save execute_data so we can restore it after a bailout — longjmp
+         * leaves the pointer dangling at the frame that was executing. */
         int handler_failed = 0;
+        zend_execute_data *saved_execute_data = EG(current_execute_data);
+        ZVAL_UNDEF(&retval);
+
         zend_try {
             fci.retval = &retval;
             fci.param_count = 0;
@@ -264,8 +280,29 @@ PHP_FUNCTION(oxphp_worker)
             if (zend_call_function(&fci, &fcc) == SUCCESS) {
                 zval_ptr_dtor(&retval);
             }
+            /* PHP 8.4: exit/die throws UnwindExit exception instead of bailout.
+             * zend_call_function returns SUCCESS but EG(exception) is set.
+             * Clear it so the worker can continue serving requests. */
+            if (EG(exception)) {
+                if (zend_is_unwind_exit(EG(exception)) || zend_is_graceful_exit(EG(exception))) {
+                    /* exit/die is NOT a handler failure — just ends current request */
+                } else {
+                    /* Unexpected lingering exception — treat as error */
+                    handler_failed = 1;
+                }
+                OBJ_RELEASE(EG(exception));
+                EG(exception) = NULL;
+            }
         } zend_catch {
+            /* Actual zend_bailout: fatal error, timeout, cancellation.
+             * Restore execution context and clean up stale engine state. */
             handler_failed = 1;
+            EG(current_execute_data) = saved_execute_data;
+            if (EG(exception)) {
+                OBJ_RELEASE(EG(exception));
+                EG(exception) = NULL;
+            }
+            CG(unclean_shutdown) = 0;
         } zend_end_try();
 
         /* 4. Run shutdown functions (register_shutdown_function support) */
@@ -291,8 +328,14 @@ PHP_FUNCTION(oxphp_worker)
 
         /* 8. Check limits — set exit_reason before breaking */
         if (handler_failed) {
-            ctx->exit_reason = 3; /* error */
-            break;
+            ctx->consecutive_errors++;
+            if (ctx->consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
+                ctx->exit_reason = 3; /* too many consecutive errors */
+                break;
+            }
+            /* Isolated error — continue serving next request */
+        } else {
+            ctx->consecutive_errors = 0;
         }
         if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) {
             ctx->exit_reason = 1; /* max_requests */
