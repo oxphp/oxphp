@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了八个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了九个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -87,6 +87,7 @@ oxphp_server_info(): array
 | `version` | `string` | 服务器版本（当前为 `"0.1.0"`） |
 | `worker_id` | `int` | 与 `oxphp_worker_id()` 相同的值 |
 | `request_time` | `float` | 请求开始时的 Unix 时间戳，精确到微秒 |
+| `worker_mode` | `bool` | 在 worker 模式下运行时为 `true`，传统模式下为 `false` |
 
 **示例：**
 
@@ -98,6 +99,7 @@ $info = oxphp_server_info();
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
+//     "worker_mode"  => true,
 // ]
 
 // 计算已用时间
@@ -174,6 +176,38 @@ cleanup_temp_files();
 - 调用此函数后，`echo` 或 `print` 的任何后续输出将从客户端响应中丢弃。
 - PHP 工作线程在脚本完成执行前一直被占用，因此长时间的后台任务会减少可用的工作池。
 - 在同一请求中第二次调用此函数将返回 `false`。
+
+---
+
+## `oxphp_is_worker`
+
+检查服务器是否运行在 worker 模式下。
+
+```php
+oxphp_is_worker(): bool
+```
+
+**参数：** 无。
+
+**返回值：** 如果当前请求由持久化 worker 进程处理（即设置了 `WORKER_FILE`）返回 `true`，在传统模式（每个请求启动新的 PHP 进程）下返回 `false`。
+
+**示例：**
+
+```php
+<?php
+if (oxphp_is_worker()) {
+    // Worker 模式：复用持久化数据库连接
+    $db = $GLOBALS['db'] ?? ($GLOBALS['db'] = new PDO($dsn));
+} else {
+    // 传统模式：每请求建立连接
+    $db = new PDO($dsn);
+}
+```
+
+**注意事项：**
+- 此函数可在 `oxphp_worker()` 处理器回调内外调用。
+- 同一值可通过 `oxphp_server_info()['worker_mode']` 获取。
+- 适用于需要根据执行模型调整行为的库和框架（例如连接池、静态缓存、会话处理）。
 
 ---
 
@@ -358,9 +392,10 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [2] => oxphp_server_info
 //     [3] => oxphp_request_heartbeat
 //     [4] => oxphp_finish_request
-//     [5] => oxphp_is_streaming
-//     [6] => oxphp_stream_flush
-//     [7] => oxphp_worker
+//     [5] => oxphp_is_worker
+//     [6] => oxphp_is_streaming
+//     [7] => oxphp_stream_flush
+//     [8] => oxphp_worker
 // )
 ```
 

@@ -285,6 +285,7 @@ extern "C" {
         send_fn: Option<unsafe extern "C" fn() -> c_int>,
     );
     pub fn oxphp_bridge_set_worker_mode(max_requests: u64, max_memory_mib: u64);
+    pub fn oxphp_bridge_is_worker_mode() -> bool;
     pub fn oxphp_bridge_reset_request_ctx();
     pub fn oxphp_bridge_worker_wait() -> c_int;
     pub fn oxphp_bridge_worker_send_response() -> c_int;

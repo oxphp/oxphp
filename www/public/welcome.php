@@ -527,7 +527,7 @@ docker run -p 8080:8080 \
             </div>
             <div class="fn-item">
                 <code>oxphp_server_info(): array</code>
-                <p>Returns SAPI name, version, worker ID, and request timestamp.</p>
+                <p>Returns SAPI name, version, worker ID, request timestamp, and worker mode flag.</p>
             </div>
             <div class="fn-item">
                 <code>oxphp_finish_request(): bool</code>
@@ -536,6 +536,10 @@ docker run -p 8080:8080 \
             <div class="fn-item">
                 <code>oxphp_stream_flush(): bool</code>
                 <p>Activates streaming mode and flushes output as a chunk.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_is_worker(): bool</code>
+                <p>Returns true if running in worker mode, false in traditional mode.</p>
             </div>
             <div class="fn-item">
                 <code>oxphp_is_streaming(): bool</code>

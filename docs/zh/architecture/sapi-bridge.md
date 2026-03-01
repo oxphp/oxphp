@@ -185,9 +185,10 @@ PHP 扩展（`ext/oxphp_sapi.c`）向 PHP 脚本暴露服务器特定函数。�
 |---|---|---|
 | `oxphp_request_id()` | `string` | 返回当前请求的十六进制请求 ID |
 | `oxphp_worker_id()` | `int` | 返回工作线程索引（从 0 开始） |
-| `oxphp_server_info()` | `array` | 返回 `sapi`、`version`、`worker_id`、`request_time` |
+| `oxphp_server_info()` | `array` | 返回 `sapi`、`version`、`worker_id`、`request_time`、`worker_mode` |
 | `oxphp_request_heartbeat(int $time = 10)` | `bool` | 超时延长占位符（当前返回 `true`） |
 | `oxphp_finish_request()` | `bool` | 标记请求已完成，用于后台处理 |
+| `oxphp_is_worker()` | `bool` | 检查服务器是否运行在 worker 模式下 |
 | `oxphp_is_streaming()` | `bool` | 检查当前请求是否使用流式模式 |
 
 ### 原生插件分发

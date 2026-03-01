@@ -414,6 +414,10 @@ void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib
     ctx.current_memory_bytes = 0;
 }
 
+bool oxphp_bridge_is_worker_mode(void) {
+    return ctx.worker_mode != 0;
+}
+
 void oxphp_bridge_reset_request_ctx(void) {
     ctx.request_id[0] = '\0';
     ctx.request_time = 0.0;

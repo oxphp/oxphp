@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers eight built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers nine built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -87,6 +87,7 @@ oxphp_server_info(): array
 | `version` | `string` | Server version (currently `"0.1.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
+| `worker_mode` | `bool` | `true` if running in worker mode, `false` in traditional mode |
 
 **Example:**
 
@@ -98,6 +99,7 @@ $info = oxphp_server_info();
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
+//     "worker_mode"  => true,
 // ]
 
 // Calculate elapsed time
@@ -174,6 +176,38 @@ cleanup_temp_files();
 - After calling this function, any further output from `echo` or `print` is discarded from the client response.
 - The PHP worker thread remains occupied until the script finishes executing, so long background tasks reduce the available worker pool.
 - Calling this function twice in the same request returns `false` on the second call.
+
+---
+
+## `oxphp_is_worker`
+
+Checks whether the server is running in worker mode.
+
+```php
+oxphp_is_worker(): bool
+```
+
+**Parameters:** None.
+
+**Return value:** `true` if the current request is handled by a persistent worker process (i.e., `WORKER_FILE` is set), `false` if running in traditional mode where each request spawns a fresh PHP process.
+
+**Example:**
+
+```php
+<?php
+if (oxphp_is_worker()) {
+    // Worker mode: reuse persistent database connection
+    $db = $GLOBALS['db'] ?? ($GLOBALS['db'] = new PDO($dsn));
+} else {
+    // Traditional mode: connect per request
+    $db = new PDO($dsn);
+}
+```
+
+**Notes:**
+- This function can be called both inside and outside the `oxphp_worker()` handler callback.
+- The same value is available via `oxphp_server_info()['worker_mode']`.
+- Useful for libraries and frameworks that need to adapt behavior depending on the execution model (e.g., connection pooling, static caches, session handling).
 
 ---
 
@@ -358,9 +392,10 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [2] => oxphp_server_info
 //     [3] => oxphp_request_heartbeat
 //     [4] => oxphp_finish_request
-//     [5] => oxphp_is_streaming
-//     [6] => oxphp_stream_flush
-//     [7] => oxphp_worker
+//     [5] => oxphp_is_worker
+//     [6] => oxphp_is_streaming
+//     [7] => oxphp_stream_flush
+//     [8] => oxphp_worker
 // )
 ```
 
