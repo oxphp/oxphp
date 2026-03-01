@@ -787,11 +787,20 @@ unsafe extern "C" fn oxphp_send_headers(sapi_headers: *mut sapi_headers_struct) 
 
 // ─── Logging ────────────────────────────────────────────────
 
-unsafe extern "C" fn oxphp_log_message(message: *const c_char, _syslog_type: c_int) {
+unsafe extern "C" fn oxphp_log_message(message: *const c_char, syslog_type: c_int) {
     if message.is_null() {
         return;
     }
     let msg = std::ffi::CStr::from_ptr(message);
+
+    // syslog_type == 1 (LOG_ALERT) indicates fatal errors.
+    // Set HTTP 500 as an additional safety net — the error callback should have
+    // already done this, but log_message doesn't trigger zend_bailout so it's
+    // guaranteed to execute fully.
+    if syslog_type == 1 {
+        set_fatal_error_status_if_default();
+    }
+
     tracing::warn!(php_message = %msg.to_string_lossy(), "PHP log");
 }
 
@@ -857,6 +866,13 @@ unsafe extern "C" fn oxphp_error_cb(
     };
 
     let (level, type_name) = error_type_str(type_);
+
+    // For fatal error types, set HTTP 500 BEFORE delegating to the original callback.
+    // The original callback may trigger zend_bailout (longjmp) which would skip any
+    // code placed after the delegation.
+    if level == "error" {
+        set_fatal_error_status_if_default();
+    }
 
     match level {
         "error" => {
@@ -932,6 +948,17 @@ pub fn clear_buffers() {
     // Drop streaming sender from previous request (receiver was consumed by ScriptResponse).
     STREAM_TX.with(|slot| {
         slot.borrow_mut().take();
+    });
+}
+
+/// Set HTTP 500 status if the current status is still the default 200.
+/// Used by error callback for fatal errors and by execute_request on bailout.
+pub fn set_fatal_error_status_if_default() {
+    RESPONSE.with(|r| {
+        let mut resp = r.borrow_mut();
+        if resp.status_code == 200 {
+            resp.status_code = 500;
+        }
     });
 }
 
@@ -1145,6 +1172,11 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         return 0;
     }
 
+    // If the handler failed (bailout/fatal error), force HTTP 500
+    if bindings::oxphp_bridge_get_handler_failed() {
+        set_fatal_error_status_if_default();
+    }
+
     // Take accumulated response and send via oneshot
     let (raw_output, raw_headers, status) = take_response();
     let body = Bytes::from(raw_output);
@@ -1246,5 +1278,27 @@ mod tests {
         // PHP uncaught exceptions may set high bits (e.g. 0x1000001 = E_ERROR with flag)
         assert_eq!(error_type_str(0x1000001), ("error", "E_ERROR"));
         assert_eq!(error_type_str(0x1000002), ("warn", "E_WARNING"));
+    }
+
+    #[test]
+    fn fatal_error_status_sets_500_from_default() {
+        RESPONSE.with(|r| r.borrow_mut().status_code = 200);
+        set_fatal_error_status_if_default();
+        RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 500));
+    }
+
+    #[test]
+    fn fatal_error_status_idempotent() {
+        RESPONSE.with(|r| r.borrow_mut().status_code = 200);
+        set_fatal_error_status_if_default();
+        set_fatal_error_status_if_default();
+        RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 500));
+    }
+
+    #[test]
+    fn fatal_error_status_preserves_non_200() {
+        RESPONSE.with(|r| r.borrow_mut().status_code = 404);
+        set_fatal_error_status_if_default();
+        RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 404));
     }
 }

@@ -329,8 +329,9 @@ PHP_FUNCTION(oxphp_worker)
         php_call_shutdown_functions();
         php_free_shutdown_functions();
 
-        /* 5. Capture memory usage before send (for Rust-side metrics) */
+        /* 5. Capture memory usage and handler failure state before send */
         ctx->current_memory_bytes = (uint64_t)zend_memory_usage(0);
+        ctx->handler_failed = handler_failed ? true : false;
 
         /* 5b. Send response back to HTTP layer */
         oxphp_bridge_worker_send_response();
