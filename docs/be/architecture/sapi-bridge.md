@@ -185,9 +185,10 @@ PHP-пашырэнне (`ext/oxphp_sapi.c`) выстаўляе сервер-сп
 |---|---|---|
 | `oxphp_request_id()` | `string` | Вяртае hex-ідэнтыфікатар запыту для бягучага запыту |
 | `oxphp_worker_id()` | `int` | Вяртае індэкс патоку воркера (з 0) |
-| `oxphp_server_info()` | `array` | Вяртае `sapi`, `version`, `worker_id`, `request_time` |
+| `oxphp_server_info()` | `array` | Вяртае `sapi`, `version`, `worker_id`, `request_time`, `worker_mode` |
 | `oxphp_request_heartbeat(int $time = 10)` | `bool` | Запас для падаўжэння таймаўту (зараз вяртае `true`) |
 | `oxphp_finish_request()` | `bool` | Пазначае запыт як завершаны для фонавай апрацоўкі |
+| `oxphp_is_worker()` | `bool` | Правярае, ці працуе сервер у рэжыме воркера |
 | `oxphp_is_streaming()` | `bool` | Правярае, ці выкарыстоўвае бягучы запыт рэжым стрымінгу |
 
 ### Натыўная дыспетчарызацыя плагінаў

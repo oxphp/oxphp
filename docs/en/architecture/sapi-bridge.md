@@ -185,9 +185,10 @@ The PHP extension (`ext/oxphp_sapi.c`) exposes server-specific functions to PHP 
 |---|---|---|
 | `oxphp_request_id()` | `string` | Returns the hex request ID for the current request |
 | `oxphp_worker_id()` | `int` | Returns the worker thread index (0-based) |
-| `oxphp_server_info()` | `array` | Returns `sapi`, `version`, `worker_id`, `request_time` |
+| `oxphp_server_info()` | `array` | Returns `sapi`, `version`, `worker_id`, `request_time`, `worker_mode` |
 | `oxphp_request_heartbeat(int $time = 10)` | `bool` | Placeholder for timeout extension (currently returns `true`) |
 | `oxphp_finish_request()` | `bool` | Marks the request as finished for background processing |
+| `oxphp_is_worker()` | `bool` | Checks if the server is running in worker mode |
 | `oxphp_is_streaming()` | `bool` | Checks if the current request uses streaming mode |
 
 ### Native Plugin Dispatch

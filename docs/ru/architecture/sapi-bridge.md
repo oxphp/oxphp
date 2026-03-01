@@ -185,9 +185,10 @@ PHP-расширение (`ext/oxphp_sapi.c`) предоставляет сер�
 |---|---|---|
 | `oxphp_request_id()` | `string` | Возвращает hex-идентификатор текущего запроса |
 | `oxphp_worker_id()` | `int` | Возвращает индекс потока воркера (начиная с 0) |
-| `oxphp_server_info()` | `array` | Возвращает `sapi`, `version`, `worker_id`, `request_time` |
+| `oxphp_server_info()` | `array` | Возвращает `sapi`, `version`, `worker_id`, `request_time`, `worker_mode` |
 | `oxphp_request_heartbeat(int $time = 10)` | `bool` | Заглушка для продления тайм-аута (в настоящее время возвращает `true`) |
 | `oxphp_finish_request()` | `bool` | Отмечает запрос как завершённый для фоновой обработки |
+| `oxphp_is_worker()` | `bool` | Проверяет, работает ли сервер в режиме воркера |
 | `oxphp_is_streaming()` | `bool` | Проверяет, использует ли текущий запрос потоковый режим |
 
 ### Нативная диспетчеризация плагинов

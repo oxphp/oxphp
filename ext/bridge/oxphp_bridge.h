@@ -316,6 +316,9 @@ void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_wor
 /** Set worker mode TLS flags for this thread. */
 void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib);
 
+/** Check if this thread is in worker mode. */
+bool oxphp_bridge_is_worker_mode(void);
+
 /**
  * Reset per-request TLS fields between worker mode requests.
  * Clears: request_id, request_time, deadline, cancelled, write_count,

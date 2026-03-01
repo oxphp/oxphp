@@ -33,17 +33,32 @@ $tmp = "/tmp/worker_{$wid}_buffer.dat";',
         'name'    => 'oxphp_server_info',
         'sig'     => 'oxphp_server_info(): array',
         'params'  => [],
-        'return'  => 'array — Associative array with keys: <code>sapi</code>, <code>version</code>, <code>worker_id</code>, <code>request_time</code>.',
+        'return'  => 'array — Associative array with keys: <code>sapi</code>, <code>version</code>, <code>worker_id</code>, <code>request_time</code>, <code>worker_mode</code>.',
         'desc'    => 'Returns server metadata for the current request. The <code>request_time</code> is a Unix timestamp with microsecond precision, set before <code>php_request_startup()</code> for accurate timing.',
         'example' => '$info = oxphp_server_info();
 // [
 //     "sapi"         => "oxphp",
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
-//     "request_time" => 1740000000.123456
+//     "request_time" => 1740000000.123456,
+//     "worker_mode"  => true
 // ]
 
 header("X-Worker: " . $info["worker_id"]);',
+    ],
+    [
+        'name'    => 'oxphp_is_worker',
+        'sig'     => 'oxphp_is_worker(): bool',
+        'params'  => [],
+        'return'  => 'bool — <code>true</code> if running in worker mode, <code>false</code> in traditional mode.',
+        'desc'    => 'Checks whether the server is running in worker mode. In worker mode, PHP boots once and handles multiple requests via <code>oxphp_worker()</code>. In traditional mode, each request spawns a fresh PHP process. Use this to conditionally enable worker-specific logic such as connection pooling or static caches.',
+        'example' => 'if (oxphp_is_worker()) {
+    // Worker mode: reuse persistent DB connection
+    $db = $GLOBALS["db"] ?? ($GLOBALS["db"] = new PDO($dsn));
+} else {
+    // Traditional mode: connect per request
+    $db = new PDO($dsn);
+}',
     ],
     [
         'name'    => 'oxphp_finish_request',
@@ -160,6 +175,7 @@ foreach ($functions as $fn) {
             'oxphp_request_id'        => '<span class="mono">"' . h(oxphp_request_id()) . '"</span>',
             'oxphp_worker_id'         => '<span class="mono">' . oxphp_worker_id() . '</span>',
             'oxphp_server_info'       => '<pre class="fn-live-pre">' . h(json_encode(oxphp_server_info(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) . '</pre>',
+            'oxphp_is_worker'         => '<span class="mono">' . (oxphp_is_worker() ? 'true' : 'false') . '</span>',
             'oxphp_is_streaming'      => '<span class="mono">' . (oxphp_is_streaming() ? 'true' : 'false') . '</span>',
             'oxphp_request_heartbeat' => '<span class="mono">' . (oxphp_request_heartbeat() ? 'true' : 'false') . '</span>',
             'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',

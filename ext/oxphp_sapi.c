@@ -44,6 +44,7 @@ PHP_FUNCTION(oxphp_server_info)
     add_assoc_string(return_value, "version", PHP_OXPHP_SAPI_VERSION);
     add_assoc_long(return_value, "worker_id", oxphp_bridge_get_worker_id());
     add_assoc_double(return_value, "request_time", oxphp_bridge_get_request_time());
+    add_assoc_bool(return_value, "worker_mode", oxphp_bridge_is_worker_mode());
 }
 /* }}} */
 
@@ -97,6 +98,16 @@ PHP_FUNCTION(oxphp_finish_request)
     sapi_flush();
 
     RETURN_TRUE;
+}
+/* }}} */
+
+/* {{{ oxphp_is_worker(): bool
+ * Check if the current request is being handled in worker mode. */
+PHP_FUNCTION(oxphp_is_worker)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    RETURN_BOOL(oxphp_bridge_is_worker_mode());
 }
 /* }}} */
 
@@ -427,6 +438,9 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_is_worker, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_is_streaming, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -445,6 +459,7 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_server_info,       arginfo_oxphp_server_info)
     PHP_FE(oxphp_request_heartbeat, arginfo_oxphp_request_heartbeat)
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
+    PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
     PHP_FE(oxphp_worker,            arginfo_oxphp_worker)
