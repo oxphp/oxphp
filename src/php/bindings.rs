@@ -293,6 +293,7 @@ extern "C" {
     pub fn oxphp_bridge_get_exit_reason() -> u8;
     pub fn oxphp_bridge_get_requests_done() -> u64;
     pub fn oxphp_bridge_get_memory_usage() -> u64;
+    pub fn oxphp_bridge_get_handler_failed() -> bool;
 
     // ─── SAPI request_info ──────────────────────────────
 

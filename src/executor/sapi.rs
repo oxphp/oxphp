@@ -1003,6 +1003,9 @@ fn execute_request(
     };
     if script_ok == 0 {
         tracing::warn!(path = %request.script_path.display(), "PHP script aborted via zend_bailout");
+        // Force HTTP 500 for fatal errors — the error callback may have already
+        // set this, but if not (e.g. syntax error before callback runs), ensure it.
+        sapi::set_fatal_error_status_if_default();
     }
 
     unsafe {

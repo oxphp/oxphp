@@ -463,6 +463,10 @@ uint64_t oxphp_bridge_get_memory_usage(void) {
     return ctx.current_memory_bytes;
 }
 
+bool oxphp_bridge_get_handler_failed(void) {
+    return ctx.handler_failed;
+}
+
 /* ── Bailout wrapper ── */
 
 void oxphp_bridge_bailout(void) {

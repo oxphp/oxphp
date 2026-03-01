@@ -75,6 +75,9 @@ typedef struct {
     /** Exit reason for worker mode (0=shutdown, 1=max_requests, 2=max_memory, 3=error). */
     uint8_t exit_reason;
 
+    /** Whether the current handler invocation failed (bailout/fatal error). */
+    bool handler_failed;
+
     /** Consecutive handler errors (bailout). Resets on success, worker exits at threshold. */
     uint32_t consecutive_errors;
 
@@ -346,6 +349,9 @@ uint64_t oxphp_bridge_get_requests_done(void);
 
 /** Get the current PHP memory usage (set after each request). */
 uint64_t oxphp_bridge_get_memory_usage(void);
+
+/** Check if the current handler invocation failed (fatal error/bailout). */
+bool oxphp_bridge_get_handler_failed(void);
 
 #ifdef __cplusplus
 }
