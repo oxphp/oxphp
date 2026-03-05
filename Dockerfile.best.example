@@ -1,0 +1,161 @@
+# ══════════════════════════════════════════════════════════════
+# OxPHP Best Practice Dockerfile
+#
+# Usage:
+#   docker build --target dev  -t myapp:dev  .
+#   docker build --target prod -t myapp:prod .
+#
+# Dev:  PHP CLI available, xdebug included, opcache validates timestamps
+# Prod: Minimal image (no PHP CLI), no xdebug, opcache fully locked
+# ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+# Stage: php-base — shared PHP extensions (pdo, intl)
+# ══════════════════════════════════════════════════════════════
+FROM php:8.4-zts-alpine3.23 AS php-base
+
+RUN apk add --no-cache \
+        icu-dev \
+        icu-libs \
+        postgresql-dev \
+        libpq \
+    && docker-php-ext-install \
+        pdo \
+        pdo_mysql \
+        pdo_pgsql \
+        intl \
+    && apk del icu-dev postgresql-dev
+
+# ══════════════════════════════════════════════════════════════
+# Stage: php-dev — add xdebug on top of base
+# ══════════════════════════════════════════════════════════════
+FROM php-base AS php-dev
+
+RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
+    && pecl install xdebug \
+    && docker-php-ext-enable xdebug \
+    && apk del $PHPIZE_DEPS linux-headers
+
+# ══════════════════════════════════════════════════════════════
+# Stage: composer — official Composer image
+# ══════════════════════════════════════════════════════════════
+FROM composer:2 AS composer
+
+# ══════════════════════════════════════════════════════════════
+# Stage: oxphp — pull OxPHP nightly artifacts
+# ══════════════════════════════════════════════════════════════
+FROM ghcr.io/oxphp/oxphp:nightly AS oxphp
+
+# ══════════════════════════════════════════════════════════════
+# Target: dev
+#
+# Base: php:8.4-zts-alpine (PHP CLI available)
+# Extensions: pdo, intl, xdebug
+# OxPHP copied INTO this image
+# ══════════════════════════════════════════════════════════════
+FROM php-dev AS dev
+
+RUN apk add --no-cache libgcc
+
+# Composer
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+
+# OxPHP binary
+COPY --from=oxphp /usr/local/bin/oxphp /usr/local/bin/oxphp
+
+# Bridge library
+COPY --from=oxphp /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+
+# OxPHP PHP extension (match base image's extension directory)
+RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
+    echo "$EXT_DIR" > /tmp/ext_dir
+COPY --from=oxphp /usr/local/lib/php/extensions/ /tmp/oxphp-ext/
+RUN cp /tmp/oxphp-ext/*/oxphp_sapi.so "$(cat /tmp/ext_dir)/" && \
+    rm -rf /tmp/oxphp-ext /tmp/ext_dir
+
+# PHP config
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp-ext.ini
+
+# Dev-friendly opcache (validates timestamps, no JIT)
+# Note: base image already loads opcache, so only override settings
+RUN { \
+        echo "[opcache]"; \
+        echo "opcache.enable=1"; \
+        echo "opcache.enable_cli=1"; \
+        echo "opcache.validate_timestamps=1"; \
+        echo "opcache.revalidate_freq=0"; \
+    } > /usr/local/etc/php/conf.d/opcache-dev.ini
+
+# Xdebug defaults (connect back to host)
+RUN { \
+        echo "[xdebug]"; \
+        echo "xdebug.mode=debug"; \
+        echo "xdebug.start_with_request=trigger"; \
+        echo "xdebug.client_host=host.docker.internal"; \
+        echo "xdebug.client_port=9003"; \
+    } > /usr/local/etc/php/conf.d/xdebug-config.ini
+
+# Create www-data user
+RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
+
+# Web root
+RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+# Your app code
+COPY --chown=www-data:www-data . /var/www/html
+
+EXPOSE 8080
+
+CMD ["oxphp"]
+
+# ══════════════════════════════════════════════════════════════
+# Stage: prod-extensions — build PHP extensions into standalone dir
+#
+# Compiles pdo + intl extensions, then extracts just the .so
+# files to copy into the minimal OxPHP image.
+# ══════════════════════════════════════════════════════════════
+FROM php-base AS prod-extensions
+
+# Collect extension .so files into a known directory
+RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
+    mkdir -p /ext-out && \
+    cp "$EXT_DIR"/pdo.so \
+       "$EXT_DIR"/pdo_mysql.so \
+       "$EXT_DIR"/pdo_pgsql.so \
+       "$EXT_DIR"/intl.so \
+       /ext-out/
+
+# ══════════════════════════════════════════════════════════════
+# Target: prod
+#
+# Base: ghcr.io/oxphp/oxphp:nightly (minimal, no PHP CLI)
+# Extensions: pdo, intl (no xdebug)
+# Only compiled .so files copied in
+# ══════════════════════════════════════════════════════════════
+FROM oxphp AS prod
+
+# Runtime deps for intl + pdo_pgsql
+USER root
+RUN apk add --no-cache icu-libs libpq
+
+# Copy extension .so files into OxPHP's extension directory
+COPY --from=prod-extensions /ext-out/*.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+# Enable extensions
+# Note: pdo.so is already loaded by the base OxPHP image
+RUN { \
+        echo "extension=pdo_mysql.so"; \
+        echo "extension=pdo_pgsql.so"; \
+        echo "extension=intl.so"; \
+    } > /usr/local/etc/php/conf.d/app-extensions.ini
+
+# Your app code
+COPY --chown=www-data:www-data . /var/www/html
+
+USER www-data
+
+EXPOSE 8080
+
+CMD ["oxphp"]
