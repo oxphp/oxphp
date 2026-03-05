@@ -71,6 +71,12 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 | `WORKER_MAX_REQUESTS` | `0` | Максімальная колькасць запытаў, якую воркер апрацоўвае перад рэцыклінгам. `0` адключае ліміт |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Максімальная памяць (у мегабайтах), якую воркер можа выкарыстоўваць перад рэцыклінгам. `0` адключае ліміт |
 
+### Кэшаванне статычных файлаў
+
+| Зменная | Па змаўчанні | Апісанне |
+|----------|---------|-------------|
+| `STATIC_CACHE_TTL` | `30d` | TTL кэша для адказаў са статычнымі файламі. Кіруе загалоўкамі `Cache-Control`, `ETag` і `Last-Modified`. Падтрымлівае: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, голыя секунды (`3600`) або `off` для адключэння |
+
 ### Сціск
 
 | Зменная | Па змаўчанні | Апісанне |
@@ -175,6 +181,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Laravel у вытворчасці (дынамічны пул)
@@ -196,6 +203,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Docker Compose
@@ -216,6 +224,7 @@ services:
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_ENABLED: "true"
+      # STATIC_CACHE_TTL: "30d"       # TTL кэша статычных файлаў (па змаўчанні: 30d)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -275,6 +284,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression_enabled": true,
+  "static_cache_ttl": 2592000,
   "access_log": true,
   "plugins": {}
 }

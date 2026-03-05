@@ -55,6 +55,8 @@ Every HTTP request in OxPHP passes through a pipeline of stages, from TCP accept
 │ Serve  │  │ (worker) │
 └───┬────┘  └────┬─────┘
     │            │
+    ├── 304? ────┤  (If-None-Match / If-Modified-Since)
+    │            │
     └─────┬──────┘
           ▼
 ┌───────────────────┐
@@ -195,7 +197,13 @@ The routing process:
 
 ### 9a. Static File Serving
 
-For `Serve` results, `static_file::serve()` reads the file from disk (with file cache for metadata), detects the MIME type, and returns the response with appropriate `Content-Type` and `Content-Length` headers.
+For `Serve` results, `static_file::serve()` handles the response with HTTP caching support:
+
+1. **Conditional check (cache hit)** — if the file is in the content cache, check `If-None-Match` / `If-Modified-Since` headers and return `304 Not Modified` if the file hasn't changed (no body, no disk I/O)
+2. **Cache hit** — return the cached content with `Cache-Control`, `ETag`, and `Last-Modified` headers
+3. **Cache miss** — read file metadata, check conditional headers before reading the file body, then serve with caching headers
+
+When `STATIC_CACHE_TTL=off`, caching headers are omitted and conditional checks are skipped.
 
 ### 9b. PHP Execution (Buffered or Streaming)
 

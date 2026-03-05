@@ -13,6 +13,7 @@
 - **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
 - **3 种路由模式** — 传统模式、框架模式（`index.php`）、SPA 模式（`index.html`）
 - **LRU 文件缓存** — 静态文件内存缓存（≤1 MB 完整缓存，更大文件流式传输）
+- **HTTP 缓存** — 支持 ETag、Last-Modified 和 304 Not Modified 条件请求
 - **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB）
 - **有界请求队列** — 队列满时返回 503 进行背压控制
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
@@ -71,6 +72,7 @@ curl http://localhost:8080/
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
+| `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL。支持格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯数字秒数（`3600`）或 `off` 禁用 |
 | `COMPRESSION_ENABLED` | `true` | 启用 Brotli 压缩；设置为 `false`、`0` 或 `off` 可禁用 |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |

@@ -50,6 +50,37 @@ pub struct Config {
     pub worker_max_requests: u64,
     /// Max memory (MB) before recycling a worker (0 = unlimited).
     pub worker_max_memory_mib: u64,
+    /// Static file cache TTL in seconds. `None` = caching disabled.
+    pub static_cache_ttl: Option<u64>,
+}
+
+/// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
+/// Bare numbers (e.g. "3600") are treated as seconds.
+/// Returns `None` for "off" or invalid input.
+pub fn parse_duration(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    if s.is_empty() {
+        return None;
+    }
+    // Bare number = seconds
+    if let Ok(secs) = s.parse::<u64>() {
+        return Some(secs);
+    }
+    let (num_str, suffix) = s.split_at(s.len() - 1);
+    let num: u64 = num_str.parse().ok()?;
+    let multiplier = match suffix {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        "d" => 86_400,
+        "w" => 604_800,
+        "y" => 31_536_000,
+        _ => return None,
+    };
+    Some(num.saturating_mul(multiplier))
 }
 
 impl Config {
@@ -110,6 +141,11 @@ impl Config {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
+        let static_cache_ttl = match std::env::var("STATIC_CACHE_TTL") {
+            Ok(val) => parse_duration(&val),
+            Err(_) => Some(2_592_000), // 30 days
+        };
+
         Ok(Self {
             server,
             log_level,
@@ -128,6 +164,7 @@ impl Config {
             worker_file,
             worker_max_requests,
             worker_max_memory_mib,
+            static_cache_ttl,
         })
     }
 
@@ -155,6 +192,75 @@ impl Config {
             "worker_file": self.worker_file.as_ref().map(|p| p.display().to_string()),
             "worker_max_requests": self.worker_max_requests,
             "worker_max_memory_mib": self.worker_max_memory_mib,
+            "static_cache_ttl": self.static_cache_ttl,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration("30s"), Some(30));
+        assert_eq!(parse_duration("0s"), Some(0));
+        assert_eq!(parse_duration("1s"), Some(1));
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration("5m"), Some(300));
+        assert_eq!(parse_duration("1m"), Some(60));
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration("1h"), Some(3600));
+        assert_eq!(parse_duration("24h"), Some(86400));
+    }
+
+    #[test]
+    fn test_parse_duration_days() {
+        assert_eq!(parse_duration("30d"), Some(2_592_000));
+        assert_eq!(parse_duration("1d"), Some(86400));
+    }
+
+    #[test]
+    fn test_parse_duration_weeks() {
+        assert_eq!(parse_duration("1w"), Some(604_800));
+        assert_eq!(parse_duration("2w"), Some(1_209_600));
+    }
+
+    #[test]
+    fn test_parse_duration_years() {
+        assert_eq!(parse_duration("1y"), Some(31_536_000));
+    }
+
+    #[test]
+    fn test_parse_duration_off() {
+        assert_eq!(parse_duration("off"), None);
+        assert_eq!(parse_duration("OFF"), None);
+        assert_eq!(parse_duration("Off"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_bare_number() {
+        assert_eq!(parse_duration("3600"), Some(3600));
+        assert_eq!(parse_duration("0"), Some(0));
+        assert_eq!(parse_duration("30"), Some(30));
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("abc"), None);
+        assert_eq!(parse_duration("30x"), None);
+    }
+
+    #[test]
+    fn test_parse_duration_whitespace() {
+        assert_eq!(parse_duration("  30s  "), Some(30));
+        assert_eq!(parse_duration(" off "), None);
     }
 }

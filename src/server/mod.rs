@@ -46,6 +46,9 @@ pub struct Server {
     pub(crate) request_timeout: Duration,
     pub(crate) compression_enabled: bool,
     pub(crate) max_query_body: usize,
+    /// Pre-computed `Cache-Control` header value, e.g. `"public, max-age=2592000"`.
+    /// `None` = caching disabled.
+    pub(crate) static_cache_control: Option<String>,
     /// Pre-configured HTTP builder reused across all connections.
     http_builder: Builder<hyper_util::rt::TokioExecutor>,
     shutdown: AtomicBool,
@@ -63,6 +66,7 @@ impl Server {
         compression_enabled: bool,
         max_query_body: usize,
         worker_file: Option<PathBuf>,
+        static_cache_control: Option<String>,
     ) -> Self {
         let mut route_config = RouteConfig::new(config);
         if let Some(wf) = worker_file {
@@ -91,6 +95,7 @@ impl Server {
             request_timeout: config.request_timeout,
             compression_enabled,
             max_query_body,
+            static_cache_control,
             http_builder,
             shutdown: AtomicBool::new(false),
         }
