@@ -52,7 +52,7 @@ $features = [
     ['Timeouts',      'REQUEST_TIMEOUT_SECONDS, HEADER_TIMEOUT_SECONDS, IDLE_TIMEOUT_SECONDS'],
     ['TLS',           'TLS_CERT + TLS_KEY (native rustls)'],
     ['Error Pages',   'Custom HTML per status code (ERROR_PAGES_DIR)'],
-    ['Static Files',  'MIME detection, in-memory cache ≤1 MiB, streaming >1 MiB'],
+    ['Static Files',  'MIME detection, in-memory cache ≤1 MiB, streaming >1 MiB, HTTP caching (ETag/304)'],
     ['Observability', '/health, /metrics (Prometheus), /config (internal server)'],
     ['Worker Pool',   'PHP ZTS threads — static (N) or dynamic (MIN:MAX)'],
     ['OPcache + JIT', 'Shared memory bytecode cache with JIT compilation'],

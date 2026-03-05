@@ -71,6 +71,12 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` 表示不限制 |
 | `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前使用的最大内存（兆字节）。`0` 表示不限制 |
 
+### 静态文件缓存
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `STATIC_CACHE_TTL` | `30d` | 静态文件响应的缓存 TTL。控制 `Cache-Control`、`ETag` 和 `Last-Modified` 头。支持：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`）或 `off` 禁用 |
+
 ### 压缩
 
 | 变量 | 默认值 | 说明 |
@@ -175,6 +181,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Laravel 生产环境（动态池）
@@ -196,6 +203,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Docker Compose
@@ -216,6 +224,7 @@ services:
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_ENABLED: "true"
+      # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -275,6 +284,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression_enabled": true,
+  "static_cache_ttl": 2592000,
   "access_log": true,
   "plugins": {}
 }

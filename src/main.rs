@@ -229,6 +229,9 @@ async fn async_main(
         config.compression,
         config.max_query_body,
         config.worker_file.clone(),
+        config
+            .static_cache_ttl
+            .map(|ttl| format!("public, max-age={ttl}")),
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 

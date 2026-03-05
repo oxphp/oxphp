@@ -13,6 +13,7 @@ Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM wi
 - **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
 - **3 routing modes** — Traditional, Framework (`index.php`), SPA (`index.html`)
 - **LRU file cache** for static files (in-memory for files ≤1 MB, streaming for larger)
+- **HTTP caching** with ETag, Last-Modified, and 304 Not Modified support for static files
 - **Brotli compression** for text responses (256 B – 3 MB range)
 - **Bounded request queue** with 503 backpressure when full
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
@@ -71,6 +72,7 @@ All settings are via environment variables:
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
+| `STATIC_CACHE_TTL` | `30d` | Static file cache TTL. Supports: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable |
 | `COMPRESSION_ENABLED` | `true` | Enable Brotli compression; disable with `false`, `0`, or `off` |
 | `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all` (every request), `error` (4xx/5xx only), empty/unset = off |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |

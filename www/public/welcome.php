@@ -310,7 +310,7 @@ $sapi       = PHP_SAPI;
             <div class="feature-card">
                 <div class="icon">&#x1F310;</div>
                 <h3>Modern HTTP Stack</h3>
-                <p>Built on Hyper + Tokio for async I/O. HTTP/1.1 with keep-alive, Brotli compression, native TLS via rustls, and configurable timeouts.</p>
+                <p>Built on Hyper + Tokio for async I/O. HTTP/1.1 with keep-alive, Brotli compression, HTTP caching with ETag/304, native TLS via rustls, and configurable timeouts.</p>
             </div>
             <div class="feature-card">
                 <div class="icon">&#x1F4CA;</div>
@@ -420,6 +420,7 @@ docker run -p 8080:8080 \
                         <tr><td><code>INDEX_FILE</code></td><td><em>(empty)</em></td><td>Routing mode: <code>index.php</code> = framework, <code>index.html</code> = SPA</td></tr>
                         <tr><td><code>TOKIO_WORKERS</code></td><td><code>0</code></td><td>Async I/O threads (0 = single-threaded)</td></tr>
                         <tr><td><code>COMPRESSION_ENABLED</code></td><td><code>true</code></td><td>Brotli compression</td></tr>
+                        <tr><td><code>STATIC_CACHE_TTL</code></td><td><code>30d</code></td><td>Static file cache TTL (<code>30s</code>, <code>5m</code>, <code>2h</code>, <code>30d</code>, <code>1w</code>, <code>1y</code>, or <code>off</code>)</td></tr>
                     </tbody>
                 </table>
             </div>

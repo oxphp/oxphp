@@ -55,6 +55,8 @@ OxPHP 中的每个 HTTP 请求都会经过一系列管道阶段，从 TCP 接受
 │ Serve  │  │ (worker) │
 └───┬────┘  └────┬─────┘
     │            │
+    ├── 304? ────┤  (If-None-Match / If-Modified-Since)
+    │            │
     └─────┬──────┘
           ▼
 ┌───────────────────┐
@@ -195,7 +197,13 @@ match tokio::time::timeout(server.request_timeout, dispatch_request(...)).await 
 
 ### 9a. 静态文件服务
 
-对于 `Serve` 结果，`static_file::serve()` 从磁盘读取文件（使用文件缓存获取元数据），检测 MIME 类型，并返回带有适当 `Content-Type` 和 `Content-Length` 头的响应。
+对于 `Serve` 结果，`static_file::serve()` 处理响应，支持 HTTP 缓存：
+
+1. **条件检查（缓存命中）** — 如果文件在内容缓存中，检查 `If-None-Match` / `If-Modified-Since` 头，如果文件未更改则返回 `304 Not Modified`（无响应体，无磁盘 I/O）
+2. **缓存命中** — 返回已缓存的内容，附带 `Cache-Control`、`ETag` 和 `Last-Modified` 头
+3. **缓存未命中** — 读取文件元数据，在读取文件内容之前检查条件头，然后附带缓存头提供服务
+
+当 `STATIC_CACHE_TTL=off` 时，不发送缓存头且跳过条件检查。
 
 ### 9b. PHP 执行（缓冲或流式）
 

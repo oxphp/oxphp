@@ -71,6 +71,12 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `WORKER_MAX_REQUESTS` | `0` | Maximum requests a worker handles before recycling. `0` disables the limit |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory (in megabytes) a worker may use before recycling. `0` disables the limit |
 
+### Static File Caching
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STATIC_CACHE_TTL` | `30d` | Cache TTL for static file responses. Controls `Cache-Control`, `ETag`, and `Last-Modified` headers. Supports: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable |
+
 ### Compression
 
 | Variable | Default | Description |
@@ -175,6 +181,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Laravel Production (dynamic pool)
@@ -196,6 +203,7 @@ IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
+STATIC_CACHE_TTL=30d
 ```
 
 ### Docker Compose
@@ -216,6 +224,7 @@ services:
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_ENABLED: "true"
+      # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -275,6 +284,7 @@ curl -s http://localhost:9090/config | jq .
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
   "compression_enabled": true,
+  "static_cache_ttl": 2592000,
   "access_log": true,
   "plugins": {}
 }

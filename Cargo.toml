@@ -43,6 +43,9 @@ dashmap = "6"
 # Compression
 brotli = "7"
 
+# HTTP date formatting (RFC 7231)
+httpdate = "1"
+
 # Error derives
 thiserror = "2"
 
