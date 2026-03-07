@@ -8,7 +8,6 @@ pub struct ServerConfig {
     pub document_root: PathBuf,
     pub index_file: Option<String>,
     pub header_read_timeout: Duration,
-    pub idle_timeout: Duration,
     pub request_timeout: Duration,
 }
 
@@ -19,7 +18,6 @@ impl ServerConfig {
             document_root,
             index_file,
             header_read_timeout: Duration::from_secs(5),
-            idle_timeout: Duration::from_secs(60),
             request_timeout: Duration::from_secs(120),
         }
     }
@@ -38,12 +36,6 @@ impl ServerConfig {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(5),
         );
-        let idle_timeout = Duration::from_secs(
-            std::env::var("IDLE_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(60),
-        );
         let request_timeout_seconds = std::env::var("REQUEST_TIMEOUT_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -59,7 +51,6 @@ impl ServerConfig {
             document_root,
             index_file,
             header_read_timeout,
-            idle_timeout,
             request_timeout,
         })
     }

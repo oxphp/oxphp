@@ -179,7 +179,6 @@ impl Config {
             "max_connections": self.max_connections,
             "drain_timeout_seconds": self.drain_timeout_seconds,
             "header_timeout_seconds": self.server.header_read_timeout.as_secs(),
-            "idle_timeout_seconds": self.server.idle_timeout.as_secs(),
             "request_timeout_seconds": self.server.request_timeout.as_secs(),
             "rate_limit": self.rate_limit,
             "rate_window_seconds": self.rate_window_seconds,

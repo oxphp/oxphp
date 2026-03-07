@@ -10,12 +10,10 @@ OxPHP 通过可配置的超时来防护慢速客户端和失控请求。每个�
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
 | `HEADER_TIMEOUT_SECONDS` | TCP 连接后接收 HTTP 头的最大时间 | `5` |
-| `IDLE_TIMEOUT_SECONDS` | Keep-alive 连接上请求之间的最大空闲时间 | `60` |
 | `REQUEST_TIMEOUT_SECONDS` | 请求处理的最大总时间（包括 PHP 执行） | `120` |
 
 ```bash
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=60
 REQUEST_TIMEOUT_SECONDS=120
 ```
 
@@ -30,10 +28,6 @@ REQUEST_TIMEOUT_SECONDS=120
 这可以防护 slowloris 类型的攻击，即客户端每次发送一个字节的头部来无限期占用连接。
 
 **实现说明**：hyper-util 要求在设置 `header_read_timeout` 之前通过 `builder.http1().timer(TokioTimer::new())` 注册一个计时器。OxPHP 始终注册此计时器。如果超时设置为零，则跳过 `header_read_timeout` 调用。
-
-### 空闲超时
-
-用于控制 keep-alive 连接在请求之间可以保持空闲的时间。`IDLE_TIMEOUT_SECONDS` 变量从环境中读取并包含在 `/config` 内部端点中，但 hyper-util 的 HTTP/1.1 构建器没有暴露 `keep_alive_timeout` 设置。此超时目前不在连接层强制执行。
 
 ### 请求超时
 

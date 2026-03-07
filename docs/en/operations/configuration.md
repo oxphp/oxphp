@@ -38,7 +38,6 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to wait for request headers after TCP connection |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout. Connections with no activity for this duration are closed |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum seconds for the entire request-response cycle. Set to `0` to disable |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
 
@@ -177,7 +176,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
@@ -199,7 +197,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true

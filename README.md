@@ -67,7 +67,6 @@ All settings are via environment variables:
 | `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
 | `RATE_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Header read timeout (Slowloris protection) |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Overall request timeout; 0 = disabled |
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |

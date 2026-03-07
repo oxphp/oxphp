@@ -58,7 +58,6 @@ services:
 
       # 超时（秒）
       - HEADER_TIMEOUT_SECONDS=5
-      - IDLE_TIMEOUT_SECONDS=60
       - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
 
@@ -108,7 +107,6 @@ services:
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `INTERNAL_ADDR` | _(未设置)_ | 内部服务器地址。未设置则禁用 |
 | `HEADER_TIMEOUT_SECONDS` | `5` | 读取请求头的超时时间 |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive 空闲超时时间 |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | 最大请求处理时间。设为 0 则禁用超时 |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | 关机期间进行中连接的宽限期 |
 | `RATE_LIMIT` | `0` | 每个 IP 每窗口期的最大请求数。0 表示禁用限流 |

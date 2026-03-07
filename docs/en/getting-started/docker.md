@@ -58,7 +58,6 @@ services:
 
       # Timeouts (seconds)
       - HEADER_TIMEOUT_SECONDS=5
-      - IDLE_TIMEOUT_SECONDS=60
       - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
 
@@ -108,7 +107,6 @@ services:
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `INTERNAL_ADDR` | _(unset)_ | Address for internal server. Unset disables it |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Timeout for reading request headers |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive idle timeout |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum request processing time. 0 disables the timeout |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Grace period for in-flight connections during shutdown |
 | `RATE_LIMIT` | `0` | Max requests per IP per window. 0 disables rate limiting |

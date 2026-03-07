@@ -10,12 +10,10 @@ OxPHP enforces configurable timeouts to protect against slow clients and runaway
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HEADER_TIMEOUT_SECONDS` | Maximum time to receive HTTP headers after TCP connect | `5` |
-| `IDLE_TIMEOUT_SECONDS` | Maximum idle time between requests on a keep-alive connection | `60` |
 | `REQUEST_TIMEOUT_SECONDS` | Maximum total time for request handling (including PHP execution) | `120` |
 
 ```bash
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=60
 REQUEST_TIMEOUT_SECONDS=120
 ```
 
@@ -30,10 +28,6 @@ Controls how long the server waits for a client to send a complete set of HTTP h
 This protects against slowloris-style attacks where a client sends headers one byte at a time to hold a connection open indefinitely.
 
 **Implementation note**: hyper-util requires a timer to be registered with `builder.http1().timer(TokioTimer::new())` before `header_read_timeout` can be set. OxPHP always registers this timer. If the timeout is set to zero, the `header_read_timeout` call is skipped.
-
-### Idle timeout
-
-Reserved for controlling how long a keep-alive connection can remain idle between requests. The `IDLE_TIMEOUT_SECONDS` variable is read from the environment and included in the `/config` internal endpoint, but hyper-util's HTTP/1.1 builder does not expose a `keep_alive_timeout` setting. This timeout is not currently enforced at the connection level.
 
 ### Request timeout
 

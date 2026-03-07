@@ -67,7 +67,6 @@ curl http://localhost:8080/
 | `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
 | `RATE_WINDOW_SECONDS` | `60` | 限流时间窗口（秒） |
 | `HEADER_TIMEOUT_SECONDS` | `5` | 请求头读取超时（Slowloris 防护） |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Keep-alive 空闲超时 |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | 整体请求超时；`0` 表示禁用 |
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |

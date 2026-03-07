@@ -58,7 +58,6 @@ services:
 
       # Таймауты (в секундах)
       - HEADER_TIMEOUT_SECONDS=5
-      - IDLE_TIMEOUT_SECONDS=60
       - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
 
@@ -108,7 +107,6 @@ services:
 | `MAX_CONNECTIONS` | `10000` | Максимальное число одновременных соединений |
 | `INTERNAL_ADDR` | _(unset)_ | Адрес внутреннего сервера. Если не задан — сервер отключён |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Таймаут чтения заголовков запроса |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Таймаут простоя keep-alive |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Максимальное время обработки запроса. 0 отключает таймаут |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Период ожидания активных соединений при завершении работы |
 | `RATE_LIMIT` | `0` | Максимум запросов с одного IP за окно. 0 отключает ограничение |

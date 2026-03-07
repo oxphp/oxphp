@@ -67,7 +67,6 @@ curl http://localhost:8080/
 | `RATE_LIMIT` | `0` (выкл) | Максимум запросов с одного IP за окно |
 | `RATE_WINDOW_SECONDS` | `60` | Размер окна ограничения частоты запросов (секунды) |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Таймаут чтения заголовков (защита от Slowloris) |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Таймаут простоя keep-alive соединения |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Общий таймаут запроса; 0 = отключён |
 | `TLS_CERT` | *(не задано)* | Путь к PEM-файлу TLS-сертификата |
 | `TLS_KEY` | *(не задано)* | Путь к PEM-файлу закрытого ключа TLS |

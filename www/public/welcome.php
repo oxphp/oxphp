@@ -467,7 +467,6 @@ docker run -p 8080:8080 \
                         <tbody>
                             <tr><td><code>REQUEST_TIMEOUT_SECONDS</code></td><td><code>120</code></td></tr>
                             <tr><td><code>HEADER_TIMEOUT_SECONDS</code></td><td><code>5</code></td></tr>
-                            <tr><td><code>IDLE_TIMEOUT_SECONDS</code></td><td><code>60</code></td></tr>
                             <tr><td><code>DRAIN_TIMEOUT_SECONDS</code></td><td><code>30</code></td></tr>
                         </tbody>
                     </table>
