@@ -3,21 +3,21 @@ title: 压缩
 description: 针对可压缩响应类型的 Brotli 压缩
 ---
 
-当客户端支持且响应类型可压缩时，OxPHP 使用 Brotli 压缩 HTTP 响应。压缩默认启用，可通过环境变量开关控制。
+当客户端支持且响应类型可压缩时，OxPHP 使用 Brotli 压缩 HTTP 响应。压缩默认启用，可通过环境变量配置质量级别。
 
 ## 配置
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
-| `COMPRESSION_ENABLED` | 启用 Brotli 压缩 | `true` |
+| `COMPRESSION_LEVEL` | Brotli 压缩质量级别（0-11） | `4` |
 
 禁用压缩：
 
 ```bash
-COMPRESSION_ENABLED=false
+COMPRESSION_LEVEL=0
 ```
 
-`false`、`0` 和 `off` 均可禁用压缩。其他任何值（或不设置该变量）均表示启用。
+设为 `0` 禁用压缩。`1`-`11` 设置 Brotli 质量级别，值越高压缩比越好，但 CPU 开销越大。默认级别 `4` 是 Web 服务的良好平衡点。
 
 ## 工作原理
 

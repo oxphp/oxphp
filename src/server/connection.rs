@@ -60,7 +60,7 @@ pub async fn handle_request(
     let (parts, body) = req.into_parts();
 
     // Check brotli support before parts are consumed by the pipeline (no alloc)
-    let supports_brotli = server.compression_enabled
+    let supports_brotli = server.compression_level > 0
         && parts
             .headers
             .get(http::header::ACCEPT_ENCODING)
@@ -155,7 +155,7 @@ pub async fn handle_request(
 
     // ── Brotli compression (after error pages, before metrics/logging) ──
     let response = if supports_brotli {
-        compression::maybe_compress(response).await
+        compression::maybe_compress(response, server.compression_level).await
     } else {
         response
     };

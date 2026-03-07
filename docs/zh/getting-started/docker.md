@@ -72,8 +72,8 @@ services:
       # 错误页面
       # - ERROR_PAGES_DIR=/var/www/errors
 
-      # 压缩（默认：true）
-      # - COMPRESSION_ENABLED=true
+      # 压缩级别（0-11，0=禁用，默认：4）
+      # - COMPRESSION_LEVEL=4
     restart: unless-stopped
 ```
 
@@ -114,7 +114,7 @@ services:
 | `TLS_CERT` | _(未设置)_ | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | _(未设置)_ | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | _(未设置)_ | 包含 `{status}.html` 错误页面文件的目录 |
-| `COMPRESSION_ENABLED` | `true` | 启用 Brotli 压缩。设为 `false`、`0` 或 `off` 可禁用 |
+| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩 |
 | `TOKIO_WORKERS` | `0` | Tokio 异步运行时线程数（0 = CPU / 2，最少 1） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`、`error`（仅 4xx/5xx）、空 = 关闭 |
 

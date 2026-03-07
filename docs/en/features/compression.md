@@ -3,21 +3,21 @@ title: Compression
 description: Brotli compression for compressible response types
 ---
 
-OxPHP compresses HTTP responses using Brotli when the client supports it and the response type is compressible. Compression is enabled by default and can be toggled with an environment variable.
+OxPHP compresses HTTP responses using Brotli when the client supports it and the response type is compressible. Compression is enabled by default and the quality level can be configured with an environment variable.
 
 ## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `COMPRESSION_ENABLED` | Enable Brotli compression | `true` |
+| `COMPRESSION_LEVEL` | Brotli compression quality level (0-11) | `4` |
 
 To disable compression:
 
 ```bash
-COMPRESSION_ENABLED=false
+COMPRESSION_LEVEL=0
 ```
 
-The values `false`, `0`, and `off` all disable compression. Any other value (or not setting the variable at all) enables it.
+Setting the level to `0` disables compression. Values `1`-`11` set the Brotli quality level, where higher values produce better compression ratios at the cost of more CPU time. The default level `4` is a good balance for web serving.
 
 ## How it works
 

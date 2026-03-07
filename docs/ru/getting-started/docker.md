@@ -72,8 +72,8 @@ services:
       # Страницы ошибок
       # - ERROR_PAGES_DIR=/var/www/errors
 
-      # Сжатие (по умолчанию: true)
-      # - COMPRESSION_ENABLED=true
+      # Уровень сжатия (0-11, 0=отключено, по умолчанию: 4)
+      # - COMPRESSION_LEVEL=4
     restart: unless-stopped
 ```
 
@@ -114,7 +114,7 @@ services:
 | `TLS_CERT` | _(unset)_ | Путь к PEM-файлу TLS-сертификата |
 | `TLS_KEY` | _(unset)_ | Путь к PEM-файлу приватного TLS-ключа |
 | `ERROR_PAGES_DIR` | _(unset)_ | Директория с файлами страниц ошибок `{status}.html` |
-| `COMPRESSION_ENABLED` | `true` | Включить сжатие Brotli. Установите `false`, `0` или `off` для отключения |
+| `COMPRESSION_LEVEL` | `4` | Уровень качества сжатия Brotli (0-11). `0` отключает сжатие |
 | `TOKIO_WORKERS` | `0` | Потоки асинхронного рантайма Tokio (0 = авто CPU/2, 1 = однопоточный) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступа: `all` (все), `error` (4xx/5xx), пустое = выкл. |
 

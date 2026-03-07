@@ -104,9 +104,8 @@ services:
 
       # ── Response ──────────────────────────────────────────────────
 
-      # Enable Brotli compression for compressible responses.
-      # Values: true/false, 1/0, on/off.
-      # - COMPRESSION_ENABLED=true
+      # Brotli compression quality level (0-11). 0 disables compression.
+      # - COMPRESSION_LEVEL=4
 
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
       # - ERROR_PAGES_DIR=/var/www/errors

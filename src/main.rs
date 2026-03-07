@@ -216,8 +216,13 @@ async fn async_main(
         None
     };
 
-    if config.compression {
-        tracing::info!("Brotli compression enabled");
+    if config.compression_level > 0 {
+        tracing::info!(
+            level = config.compression_level,
+            "Brotli compression enabled"
+        );
+    } else {
+        tracing::info!("Brotli compression disabled");
     }
 
     let server = Arc::new(server::Server::new(
@@ -226,7 +231,7 @@ async fn async_main(
         Arc::clone(&metrics),
         dispatcher,
         tls_acceptor,
-        config.compression,
+        config.compression_level,
         config.max_query_body,
         config.worker_file.clone(),
         config

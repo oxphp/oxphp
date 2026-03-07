@@ -80,7 +80,7 @@ OxPHP настраивается исключительно через пере�
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `COMPRESSION_ENABLED` | `true` | Включить сжатие Brotli для сжимаемых типов ответов. Отключить значением `false`, `0` или `off` |
+| `COMPRESSION_LEVEL` | `4` | Уровень качества сжатия Brotli (0-11). `0` отключает сжатие, `1`-`11` задают уровень качества |
 
 ## Режимы воркеров
 
@@ -178,7 +178,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -199,7 +199,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -220,7 +220,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION_ENABLED: "true"
+      COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # TTL кеша статических файлов (по умолчанию: 30d)
     volumes:
       - ./src:/var/www/html

@@ -54,7 +54,7 @@ async fn start_server_with_options(
         metrics,
         Arc::new(dispatcher),
         None,
-        false,                                     // compression disabled in tests
+        0,                                         // compression disabled in tests
         512 * 1024,                                // max_query_body: 512 KB
         None,                                      // no worker mode
         Some("public, max-age=86400".to_string()), // static_cache_control

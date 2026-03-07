@@ -72,8 +72,8 @@ services:
       # Старонкі памылак
       # - ERROR_PAGES_DIR=/var/www/errors
 
-      # Сціск (па змаўчанні: true)
-      # - COMPRESSION_ENABLED=true
+      # Узровень сціску (0-11, 0=адключана, па змаўчанні: 4)
+      # - COMPRESSION_LEVEL=4
     restart: unless-stopped
 ```
 
@@ -114,7 +114,7 @@ services:
 | `TLS_CERT` | _(не зададзена)_ | Шлях да файла сертыфіката TLS у фармаце PEM |
 | `TLS_KEY` | _(не зададзена)_ | Шлях да файла прыватнага ключа TLS у фармаце PEM |
 | `ERROR_PAGES_DIR` | _(не зададзена)_ | Каталог з файламі старонак памылак `{status}.html` |
-| `COMPRESSION_ENABLED` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
+| `COMPRESSION_LEVEL` | `4` | Узровень якасці сціску Brotli (0-11). `0` адключае сціск |
 | `TOKIO_WORKERS` | `0` (CPU / 2, мін. 1) | Патокі асінхроннага асяроддзя выканання Tokio (0 = аўта, 1 = аднапаточны) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступу: `all`, `error` (толькі 4xx/5xx), пустое = выкл. |
 

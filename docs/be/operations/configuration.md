@@ -80,7 +80,7 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 
 | Зменная | Па змаўчанні | Апісанне |
 |----------|---------|-------------|
-| `COMPRESSION_ENABLED` | `true` | Уключыць сціск Brotli для тыпаў адказаў, якія паддаюцца сціску. Адключыце з дапамогай `false`, `0` або `off` |
+| `COMPRESSION_LEVEL` | `4` | Узровень якасці сціску Brotli (0-11). `0` адключае сціск, `1`-`11` задаюць узровень якасці |
 
 ## Рэжымы воркераў
 
@@ -178,7 +178,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -199,7 +199,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -220,7 +220,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION_ENABLED: "true"
+      COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # TTL кэша статычных файлаў (па змаўчанні: 30d)
     volumes:
       - ./src:/var/www/html

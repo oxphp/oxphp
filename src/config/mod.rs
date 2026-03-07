@@ -41,7 +41,7 @@ pub struct Config {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
     pub error_pages_dir: Option<String>,
-    pub compression: bool,
+    pub compression_level: i32,
     pub access_log: AccessLogLevel,
     pub max_query_body: usize,
     /// Worker mode: PHP file that boots the application and calls oxphp_worker().
@@ -108,9 +108,19 @@ impl Config {
         let tls_cert = std::env::var("TLS_CERT").ok();
         let tls_key = std::env::var("TLS_KEY").ok();
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
-        let compression = std::env::var("COMPRESSION_ENABLED")
-            .map(|v| v != "false" && v != "0" && v != "off")
-            .unwrap_or(true);
+        let compression_level: i32 = match std::env::var("COMPRESSION_LEVEL") {
+            Ok(val) => match val.parse::<i32>() {
+                Ok(v) if (0..=11).contains(&v) => v,
+                _ => {
+                    eprintln!(
+                        "Error: COMPRESSION_LEVEL must be 0-11 (got {:?}), 0 = disabled",
+                        val
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(_) => 4,
+        };
         let access_log = match std::env::var("ACCESS_LOG").as_deref() {
             Ok("all") => AccessLogLevel::All,
             Ok("error") => AccessLogLevel::Error,
@@ -158,7 +168,7 @@ impl Config {
             tls_cert,
             tls_key,
             error_pages_dir,
-            compression,
+            compression_level,
             access_log,
             max_query_body,
             worker_file,
@@ -184,7 +194,7 @@ impl Config {
             "rate_window_seconds": self.rate_window_seconds,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "error_pages_dir": self.error_pages_dir,
-            "compression_enabled": self.compression,
+            "compression_level": self.compression_level,
             "access_log": self.access_log.to_string(),
             "max_query_body": self.max_query_body,
             "worker_mode": self.worker_file.is_some(),
