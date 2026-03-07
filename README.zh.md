@@ -1,6 +1,10 @@
-# OxPHP
+<p align="center">
+  <img src="logo.svg" alt="OxPHP" width="300">
+</p>
 
-用 Rust 编写的异步 PHP 应用服务器。以单一二进制文件取代 nginx + PHP-FPM，处理 HTTP 请求、通过自定义 SAPI 原生执行 PHP，并提供内置可观测性支持。
+<p align="center">
+  用 Rust 编写的异步 PHP 应用服务器。以单一二进制文件取代 nginx + PHP-FPM，处理 HTTP 请求、通过自定义 SAPI 原生执行 PHP，并提供内置可观测性支持。
+</p>
 
 ## 功能特性
 

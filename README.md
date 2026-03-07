@@ -1,6 +1,10 @@
-# OxPHP
+<p align="center">
+  <img src="logo.svg" alt="OxPHP" width="300">
+</p>
 
-Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM with a single binary that handles HTTP, executes PHP natively via a custom SAPI, and provides built-in observability.
+<p align="center">
+  Asynchronous PHP application server written in Rust. Replaces nginx + PHP-FPM with a single binary that handles HTTP, executes PHP natively via a custom SAPI, and provides built-in observability.
+</p>
 
 ## Features
 
