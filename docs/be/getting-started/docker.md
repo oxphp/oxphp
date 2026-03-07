@@ -117,7 +117,7 @@ services:
 | `COMPRESSION_ENABLED` | `true` | Уключыць сціск Brotli. Усталюйце `false`, `0` або `off` для адключэння |
 | `TOKIO_WORKERS` | `0` (CPU / 2, мін. 1) | Патокі асінхроннага асяроддзя выканання Tokio (0 = аўта, 1 = аднапаточны) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступу: `all`, `error` (толькі 4xx/5xx), пустое = выкл. |
-| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Памер папярэдне выдзеленага пула слотаў адказу |
+
 
 ### Парты
 

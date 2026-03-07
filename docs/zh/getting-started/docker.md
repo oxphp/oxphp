@@ -117,7 +117,7 @@ services:
 | `COMPRESSION_ENABLED` | `true` | 启用 Brotli 压缩。设为 `false`、`0` 或 `off` 可禁用 |
 | `TOKIO_WORKERS` | `0` | Tokio 异步运行时线程数（0 = CPU / 2，最少 1） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`、`error`（仅 4xx/5xx）、空 = 关闭 |
-| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | 预分配的响应槽池大小 |
+
 
 ### 端口
 

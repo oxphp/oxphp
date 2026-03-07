@@ -117,7 +117,7 @@ services:
 | `COMPRESSION_ENABLED` | `true` | Enable Brotli compression. Set to `false`, `0`, or `off` to disable |
 | `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async runtime threads (0 = auto) |
 | `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all`, `error` (4xx/5xx only), empty = off |
-| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Pre-allocated response slot pool size |
+
 
 ### Ports
 
