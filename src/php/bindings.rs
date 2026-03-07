@@ -296,6 +296,9 @@ extern "C" {
     pub fn oxphp_bridge_get_memory_usage() -> u64;
     pub fn oxphp_bridge_get_handler_failed() -> bool;
 
+    // ─── SAPI response code ─────────────────────────────
+    pub fn oxphp_bridge_get_response_code() -> c_int;
+
     // ─── SAPI request_info ──────────────────────────────
 
     pub fn oxphp_bridge_set_request_info(

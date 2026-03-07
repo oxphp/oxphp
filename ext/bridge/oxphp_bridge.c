@@ -371,6 +371,14 @@ void oxphp_bridge_set_request_info(
     const char *content_type,
     long content_length
 ) {
+    /* Reset response code from the bridge's TSRM context.
+     * sapi_activate() (called by php_request_startup) resets this in libphp's
+     * TSRM context, but the bridge library has its own _tsrm_ls_cache that
+     * may resolve to stale memory. Explicitly resetting here ensures
+     * collect_response_code() reads 200 (not a leaked value from the
+     * previous request) when called after script execution. */
+    SG(sapi_headers).http_response_code = 200;
+
     /* Set a non-NULL server_context — PHP checks this in sapi_activate()
      * to decide whether to read POST data and cookies. Without it,
      * $_POST/$_FILES/$_COOKIE are never populated. */
@@ -379,6 +387,15 @@ void oxphp_bridge_set_request_info(
     SG(request_info).query_string = (char*)query_string;
     SG(request_info).content_type = content_type;
     SG(request_info).content_length = content_length;
+}
+
+/* ── SAPI response code ── */
+
+int oxphp_bridge_get_response_code(void) {
+#ifdef ZTS
+    TSRMLS_CACHE_UPDATE();
+#endif
+    return SG(sapi_headers).http_response_code;
 }
 
 /* ── Zval lifecycle ── */

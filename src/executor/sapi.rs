@@ -1008,6 +1008,10 @@ fn execute_request(
         sapi::set_fatal_error_status_if_default();
     }
 
+    // Collect the HTTP response code from PHP's SG(sapi_headers) via the C bridge.
+    // Must happen before php_request_shutdown() clears PHP state.
+    sapi::collect_response_code();
+
     unsafe {
         bindings::zend_destroy_file_handle(&mut file_handle);
     }
