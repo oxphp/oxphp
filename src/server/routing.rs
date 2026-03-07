@@ -1,11 +1,15 @@
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use dashmap::DashMap;
+use lru::LruCache;
 use percent_encoding::percent_decode_str;
 
 use crate::config::ServerConfig;
 use crate::server::response::static_file::FileCache;
+
+/// Maximum number of entries in the route cache.
+const ROUTE_CACHE_CAPACITY: usize = 10_000;
 
 /// Result of route resolution.
 #[derive(Debug, Clone)]
@@ -19,10 +23,9 @@ pub enum RouteResult {
 }
 
 /// Routing configuration derived from server config.
-#[derive(Debug)]
 pub struct RouteConfig {
     document_root: Arc<PathBuf>,
-    canonical_root: Option<PathBuf>,
+    canonical_root: PathBuf,
     index_file: Option<String>,
     index_file_path: Option<PathBuf>,
     index_file_is_php: bool,
@@ -36,28 +39,24 @@ pub struct RouteConfig {
     root_index_php_key: String,
     root_index_html_key: String,
     /// Cache of resolved routes keyed by URI path.
-    /// After warmup, most requests hit this cache (single DashMap read).
-    route_cache: DashMap<String, RouteResult>,
+    /// Mutex is fine here: hold time is O(1) for both get and put.
+    route_cache: Mutex<LruCache<String, RouteResult>>,
 }
 
 impl RouteConfig {
     /// Create route config from server config.
     ///
-    /// Attempts to canonicalize the document root at startup for symlink escape
-    /// protection. Falls back to the original path with a warning if
-    /// canonicalization fails (e.g. path does not exist yet).
+    /// Panics if the document root cannot be canonicalized, since symlink escape
+    /// protection requires a valid, resolvable document root path.
     pub fn new(config: &ServerConfig) -> Self {
-        let canonical_root = match std::fs::canonicalize(&config.document_root) {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(
-                    document_root = %config.document_root.display(),
-                    error = %e,
-                    "Could not canonicalize document_root; symlink escape protection disabled"
-                );
-                None
-            }
-        };
+        let canonical_root = std::fs::canonicalize(&config.document_root).unwrap_or_else(|e| {
+            panic!(
+                "Fatal: cannot canonicalize document_root '{}': {}. \
+                     Symlink escape protection requires a valid document root path.",
+                config.document_root.display(),
+                e
+            );
+        });
 
         let index_file_path = config
             .index_file
@@ -86,13 +85,15 @@ impl RouteConfig {
             root_index_html,
             root_index_php_key,
             root_index_html_key,
-            route_cache: DashMap::new(),
+            route_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
+            )),
         }
     }
 
     /// Returns the canonical document root, if canonicalization succeeded at startup.
-    pub fn canonical_root(&self) -> Option<&Path> {
-        self.canonical_root.as_deref()
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
     }
 
     /// Returns the document root path.
@@ -122,9 +123,12 @@ impl RouteConfig {
         uri_path: &str,
         file_cache: &Arc<FileCache>,
     ) -> RouteResult {
-        // Fast path: check route cache
-        if let Some(cached) = self.route_cache.get(uri_path) {
-            return cached.value().clone();
+        // Fast path: check route cache (single lock, O(1) get + LRU promotion)
+        {
+            let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(result) = cache.get(uri_path) {
+                return result.clone();
+            }
         }
 
         let result = self.resolve_request_inner(uri_path, file_cache).await;
@@ -151,9 +155,11 @@ impl RouteConfig {
             RouteResult::NotFound => result,
         };
 
-        // Cache the validated result
-        self.route_cache
-            .insert(uri_path.to_string(), result.clone());
+        // Cache the result (LruCache handles eviction automatically)
+        {
+            let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
+            cache.put(uri_path.to_string(), result.clone());
+        }
 
         result
     }
@@ -161,10 +167,7 @@ impl RouteConfig {
     /// Check that a resolved path is within the canonical document root.
     /// Results are cached in the file cache to avoid repeated `realpath(3)` syscalls.
     async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
-        let canonical_root = match &self.canonical_root {
-            Some(root) => root,
-            None => return true, // canonicalization disabled, skip check
-        };
+        let canonical_root = &self.canonical_root;
 
         let cache_key = path.to_string_lossy().to_string();
 
@@ -598,5 +601,53 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/sub/page.html", &cache).await;
         assert!(matches!(result, RouteResult::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn test_route_cache_capacity_cap() {
+        let dir = setup_test_dir();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+
+        // Fill route cache beyond capacity with unique paths
+        for i in 0..ROUTE_CACHE_CAPACITY + 100 {
+            rc.resolve_request(&format!("/nonexistent_{i}.txt"), &cache)
+                .await;
+        }
+
+        // Route cache should not exceed capacity (LRU eviction keeps it bounded)
+        let cache_len = rc.route_cache.lock().unwrap().len();
+        assert!(
+            cache_len <= ROUTE_CACHE_CAPACITY,
+            "Route cache size {} exceeds capacity {}",
+            cache_len,
+            ROUTE_CACHE_CAPACITY,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_cache_lru_eviction() {
+        let dir = setup_test_dir();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+
+        // Access /style.css to warm it into cache
+        rc.resolve_request("/style.css", &cache).await;
+
+        // Fill cache to capacity with other paths
+        for i in 0..ROUTE_CACHE_CAPACITY {
+            rc.resolve_request(&format!("/fill_{i}.txt"), &cache).await;
+        }
+
+        // /style.css was least recently used — should be evicted
+        let lru_cache = rc.route_cache.lock().unwrap();
+        assert!(
+            !lru_cache.contains("/style.css"),
+            "LRU entry should have been evicted"
+        );
+        assert!(
+            lru_cache.len() <= ROUTE_CACHE_CAPACITY,
+            "Cache should not exceed capacity"
+        );
     }
 }

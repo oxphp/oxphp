@@ -37,18 +37,27 @@ fn generate_request_id() -> String {
     id
 }
 
+/// Check that a request ID contains only safe characters and is reasonable length.
+fn is_valid_request_id(s: &str) -> bool {
+    s.len() <= 64
+        && !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
 /// Generates a request ID or preserves an incoming `X-Request-ID` header.
 pub struct RequestIdGenerator;
 
 impl EventHandler<RequestReceived> for RequestIdGenerator {
     #[inline]
     fn handle(&self, event: &mut RequestReceived) -> Propagation {
-        // Honor incoming X-Request-ID header, or generate one
+        // Honor incoming X-Request-ID header if it passes validation, or generate one
         let id = event
             .parts
             .headers
             .get("x-request-id")
             .and_then(|v: &http::HeaderValue| v.to_str().ok())
+            .filter(|s| is_valid_request_id(s))
             .map(|s: &str| s.to_string())
             .unwrap_or_else(generate_request_id);
 
@@ -128,5 +137,67 @@ mod tests {
     #[test]
     fn test_priority() {
         assert_eq!(RequestIdGenerator.priority(), -100);
+    }
+
+    #[test]
+    fn test_rejects_invalid_request_id_with_spaces() {
+        let handler = RequestIdGenerator;
+        let mut event = make_event();
+        event
+            .parts
+            .headers
+            .insert("x-request-id", HeaderValue::from_static("has spaces"));
+
+        handler.handle(&mut event);
+        // Should generate a new ID, not use the invalid one
+        assert_ne!(event.request_id, "has spaces");
+        assert_eq!(event.request_id.len(), 20);
+    }
+
+    #[test]
+    fn test_rejects_empty_request_id() {
+        let handler = RequestIdGenerator;
+        let mut event = make_event();
+        event
+            .parts
+            .headers
+            .insert("x-request-id", HeaderValue::from_static(""));
+
+        handler.handle(&mut event);
+        assert_eq!(event.request_id.len(), 20);
+    }
+
+    #[test]
+    fn test_rejects_overlong_request_id() {
+        let handler = RequestIdGenerator;
+        let mut event = make_event();
+        let long_id = "a".repeat(65);
+        event
+            .parts
+            .headers
+            .insert("x-request-id", HeaderValue::from_str(&long_id).unwrap());
+
+        handler.handle(&mut event);
+        assert_ne!(event.request_id, long_id);
+        assert_eq!(event.request_id.len(), 20);
+    }
+
+    #[test]
+    fn test_accepts_valid_request_id_formats() {
+        assert!(is_valid_request_id("abc-123"));
+        assert!(is_valid_request_id("req_456"));
+        assert!(is_valid_request_id("v1.2.3"));
+        assert!(is_valid_request_id("a"));
+        assert!(is_valid_request_id(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn test_rejects_invalid_request_id_formats() {
+        assert!(!is_valid_request_id(""));
+        assert!(!is_valid_request_id(&"x".repeat(65)));
+        assert!(!is_valid_request_id("has space"));
+        assert!(!is_valid_request_id("has\nnewline"));
+        assert!(!is_valid_request_id("<script>alert(1)</script>"));
+        assert!(!is_valid_request_id("id;drop table"));
     }
 }

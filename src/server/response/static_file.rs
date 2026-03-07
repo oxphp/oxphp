@@ -91,7 +91,7 @@ impl FileCache {
     pub async fn check(&self, path: &str) -> (Option<FileType>, bool) {
         // Check cache (short write lock for LRU update, no await inside)
         {
-            let mut guard = self.inner.write().unwrap();
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
             let inner = &mut *guard;
             if let Some(entry) = inner.meta.get_mut(path) {
                 entry.last_used = inner.counter;
@@ -109,7 +109,7 @@ impl FileCache {
 
         // Insert into cache with LRU eviction (write lock)
         {
-            let mut inner = self.inner.write().unwrap();
+            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
             // Evict LRU entry if at capacity
             if inner.meta.len() >= inner.capacity {
@@ -152,7 +152,7 @@ impl FileCache {
     /// Returns `Some(true)` if cached and not modified, `Some(false)` if cached but modified,
     /// `None` on cache miss. Uses read lock — no cloning.
     pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         let entry = guard.content.get(key)?;
         Some(check_not_modified(headers, &entry.etag, &entry.modified))
     }
@@ -164,7 +164,7 @@ impl FileCache {
         &self,
         key: &str,
     ) -> Option<(Bytes, Arc<str>, SystemTime, Arc<str>, Arc<str>)> {
-        let mut guard = self.inner.write().unwrap();
+        let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let inner = &mut *guard;
         if let Some(entry) = inner.content.get_mut(key) {
             entry.last_used = inner.counter;
@@ -196,7 +196,7 @@ impl FileCache {
             return;
         }
 
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         // Evict LRU entries while over budget
         while inner.content_total_bytes + bytes.len() > MAX_CACHE_TOTAL_BYTES {
@@ -239,13 +239,13 @@ impl FileCache {
     /// The inner `Option<PathBuf>` distinguishes: `Some(path)` = canonicalization
     /// succeeded, `None` = file did not exist at cache time.
     pub fn get_canonical(&self, key: &str) -> Option<Option<PathBuf>> {
-        let guard = self.inner.read().unwrap();
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.canonical.get(key).map(|entry| entry.path.clone())
     }
 
     /// Cache a canonical path result. Uses the same capacity as the metadata cache.
     pub fn insert_canonical(&self, key: String, canonical: Option<PathBuf>) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
 
         // Evict LRU entry if at capacity
         if inner.canonical.len() >= inner.capacity {
@@ -276,8 +276,8 @@ impl FileCache {
 
 /// Re-canonicalize a file path and verify it stays within the document root.
 /// Returns `false` if the path escapes the root (TOCTOU mitigation).
-fn verify_canonical(file_path: &Path, canonical_root: &Path) -> bool {
-    match std::fs::canonicalize(file_path) {
+async fn verify_canonical(file_path: &Path, canonical_root: &Path) -> bool {
+    match tokio::fs::canonicalize(file_path).await {
         Ok(real) => real.starts_with(canonical_root),
         Err(_) => false,
     }
@@ -355,12 +355,12 @@ fn add_cache_headers(
 /// Serve a static file with MIME type detection, content caching, and streaming.
 ///
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
-/// If `canonical_root` is provided, re-validates the file path at serve time
+/// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
 pub async fn serve(
     file_path: &Path,
     cache: &FileCache,
-    canonical_root: Option<&Path>,
+    canonical_root: &Path,
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
@@ -402,16 +402,14 @@ pub async fn serve(
         .into();
 
     // 2. TOCTOU mitigation: re-canonicalize before reading from disk
-    if let Some(root) = canonical_root {
-        if !verify_canonical(file_path, root) {
-            tracing::warn!(
-                path = %file_path.display(),
-                "TOCTOU: path escaped document root at serve time"
-            );
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(full_body(Bytes::from_static(b"404 Not Found")))?);
-        }
+    if !verify_canonical(file_path, canonical_root).await {
+        tracing::warn!(
+            path = %file_path.display(),
+            "TOCTOU: path escaped document root at serve time"
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(full_body(Bytes::from_static(b"404 Not Found")))?);
     }
 
     // 3. Get file metadata for size and modification time
@@ -506,8 +504,15 @@ pub async fn serve(
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    /// Canonicalize the temp dir path so it matches what `verify_canonical` resolves
+    /// (e.g. macOS `/var` → `/private/var` symlink).
+    fn canonical_root(dir: &TempDir) -> PathBuf {
+        std::fs::canonicalize(dir.path()).unwrap()
+    }
 
     #[tokio::test]
     async fn test_file_cache_hit_miss() {
@@ -607,7 +612,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -628,7 +633,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -650,7 +655,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -667,11 +672,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_serve_nonexistent_returns_404() {
+        let dir = TempDir::new().unwrap();
         let cache = FileCache::new(10);
         let response = serve(
-            Path::new("/nonexistent/file.txt"),
+            &dir.path().join("nonexistent.txt"),
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -843,7 +849,7 @@ mod tests {
         let _response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -860,7 +866,7 @@ mod tests {
         let response2 = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -973,7 +979,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=3600"),
         )
@@ -1001,9 +1007,15 @@ mod tests {
         fs::write(&file_path, "body {}").unwrap();
 
         let cache = FileCache::new(10);
-        let response = serve(&file_path, &cache, None, &HeaderMap::new(), None)
-            .await
-            .unwrap();
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &HeaderMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers().get(header::CACHE_CONTROL).is_none());
@@ -1023,7 +1035,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1043,7 +1055,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1064,7 +1076,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1085,7 +1097,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1105,7 +1117,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
-            None,
+            &canonical_root(&dir),
             &headers,
             Some("public, max-age=86400"),
         )
