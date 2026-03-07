@@ -2,6 +2,12 @@
 name = "oxphp"
 version = "0.1.0"
 edition = "2021"
+description = "Asynchronous PHP application server"
+license = "AGPL-3.0-only"
+repository = "https://github.com/oxphp/oxphp"
+homepage = "https://oxphp.dev"
+rust-version = "1.91.1"
+publish = false
 
 [dependencies]
 # Async runtime
@@ -39,6 +45,9 @@ crossbeam-channel = "0.5"
 
 # Concurrent hash map for rate limiting
 dashmap = "6"
+
+# LRU cache
+lru = "0.12"
 
 # Compression
 brotli = "7"

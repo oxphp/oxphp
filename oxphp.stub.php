@@ -74,6 +74,22 @@ function oxphp_server_info(): array {}
 function oxphp_finish_request(): bool {}
 
 /**
+ * Checks whether the server is running in worker mode.
+ *
+ * In worker mode, PHP boots once and handles multiple requests via
+ * oxphp_worker(). In traditional mode, each request spawns a fresh
+ * PHP process. Use this to conditionally enable worker-specific logic.
+ *
+ * @return bool true if running in worker mode
+ *
+ * @example
+ * if (oxphp_is_worker()) {
+ *     // persistent connections, shared state, etc.
+ * }
+ */
+function oxphp_is_worker(): bool {}
+
+/**
  * Checks whether the current request is in streaming mode.
  *
  * In streaming mode (SSE, chunked transfer), output is flushed
@@ -106,3 +122,51 @@ function oxphp_is_streaming(): bool {}
  * }
  */
 function oxphp_request_heartbeat(int $time = 10): bool {}
+
+/**
+ * Activate streaming mode and flush buffered output as a chunk to the client.
+ *
+ * On the first call, HTTP headers are sent immediately. Each subsequent call
+ * flushes any output written since the last flush as a new chunk.
+ *
+ * Use this for Server-Sent Events (SSE), chunked transfer, or any real-time
+ * streaming pattern. Streaming mode is also auto-activated when PHP sets
+ * Content-Type: text/event-stream.
+ *
+ * Returns false if oxphp_finish_request() was already called.
+ *
+ * @return bool true on success, false if request is already finished
+ *
+ * @example
+ * header('Content-Type: text/event-stream');
+ * header('Cache-Control: no-cache');
+ * for ($i = 0; $i < 10; $i++) {
+ *     echo "data: " . json_encode(["counter" => $i]) . "\n\n";
+ *     oxphp_stream_flush();
+ *     sleep(1);
+ * }
+ */
+function oxphp_stream_flush(): bool {}
+
+/**
+ * Enter worker mode loop. The handler is called for each HTTP request.
+ *
+ * Between requests, a soft reset cleans per-request state (output buffers,
+ * headers, superglobals) without destroying the PHP heap. Bootstrap state
+ * (autoloader, DI container, routes, variables in the outer scope) persists.
+ *
+ * Only available when WORKER_FILE env var is set. Returns true on graceful
+ * shutdown (channel closed), or exits the loop on max_requests/max_memory
+ * limits. Code after oxphp_worker() runs during shutdown.
+ *
+ * @param callable $handler Called for each request with fresh superglobals
+ * @return bool true on graceful exit, false if not in worker mode
+ *
+ * @example
+ * $app = new App();  // boot once
+ * oxphp_worker(function () use ($app) {
+ *     $app->handle();  // called per request
+ * });
+ * $app->terminate();  // graceful shutdown
+ */
+function oxphp_worker(callable $handler): bool {}

@@ -239,13 +239,16 @@ async fn async_main(
     plugin_manager.on_ready_all();
 
     // Spawn graceful shutdown handler
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let server_ref = Arc::clone(&server);
     let pm_shutdown = Arc::clone(&plugin_manager);
+    let shutdown_ref = Arc::clone(&shutdown_notify);
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("Received shutdown signal, draining connections");
         pm_shutdown.shutdown_all();
         server_ref.shutdown();
+        shutdown_ref.notify_one();
     });
 
     // Accept loop
@@ -254,7 +257,12 @@ async fn async_main(
             break;
         }
 
-        let (stream, remote_addr) = match listener.accept().await {
+        let accept_result = tokio::select! {
+            result = listener.accept() => result,
+            _ = shutdown_notify.notified() => break,
+        };
+
+        let (stream, remote_addr) = match accept_result {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to accept connection");

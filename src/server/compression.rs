@@ -17,6 +17,12 @@ const BROTLI_QUALITY: i32 = 4;
 /// Brotli window size. 20 = 1 MB window — good for typical web responses.
 const BROTLI_WINDOW: i32 = 20;
 
+/// Bodies smaller than this are compressed inline on the async thread.
+/// Above this threshold, compression is offloaded to a blocking thread
+/// to avoid stalling the Tokio runtime. 64 KB is well below the point
+/// where brotli q4 latency becomes noticeable (~100µs for 64 KB).
+const BLOCKING_THRESHOLD: usize = 65_536;
+
 /// Try to compress a response with brotli. Called only when the client accepts brotli.
 /// The caller must verify `accepts_brotli()` before calling.
 pub async fn maybe_compress(response: Response<ResponseBody>) -> Response<ResponseBody> {
@@ -65,10 +71,23 @@ pub async fn maybe_compress(response: Response<ResponseBody>) -> Response<Respon
         return Response::from_parts(parts, full_body(body_bytes));
     }
 
-    // Compress with brotli — returns None if compressed is not smaller
-    let compressed = match compress_brotli(&body_bytes) {
-        Some(c) => c,
-        None => return Response::from_parts(parts, full_body(body_bytes)),
+    // Small bodies: compress inline (spawn_blocking overhead > compression time).
+    // Large bodies: offload to blocking thread to avoid stalling the runtime.
+    let compressed = if body_bytes.len() <= BLOCKING_THRESHOLD {
+        match compress_brotli(&body_bytes) {
+            Some(c) => c,
+            None => return Response::from_parts(parts, full_body(body_bytes)),
+        }
+    } else {
+        let body_bytes_ref = body_bytes.clone();
+        match tokio::task::spawn_blocking(move || compress_brotli(&body_bytes_ref)).await {
+            Ok(Some(c)) => c,
+            Ok(None) => return Response::from_parts(parts, full_body(body_bytes)),
+            Err(e) => {
+                tracing::warn!(error = %e, "Compression spawn_blocking task failed");
+                return Response::from_parts(parts, full_body(body_bytes));
+            }
+        }
     };
 
     let compressed_len = compressed.len();
