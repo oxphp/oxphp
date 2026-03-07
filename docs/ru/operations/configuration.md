@@ -38,7 +38,6 @@ OxPHP настраивается исключительно через пере�
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Максимальное время ожидания заголовков запроса после TCP-соединения в секундах |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Таймаут бездействия keep-alive. Соединения без активности в течение этого времени закрываются |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Максимальное время всего цикла запрос-ответ в секундах. Установите `0` для отключения |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Максимальное время ожидания завершения текущих соединений при плавной остановке в секундах |
 
@@ -177,7 +176,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
@@ -199,7 +197,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true

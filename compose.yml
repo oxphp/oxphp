@@ -83,9 +83,6 @@ services:
       # Max seconds to receive HTTP headers after connection is accepted.
       - HEADER_TIMEOUT_SECONDS=5
 
-      # Max seconds a keep-alive connection can stay idle between requests.
-      - IDLE_TIMEOUT_SECONDS=60
-
       # Max seconds for the entire request (including PHP execution). 0 = no limit.
       - REQUEST_TIMEOUT_SECONDS=120
 

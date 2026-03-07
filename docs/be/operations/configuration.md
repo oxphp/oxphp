@@ -38,7 +38,6 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 | Зменная | Па змаўчанні | Апісанне |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Максімум секунд для чакання загалоўкаў запыту пасля TCP-злучэння |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Тайм-аўт бяздзейнасці keep-alive. Злучэнні без актыўнасці на працягу гэтага часу закрываюцца |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Максімум секунд для ўсяго цыклу запыт-адказ. Усталюйце `0` для адключэння |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Максімум секунд для чакання завяршэння злучэнняў у апрацоўцы падчас плаўнай спынкі |
 
@@ -177,7 +176,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true
@@ -199,7 +197,6 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-IDLE_TIMEOUT_SECONDS=30
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_ENABLED=true

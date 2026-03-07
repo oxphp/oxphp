@@ -58,7 +58,6 @@ services:
 
       # Тайм-аўты (секунды)
       - HEADER_TIMEOUT_SECONDS=5
-      - IDLE_TIMEOUT_SECONDS=60
       - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
 
@@ -108,7 +107,6 @@ services:
 | `MAX_CONNECTIONS` | `10000` | Максімальная колькасць адначасовых злучэнняў |
 | `INTERNAL_ADDR` | _(не зададзена)_ | Адрас унутранага сервера. Калі не зададзена, ён адключаны |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Тайм-аўт чытання загалоўкаў запыту |
-| `IDLE_TIMEOUT_SECONDS` | `60` | Тайм-аўт прастою keep-alive |
 | `REQUEST_TIMEOUT_SECONDS` | `120` | Максімальны час апрацоўкі запыту. 0 адключае тайм-аўт |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Перыяд чакання для незавершаных злучэнняў падчас спынкі |
 | `RATE_LIMIT` | `0` | Максімальная колькасць запытаў на IP за акно. 0 адключае абмежаванне |
