@@ -80,7 +80,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `COMPRESSION_ENABLED` | `true` | 对可压缩的响应类型启用 Brotli 压缩。使用 `false`、`0` 或 `off` 禁用 |
+| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩，`1`-`11` 设置质量级别 |
 
 ## 工作线程模式
 
@@ -178,7 +178,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -199,7 +199,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -220,7 +220,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION_ENABLED: "true"
+      COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
     volumes:
       - ./src:/var/www/html

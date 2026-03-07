@@ -419,7 +419,7 @@ docker run -p 8080:8080 \
                         <tr><td><code>DOCUMENT_ROOT</code></td><td><code>/var/www/html/public</code></td><td>Document root path</td></tr>
                         <tr><td><code>INDEX_FILE</code></td><td><em>(empty)</em></td><td>Routing mode: <code>index.php</code> = framework, <code>index.html</code> = SPA</td></tr>
                         <tr><td><code>TOKIO_WORKERS</code></td><td><code>0</code></td><td>Async I/O threads (0 = auto, CPU/2)</td></tr>
-                        <tr><td><code>COMPRESSION_ENABLED</code></td><td><code>true</code></td><td>Brotli compression</td></tr>
+                        <tr><td><code>COMPRESSION_LEVEL</code></td><td><code>4</code></td><td>Brotli compression level (0-11, 0=off)</td></tr>
                         <tr><td><code>STATIC_CACHE_TTL</code></td><td><code>30d</code></td><td>Static file cache TTL (<code>30s</code>, <code>5m</code>, <code>2h</code>, <code>30d</code>, <code>1w</code>, <code>1y</code>, or <code>off</code>)</td></tr>
                     </tbody>
                 </table>

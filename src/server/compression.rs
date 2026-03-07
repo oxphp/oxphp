@@ -11,21 +11,25 @@ const MIN_COMPRESS_SIZE: usize = 256;
 /// Larger responses should be streamed from disk without compression.
 const MAX_COMPRESS_SIZE: usize = 3 * 1024 * 1024;
 
-/// Brotli quality level (1-11). 4 is a good balance for web serving.
-const BROTLI_QUALITY: i32 = 4;
-
 /// Brotli window size. 20 = 1 MB window — good for typical web responses.
 const BROTLI_WINDOW: i32 = 20;
 
 /// Bodies smaller than this are compressed inline on the async thread.
 /// Above this threshold, compression is offloaded to a blocking thread
-/// to avoid stalling the Tokio runtime. 64 KB is well below the point
-/// where brotli q4 latency becomes noticeable (~100µs for 64 KB).
-const BLOCKING_THRESHOLD: usize = 65_536;
+/// to avoid stalling the Tokio runtime.
+const BLOCKING_THRESHOLD_LOW: usize = 65_536;
+
+/// Lower threshold for high quality levels (>4) where brotli is 10-100x slower.
+/// At q11, even 8 KB can take milliseconds — keep async thread responsive.
+const BLOCKING_THRESHOLD_HIGH: usize = 4_096;
 
 /// Try to compress a response with brotli. Called only when the client accepts brotli.
 /// The caller must verify `accepts_brotli()` before calling.
-pub async fn maybe_compress(response: Response<ResponseBody>) -> Response<ResponseBody> {
+/// `quality` is the brotli compression level (1-11).
+pub async fn maybe_compress(
+    response: Response<ResponseBody>,
+    quality: i32,
+) -> Response<ResponseBody> {
     // Check Content-Type
     let content_type = response
         .headers()
@@ -73,14 +77,20 @@ pub async fn maybe_compress(response: Response<ResponseBody>) -> Response<Respon
 
     // Small bodies: compress inline (spawn_blocking overhead > compression time).
     // Large bodies: offload to blocking thread to avoid stalling the runtime.
-    let compressed = if body_bytes.len() <= BLOCKING_THRESHOLD {
-        match compress_brotli(&body_bytes) {
+    // High quality levels (>4) use a lower threshold since brotli gets much slower.
+    let blocking_threshold = if quality <= 4 {
+        BLOCKING_THRESHOLD_LOW
+    } else {
+        BLOCKING_THRESHOLD_HIGH
+    };
+    let compressed = if body_bytes.len() <= blocking_threshold {
+        match compress_brotli(&body_bytes, quality) {
             Some(c) => c,
             None => return Response::from_parts(parts, full_body(body_bytes)),
         }
     } else {
         let body_bytes_ref = body_bytes.clone();
-        match tokio::task::spawn_blocking(move || compress_brotli(&body_bytes_ref)).await {
+        match tokio::task::spawn_blocking(move || compress_brotli(&body_bytes_ref, quality)).await {
             Ok(Some(c)) => c,
             Ok(None) => return Response::from_parts(parts, full_body(body_bytes)),
             Err(e) => {
@@ -142,10 +152,10 @@ fn is_compressible(content_type: &str) -> bool {
 }
 
 /// Compress data using Brotli. Returns None if compression would not reduce size.
-fn compress_brotli(data: &[u8]) -> Option<Vec<u8>> {
+fn compress_brotli(data: &[u8], quality: i32) -> Option<Vec<u8>> {
     let mut output = Vec::with_capacity(data.len() / 2);
     let params = brotli::enc::BrotliEncoderParams {
-        quality: BROTLI_QUALITY,
+        quality,
         lgwin: BROTLI_WINDOW,
         ..Default::default()
     };
@@ -223,7 +233,7 @@ mod tests {
     #[test]
     fn test_compress_brotli_roundtrip() {
         let data = "Hello, World! ".repeat(50);
-        let compressed = compress_brotli(data.as_bytes());
+        let compressed = compress_brotli(data.as_bytes(), 4);
         assert!(compressed.is_some());
 
         let compressed = compressed.unwrap();
@@ -236,7 +246,7 @@ mod tests {
     fn test_compress_brotli_returns_none_when_not_smaller() {
         // Random-ish data that doesn't compress well
         let data: Vec<u8> = (0..300).map(|i| (i * 7 + 13) as u8).collect();
-        let result = compress_brotli(&data);
+        let result = compress_brotli(&data, 4);
         if let Some(compressed) = result {
             assert!(compressed.len() < data.len());
         }
@@ -247,7 +257,7 @@ mod tests {
         let body = "a".repeat(500); // >256 bytes, compressible
         let response = build_response("text/html", body.as_bytes());
 
-        let result = maybe_compress(response).await;
+        let result = maybe_compress(response, 4).await;
 
         assert_eq!(
             result.headers().get(header::CONTENT_ENCODING).unwrap(),
@@ -275,7 +285,7 @@ mod tests {
         let body = vec![0u8; 500];
         let response = build_response("image/png", &body);
 
-        let result = maybe_compress(response).await;
+        let result = maybe_compress(response, 4).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }
@@ -284,7 +294,7 @@ mod tests {
     async fn test_skip_small_body() {
         let response = build_response("text/html", b"<h1>Hi</h1>");
 
-        let result = maybe_compress(response).await;
+        let result = maybe_compress(response, 4).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }
@@ -299,7 +309,7 @@ mod tests {
             .body(full_body(Bytes::from(body)))
             .unwrap();
 
-        let result = maybe_compress(response).await;
+        let result = maybe_compress(response, 4).await;
 
         assert_eq!(
             result.headers().get(header::CONTENT_ENCODING).unwrap(),
@@ -317,7 +327,7 @@ mod tests {
             .body(full_body(Bytes::from(body)))
             .unwrap();
 
-        let result = maybe_compress(response).await;
+        let result = maybe_compress(response, 4).await;
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
     }

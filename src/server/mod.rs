@@ -44,7 +44,7 @@ pub struct Server {
     pub(crate) dispatcher: Arc<EventDispatcher>,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     pub(crate) request_timeout: Duration,
-    pub(crate) compression_enabled: bool,
+    pub(crate) compression_level: i32,
     pub(crate) max_query_body: usize,
     /// Pre-computed `Cache-Control` header value, e.g. `"public, max-age=2592000"`.
     /// `None` = caching disabled.
@@ -63,7 +63,7 @@ impl Server {
         metrics: Arc<Metrics>,
         dispatcher: Arc<EventDispatcher>,
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-        compression_enabled: bool,
+        compression_level: i32,
         max_query_body: usize,
         worker_file: Option<PathBuf>,
         static_cache_control: Option<String>,
@@ -93,7 +93,7 @@ impl Server {
             dispatcher,
             tls_acceptor,
             request_timeout: config.request_timeout,
-            compression_enabled,
+            compression_level,
             max_query_body,
             static_cache_control,
             http_builder,

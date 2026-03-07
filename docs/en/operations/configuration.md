@@ -80,7 +80,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COMPRESSION_ENABLED` | `true` | Enable Brotli compression for compressible response types. Disable with `false`, `0`, or `off` |
+| `COMPRESSION_LEVEL` | `4` | Brotli compression quality level (0-11). `0` disables compression, `1`-`11` set quality |
 
 ## Worker Modes
 
@@ -178,7 +178,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -199,7 +199,7 @@ RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_ENABLED=true
+COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
@@ -220,7 +220,7 @@ services:
       QUEUE_CAPACITY: "512"
       LOG_LEVEL: "info"
       INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION_ENABLED: "true"
+      COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
     volumes:
       - ./src:/var/www/html

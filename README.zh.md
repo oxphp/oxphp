@@ -76,7 +76,7 @@ curl http://localhost:8080/
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
 | `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL。支持格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯数字秒数（`3600`）或 `off` 禁用 |
-| `COMPRESSION_ENABLED` | `true` | 启用 Brotli 压缩；设置为 `false`、`0` 或 `off` 可禁用 |
+| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩，`1`-`11` 设置质量级别 |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）；设置后启用持久化工作进程模式 |
