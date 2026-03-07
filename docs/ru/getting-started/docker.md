@@ -117,7 +117,7 @@ services:
 | `COMPRESSION_ENABLED` | `true` | Включить сжатие Brotli. Установите `false`, `0` или `off` для отключения |
 | `TOKIO_WORKERS` | `0` | Потоки асинхронного рантайма Tokio (0 = авто CPU/2, 1 = однопоточный) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступа: `all` (все), `error` (4xx/5xx), пустое = выкл. |
-| `SLOT_POOL_SIZE` | `QUEUE_CAPACITY + PHP_WORKERS*2` | Размер пула предварительно выделенных слотов ответа |
+
 
 ### Порты
 
