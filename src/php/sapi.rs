@@ -775,13 +775,12 @@ unsafe extern "C" fn oxphp_header_handler(
     })
 }
 
-unsafe extern "C" fn oxphp_send_headers(sapi_headers: *mut sapi_headers_struct) -> c_int {
-    if !sapi_headers.is_null() {
-        let code = (*sapi_headers).http_response_code;
-        if code > 0 {
-            RESPONSE.with(|r| r.borrow_mut().status_code = code as u16);
-        }
-    }
+unsafe extern "C" fn oxphp_send_headers(_sapi_headers: *mut sapi_headers_struct) -> c_int {
+    // NOTE: Do NOT read http_response_code from _sapi_headers here.
+    // In PHP ZTS, the sapi_headers pointer passed to this callback may reference
+    // stale TSRM memory, causing status codes from previous requests to leak.
+    // Instead, we read the response code from the C bridge (which has correct TSRM
+    // context) after script execution — see collect_response_code().
     1 // SAPI_HEADER_SENT_SUCCESSFULLY
 }
 
@@ -923,6 +922,23 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
 // ─── Buffer Access ──────────────────────────────────────────
 
 /// Take output, headers, and status code in a single TLS lookup + borrow.
+/// Read the HTTP response code from PHP's SG(sapi_headers).http_response_code
+/// via the C bridge (which has a correct TSRM context).
+/// Must be called after script execution, before php_request_shutdown()
+/// destroys the request state.
+pub fn collect_response_code() {
+    let code = unsafe { bindings::oxphp_bridge_get_response_code() };
+    if code > 0 {
+        RESPONSE.with(|r| {
+            let mut resp = r.borrow_mut();
+            // Don't overwrite status set by error handlers (e.g. 500 from fatal)
+            if resp.status_code == 200 {
+                resp.status_code = code as u16;
+            }
+        });
+    }
+}
+
 pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
     RESPONSE.with(|r| {
         let mut resp = r.borrow_mut();

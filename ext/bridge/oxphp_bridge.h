@@ -272,6 +272,11 @@ void oxphp_bridge_set_request_info(
     long content_length
 );
 
+/* ── SAPI response code ── */
+
+/** Read SG(sapi_headers).http_response_code from the C side (correct TSRM context). */
+int oxphp_bridge_get_response_code(void);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */
