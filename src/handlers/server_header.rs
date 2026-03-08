@@ -1,13 +1,7 @@
-use std::sync::LazyLock;
-
 use http::HeaderValue;
 
 use crate::events::ResponseBuilding;
 use crate::events::{EventHandler, Priority, Propagation};
-
-/// Pre-computed `Server` header value — avoids allocation per response.
-static SERVER_HEADER_VALUE: LazyLock<HeaderValue> =
-    LazyLock::new(|| HeaderValue::from_static(concat!("OxPHP/", env!("CARGO_PKG_VERSION"))));
 
 /// Adds `Server` and `X-Request-ID` headers to every response.
 pub struct ServerHeaderHandler;
@@ -18,7 +12,7 @@ impl EventHandler<ResponseBuilding> for ServerHeaderHandler {
         event
             .response
             .headers_mut()
-            .insert(http::header::SERVER, SERVER_HEADER_VALUE.clone());
+            .insert(http::header::SERVER, HeaderValue::from_static("OxPHP"));
 
         if let Ok(hv) = HeaderValue::from_str(&event.request_id) {
             event.response.headers_mut().insert("x-request-id", hv);
@@ -53,14 +47,16 @@ mod tests {
 
         handler.handle(&mut event);
         assert!(event.response.headers().contains_key("server"));
-        assert!(event
-            .response
-            .headers()
-            .get("server")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .starts_with("OxPHP/"));
+        assert_eq!(
+            event
+                .response
+                .headers()
+                .get("server")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "OxPHP"
+        );
     }
 
     #[test]

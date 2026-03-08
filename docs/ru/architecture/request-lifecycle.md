@@ -267,7 +267,7 @@ let response_rx = ctx.executor.execute(script_request);
 | Приоритет | Обработчик | Действие |
 |---|---|---|
 | 60 | `ErrorPagesHandler` | Заменяет тело ответа пользовательской HTML-страницей для статуса >= 400 |
-| 100 | `ServerHeaderHandler` | Добавляет заголовки `Server: OxPHP/{version}` и `X-Request-ID` |
+| 100 | `ServerHeaderHandler` | Добавляет заголовки `Server: OxPHP` и `X-Request-ID` |
 
 Это единственная точка, где `request_id` клонируется (один раз), поскольку он нужен снова в событии `RequestComplete`.
 

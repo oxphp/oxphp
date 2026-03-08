@@ -96,7 +96,7 @@ impl RequestData {
     }
 }
 
-const SERVER_SOFTWARE: &str = "OxPHP/0.1.0";
+const SERVER_SOFTWARE: &str = concat!("OxPHP/", env!("CARGO_PKG_VERSION"));
 
 /// Snapshot of process environment variables captured once at startup.
 /// Avoids per-request `std::env::vars()` overhead (mutex, UTF-8 validation,

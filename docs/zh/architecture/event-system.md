@@ -280,7 +280,7 @@ OxPHP 内置七个处理器，定义在 `src/handlers/` 中：
 | `MetricsRequestHandler` | `RequestReceived` | 0 | 记录请求计数和方法 |
 | `MetricsResponseHandler` | `RequestComplete` | 0 | 记录响应状态类和持续时间 |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | 用自定义 HTML 替换错误响应体（状态码 >= 400） |
-| `ServerHeaderHandler` | `ResponseBuilding` | 100 | 添加 `Server: OxPHP/{version}` 和 `X-Request-ID` 头 |
+| `ServerHeaderHandler` | `ResponseBuilding` | 100 | 添加 `Server: OxPHP` 和 `X-Request-ID` 头 |
 | `AccessLogHandler` | `RequestComplete` | 100 | 通过 `tracing::info!` 输出结构化 JSON 访问日志（仅在 `config.access_log` 启用时注册） |
 
 ### 优先级设计

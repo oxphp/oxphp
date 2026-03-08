@@ -267,7 +267,7 @@ After the response is built (from either static file serving or PHP execution), 
 | Priority | Handler | Action |
 |---|---|---|
 | 60 | `ErrorPagesHandler` | Replaces the response body with a custom HTML page for status >= 400 |
-| 100 | `ServerHeaderHandler` | Adds `Server: OxPHP/{version}` and `X-Request-ID` headers |
+| 100 | `ServerHeaderHandler` | Adds `Server: OxPHP` and `X-Request-ID` headers |
 
 This is the only point where `request_id` is cloned (once), because it is needed again in the `RequestComplete` event.
 
