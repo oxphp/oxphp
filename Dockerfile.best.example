@@ -44,7 +44,7 @@ FROM composer:2 AS composer
 # ══════════════════════════════════════════════════════════════
 # Stage: oxphp — pull OxPHP nightly artifacts
 # ══════════════════════════════════════════════════════════════
-FROM ghcr.io/oxphp/oxphp:nightly AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.1.0 AS oxphp
 
 # ══════════════════════════════════════════════════════════════
 # Target: dev
@@ -130,7 +130,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 # ══════════════════════════════════════════════════════════════
 # Target: prod
 #
-# Base: ghcr.io/oxphp/oxphp:nightly (minimal, no PHP CLI)
+# Base: ghcr.io/oxphp/oxphp:0.1.0 (minimal, no PHP CLI)
 # Extensions: pdo, intl (no xdebug)
 # Only compiled .so files copied in
 # ══════════════════════════════════════════════════════════════

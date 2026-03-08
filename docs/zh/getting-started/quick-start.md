@@ -14,7 +14,7 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ## 2. 创建 Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

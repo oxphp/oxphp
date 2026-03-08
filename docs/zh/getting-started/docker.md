@@ -3,14 +3,14 @@ title: Docker
 description: Docker 镜像使用、compose.yml 参考及部署技巧
 ---
 
-OxPHP 以预构建的 Docker 镜像形式发布，地址为 `ghcr.io/oxphp/oxphp:nightly`。本页介绍如何使用该镜像、通过 `compose.yml` 进行配置，以及常见的部署注意事项。
+OxPHP 以预构建的 Docker 镜像形式发布，地址为 `ghcr.io/oxphp/oxphp:0.1.0`。本页介绍如何使用该镜像、通过 `compose.yml` 进行配置，以及常见的部署注意事项。
 
 ## 使用镜像
 
 运行 OxPHP 最简单的方式是基于基础镜像扩展并加入你的应用文件：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -82,7 +82,7 @@ services:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:nightly
+    image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
       - "8080:8080"
     volumes:

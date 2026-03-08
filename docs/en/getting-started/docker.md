@@ -3,14 +3,14 @@ title: Docker
 description: Docker image usage, compose.yml reference, and deployment tips
 ---
 
-OxPHP is distributed as a pre-built Docker image at `ghcr.io/oxphp/oxphp:nightly`. This page covers how to use the image, configure it with `compose.yml`, and common deployment considerations.
+OxPHP is distributed as a pre-built Docker image at `ghcr.io/oxphp/oxphp:0.1.0`. This page covers how to use the image, configure it with `compose.yml`, and common deployment considerations.
 
 ## Using the Image
 
 The simplest way to run OxPHP is to extend the base image with your application files:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -82,7 +82,7 @@ For development, you can mount your source directory as a volume instead of copy
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:nightly
+    image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
       - "8080:8080"
     volumes:
