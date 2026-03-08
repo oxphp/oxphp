@@ -8,13 +8,13 @@ description: How to install and run OxPHP
 OxPHP is distributed as a pre-built Docker image. Pull the latest nightly build:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:nightly
+docker pull ghcr.io/oxphp/oxphp:0.1.0
 ```
 
 Create a `Dockerfile` in your project root:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

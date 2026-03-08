@@ -8,13 +8,13 @@ description: Как установить и запустить OxPHP
 OxPHP распространяется в виде готового Docker-образа. Загрузите последнюю ночную сборку:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:nightly
+docker pull ghcr.io/oxphp/oxphp:0.1.0
 ```
 
 Создайте `Dockerfile` в корне проекта:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

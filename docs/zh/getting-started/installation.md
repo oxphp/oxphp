@@ -8,13 +8,13 @@ description: 如何安装和运行 OxPHP
 OxPHP 以预构建的 Docker 镜像形式发布。拉取最新的每夜构建版本：
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:nightly
+docker pull ghcr.io/oxphp/oxphp:0.1.0
 ```
 
 在项目根目录创建一个 `Dockerfile`：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

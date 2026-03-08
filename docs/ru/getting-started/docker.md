@@ -3,14 +3,14 @@ title: Docker
 description: Использование Docker-образа, справочник по compose.yml и советы по развёртыванию
 ---
 
-OxPHP распространяется в виде готового Docker-образа по адресу `ghcr.io/oxphp/oxphp:nightly`. На этой странице описано, как использовать образ, настраивать его с помощью `compose.yml`, а также рассмотрены распространённые аспекты развёртывания.
+OxPHP распространяется в виде готового Docker-образа по адресу `ghcr.io/oxphp/oxphp:0.1.0`. На этой странице описано, как использовать образ, настраивать его с помощью `compose.yml`, а также рассмотрены распространённые аспекты развёртывания.
 
 ## Использование образа
 
 Самый простой способ запустить OxPHP — расширить базовый образ файлами вашего приложения:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:nightly
+FROM ghcr.io/oxphp/oxphp:0.1.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -82,7 +82,7 @@ services:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:nightly
+    image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
       - "8080:8080"
     volumes:
