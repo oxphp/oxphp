@@ -280,7 +280,7 @@ Seven handlers ship with OxPHP, defined in `src/handlers/`:
 | `MetricsRequestHandler` | `RequestReceived` | 0 | Records request count and method |
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Records response status class and duration |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Replaces error response body with custom HTML (status >= 400) |
-| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Adds `Server: OxPHP/{version}` and `X-Request-ID` headers |
+| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Adds `Server: OxPHP` and `X-Request-ID` headers |
 | `AccessLogHandler` | `RequestComplete` | 100 | Emits structured JSON access log via `tracing::info!` (only registered when `config.access_log` is enabled) |
 
 ### Priority Design

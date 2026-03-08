@@ -187,7 +187,7 @@ async fn test_server_header() {
 
     let resp = reqwest::get(&url).await.unwrap();
     let server_hdr = resp.headers().get("server").unwrap().to_str().unwrap();
-    assert!(server_hdr.starts_with("OxPHP/"));
+    assert_eq!(server_hdr, "OxPHP");
 }
 
 #[tokio::test]

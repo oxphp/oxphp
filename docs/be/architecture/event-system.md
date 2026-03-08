@@ -280,7 +280,7 @@ pub struct RequestComplete {
 | `MetricsRequestHandler` | `RequestReceived` | 0 | Запісвае колькасць запытаў і метад |
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Запісвае клас статусу адказу і працягласць |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Замяняе цела адказу на карыстальніцкі HTML (статус >= 400) |
-| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Дадае загалоўкі `Server: OxPHP/{version}` і `X-Request-ID` |
+| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Дадае загалоўкі `Server: OxPHP` і `X-Request-ID` |
 | `AccessLogHandler` | `RequestComplete` | 100 | Выводзіць структураваны JSON-лог доступу праз `tracing::info!` (рэгіструецца толькі калі ўключаны `config.access_log`) |
 
 ### Дызайн прыярытэтаў

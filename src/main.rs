@@ -92,6 +92,7 @@ async fn async_main(
     };
 
     tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
         executor = %config.executor_type,

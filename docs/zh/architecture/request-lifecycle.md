@@ -267,7 +267,7 @@ Tokio 任务等待 `oneshot::Receiver`。当 PHP 工作线程完成时，它发�
 | 优先级 | 处理器 | 操作 |
 |---|---|---|
 | 60 | `ErrorPagesHandler` | 对状态码 >= 400 的响应，用自定义 HTML 页面替换响应体 |
-| 100 | `ServerHeaderHandler` | 添加 `Server: OxPHP/{version}` 和 `X-Request-ID` 头 |
+| 100 | `ServerHeaderHandler` | 添加 `Server: OxPHP` 和 `X-Request-ID` 头 |
 
 这是整个管道中 `request_id` 唯一一次被克隆的地方，因为在 `RequestComplete` 事件中还需要用到它。
 

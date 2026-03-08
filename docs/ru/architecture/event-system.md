@@ -280,7 +280,7 @@ OxPHP поставляется с семью обработчиками, опр�
 | `MetricsRequestHandler` | `RequestReceived` | 0 | Записывает количество запросов и метод |
 | `MetricsResponseHandler` | `RequestComplete` | 0 | Записывает класс статуса ответа и продолжительность |
 | `ErrorPagesHandler` | `ResponseBuilding` | 60 | Заменяет тело ответа пользовательским HTML (статус >= 400) |
-| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Добавляет заголовки `Server: OxPHP/{version}` и `X-Request-ID` |
+| `ServerHeaderHandler` | `ResponseBuilding` | 100 | Добавляет заголовки `Server: OxPHP` и `X-Request-ID` |
 | `AccessLogHandler` | `RequestComplete` | 100 | Выводит структурированный JSON-лог доступа через `tracing::info!` (регистрируется только когда `config.access_log` включён) |
 
 ### Проектирование приоритетов

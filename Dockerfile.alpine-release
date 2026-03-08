@@ -59,6 +59,9 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
+# Version injected from CI (tag v1.2.3 → "1.2.3")
+ARG OXPHP_VERSION="0.0.0-dev"
+
 # Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./
 
@@ -72,6 +75,9 @@ RUN mkdir src && \
 # Copy real source and build script
 COPY src ./src
 COPY build.rs ./
+
+# Patch version from build arg
+RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
 
 RUN cargo build --release
 
