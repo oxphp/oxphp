@@ -2,43 +2,33 @@
   <img src="logo.svg" alt="OxPHP" width="300">
 </p>
 
+<h3 align="center">为云原生基础设施打造的多线程 PHP 应用服务器。</h3>
+
 <p align="center">
-  用 Rust 编写的异步 PHP 应用服务器。以单一二进制文件取代 nginx + PHP-FPM，处理 HTTP 请求、通过自定义 SAPI 原生执行 PHP，并提供内置可观测性支持。
+  OxPHP 是一个用 Rust 编写的异步 PHP 应用服务器 ——<br>
+  专为对低延迟、高并发和零配置可观测性有严格要求的生产工作负载而构建。
 </p>
 
-## 功能特性
+<p align="center">
+  <a href="docs/en/">Docs</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-oxphp">为什么选择 OxPHP</a> · <a href="#配置">配置</a>
+</p>
 
-- **原生 PHP 执行** — 通过自定义 SAPI（`oxphp`）配合 ZTS 工作池运行
-- **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
-- **原生 Rust↔PHP 桥接** — 通过 C 访问函数直接操作 `zval`，零序列化开销
-- **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
-- **结构化错误日志** — PHP 错误通过 `tracing` 输出，包含 `php_error_type`、`php_file`、`php_line` 字段
-- **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
-- **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
-- **3 种路由模式** — 传统模式、框架模式（`index.php`）、SPA 模式（`index.html`）
-- **LRU 文件缓存** — 静态文件内存缓存（≤1 MB 完整缓存，更大文件流式传输）
-- **HTTP 缓存** — 支持 ETag、Last-Modified 和 304 Not Modified 条件请求
-- **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB）
-- **有界请求队列** — 队列满时返回 503 进行背压控制
-- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
-- **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
-- **Prometheus 指标** — 通过内部服务器 `/metrics` 端点暴露
-- **健康检查**端点 `/health`，支持 K8s 就绪探针
-- **请求 ID** 生成与透传（`X-Request-ID` 请求头）
-- **访问日志** — 通过结构化 JSON tracing 输出（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
-- **自定义错误页面** — 启动时预加载，热路径零 I/O
-- **JSON 结构化日志** — 基于 tracing
-- **路径穿越防护** — 包含符号链接逃逸检测
-- **非 root 容器**运行 — 以 www-data（UID 82）身份执行
-- **mimalloc** 分配器 — 降低高并发下的内存分配延迟
-- **可配置 Tokio 运行时** — 默认自动（CPU / 2，最少 1），可通过 `TOKIO_WORKERS` 调整
-- **工作线程健康监控** — 自动检测并重启崩溃的工作线程
-- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
-- **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
-- **工作进程模式** — 持久化 PHP 进程，请求间软重置，根据请求数或内存自动回收，并提供每工作进程的 Prometheus 指标
-- **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
+<p align="center">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-powered-orange">
+  <img alt="PHP" src="https://img.shields.io/badge/php-8.4-blue">
+  <img alt="License" src="https://img.shields.io/github/license/oxphp/oxphp">
+  <img alt="Release" src="https://img.shields.io/github/v/release/oxphp/oxphp">
+  <img alt="Stars" src="https://img.shields.io/github/stars/oxphp/oxphp?style=flat">
+  <img alt="Docker" src="https://img.shields.io/badge/docker-ghcr.io-2496ED?logo=docker&logoColor=white">
+  <img alt="HTTP/2" src="https://img.shields.io/badge/HTTP%2F2-supported-brightgreen">
+  <img alt="TLS" src="https://img.shields.io/badge/TLS-1.3-brightgreen">
+</p>
+
+---
 
 ## 快速开始
+
+两行命令，仅此而已。
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -46,42 +36,95 @@ FROM ghcr.io/oxphp/oxphp:0.1.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
+> **注意：** 默认情况下，`DOCUMENT_ROOT` 为 `/var/www/html/public`。请将入口脚本（如 `index.php`）放在 `public/` 子目录中 —— OxPHP 将从该目录提供文件服务，而非 `/var/www/html` 根目录。这与 Laravel、Symfony 和 Slim 等框架的标准目录布局一致，开箱即用。
+
 ```bash
 docker build -t my-app . && docker run -p 8080:8080 my-app
 curl http://localhost:8080/
 ```
 
-## 配置
+无需 nginx 配置。无需 PHP-FPM 进程池调优。无需进程管理器。只需你的应用。
 
-所有配置均通过环境变量设置：
+---
 
-| 变量 | 默认值 | 描述 |
-|---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
-| `INDEX_FILE` | *(未设置)* | 路由模式：空 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
-| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | Tokio 异步 I/O 线程数；`0` = 自动，`1` = 单线程，`N` = 多线程 |
-| `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
-| `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
-| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下，工作线程的空闲超时时间（仅动态模式有效） |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 503 |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时（秒） |
-| `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
-| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
-| `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
-| `RATE_WINDOW_SECONDS` | `60` | 限流时间窗口（秒） |
-| `HEADER_TIMEOUT_SECONDS` | `5` | 请求头读取超时（Slowloris 防护） |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | 整体请求超时；`0` 表示禁用 |
-| `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
-| `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
-| `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
-| `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL。支持格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯数字秒数（`3600`）或 `off` 禁用 |
-| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩，`1`-`11` 设置质量级别 |
-| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
-| `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
-| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径（相对于 `DOCUMENT_ROOT`）；设置后启用持久化工作进程模式 |
-| `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数；`0` = 无限制 |
-| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）；`0` = 无限制 |
+## 为什么选择 OxPHP？
+
+传统 PHP 技术栈由三个相互粘合的组件构成：Web 服务器、进程管理器和 PHP 运行时。每一层都增加了配置复杂度、故障模式和运维负担。
+
+OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
+
+| | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
+|---|---|---|---|---|
+| Language | C / C | Go + C | Go | **Rust** |
+| HTTP/2 | ✅ | ✅ | ✅ | ✅ |
+| TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
+| Worker mode | ❌ | ✅ | ✅ | ✅ |
+| Worker recycling (req / mem) | ❌ | ❌ | ✅ | ✅ |
+| Worker health + auto-respawn | ❌ | ❌ | ✅ | ✅ |
+| Early response (`finish_request`) | ❌ | ✅ | ✅ | ✅ |
+| Backpressure / 503 | manual | ❌ | ❌ | ✅ built-in |
+| Prometheus metrics | plugin | plugin | ✅ | ✅ built-in |
+| Panic isolation | ❌ | ❌ | partial | ✅ `catch_unwind` |
+| Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
+| SSE streaming | ❌ | ✅ | ❌ | ✅ |
+| Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
+| HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
+| HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
+| JSON structured logging | ⚙️ manual `log_format` | ✅ (with flag) | ✅ configurable | ✅ built-in default |
+| Graceful shutdown | ✅ | ✅ | ✅ | ✅ |
+| Memory safety | ❌ | partial | partial | ✅ Rust |
+| Single binary deploy | ❌ | ❌ | ❌ | ✅ |
+
+---
+
+## 基准测试
+
+> 正式基准测试即将推出。我们正在开发一套可复现的测试套件，涵盖 req/s、延迟（p50/p99）、内存使用以及并发负载下的工作池吞吐量。
+
+---
+
+## 功能特性
+
+### PHP 运行时
+- **原生 PHP 执行** — 通过自定义 SAPI（`oxphp`）配合 ZTS 工作池运行
+- **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
+- **原生 Rust↔PHP 桥接** — 通过 C 访问函数直接操作 `zval`，零序列化开销
+- **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
+- **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
+
+### 工作进程模型
+- **工作进程模式** — 持久化 PHP 进程，请求间软重置，保持自动加载器和数据库连接跨请求存活
+- **自动回收** — 按请求数或内存阈值自动回收工作进程
+- **工作线程健康监控** — 自动检测崩溃线程并重启
+- **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
+
+### HTTP 与网络
+- **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
+- **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
+- **3 种路由模式** — 传统模式、框架模式（`index.php`）、SPA 模式（`index.html`）
+- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现
+- **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
+
+### 性能
+- **LRU 文件缓存** — 静态文件内存缓存（≤1 MB 完整缓存，更大文件流式传输）
+- **HTTP 缓存** — 支持 ETag、Last-Modified 和 304 Not Modified 条件请求
+- **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB）
+- **mimalloc** 分配器 — 降低高并发下的内存分配延迟
+- **可配置 Tokio 运行时** — 默认多线程（CPU / 2），可通过 `TOKIO_WORKERS` 调整
+
+### 可靠性与运维
+- **有界请求队列** — 队列满时返回 503 进行背压控制
+- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
+- **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖
+- **健康检查**端点 `/health` — 支持 K8s 就绪探针
+- **结构化错误日志** — PHP 错误通过 `tracing` 输出，包含 `php_error_type`、`php_file`、`php_line` 字段
+- **JSON 访问日志**（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
+- **自定义错误页面** — 启动时预加载，热路径零 I/O
+- **路径穿越防护** — 包含符号链接逃逸检测
+- **非 root 容器**运行 — 以 www-data（UID 82）身份执行
+- **请求 ID** 生成与透传（`X-Request-ID`）
+
+---
 
 ## 架构
 
@@ -110,11 +153,10 @@ curl http://localhost:8080/
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
 ```
 
-- **可配置 Tokio 运行时** — 默认自动（`TOKIO_WORKERS=0`，CPU / 2，最少 1），`1` = 单线程，高吞吐场景可设为更大值
-- **多线程 PHP 工作池** — 基于 PHP ZTS，每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
+- **Tokio 异步运行时** — 默认多线程，可通过 `TOKIO_WORKERS` 调整
+- **ZTS 工作池** — 每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
 - 工作线程通过 `crossbeam::bounded` 接收请求，通过 `ExecuteResult`（即时或经由 `oneshot` 延迟）返回结果
-- **工作线程健康监控** — 自动检测崩溃线程并重启
-- **工作进程模式** — 持久化 PHP 进程，请求间软重置；工作进程循环调用 `oxphp_worker($handler)`，保持引导状态（自动加载器、数据库连接）跨请求存活
+- **工作进程模式** — 持久化 PHP 进程，请求间软重置；保持引导状态（自动加载器、数据库连接）跨请求存活
 
 ### 内部服务器
 
@@ -126,10 +168,46 @@ curl http://localhost:8080/
 | `GET /metrics` | Prometheus 文本格式指标 |
 | `GET /config` | JSON 格式运行时配置（TLS 路径已脱敏） |
 
+---
+
+## 配置
+
+所有配置均通过环境变量设置 —— 无需配置文件。
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
+| `INDEX_FILE` | *(未设置)* | 路由模式：空 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
+| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 异步 I/O 线程数；`0` = 自动 |
+| `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
+| `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下工作线程的空闲超时时间 |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 503 |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时 |
+| `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
+| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
+| `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
+| `RATE_WINDOW_SECONDS` | `60` | 限流时间窗口（秒） |
+| `HEADER_TIMEOUT_SECONDS` | `5` | 请求头读取超时（Slowloris 防护） |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 整体请求超时；`0` 表示禁用 |
+| `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
+| `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
+| `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
+| `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL（`30s`、`5m`、`2h`、`30d`、`1y`、`off`） |
+| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0 = 关闭，1-11） |
+| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
+| `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
+| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径；设置后启用持久化工作进程模式 |
+| `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数 |
+| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
+
+---
+
 ## 构建
 
 ```bash
-# 宿主机（不含 PHP — 运行所有测试，无 PHP 执行）
+# 宿主机（不含 PHP — 所有测试通过，无 PHP 执行）
 cargo build --release
 
 # Docker（含 PHP — 完整功能）
@@ -160,6 +238,30 @@ INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
 curl http://localhost:9090/health
 curl http://localhost:9090/metrics
 ```
+
+---
+
+## 路线图
+
+> 以下项目未按优先级排序。列入此表并不代表一定会实现。
+
+| Feature | 描述 |
+|---|---|
+| **PHP 8.5** | PHP 8.5 发布后提供支持 |
+| **Trace Context (W3C)** | 跨请求自动传播 `traceparent` / `tracestate` 请求头 |
+| **OpenTelemetry** | 通过 OTLP 将追踪和指标导出到任何兼容的后端 |
+| **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
+| **Built-in PHP Profiler** | 无需 xdebug 或外部代理的低开销性能分析，直接集成在服务器中 |
+| **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |
+| **Non-Docker Install** | 通过系统包管理器（apt、brew 等）原生安装 |
+| **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |
+| **HTTP 103 Early Hints** | 发送 `103 Early Hints` 响应，允许客户端在最终响应前预加载资源 |
+| **Ecosystem Plugins** | 扩展插件系统：更多生命周期钩子、更丰富的 PHP API，以及第三方插件作者文档 |
+| **Shared Async Runtime** | 将 Tokio 运行时暴露给 PHP 工作进程，实现用户代码中的异步感知操作 |
+| **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
+| **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
+| **Promise API** | *(探索性)* `OxPHP\Promise` 和 `AsyncTask` —— 基于 Tokio 运行时的 PHP 异步任务执行 API；仍在评估中 |
+| **Diagnostics** | 生产诊断工具：检查操作系统限制（ulimit、TCP backlog、epoll/kqueue、容器设置），识别性能瓶颈（工作队列深度、锁竞争、GC/内存分配压力、ZTS 统计），并给出针对性的可操作建议 |
 
 ## 文档
 
