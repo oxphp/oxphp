@@ -140,6 +140,17 @@ Every static file response includes:
 | `ETag` | `W/"<size>-<mtime_hex>"` *(when caching enabled)* |
 | `Last-Modified` | RFC 7231 HTTP date *(when caching enabled)* |
 
+## Cache metrics
+
+The file cache exposes two Prometheus counters for monitoring cache effectiveness:
+
+| Metric | Description |
+|--------|-------------|
+| `oxphp_static_cache_hits_total` | Requests served from the content cache (no disk I/O) |
+| `oxphp_static_cache_misses_total` | Requests that required reading from disk |
+
+Cache hit ratio can be computed as `hits / (hits + misses)`. A low hit ratio may indicate the content cache budget (64 MB) is too small for the working set, or that most requested files exceed the 1 MB per-file cache limit.
+
 ## Error handling
 
 - **File not found**: returns 404 with a plain text body
@@ -150,4 +161,5 @@ Every static file response includes:
 
 - [Routing](routing.md) -- how URL paths are resolved to files on disk
 - [Compression](compression.md) -- Brotli compression for compressible static file responses; `Vary: Accept-Encoding` is added by the compression layer, not by static file serving
+- [Metrics](/operations/metrics.md) -- `oxphp_static_cache_hits_total` and `oxphp_static_cache_misses_total` counters
 - [Error Pages](error-pages.md) -- custom HTML pages for error responses

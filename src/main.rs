@@ -172,9 +172,10 @@ async fn async_main(
 
     // Conditional handlers
     if let Some(ref limiter) = rate_limiter {
-        dispatcher.on(handlers::rate_limit::RateLimitHandler::new(Arc::clone(
-            limiter,
-        )));
+        dispatcher.on(handlers::rate_limit::RateLimitHandler::new(
+            Arc::clone(limiter),
+            Arc::clone(&metrics),
+        ));
         tracing::info!("Rate limit handler registered");
     }
     if let Some(ref pages) = error_pages {

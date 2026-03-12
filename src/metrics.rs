@@ -111,6 +111,15 @@ impl WorkerMetrics {
     }
 }
 
+/// Histogram bucket boundaries for overall request duration (microseconds).
+/// Wider range than worker-mode buckets to cover static files + PHP.
+const REQUEST_DURATION_BUCKET_BOUNDS: [u64; 12] = [
+    100, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
+];
+
+/// Histogram bucket boundaries for queue wait time (microseconds).
+const QUEUE_WAIT_BUCKET_BOUNDS: [u64; 9] = [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 50_000];
+
 /// Lock-free atomic metrics counters for the server.
 /// All operations use `Relaxed` ordering — counters are approximate and don't
 /// need happens-before guarantees with other data.
@@ -131,6 +140,32 @@ pub struct Metrics {
     workers_spawned_total: AtomicU64,
     workers_retired_total: AtomicU64,
     worker_metrics: std::sync::OnceLock<Arc<WorkerMetrics>>,
+
+    // ── New metrics ──
+    /// Request duration histogram (all requests, not just worker mode).
+    request_duration_buckets: [AtomicU64; 13], // 12 bounded + 1 +Inf
+    // _sum reuses total_response_time_us; _count derived from responses_by_status_class sum.
+    /// Total request body bytes received.
+    request_bytes_total: AtomicU64,
+    /// Total response body bytes sent.
+    response_bytes_total: AtomicU64,
+
+    /// Queue wait time histogram (time between queue submit and worker pickup).
+    queue_wait_buckets: [AtomicU64; 10], // 9 bounded + 1 +Inf
+    queue_wait_sum_us: AtomicU64,
+    queue_wait_count: AtomicU64,
+
+    /// Requests rejected by rate limiter (429).
+    rate_limited_total: AtomicU64,
+
+    /// Static file cache hits and misses.
+    static_cache_hits: AtomicU64,
+    static_cache_misses: AtomicU64,
+
+    /// Responses compressed with brotli.
+    compressed_responses_total: AtomicU64,
+    /// Bytes saved by compression (original - compressed).
+    compression_bytes_saved_total: AtomicU64,
 }
 
 const METHOD_LABELS: [&str; 10] = [
@@ -161,6 +196,19 @@ fn status_class_index(status: u16) -> usize {
     }
 }
 
+/// Place a value into the correct histogram bucket. Buckets array must have
+/// `bounds.len() + 1` elements (bounded slots + one +Inf slot).
+#[inline]
+fn record_histogram(buckets: &[AtomicU64], bounds: &[u64], value: u64) {
+    for (i, &bound) in bounds.iter().enumerate() {
+        if value <= bound {
+            buckets[i].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    buckets[bounds.len()].fetch_add(1, Ordering::Relaxed);
+}
+
 impl Default for Metrics {
     fn default() -> Self {
         Self::new()
@@ -186,6 +234,17 @@ impl Metrics {
             workers_spawned_total: AtomicU64::new(0),
             workers_retired_total: AtomicU64::new(0),
             worker_metrics: std::sync::OnceLock::new(),
+            request_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            request_bytes_total: AtomicU64::new(0),
+            response_bytes_total: AtomicU64::new(0),
+            queue_wait_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            queue_wait_sum_us: AtomicU64::new(0),
+            queue_wait_count: AtomicU64::new(0),
+            rate_limited_total: AtomicU64::new(0),
+            static_cache_hits: AtomicU64::new(0),
+            static_cache_misses: AtomicU64::new(0),
+            compressed_responses_total: AtomicU64::new(0),
+            compression_bytes_saved_total: AtomicU64::new(0),
         }
     }
 
@@ -194,10 +253,27 @@ impl Metrics {
         self.requests_by_method[method_index(method)].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_response(&self, status: u16, duration: Duration) {
+    pub fn record_response(
+        &self,
+        status: u16,
+        duration: Duration,
+        request_body_size: u64,
+        response_size: u64,
+    ) {
         self.responses_by_status_class[status_class_index(status)].fetch_add(1, Ordering::Relaxed);
+        let duration_us = duration.as_micros() as u64;
+        // total_response_time_us doubles as histogram _sum (same value, one atomic)
         self.total_response_time_us
-            .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+            .fetch_add(duration_us, Ordering::Relaxed);
+        record_histogram(
+            &self.request_duration_buckets,
+            &REQUEST_DURATION_BUCKET_BOUNDS,
+            duration_us,
+        );
+        self.request_bytes_total
+            .fetch_add(request_body_size, Ordering::Relaxed);
+        self.response_bytes_total
+            .fetch_add(response_size, Ordering::Relaxed);
     }
 
     pub fn connection_opened(&self) {
@@ -244,6 +320,32 @@ impl Metrics {
 
     pub fn worker_retired(&self) {
         self.workers_retired_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record queue wait time in microseconds.
+    pub fn record_queue_wait(&self, wait_us: u64) {
+        record_histogram(&self.queue_wait_buckets, &QUEUE_WAIT_BUCKET_BOUNDS, wait_us);
+        self.queue_wait_sum_us.fetch_add(wait_us, Ordering::Relaxed);
+        self.queue_wait_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn rate_limited(&self) {
+        self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn static_cache_hit(&self) {
+        self.static_cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn static_cache_miss(&self) {
+        self.static_cache_misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_compression(&self, bytes_saved: u64) {
+        self.compressed_responses_total
+            .fetch_add(1, Ordering::Relaxed);
+        self.compression_bytes_saved_total
+            .fetch_add(bytes_saved, Ordering::Relaxed);
     }
 
     pub fn workers_current(&self) -> usize {
@@ -431,6 +533,146 @@ impl Metrics {
             self.workers_retired_total.load(Ordering::Relaxed)
         );
 
+        // ── Request duration histogram ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_request_duration_us Request duration in microseconds."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_request_duration_us histogram");
+        let mut cumulative = 0u64;
+        for (i, &bound) in REQUEST_DURATION_BUCKET_BOUNDS.iter().enumerate() {
+            cumulative += self.request_duration_buckets[i].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "oxphp_request_duration_us_bucket{{le=\"{bound}\"}} {cumulative}"
+            );
+        }
+        cumulative += self.request_duration_buckets[12].load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "oxphp_request_duration_us_bucket{{le=\"+Inf\"}} {cumulative}"
+        );
+        let _ = writeln!(
+            out,
+            "oxphp_request_duration_us_sum {}",
+            self.total_response_time_us.load(Ordering::Relaxed)
+        );
+        let response_count: u64 = self
+            .responses_by_status_class
+            .iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .sum();
+        let _ = writeln!(out, "oxphp_request_duration_us_count {response_count}");
+
+        // ── Bytes ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_request_bytes_total Total request body bytes received."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_request_bytes_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_request_bytes_total {}",
+            self.request_bytes_total.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_response_bytes_total Total response body bytes sent."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_response_bytes_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_response_bytes_total {}",
+            self.response_bytes_total.load(Ordering::Relaxed)
+        );
+
+        // ── Queue wait histogram ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_queue_wait_us Time waiting in queue before worker pickup."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_queue_wait_us histogram");
+        let mut cumulative = 0u64;
+        for (i, &bound) in QUEUE_WAIT_BUCKET_BOUNDS.iter().enumerate() {
+            cumulative += self.queue_wait_buckets[i].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "oxphp_queue_wait_us_bucket{{le=\"{bound}\"}} {cumulative}"
+            );
+        }
+        cumulative += self.queue_wait_buckets[9].load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "oxphp_queue_wait_us_bucket{{le=\"+Inf\"}} {cumulative}"
+        );
+        let _ = writeln!(
+            out,
+            "oxphp_queue_wait_us_sum {}",
+            self.queue_wait_sum_us.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "oxphp_queue_wait_us_count {}",
+            self.queue_wait_count.load(Ordering::Relaxed)
+        );
+
+        // ── Rate limiting ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_rate_limited_total Requests rejected by rate limiter."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_rate_limited_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_rate_limited_total {}",
+            self.rate_limited_total.load(Ordering::Relaxed)
+        );
+
+        // ── Static file cache ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_static_cache_hits_total Static file cache hits."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_static_cache_hits_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_static_cache_hits_total {}",
+            self.static_cache_hits.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_static_cache_misses_total Static file cache misses."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_static_cache_misses_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_static_cache_misses_total {}",
+            self.static_cache_misses.load(Ordering::Relaxed)
+        );
+
+        // ── Compression ──
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_compressed_responses_total Responses compressed with brotli."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_compressed_responses_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_compressed_responses_total {}",
+            self.compressed_responses_total.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_compression_bytes_saved_total Bytes saved by compression."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_compression_bytes_saved_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_compression_bytes_saved_total {}",
+            self.compression_bytes_saved_total.load(Ordering::Relaxed)
+        );
+
         // ── Worker Mode Metrics ──
         if let Some(wm) = self.worker_metrics.get() {
             let _ = writeln!(
@@ -614,14 +856,16 @@ mod tests {
     #[test]
     fn test_record_response() {
         let m = Metrics::new();
-        m.record_response(200, Duration::from_micros(500));
-        m.record_response(404, Duration::from_micros(100));
-        m.record_response(500, Duration::from_micros(200));
+        m.record_response(200, Duration::from_micros(500), 100, 2000);
+        m.record_response(404, Duration::from_micros(100), 0, 500);
+        m.record_response(500, Duration::from_micros(200), 50, 1000);
 
         assert_eq!(m.responses_by_status_class[1].load(Ordering::Relaxed), 1); // 2xx
         assert_eq!(m.responses_by_status_class[3].load(Ordering::Relaxed), 1); // 4xx
         assert_eq!(m.responses_by_status_class[4].load(Ordering::Relaxed), 1); // 5xx
         assert_eq!(m.total_response_time_us.load(Ordering::Relaxed), 800);
+        assert_eq!(m.request_bytes_total.load(Ordering::Relaxed), 150);
+        assert_eq!(m.response_bytes_total.load(Ordering::Relaxed), 3500);
     }
 
     #[test]
@@ -683,13 +927,19 @@ mod tests {
     fn test_to_prometheus() {
         let m = Metrics::new();
         m.record_request(&Method::GET);
-        m.record_response(200, Duration::from_micros(1000));
+        m.record_response(200, Duration::from_micros(1000), 50, 500);
 
         let output = m.to_prometheus();
         assert!(output.contains("oxphp_requests_total 1"));
         assert!(output.contains("oxphp_requests_by_method_total{method=\"GET\"} 1"));
         assert!(output.contains("oxphp_responses_by_status_total{status=\"2xx\"} 1"));
         assert!(output.contains("oxphp_response_time_us_total 1000"));
+        assert!(output.contains("oxphp_request_bytes_total 50"));
+        assert!(output.contains("oxphp_response_bytes_total 500"));
+        // _count derived from responses_by_status_class (one 200 → count=1)
+        assert!(output.contains("oxphp_request_duration_us_count 1"));
+        // _sum reuses total_response_time_us
+        assert!(output.contains("oxphp_request_duration_us_sum 1000"));
     }
 
     // ── WorkerMetrics tests ──
@@ -799,5 +1049,111 @@ mod tests {
         let output = m.to_prometheus();
         assert!(!output.contains("oxphp_worker_mode_enabled"));
         assert!(!output.contains("oxphp_worker_requests_handled"));
+    }
+
+    // ── New metrics tests ──
+
+    #[test]
+    fn test_request_duration_histogram() {
+        let m = Metrics::new();
+        m.record_response(200, Duration::from_micros(50), 0, 0); // bucket[0] (le=100)
+        m.record_response(200, Duration::from_micros(600), 0, 0); // bucket[2] (le=1000)
+        m.record_response(200, Duration::from_micros(5_000_000), 0, 0); // bucket[12] (+Inf)
+
+        assert_eq!(m.request_duration_buckets[0].load(Ordering::Relaxed), 1); // <=100
+        assert_eq!(m.request_duration_buckets[2].load(Ordering::Relaxed), 1); // <=1000
+        assert_eq!(m.request_duration_buckets[12].load(Ordering::Relaxed), 1); // +Inf
+                                                                               // _count derived from responses_by_status_class sum (all 200 → class[1])
+        assert_eq!(m.responses_by_status_class[1].load(Ordering::Relaxed), 3);
+        // _sum reuses total_response_time_us
+        assert_eq!(
+            m.total_response_time_us.load(Ordering::Relaxed),
+            50 + 600 + 5_000_000
+        );
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_request_duration_us_bucket{le=\"100\"} 1"));
+        assert!(output.contains("oxphp_request_duration_us_bucket{le=\"1000\"} 2")); // cumulative
+        assert!(output.contains("oxphp_request_duration_us_bucket{le=\"+Inf\"} 3"));
+        assert!(output.contains("oxphp_request_duration_us_count 3"));
+    }
+
+    #[test]
+    fn test_bytes_counters() {
+        let m = Metrics::new();
+        m.record_response(200, Duration::from_micros(100), 1024, 4096);
+        m.record_response(200, Duration::from_micros(100), 512, 2048);
+
+        assert_eq!(m.request_bytes_total.load(Ordering::Relaxed), 1536);
+        assert_eq!(m.response_bytes_total.load(Ordering::Relaxed), 6144);
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_request_bytes_total 1536"));
+        assert!(output.contains("oxphp_response_bytes_total 6144"));
+    }
+
+    #[test]
+    fn test_queue_wait_histogram() {
+        let m = Metrics::new();
+        m.record_queue_wait(30); // bucket[0] (le=50)
+        m.record_queue_wait(200); // bucket[2] (le=250)
+        m.record_queue_wait(100_000); // bucket[9] (+Inf)
+
+        assert_eq!(m.queue_wait_buckets[0].load(Ordering::Relaxed), 1);
+        assert_eq!(m.queue_wait_buckets[2].load(Ordering::Relaxed), 1);
+        assert_eq!(m.queue_wait_buckets[9].load(Ordering::Relaxed), 1);
+        assert_eq!(m.queue_wait_count.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            m.queue_wait_sum_us.load(Ordering::Relaxed),
+            30 + 200 + 100_000
+        );
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_queue_wait_us_bucket{le=\"50\"} 1"));
+        assert!(output.contains("oxphp_queue_wait_us_bucket{le=\"+Inf\"} 3"));
+        assert!(output.contains("oxphp_queue_wait_us_count 3"));
+    }
+
+    #[test]
+    fn test_rate_limited_counter() {
+        let m = Metrics::new();
+        m.rate_limited();
+        m.rate_limited();
+
+        assert_eq!(m.rate_limited_total.load(Ordering::Relaxed), 2);
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_rate_limited_total 2"));
+    }
+
+    #[test]
+    fn test_static_cache_counters() {
+        let m = Metrics::new();
+        m.static_cache_hit();
+        m.static_cache_hit();
+        m.static_cache_miss();
+
+        assert_eq!(m.static_cache_hits.load(Ordering::Relaxed), 2);
+        assert_eq!(m.static_cache_misses.load(Ordering::Relaxed), 1);
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_static_cache_hits_total 2"));
+        assert!(output.contains("oxphp_static_cache_misses_total 1"));
+    }
+
+    #[test]
+    fn test_compression_counters() {
+        let m = Metrics::new();
+        m.record_compression(500);
+        m.record_compression(1200);
+
+        assert_eq!(m.compressed_responses_total.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            m.compression_bytes_saved_total.load(Ordering::Relaxed),
+            1700
+        );
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_compressed_responses_total 2"));
+        assert!(output.contains("oxphp_compression_bytes_saved_total 1700"));
     }
 }

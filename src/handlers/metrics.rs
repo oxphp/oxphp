@@ -41,7 +41,12 @@ impl MetricsResponseHandler {
 impl EventHandler<RequestComplete> for MetricsResponseHandler {
     #[inline]
     fn handle(&self, event: &mut RequestComplete) -> Propagation {
-        self.metrics.record_response(event.status, event.duration);
+        self.metrics.record_response(
+            event.status,
+            event.duration,
+            event.request_body_size,
+            event.response_size,
+        );
         Propagation::Continue
     }
 
@@ -95,6 +100,8 @@ mod tests {
             status: 200,
             duration: Duration::from_micros(500),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 100,
+            response_size: 500,
         };
 
         let result = handler.handle(&mut event);

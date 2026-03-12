@@ -62,6 +62,8 @@ When the rate limiter rejects a request, it sets the `early_response` field on t
 
 The handler always returns `Propagation::Continue` so that metrics and access logging handlers still process the request. This means rate-limited requests appear in your access logs and metrics.
 
+Each rejected request increments the `oxphp_rate_limited_total` Prometheus counter.
+
 ## Cleanup
 
 A background Tokio task runs every 60 seconds and removes entries whose window expired more than `2 * RATE_WINDOW_SECONDS` seconds ago. This prevents the `DashMap` from growing indefinitely when clients send a burst of requests and then disappear.
@@ -76,4 +78,5 @@ A background Tokio task runs every 60 seconds and removes entries whose window e
 
 - [Request IDs](request-ids.md) -- rate-limited responses include the `X-Request-ID` header
 - [Access Logging](access-logging.md) -- rate-limited requests appear in access logs
+- [Metrics](/operations/metrics.md) -- the `oxphp_rate_limited_total` counter tracks rejected requests
 - [Error Pages](error-pages.md) -- custom error pages do not apply to 429 responses (rate limiting sets the response body directly)

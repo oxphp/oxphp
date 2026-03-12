@@ -245,6 +245,8 @@ mod tests {
             status: 200,
             duration: std::time::Duration::from_millis(10),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 0,
+            response_size: 0,
         };
         let result = EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert_eq!(result, Propagation::Continue);
@@ -343,6 +345,8 @@ mod tests {
             status: 200,
             duration: std::time::Duration::from_millis(5),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 0,
+            response_size: 0,
         };
         EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert!(called.load(Ordering::SeqCst));

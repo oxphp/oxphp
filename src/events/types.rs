@@ -114,6 +114,10 @@ pub struct RequestComplete {
     pub status: u16,
     pub duration: Duration,
     pub remote_addr: SocketAddr,
+    /// Request body size in bytes (0 for GET/HEAD).
+    pub request_body_size: u64,
+    /// Response body size in bytes.
+    pub response_size: u64,
 }
 
 impl Event for RequestComplete {

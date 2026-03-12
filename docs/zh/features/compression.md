@@ -96,7 +96,19 @@ COMPRESSION_LEVEL=0
 
 `Vary` 头确保 HTTP 缓存为支持 Brotli 和不支持的客户端分别存储不同版本。
 
+## 指标
+
+应用压缩时，两个 Prometheus 计数器会递增：
+
+| 指标 | 说明 |
+|------|------|
+| `oxphp_compressed_responses_total` | 使用 Brotli 压缩的响应总数 |
+| `oxphp_compression_bytes_saved_total` | 压缩节省的总字节数（原始大小 - 压缩后大小） |
+
+这些计数器仅在响应确实被压缩（压缩输出小于原始数据）时递增。如果压缩产生了更大的结果，则发送原始响应，计数器不会更新。
+
 ## 另请参阅
 
 - [静态文件](static-files.md) -- 文件服务和内容缓存
+- [指标](/operations/metrics.md) -- 完整的 Prometheus 指标参考，包括压缩计数器
 - [超时](timeouts.md) -- 请求超时适用于包括压缩在内的完整处理流程

@@ -62,6 +62,8 @@ X-Request-ID: 67890abc00000042
 
 处理器始终返回 `Propagation::Continue`，以便指标和访问日志处理器仍然处理该请求。这意味着被限速的请求会出现在访问日志和指标中。
 
+每个被拒绝的请求都会递增 Prometheus 计数器 `oxphp_rate_limited_total`。
+
 ## 清理
 
 一个后台 Tokio 任务每 60 秒运行一次，移除窗口期在 `2 * RATE_WINDOW_SECONDS` 秒之前已过期的条目。这可以防止 `DashMap` 在客户端发送一波请求后消失时无限增长。
@@ -76,4 +78,5 @@ X-Request-ID: 67890abc00000042
 
 - [请求 ID](request-ids.md) -- 被限速的响应包含 `X-Request-ID` 头
 - [访问日志](access-logging.md) -- 被限速的请求会出现在访问日志中
+- [指标](/operations/metrics.md) -- `oxphp_rate_limited_total` 计数器跟踪被拒绝的请求
 - [自定义错误页面](error-pages.md) -- 自定义错误页面不适用于 429 响应（速率限制直接设置响应体）
