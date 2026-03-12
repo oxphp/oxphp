@@ -17,14 +17,14 @@ oxphp_request_id(): string
 
 **参数：** 无。
 
-**返回值：** 一个 16 字符的十六进制字符串。格式为 `{timestamp_hex}{counter_hex}`，前 8 个字符是 Unix 时间戳，后 8 个是单调递增计数器。如果未设置请求 ID（正常请求处理中不应发生），则返回空字符串。
+**返回值：** 一个 20 字符的十六进制字符串。格式为 `{timestamp:08x}{process:04x}{counter:08x}`，前 8 个字符是 Unix 时间戳，接下来 4 个是进程标识符（PID XOR 启动纳秒），后 8 个是单调递增计数器。如果未设置请求 ID（正常请求处理中不应发生），则返回空字符串。
 
 **示例：**
 
 ```php
 <?php
 $requestId = oxphp_request_id();
-// "67a3b1c400000042"
+// "67a3b1c4a1f200000042"
 
 header("X-Request-Id: $requestId");
 
@@ -35,7 +35,7 @@ error_log("[$requestId] Processing payment for order #1234");
 **注意事项：**
 - 请求 ID 在 PHP 执行开始前由服务器设置。
 - 同一 ID 在 Rust 端也可用于访问日志和响应头。
-- ID 在单个服务器进程生命周期内唯一。
+- 由于进程标识符组件，ID 在不同进程和重启之间保持唯一。
 
 ---
 
@@ -115,7 +115,7 @@ echo "Request processing took {$elapsed}s so far";
 
 ## `oxphp_request_heartbeat`
 
-为未来的看门狗超时延长机制预留的占位函数。当前为空操作。
+从当前时间起将执行截止时间延长指定的秒数。在长时间运行的脚本中使用此函数，以防止协作式看门狗终止请求。
 
 ```php
 oxphp_request_heartbeat(int $time = 10): bool
@@ -125,9 +125,9 @@ oxphp_request_heartbeat(int $time = 10): bool
 
 | 名称 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `$time` | `int` | `10` | 请求的超时延长秒数 |
+| `$time` | `int` | `10` | 从当前时间起延长截止时间的秒数 |
 
-**返回值：** 当前实现始终返回 `true`。
+**返回值：** 成功时返回 `true`。如果 `$time` 为零或负数，或未设置执行截止时间，返回 `false`。
 
 **示例：**
 
@@ -136,13 +136,14 @@ oxphp_request_heartbeat(int $time = 10): bool
 // 长时间运行的数据导入
 foreach ($records as $record) {
     process($record);
-    oxphp_request_heartbeat(30); // 通知脚本仍然存活
+    oxphp_request_heartbeat(30); // 延长截止时间 30 秒
 }
 ```
 
 **注意事项：**
-- 此函数是为前向兼容性而存在的。未来版本中，它将重置请求超时看门狗定时器。
-- 现在调用它是安全的，没有性能开销。
+- 截止时间每 128 次 `ub_write` 调用（即每 128 次输出操作）协作式检查一次。这不是硬实时保证。
+- 初始截止时间在 PHP 执行开始前从 `REQUEST_TIMEOUT_SECONDS` 设置。
+- 如果未配置超时（截止时间为 0），调用此函数无效并返回 `false`。
 
 ---
 
@@ -287,7 +288,7 @@ for ($i = 0; $i < 10; $i++) {
 
 ## `oxphp_worker`
 
-进入持久化工作进程模式循环。对每个传入的 HTTP 请求调用提供的处理器回调。请求之间会进行软重置，清理每请求状态（超全局变量、输出缓冲区、`$_SESSION`），而不销毁 PHP 堆，因此引导状态（自动加载器、数据库连接、缓存配置）在请求间保持不变。
+进入持久化工作进程模式循环。对每个传入的 HTTP 请求调用提供的处理器回调。请求之间会进行软重置，清理每请求状态（超全局变量、输出缓冲区、响应头、错误状态），而不销毁 PHP 堆，因此引导状态（自动加载器、数据库连接、缓存配置）在请求间保持不变。
 
 ```php
 oxphp_worker(callable $handler): bool
@@ -340,7 +341,7 @@ oxphp_worker(function () use ($db, $config) {
 3. 垃圾收集定期运行（每 100 个请求），在不影响每请求延迟的情况下回收循环引用。
 4. 循环在以下情况退出：
    - 服务器关闭（优雅关闭信号）
-   - 处理器抛出未捕获的异常或致命错误（退出原因：`error`）
+   - 处理器连续失败 3 次（退出原因：`consecutive_errors`）— 单独的错误可以容忍，成功时计数器重置
    - 工作进程达到 `WORKER_MAX_REQUESTS`（退出原因：`max_requests`）
    - 工作进程超过 `WORKER_MAX_MEMORY_MIB`（退出原因：`max_memory`）
 

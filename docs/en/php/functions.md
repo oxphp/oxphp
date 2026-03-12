@@ -17,14 +17,14 @@ oxphp_request_id(): string
 
 **Parameters:** None.
 
-**Return value:** A 16-character hexadecimal string. The format is `{timestamp_hex}{counter_hex}`, where the first 8 characters are the Unix timestamp and the last 8 are a monotonic counter. Returns an empty string if no request ID has been set (should not happen during normal request processing).
+**Return value:** A 20-character hexadecimal string. The format is `{timestamp:08x}{process:04x}{counter:08x}`, where the first 8 characters are the Unix timestamp, the next 4 are a per-process identifier (PID XOR startup nanos), and the last 8 are a monotonic counter. Returns an empty string if no request ID has been set (should not happen during normal request processing).
 
 **Example:**
 
 ```php
 <?php
 $requestId = oxphp_request_id();
-// "67a3b1c400000042"
+// "67a3b1c4a1f200000042"
 
 header("X-Request-Id: $requestId");
 
@@ -35,7 +35,7 @@ error_log("[$requestId] Processing payment for order #1234");
 **Notes:**
 - The request ID is set by the server before PHP execution begins.
 - The same ID is available on the Rust side for access logging and response headers.
-- The ID is unique within a single server process lifetime.
+- The ID is unique across processes and restarts thanks to the process identifier component.
 
 ---
 
@@ -115,7 +115,7 @@ echo "Request processing took {$elapsed}s so far";
 
 ## `oxphp_request_heartbeat`
 
-Placeholder for a future watchdog timeout extension mechanism. Currently a no-op.
+Extends the execution deadline by the given number of seconds from now. Use this in long-running scripts to prevent the cooperative watchdog from killing the request.
 
 ```php
 oxphp_request_heartbeat(int $time = 10): bool
@@ -125,9 +125,9 @@ oxphp_request_heartbeat(int $time = 10): bool
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `$time` | `int` | `10` | Requested timeout extension in seconds |
+| `$time` | `int` | `10` | Number of seconds to extend the deadline from now |
 
-**Return value:** Always returns `true` in the current implementation.
+**Return value:** Returns `true` on success. Returns `false` if `$time` is zero or negative, or if no execution deadline is set.
 
 **Example:**
 
@@ -136,13 +136,14 @@ oxphp_request_heartbeat(int $time = 10): bool
 // Long-running data import
 foreach ($records as $record) {
     process($record);
-    oxphp_request_heartbeat(30); // Signal that the script is still alive
+    oxphp_request_heartbeat(30); // Extend deadline by 30 seconds
 }
 ```
 
 **Notes:**
-- This function exists to provide forward compatibility. In a future release, it will reset the request timeout watchdog timer.
-- Calling it today is safe and has no performance cost.
+- The deadline is checked cooperatively every 128 `ub_write` calls (i.e., every 128 output operations). It is not a hard real-time guarantee.
+- The initial deadline is set from `REQUEST_TIMEOUT_SECONDS` before PHP execution begins.
+- If no timeout is configured (deadline is 0), calling this function has no effect and returns `false`.
 
 ---
 
@@ -287,7 +288,7 @@ for ($i = 0; $i < 10; $i++) {
 
 ## `oxphp_worker`
 
-Enters the persistent worker mode loop. Calls the provided handler callback for each incoming HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers, `$_SESSION`) without destroying the PHP heap, so bootstrap state (autoloaders, database connections, cached config) persists across requests.
+Enters the persistent worker mode loop. Calls the provided handler callback for each incoming HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers, response headers, error state) without destroying the PHP heap, so bootstrap state (autoloaders, database connections, cached config) persists across requests.
 
 ```php
 oxphp_worker(callable $handler): bool
@@ -340,7 +341,7 @@ oxphp_worker(function () use ($db, $config) {
 3. Garbage collection runs periodically (every 100 requests) to reclaim cyclic references without impacting per-request latency.
 4. The loop exits when:
    - The server shuts down (graceful shutdown signal)
-   - The handler throws an uncaught exception or fatal error (exit reason: `error`)
+   - The handler fails 3 times in a row (exit reason: `consecutive_errors`) — isolated errors are tolerated and the counter resets on success
    - The worker hits `WORKER_MAX_REQUESTS` (exit reason: `max_requests`)
    - The worker exceeds `WORKER_MAX_MEMORY_MIB` (exit reason: `max_memory`)
 
