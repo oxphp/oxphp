@@ -148,6 +148,12 @@ impl FileCache {
         matches!(self.check(path).await.0, Some(FileType::Dir))
     }
 
+    /// Read-only check whether content is in the cache. No LRU update, no write lock, no I/O.
+    pub fn content_cached(&self, key: &str) -> bool {
+        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        guard.content.contains_key(key)
+    }
+
     /// Check if cached content matches the request's conditional headers (304 fast path).
     /// Returns `Some(true)` if cached and not modified, `Some(false)` if cached but modified,
     /// `None` on cache miss. Uses read lock — no cloning.

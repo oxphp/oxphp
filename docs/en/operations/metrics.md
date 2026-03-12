@@ -35,12 +35,21 @@ curl http://localhost:9090/metrics
 | `oxphp_requests_by_method_total` | counter | `method` | Requests broken down by HTTP method |
 | `oxphp_responses_by_status_total` | counter | `status` | Responses broken down by status class |
 | `oxphp_response_time_us_total` | counter | --- | Cumulative response time in microseconds |
+| `oxphp_request_duration_us` | histogram | --- | Request duration in microseconds (all requests) |
+| `oxphp_request_bytes_total` | counter | --- | Total request body bytes received |
+| `oxphp_response_bytes_total` | counter | --- | Total response body bytes sent |
 
 **Method labels:** `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`, `CONNECT`, `OTHER`.
 
 **Status labels:** `1xx`, `2xx`, `3xx`, `4xx`, `5xx`.
 
 Only methods and status classes with at least one recorded event are emitted. Zero-count labels are omitted to keep the output compact.
+
+#### Request Duration Histogram
+
+Bucket boundaries (microseconds): 100, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000, +Inf.
+
+This histogram covers all requests (static files and PHP), unlike `oxphp_worker_request_duration_us` which only measures PHP handler execution time. The `_sum` reuses `oxphp_response_time_us_total` (same value, one atomic) and `_count` is derived from the sum of all `oxphp_responses_by_status_total` counters.
 
 ### Connections
 
@@ -55,6 +64,13 @@ Only methods and status classes with at least one recorded event are emitted. Ze
 | `oxphp_pending_requests` | gauge | Requests currently waiting in the PHP worker queue |
 | `oxphp_dropped_requests_total` | counter | Requests rejected with 503 because the queue was full |
 | `oxphp_busy_workers` | gauge | Worker threads currently processing a request |
+| `oxphp_queue_wait_us` | histogram | Time waiting in queue before worker pickup (microseconds) |
+
+#### Queue Wait Histogram
+
+Bucket boundaries (microseconds): 50, 100, 250, 500, 1000, 2500, 5000, 10000, 50000, +Inf.
+
+Measures the time between submitting a request to the worker queue and a worker picking it up. Helps identify queue pressure and worker starvation.
 
 ### PHP Worker Pool
 
@@ -66,6 +82,32 @@ Only methods and status classes with at least one recorded event are emitted. Ze
 | `oxphp_workers_idle` | gauge | Worker threads not currently processing a request (dynamic mode only, 0 in static mode) |
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired by the ScaleManager (dynamic mode only) |
+
+### Rate Limiting
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_rate_limited_total` | counter | Requests rejected by the rate limiter (429) |
+
+This counter increments each time a request is rejected with a 429 response. Only emitted when rate limiting is enabled (`RATE_LIMIT` > 0).
+
+### Static File Cache
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_static_cache_hits_total` | counter | Static file requests served from the content cache |
+| `oxphp_static_cache_misses_total` | counter | Static file requests that required disk I/O |
+
+Cache hit ratio can be computed as `hits / (hits + misses)`. A low hit ratio may indicate the content cache budget (64 MB) is too small for the working set.
+
+### Compression
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_compressed_responses_total` | counter | Responses compressed with Brotli |
+| `oxphp_compression_bytes_saved_total` | counter | Total bytes saved by compression (original - compressed) |
+
+These counters only increment when compression is enabled (`COMPRESSION_LEVEL` > 0) and a response is actually compressed (the compressed output is smaller than the original).
 
 ### Worker Mode
 
@@ -139,6 +181,32 @@ oxphp_dropped_requests_total 0
 # TYPE oxphp_response_time_us_total counter
 oxphp_response_time_us_total 192000000
 
+# HELP oxphp_request_duration_us Request duration in microseconds.
+# TYPE oxphp_request_duration_us histogram
+oxphp_request_duration_us_bucket{le="100"} 5200
+oxphp_request_duration_us_bucket{le="500"} 18400
+oxphp_request_duration_us_bucket{le="1000"} 31000
+oxphp_request_duration_us_bucket{le="2500"} 40200
+oxphp_request_duration_us_bucket{le="5000"} 44800
+oxphp_request_duration_us_bucket{le="10000"} 46900
+oxphp_request_duration_us_bucket{le="25000"} 47600
+oxphp_request_duration_us_bucket{le="50000"} 47900
+oxphp_request_duration_us_bucket{le="100000"} 48100
+oxphp_request_duration_us_bucket{le="250000"} 48180
+oxphp_request_duration_us_bucket{le="500000"} 48200
+oxphp_request_duration_us_bucket{le="1000000"} 48203
+oxphp_request_duration_us_bucket{le="+Inf"} 48203
+oxphp_request_duration_us_sum 192000000
+oxphp_request_duration_us_count 48203
+
+# HELP oxphp_request_bytes_total Total request body bytes received.
+# TYPE oxphp_request_bytes_total counter
+oxphp_request_bytes_total 15360000
+
+# HELP oxphp_response_bytes_total Total response body bytes sent.
+# TYPE oxphp_response_bytes_total counter
+oxphp_response_bytes_total 482030000
+
 # HELP oxphp_busy_workers Currently busy worker threads.
 # TYPE oxphp_busy_workers gauge
 oxphp_busy_workers 2
@@ -166,6 +234,41 @@ oxphp_workers_spawned_total 12
 # HELP oxphp_workers_retired_total Total workers retired.
 # TYPE oxphp_workers_retired_total counter
 oxphp_workers_retired_total 4
+
+# HELP oxphp_queue_wait_us Time waiting in queue before worker pickup.
+# TYPE oxphp_queue_wait_us histogram
+oxphp_queue_wait_us_bucket{le="50"} 20100
+oxphp_queue_wait_us_bucket{le="100"} 35400
+oxphp_queue_wait_us_bucket{le="250"} 42000
+oxphp_queue_wait_us_bucket{le="500"} 45600
+oxphp_queue_wait_us_bucket{le="1000"} 47200
+oxphp_queue_wait_us_bucket{le="2500"} 47900
+oxphp_queue_wait_us_bucket{le="5000"} 48100
+oxphp_queue_wait_us_bucket{le="10000"} 48180
+oxphp_queue_wait_us_bucket{le="50000"} 48203
+oxphp_queue_wait_us_bucket{le="+Inf"} 48203
+oxphp_queue_wait_us_sum 4820300
+oxphp_queue_wait_us_count 48203
+
+# HELP oxphp_rate_limited_total Requests rejected by rate limiter.
+# TYPE oxphp_rate_limited_total counter
+oxphp_rate_limited_total 23
+
+# HELP oxphp_static_cache_hits_total Static file cache hits.
+# TYPE oxphp_static_cache_hits_total counter
+oxphp_static_cache_hits_total 12400
+
+# HELP oxphp_static_cache_misses_total Static file cache misses.
+# TYPE oxphp_static_cache_misses_total counter
+oxphp_static_cache_misses_total 350
+
+# HELP oxphp_compressed_responses_total Responses compressed with brotli.
+# TYPE oxphp_compressed_responses_total counter
+oxphp_compressed_responses_total 38500
+
+# HELP oxphp_compression_bytes_saved_total Bytes saved by compression.
+# TYPE oxphp_compression_bytes_saved_total counter
+oxphp_compression_bytes_saved_total 96250000
 
 # HELP oxphp_worker_mode_enabled Whether worker mode is active.
 # TYPE oxphp_worker_mode_enabled gauge
@@ -286,6 +389,45 @@ rate(oxphp_dropped_requests_total[5m])
 rate(oxphp_workers_spawned_total[5m]) * 60
 ```
 
+**Request p99 latency (microseconds):**
+
+```promql
+histogram_quantile(0.99, rate(oxphp_request_duration_us_bucket[5m]))
+```
+
+**Request throughput (bytes per second, in/out):**
+
+```promql
+rate(oxphp_request_bytes_total[5m])
+rate(oxphp_response_bytes_total[5m])
+```
+
+**Queue wait p95 (microseconds):**
+
+```promql
+histogram_quantile(0.95, rate(oxphp_queue_wait_us_bucket[5m]))
+```
+
+**Rate-limited requests per second:**
+
+```promql
+rate(oxphp_rate_limited_total[5m])
+```
+
+**Static file cache hit ratio:**
+
+```promql
+rate(oxphp_static_cache_hits_total[5m])
+/ (rate(oxphp_static_cache_hits_total[5m]) + rate(oxphp_static_cache_misses_total[5m]))
+```
+
+**Compression savings ratio:**
+
+```promql
+rate(oxphp_compression_bytes_saved_total[5m])
+/ rate(oxphp_response_bytes_total[5m])
+```
+
 **Worker mode request rate:**
 
 ```promql
@@ -366,6 +508,47 @@ groups:
           severity: warning
         annotations:
           summary: "OxPHP worker p99 latency exceeds 50ms"
+
+      - alert: OxPHPHighRequestLatency
+        expr: >
+          histogram_quantile(0.99,
+            rate(oxphp_request_duration_us_bucket[5m])
+          ) > 500000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP request p99 latency exceeds 500ms"
+
+      - alert: OxPHPHighQueueWait
+        expr: >
+          histogram_quantile(0.95,
+            rate(oxphp_queue_wait_us_bucket[5m])
+          ) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP queue wait p95 exceeds 10ms — consider adding workers"
+
+      - alert: OxPHPRateLimiting
+        expr: rate(oxphp_rate_limited_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "OxPHP is actively rate-limiting requests"
+
+      - alert: OxPHPLowCacheHitRate
+        expr: >
+          rate(oxphp_static_cache_hits_total[5m])
+          / (rate(oxphp_static_cache_hits_total[5m])
+             + rate(oxphp_static_cache_misses_total[5m])) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP static file cache hit rate below 50%"
 
 ```
 

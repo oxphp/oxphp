@@ -53,6 +53,8 @@ mod tests {
             status,
             duration: Duration::from_micros(500),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 0,
+            response_size: 0,
         }
     }
 

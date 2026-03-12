@@ -140,6 +140,17 @@ ETag 使用弱格式 `W/"<size>-<mtime_hex>"`，其中：
 | `ETag` | `W/"<size>-<mtime_hex>"` *（启用缓存时）* |
 | `Last-Modified` | RFC 7231 HTTP 日期 *（启用缓存时）* |
 
+## 缓存指标
+
+文件缓存提供两个 Prometheus 计数器用于监控缓存效率：
+
+| 指标 | 说明 |
+|------|------|
+| `oxphp_static_cache_hits_total` | 从内容缓存提供的请求数（无磁盘 I/O） |
+| `oxphp_static_cache_misses_total` | 需要从磁盘读取的请求数 |
+
+缓存命中率可计算为 `hits / (hits + misses)`。低命中率可能表明内容缓存预算（64 MB）对于工作集来说太小，或者大多数请求的文件超过了 1 MB 的单文件缓存限制。
+
 ## 错误处理
 
 - **文件未找到**：返回 404，带纯文本响应体
@@ -150,4 +161,5 @@ ETag 使用弱格式 `W/"<size>-<mtime_hex>"`，其中：
 
 - [路由](routing.md) -- URL 路径如何解析到磁盘文件
 - [压缩](compression.md) -- 可压缩静态文件响应的 Brotli 压缩；`Vary: Accept-Encoding` 由压缩层添加，而非静态文件服务
+- [指标](/operations/metrics.md) -- `oxphp_static_cache_hits_total` 和 `oxphp_static_cache_misses_total` 计数器
 - [自定义错误页面](error-pages.md) -- 错误响应的自定义 HTML 页面

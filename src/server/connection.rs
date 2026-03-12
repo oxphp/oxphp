@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
+use hyper::body::Body as _;
 use hyper::body::Incoming;
 
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
@@ -84,6 +85,7 @@ pub async fn handle_request(
     // Check for early response (e.g., 429 from rate limiter)
     if let Some(early_resp) = received_event.early_response {
         let status = early_resp.status().as_u16();
+        let response_size = early_resp.body().size_hint().exact().unwrap_or(0);
         let elapsed = start.elapsed();
 
         // Dispatch RequestComplete for the early response
@@ -94,6 +96,8 @@ pub async fn handle_request(
             status,
             duration: elapsed,
             remote_addr,
+            request_body_size: 0,
+            response_size,
         };
         server.dispatcher.dispatch(&mut complete_event);
 
@@ -122,24 +126,30 @@ pub async fn handle_request(
                     timeout_secs = server.request_timeout.as_secs(),
                     "Request timeout"
                 );
-                Ok(Response::builder()
-                    .status(StatusCode::GATEWAY_TIMEOUT)
-                    .body(full_body(Bytes::from_static(b"504 Gateway Timeout")))
-                    .unwrap())
+                Ok((
+                    Response::builder()
+                        .status(StatusCode::GATEWAY_TIMEOUT)
+                        .body(full_body(Bytes::from_static(b"504 Gateway Timeout")))
+                        .unwrap(),
+                    0usize,
+                ))
             }
         }
     } else {
         dispatch_request(parts, body, server, remote_addr, &request_id).await
     };
 
-    let response = match result {
-        Ok(resp) => resp,
+    let (response, request_body_size) = match result {
+        Ok((resp, body_size)) => (resp, body_size),
         Err(e) => {
             tracing::error!(error = %e, path = %path_str, request_id = %request_id, "Internal server error");
-            Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(full_body(Bytes::from_static(b"500 Internal Server Error")))
-                .unwrap()
+            (
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(full_body(Bytes::from_static(b"500 Internal Server Error")))
+                    .unwrap(),
+                0,
+            )
         }
     };
 
@@ -155,7 +165,13 @@ pub async fn handle_request(
 
     // ── Brotli compression (after error pages, before metrics/logging) ──
     let response = if supports_brotli {
-        compression::maybe_compress(response, server.compression_level).await
+        let pre_size = response.body().size_hint().exact().unwrap_or(0);
+        let compressed = compression::maybe_compress(response, server.compression_level).await;
+        let post_size = compressed.body().size_hint().exact().unwrap_or(0);
+        if post_size < pre_size {
+            server.metrics.record_compression(pre_size - post_size);
+        }
+        compressed
     } else {
         response
     };
@@ -163,6 +179,7 @@ pub async fn handle_request(
     // ── RequestComplete event ──
     // Handlers: MetricsResponseHandler (0), AccessLogHandler (100)
     let status = response.status().as_u16();
+    let response_size = response.body().size_hint().exact().unwrap_or(0);
     let elapsed = start.elapsed();
     let mut complete_event = RequestComplete {
         request_id, // move — no clone
@@ -171,46 +188,66 @@ pub async fn handle_request(
         status,
         duration: elapsed,
         remote_addr,
+        request_body_size: request_body_size as u64,
+        response_size,
     };
     server.dispatcher.dispatch(&mut complete_event);
 
     Ok(response)
 }
 
+/// Returns (response, request_body_size).
 async fn dispatch_request(
     parts: http::request::Parts,
     body: Incoming,
     server: &Server,
     remote_addr: SocketAddr,
     request_id: &str,
-) -> Result<Response<ResponseBody>, crate::types::BoxError> {
+) -> Result<(Response<ResponseBody>, usize), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
         .route_config
         .resolve_request(uri_path, &server.file_cache)
         .await;
 
+    let mut request_body_size = 0usize;
+
     let response = match route_result {
         RouteResult::Serve(file_path) => {
-            static_file::serve(
+            // Read-only cache check: read lock, no LRU update, no stat() syscall
+            let cache_key = file_path.to_string_lossy();
+            let was_cached = server.file_cache.content_cached(&cache_key);
+
+            let response = static_file::serve(
                 &file_path,
                 &server.file_cache,
                 server.route_config.canonical_root(),
                 &parts.headers,
                 server.static_cache_control.as_deref(),
             )
-            .await?
+            .await?;
+
+            if was_cached {
+                server.metrics.static_cache_hit();
+            } else {
+                server.metrics.static_cache_miss();
+            }
+
+            response
         }
         RouteResult::Execute(script_path) => {
             let is_query = is_query_method(&parts.method);
 
             // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2
             if is_query && !parts.headers.contains_key(http::header::CONTENT_TYPE) {
-                return Ok(Response::builder()
-                    .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
-                    .body(full_body(Bytes::from_static(
-                        b"415 Unsupported Media Type: QUERY requires Content-Type",
-                    )))?);
+                return Ok((
+                    Response::builder()
+                        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                        .body(full_body(Bytes::from_static(
+                            b"415 Unsupported Media Type: QUERY requires Content-Type",
+                        )))?,
+                    0,
+                ));
             }
 
             // Collect body for methods that carry a payload.
@@ -229,9 +266,12 @@ async fn dispatch_request(
                 // Early rejection via Content-Length header — zero I/O, no body read
                 if let Some(cl) = parts.headers.get(http::header::CONTENT_LENGTH) {
                     if parse_content_length(cl.as_bytes()).is_some_and(|len| len > limit) {
-                        return Ok(Response::builder()
-                            .status(StatusCode::PAYLOAD_TOO_LARGE)
-                            .body(full_body(Bytes::from_static(b"413 Payload Too Large")))?);
+                        return Ok((
+                            Response::builder()
+                                .status(StatusCode::PAYLOAD_TOO_LARGE)
+                                .body(full_body(Bytes::from_static(b"413 Payload Too Large")))?,
+                            0,
+                        ));
                     }
                 }
 
@@ -243,11 +283,14 @@ async fn dispatch_request(
                         if e.downcast_ref::<http_body_util::LengthLimitError>()
                             .is_some()
                         {
-                            return Ok(Response::builder()
-                                .status(StatusCode::PAYLOAD_TOO_LARGE)
-                                .body(full_body(Bytes::from_static(
-                                b"413 Payload Too Large",
-                            )))?);
+                            return Ok((
+                                Response::builder()
+                                    .status(StatusCode::PAYLOAD_TOO_LARGE)
+                                    .body(full_body(Bytes::from_static(
+                                        b"413 Payload Too Large",
+                                    )))?,
+                                0,
+                            ));
                         }
                         return Err(e);
                     }
@@ -256,6 +299,7 @@ async fn dispatch_request(
                 Bytes::new()
             };
 
+            request_body_size = body_bytes.len();
             let query_string = parts.uri.query().unwrap_or("").to_string();
 
             let script_request = ScriptRequest {
@@ -271,25 +315,35 @@ async fn dispatch_request(
                 timeout_us: server.request_timeout.as_micros() as u64,
             };
 
+            let queue_start = Instant::now();
             server.metrics.request_queued();
             let execute_result = server.executor.execute(script_request);
 
             let script_response = match execute_result {
                 ExecuteResult::Immediate(resp) => {
                     server.metrics.request_dequeued();
+                    server
+                        .metrics
+                        .record_queue_wait(queue_start.elapsed().as_micros() as u64);
                     resp
                 }
                 ExecuteResult::Deferred(rx) => match rx.await {
                     Ok(resp) => {
                         server.metrics.request_dequeued();
+                        server
+                            .metrics
+                            .record_queue_wait(queue_start.elapsed().as_micros() as u64);
                         resp
                     }
                     Err(_) => {
                         server.metrics.request_dropped();
-                        return Ok(Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
-                            .unwrap());
+                        return Ok((
+                            Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
+                                .unwrap(),
+                            request_body_size,
+                        ));
                     }
                 },
             };
@@ -310,7 +364,7 @@ async fn dispatch_request(
             .body(full_body(Bytes::from_static(b"404 Not Found")))?,
     };
 
-    Ok(response)
+    Ok((response, request_body_size))
 }
 
 #[cfg(test)]

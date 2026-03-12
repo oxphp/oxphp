@@ -35,12 +35,21 @@ curl http://localhost:9090/metrics
 | `oxphp_requests_by_method_total` | counter | `method` | 按 HTTP 方法分类的请求数 |
 | `oxphp_responses_by_status_total` | counter | `status` | 按状态码分类的响应数 |
 | `oxphp_response_time_us_total` | counter | --- | 累计响应时间（微秒） |
+| `oxphp_request_duration_us` | histogram | --- | 请求耗时（微秒，所有请求） |
+| `oxphp_request_bytes_total` | counter | --- | 接收的请求体总字节数 |
+| `oxphp_response_bytes_total` | counter | --- | 发送的响应体总字节数 |
 
 **方法标签：** `GET`、`POST`、`PUT`、`DELETE`、`PATCH`、`HEAD`、`OPTIONS`、`CONNECT`、`OTHER`。
 
 **状态标签：** `1xx`、`2xx`、`3xx`、`4xx`、`5xx`。
 
 只有至少有一个记录事件的方法和状态分类才会输出。零计数标签被省略以保持输出紧凑。
+
+#### 请求耗时直方图
+
+桶边界（微秒）：100、500、1000、2500、5000、10000、25000、50000、100000、250000、500000、1000000、+Inf。
+
+此直方图覆盖所有请求（静态文件和 PHP），与仅测量 PHP 处理器执行时间的 `oxphp_worker_request_duration_us` 不同。`_sum` 复用 `oxphp_response_time_us_total`（相同的值，一个原子变量），`_count` 由所有 `oxphp_responses_by_status_total` 计数器之和得出。
 
 ### 连接
 
@@ -55,6 +64,13 @@ curl http://localhost:9090/metrics
 | `oxphp_pending_requests` | gauge | 当前在 PHP 工作队列中等待的请求数 |
 | `oxphp_dropped_requests_total` | counter | 因队列满而被 503 拒绝的请求数 |
 | `oxphp_busy_workers` | gauge | 当前正在处理请求的工作线程数 |
+| `oxphp_queue_wait_us` | histogram | 在队列中等待工作线程拾取的时间（微秒） |
+
+#### 队列等待直方图
+
+桶边界（微秒）：50、100、250、500、1000、2500、5000、10000、50000、+Inf。
+
+测量请求提交到工作队列与工作线程拾取之间的时间。有助于识别队列压力和工作线程不足。
 
 ### PHP 工作池
 
@@ -66,6 +82,32 @@ curl http://localhost:9090/metrics
 | `oxphp_workers_idle` | gauge | 当前未处理请求的工作线程数（仅动态模式，静态模式为 0） |
 | `oxphp_workers_spawned_total` | counter | 自启动以来创建的工作线程总数（包括初始工作线程） |
 | `oxphp_workers_retired_total` | counter | 被 ScaleManager 回收的工作线程总数（仅动态模式） |
+
+### 速率限制
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_rate_limited_total` | counter | 被速率限制器拒绝的请求数（429） |
+
+每当请求被 429 响应拒绝时，此计数器递增。仅在启用速率限制（`RATE_LIMIT` > 0）时输出。
+
+### 静态文件缓存
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_static_cache_hits_total` | counter | 从内容缓存提供的静态文件请求数 |
+| `oxphp_static_cache_misses_total` | counter | 需要磁盘 I/O 的静态文件请求数 |
+
+缓存命中率可计算为 `hits / (hits + misses)`。低命中率可能表明内容缓存预算（64 MB）对于工作集来说太小。
+
+### 压缩
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_compressed_responses_total` | counter | 使用 Brotli 压缩的响应数 |
+| `oxphp_compression_bytes_saved_total` | counter | 压缩节省的总字节数（原始大小 - 压缩后大小） |
+
+这些计数器仅在启用压缩（`COMPRESSION_LEVEL` > 0）且响应确实被压缩（压缩输出小于原始数据）时递增。
 
 ### 工作进程模式
 
@@ -139,6 +181,32 @@ oxphp_dropped_requests_total 0
 # TYPE oxphp_response_time_us_total counter
 oxphp_response_time_us_total 192000000
 
+# HELP oxphp_request_duration_us Request duration in microseconds.
+# TYPE oxphp_request_duration_us histogram
+oxphp_request_duration_us_bucket{le="100"} 5200
+oxphp_request_duration_us_bucket{le="500"} 18400
+oxphp_request_duration_us_bucket{le="1000"} 31000
+oxphp_request_duration_us_bucket{le="2500"} 40200
+oxphp_request_duration_us_bucket{le="5000"} 44800
+oxphp_request_duration_us_bucket{le="10000"} 46900
+oxphp_request_duration_us_bucket{le="25000"} 47600
+oxphp_request_duration_us_bucket{le="50000"} 47900
+oxphp_request_duration_us_bucket{le="100000"} 48100
+oxphp_request_duration_us_bucket{le="250000"} 48180
+oxphp_request_duration_us_bucket{le="500000"} 48200
+oxphp_request_duration_us_bucket{le="1000000"} 48203
+oxphp_request_duration_us_bucket{le="+Inf"} 48203
+oxphp_request_duration_us_sum 192000000
+oxphp_request_duration_us_count 48203
+
+# HELP oxphp_request_bytes_total Total request body bytes received.
+# TYPE oxphp_request_bytes_total counter
+oxphp_request_bytes_total 15360000
+
+# HELP oxphp_response_bytes_total Total response body bytes sent.
+# TYPE oxphp_response_bytes_total counter
+oxphp_response_bytes_total 482030000
+
 # HELP oxphp_busy_workers Currently busy worker threads.
 # TYPE oxphp_busy_workers gauge
 oxphp_busy_workers 2
@@ -166,6 +234,41 @@ oxphp_workers_spawned_total 12
 # HELP oxphp_workers_retired_total Total workers retired.
 # TYPE oxphp_workers_retired_total counter
 oxphp_workers_retired_total 4
+
+# HELP oxphp_queue_wait_us Time waiting in queue before worker pickup.
+# TYPE oxphp_queue_wait_us histogram
+oxphp_queue_wait_us_bucket{le="50"} 20100
+oxphp_queue_wait_us_bucket{le="100"} 35400
+oxphp_queue_wait_us_bucket{le="250"} 42000
+oxphp_queue_wait_us_bucket{le="500"} 45600
+oxphp_queue_wait_us_bucket{le="1000"} 47200
+oxphp_queue_wait_us_bucket{le="2500"} 47900
+oxphp_queue_wait_us_bucket{le="5000"} 48100
+oxphp_queue_wait_us_bucket{le="10000"} 48180
+oxphp_queue_wait_us_bucket{le="50000"} 48203
+oxphp_queue_wait_us_bucket{le="+Inf"} 48203
+oxphp_queue_wait_us_sum 4820300
+oxphp_queue_wait_us_count 48203
+
+# HELP oxphp_rate_limited_total Requests rejected by rate limiter.
+# TYPE oxphp_rate_limited_total counter
+oxphp_rate_limited_total 23
+
+# HELP oxphp_static_cache_hits_total Static file cache hits.
+# TYPE oxphp_static_cache_hits_total counter
+oxphp_static_cache_hits_total 12400
+
+# HELP oxphp_static_cache_misses_total Static file cache misses.
+# TYPE oxphp_static_cache_misses_total counter
+oxphp_static_cache_misses_total 350
+
+# HELP oxphp_compressed_responses_total Responses compressed with brotli.
+# TYPE oxphp_compressed_responses_total counter
+oxphp_compressed_responses_total 38500
+
+# HELP oxphp_compression_bytes_saved_total Bytes saved by compression.
+# TYPE oxphp_compression_bytes_saved_total counter
+oxphp_compression_bytes_saved_total 96250000
 
 # HELP oxphp_worker_mode_enabled Whether worker mode is active.
 # TYPE oxphp_worker_mode_enabled gauge
@@ -286,6 +389,45 @@ rate(oxphp_dropped_requests_total[5m])
 rate(oxphp_workers_spawned_total[5m]) * 60
 ```
 
+**请求 p99 延迟（微秒）：**
+
+```promql
+histogram_quantile(0.99, rate(oxphp_request_duration_us_bucket[5m]))
+```
+
+**请求吞吐量（字节/秒，入/出）：**
+
+```promql
+rate(oxphp_request_bytes_total[5m])
+rate(oxphp_response_bytes_total[5m])
+```
+
+**队列等待 p95（微秒）：**
+
+```promql
+histogram_quantile(0.95, rate(oxphp_queue_wait_us_bucket[5m]))
+```
+
+**每秒被限速的请求数：**
+
+```promql
+rate(oxphp_rate_limited_total[5m])
+```
+
+**静态文件缓存命中率：**
+
+```promql
+rate(oxphp_static_cache_hits_total[5m])
+/ (rate(oxphp_static_cache_hits_total[5m]) + rate(oxphp_static_cache_misses_total[5m]))
+```
+
+**压缩节省比率：**
+
+```promql
+rate(oxphp_compression_bytes_saved_total[5m])
+/ rate(oxphp_response_bytes_total[5m])
+```
+
 **工作进程模式请求速率：**
 
 ```promql
@@ -366,6 +508,47 @@ groups:
           severity: warning
         annotations:
           summary: "OxPHP worker p99 latency exceeds 50ms"
+
+      - alert: OxPHPHighRequestLatency
+        expr: >
+          histogram_quantile(0.99,
+            rate(oxphp_request_duration_us_bucket[5m])
+          ) > 500000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP request p99 latency exceeds 500ms"
+
+      - alert: OxPHPHighQueueWait
+        expr: >
+          histogram_quantile(0.95,
+            rate(oxphp_queue_wait_us_bucket[5m])
+          ) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP queue wait p95 exceeds 10ms — consider adding workers"
+
+      - alert: OxPHPRateLimiting
+        expr: rate(oxphp_rate_limited_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "OxPHP is actively rate-limiting requests"
+
+      - alert: OxPHPLowCacheHitRate
+        expr: >
+          rate(oxphp_static_cache_hits_total[5m])
+          / (rate(oxphp_static_cache_hits_total[5m])
+             + rate(oxphp_static_cache_misses_total[5m])) < 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP static file cache hit rate below 50%"
 
 ```
 

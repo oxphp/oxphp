@@ -96,7 +96,19 @@ When compression is applied, the following headers are set:
 
 The `Vary` header ensures that HTTP caches store separate versions for clients that support Brotli and those that do not.
 
+## Metrics
+
+When compression is applied, two Prometheus counters are incremented:
+
+| Metric | Description |
+|--------|-------------|
+| `oxphp_compressed_responses_total` | Total responses compressed with Brotli |
+| `oxphp_compression_bytes_saved_total` | Total bytes saved (original size - compressed size) |
+
+These counters only increment when a response is actually compressed (the compressed output is smaller than the original). If compression produces a larger result, the original response is sent uncompressed and the counters are not updated.
+
 ## See Also
 
 - [Static Files](static-files.md) -- file serving and content caching
+- [Metrics](/operations/metrics.md) -- full Prometheus metrics reference including compression counters
 - [Timeouts](timeouts.md) -- request timeout applies to the full pipeline including compression
