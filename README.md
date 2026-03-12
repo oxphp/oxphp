@@ -59,21 +59,13 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
 | Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Worker recycling (req / mem) | ❌ | ❌ | ✅ | ✅ |
-| Worker health + auto-respawn | ❌ | ❌ | ✅ | ✅ |
-| Early response (`finish_request`) | ❌ | ✅ | ✅ | ✅ |
 | Backpressure / 503 | manual | ❌ | ❌ | ✅ built-in |
-| Prometheus metrics | plugin | plugin | ✅ | ✅ built-in |
-| Panic isolation | ❌ | ❌ | partial | ✅ `catch_unwind` |
+| Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
 | Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
-| SSE streaming | ❌ | ✅ | ❌ | ✅ |
 | Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
 | HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
-| JSON structured logging | ⚙️ manual `log_format` | ✅ (with flag) | ✅ configurable | ✅ built-in default |
-| Graceful shutdown | ✅ | ✅ | ✅ | ✅ |
 | Memory safety | ❌ | partial | partial | ✅ Rust |
-| Single binary deploy | ❌ | ❌ | ❌ | ✅ |
 
 ---
 
