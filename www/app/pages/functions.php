@@ -145,6 +145,74 @@ oxphp_worker(function () use ($db) {
     }
 });',
     ],
+    [
+        'name'    => 'oxphp_async',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_async(Closure $closure, mixed ...$args): int|false',
+        'params'  => [
+            ['name' => '$closure', 'type' => 'Closure', 'desc' => 'The closure to execute asynchronously on a dedicated worker thread.'],
+            ['name' => '...$args', 'type' => 'mixed', 'desc' => 'Arguments passed to the closure via deep copy (serialized across threads).'],
+        ],
+        'return'  => 'int|false — Promise ID on success, <code>false</code> if async pool is disabled or queue is full.',
+        'desc'    => 'Dispatches a closure for asynchronous execution on the dedicated async worker pool (separate from HTTP workers). Variables captured via <code>use</code> are serialized to the async thread. Supported types: null, bool, int, float, string, array. Objects and resources are rejected.',
+        'example' => '$p = oxphp_async(function(int $x, int $y): int {
+    return $x + $y;
+}, 10, 20);
+
+$result = oxphp_async_await($p); // 30',
+    ],
+    [
+        'name'    => 'oxphp_async_await',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_async_await(int $promise_id, ?float $timeout = null): mixed',
+        'params'  => [
+            ['name' => '$promise_id', 'type' => 'int', 'desc' => 'Promise ID returned by <code>oxphp_async()</code>.'],
+            ['name' => '$timeout', 'type' => '?float', 'default' => 'null', 'desc' => 'Timeout in seconds. <code>null</code> waits indefinitely.'],
+        ],
+        'return'  => 'mixed — The return value of the closure.',
+        'desc'    => 'Blocks the current thread until the async task completes and returns its result. The return value is deserialized from the async worker thread. Each promise can only be awaited once. Throws <code>OxPHP\AsyncException</code> on failure or <code>OxPHP\AsyncTimeoutException</code> on timeout.',
+        'example' => '$p = oxphp_async(fn(): string => "hello");
+$result = oxphp_async_await($p); // "hello"
+
+// With timeout:
+try {
+    $result = oxphp_async_await($p, 2.0);
+} catch (\OxPHP\AsyncTimeoutException $e) {
+    // task took longer than 2 seconds
+}',
+    ],
+    [
+        'name'    => 'oxphp_async_await_all',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array',
+        'params'  => [
+            ['name' => '$promise_ids', 'type' => 'array', 'desc' => 'Array of promise IDs from <code>oxphp_async()</code>.'],
+            ['name' => '$timeout', 'type' => '?float', 'default' => 'null', 'desc' => 'Per-promise timeout in seconds.'],
+        ],
+        'return'  => 'array — Associative array mapping promise ID =&gt; result value.',
+        'desc'    => 'Awaits multiple promises and returns all results. Blocks until every promise completes. Throws if any promise fails or times out.',
+        'example' => '$p1 = oxphp_async(fn() => 1);
+$p2 = oxphp_async(fn() => 2);
+$p3 = oxphp_async(fn() => 3);
+$results = oxphp_async_await_all([$p1, $p2, $p3]);
+// [$p1 => 1, $p2 => 2, $p3 => 3]',
+    ],
+    [
+        'name'    => 'oxphp_async_await_any',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array',
+        'params'  => [
+            ['name' => '$promise_ids', 'type' => 'array', 'desc' => 'Array of promise IDs from <code>oxphp_async()</code>.'],
+            ['name' => '$timeout', 'type' => '?float', 'default' => 'null', 'desc' => 'Overall timeout in seconds.'],
+        ],
+        'return'  => 'array — <code>[\'id\' => int, \'value\' => mixed]</code> — the winning promise.',
+        'desc'    => 'Races multiple promises using <code>futures::select_all</code> and returns the first to complete. Non-winning promises remain individually awaitable via <code>oxphp_async_await()</code>. On timeout, all specified promises are cancelled.',
+        'example' => '$p1 = oxphp_async(fn() => slow_api_a()); // 500ms
+$p2 = oxphp_async(fn() => slow_api_b()); // 100ms
+$winner = oxphp_async_await_any([$p1, $p2]);
+// ["id" => $p2, "value" => ...]  (fastest wins)
+$other = oxphp_async_await($p1); // still awaitable',
+    ],
 ];
 
 // ── Build function sections ──────────────────────────
@@ -181,6 +249,10 @@ foreach ($functions as $fn) {
             'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',
             'oxphp_finish_request'    => '<span class="mono dim">not called &mdash; would end response</span>',
             'oxphp_worker'            => '<span class="mono dim">not called &mdash; enters worker loop</span>',
+            'oxphp_async'             => '<span class="mono dim">not called &mdash; dispatches closure to async pool</span>',
+            'oxphp_async_await'       => '<span class="mono dim">not called &mdash; blocks until promise completes</span>',
+            'oxphp_async_await_all'   => '<span class="mono dim">not called &mdash; awaits multiple promises</span>',
+            'oxphp_async_await_any'   => '<span class="mono dim">not called &mdash; races promises, returns fastest</span>',
             default                   => '',
         };
         $live = '<div class="fn-live"><span class="fn-live-label">Live result</span>' . $val . '</div>';
@@ -189,7 +261,7 @@ foreach ($functions as $fn) {
     $sections .= '<div class="fn-entry fn-slide" id="' . $fn['name'] . '" style="animation-delay:' . $delay . 'ms">'
         . '<div class="fn-header">'
         . '<h2><a href="#' . $fn['name'] . '">' . $fn['name'] . '</a></h2>'
-        . '<div class="fn-version">0.1.0</div></div>'
+        . '<div class="fn-version">' . h($fn['version'] ?? '0.1.0') . '</div></div>'
         . '<div class="fn-sig-block"><code>' . $sig_html . '</code></div>'
         . '<p class="fn-description">' . $fn['desc'] . '</p>'
         . $live

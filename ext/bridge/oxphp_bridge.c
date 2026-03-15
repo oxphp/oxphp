@@ -154,6 +154,8 @@ int oxphp_bridge_get_plugin_fn_total(int index) {
 #include "SAPI.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_hash.h"
+#include "Zend/zend_closures.h"
+#include "Zend/zend_exceptions.h"
 
 /* Define thread-local TSRM cache for this compilation unit.
  * SG()/CG()/EG() macros expand to use TSRMLS_CACHE (_tsrm_ls_cache).
@@ -404,6 +406,26 @@ void oxphp_zval_dtor(void *zv) {
     zval_ptr_dtor((zval*)zv);
 }
 
+void oxphp_zval_addref(void *zv) {
+    Z_TRY_ADDREF_P((zval*)zv);
+}
+
+void *oxphp_closure_addref(void *closure_zv) {
+    zval *zv = (zval*)closure_zv;
+    if (Z_TYPE_P(zv) == IS_OBJECT) {
+        zend_object *obj = Z_OBJ_P(zv);
+        GC_ADDREF(obj);
+        return obj;
+    }
+    return NULL;
+}
+
+void oxphp_closure_release(void *obj_ptr) {
+    if (obj_ptr) {
+        OBJ_RELEASE((zend_object*)obj_ptr);
+    }
+}
+
 size_t oxphp_zval_size(void) {
     return sizeof(zval);
 }
@@ -577,4 +599,847 @@ int oxphp_execute_script_safe(void *file_handle) {
         result = 0;  /* bailout occurred */
     } zend_end_try();
     return result;
+}
+
+/* ─── Async Dispatch Function Pointers ─────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. Same pattern as worker callbacks.
+ */
+static oxphp_async_dispatch_fn_t rust_async_dispatch = NULL;
+static oxphp_await_dispatch_fn_t rust_await_dispatch = NULL;
+static oxphp_await_any_dispatch_fn_t rust_await_any_dispatch = NULL;
+
+void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn) {
+    rust_async_dispatch = fn;
+}
+
+void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn) {
+    rust_await_dispatch = fn;
+}
+
+void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn) {
+    rust_await_any_dispatch = fn;
+}
+
+int64_t oxphp_bridge_async_dispatch(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *closure_zval
+) {
+    if (__builtin_expect(rust_async_dispatch != NULL, 1)) {
+        return rust_async_dispatch(op_array, static_vars, this_ptr, argc, args, closure_zval);
+    }
+    return -1;
+}
+
+int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval) {
+    if (__builtin_expect(rust_await_dispatch != NULL, 1)) {
+        return rust_await_dispatch(promise_id, timeout, retval);
+    }
+    return -1;
+}
+
+int oxphp_bridge_await_any_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+) {
+    if (__builtin_expect(rust_await_any_dispatch != NULL, 1)) {
+        return rust_await_any_dispatch(promise_ids, count, timeout, out_winner_id, retval);
+    }
+    return -1;
+}
+
+/* ─── Async Promise Cleanup ─────────────────────────────────── */
+static oxphp_cleanup_promises_fn_t rust_cleanup_promises = NULL;
+
+void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn) {
+    rust_cleanup_promises = fn;
+}
+
+void oxphp_bridge_cleanup_outstanding_promises(void) {
+    if (__builtin_expect(rust_cleanup_promises != NULL, 1)) {
+        rust_cleanup_promises();
+    }
+}
+
+/* === Async Promise: Freeze/Unfreeze === */
+
+static void oxphp_freeze_zval_recursive(zval *zv);
+
+int oxphp_freeze_zval(zval *zv, uint32_t *out_orig_refcount, uint32_t *out_orig_gc_flags, uint32_t *out_orig_type_flags) {
+    /* Unwrap references */
+    if (Z_TYPE_P(zv) == IS_REFERENCE) {
+        zv = Z_REFVAL_P(zv);
+    }
+
+    switch (Z_TYPE_P(zv)) {
+        case IS_ARRAY: {
+            /* Separate COW-shared arrays before freezing */
+            SEPARATE_ARRAY(zv);
+            HashTable *ht = Z_ARRVAL_P(zv);
+            *out_orig_refcount = GC_REFCOUNT(ht);
+            *out_orig_gc_flags = GC_FLAGS(ht);
+            *out_orig_type_flags = Z_TYPE_FLAGS_P(zv);
+
+            GC_ADD_FLAGS(ht, IS_ARRAY_IMMUTABLE);
+            GC_SET_REFCOUNT(ht, 2); /* GC_IMMUTABLE_REFCOUNT */
+
+            zval *val;
+            ZEND_HASH_FOREACH_VAL(ht, val) {
+                oxphp_freeze_zval_recursive(val);
+            } ZEND_HASH_FOREACH_END();
+            return 0;
+        }
+        case IS_STRING: {
+            *out_orig_refcount = 0;
+            *out_orig_gc_flags = 0;
+            *out_orig_type_flags = Z_TYPE_FLAGS_P(zv);
+            /* Clear refcounted flag — engine skips refcount ops */
+            Z_TYPE_FLAGS_P(zv) &= ~(IS_TYPE_REFCOUNTED | IS_TYPE_COLLECTABLE);
+            return 0;
+        }
+        case IS_LONG:
+        case IS_DOUBLE:
+        case IS_TRUE:
+        case IS_FALSE:
+        case IS_NULL:
+            /* Value types — no freeze needed */
+            *out_orig_refcount = 0;
+            *out_orig_gc_flags = 0;
+            *out_orig_type_flags = 0;
+            return 0;
+        default:
+            /* Objects, resources — cannot freeze */
+            return -1;
+    }
+}
+
+/* Recursive freeze for array elements */
+static void oxphp_freeze_zval_recursive(zval *zv) {
+    if (Z_TYPE_P(zv) == IS_REFERENCE) {
+        zv = Z_REFVAL_P(zv);
+    }
+    if (Z_TYPE_P(zv) == IS_ARRAY) {
+        HashTable *ht = Z_ARRVAL_P(zv);
+        GC_ADD_FLAGS(ht, IS_ARRAY_IMMUTABLE);
+        GC_SET_REFCOUNT(ht, 2);
+        zval *val;
+        ZEND_HASH_FOREACH_VAL(ht, val) {
+            oxphp_freeze_zval_recursive(val);
+        } ZEND_HASH_FOREACH_END();
+    } else if (Z_TYPE_P(zv) == IS_STRING) {
+        Z_TYPE_FLAGS_P(zv) &= ~(IS_TYPE_REFCOUNTED | IS_TYPE_COLLECTABLE);
+    }
+}
+
+/* === Async Promise: Unfreeze === */
+
+static void oxphp_unfreeze_zval_recursive(zval *zv);
+
+void oxphp_unfreeze_zval(zval *zv, uint32_t orig_refcount, uint32_t orig_gc_flags, uint32_t orig_type_flags) {
+    if (Z_TYPE_P(zv) == IS_REFERENCE) {
+        zv = Z_REFVAL_P(zv);
+    }
+    switch (Z_TYPE_P(zv)) {
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(zv);
+            GC_SET_REFCOUNT(ht, orig_refcount);
+            /* Clear all flags then restore originals (GC_FLAGS is not an lvalue in PHP 8.4) */
+            GC_DEL_FLAGS(ht, GC_FLAGS(ht));
+            GC_ADD_FLAGS(ht, orig_gc_flags);
+            Z_TYPE_FLAGS_P(zv) = (uint8_t)orig_type_flags;
+
+            zval *val;
+            ZEND_HASH_FOREACH_VAL(ht, val) {
+                oxphp_unfreeze_zval_recursive(val);
+            } ZEND_HASH_FOREACH_END();
+            break;
+        }
+        case IS_STRING:
+            Z_TYPE_FLAGS_P(zv) = (uint8_t)orig_type_flags;
+            break;
+        default:
+            break;
+    }
+}
+
+static void oxphp_unfreeze_zval_recursive(zval *zv) {
+    if (Z_TYPE_P(zv) == IS_REFERENCE) {
+        zv = Z_REFVAL_P(zv);
+    }
+    if (Z_TYPE_P(zv) == IS_ARRAY) {
+        HashTable *ht = Z_ARRVAL_P(zv);
+        GC_DEL_FLAGS(ht, IS_ARRAY_IMMUTABLE);
+        GC_SET_REFCOUNT(ht, 1);
+        zval *val;
+        ZEND_HASH_FOREACH_VAL(ht, val) {
+            oxphp_unfreeze_zval_recursive(val);
+        } ZEND_HASH_FOREACH_END();
+    } else if (Z_TYPE_P(zv) == IS_STRING) {
+        Z_TYPE_FLAGS_P(zv) |= IS_TYPE_REFCOUNTED;
+    }
+}
+
+/* === Async Promise: Deep Copy === */
+
+void oxphp_deep_copy_zval(zval *dst, const zval *src) {
+    switch (Z_TYPE_P(src)) {
+        case IS_NULL:
+        case IS_TRUE:
+        case IS_FALSE:
+        case IS_LONG:
+        case IS_DOUBLE:
+            ZVAL_COPY_VALUE(dst, src);
+            break;
+        case IS_STRING: {
+            size_t len = Z_STRLEN_P(src);
+            ZVAL_STRINGL(dst, Z_STRVAL_P(src), len);
+            break;
+        }
+        case IS_ARRAY: {
+            uint32_t count = zend_hash_num_elements(Z_ARRVAL_P(src));
+            array_init_size(dst, count);
+            zend_ulong idx;
+            zend_string *key;
+            zval *val;
+            ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(src), idx, key, val) {
+                zval copied;
+                oxphp_deep_copy_zval(&copied, val);
+                if (key) {
+                    zend_string *key_copy = zend_string_init(
+                        ZSTR_VAL(key), ZSTR_LEN(key), 0
+                    );
+                    zend_hash_add_new(Z_ARRVAL_P(dst), key_copy, &copied);
+                    zend_string_release(key_copy);
+                } else {
+                    zend_hash_index_add_new(Z_ARRVAL_P(dst), idx, &copied);
+                }
+            } ZEND_HASH_FOREACH_END();
+            break;
+        }
+        case IS_REFERENCE:
+            oxphp_deep_copy_zval(dst, Z_REFVAL_P(src));
+            break;
+        default:
+            /* Objects, resources — cannot deep copy across threads */
+            ZVAL_NULL(dst);
+            break;
+    }
+}
+
+void oxphp_deep_free_zval(zval *zv) {
+    zval_ptr_dtor(zv);
+}
+
+/* === Portable (cross-thread) serialization ===
+ *
+ * Serializes zvals into a flat byte buffer allocated via system malloc().
+ * The buffer can cross ZTS thread boundaries safely.  The receiver calls
+ * oxphp_portable_deserialize() which allocates strings/arrays via emalloc
+ * on ITS OWN thread's zend_mm_heap — avoiding the cross-heap corruption
+ * that oxphp_deep_copy_zval/oxphp_deep_free_zval cause.
+ *
+ * Wire format per zval:
+ *   [1 byte type tag] [payload …]
+ *
+ * Type tags:
+ *   0 = null, 1 = true, 2 = false, 3 = long (8 bytes),
+ *   4 = double (8 bytes), 5 = string (4 bytes length + N bytes data),
+ *   6 = array (4 bytes count + N×(1 byte key_type + key + value) entries),
+ *       key_type: 0 = index (8 bytes ulong), 1 = string key (4 bytes len + data)
+ */
+
+/* Growable buffer using system malloc */
+typedef struct {
+    unsigned char *data;
+    size_t len;
+    size_t cap;
+} portbuf_t;
+
+static void portbuf_init(portbuf_t *b) {
+    b->cap = 256;
+    b->data = (unsigned char *)malloc(b->cap);
+    b->len = 0;
+}
+
+static int portbuf_ensure(portbuf_t *b, size_t extra) {
+    if (b->len + extra <= b->cap) return 0;
+    size_t need = b->len + extra;
+    size_t ncap = b->cap * 2;
+    while (ncap < need) ncap *= 2;
+    unsigned char *p = (unsigned char *)realloc(b->data, ncap);
+    if (!p) return -1;
+    b->data = p;
+    b->cap = ncap;
+    return 0;
+}
+
+static void portbuf_put(portbuf_t *b, const void *src, size_t n) {
+    memcpy(b->data + b->len, src, n);
+    b->len += n;
+}
+
+static void portbuf_u8(portbuf_t *b, uint8_t v) {
+    b->data[b->len++] = v;
+}
+
+static void portbuf_u32(portbuf_t *b, uint32_t v) {
+    memcpy(b->data + b->len, &v, 4);
+    b->len += 4;
+}
+
+static void portbuf_u64(portbuf_t *b, uint64_t v) {
+    memcpy(b->data + b->len, &v, 8);
+    b->len += 8;
+}
+
+/* Forward declaration for recursive serialization */
+static int portbuf_ser_zval(portbuf_t *b, const zval *zv);
+
+static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
+    if (portbuf_ensure(b, 16) != 0) return -1;
+
+    switch (Z_TYPE_P(zv)) {
+        case IS_NULL:
+        case IS_UNDEF:
+            portbuf_u8(b, 0);
+            break;
+        case IS_TRUE:
+            portbuf_u8(b, 1);
+            break;
+        case IS_FALSE:
+            portbuf_u8(b, 2);
+            break;
+        case IS_LONG: {
+            portbuf_u8(b, 3);
+            int64_t v = (int64_t)Z_LVAL_P(zv);
+            if (portbuf_ensure(b, 8) != 0) return -1;
+            memcpy(b->data + b->len, &v, 8);
+            b->len += 8;
+            break;
+        }
+        case IS_DOUBLE: {
+            portbuf_u8(b, 4);
+            double v = Z_DVAL_P(zv);
+            if (portbuf_ensure(b, 8) != 0) return -1;
+            memcpy(b->data + b->len, &v, 8);
+            b->len += 8;
+            break;
+        }
+        case IS_STRING: {
+            size_t slen = Z_STRLEN_P(zv);
+            uint32_t slen32 = (uint32_t)slen;
+            if (portbuf_ensure(b, 1 + 4 + slen) != 0) return -1;
+            portbuf_u8(b, 5);
+            portbuf_u32(b, slen32);
+            portbuf_put(b, Z_STRVAL_P(zv), slen);
+            break;
+        }
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(zv);
+            uint32_t count = zend_hash_num_elements(ht);
+            if (portbuf_ensure(b, 1 + 4) != 0) return -1;
+            portbuf_u8(b, 6);
+            portbuf_u32(b, count);
+
+            zend_ulong idx;
+            zend_string *key;
+            zval *val;
+            ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
+                if (key) {
+                    size_t klen = ZSTR_LEN(key);
+                    if (portbuf_ensure(b, 1 + 4 + klen) != 0) return -1;
+                    portbuf_u8(b, 1); /* string key */
+                    portbuf_u32(b, (uint32_t)klen);
+                    portbuf_put(b, ZSTR_VAL(key), klen);
+                } else {
+                    if (portbuf_ensure(b, 1 + 8) != 0) return -1;
+                    portbuf_u8(b, 0); /* index key */
+                    portbuf_u64(b, (uint64_t)idx);
+                }
+                if (portbuf_ser_zval(b, val) != 0) return -1;
+            } ZEND_HASH_FOREACH_END();
+            break;
+        }
+        case IS_REFERENCE:
+            return portbuf_ser_zval(b, Z_REFVAL_P(zv));
+        default:
+            /* Objects, resources — serialize as null */
+            portbuf_u8(b, 0);
+            break;
+    }
+    return 0;
+}
+
+int oxphp_portable_serialize(const zval *args, uint32_t argc,
+                             unsigned char **out_buf, size_t *out_len) {
+    portbuf_t b;
+    portbuf_init(&b);
+    if (!b.data) return -1;
+
+    for (uint32_t i = 0; i < argc; i++) {
+        if (portbuf_ser_zval(&b, &args[i]) != 0) {
+            free(b.data);
+            return -1;
+        }
+    }
+    *out_buf = b.data;
+    *out_len = b.len;
+    return 0;
+}
+
+/* Reader state for deserialization */
+typedef struct {
+    const unsigned char *data;
+    size_t len;
+    size_t pos;
+} portrd_t;
+
+static int portrd_u8(portrd_t *r, uint8_t *out) {
+    if (r->pos >= r->len) return -1;
+    *out = r->data[r->pos++];
+    return 0;
+}
+
+static int portrd_u32(portrd_t *r, uint32_t *out) {
+    if (r->pos + 4 > r->len) return -1;
+    memcpy(out, r->data + r->pos, 4);
+    r->pos += 4;
+    return 0;
+}
+
+static int portrd_u64(portrd_t *r, uint64_t *out) {
+    if (r->pos + 8 > r->len) return -1;
+    memcpy(out, r->data + r->pos, 8);
+    r->pos += 8;
+    return 0;
+}
+
+static int portrd_bytes(portrd_t *r, size_t n, const unsigned char **out) {
+    if (r->pos + n > r->len) return -1;
+    *out = r->data + r->pos;
+    r->pos += n;
+    return 0;
+}
+
+/* Forward declaration for recursive deserialization */
+static int portrd_deser_zval(portrd_t *r, zval *out);
+
+static int portrd_deser_zval(portrd_t *r, zval *out) {
+    uint8_t tag;
+    if (portrd_u8(r, &tag) != 0) return -1;
+
+    switch (tag) {
+        case 0: /* null */
+            ZVAL_NULL(out);
+            break;
+        case 1: /* true */
+            ZVAL_TRUE(out);
+            break;
+        case 2: /* false */
+            ZVAL_FALSE(out);
+            break;
+        case 3: { /* long */
+            int64_t v;
+            if (r->pos + 8 > r->len) return -1;
+            memcpy(&v, r->data + r->pos, 8);
+            r->pos += 8;
+            ZVAL_LONG(out, (zend_long)v);
+            break;
+        }
+        case 4: { /* double */
+            double v;
+            if (r->pos + 8 > r->len) return -1;
+            memcpy(&v, r->data + r->pos, 8);
+            r->pos += 8;
+            ZVAL_DOUBLE(out, v);
+            break;
+        }
+        case 5: { /* string */
+            uint32_t slen;
+            if (portrd_u32(r, &slen) != 0) return -1;
+            const unsigned char *sdata;
+            if (portrd_bytes(r, slen, &sdata) != 0) return -1;
+            /* ZVAL_STRINGL uses emalloc on the CURRENT thread's heap — correct! */
+            ZVAL_STRINGL(out, (const char *)sdata, slen);
+            break;
+        }
+        case 6: { /* array */
+            uint32_t count;
+            if (portrd_u32(r, &count) != 0) return -1;
+            /* array_init_size uses emalloc on the CURRENT thread's heap — correct! */
+            array_init_size(out, count);
+            for (uint32_t i = 0; i < count; i++) {
+                uint8_t key_type;
+                if (portrd_u8(r, &key_type) != 0) return -1;
+
+                zval elem;
+                ZVAL_UNDEF(&elem);
+
+                if (key_type == 1) {
+                    /* string key */
+                    uint32_t klen;
+                    if (portrd_u32(r, &klen) != 0) return -1;
+                    const unsigned char *kdata;
+                    if (portrd_bytes(r, klen, &kdata) != 0) return -1;
+                    if (portrd_deser_zval(r, &elem) != 0) {
+                        zval_ptr_dtor(&elem);
+                        return -1;
+                    }
+                    zend_string *zkey = zend_string_init(
+                        (const char *)kdata, klen, 0
+                    );
+                    zend_hash_add_new(Z_ARRVAL_P(out), zkey, &elem);
+                    zend_string_release(zkey);
+                } else {
+                    /* index key */
+                    uint64_t idx;
+                    if (portrd_u64(r, &idx) != 0) return -1;
+                    if (portrd_deser_zval(r, &elem) != 0) {
+                        zval_ptr_dtor(&elem);
+                        return -1;
+                    }
+                    zend_hash_index_add_new(Z_ARRVAL_P(out), (zend_ulong)idx, &elem);
+                }
+            }
+            break;
+        }
+        default:
+            ZVAL_NULL(out);
+            break;
+    }
+    return 0;
+}
+
+int oxphp_portable_deserialize(const unsigned char *buf, size_t len,
+                               uint32_t argc, zval *out) {
+    portrd_t r = { buf, len, 0 };
+    for (uint32_t i = 0; i < argc; i++) {
+        if (portrd_deser_zval(&r, &out[i]) != 0) {
+            /* Cleanup already-deserialized zvals on error */
+            for (uint32_t j = 0; j < i; j++) {
+                zval_ptr_dtor(&out[j]);
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int oxphp_portable_serialize_ht(HashTable *ht,
+                                unsigned char **out_buf, size_t *out_len) {
+    /* Wrap the HashTable in a temporary IS_ARRAY zval and serialize as 1 zval */
+    zval tmp;
+    ZVAL_ARR(&tmp, ht);
+    return oxphp_portable_serialize(&tmp, 1, out_buf, out_len);
+}
+
+int oxphp_portable_deserialize_ht(const unsigned char *buf, size_t len,
+                                  HashTable **out_ht) {
+    /* Deserialize as 1 zval, then extract the HashTable */
+    zval tmp;
+    ZVAL_UNDEF(&tmp);
+    if (oxphp_portable_deserialize(buf, len, 1, &tmp) != 0) {
+        return -1;
+    }
+    if (Z_TYPE(tmp) != IS_ARRAY) {
+        zval_ptr_dtor(&tmp);
+        return -1;
+    }
+    /* Separate the HashTable from the zval — caller owns it.
+     * Increment refcount so the zval_ptr_dtor below doesn't free it. */
+    *out_ht = Z_ARRVAL(tmp);
+    GC_ADDREF(*out_ht);
+    zval_ptr_dtor(&tmp);
+    return 0;
+}
+
+void oxphp_portable_free(unsigned char *buf) {
+    free(buf);
+}
+
+void oxphp_portable_free_ht(HashTable *ht) {
+    if (ht) {
+        zend_array_destroy(ht);
+    }
+}
+
+/* === Async Promise: Closure Inspection === */
+
+/* PHP 8.4: zend_closure struct is opaque — use public API only */
+
+void *oxphp_closure_get_op_array(zval *closure) {
+    if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
+        return NULL;
+    }
+    const zend_function *func = zend_get_closure_method_def(Z_OBJ_P(closure));
+    if (!func || func->type != ZEND_USER_FUNCTION) {
+        return NULL; /* Internal function — cannot transfer */
+    }
+    return (void *)&func->op_array;
+}
+
+int oxphp_closure_get_static_vars(zval *closure, HashTable **out_ht) {
+    if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
+        *out_ht = NULL;
+        return -1;
+    }
+    const zend_function *func = zend_get_closure_method_def(Z_OBJ_P(closure));
+    if (!func || func->type != ZEND_USER_FUNCTION) {
+        *out_ht = NULL;
+        return -1;
+    }
+    *out_ht = func->op_array.static_variables;
+    return 0;
+}
+
+int oxphp_closure_has_this(zval *closure) {
+    if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
+        return 0;
+    }
+    zval *this_ptr = zend_get_closure_this_ptr(closure);
+    return (this_ptr && Z_TYPE_P(this_ptr) != IS_UNDEF) ? 1 : 0;
+}
+
+zval *oxphp_closure_get_this(zval *closure) {
+    if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
+        return NULL;
+    }
+    zval *this_ptr = zend_get_closure_this_ptr(closure);
+    return (this_ptr && Z_TYPE_P(this_ptr) != IS_UNDEF) ? this_ptr : NULL;
+}
+
+/* ─── Async Exception Details ────────────────────────────── */
+static __thread char *async_exc_class = NULL;
+static __thread char *async_exc_msg = NULL;
+static __thread char *async_exc_trace = NULL;
+
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace) {
+    free(async_exc_class);
+    free(async_exc_msg);
+    free(async_exc_trace);
+    async_exc_class = cls ? strdup(cls) : NULL;
+    async_exc_msg = msg ? strdup(msg) : NULL;
+    async_exc_trace = trace ? strdup(trace) : NULL;
+}
+
+const char *oxphp_bridge_get_async_exc_class(void) { return async_exc_class; }
+const char *oxphp_bridge_get_async_exc_message(void) { return async_exc_msg; }
+const char *oxphp_bridge_get_async_exc_trace(void) { return async_exc_trace; }
+
+void oxphp_bridge_clear_async_exception(void) {
+    free(async_exc_class);
+    free(async_exc_msg);
+    free(async_exc_trace);
+    async_exc_class = NULL;
+    async_exc_msg = NULL;
+    async_exc_trace = NULL;
+}
+
+/* === Async Promise: Async Worker State === */
+
+void oxphp_bridge_set_async_worker(int is_async) {
+    ctx.is_async_worker = is_async;
+}
+
+int oxphp_bridge_is_async_worker(void) {
+    return ctx.is_async_worker;
+}
+
+/* ─── Async Fatal Error Capture ────────────────────────────── */
+/* Thread-local buffer to capture the error message from zend_error_cb
+ * before zend_bailout() is called. The Rust error callback writes here
+ * for fatal errors on async worker threads; the zend_catch block in
+ * oxphp_execute_async_task reads and parses it. */
+static __thread char *captured_fatal_msg = NULL;
+
+void oxphp_bridge_capture_fatal(const char *msg, size_t len) {
+    free(captured_fatal_msg);
+    if (msg && len > 0) {
+        captured_fatal_msg = strndup(msg, len);
+    } else {
+        captured_fatal_msg = NULL;
+    }
+}
+
+char *oxphp_bridge_pop_fatal(void) {
+    char *msg = captured_fatal_msg;
+    captured_fatal_msg = NULL;
+    return msg; /* caller owns — free with free() */
+}
+
+/* === Async Promise: Async Reset === */
+
+#include "main/php_output.h"
+
+void oxphp_async_reset(void) {
+    /* Clear error state */
+    CG(unclean_shutdown) = 0;
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
+
+    /* Reset output buffers */
+    php_output_end_all();
+    php_output_deactivate();
+    php_output_activate();
+
+    /* Clear PHP error state */
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+        PG(last_error_message) = NULL;
+    }
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+        PG(last_error_file) = NULL;
+    }
+
+    /* Reset execution timer */
+    zend_set_timeout(0, 0);
+}
+
+/* === Async Promise: Execute Async Task === */
+
+int oxphp_execute_async_task(
+    zend_op_array *op_array,
+    HashTable *static_vars,
+    zval *this_ptr,
+    uint32_t argc,
+    zval *args,
+    zval *retval,
+    char **exc_class,
+    char **exc_message,
+    char **exc_trace
+) {
+    zval closure;
+    zend_function func;
+
+    *exc_class = NULL;
+    *exc_message = NULL;
+    *exc_trace = NULL;
+    ZVAL_NULL(retval);
+
+    /* Reconstruct closure from op_array + static_vars */
+    memcpy(&func, op_array, sizeof(zend_op_array));
+    func.op_array.static_variables = static_vars;
+
+    zend_create_closure(&closure, &func,
+        NULL, /* scope */
+        NULL, /* called_scope */
+        this_ptr /* this_ptr, may be NULL */
+    );
+
+    /* Set up call info */
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    if (zend_fcall_info_init(&closure, 0, &fci, &fcc, NULL, NULL) != SUCCESS) {
+        zval_ptr_dtor(&closure);
+        *exc_class = strdup("RuntimeException");
+        *exc_message = strdup("Failed to initialize async closure call");
+        return -1;
+    }
+
+    fci.retval = retval;
+    fci.param_count = argc;
+    fci.params = args;
+
+    int result = 0;
+
+    zend_try {
+        if (zend_call_function(&fci, &fcc) != SUCCESS) {
+            *exc_class = strdup("RuntimeException");
+            *exc_message = strdup("Failed to call async closure");
+            result = -1;
+        } else if (EG(exception)) {
+            /* Capture exception details */
+            zend_object *ex = EG(exception);
+            zend_class_entry *ce = ex->ce;
+            *exc_class = strdup(ZSTR_VAL(ce->name));
+
+            /* Get message via property read */
+            zval rv;
+            zval *msg_zv = zend_read_property(ce, ex, "message", sizeof("message") - 1, 1, &rv);
+            if (msg_zv && Z_TYPE_P(msg_zv) == IS_STRING) {
+                *exc_message = strdup(Z_STRVAL_P(msg_zv));
+            } else {
+                *exc_message = strdup("(unknown)");
+            }
+
+            /* Get trace string via getTraceAsString() */
+            zval trace_zv;
+            zend_function *trace_fn = zend_hash_str_find_ptr(
+                &ce->function_table, "gettraceasstring", sizeof("gettraceasstring") - 1
+            );
+            if (trace_fn) {
+                zend_call_known_instance_method_with_0_params(trace_fn, ex, &trace_zv);
+                if (Z_TYPE(trace_zv) == IS_STRING) {
+                    *exc_trace = strdup(Z_STRVAL(trace_zv));
+                }
+                zval_ptr_dtor(&trace_zv);
+            }
+
+            zend_clear_exception();
+            result = -1;
+        }
+    } zend_catch {
+        /* Fatal error / zend_bailout — EG(exception) is cleared by zend_exception_error
+         * before bailout, but our error callback captured the formatted message. */
+        char *fatal_msg = oxphp_bridge_pop_fatal();
+        if (fatal_msg && strncmp(fatal_msg, "Uncaught ", 9) == 0) {
+            /* Parse "Uncaught ClassName: message in /path/to/file.php:NN" */
+            const char *class_start = fatal_msg + 9;
+            const char *colon = strchr(class_start, ':');
+            if (colon && colon > class_start) {
+                *exc_class = strndup(class_start, (size_t)(colon - class_start));
+                /* Skip ": " after class name */
+                const char *msg_start = colon + 2;
+                /* Find " in " to strip the file location */
+                const char *in_pos = strstr(msg_start, " in ");
+                if (in_pos) {
+                    *exc_message = strndup(msg_start, (size_t)(in_pos - msg_start));
+                } else {
+                    *exc_message = strdup(msg_start);
+                }
+            } else {
+                /* Uncaught but no colon — use full message */
+                *exc_class = strdup("Error");
+                *exc_message = strdup(fatal_msg);
+            }
+            free(fatal_msg);
+        } else if (fatal_msg) {
+            /* Non-uncaught fatal: die()/exit() or other fatal */
+            *exc_class = strdup("Error");
+            *exc_message = fatal_msg; /* transfer ownership */
+        } else {
+            *exc_class = strdup("Error");
+            *exc_message = strdup("Fatal error in async closure");
+        }
+        CG(unclean_shutdown) = 0;
+        result = -1;
+    } zend_end_try();
+
+    zval_ptr_dtor(&closure);
+    return result;
+}
+
+/* === Async Promise: Borrow Proxy === */
+
+/* CE pointer set by oxphp_sapi.c during MINIT via oxphp_bridge_set_borrow_proxy_ce() */
+static zend_class_entry *borrow_proxy_ce = NULL;
+
+void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce) {
+    borrow_proxy_ce = ce;
+}
+
+void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
+    if (!borrow_proxy_ce) {
+        ZVAL_NULL(dst);
+        return;
+    }
+    object_init_ex(dst, borrow_proxy_ce);
+    zend_update_property_long(borrow_proxy_ce, Z_OBJ_P(dst),
+        "promiseId", sizeof("promiseId") - 1, (zend_long)promise_id);
 }

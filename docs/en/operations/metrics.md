@@ -109,6 +109,20 @@ Cache hit ratio can be computed as `hits / (hits + misses)`. A low hit ratio may
 
 These counters only increment when compression is enabled (`COMPRESSION_LEVEL` > 0) and a response is actually compressed (the compressed output is smaller than the original).
 
+### Async Tasks
+
+These metrics are only emitted when the async pool is active (`ASYNC_WORKERS` > 0) and at least one task has been dispatched or rejected.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_async_tasks_dispatched_total` | counter | Total tasks submitted via `oxphp_async()` |
+| `oxphp_async_tasks_completed_total` | counter | Tasks that returned a value successfully |
+| `oxphp_async_tasks_failed_total` | counter | Tasks that threw an exception or called `die()`/`exit()` |
+| `oxphp_async_tasks_cancelled_total` | counter | Tasks cancelled (timeout expired or RSHUTDOWN cleanup) |
+| `oxphp_async_tasks_rejected_total` | counter | Tasks rejected because the async queue was full |
+
+Task success rate can be computed as `completed / dispatched`. A high `rejected` count indicates the `ASYNC_QUEUE_CAPACITY` is too small or `ASYNC_WORKERS` is insufficient.
+
 ### Worker Mode
 
 These metrics are only emitted when worker mode is active (`WORKER_FILE` is set). They provide visibility into persistent PHP worker lifecycle, recycling, and per-request execution times.
@@ -270,6 +284,26 @@ oxphp_compressed_responses_total 38500
 # TYPE oxphp_compression_bytes_saved_total counter
 oxphp_compression_bytes_saved_total 96250000
 
+# HELP oxphp_async_tasks_dispatched_total Total async tasks dispatched.
+# TYPE oxphp_async_tasks_dispatched_total counter
+oxphp_async_tasks_dispatched_total 1250
+
+# HELP oxphp_async_tasks_completed_total Async tasks completed successfully.
+# TYPE oxphp_async_tasks_completed_total counter
+oxphp_async_tasks_completed_total 1200
+
+# HELP oxphp_async_tasks_failed_total Async tasks that threw exceptions.
+# TYPE oxphp_async_tasks_failed_total counter
+oxphp_async_tasks_failed_total 45
+
+# HELP oxphp_async_tasks_cancelled_total Async tasks cancelled.
+# TYPE oxphp_async_tasks_cancelled_total counter
+oxphp_async_tasks_cancelled_total 5
+
+# HELP oxphp_async_tasks_rejected_total Async tasks rejected (queue full).
+# TYPE oxphp_async_tasks_rejected_total counter
+oxphp_async_tasks_rejected_total 0
+
 # HELP oxphp_worker_mode_enabled Whether worker mode is active.
 # TYPE oxphp_worker_mode_enabled gauge
 oxphp_worker_mode_enabled 1
@@ -428,6 +462,25 @@ rate(oxphp_compression_bytes_saved_total[5m])
 / rate(oxphp_response_bytes_total[5m])
 ```
 
+**Async task dispatch rate (tasks per second):**
+
+```promql
+rate(oxphp_async_tasks_dispatched_total[5m])
+```
+
+**Async task failure rate:**
+
+```promql
+rate(oxphp_async_tasks_failed_total[5m])
+/ rate(oxphp_async_tasks_dispatched_total[5m]) * 100
+```
+
+**Async task rejection rate (queue full):**
+
+```promql
+rate(oxphp_async_tasks_rejected_total[5m])
+```
+
 **Worker mode request rate:**
 
 ```promql
@@ -539,6 +592,24 @@ groups:
         annotations:
           summary: "OxPHP is actively rate-limiting requests"
 
+      - alert: OxPHPAsyncTaskRejections
+        expr: rate(oxphp_async_tasks_rejected_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async queue is full — tasks are being rejected"
+
+      - alert: OxPHPAsyncHighFailureRate
+        expr: >
+          rate(oxphp_async_tasks_failed_total[5m])
+          / rate(oxphp_async_tasks_dispatched_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async task failure rate above 10%"
+
       - alert: OxPHPLowCacheHitRate
         expr: >
           rate(oxphp_static_cache_hits_total[5m])
@@ -568,6 +639,7 @@ Plugins can contribute additional metrics to the `/metrics` output. Plugin metri
 
 - [Health Checks](health-checks.md) --- the `/health` and `/config` endpoints on the internal server
 - [Configuration](configuration.md) --- `INTERNAL_ADDR` and other environment variables
+- [Async Promises](/features/async-promises.md) --- parallel PHP execution and async task metrics
 - [Worker Pool](/architecture/worker-pool.md) --- static and dynamic scaling, worker mode, and recycling behavior
 - [Graceful Shutdown](graceful-shutdown.md) --- how connection draining affects `oxphp_active_connections`
 

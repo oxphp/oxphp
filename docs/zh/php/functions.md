@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了九个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了十三个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -354,6 +354,161 @@ oxphp_worker(function () use ($db, $config) {
 
 ---
 
+## `oxphp_async`
+
+将闭包分发到专用异步工作池进行异步执行。闭包的 `use` 变量和参数在源线程上序列化，在异步工作线程上反序列化为独立副本。
+
+```php
+oxphp_async(Closure $closure, mixed ...$args): int|false
+```
+
+**参数：**
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `$closure` | `Closure` | 要在异步工作线程上执行的闭包 |
+| `...$args` | `mixed` | 序列化到工作线程的参数。支持标量、字符串和数组。资源和对象将被拒绝并触发 `E_WARNING` |
+
+**返回值：** 成功时返回 Promise ID（正整数）。如果异步池未配置（`ASYNC_WORKERS=0`）或队列已满，返回 `false`。
+
+**示例：**
+
+```php
+<?php
+$promise = oxphp_async(function(int $x, int $y): int {
+    return $x + $y;
+}, 10, 20);
+
+$result = oxphp_async_await($promise);
+// 30
+```
+
+**注意事项：**
+- 闭包在拥有自己 PHP ZTS 状态的独立操作系统线程上执行。通过 `use` 捕获的变量被序列化为独立副本 — 源变量保持可写。
+- 异步池必须通过 `ASYNC_WORKERS` 环境变量启用。
+- 当队列已满时，任务将被拒绝，`oxphp_async()` 返回 `false`。
+
+---
+
+## `oxphp_async_await`
+
+阻塞当前线程，直到指定的异步任务完成并返回其结果。
+
+```php
+oxphp_async_await(int $promise_id, ?float $timeout = null): mixed
+```
+
+**参数：**
+
+| 名称 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `$promise_id` | `int` | *(必填)* | `oxphp_async()` 返回的 Promise ID |
+| `$timeout` | `?float` | `null` | 最大等待秒数。`null` 表示无限等待 |
+
+**返回值：** 闭包的返回值。支持所有标量类型、字符串和数组（包括嵌套）。
+
+**抛出异常：**
+
+| 异常 | 条件 |
+|------|------|
+| `OxPHP\AsyncException` | 闭包抛出了异常，或调用了 `die()` / `exit()` |
+| `OxPHP\AsyncTimeoutException` | 超时时间到期而任务尚未完成 |
+
+**示例：**
+
+```php
+<?php
+$p = oxphp_async(function(): string {
+    usleep(100_000);
+    return 'done';
+});
+
+try {
+    $result = oxphp_async_await($p, 0.5); // 500ms timeout
+} catch (\OxPHP\AsyncTimeoutException $e) {
+    $result = 'timed out';
+}
+```
+
+**注意事项：**
+- 返回值从异步工作线程反序列化到当前线程的堆上。
+- 每个 Promise ID 只能被等待一次。两次等待同一 ID 的行为未定义。
+- 未等待的 Promise 在请求结束时（RSHUTDOWN）自动清理，清理超时为 5 秒。
+
+---
+
+## `oxphp_async_await_all`
+
+等待多个 Promise 并以关联数组形式返回所有结果。
+
+```php
+oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array
+```
+
+**参数：**
+
+| 名称 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `$promise_ids` | `array` | *(必填)* | `oxphp_async()` 返回的 Promise ID 数组 |
+| `$timeout` | `?float` | `null` | 每个 Promise 的超时时间（秒） |
+
+**返回值：** 将每个 Promise ID 映射到其结果值的关联数组。
+
+**抛出异常：** 如果任何 Promise 失败或超时，抛出 `OxPHP\AsyncException` 或 `OxPHP\AsyncTimeoutException`。
+
+**示例：**
+
+```php
+<?php
+$p1 = oxphp_async(function(): int { return 1; });
+$p2 = oxphp_async(function(): int { return 2; });
+$p3 = oxphp_async(function(): int { return 3; });
+
+$results = oxphp_async_await_all([$p1, $p2, $p3]);
+// [$p1 => 1, $p2 => 2, $p3 => 3]
+```
+
+---
+
+## `oxphp_async_await_any`
+
+竞速多个 Promise 并返回最先完成的结果，与数组顺序无关。内部使用 `futures::select_all` 实现真正的并发竞速语义。
+
+```php
+oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array
+```
+
+**参数：**
+
+| 名称 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `$promise_ids` | `array` | *(必填)* | `oxphp_async()` 返回的 Promise ID 数组 |
+| `$timeout` | `?float` | `null` | 任何 Promise 完成的整体超时时间（秒） |
+
+**返回值：** 包含两个键的关联数组：`id`（最先完成的 Promise ID）和 `value`（其结果）。
+
+**抛出异常：** 如果获胜的 Promise 抛出了异常，抛出 `OxPHP\AsyncException`。如果在超时时间内没有 Promise 完成，抛出 `OxPHP\AsyncTimeoutException`。
+
+**剩余 Promise：** 未获胜的 Promise 仍在执行中，可通过 `oxphp_async_await()` 单独等待。超时时，所有指定的 Promise 将被取消。
+
+**示例：**
+
+```php
+<?php
+$p1 = oxphp_async(function(): int { sleep(2); return 1; });
+$p2 = oxphp_async(function(): int { usleep(100_000); return 2; });
+$p3 = oxphp_async(function(): int { sleep(1); return 3; });
+
+$winner = oxphp_async_await_any([$p1, $p2, $p3]);
+// ['id' => $p2, 'value' => 2]  (fastest to complete, ~100ms)
+
+// Non-winning promises are still awaitable
+$r1 = oxphp_async_await($p1); // 1
+$r3 = oxphp_async_await($p3); // 3
+```
+
+---
+
 ## 插件函数
 
 插件可以注册自定义 PHP 函数，供脚本调用。这些函数在 PHP 模块初始化（`MINIT`）期间注册，通过 C 桥接分发到 Rust 处理代码。
@@ -397,11 +552,16 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [6] => oxphp_is_streaming
 //     [7] => oxphp_stream_flush
 //     [8] => oxphp_worker
+//     [9] => oxphp_async
+//     [10] => oxphp_async_await
+//     [11] => oxphp_async_await_all
+//     [12] => oxphp_async_await_any
 // )
 ```
 
 ## 另请参阅
 
+- [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 和 `oxphp_async_await()` 进行并行执行
 - [超全局变量](superglobals.md) --- OxPHP 如何填充 `$_SERVER`、`$_GET`、`$_POST` 及其他超全局变量
 - [OPcache 兼容性](opcache.md) --- `request_time` 回调如何启用 OPcache
 - [请求 ID](/features/request-ids.md) --- 请求 ID 如何生成和传播

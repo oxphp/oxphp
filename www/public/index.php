@@ -21,6 +21,7 @@ match (true) {
     $path === '/opcache'   => require APP_ROOT . '/pages/opcache.php',
     $path === '/functions' => require APP_ROOT . '/pages/functions.php',
     $path === '/sse'       => require APP_ROOT . '/pages/sse.php',
+    $path === '/async'     => require APP_ROOT . '/pages/async.php',
 
     // JSON API
     str_starts_with($path, '/api/echo')       => require APP_ROOT . '/api/echo.php',
@@ -28,6 +29,7 @@ match (true) {
     $path === '/api/upload'                   => require APP_ROOT . '/api/upload.php',
     str_starts_with($path, '/api/cookies')    => require APP_ROOT . '/api/cookies.php',
     $path === '/api/slow'                     => require APP_ROOT . '/api/slow.php',
+    $path === '/api/async'                    => require APP_ROOT . '/api/async.php',
     str_starts_with($path, '/api/sse-native') => require APP_ROOT . '/api/sse_native.php',
     str_starts_with($path, '/api/sse')        => require APP_ROOT . '/api/sse.php',
     $path === '/api/error'                    => require APP_ROOT . '/api/error.php',

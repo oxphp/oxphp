@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers nine built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers thirteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -354,6 +354,161 @@ oxphp_worker(function () use ($db, $config) {
 
 ---
 
+## `oxphp_async`
+
+Dispatches a closure for asynchronous execution on the dedicated async worker pool. The closure's `use` variables and arguments are serialized on the source thread and deserialized as independent copies on the async worker thread.
+
+```php
+oxphp_async(Closure $closure, mixed ...$args): int|false
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `$closure` | `Closure` | The closure to execute on an async worker thread |
+| `...$args` | `mixed` | Arguments serialized to the worker. Scalars, strings, and arrays are supported. Resources and objects are rejected with `E_WARNING` |
+
+**Return value:** A promise ID (positive integer) on success. Returns `false` if the async pool is not configured (`ASYNC_WORKERS=0`) or the queue is full.
+
+**Example:**
+
+```php
+<?php
+$promise = oxphp_async(function(int $x, int $y): int {
+    return $x + $y;
+}, 10, 20);
+
+$result = oxphp_async_await($promise);
+// 30
+```
+
+**Notes:**
+- The closure executes on a separate OS thread with its own PHP ZTS state. Variables captured via `use` are serialized as independent copies — the source variables remain writable.
+- The async pool must be enabled via the `ASYNC_WORKERS` environment variable.
+- When the queue is full, the task is rejected and `oxphp_async()` returns `false`.
+
+---
+
+## `oxphp_async_await`
+
+Blocks the current thread until the specified async task completes and returns its result.
+
+```php
+oxphp_async_await(int $promise_id, ?float $timeout = null): mixed
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `$promise_id` | `int` | *(required)* | The promise ID returned by `oxphp_async()` |
+| `$timeout` | `?float` | `null` | Maximum seconds to wait. `null` waits indefinitely |
+
+**Return value:** The return value of the closure. All scalar types, strings, and arrays (including nested) are supported.
+
+**Throws:**
+
+| Exception | Condition |
+|-----------|-----------|
+| `OxPHP\AsyncException` | The closure threw an exception, or called `die()` / `exit()` |
+| `OxPHP\AsyncTimeoutException` | The timeout expired before the task completed |
+
+**Example:**
+
+```php
+<?php
+$p = oxphp_async(function(): string {
+    usleep(100_000);
+    return 'done';
+});
+
+try {
+    $result = oxphp_async_await($p, 0.5); // 500ms timeout
+} catch (\OxPHP\AsyncTimeoutException $e) {
+    $result = 'timed out';
+}
+```
+
+**Notes:**
+- The return value is deserialized from the async worker thread onto the current thread's heap.
+- Each promise ID can only be awaited once. Awaiting the same ID twice results in undefined behavior.
+- Non-awaited promises are cleaned up automatically at request end (RSHUTDOWN) with a 5-second timeout.
+
+---
+
+## `oxphp_async_await_all`
+
+Awaits multiple promises and returns all results as an associative array.
+
+```php
+oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `$promise_ids` | `array` | *(required)* | Array of promise IDs returned by `oxphp_async()` |
+| `$timeout` | `?float` | `null` | Per-promise timeout in seconds |
+
+**Return value:** An associative array mapping each promise ID to its result value.
+
+**Throws:** `OxPHP\AsyncException` or `OxPHP\AsyncTimeoutException` if any promise fails or times out.
+
+**Example:**
+
+```php
+<?php
+$p1 = oxphp_async(function(): int { return 1; });
+$p2 = oxphp_async(function(): int { return 2; });
+$p3 = oxphp_async(function(): int { return 3; });
+
+$results = oxphp_async_await_all([$p1, $p2, $p3]);
+// [$p1 => 1, $p2 => 2, $p3 => 3]
+```
+
+---
+
+## `oxphp_async_await_any`
+
+Races multiple promises and returns the first to complete, regardless of array order. Uses `futures::select_all` internally for true concurrent race semantics.
+
+```php
+oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array
+```
+
+**Parameters:**
+
+| Name | Type | Default | Description |
+|------|------|---------|-------------|
+| `$promise_ids` | `array` | *(required)* | Array of promise IDs returned by `oxphp_async()` |
+| `$timeout` | `?float` | `null` | Overall timeout in seconds for any promise to complete |
+
+**Return value:** An associative array with two keys: `id` (the promise ID that completed first) and `value` (its result).
+
+**Throws:** `OxPHP\AsyncException` if the winning promise threw an exception. `OxPHP\AsyncTimeoutException` if no promise completes within the timeout.
+
+**Remaining promises:** Non-winning promises stay in flight and can be awaited individually via `oxphp_async_await()`. On timeout, all specified promises are cancelled.
+
+**Example:**
+
+```php
+<?php
+$p1 = oxphp_async(function(): int { sleep(2); return 1; });
+$p2 = oxphp_async(function(): int { usleep(100_000); return 2; });
+$p3 = oxphp_async(function(): int { sleep(1); return 3; });
+
+$winner = oxphp_async_await_any([$p1, $p2, $p3]);
+// ['id' => $p2, 'value' => 2]  (fastest to complete, ~100ms)
+
+// Non-winning promises are still awaitable
+$r1 = oxphp_async_await($p1); // 1
+$r3 = oxphp_async_await($p3); // 3
+```
+
+---
+
 ## Plugin Functions
 
 Plugins can register custom PHP functions that are callable from your scripts. These functions are registered during PHP module initialization (`MINIT`) and dispatched through the C bridge to Rust handler code.
@@ -397,11 +552,16 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [6] => oxphp_is_streaming
 //     [7] => oxphp_stream_flush
 //     [8] => oxphp_worker
+//     [9] => oxphp_async
+//     [10] => oxphp_async_await
+//     [11] => oxphp_async_await_all
+//     [12] => oxphp_async_await_any
 // )
 ```
 
 ## See Also
 
+- [Async Promises](/features/async-promises.md) --- parallel execution with `oxphp_async()` and `oxphp_async_await()`
 - [Superglobals](superglobals.md) --- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
 - [OPcache Compatibility](opcache.md) --- how the `request_time` callback enables OPcache
 - [Request IDs](/features/request-ids.md) --- how request IDs are generated and propagated

@@ -109,6 +109,20 @@ curl http://localhost:9090/metrics
 
 Эти счётчики увеличиваются только при включённом сжатии (`COMPRESSION_LEVEL` > 0) и когда ответ действительно сжат (сжатый вывод меньше оригинала).
 
+### Асинхронные задачи
+
+Эти метрики выводятся только при активном асинхронном пуле (`ASYNC_WORKERS` > 0) и когда хотя бы одна задача была отправлена или отклонена.
+
+| Метрика | Тип | Описание |
+|---------|-----|----------|
+| `oxphp_async_tasks_dispatched_total` | counter | Общее количество задач, отправленных через `oxphp_async()` |
+| `oxphp_async_tasks_completed_total` | counter | Задачи, успешно вернувшие значение |
+| `oxphp_async_tasks_failed_total` | counter | Задачи, выбросившие исключение или вызвавшие `die()`/`exit()` |
+| `oxphp_async_tasks_cancelled_total` | counter | Задачи, отменённые (истёк таймаут или очистка при RSHUTDOWN) |
+| `oxphp_async_tasks_rejected_total` | counter | Задачи, отклонённые из-за заполненности асинхронной очереди |
+
+Долю успешных задач можно вычислить как `completed / dispatched`. Высокое значение `rejected` указывает на то, что `ASYNC_QUEUE_CAPACITY` слишком мал или количество `ASYNC_WORKERS` недостаточно.
+
 ### Режим воркера
 
 Эти метрики выводятся только при активном режиме воркера (установлен `WORKER_FILE`). Они обеспечивают наблюдаемость жизненного цикла персистентных PHP-воркеров, рециклирования и времени выполнения каждого запроса.
@@ -270,6 +284,26 @@ oxphp_compressed_responses_total 38500
 # TYPE oxphp_compression_bytes_saved_total counter
 oxphp_compression_bytes_saved_total 96250000
 
+# HELP oxphp_async_tasks_dispatched_total Total async tasks dispatched.
+# TYPE oxphp_async_tasks_dispatched_total counter
+oxphp_async_tasks_dispatched_total 1250
+
+# HELP oxphp_async_tasks_completed_total Async tasks completed successfully.
+# TYPE oxphp_async_tasks_completed_total counter
+oxphp_async_tasks_completed_total 1200
+
+# HELP oxphp_async_tasks_failed_total Async tasks that threw exceptions.
+# TYPE oxphp_async_tasks_failed_total counter
+oxphp_async_tasks_failed_total 45
+
+# HELP oxphp_async_tasks_cancelled_total Async tasks cancelled.
+# TYPE oxphp_async_tasks_cancelled_total counter
+oxphp_async_tasks_cancelled_total 5
+
+# HELP oxphp_async_tasks_rejected_total Async tasks rejected (queue full).
+# TYPE oxphp_async_tasks_rejected_total counter
+oxphp_async_tasks_rejected_total 0
+
 # HELP oxphp_worker_mode_enabled Whether worker mode is active.
 # TYPE oxphp_worker_mode_enabled gauge
 oxphp_worker_mode_enabled 1
@@ -428,6 +462,25 @@ rate(oxphp_compression_bytes_saved_total[5m])
 / rate(oxphp_response_bytes_total[5m])
 ```
 
+**Частота отправки асинхронных задач (задач в секунду):**
+
+```promql
+rate(oxphp_async_tasks_dispatched_total[5m])
+```
+
+**Доля ошибок асинхронных задач:**
+
+```promql
+rate(oxphp_async_tasks_failed_total[5m])
+/ rate(oxphp_async_tasks_dispatched_total[5m]) * 100
+```
+
+**Частота отклонения асинхронных задач (очередь заполнена):**
+
+```promql
+rate(oxphp_async_tasks_rejected_total[5m])
+```
+
 **Частота запросов в режиме воркера:**
 
 ```promql
@@ -539,6 +592,24 @@ groups:
         annotations:
           summary: "OxPHP is actively rate-limiting requests"
 
+      - alert: OxPHPAsyncTaskRejections
+        expr: rate(oxphp_async_tasks_rejected_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async queue is full — tasks are being rejected"
+
+      - alert: OxPHPAsyncHighFailureRate
+        expr: >
+          rate(oxphp_async_tasks_failed_total[5m])
+          / rate(oxphp_async_tasks_dispatched_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async task failure rate above 10%"
+
       - alert: OxPHPLowCacheHitRate
         expr: >
           rate(oxphp_static_cache_hits_total[5m])
@@ -568,5 +639,6 @@ groups:
 
 - [Проверки состояния](health-checks.md) --- эндпоинты `/health` и `/config` внутреннего сервера
 - [Конфигурация](configuration.md) --- `INTERNAL_ADDR` и другие переменные окружения
+- [Асинхронные промисы](/features/async-promises.md) --- параллельное выполнение PHP и метрики асинхронных задач
 - [Пул воркеров](/architecture/worker-pool.md) --- статическое и динамическое масштабирование, режим воркера и поведение рециклирования
 - [Плавная остановка](graceful-shutdown.md) --- как дренирование соединений влияет на `oxphp_active_connections`

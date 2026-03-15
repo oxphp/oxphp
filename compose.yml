@@ -25,7 +25,7 @@ services:
       #   (unset)      — traditional: direct file mapping, / → index.php or index.html
       #   index.php    — framework: all requests → index.php, direct .php access blocked
       #   index.html   — SPA: missing files → index.html, .php still executes
-      - INDEX_FILE=index.php
+      # - INDEX_FILE=index.php
 
       # PHP executor backend.
       #   sapi  — execute PHP via custom SAPI (default, requires php feature)
@@ -109,6 +109,16 @@ services:
 
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
       # - ERROR_PAGES_DIR=/var/www/errors
+
+      # ── Async Promises ──────────────────────────────────────────────
+
+      # Number of dedicated async worker threads for oxphp_async().
+      # 0 = async pool disabled (default).
+      - ASYNC_WORKERS=4
+
+      # Bounded channel capacity for pending async tasks.
+      # Tasks are rejected when full. Default: ASYNC_WORKERS * 64.
+      # - ASYNC_QUEUE_CAPACITY=0
 
       # ── Worker Mode ────────────────────────────────────────────────
 

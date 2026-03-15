@@ -166,6 +166,13 @@ pub struct Metrics {
     compressed_responses_total: AtomicU64,
     /// Bytes saved by compression (original - compressed).
     compression_bytes_saved_total: AtomicU64,
+
+    // ── Async pool metrics ──
+    async_tasks_dispatched: AtomicU64,
+    async_tasks_completed: AtomicU64,
+    async_tasks_failed: AtomicU64,
+    async_tasks_cancelled: AtomicU64,
+    async_tasks_rejected: AtomicU64,
 }
 
 const METHOD_LABELS: [&str; 10] = [
@@ -245,6 +252,11 @@ impl Metrics {
             static_cache_misses: AtomicU64::new(0),
             compressed_responses_total: AtomicU64::new(0),
             compression_bytes_saved_total: AtomicU64::new(0),
+            async_tasks_dispatched: AtomicU64::new(0),
+            async_tasks_completed: AtomicU64::new(0),
+            async_tasks_failed: AtomicU64::new(0),
+            async_tasks_cancelled: AtomicU64::new(0),
+            async_tasks_rejected: AtomicU64::new(0),
         }
     }
 
@@ -346,6 +358,26 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
         self.compression_bytes_saved_total
             .fetch_add(bytes_saved, Ordering::Relaxed);
+    }
+
+    pub fn async_task_dispatched(&self) {
+        self.async_tasks_dispatched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn async_task_completed(&self) {
+        self.async_tasks_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn async_task_failed(&self) {
+        self.async_tasks_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn async_task_cancelled(&self) {
+        self.async_tasks_cancelled.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn async_task_rejected(&self) {
+        self.async_tasks_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn workers_current(&self) -> usize {
@@ -672,6 +704,61 @@ impl Metrics {
             "oxphp_compression_bytes_saved_total {}",
             self.compression_bytes_saved_total.load(Ordering::Relaxed)
         );
+
+        // ── Async pool metrics ──
+        let async_dispatched = self.async_tasks_dispatched.load(Ordering::Relaxed);
+        if async_dispatched > 0 || self.async_tasks_rejected.load(Ordering::Relaxed) > 0 {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_dispatched_total Total async tasks dispatched."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_dispatched_total counter");
+            let _ = writeln!(out, "oxphp_async_tasks_dispatched_total {async_dispatched}");
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_completed_total Async tasks completed successfully."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_completed_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_async_tasks_completed_total {}",
+                self.async_tasks_completed.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_failed_total Async tasks that threw exceptions."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_failed_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_async_tasks_failed_total {}",
+                self.async_tasks_failed.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_cancelled_total Async tasks cancelled."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_cancelled_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_async_tasks_cancelled_total {}",
+                self.async_tasks_cancelled.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_rejected_total Async tasks rejected (queue full)."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_rejected_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_async_tasks_rejected_total {}",
+                self.async_tasks_rejected.load(Ordering::Relaxed)
+            );
+        }
 
         // ── Worker Mode Metrics ──
         if let Some(wm) = self.worker_metrics.get() {
@@ -1155,5 +1242,23 @@ mod tests {
         let output = m.to_prometheus();
         assert!(output.contains("oxphp_compressed_responses_total 2"));
         assert!(output.contains("oxphp_compression_bytes_saved_total 1700"));
+    }
+
+    #[test]
+    fn test_async_metrics() {
+        let m = Metrics::new();
+        m.async_task_dispatched();
+        m.async_task_dispatched();
+        m.async_task_completed();
+        m.async_task_failed();
+        m.async_task_cancelled();
+        m.async_task_rejected();
+
+        let prom = m.to_prometheus();
+        assert!(prom.contains("oxphp_async_tasks_dispatched_total 2"));
+        assert!(prom.contains("oxphp_async_tasks_completed_total 1"));
+        assert!(prom.contains("oxphp_async_tasks_failed_total 1"));
+        assert!(prom.contains("oxphp_async_tasks_cancelled_total 1"));
+        assert!(prom.contains("oxphp_async_tasks_rejected_total 1"));
     }
 }

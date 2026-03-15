@@ -2,12 +2,19 @@
 #include "SAPI.h"
 #include "oxphp_bridge.h"
 #include "Zend/zend_API.h"
+#include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "ext/standard/basic_functions.h"
 #include <stdlib.h>
 #include <time.h>
+
+/* Async promise exception and proxy classes */
+static zend_class_entry *oxphp_async_exception_ce = NULL;
+static zend_class_entry *oxphp_async_timeout_ce = NULL;
+static zend_class_entry *oxphp_async_borrow_ce = NULL;
+zend_class_entry *oxphp_borrowed_proxy_ce = NULL;
 
 /* {{{ oxphp_request_id(): string
  * Returns the hex request ID for the current request. */
@@ -421,6 +428,293 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_oxphp_native_dispatch, 0, 0, 0)
 ZEND_END_ARG_INFO()
 /* }}} */
 
+/* ─── Async Promise PHP Functions ─────────────────────────── */
+
+/* {{{ oxphp_async(Closure $closure, mixed ...$args): int
+ * Dispatch a closure for async execution on a dedicated worker thread.
+ * Returns a promise ID (int) that can be passed to oxphp_async_await(). */
+PHP_FUNCTION(oxphp_async)
+{
+    zval *closure_zv;
+    zval *args = NULL;
+    uint32_t argc = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, -1)
+        Z_PARAM_OBJECT_OF_CLASS(closure_zv, zend_ce_closure)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_VARIADIC('+', args, argc)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Prevent nested async calls from async worker threads */
+    if (oxphp_bridge_is_async_worker()) {
+        zend_throw_exception(oxphp_async_exception_ce,
+            "Cannot call oxphp_async() from within an async worker", 0);
+        RETURN_THROWS();
+    }
+
+    /* Get op_array — must be a user function (not internal) */
+    void *op_array = oxphp_closure_get_op_array(closure_zv);
+    if (!op_array) {
+        zend_throw_exception(oxphp_async_exception_ce,
+            "Closure must be a user-defined function (not internal/built-in)", 0);
+        RETURN_THROWS();
+    }
+
+    /* Get this_ptr (may be NULL for unbound closures) */
+    zval *this_ptr = oxphp_closure_get_this(closure_zv);
+
+    /* Get static_vars HashTable (captured use-vars) */
+    HashTable *static_vars = NULL;
+    oxphp_closure_get_static_vars(closure_zv, &static_vars);
+
+    /* Validate: reject resources and objects in use-vars.
+     * Objects cannot be serialized across threads (PDO, sockets, etc.
+     * would silently become null). Resources are inherently non-portable. */
+    if (static_vars) {
+        zval *val;
+        ZEND_HASH_FOREACH_VAL(static_vars, val) {
+            zval *check = val;
+            if (Z_TYPE_P(check) == IS_REFERENCE) {
+                check = Z_REFVAL_P(check);
+            }
+            if (Z_TYPE_P(check) == IS_RESOURCE) {
+                zend_throw_exception(oxphp_async_exception_ce,
+                    "Cannot pass resource values in use-vars to async closure", 0);
+                RETURN_THROWS();
+            }
+            if (Z_TYPE_P(check) == IS_OBJECT) {
+                zend_throw_exception(oxphp_async_exception_ce,
+                    "Cannot pass object values in use-vars to async closure"
+                    " (objects cannot be serialized across threads)", 0);
+                RETURN_THROWS();
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    /* Validate: reject resources and objects in args */
+    for (uint32_t i = 0; i < argc; i++) {
+        zval *arg = &args[i];
+        if (Z_TYPE_P(arg) == IS_REFERENCE) {
+            arg = Z_REFVAL_P(arg);
+        }
+        if (Z_TYPE_P(arg) == IS_RESOURCE) {
+            zend_throw_exception(oxphp_async_exception_ce,
+                "Cannot pass resource values as arguments to async closure", 0);
+            RETURN_THROWS();
+        }
+        if (Z_TYPE_P(arg) == IS_OBJECT) {
+            zend_throw_exception(oxphp_async_exception_ce,
+                "Cannot pass object values as arguments to async closure (use use-vars for object binding)", 0);
+            RETURN_THROWS();
+        }
+    }
+
+    /* Dispatch to Rust via bridge function pointer */
+    int64_t promise_id = oxphp_bridge_async_dispatch(
+        op_array, static_vars, this_ptr, argc, args, closure_zv
+    );
+
+    if (promise_id < 0) {
+        zend_throw_exception(oxphp_async_exception_ce,
+            "Failed to dispatch async task (pool full or not configured)", 0);
+        RETURN_THROWS();
+    }
+
+    RETURN_LONG((zend_long)promise_id);
+}
+/* }}} */
+
+/* {{{ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
+ * Block until an async promise completes and return its result.
+ * Timeout of 0.0 means wait indefinitely.
+ * Throws AsyncTimeoutException on timeout, AsyncException on error. */
+PHP_FUNCTION(oxphp_async_await)
+{
+    zend_long promise_id;
+    double timeout = 0.0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_LONG(promise_id)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_DOUBLE(timeout)
+    ZEND_PARSE_PARAMETERS_END();
+
+    int result = oxphp_bridge_await_dispatch((int64_t)promise_id, timeout, return_value);
+
+    if (result == -2) {
+        zend_throw_exception_ex(oxphp_async_timeout_ce, 0,
+            "Async promise %ld timed out after %.3f seconds",
+            (long)promise_id, timeout);
+        RETURN_THROWS();
+    } else if (result == -1) {
+        const char *exc_class = oxphp_bridge_get_async_exc_class();
+        const char *exc_msg = oxphp_bridge_get_async_exc_message();
+
+        zend_string *msg;
+        if (exc_msg) {
+            msg = zend_strpprintf(0, "Async task failed: [%s] %s",
+                exc_class ? exc_class : "Unknown", exc_msg);
+        } else {
+            msg = zend_strpprintf(0, "Async promise %ld failed", (long)promise_id);
+        }
+
+        zend_throw_exception(oxphp_async_exception_ce, ZSTR_VAL(msg), 0);
+        zend_string_release(msg);
+
+        oxphp_bridge_clear_async_exception();
+        RETURN_THROWS();
+    }
+    /* return_value already populated by Rust via retval pointer */
+}
+/* }}} */
+
+/* {{{ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
+ * Await all promises and return an associative array of results keyed by promise ID.
+ * Throws on the first failure or timeout encountered. */
+PHP_FUNCTION(oxphp_async_await_all)
+{
+    zval *promises_zv;
+    double timeout = 0.0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_ARRAY(promises_zv)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_DOUBLE(timeout)
+    ZEND_PARSE_PARAMETERS_END();
+
+    HashTable *ht = Z_ARRVAL_P(promises_zv);
+    uint32_t count = zend_hash_num_elements(ht);
+
+    array_init_size(return_value, count);
+
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(ht, entry) {
+        if (Z_TYPE_P(entry) != IS_LONG) {
+            zend_throw_exception(oxphp_async_exception_ce,
+                "oxphp_async_await_all() expects an array of integer promise IDs", 0);
+            zval_ptr_dtor(return_value);
+            RETURN_THROWS();
+        }
+
+        zend_long pid = Z_LVAL_P(entry);
+        zval result;
+        ZVAL_NULL(&result);
+
+        int status = oxphp_bridge_await_dispatch((int64_t)pid, timeout, &result);
+
+        if (status == -2) {
+            zval_ptr_dtor(&result);
+            zval_ptr_dtor(return_value);
+            zend_throw_exception_ex(oxphp_async_timeout_ce, 0,
+                "Async promise %ld timed out after %.3f seconds",
+                (long)pid, timeout);
+            RETURN_THROWS();
+        } else if (status == -1) {
+            zval_ptr_dtor(&result);
+            zval_ptr_dtor(return_value);
+
+            const char *exc_class = oxphp_bridge_get_async_exc_class();
+            const char *exc_msg = oxphp_bridge_get_async_exc_message();
+
+            zend_string *msg;
+            if (exc_msg) {
+                msg = zend_strpprintf(0, "Async task failed: [%s] %s",
+                    exc_class ? exc_class : "Unknown", exc_msg);
+            } else {
+                msg = zend_strpprintf(0, "Async promise %ld failed", (long)pid);
+            }
+
+            zend_throw_exception(oxphp_async_exception_ce, ZSTR_VAL(msg), 0);
+            zend_string_release(msg);
+            oxphp_bridge_clear_async_exception();
+            RETURN_THROWS();
+        }
+
+        zend_hash_index_add_new(Z_ARRVAL_P(return_value), (zend_ulong)pid, &result);
+    } ZEND_HASH_FOREACH_END();
+}
+/* }}} */
+
+/* {{{ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+ * Race multiple promises and return the first to complete.
+ * Returns ['id' => int, 'value' => mixed].
+ * Uses futures::select_all for true race semantics — the fastest promise wins
+ * regardless of array order. Non-winning promises remain awaitable individually.
+ * On timeout, all specified promises are cancelled. */
+PHP_FUNCTION(oxphp_async_await_any)
+{
+    zval *promises_zv;
+    double timeout = 0.0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_ARRAY(promises_zv)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_DOUBLE(timeout)
+    ZEND_PARSE_PARAMETERS_END();
+
+    HashTable *ht = Z_ARRVAL_P(promises_zv);
+    uint32_t count = zend_hash_num_elements(ht);
+
+    if (count == 0) {
+        zend_throw_exception(oxphp_async_exception_ce,
+            "oxphp_async_await_any() requires at least one promise ID", 0);
+        RETURN_THROWS();
+    }
+
+    /* Collect promise IDs into a C array for the bridge call */
+    int64_t *pids = emalloc(sizeof(int64_t) * count);
+    uint32_t idx = 0;
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(ht, entry) {
+        if (Z_TYPE_P(entry) != IS_LONG) {
+            efree(pids);
+            zend_throw_exception(oxphp_async_exception_ce,
+                "oxphp_async_await_any() expects an array of integer promise IDs", 0);
+            RETURN_THROWS();
+        }
+        pids[idx++] = (int64_t)Z_LVAL_P(entry);
+    } ZEND_HASH_FOREACH_END();
+
+    int64_t winner_id = -1;
+    zval result;
+    ZVAL_NULL(&result);
+
+    int status = oxphp_bridge_await_any_dispatch(pids, count, timeout, &winner_id, &result);
+    efree(pids);
+
+    if (status == -2) {
+        zval_ptr_dtor(&result);
+        zend_throw_exception_ex(oxphp_async_timeout_ce, 0,
+            "oxphp_async_await_any() timed out after %.3f seconds waiting for %u promises",
+            timeout, count);
+        RETURN_THROWS();
+    } else if (status == -1) {
+        zval_ptr_dtor(&result);
+
+        const char *exc_class = oxphp_bridge_get_async_exc_class();
+        const char *exc_msg = oxphp_bridge_get_async_exc_message();
+
+        zend_string *msg;
+        if (exc_msg) {
+            msg = zend_strpprintf(0, "Async task failed: [%s] %s",
+                exc_class ? exc_class : "Unknown", exc_msg);
+        } else {
+            msg = zend_strpprintf(0, "Async promise %ld failed", (long)winner_id);
+        }
+
+        zend_throw_exception(oxphp_async_exception_ce, ZSTR_VAL(msg), 0);
+        zend_string_release(msg);
+        oxphp_bridge_clear_async_exception();
+        RETURN_THROWS();
+    }
+
+    /* Return winner result */
+    array_init_size(return_value, 2);
+    add_assoc_long(return_value, "id", (zend_long)winner_id);
+    zend_hash_str_add_new(Z_ARRVAL_P(return_value), "value", sizeof("value") - 1, &result);
+}
+/* }}} */
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_request_id, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()
@@ -450,6 +744,26 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker, 0, 1, _IS_BOOL, 0)
     ZEND_ARG_CALLABLE_INFO(0, handler, 0)
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_async, 0, 1, IS_LONG, 0)
+    ZEND_ARG_OBJ_INFO(0, closure, Closure, 0)
+    ZEND_ARG_VARIADIC_TYPE_INFO(0, args, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_async_await, 0, 1, IS_MIXED, 0)
+    ZEND_ARG_TYPE_INFO(0, promise_id, IS_LONG, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeout, IS_DOUBLE, 0, "0.0")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_async_await_all, 0, 1, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, promise_ids, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeout, IS_DOUBLE, 0, "0.0")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_async_await_any, 0, 1, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO(0, promise_ids, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, timeout, IS_DOUBLE, 0, "0.0")
+ZEND_END_ARG_INFO()
 /* }}} */
 
 /* {{{ function entries */
@@ -463,6 +777,10 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
     PHP_FE(oxphp_worker,            arginfo_oxphp_worker)
+    PHP_FE(oxphp_async,             arginfo_oxphp_async)
+    PHP_FE(oxphp_async_await,             arginfo_oxphp_async_await)
+    PHP_FE(oxphp_async_await_all,         arginfo_oxphp_async_await_all)
+    PHP_FE(oxphp_async_await_any,         arginfo_oxphp_async_await_any)
     PHP_FE_END
 };
 /* }}} */
@@ -476,6 +794,118 @@ PHP_MINFO_FUNCTION(oxphp_sapi)
     php_info_print_table_end();
 }
 /* }}} */
+
+/* === BorrowedProxy — all access throws AsyncBorrowException === */
+
+static void oxphp_borrow_throw(const char *method) {
+    zend_throw_exception_ex(oxphp_async_borrow_ce, 0,
+        "Cannot access borrowed object via %s — awaiting async promise", method);
+}
+
+PHP_METHOD(BorrowedProxy, __get) {
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+    oxphp_borrow_throw("__get");
+}
+
+PHP_METHOD(BorrowedProxy, __set) {
+    zend_string *name;
+    zval *value;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_ZVAL(value)
+    ZEND_PARSE_PARAMETERS_END();
+    oxphp_borrow_throw("__set");
+}
+
+PHP_METHOD(BorrowedProxy, __call) {
+    zend_string *name;
+    zval *arguments;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_ARRAY(arguments)
+    ZEND_PARSE_PARAMETERS_END();
+    oxphp_borrow_throw("__call");
+}
+
+PHP_METHOD(BorrowedProxy, __isset) {
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+    oxphp_borrow_throw("__isset");
+    RETURN_FALSE;
+}
+
+PHP_METHOD(BorrowedProxy, __unset) {
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+    oxphp_borrow_throw("__unset");
+}
+
+PHP_METHOD(BorrowedProxy, __toString) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    oxphp_borrow_throw("__toString");
+    RETURN_THROWS();
+}
+
+PHP_METHOD(BorrowedProxy, __debugInfo) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    oxphp_borrow_throw("__debugInfo");
+}
+
+PHP_METHOD(BorrowedProxy, jsonSerialize) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    oxphp_borrow_throw("jsonSerialize");
+}
+
+/* Arginfo for BorrowedProxy methods */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_borrowed_proxy_get, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_borrowed_proxy_set, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_borrowed_proxy_call, 0, 0, 2)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, arguments, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_borrowed_proxy_isset, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_borrowed_proxy_unset, 0, 0, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_borrowed_proxy_tostring, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_borrowed_proxy_debuginfo, 0, 0, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_borrowed_proxy_jsonserialize, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry oxphp_borrowed_proxy_methods[] = {
+    PHP_ME(BorrowedProxy, __get,          arginfo_borrowed_proxy_get,           ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __set,          arginfo_borrowed_proxy_set,           ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __call,         arginfo_borrowed_proxy_call,          ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __isset,        arginfo_borrowed_proxy_isset,         ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __unset,        arginfo_borrowed_proxy_unset,         ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __toString,     arginfo_borrowed_proxy_tostring,      ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, __debugInfo,    arginfo_borrowed_proxy_debuginfo,     ZEND_ACC_PUBLIC)
+    PHP_ME(BorrowedProxy, jsonSerialize,  arginfo_borrowed_proxy_jsonserialize, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
 
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
@@ -501,6 +931,33 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         }
     }
 
+    /* Async exception classes */
+    zend_class_entry ce;
+
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP", "AsyncException", NULL);
+    oxphp_async_exception_ce = zend_register_internal_class_ex(&ce, zend_ce_exception);
+
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP", "AsyncTimeoutException", NULL);
+    oxphp_async_timeout_ce = zend_register_internal_class_ex(&ce, oxphp_async_exception_ce);
+
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP", "AsyncBorrowException", NULL);
+    oxphp_async_borrow_ce = zend_register_internal_class_ex(&ce, zend_ce_exception);
+
+    /* BorrowedProxy class */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP", "BorrowedProxy", oxphp_borrowed_proxy_methods);
+    oxphp_borrowed_proxy_ce = zend_register_internal_class(&ce);
+    /* Share CE with bridge library so oxphp_create_borrow_proxy() can use it */
+    oxphp_bridge_set_borrow_proxy_ce(oxphp_borrowed_proxy_ce);
+
+    return SUCCESS;
+}
+/* }}} */
+
+/* {{{ RSHUTDOWN — cleanup outstanding async promises */
+PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
+{
+    /* Cleanup any outstanding promises not awaited by user code. */
+    oxphp_bridge_cleanup_outstanding_promises();
     return SUCCESS;
 }
 /* }}} */
@@ -513,7 +970,7 @@ zend_module_entry oxphp_sapi_module_entry = {
     PHP_MINIT(oxphp_sapi),
     NULL,   /* MSHUTDOWN */
     NULL,   /* RINIT */
-    NULL,   /* RSHUTDOWN */
+    PHP_RSHUTDOWN(oxphp_sapi),   /* RSHUTDOWN */
     PHP_MINFO(oxphp_sapi),
     PHP_OXPHP_SAPI_VERSION,
     STANDARD_MODULE_PROPERTIES

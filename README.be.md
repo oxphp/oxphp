@@ -90,6 +90,14 @@ OxPHP аб'ядноўвае ўсе тры ў адзін бінарны файл 
 - **Маніторынг стану воркераў** — аварыйна завершаныя воркеры аўтаматычна вызначаюцца і перазапускаюцца
 - **Ранні адказ** праз `oxphp_finish_request()` — адпраўка адказу з працягам фонавай апрацоўкі
 
+### Async Promises
+- **`oxphp_async()` / `oxphp_async_await()`** — адпраўка замыканняў у выдзелены пул патокаў для сапраўднага паралельнага выканання
+- **Партатыўная серыялізацыя** для зменных `use`, аргументаў і вяртаемых значэнняў — бяспечная бінарная перадача паміж патокамі
+- Падтрымліваемыя тыпы: скаляры, радкі, масівы (укладзеныя). Рэсурсы і аб'екты адхіляюцца з `E_WARNING`
+- **Бяспека выключэнняў і die()** — выключэнні, `die()` і `exit()` перахопліваюцца і паўторна выклікаюцца як `OxPHP\AsyncException`
+- **Падтрымка тайм-аўтаў** — тайм-аўты для кожнай задачы з `OxPHP\AsyncTimeoutException`
+- **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — прымітывы пакетнай апрацоўкі і спаборніцтва
+
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2** з аўтавызначэннем (h2c) праз hyper
 - **TLS 1.3** з ALPN (h2 + http/1.1) праз rustls
@@ -143,11 +151,20 @@ OxPHP аб'ядноўвае ўсе тры ў адзін бінарны файл 
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+                           │
+                    ┌──────▼───────┐
+                    │ Async pool   │  oxphp_async() / oxphp_async_await()
+                    │(crossbeam ch)│  dedicated OS threads (ZTS)
+                    └──────┬───────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         Async Worker  Async Worker  Async Worker
 ```
 
 - **Асінхронны runtime Tokio** — шматпатокавы па змаўчанні, наладжваецца праз `TOKIO_WORKERS`
 - **Пул воркераў ZTS** — кожны воркер — гэта выдзелены паток АС з ізаляцыяй праз `catch_unwind`
 - Воркеры атрымліваюць запыты праз `crossbeam::bounded` і вяртаюць вынік праз `ExecuteResult` (неадкладна або адкладзена праз `oneshot`)
+- **Асінхронны пул** — асобныя патокі АС для задач `oxphp_async()`, прадухіляючы дэдлокі з HTTP-пулам
 - **Рэжым воркера** — пастаянныя PHP-працэсы з мяккім скідам; захоўваюць стан загрузкі (аўтазагрузчыкі, злучэнні з БД) паміж запытамі
 
 ### Унутраны сервер
@@ -193,6 +210,8 @@ OxPHP аб'ядноўвае ўсе тры ў адзін бінарны файл 
 | `WORKER_FILE` | *(не зададзена)* | Шлях да PHP-скрыпту воркера; уключае рэжым пастаянных воркераў |
 | `WORKER_MAX_REQUESTS` | `0` (без абмежаванняў) | Макс. запытаў на воркер да рэцыклізацыі |
 | `WORKER_MAX_MEMORY_MIB` | `0` (без абмежаванняў) | Макс. памяць (МіБ) на воркер да рэцыклізацыі |
+| `ASYNC_WORKERS` | `0` (выключана) | Выдзеленыя патокі асінхронных воркераў для `oxphp_async()` |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Абмежаваная чарга для асінхронных задач; адхіляюцца пры перапаўненні |
 
 ---
 
@@ -225,6 +244,11 @@ curl "http://localhost:8080/test_superglobals.php?foo=bar"
 curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
 curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
 
+# Асінхронныя промісы
+curl http://localhost:8080/test_async.php
+curl http://localhost:8080/test_async_parallel.php
+curl http://localhost:8080/test_async_die.php
+
 # Унутраны сервер
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
 curl http://localhost:9090/health
@@ -252,7 +276,7 @@ curl http://localhost:9090/metrics
 | **Shared Async Runtime** | Адкрыццё runtime Tokio для PHP-воркераў, што дазваляе асінхронныя аперацыі з кода прыкладання |
 | **Database Connection Pool** | Убудаваны пул злучэнняў праз `sqlx`, які зніжае накладныя выдаткі на злучэнне пры кожным запыце |
 | **gRPC Server** | *(спекулятыўна)* Альтэрнатыўны рэжым сервера — gRPC замест HTTP; вельмі нявызначана, магчыма, не будзе рэалізавана |
-| **Promise API** | *(спекулятыўна)* `OxPHP\Promise` і `AsyncTask` — PHP API для асінхроннага выканання задач на базе runtime Tokio; разглядаецца |
+| ~~**Promise API**~~ | ✅ Рэалізавана — `oxphp_async()` / `oxphp_async_await()` з выдзеленым пулам патокаў, партатыўнай серыялізацыяй і бяспекай выключэнняў |
 | **Diagnostics** | Прадакшн-дыягностыка: праверка абмежаванняў АС (ulimit, TCP backlog, epoll/kqueue, налады кантэйнера), выяўленне вузкіх месцаў прадукцыйнасці (глыбіня чаргі воркераў, канкурэнцыя блакіровак, нагрузка на GC/алакатар, статыстыка ZTS) і канкрэтныя рэкамендацыі па дзеянням |
 
 ## Дакументацыя
