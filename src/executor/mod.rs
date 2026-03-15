@@ -1,3 +1,4 @@
+pub mod async_pool;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod stub;

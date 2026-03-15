@@ -5,9 +5,15 @@ mod logging;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::net::TcpListener;
+use tokio::runtime::Handle;
 use tokio::signal;
 use tokio::sync::Semaphore;
+
+/// Process-global Tokio runtime handle for async promise await operations.
+/// Set once in async_main(), read by PHP worker threads for block_on().
+pub static TOKIO_HANDLE: OnceLock<Handle> = OnceLock::new();
 
 use oxphp::config;
 use oxphp::events::EventDispatcher;
@@ -45,6 +51,12 @@ fn main() -> Result<(), types::BoxError> {
     let executor: Arc<dyn executor::ScriptExecutor> =
         Arc::from(executor::create_executor(Arc::clone(&metrics)));
 
+    let async_pool = oxphp::executor::async_pool::AsyncWorkerPool::new(
+        config.async_workers,
+        config.async_queue_capacity,
+        Some(Arc::clone(&metrics)),
+    );
+
     let cpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -69,6 +81,7 @@ fn main() -> Result<(), types::BoxError> {
         metrics,
         dispatcher,
         plugin_manager,
+        async_pool,
     ))
 }
 
@@ -78,7 +91,21 @@ async fn async_main(
     metrics: Arc<Metrics>,
     mut dispatcher: EventDispatcher,
     plugin_manager: PluginManager,
+    mut async_pool: Option<executor::async_pool::AsyncWorkerPool>,
 ) -> Result<(), types::BoxError> {
+    TOKIO_HANDLE
+        .set(Handle::current())
+        .expect("TOKIO_HANDLE already set");
+
+    #[cfg(feature = "php")]
+    if let Some(ref mut pool) = async_pool {
+        pool.start();
+        oxphp::php::sapi::set_global_async_tx(pool.task_sender());
+        oxphp::php::sapi::set_async_tokio_handle(Handle::current());
+        oxphp::php::sapi::register_async_callbacks();
+        oxphp::php::sapi::set_async_metrics(Arc::clone(&metrics));
+    }
+
     let _log_guard = logging::init(&config.log_level)?;
 
     let mode = if config.worker_file.is_some() {
@@ -328,6 +355,11 @@ async fn async_main(
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    }
+
+    // Shutdown async worker pool
+    if let Some(ref mut pool) = async_pool {
+        pool.shutdown();
     }
 
     // Abort internal server task

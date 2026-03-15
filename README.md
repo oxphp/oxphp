@@ -90,6 +90,14 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 - **Worker health monitoring** — dead workers are automatically detected and respawned
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work
 
+### Async Promises
+- **`oxphp_async()` / `oxphp_async_await()`** — dispatch closures to a dedicated thread pool for true parallel execution
+- **Portable serialization** for `use` variables, arguments, and return values — safe cross-thread binary transfer
+- Supported types: scalars, strings, arrays (nested). Resources and objects rejected with `E_WARNING`
+- **Exception & die() safety** — exceptions, `die()`, and `exit()` are caught and re-thrown as `OxPHP\AsyncException`
+- **Timeout support** — per-task timeouts with `OxPHP\AsyncTimeoutException`
+- **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — batch and race primitives
+
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
 - **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
@@ -143,11 +151,20 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+                           │
+                    ┌──────▼───────┐
+                    │ Async pool   │  oxphp_async() / oxphp_async_await()
+                    │(crossbeam ch)│  dedicated OS threads (ZTS)
+                    └──────┬───────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         Async Worker  Async Worker  Async Worker
 ```
 
 - **Tokio async runtime** — multi-threaded by default, tunable via `TOKIO_WORKERS`
 - **ZTS worker pool** — each worker is a dedicated OS thread with `catch_unwind` isolation
 - Workers receive requests via `crossbeam::bounded`, respond via `ExecuteResult` (immediate or deferred via `oneshot`)
+- **Async pool** — separate OS threads for `oxphp_async()` tasks, preventing deadlocks with the HTTP pool
 - **Worker mode** — persistent PHP with soft reset; keeps bootstrap state (autoloaders, DB connections) alive
 
 ### Internal Server
@@ -193,6 +210,8 @@ All settings are via environment variables — no config files required.
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script; enables persistent worker mode |
 | `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling |
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
+| `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
 
 ---
 
@@ -215,7 +234,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ## Development
 
 ```bash
-# Full verification (host, 167 tests)
+# Full verification (host)
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker smoke tests
@@ -224,6 +243,11 @@ curl http://localhost:8080/
 curl "http://localhost:8080/test_superglobals.php?foo=bar"
 curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
 curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+
+# Async promises
+curl http://localhost:8080/test_async.php
+curl http://localhost:8080/test_async_parallel.php
+curl http://localhost:8080/test_async_die.php
 
 # Internal server
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
@@ -252,7 +276,7 @@ curl http://localhost:9090/metrics
 | **Shared Async Runtime** | Expose the Tokio runtime to PHP workers, enabling async-aware operations from userland |
 | **Database Connection Pool** | Built-in connection pooling via `sqlx`, reducing per-request connection overhead |
 | **gRPC Server** | *(speculative)* An alternative server mode — gRPC instead of HTTP; very uncertain, may not happen |
-| **Promise API** | *(speculative)* `OxPHP\Promise` and `AsyncTask` — a PHP-side API for async task execution backed by the Tokio runtime; under consideration |
+| ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |
 | **Diagnostics** | Production doctor: checks OS limits (ulimit, TCP backlog, epoll/kqueue, container settings), identifies performance bottlenecks (worker queue depth, lock contention, GC/alloc pressure, ZTS stats), and gives specific actionable recommendations |
 
 ## Documentation

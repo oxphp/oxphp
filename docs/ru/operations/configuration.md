@@ -76,6 +76,13 @@ OxPHP настраивается исключительно через пере�
 |------------|--------------|----------|
 | `STATIC_CACHE_TTL` | `30d` | TTL кеширования ответов со статическими файлами. Управляет заголовками `Cache-Control`, `ETag` и `Last-Modified`. Поддерживает: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, число в секундах (`3600`) или `off` для отключения |
 
+### Асинхронный пул
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `ASYNC_WORKERS` | `0` (отключено) | Количество выделенных потоков асинхронных воркеров для `oxphp_async()`. `0` отключает асинхронный пул |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Размер ограниченного канала для ожидающих асинхронных задач. Задачи отклоняются при заполнении |
+
 ### Сжатие
 
 | Переменная | По умолчанию | Описание |
@@ -222,6 +229,7 @@ services:
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # TTL кеша статических файлов (по умолчанию: 30d)
+      # ASYNC_WORKERS: "4"            # Потоки асинхронных воркеров для oxphp_async() (по умолчанию: 0 = отключено)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -280,9 +288,11 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression_enabled": true,
+  "compression_level": 4,
   "static_cache_ttl": 2592000,
-  "access_log": true,
+  "access_log": "all",
+  "async_workers": 4,
+  "async_queue_capacity": 256,
   "plugins": {}
 }
 ```
@@ -297,4 +307,5 @@ curl -s http://localhost:9090/config | jq .
 - [Плавная остановка](graceful-shutdown.md) --- как `DRAIN_TIMEOUT_SECONDS` влияет на последовательность остановки
 - [TLS](/features/tls.md) --- конфигурация TLS и требования к сертификатам
 - [Ограничение частоты запросов](/features/rate-limiting.md) --- подробности ограничения частоты запросов по IP
+- [Асинхронные промисы](/features/async-promises.md) --- параллельное выполнение PHP с `oxphp_async()`
 - [Пул воркеров](/architecture/worker-pool.md) --- архитектура статического и динамического пула воркеров

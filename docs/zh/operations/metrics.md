@@ -109,6 +109,20 @@ curl http://localhost:9090/metrics
 
 这些计数器仅在启用压缩（`COMPRESSION_LEVEL` > 0）且响应确实被压缩（压缩输出小于原始数据）时递增。
 
+### 异步任务
+
+以下指标仅在异步池处于活跃状态（`ASYNC_WORKERS` > 0）且至少分发或拒绝了一个任务时输出。
+
+| 指标 | 类型 | 说明 |
+|------|------|------|
+| `oxphp_async_tasks_dispatched_total` | counter | 通过 `oxphp_async()` 提交的任务总数 |
+| `oxphp_async_tasks_completed_total` | counter | 成功返回值的任务数 |
+| `oxphp_async_tasks_failed_total` | counter | 抛出异常或调用了 `die()`/`exit()` 的任务数 |
+| `oxphp_async_tasks_cancelled_total` | counter | 被取消的任务数（超时到期或 RSHUTDOWN 清理） |
+| `oxphp_async_tasks_rejected_total` | counter | 因异步队列已满而被拒绝的任务数 |
+
+任务成功率可计算为 `completed / dispatched`。高 `rejected` 计数表明 `ASYNC_QUEUE_CAPACITY` 太小或 `ASYNC_WORKERS` 不足。
+
 ### 工作进程模式
 
 以下指标仅在工作进程模式激活时（设置了 `WORKER_FILE`）输出。它们提供对持久化 PHP 工作进程生命周期、回收和每请求执行时间的可见性。
@@ -270,6 +284,26 @@ oxphp_compressed_responses_total 38500
 # TYPE oxphp_compression_bytes_saved_total counter
 oxphp_compression_bytes_saved_total 96250000
 
+# HELP oxphp_async_tasks_dispatched_total Total async tasks dispatched.
+# TYPE oxphp_async_tasks_dispatched_total counter
+oxphp_async_tasks_dispatched_total 1250
+
+# HELP oxphp_async_tasks_completed_total Async tasks completed successfully.
+# TYPE oxphp_async_tasks_completed_total counter
+oxphp_async_tasks_completed_total 1200
+
+# HELP oxphp_async_tasks_failed_total Async tasks that threw exceptions.
+# TYPE oxphp_async_tasks_failed_total counter
+oxphp_async_tasks_failed_total 45
+
+# HELP oxphp_async_tasks_cancelled_total Async tasks cancelled.
+# TYPE oxphp_async_tasks_cancelled_total counter
+oxphp_async_tasks_cancelled_total 5
+
+# HELP oxphp_async_tasks_rejected_total Async tasks rejected (queue full).
+# TYPE oxphp_async_tasks_rejected_total counter
+oxphp_async_tasks_rejected_total 0
+
 # HELP oxphp_worker_mode_enabled Whether worker mode is active.
 # TYPE oxphp_worker_mode_enabled gauge
 oxphp_worker_mode_enabled 1
@@ -428,6 +462,25 @@ rate(oxphp_compression_bytes_saved_total[5m])
 / rate(oxphp_response_bytes_total[5m])
 ```
 
+**异步任务分发速率（每秒任务数）：**
+
+```promql
+rate(oxphp_async_tasks_dispatched_total[5m])
+```
+
+**异步任务失败率：**
+
+```promql
+rate(oxphp_async_tasks_failed_total[5m])
+/ rate(oxphp_async_tasks_dispatched_total[5m]) * 100
+```
+
+**异步任务拒绝率（队列已满）：**
+
+```promql
+rate(oxphp_async_tasks_rejected_total[5m])
+```
+
 **工作进程模式请求速率：**
 
 ```promql
@@ -539,6 +592,24 @@ groups:
         annotations:
           summary: "OxPHP is actively rate-limiting requests"
 
+      - alert: OxPHPAsyncTaskRejections
+        expr: rate(oxphp_async_tasks_rejected_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async queue is full — tasks are being rejected"
+
+      - alert: OxPHPAsyncHighFailureRate
+        expr: >
+          rate(oxphp_async_tasks_failed_total[5m])
+          / rate(oxphp_async_tasks_dispatched_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "OxPHP async task failure rate above 10%"
+
       - alert: OxPHPLowCacheHitRate
         expr: >
           rate(oxphp_static_cache_hits_total[5m])
@@ -568,5 +639,6 @@ groups:
 
 - [健康检查](health-checks.md) --- 内部服务器的 `/health` 和 `/config` 端点
 - [配置](configuration.md) --- `INTERNAL_ADDR` 及其他环境变量
+- [异步 Promise](/features/async-promises.md) --- 并行 PHP 执行和异步任务指标
 - [工作池](/architecture/worker-pool.md) --- 静态和动态伸缩、工作进程模式和回收行为
 - [优雅关闭](graceful-shutdown.md) --- 连接排空如何影响 `oxphp_active_connections`

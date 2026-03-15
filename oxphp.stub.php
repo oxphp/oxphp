@@ -170,3 +170,126 @@ function oxphp_stream_flush(): bool {}
  * $app->terminate();  // graceful shutdown
  */
 function oxphp_worker(callable $handler): bool {}
+
+/**
+ * Dispatch a closure for asynchronous execution on the dedicated async worker pool.
+ *
+ * The closure is transferred to a separate OS thread (PHP ZTS). Variables captured
+ * via `use` and arguments passed via ...$args are serialized on the source thread
+ * and deserialized on the async worker thread (independent copies).
+ *
+ * Supported argument types: null, bool, int, float, string, array.
+ * Resources and objects are rejected with E_WARNING.
+ *
+ * Requires ASYNC_WORKERS > 0. Returns false if the async pool is disabled or
+ * the queue is full.
+ *
+ * @param \Closure $closure The closure to execute asynchronously
+ * @param mixed ...$args Arguments serialized to the async worker thread
+ * @return int|false Promise ID (positive integer) on success, false on failure
+ *
+ * @example
+ * $p = oxphp_async(function(int $x, int $y): int {
+ *     return $x + $y;
+ * }, 10, 20);
+ * $result = oxphp_async_await($p); // 30
+ */
+function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
+
+/**
+ * Block until the async task completes and return its result.
+ *
+ * The return value is deserialized from the async worker thread onto the
+ * current thread's heap.
+ *
+ * Each promise ID can only be awaited once. Non-awaited promises are cleaned up
+ * automatically at request end (RSHUTDOWN) with a 5-second timeout.
+ *
+ * @param int $promise_id Promise ID returned by oxphp_async()
+ * @param float|null $timeout Maximum seconds to wait, null = wait indefinitely
+ * @return mixed The return value of the closure
+ *
+ * @throws \OxPHP\AsyncException If the closure threw an exception or called die()/exit()
+ * @throws \OxPHP\AsyncTimeoutException If the timeout expired before completion
+ *
+ * @example
+ * $p = oxphp_async(function(): string { return 'hello'; });
+ * $result = oxphp_async_await($p); // "hello"
+ *
+ * // With timeout:
+ * try {
+ *     $result = oxphp_async_await($p, 2.0);
+ * } catch (\OxPHP\AsyncTimeoutException $e) {
+ *     // task took longer than 2 seconds
+ * }
+ */
+function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
+
+/**
+ * Await multiple promises and return all results.
+ *
+ * Blocks until every promise completes (or fails/times out). Returns an
+ * associative array mapping each promise ID to its result value.
+ *
+ * @param int[] $promise_ids Array of promise IDs from oxphp_async()
+ * @param float|null $timeout Per-promise timeout in seconds, null = no limit
+ * @return array<int, mixed> Map of promise ID => result value
+ *
+ * @throws \OxPHP\AsyncException If any promise fails
+ * @throws \OxPHP\AsyncTimeoutException If any promise times out
+ *
+ * @example
+ * $p1 = oxphp_async(fn() => 1);
+ * $p2 = oxphp_async(fn() => 2);
+ * $p3 = oxphp_async(fn() => 3);
+ * $results = oxphp_async_await_all([$p1, $p2, $p3]);
+ * // [$p1 => 1, $p2 => 2, $p3 => 3]
+ */
+function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array {}
+
+/**
+ * Race multiple promises and return the first to complete.
+ *
+ * Uses true concurrent race semantics (futures::select_all) — the fastest
+ * promise wins regardless of array order. Non-winning promises remain
+ * individually awaitable via oxphp_async_await().
+ *
+ * On timeout, all specified promises are cancelled and cannot be awaited.
+ *
+ * @param int[] $promise_ids Array of promise IDs from oxphp_async()
+ * @param float|null $timeout Overall timeout in seconds, null = no limit
+ * @return array{id: int, value: mixed} The winning promise ID and its result
+ *
+ * @throws \OxPHP\AsyncException If the winning promise threw an exception
+ * @throws \OxPHP\AsyncTimeoutException If no promise completes within timeout
+ *
+ * @example
+ * $p1 = oxphp_async(fn() => slow_api_a());
+ * $p2 = oxphp_async(fn() => slow_api_b());
+ * $winner = oxphp_async_await_any([$p1, $p2]);
+ * // ['id' => $p2, 'value' => ...] (whichever finished first)
+ * $other = oxphp_async_await($p1); // non-winner still awaitable
+ */
+function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
+
+namespace OxPHP {
+    /**
+     * Thrown when an async task fails — the closure threw an exception,
+     * or called die()/exit().
+     *
+     * The message contains the original exception class and message:
+     * "Async task failed: [DomainException] invalid value"
+     */
+    class AsyncException extends \Exception {}
+
+    /**
+     * Thrown when oxphp_async_await() times out before the task completes.
+     */
+    class AsyncTimeoutException extends AsyncException {}
+
+    /**
+     * Reserved for future use. Previously planned for frozen variable
+     * write protection; currently not thrown by the runtime.
+     */
+    class AsyncBorrowException extends \Exception {}
+}

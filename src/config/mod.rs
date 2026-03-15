@@ -52,6 +52,10 @@ pub struct Config {
     pub worker_max_memory_mib: u64,
     /// Static file cache TTL in seconds. `None` = caching disabled.
     pub static_cache_ttl: Option<u64>,
+    /// Number of dedicated async worker threads. 0 = async pool disabled.
+    pub async_workers: usize,
+    /// Bounded channel capacity for pending async tasks. 0 = auto (async_workers * 64).
+    pub async_queue_capacity: usize,
 }
 
 /// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
@@ -156,6 +160,15 @@ impl Config {
             Err(_) => Some(2_592_000), // 30 days
         };
 
+        let async_workers: usize = std::env::var("ASYNC_WORKERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let async_queue_capacity: usize = std::env::var("ASYNC_QUEUE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
         Ok(Self {
             server,
             log_level,
@@ -175,6 +188,8 @@ impl Config {
             worker_max_requests,
             worker_max_memory_mib,
             static_cache_ttl,
+            async_workers,
+            async_queue_capacity,
         })
     }
 
@@ -202,6 +217,12 @@ impl Config {
             "worker_max_requests": self.worker_max_requests,
             "worker_max_memory_mib": self.worker_max_memory_mib,
             "static_cache_ttl": self.static_cache_ttl,
+            "async_workers": self.async_workers,
+            "async_queue_capacity": if self.async_queue_capacity > 0 {
+                self.async_queue_capacity
+            } else {
+                self.async_workers * 64
+            },
         })
     }
 }

@@ -83,6 +83,9 @@ typedef struct {
 
     /** Current PHP heap usage in bytes (updated after each request). */
     uint64_t current_memory_bytes;
+
+    /** Whether this thread is an async worker (not a request worker). */
+    int is_async_worker;
 } oxphp_ctx_t;
 
 /**
@@ -282,6 +285,15 @@ int oxphp_bridge_get_response_code(void);
 /** Destroy a zval (decrement refcount, free if needed). */
 void oxphp_zval_dtor(void *zv);
 
+/** Increment zval refcount (prevent GC while async task holds op_array pointer). */
+void oxphp_zval_addref(void *zv);
+
+/** Addref the closure object and return the zend_object pointer (stable across stack frames). */
+void *oxphp_closure_addref(void *closure_zv);
+
+/** Release a closure object reference obtained via oxphp_closure_addref. */
+void oxphp_closure_release(void *obj_ptr);
+
 /** Return sizeof(zval) for the running PHP build. */
 size_t oxphp_zval_size(void);
 
@@ -360,6 +372,148 @@ uint64_t oxphp_bridge_get_memory_usage(void);
 
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);
+
+/* === Async Promise Support === */
+
+/* Async worker state (no PHP types — safe without php.h) */
+void oxphp_async_reset(void);
+void oxphp_bridge_set_async_worker(int is_async);
+int oxphp_bridge_is_async_worker(void);
+
+/* Capture last fatal error message (from zend_error_cb) for async exception propagation. */
+void oxphp_bridge_capture_fatal(const char *msg, size_t len);
+char *oxphp_bridge_pop_fatal(void);
+
+/* ─── Async Dispatch Function Pointers ─────────────────────── */
+
+/**
+ * Function pointer types for async dispatch (C extension → Rust).
+ * The extension calls these to dispatch closures and await results.
+ */
+typedef int64_t (*oxphp_async_dispatch_fn_t)(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *closure_zval
+);
+typedef int (*oxphp_await_dispatch_fn_t)(
+    int64_t promise_id, double timeout, void *retval
+);
+typedef int (*oxphp_await_any_dispatch_fn_t)(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
+
+/** Register Rust async dispatch callbacks (called once at init). */
+void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
+void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
+void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
+
+/** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
+int64_t oxphp_bridge_async_dispatch(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *closure_zval
+);
+
+/** Call Rust await dispatch. Returns 0 (success), -1 (error), -2 (timeout). */
+int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval);
+
+/** Call Rust await_any dispatch. Races multiple promises, returns the first to complete.
+ *  On success: *out_winner_id is the winning promise ID, retval has the result.
+ *  Returns 0 (success), -1 (error), -2 (timeout). */
+int oxphp_bridge_await_any_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
+
+/* ─── Async Promise Cleanup ─────────────────────────────────── */
+typedef void (*oxphp_cleanup_promises_fn_t)(void);
+void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn);
+void oxphp_bridge_cleanup_outstanding_promises(void);
+
+/* ─── Async Exception Details ────────────────────────────── */
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace);
+const char *oxphp_bridge_get_async_exc_class(void);
+const char *oxphp_bridge_get_async_exc_message(void);
+const char *oxphp_bridge_get_async_exc_trace(void);
+void oxphp_bridge_clear_async_exception(void);
+
+/* The remaining async functions use PHP types (zval, HashTable, zend_op_array)
+ * and are only available when PHP headers have been included first.
+ * Rust FFI uses *mut c_void for all these pointer types. */
+#ifdef PHP_H
+
+/* Freeze a zval in-place: arrays get IS_ARRAY_IMMUTABLE, strings get refcount flags cleared.
+ * Saves original state into out params for later unfreeze.
+ * Returns 0 on success, -1 if type cannot be frozen (IS_OBJECT, IS_RESOURCE). */
+int oxphp_freeze_zval(zval *zv, uint32_t *out_orig_refcount, uint32_t *out_orig_gc_flags, uint32_t *out_orig_type_flags);
+
+/* Unfreeze a zval, restoring original refcount and flags. */
+void oxphp_unfreeze_zval(zval *zv, uint32_t orig_refcount, uint32_t orig_gc_flags, uint32_t orig_type_flags);
+
+/* Deep-copy a zval using emalloc on the target thread. Result is thread-independent. */
+void oxphp_deep_copy_zval(zval *dst, const zval *src);
+
+/* Free a deep-copied zval. */
+void oxphp_deep_free_zval(zval *zv);
+
+/* === Portable (cross-thread) serialization ===
+ * Serialize zvals into a flat system-malloc'd buffer that can safely cross
+ * ZTS thread boundaries. The receiver calls deserialize on its own thread,
+ * which allocates via emalloc on the correct per-thread heap. */
+
+/* Serialize `argc` zvals into a portable buffer.
+ * Returns 0 on success, -1 on failure.
+ * On success, *out_buf and *out_len are set (caller owns, free with oxphp_portable_free). */
+int oxphp_portable_serialize(const zval *args, uint32_t argc,
+                             unsigned char **out_buf, size_t *out_len);
+
+/* Serialize a HashTable (e.g. closure static_vars) into a portable buffer.
+ * Returns 0 on success, -1 on failure. */
+int oxphp_portable_serialize_ht(HashTable *ht,
+                                unsigned char **out_buf, size_t *out_len);
+
+/* Deserialize a portable buffer into `argc` zvals on the current thread's heap.
+ * `out` must point to pre-allocated (zeroed) zval storage for argc zvals. */
+int oxphp_portable_deserialize(const unsigned char *buf, size_t len,
+                               uint32_t argc, zval *out);
+
+/* Deserialize a portable buffer produced by oxphp_portable_serialize_ht
+ * into a new HashTable on the current thread's heap.
+ * Returns 0 on success, -1 on failure. Caller owns the returned HashTable. */
+int oxphp_portable_deserialize_ht(const unsigned char *buf, size_t len,
+                                  HashTable **out_ht);
+
+/* Free a buffer returned by oxphp_portable_serialize / oxphp_portable_serialize_ht. */
+void oxphp_portable_free(unsigned char *buf);
+
+/* Free a HashTable returned by oxphp_portable_deserialize_ht. */
+void oxphp_portable_free_ht(HashTable *ht);
+
+/* Closure inspection */
+void *oxphp_closure_get_op_array(zval *closure);
+int oxphp_closure_get_static_vars(zval *closure, HashTable **out_ht);
+int oxphp_closure_has_this(zval *closure);
+zval *oxphp_closure_get_this(zval *closure);
+
+/* Borrow proxy */
+void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
+void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id);
+
+/* Execute an async task on an async worker thread.
+ * Returns 0 on success, -1 on exception.
+ * On exception: exc_class, exc_message, exc_trace are malloc'd strings (caller frees). */
+int oxphp_execute_async_task(
+    zend_op_array *op_array,
+    HashTable *static_vars,
+    zval *this_ptr,
+    uint32_t argc,
+    zval *args,
+    zval *retval,
+    char **exc_class,
+    char **exc_message,
+    char **exc_trace
+);
+
+#endif /* PHP_H */
 
 #ifdef __cplusplus
 }

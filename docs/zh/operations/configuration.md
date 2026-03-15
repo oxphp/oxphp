@@ -70,6 +70,13 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` 表示不限制 |
 | `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前使用的最大内存（兆字节）。`0` 表示不限制 |
 
+### 异步池
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数。`0` 禁用异步池 |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 待处理异步任务的有界通道大小。队列满时任务将被拒绝 |
+
 ### 静态文件缓存
 
 | 变量 | 默认值 | 说明 |
@@ -222,6 +229,7 @@ services:
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
+      # ASYNC_WORKERS: "4"            # Async worker threads for oxphp_async() (default: 0 = disabled)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -280,9 +288,11 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression_enabled": true,
+  "compression_level": 4,
   "static_cache_ttl": 2592000,
-  "access_log": true,
+  "access_log": "all",
+  "async_workers": 4,
+  "async_queue_capacity": 256,
   "plugins": {}
 }
 ```
@@ -297,4 +307,5 @@ curl -s http://localhost:9090/config | jq .
 - [优雅关闭](graceful-shutdown.md) --- `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程
 - [TLS](/features/tls.md) --- TLS 配置和证书要求
 - [速率限制](/features/rate-limiting.md) --- 按 IP 速率限制详情
+- [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 进行并行 PHP 执行
 - [工作池](/architecture/worker-pool.md) --- 静态和动态工作池架构

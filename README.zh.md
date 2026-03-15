@@ -90,6 +90,14 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 - **工作线程健康监控** — 自动检测崩溃线程并重启
 - **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
 
+### 异步 Promise
+- **`oxphp_async()` / `oxphp_async_await()`** — 将闭包分发到专用线程池进行真正的并行执行
+- **可移植序列化** — `use` 变量、参数和返回值安全跨线程二进制传输
+- 支持类型：标量、字符串、数组（嵌套）。资源和对象将被拒绝并触发 `E_WARNING`
+- **异常与 die() 安全** — 异常、`die()` 和 `exit()` 被捕获并重新抛出为 `OxPHP\AsyncException`
+- **超时支持** — 每任务超时，抛出 `OxPHP\AsyncTimeoutException`
+- **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — 批量等待和竞速原语
+
 ### HTTP 与网络
 - **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
 - **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
@@ -143,11 +151,20 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+                           │
+                    ┌──────▼───────┐
+                    │ Async pool   │  oxphp_async() / oxphp_async_await()
+                    │(crossbeam ch)│  dedicated OS threads (ZTS)
+                    └──────┬───────┘
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+         Async Worker  Async Worker  Async Worker
 ```
 
 - **Tokio 异步运行时** — 默认多线程，可通过 `TOKIO_WORKERS` 调整
 - **ZTS 工作池** — 每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
 - 工作线程通过 `crossbeam::bounded` 接收请求，通过 `ExecuteResult`（即时或经由 `oneshot` 延迟）返回结果
+- **异步池** — 独立操作系统线程用于 `oxphp_async()` 任务，防止与 HTTP 池死锁
 - **工作进程模式** — 持久化 PHP 进程，请求间软重置；保持引导状态（自动加载器、数据库连接）跨请求存活
 
 ### 内部服务器
@@ -193,6 +210,8 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径；设置后启用持久化工作进程模式 |
 | `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数 |
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
+| `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
 
 ---
 
@@ -225,6 +244,11 @@ curl "http://localhost:8080/test_superglobals.php?foo=bar"
 curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
 curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
 
+# 异步 Promise
+curl http://localhost:8080/test_async.php
+curl http://localhost:8080/test_async_parallel.php
+curl http://localhost:8080/test_async_die.php
+
 # 内部服务器
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
 curl http://localhost:9090/health
@@ -252,7 +276,7 @@ curl http://localhost:9090/metrics
 | **Shared Async Runtime** | 将 Tokio 运行时暴露给 PHP 工作进程，实现用户代码中的异步感知操作 |
 | **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
 | **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
-| **Promise API** | *(探索性)* `OxPHP\Promise` 和 `AsyncTask` —— 基于 Tokio 运行时的 PHP 异步任务执行 API；仍在评估中 |
+| ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
 | **Diagnostics** | 生产诊断工具：检查操作系统限制（ulimit、TCP backlog、epoll/kqueue、容器设置），识别性能瓶颈（工作队列深度、锁竞争、GC/内存分配压力、ZTS 统计），并给出针对性的可操作建议 |
 
 ## 文档

@@ -32,6 +32,7 @@ $routes = [
     ['GET',    '/api/large?kb=N', 'Generate N KB (compression test)'],
     ['GET',    '/api/headers',    'Inspect all headers'],
     ['GET',    '/api/info',       'Server info JSON'],
+    ['GET',    '/api/async?mode=X', 'Async demo (parallel, race, compute)'],
 ];
 
 $routes_html = '';
@@ -54,6 +55,7 @@ $features = [
     ['Error Pages',   'Custom HTML per status code (ERROR_PAGES_DIR)'],
     ['Static Files',  'MIME detection, in-memory cache ≤1 MiB, streaming >1 MiB, HTTP caching (ETag/304)'],
     ['Observability', '/health, /metrics (Prometheus), /config (internal server)'],
+    ['Async Promises', 'oxphp_async() + oxphp_async_await() — parallel closures on dedicated thread pool'],
     ['Worker Pool',   'PHP ZTS threads — static (N) or dynamic (MIN:MAX)'],
     ['OPcache + JIT', 'Shared memory bytecode cache with JIT compilation'],
 ];

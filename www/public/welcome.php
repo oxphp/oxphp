@@ -342,6 +342,11 @@ $sapi       = PHP_SAPI;
                 <h3>High Performance</h3>
                 <p>mimalloc allocator, zero-clone hot path, lock-free response slot pool, pre-allocated buffers. Benchmarked at ~32.7k req/s &mdash; outperforming nginx&nbsp;+&nbsp;PHP&#8209;FPM.</p>
             </div>
+            <div class="feature-card">
+                <div class="icon">&#x23F3;</div>
+                <h3>Async Promises</h3>
+                <p>Dispatch closures to a dedicated async thread pool with <code>oxphp_async()</code>. Await single, all, or race with <code>oxphp_async_await()</code>, <code>oxphp_async_await_all()</code>, <code>oxphp_async_await_any()</code>.</p>
+            </div>
         </div>
 
         <!-- ── Quick Start ── -->
@@ -460,6 +465,21 @@ docker run -p 8080:8080 \
                 </div>
             </div>
             <div class="card">
+                <div class="card-header">Async Pool</div>
+                <div class="card-body">
+                    <table class="env-table">
+                        <thead><tr><th>Variable</th><th>Default</th></tr></thead>
+                        <tbody>
+                            <tr><td><code>ASYNC_WORKERS</code></td><td><code>0</code> (disabled)</td></tr>
+                            <tr><td><code>ASYNC_QUEUE_CAPACITY</code></td><td>workers &times; 64</td></tr>
+                        </tbody>
+                    </table>
+                    <p style="margin-top: 12px; font-size: 0.8125rem; color: var(--color-muted)">
+                        Set <code>ASYNC_WORKERS=4</code> to enable <code>oxphp_async()</code> parallel execution.
+                    </p>
+                </div>
+            </div>
+            <div class="card">
                 <div class="card-header">Timeouts</div>
                 <div class="card-body">
                     <table class="env-table">
@@ -552,6 +572,22 @@ docker run -p 8080:8080 \
             <div class="fn-item">
                 <code>oxphp_worker(callable $handler): bool</code>
                 <p>Enters persistent worker loop. Calls handler per request with soft reset.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_async(Closure $closure, ...$args): int|false</code>
+                <p>Dispatches a closure to the async worker pool. Returns a promise ID.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_async_await(int $id, ?float $timeout): mixed</code>
+                <p>Blocks until the async task completes and returns its result.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_async_await_all(array $ids, ?float $timeout): array</code>
+                <p>Awaits all promises and returns results as an associative array.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_async_await_any(array $ids, ?float $timeout): array</code>
+                <p>Races promises, returns the first to complete (fastest wins).</p>
             </div>
         </div>
 

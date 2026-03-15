@@ -36,6 +36,7 @@ function layout(string $title, string $content): void {
         '/opcache'   => 'OPcache',
         '/functions' => 'Functions',
         '/sse'       => 'SSE',
+        '/async'     => 'Async',
     ];
 
     $current = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);

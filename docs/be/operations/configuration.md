@@ -70,6 +70,13 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 | `WORKER_MAX_REQUESTS` | `0` | Максімальная колькасць запытаў, якую воркер апрацоўвае перад рэцыклінгам. `0` адключае ліміт |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Максімальная памяць (у мегабайтах), якую воркер можа выкарыстоўваць перад рэцыклінгам. `0` адключае ліміт |
 
+### Асінхронны пул
+
+| Зменная | Па змаўчанні | Апісанне |
+|----------|---------|-------------|
+| `ASYNC_WORKERS` | `0` (выключана) | Колькасць выдзеленых патокаў асінхронных воркераў для `oxphp_async()`. `0` адключае асінхронны пул |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Памер абмежаванага канала для чаканых асінхронных задач. Задачы адхіляюцца, калі канал поўны |
+
 ### Кэшаванне статычных файлаў
 
 | Зменная | Па змаўчанні | Апісанне |
@@ -222,6 +229,7 @@ services:
       INTERNAL_ADDR: "127.0.0.1:9090"
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # TTL кэша статычных файлаў (па змаўчанні: 30d)
+      # ASYNC_WORKERS: "4"            # Патокі асінхронных воркераў для oxphp_async() (па змаўчанні: 0 = выключана)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -280,9 +288,11 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "tls_enabled": true,
   "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression_enabled": true,
+  "compression_level": 4,
   "static_cache_ttl": 2592000,
-  "access_log": true,
+  "access_log": "all",
+  "async_workers": 4,
+  "async_queue_capacity": 256,
   "plugins": {}
 }
 ```
@@ -297,4 +307,5 @@ curl -s http://localhost:9090/config | jq .
 - [Плаўная спынка](graceful-shutdown.md) --- як `DRAIN_TIMEOUT_SECONDS` уплывае на паслядоўнасць спынкі
 - [TLS](/be/features/tls.md) --- канфігурацыя TLS і патрабаванні да сертыфікатаў
 - [Абмежаванне хуткасці](/be/features/rate-limiting.md) --- дэталі абмежавання хуткасці па IP
+- [Асінхронныя промісы](/be/features/async-promises.md) --- паралельнае выкананне PHP з `oxphp_async()`
 - [Пул воркераў](/be/architecture/worker-pool.md) --- архітэктура статычнага і дынамічнага пула воркераў

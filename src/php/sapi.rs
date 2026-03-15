@@ -10,6 +10,7 @@ use http::header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
+use crate::async_types::{AsyncResult, AsyncTask, PromiseCleanup};
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
@@ -58,6 +59,28 @@ thread_local! {
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
+    /// Promise ID -> (oneshot receiver, cancellation flag). HTTP worker threads only.
+    static PROMISE_MAP: RefCell<HashMap<u64, (
+        tokio::sync::oneshot::Receiver<AsyncResult>,
+        std::sync::Arc<std::sync::atomic::AtomicBool>,
+    )>> = RefCell::new(HashMap::new());
+
+    /// Per-thread monotonic promise ID counter.
+    static PROMISE_COUNTER: std::cell::Cell<u64> = std::cell::Cell::new(0);
+
+    /// Async task channel sender. Set once per HTTP/worker-mode thread.
+    static ASYNC_TX: RefCell<Option<crossbeam_channel::Sender<AsyncTask>>>
+        = RefCell::new(None);
+
+    /// Per-promise freeze/borrow cleanup state.
+    static PROMISE_CLEANUP: RefCell<HashMap<u64, PromiseCleanup>>
+        = RefCell::new(HashMap::new());
+
+    /// True on async worker threads, false on HTTP workers.
+    static IS_ASYNC_WORKER: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -871,6 +894,19 @@ unsafe extern "C" fn oxphp_error_cb(
     // code placed after the delegation.
     if level == "error" {
         set_fatal_error_status_if_default();
+
+        // On async worker threads, capture the error message for exception propagation.
+        // When an uncaught exception triggers zend_exception_error → zend_bailout,
+        // EG(exception) is cleared before bailout. The zend_catch block in
+        // oxphp_execute_async_task reads this captured message to extract the
+        // original exception class and message.
+        if is_async_worker() && !message.is_null() {
+            let raw = (*message).as_bytes();
+            crate::bridge::ffi::oxphp_bridge_capture_fatal(
+                raw.as_ptr() as *const std::os::raw::c_char,
+                raw.len(),
+            );
+        }
     }
 
     match level {
@@ -1169,6 +1205,9 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 /// # Safety
 /// Called from C code via function pointer.
 unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
+    // Cleanup any outstanding async promises from this request
+    cleanup_outstanding_promises_callback();
+
     // If streaming was active, close the stream
     if bindings::oxphp_bridge_is_streaming() {
         flush_stream_chunk();
@@ -1257,6 +1296,648 @@ pub fn get_worker_wait_callback() -> Option<unsafe extern "C" fn() -> std::os::r
 /// Get the worker send callback function pointer for registering with the bridge.
 pub fn get_worker_send_callback() -> Option<unsafe extern "C" fn() -> std::os::raw::c_int> {
     Some(worker_send_callback)
+}
+
+// ─── Async Promise TLS Accessors ──────────────────────────────
+
+pub fn next_promise_id() -> u64 {
+    PROMISE_COUNTER.with(|c| {
+        let id = c.get();
+        c.set(id.wrapping_add(1));
+        id
+    })
+}
+
+pub fn store_promise(
+    id: u64,
+    rx: tokio::sync::oneshot::Receiver<AsyncResult>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    PROMISE_MAP.with(|m| {
+        m.borrow_mut().insert(id, (rx, cancelled));
+    });
+}
+
+pub fn take_promise(
+    id: u64,
+) -> Option<(
+    tokio::sync::oneshot::Receiver<AsyncResult>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)> {
+    PROMISE_MAP.with(|m| m.borrow_mut().remove(&id))
+}
+
+pub fn store_promise_cleanup(id: u64, cleanup: PromiseCleanup) {
+    PROMISE_CLEANUP.with(|m| {
+        m.borrow_mut().insert(id, cleanup);
+    });
+}
+
+pub fn take_promise_cleanup(id: u64) -> Option<PromiseCleanup> {
+    PROMISE_CLEANUP.with(|m| m.borrow_mut().remove(&id))
+}
+
+pub fn outstanding_promise_ids() -> Vec<u64> {
+    let mut ids: std::collections::HashSet<u64> =
+        PROMISE_MAP.with(|m| m.borrow().keys().copied().collect());
+    // Also include IDs that only exist in PROMISE_CLEANUP (e.g., timed-out promises
+    // where the rx was consumed but cleanup data remains).
+    PROMISE_CLEANUP.with(|m| {
+        for &id in m.borrow().keys() {
+            ids.insert(id);
+        }
+    });
+    ids.into_iter().collect()
+}
+
+pub fn set_async_tx(tx: crossbeam_channel::Sender<AsyncTask>) {
+    ASYNC_TX.with(|slot| {
+        *slot.borrow_mut() = Some(tx);
+    });
+}
+
+pub fn get_async_tx() -> Option<crossbeam_channel::Sender<AsyncTask>> {
+    ASYNC_TX.with(|slot| slot.borrow().clone())
+}
+
+pub fn set_is_async_worker(val: bool) {
+    IS_ASYNC_WORKER.with(|c| c.set(val));
+}
+
+pub fn is_async_worker() -> bool {
+    IS_ASYNC_WORKER.with(|c| c.get())
+}
+
+/// Process-global async task sender — set once after the AsyncWorkerPool is started,
+/// read by PHP worker threads to clone a per-thread sender without needing to pass
+/// it through spawn_worker (workers are started before the pool exists).
+static GLOBAL_ASYNC_TX: OnceLock<crossbeam_channel::Sender<crate::async_types::AsyncTask>> =
+    OnceLock::new();
+
+/// Set the global async task sender. Must be called at most once, after the pool starts.
+pub fn set_global_async_tx(tx: crossbeam_channel::Sender<crate::async_types::AsyncTask>) {
+    GLOBAL_ASYNC_TX
+        .set(tx)
+        .expect("GLOBAL_ASYNC_TX already set");
+}
+
+/// Get a reference to the global async task sender, if the pool is configured.
+pub fn get_global_async_tx(
+) -> Option<&'static crossbeam_channel::Sender<crate::async_types::AsyncTask>> {
+    GLOBAL_ASYNC_TX.get()
+}
+
+// ─── Async Tokio Handle ──────────────────────────────────────
+
+/// Process-global Tokio runtime handle for async promise await operations.
+/// Set once in main.rs, read by PHP worker threads for `block_on()` in `await_dispatch_callback`.
+static ASYNC_TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Set the Tokio runtime handle for async await. Must be called once from main.rs.
+pub fn set_async_tokio_handle(handle: tokio::runtime::Handle) {
+    ASYNC_TOKIO_HANDLE
+        .set(handle)
+        .expect("ASYNC_TOKIO_HANDLE already set");
+}
+
+// ─── Async Metrics ──────────────────────────────────────────────
+
+/// Process-global metrics handle for async task counters.
+/// Set once in main.rs alongside async pool setup; read from dispatch/await callbacks.
+static ASYNC_METRICS: OnceLock<Arc<crate::metrics::Metrics>> = OnceLock::new();
+
+/// Set the metrics handle for async task tracking. Called once from main.rs.
+pub fn set_async_metrics(metrics: Arc<crate::metrics::Metrics>) {
+    ASYNC_METRICS.set(metrics).ok();
+}
+
+fn get_async_metrics() -> Option<&'static Arc<crate::metrics::Metrics>> {
+    ASYNC_METRICS.get()
+}
+
+// ─── Async Dispatch Callbacks ──────────────────────────────────
+
+/// Rust-side callback invoked from C when PHP calls `oxphp_async()`.
+///
+/// Freezes static variables, borrows objects, deep-copies arguments,
+/// sends the task to the async worker pool, and returns a promise ID.
+///
+/// # Safety
+/// Called from C FFI. All pointer arguments must be valid PHP zvals/op_arrays.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn async_dispatch_callback(
+    op_array: *const c_void,
+    static_vars: *mut c_void,
+    this_ptr: *mut c_void,
+    argc: u32,
+    args: *mut c_void,
+    closure_zval: *mut c_void,
+) -> i64 {
+    use crate::async_types::BorrowedZval;
+    use crate::bridge::ffi;
+
+    // 1. Get global async task sender
+    let tx = match get_global_async_tx() {
+        Some(tx) => tx,
+        None => return -1,
+    };
+
+    // 2. Generate promise ID
+    let promise_id = next_promise_id();
+
+    // 3. Prepare cleanup tracker for freeze/borrow state
+    let mut cleanup = PromiseCleanup::new();
+
+    // Addref the closure object to prevent GC from freeing the op_array
+    // while the async worker still holds a pointer to it. We store the
+    // zend_object pointer (stable) rather than the zval pointer (stack-local
+    // in PHP_FUNCTION, invalid after the C function returns).
+    if !closure_zval.is_null() {
+        let obj_ptr = ffi::oxphp_closure_addref(closure_zval);
+        if !obj_ptr.is_null() {
+            cleanup.closure_zval = obj_ptr;
+        }
+    }
+
+    // Portable-serialize static_vars (closure use-vars) for safe cross-thread transfer.
+    // All data crossing thread boundaries must be serialized — no pointer sharing.
+    let (sv_buf, sv_len) = if !static_vars.is_null() {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc = ffi::oxphp_portable_serialize_ht(
+            static_vars as *mut c_void,
+            &mut out_buf,
+            &mut out_len,
+        );
+        if rc != 0 || out_buf.is_null() {
+            return -1;
+        }
+        (out_buf, out_len)
+    } else {
+        (std::ptr::null_mut(), 0usize)
+    };
+
+    // 4. Handle this_ptr borrowing
+    if !this_ptr.is_null() {
+        let zval_size = ffi::oxphp_zval_size();
+        let mut original_data = [0u8; 16];
+        let copy_len = zval_size.min(16);
+        std::ptr::copy_nonoverlapping(this_ptr as *const u8, original_data.as_mut_ptr(), copy_len);
+        ffi::oxphp_create_borrow_proxy(this_ptr, promise_id);
+        cleanup.borrowed.push(BorrowedZval {
+            proxy_zval_ptr: this_ptr,
+            original_zval_data: original_data,
+        });
+    }
+
+    // 5. Portable-serialize args (system malloc buffer, safe to cross threads)
+    let (ser_buf, ser_len) = if argc > 0 && !args.is_null() {
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let rc =
+            ffi::oxphp_portable_serialize(args as *const c_void, argc, &mut out_buf, &mut out_len);
+        if rc != 0 || out_buf.is_null() {
+            return -1;
+        }
+        (out_buf, out_len)
+    } else {
+        (std::ptr::null_mut(), 0usize)
+    };
+
+    // 6. Create oneshot channel
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // 7. Build and send task
+    let task = AsyncTask {
+        promise_id,
+        op_array,
+        serialized_static_vars: sv_buf,
+        serialized_static_vars_len: sv_len,
+        this_ptr,
+        argc,
+        serialized_args: ser_buf,
+        serialized_args_len: ser_len,
+        cancelled: cancelled.clone(),
+        result_tx,
+    };
+
+    match tx.try_send(task) {
+        Ok(()) => {
+            store_promise(promise_id, result_rx, cancelled);
+            store_promise_cleanup(promise_id, cleanup);
+            if let Some(m) = get_async_metrics() {
+                m.async_task_dispatched();
+            }
+            promise_id as i64
+        }
+        Err(crossbeam_channel::TrySendError::Full(_))
+        | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            // Rollback: cleanup borrowed (restore original zval bytes)
+            for borrowed in &cleanup.borrowed {
+                let zval_size = ffi::oxphp_zval_size();
+                let copy_len = zval_size.min(16);
+                std::ptr::copy_nonoverlapping(
+                    borrowed.original_zval_data.as_ptr(),
+                    borrowed.proxy_zval_ptr as *mut u8,
+                    copy_len,
+                );
+            }
+            // Cleanup frozen (unfreeze)
+            for frozen in &cleanup.frozen {
+                ffi::oxphp_unfreeze_zval(
+                    frozen.zval_ptr,
+                    frozen.orig_refcount,
+                    frozen.orig_gc_flags,
+                    frozen.orig_type_flags,
+                );
+            }
+            // Free serialized buffers (system malloc'd — safe from any thread)
+            if !ser_buf.is_null() {
+                ffi::oxphp_portable_free(ser_buf);
+            }
+            if !sv_buf.is_null() {
+                ffi::oxphp_portable_free(sv_buf);
+            }
+            // Release the closure object reference on rollback
+            if !cleanup.closure_zval.is_null() {
+                ffi::oxphp_closure_release(cleanup.closure_zval);
+            }
+            if let Some(m) = get_async_metrics() {
+                m.async_task_rejected();
+            }
+            -1
+        }
+    }
+}
+
+/// Rust-side callback invoked from C when PHP calls `oxphp_async_await()`.
+///
+/// Blocks on the oneshot receiver until the async result arrives,
+/// cleans up frozen/borrowed state, and copies the result into retval.
+///
+/// Returns: 0 = success (retval populated), -1 = error, -2 = timeout.
+///
+/// # Safety
+/// Called from C FFI. `retval` must be a valid zval pointer.
+pub unsafe extern "C" fn await_dispatch_callback(
+    promise_id: i64,
+    timeout: f64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    use std::time::Duration;
+
+    let id = promise_id as u64;
+
+    // Take promise from map
+    let (rx, cancelled) = match take_promise(id) {
+        Some(p) => p,
+        None => return -1,
+    };
+
+    // Block on result — use tokio::runtime::Handle::block_on for timeout support
+    let mut result = if timeout > 0.0 {
+        match ASYNC_TOKIO_HANDLE.get() {
+            Some(handle) => {
+                let dur = Duration::from_secs_f64(timeout);
+                match handle.block_on(async { tokio::time::timeout(dur, rx).await }) {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(_)) => {
+                        // Channel closed — task was dropped
+                        cleanup_promise(id);
+                        return -1;
+                    }
+                    Err(_) => {
+                        // Timeout — signal cancellation so the async worker stops.
+                        // Note: rx was consumed by the timeout future, so we can't
+                        // re-store it. The PROMISE_CLEANUP data remains and will be
+                        // cleaned up by RSHUTDOWN (cleanup_outstanding_promises).
+                        // The cancelled flag tells the worker to stop early.
+                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return -2;
+                    }
+                }
+            }
+            None => {
+                // No tokio handle — fall back to blocking recv
+                match rx.blocking_recv() {
+                    Ok(r) => r,
+                    Err(_) => {
+                        cleanup_promise(id);
+                        return -1;
+                    }
+                }
+            }
+        }
+    } else {
+        // No timeout — blocking recv
+        match rx.blocking_recv() {
+            Ok(r) => r,
+            Err(_) => {
+                cleanup_promise(id);
+                return -1;
+            }
+        }
+    };
+
+    // Cleanup frozen/borrowed state
+    cleanup_promise(id);
+
+    // Handle result
+    if result.success {
+        if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+            // Deserialize the return value on THIS thread's heap (correct emalloc)
+            let rc = ffi::oxphp_portable_deserialize(
+                result.serialized_value,
+                result.serialized_value_len,
+                1, // single return value
+                retval,
+            );
+            // Free the serialized buffer (system malloc'd) and null the pointer
+            // to prevent double-free in AsyncResult::drop
+            ffi::oxphp_portable_free(result.serialized_value);
+            result.serialized_value = std::ptr::null_mut();
+            if rc != 0 {
+                return -1;
+            }
+        }
+        0
+    } else {
+        // Store exception details in bridge TLS so the C extension can
+        // create a proper exception with class/message/trace from the worker.
+        if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
+            let cls_c = CString::new(cls.as_str()).unwrap_or_default();
+            let msg_c = CString::new(msg.as_str()).unwrap_or_default();
+            let trace_c = result
+                .exception_trace
+                .as_deref()
+                .map(|t| CString::new(t).unwrap_or_default());
+            ffi::oxphp_bridge_set_async_exception(
+                cls_c.as_ptr(),
+                msg_c.as_ptr(),
+                trace_c
+                    .as_ref()
+                    .map(|c| c.as_ptr())
+                    .unwrap_or(std::ptr::null()),
+            );
+        }
+        -1
+    }
+}
+
+/// Rust-side callback invoked from C when PHP calls `oxphp_async_await_any()`.
+///
+/// Races multiple promise receivers using `futures::select_all`, returning the
+/// first to complete. Non-winning receivers are put back into PROMISE_MAP so
+/// they can be awaited individually later via `oxphp_async_await()`.
+///
+/// Returns: 0 = success, -1 = error, -2 = timeout.
+/// On success: `*out_winner_id` is the winning promise ID, `retval` is populated.
+///
+/// **Timeout behavior**: On timeout, all receivers are consumed by `select_all`
+/// and cannot be recovered. The corresponding promises are cancelled and will be
+/// cleaned up by RSHUTDOWN. Remaining promises cannot be awaited after timeout.
+///
+/// # Safety
+/// Called from C FFI. `promise_ids` must point to `count` valid i64 values.
+/// `out_winner_id` and `retval` must be valid writable pointers.
+pub unsafe extern "C" fn await_any_dispatch_callback(
+    promise_ids: *const i64,
+    count: u32,
+    timeout: f64,
+    out_winner_id: *mut i64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    use futures_util::future::select_all;
+    use std::time::Duration;
+
+    if count == 0 || promise_ids.is_null() {
+        return -1;
+    }
+
+    // Collect promise IDs from the C array
+    let ids: Vec<u64> = (0..count as usize)
+        .map(|i| *promise_ids.add(i) as u64)
+        .collect();
+
+    // Take all receivers and cancelled flags from PROMISE_MAP.
+    // Track (id, cancelled) in parallel vecs — select_all returns remaining
+    // receivers in original order (minus winner), so index-based mapping works.
+    let mut id_map: Vec<u64> = Vec::with_capacity(ids.len());
+    let mut cancel_map: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+        Vec::with_capacity(ids.len());
+    let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> = Vec::with_capacity(ids.len());
+
+    for &id in &ids {
+        if let Some((rx, cancelled)) = take_promise(id) {
+            id_map.push(id);
+            cancel_map.push(cancelled);
+            rxs.push(rx);
+        }
+    }
+
+    if rxs.is_empty() {
+        return -1;
+    }
+
+    let handle = match ASYNC_TOKIO_HANDLE.get() {
+        Some(h) => h,
+        None => {
+            // No tokio handle — put receivers back and fail
+            for (rx, (id, cancelled)) in rxs.into_iter().zip(id_map.iter().zip(cancel_map.iter())) {
+                store_promise(*id, rx, cancelled.clone());
+            }
+            return -1;
+        }
+    };
+
+    // select_all races all receivers. oneshot::Receiver<T> is Unpin + Future,
+    // so select_all operates directly — no Box::pin needed.
+    // Returns (winner_output, winner_index, remaining_receivers).
+    let race_result = if timeout > 0.0 {
+        let dur = Duration::from_secs_f64(timeout);
+        handle.block_on(async { tokio::time::timeout(dur, select_all(rxs)).await })
+    } else {
+        Ok(handle.block_on(select_all(rxs)))
+    };
+
+    match race_result {
+        Ok((recv_result, winner_idx, remaining)) => {
+            let winner_id = id_map[winner_idx];
+
+            // Put remaining (non-winning) receivers back into PROMISE_MAP.
+            // select_all returns remaining in original order with the winner removed.
+            let mut remaining_iter = remaining.into_iter();
+            for orig_idx in 0..id_map.len() {
+                if orig_idx == winner_idx {
+                    continue;
+                }
+                if let Some(rx) = remaining_iter.next() {
+                    store_promise(id_map[orig_idx], rx, cancel_map[orig_idx].clone());
+                }
+            }
+
+            // Handle the winning result
+            let mut result = match recv_result {
+                Ok(r) => r,
+                Err(_) => {
+                    // Channel closed — task was dropped
+                    cleanup_promise(winner_id);
+                    return -1;
+                }
+            };
+
+            // Cleanup the winner's frozen/borrowed state
+            cleanup_promise(winner_id);
+
+            if result.success {
+                *out_winner_id = winner_id as i64;
+                if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                    let rc = ffi::oxphp_portable_deserialize(
+                        result.serialized_value,
+                        result.serialized_value_len,
+                        1,
+                        retval,
+                    );
+                    ffi::oxphp_portable_free(result.serialized_value);
+                    result.serialized_value = std::ptr::null_mut();
+                    if rc != 0 {
+                        return -1;
+                    }
+                }
+                0
+            } else {
+                if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message)
+                {
+                    let cls_c = CString::new(cls.as_str()).unwrap_or_default();
+                    let msg_c = CString::new(msg.as_str()).unwrap_or_default();
+                    let trace_c = result
+                        .exception_trace
+                        .as_deref()
+                        .map(|t| CString::new(t).unwrap_or_default());
+                    ffi::oxphp_bridge_set_async_exception(
+                        cls_c.as_ptr(),
+                        msg_c.as_ptr(),
+                        trace_c
+                            .as_ref()
+                            .map(|c| c.as_ptr())
+                            .unwrap_or(std::ptr::null()),
+                    );
+                }
+                *out_winner_id = winner_id as i64;
+                -1
+            }
+        }
+        Err(_timeout) => {
+            // Timeout — select_all consumed all receivers. Signal cancellation
+            // so async workers stop early. RSHUTDOWN will clean up PromiseCleanup data.
+            for cancel in &cancel_map {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            -2
+        }
+    }
+}
+
+/// Restore frozen and borrowed zvals for a completed/timed-out promise.
+unsafe fn cleanup_promise(id: u64) {
+    use crate::bridge::ffi;
+
+    if let Some(cleanup) = take_promise_cleanup(id) {
+        for frozen in &cleanup.frozen {
+            ffi::oxphp_unfreeze_zval(
+                frozen.zval_ptr,
+                frozen.orig_refcount,
+                frozen.orig_gc_flags,
+                frozen.orig_type_flags,
+            );
+        }
+        for borrowed in &cleanup.borrowed {
+            let zval_size = ffi::oxphp_zval_size();
+            let copy_len = zval_size.min(16);
+            std::ptr::copy_nonoverlapping(
+                borrowed.original_zval_data.as_ptr(),
+                borrowed.proxy_zval_ptr as *mut u8,
+                copy_len,
+            );
+        }
+        // Release the closure object reference (prevents op_array from being
+        // freed while the async worker holds a pointer to it).
+        if !cleanup.closure_zval.is_null() {
+            ffi::oxphp_closure_release(cleanup.closure_zval);
+        }
+    }
+}
+
+/// RSHUTDOWN / worker-mode callback: clean up any async promises that were
+/// dispatched but never awaited by user code.  Safe to call when the map is
+/// empty (returns immediately).
+///
+/// # Safety
+/// Called from C FFI (RSHUTDOWN) or internally from `worker_send_callback`.
+unsafe extern "C" fn cleanup_outstanding_promises_callback() {
+    use crate::bridge::ffi;
+
+    let ids = outstanding_promise_ids();
+    if ids.is_empty() {
+        return;
+    }
+    tracing::warn!(count = ids.len(), "Cleaning up non-awaited async promises");
+
+    for id in ids {
+        if let Some((rx, cancelled)) = take_promise(id) {
+            // Signal cancellation
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Block with 5-second timeout per promise to avoid indefinite hang
+            if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
+                let _ = handle.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), rx).await
+                });
+            } else {
+                // No handle available, just drop rx
+                drop(rx);
+            }
+        }
+        if let Some(cleanup) = take_promise_cleanup(id) {
+            // Unfreeze frozen zvals
+            for frozen in &cleanup.frozen {
+                ffi::oxphp_unfreeze_zval(
+                    frozen.zval_ptr,
+                    frozen.orig_refcount,
+                    frozen.orig_gc_flags,
+                    frozen.orig_type_flags,
+                );
+            }
+            // Restore borrowed zvals
+            for borrowed in &cleanup.borrowed {
+                let zval_size = ffi::oxphp_zval_size();
+                let copy_len = zval_size.min(16);
+                std::ptr::copy_nonoverlapping(
+                    borrowed.original_zval_data.as_ptr(),
+                    borrowed.proxy_zval_ptr as *mut u8,
+                    copy_len,
+                );
+            }
+        }
+    }
+}
+
+/// Register the async dispatch callbacks with the C bridge.
+///
+/// This must be called after the async pool is started and before PHP workers
+/// begin processing requests. It wires up the Rust dispatch functions so the
+/// C extension's `oxphp_async()` and `oxphp_async_await()` can call into Rust.
+pub fn register_async_callbacks() {
+    unsafe {
+        crate::bridge::ffi::oxphp_bridge_set_async_dispatch(Some(async_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_await_dispatch(Some(await_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_await_any_dispatch(Some(await_any_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
+            cleanup_outstanding_promises_callback,
+        ));
+    }
 }
 
 #[cfg(test)]
