@@ -263,7 +263,7 @@ curl http://localhost:9090/metrics
 
 | Feature | 描述 |
 |---|---|
-| **PHP 8.5** | PHP 8.5 发布后提供支持 |
+| **PHP 8.5** | 支持 PHP 8.5 |
 | **Trace Context (W3C)** | 跨请求自动传播 `traceparent` / `tracestate` 请求头 |
 | **OpenTelemetry** | 通过 OTLP 将追踪和指标导出到任何兼容的后端 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
@@ -273,7 +273,7 @@ curl http://localhost:9090/metrics
 | **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |
 | **HTTP 103 Early Hints** | 发送 `103 Early Hints` 响应，允许客户端在最终响应前预加载资源 |
 | **Ecosystem Plugins** | 扩展插件系统：更多生命周期钩子、更丰富的 PHP API，以及第三方插件作者文档 |
-| **Shared Async Runtime** | 将 Tokio 运行时暴露给 PHP 工作进程，实现用户代码中的异步感知操作 |
+| ~~**Shared Async Runtime**~~ | ✅ 已实现 — Tokio 运行时驱动 `oxphp_async()` / `oxphp_async_await()`，支持超时、结果传递和竞争协调 |
 | **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
 | **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
