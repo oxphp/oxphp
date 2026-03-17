@@ -309,6 +309,13 @@ pub fn set_request_data(req: &ScriptRequest) {
     REQUEST_DATA.with(|rd| {
         let mut data = rd.borrow_mut();
 
+        // Extract cookie string for read_cookies callback (before borrowing server_vars)
+        data.cookie_string = req
+            .headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| CString::new(s).ok());
+
         // Clear previous values but keep the Vec allocation
         data.server_vars.clear();
 
@@ -379,13 +386,6 @@ pub fn set_request_data(req: &ScriptRequest) {
             }
         }
 
-        // Extract cookie string for read_cookies callback
-        data.cookie_string = req
-            .headers
-            .get(header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| CString::new(s).ok());
-
         // All request headers as HTTP_{UPPER_SNAKE_CASE}
         // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
         let mut header_buf = String::with_capacity(64);
@@ -406,7 +406,14 @@ pub fn set_request_data(req: &ScriptRequest) {
                     b.to_ascii_uppercase() as char
                 });
             }
-            push_server_var(&mut data.server_vars, &header_buf, val_str);
+            push_server_var(vars, &header_buf, val_str);
+        }
+
+        // Trace context variables (when tracing is enabled)
+        if !req.trace_id.is_empty() {
+            push_server_var(vars, "OXPHP_TRACE_ID", &req.trace_id);
+            push_server_var(vars, "OXPHP_SPAN_ID", &req.span_id);
+            push_server_var(vars, "OXPHP_PARENT_SPAN_ID", &req.parent_span_id);
         }
 
         // Strings for SG(request_info) — stored as CStrings so pointers

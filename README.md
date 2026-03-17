@@ -112,17 +112,21 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 - **mimalloc** allocator for lower allocation latency under contention
 - **Configurable Tokio runtime** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
 
-### Reliability & Operations
-- **Bounded request queue** with 503 backpressure when full
-- **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
+### Observability
+- **W3C Trace Context** — automatic `traceparent`/`tracestate` propagation, `$_SERVER['OXPHP_TRACE_ID']` for PHP log correlation
+- **OpenTelemetry** — OTLP span export (gRPC/HTTP) with semantic conventions, configurable sampling, batch processing
 - **Prometheus metrics** at `/metrics` — per-worker, zero dependencies
 - **Health check** at `/health` — ready for K8s readiness probes
 - **Structured error logging** — PHP errors routed through `tracing` with `php_error_type`, `php_file`, `php_line`
-- **JSON access logging** (levels: `all`, `error`, off via `ACCESS_LOG`)
+- **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`)
+- **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled
+
+### Reliability & Operations
+- **Bounded request queue** with 503 backpressure when full
+- **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path
 - **Path traversal protection** with symlink escape detection
 - **Non-root container** execution as www-data (UID 82)
-- **Request ID** generation + pass-through (`X-Request-ID`)
 
 ---
 
@@ -212,6 +216,22 @@ All settings are via environment variables — no config files required.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
+| `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
+
+### OpenTelemetry (`plugin-otel` feature)
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_ENABLED` | `false` | Enable span export. Implies `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` (port 4317) or `http/protobuf` (port 4318) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Auth headers for hosted backends (`key=value,key=value`) |
+| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported traces |
+| `OTEL_SERVICE_VERSION` | *(unset)* | Service version in exported traces |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Resource attributes (`key=value,key=value`) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) |
 
 ---
 
@@ -264,8 +284,8 @@ curl http://localhost:9090/metrics
 | Feature | Description |
 |---|---|
 | **PHP 8.5** | Support for PHP 8.5 |
-| **Trace Context (W3C)** | Automatic propagation of `traceparent` / `tracestate` headers across requests |
-| **OpenTelemetry** | Export traces and metrics via OTLP to any compatible backend |
+| ~~**Trace Context (W3C)**~~ | ✅ Implemented — automatic propagation of `traceparent` / `tracestate` headers (W3C spec), enabled via `TRACE_CONTEXT=true` |
+| ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
 | **Built-in PHP Profiler** | Low-overhead profiling without xdebug or external agents, integrated directly into the server |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |

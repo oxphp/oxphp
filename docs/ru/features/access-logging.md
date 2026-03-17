@@ -41,6 +41,8 @@ ACCESS_LOG=error
   "level": "INFO",
   "fields": {
     "request_id": "67890abc00000042",
+    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
+    "span_id": "a1b2c3d4e5f6a7b8",
     "method": "GET",
     "path": "/api/users",
     "status": 200,
@@ -50,6 +52,8 @@ ACCESS_LOG=error
   }
 }
 ```
+
+При отключённом `TRACE_CONTEXT` поля `trace_id` и `span_id` не включаются в записи журнала.
 
 ### Поля
 
@@ -61,6 +65,8 @@ ACCESS_LOG=error
 | `status` | number | Код состояния HTTP-ответа |
 | `duration_us` | number | Общее время обработки запроса в микросекундах |
 | `remote_addr` | string | IP-адрес и порт клиента |
+| `trace_id` | string | Идентификатор трассировки W3C (32 hex-символа). Присутствует только при `TRACE_CONTEXT=true` |
+| `span_id` | string | Идентификатор спана (16 hex-символов). Присутствует только при `TRACE_CONTEXT=true` |
 
 ## Как это работает
 
@@ -101,4 +107,5 @@ RUST_LOG=warn,access_log=info
 ## Смотрите также
 
 - [Идентификаторы запросов](request-ids.md) — как генерируются и пробрасываются идентификаторы запросов
+- [Распределённая трассировка](distributed-tracing.md) — поля `trace_id` и `span_id` в записях журнала
 - [Ограничение частоты запросов](rate-limiting.md) — запросы с ограничением частоты всё равно отображаются в журналах доступа

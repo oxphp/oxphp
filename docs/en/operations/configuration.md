@@ -89,6 +89,29 @@ OxPHP is configured entirely through environment variables. There are no configu
 |----------|---------|-------------|
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality level (0-11). `0` disables compression, `1`-`11` set quality |
 
+### Distributed Tracing
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRACE_CONTEXT` | `false` | Enable W3C Trace Context propagation. Parses incoming `traceparent`/`tracestate` headers, generates trace IDs, injects into responses and PHP `$_SERVER`. Automatically enabled when `OTEL_ENABLED=true` |
+
+### OpenTelemetry (`plugin-otel` feature)
+
+W3C Trace Context propagation is always available (zero dependencies). OpenTelemetry span export requires building with `--features plugin-otel`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | Enable OpenTelemetry span export. Implies `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` (port 4317) or `http/protobuf` (port 4318) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(none)* | Authentication headers for hosted backends (`key=value,key=value`) |
+| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported traces |
+| `OTEL_SERVICE_VERSION` | *(none)* | Service version in exported traces |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(none)* | Resource attributes attached to every span (`key=value,key=value`) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio for ratio-based samplers (0.0–1.0) |
+
 ## Worker Modes
 
 The `PHP_WORKERS` variable controls whether the PHP worker pool uses a fixed size or scales dynamically.
@@ -230,6 +253,8 @@ services:
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
       # ASYNC_WORKERS: "4"            # Async worker threads for oxphp_async() (default: 0 = disabled)
+      # TRACE_CONTEXT: "true"         # Enable W3C Trace Context propagation
+      # OTEL_ENABLED: "true"          # Enable OpenTelemetry span export (implies TRACE_CONTEXT=true)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -308,4 +333,5 @@ TLS key and certificate paths are not included in the output. The `tls_enabled` 
 - [TLS](/features/tls.md) --- TLS configuration and certificate requirements
 - [Rate Limiting](/features/rate-limiting.md) --- per-IP rate limiting details
 - [Async Promises](/features/async-promises.md) --- parallel PHP execution with `oxphp_async()`
+- [Distributed Tracing](/features/distributed-tracing.md) --- W3C Trace Context and OpenTelemetry configuration
 - [Worker Pool](/architecture/worker-pool.md) --- static and dynamic worker pool architecture

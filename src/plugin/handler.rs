@@ -28,6 +28,7 @@ pub struct PluginRequestView<'a> {
     pub request_id: &'a str,
     headers: &'a http::HeaderMap,
     cookies: PluginCookies,
+    metadata: &'a [(String, String)],
 }
 
 impl<'a> PluginRequestView<'a> {
@@ -38,6 +39,7 @@ impl<'a> PluginRequestView<'a> {
         request_id: &'a str,
         headers: &'a http::HeaderMap,
         cookies: PluginCookies,
+        metadata: &'a [(String, String)],
     ) -> Self {
         Self {
             method,
@@ -46,6 +48,7 @@ impl<'a> PluginRequestView<'a> {
             request_id,
             headers,
             cookies,
+            metadata,
         }
     }
 
@@ -62,12 +65,21 @@ impl<'a> PluginRequestView<'a> {
     pub fn cookie(&self, key: &str) -> Option<&str> {
         self.cookies.get(key)
     }
+
+    /// Look up a metadata value by key.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 /// Actions a plugin can take during request processing.
 pub struct PluginRequestActions {
     pub(crate) metadata: Vec<(String, String)>,
     pub(crate) early_response: Option<http::Response<ResponseBody>>,
+    pub(crate) request_id_override: Option<String>,
 }
 
 impl PluginRequestActions {
@@ -75,6 +87,7 @@ impl PluginRequestActions {
         Self {
             metadata: Vec::new(),
             early_response: None,
+            request_id_override: None,
         }
     }
 
@@ -87,6 +100,11 @@ impl PluginRequestActions {
     pub fn set_early_response(&mut self, response: http::Response<ResponseBody>) {
         self.early_response = Some(response);
     }
+
+    /// Override the request ID (e.g. with a trace-derived identifier).
+    pub fn set_request_id(&mut self, id: String) {
+        self.request_id_override = Some(id);
+    }
 }
 
 // ─── Response view/actions ───────────────────────────────────
@@ -96,6 +114,7 @@ pub struct PluginResponseView<'a> {
     pub status: StatusCode,
     pub request_id: &'a str,
     headers: &'a http::HeaderMap,
+    metadata: &'a [(String, String)],
 }
 
 impl<'a> PluginResponseView<'a> {
@@ -103,16 +122,26 @@ impl<'a> PluginResponseView<'a> {
         status: StatusCode,
         request_id: &'a str,
         headers: &'a http::HeaderMap,
+        metadata: &'a [(String, String)],
     ) -> Self {
         Self {
             status,
             request_id,
             headers,
+            metadata,
         }
     }
 
     pub fn header(&self, name: &str) -> Option<&HeaderValue> {
         self.headers.get(name)
+    }
+
+    /// Look up a metadata value by key.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -166,6 +195,44 @@ pub struct PluginCompleteView<'a> {
     pub status: u16,
     pub duration: Duration,
     pub remote_addr: SocketAddr,
+    pub request_body_size: u64,
+    pub response_size: u64,
+    metadata: &'a [(String, String)],
+}
+
+impl<'a> PluginCompleteView<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        request_id: &'a str,
+        method: &'a str,
+        path: &'a str,
+        status: u16,
+        duration: Duration,
+        remote_addr: SocketAddr,
+        request_body_size: u64,
+        response_size: u64,
+        metadata: &'a [(String, String)],
+    ) -> Self {
+        Self {
+            request_id,
+            method,
+            path,
+            status,
+            duration,
+            remote_addr,
+            request_body_size,
+            response_size,
+            metadata,
+        }
+    }
+
+    /// Look up a metadata value by key.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
 }
 
 // ─── Handler traits ──────────────────────────────────────────
@@ -252,7 +319,8 @@ mod tests {
         let cookies = PluginCookies { cookies: vec![] };
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let uri: Uri = "/test".parse().unwrap();
-        let view = PluginRequestView::new(&Method::GET, &uri, addr, "req123", &headers, cookies);
+        let view =
+            PluginRequestView::new(&Method::GET, &uri, addr, "req123", &headers, cookies, &[]);
 
         assert!(view.header("cookie").is_none());
         assert!(view.header("Cookie").is_none());
@@ -268,7 +336,8 @@ mod tests {
         };
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let uri: Uri = "/test".parse().unwrap();
-        let view = PluginRequestView::new(&Method::GET, &uri, addr, "req123", &headers, cookies);
+        let view =
+            PluginRequestView::new(&Method::GET, &uri, addr, "req123", &headers, cookies, &[]);
 
         assert_eq!(view.cookie("token"), Some("abc"));
         assert_eq!(view.cookie("other"), None);
@@ -289,7 +358,7 @@ mod tests {
     fn test_response_view_header() {
         let mut headers = http::HeaderMap::new();
         headers.insert("x-custom", "val".parse().unwrap());
-        let view = PluginResponseView::new(StatusCode::OK, "req123", &headers);
+        let view = PluginResponseView::new(StatusCode::OK, "req123", &headers, &[]);
         assert_eq!(view.header("x-custom").unwrap(), "val");
         assert!(view.header("missing").is_none());
     }
@@ -346,5 +415,40 @@ mod tests {
             query: None,
         };
         assert!(req.header("accept").is_some());
+    }
+
+    #[test]
+    fn test_request_view_metadata_accessor() {
+        let headers = http::HeaderMap::new();
+        let cookies = PluginCookies { cookies: vec![] };
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let uri: Uri = "/test".parse().unwrap();
+        let metadata = vec![
+            ("trace_id".to_string(), "abc123".to_string()),
+            ("span_id".to_string(), "def456".to_string()),
+        ];
+        let view = PluginRequestView::new(
+            &Method::GET,
+            &uri,
+            addr,
+            "req123",
+            &headers,
+            cookies,
+            &metadata,
+        );
+        assert_eq!(view.metadata("trace_id"), Some("abc123"));
+        assert_eq!(view.metadata("span_id"), Some("def456"));
+        assert_eq!(view.metadata("missing"), None);
+    }
+
+    #[test]
+    fn test_request_id_override() {
+        let mut actions = PluginRequestActions::new();
+        assert!(actions.request_id_override.is_none());
+        actions.set_request_id("trace-derived-id".to_string());
+        assert_eq!(
+            actions.request_id_override,
+            Some("trace-derived-id".to_string())
+        );
     }
 }

@@ -64,6 +64,9 @@ libc = "0.2"
 # Fast allocator
 mimalloc = "0.1"
 
+# Cryptographic random bytes (trace ID / span ID generation)
+getrandom = "0.2"
+
 # TLS
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
@@ -72,10 +75,18 @@ rustls-pemfile = "2"
 # Base64 encoding (optional — used by example plugin)
 base64 = { version = "0.22", optional = true }
 
+# OpenTelemetry (optional — used by otel plugin)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.27", optional = true }
+tonic = { version = "0.12", optional = true }
+
 [features]
 default = ["php"]
 php = []
 plugin-example = ["base64"]
+plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 
 [profile.release]
 lto = "thin"

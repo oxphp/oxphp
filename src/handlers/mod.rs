@@ -4,3 +4,4 @@ pub mod metrics;
 pub mod rate_limit;
 pub mod request_id;
 pub mod server_header;
+pub mod trace_context;

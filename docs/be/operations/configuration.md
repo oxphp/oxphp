@@ -89,6 +89,29 @@ OxPHP канфігуруецца цалкам праз зменныя асяро
 |----------|---------|-------------|
 | `COMPRESSION_LEVEL` | `4` | Узровень якасці сціску Brotli (0-11). `0` адключае сціск, `1`-`11` задаюць узровень якасці |
 
+### Размеркаваная трасіроўка
+
+| Зменная | Па змаўчанні | Апісанне |
+|----------|---------|-------------|
+| `TRACE_CONTEXT` | `false` | Уключыць распаўсюджванне W3C Trace Context. Разбірае ўваходныя загалоўкі `traceparent`/`tracestate`, генеруе trace ID, устаўляе ў адказы і PHP `$_SERVER`. Аўтаматычна ўключаецца, калі `OTEL_ENABLED=true` |
+
+### OpenTelemetry (фіча `plugin-otel`)
+
+Распаўсюджванне W3C Trace Context заўсёды даступна (без залежнасцяў). Экспарт спанаў OpenTelemetry патрабуе зборкі з `--features plugin-otel`.
+
+| Зменная | Па змаўчанні | Апісанне |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | Уключыць экспарт спанаў OpenTelemetry. Мяркуе `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | Канчатковая кропка калектара OTLP |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Пратакол экспарту: `grpc` (порт 4317) або `http/protobuf` (порт 4318) |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Тайм-аўт экспарту ў мілісекундах |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(няма)* | Загалоўкі аўтэнтыфікацыі для хастэд-бэкендаў (`key=value,key=value`) |
+| `OTEL_SERVICE_NAME` | `oxphp` | Назва сэрвісу ў экспартаваных трэйсах |
+| `OTEL_SERVICE_VERSION` | *(няма)* | Версія сэрвісу ў экспартаваных трэйсах |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(няма)* | Атрыбуты рэсурсаў, далучаныя да кожнага спана (`key=value,key=value`) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Стратэгія семплінгу: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Каэфіцыент семплінгу для семплераў на аснове каэфіцыента (0.0–1.0) |
+
 ## Рэжымы воркераў
 
 Зменная `PHP_WORKERS` кантралюе, ці выкарыстоўвае пул PHP-воркераў фіксаваны памер або дынамічнае маштабаванне.
@@ -230,6 +253,8 @@ services:
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # TTL кэша статычных файлаў (па змаўчанні: 30d)
       # ASYNC_WORKERS: "4"            # Патокі асінхронных воркераў для oxphp_async() (па змаўчанні: 0 = выключана)
+      # TRACE_CONTEXT: "true"         # Уключыць распаўсюджванне W3C Trace Context
+      # OTEL_ENABLED: "true"          # Уключыць экспарт спанаў OpenTelemetry (мяркуе TRACE_CONTEXT=true)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -308,4 +333,5 @@ curl -s http://localhost:9090/config | jq .
 - [TLS](/be/features/tls.md) --- канфігурацыя TLS і патрабаванні да сертыфікатаў
 - [Абмежаванне хуткасці](/be/features/rate-limiting.md) --- дэталі абмежавання хуткасці па IP
 - [Асінхронныя промісы](/be/features/async-promises.md) --- паралельнае выкананне PHP з `oxphp_async()`
+- [Размеркаваная трасіроўка](/be/features/distributed-tracing.md) --- канфігурацыя W3C Trace Context і OpenTelemetry
 - [Пул воркераў](/be/architecture/worker-pool.md) --- архітэктура статычнага і дынамічнага пула воркераў
