@@ -112,17 +112,21 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 - **mimalloc** 分配器 — 降低高并发下的内存分配延迟
 - **可配置 Tokio 运行时** — 默认多线程（CPU / 2），可通过 `TOKIO_WORKERS` 调整
 
-### 可靠性与运维
-- **有界请求队列** — 队列满时返回 503 进行背压控制
-- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
+### 可观测性
+- **W3C Trace Context** — 自动传播 `traceparent`/`tracestate`，`$_SERVER['OXPHP_TRACE_ID']` 用于 PHP 日志关联
+- **OpenTelemetry** — 通过 `plugin-otel` 特性进行 OTLP Span 导出（gRPC/HTTP），支持语义化约定、可配置采样和批处理
 - **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖
 - **健康检查**端点 `/health` — 支持 K8s 就绪探针
 - **结构化错误日志** — PHP 错误通过 `tracing` 输出，包含 `php_error_type`、`php_file`、`php_line` 字段
-- **JSON 访问日志**（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
+- **JSON 访问日志** — 可选 `trace_id`/`span_id` 字段（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
+- **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式
+
+### 可靠性与运维
+- **有界请求队列** — 队列满时返回 503 进行背压控制
+- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
 - **自定义错误页面** — 启动时预加载，热路径零 I/O
 - **路径穿越防护** — 包含符号链接逃逸检测
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
-- **请求 ID** 生成与透传（`X-Request-ID`）
 
 ---
 
@@ -212,6 +216,22 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
+| `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
+
+### OpenTelemetry（`plugin-otel` 特性）
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `OTEL_ENABLED` | `false` | 启用 Span 导出。隐含 `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP 收集器端点 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc`（端口 4317）或 `http/protobuf`（端口 4318） |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(未设置)* | 托管后端的认证头（`key=value,key=value`） |
+| `OTEL_SERVICE_NAME` | `oxphp` | 导出追踪中的服务名称 |
+| `OTEL_SERVICE_VERSION` | *(未设置)* | 导出追踪中的服务版本 |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(未设置)* | 资源属性（`key=value,key=value`） |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样器：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 采样比率（0.0-1.0） |
 
 ---
 
@@ -264,8 +284,8 @@ curl http://localhost:9090/metrics
 | Feature | 描述 |
 |---|---|
 | **PHP 8.5** | 支持 PHP 8.5 |
-| **Trace Context (W3C)** | 跨请求自动传播 `traceparent` / `tracestate` 请求头 |
-| **OpenTelemetry** | 通过 OTLP 将追踪和指标导出到任何兼容的后端 |
+| ~~**Trace Context (W3C)**~~ | ✅ 已实现 — 自动传播 `traceparent` / `tracestate` 头（W3C 规范），通过 `TRACE_CONTEXT=true` 启用 |
+| ~~**OpenTelemetry**~~ | ✅ 已实现 — 通过 `plugin-otel` 特性进行 OTLP 追踪导出，W3C context 传播，每请求 Span 支持标准语义化约定 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
 | **Built-in PHP Profiler** | 无需 xdebug 或外部代理的低开销性能分析，直接集成在服务器中 |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |

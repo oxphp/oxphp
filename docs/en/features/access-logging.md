@@ -41,6 +41,8 @@ Every access log entry is a single JSON line written to stdout:
   "level": "INFO",
   "fields": {
     "request_id": "67890abc00000042",
+    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
+    "span_id": "a1b2c3d4e5f6a7b8",
     "method": "GET",
     "path": "/api/users",
     "status": 200,
@@ -50,6 +52,8 @@ Every access log entry is a single JSON line written to stdout:
   }
 }
 ```
+
+When `TRACE_CONTEXT` is disabled, `trace_id` and `span_id` fields are omitted from log entries.
 
 ### Fields
 
@@ -61,6 +65,8 @@ Every access log entry is a single JSON line written to stdout:
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
 | `remote_addr` | string | Client IP address and port |
+| `trace_id` | string | W3C trace ID (32 hex chars). Present only when `TRACE_CONTEXT=true` |
+| `span_id` | string | Span ID (16 hex chars). Present only when `TRACE_CONTEXT=true` |
 
 ## How it works
 
@@ -101,4 +107,5 @@ No sidecar or file-based log shipping is needed.
 ## See Also
 
 - [Request IDs](request-ids.md) -- how request IDs are generated and passed through
+- [Distributed Tracing](distributed-tracing.md) -- `trace_id` and `span_id` fields in log entries
 - [Rate Limiting](rate-limiting.md) -- rate-limited requests still appear in access logs

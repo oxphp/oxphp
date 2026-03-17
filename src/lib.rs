@@ -10,4 +10,5 @@ pub mod php;
 pub mod plugin;
 pub mod plugins;
 pub mod server;
+pub mod trace_context;
 pub mod types;

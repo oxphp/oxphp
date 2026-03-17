@@ -34,6 +34,15 @@ fn is_query_method(method: &Method) -> bool {
     method.as_str() == "QUERY"
 }
 
+/// Look up a key in the metadata vector, returning empty string if not found.
+fn metadata_get<'a>(metadata: &'a [(String, String)], key: &str) -> &'a str {
+    metadata
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("")
+}
+
 /// Parse Content-Length from raw bytes without UTF-8 validation.
 /// Content-Length is always ASCII digits — no need for `to_str()` + `parse()`.
 fn parse_content_length(bytes: &[u8]) -> Option<usize> {
@@ -81,6 +90,7 @@ pub async fn handle_request(
 
     // Take ownership — no clone
     let request_id = std::mem::take(&mut received_event.request_id);
+    let mut metadata = std::mem::take(&mut received_event.metadata);
 
     // Check for early response (e.g., 429 from rate limiter)
     if let Some(early_resp) = received_event.early_response {
@@ -98,6 +108,7 @@ pub async fn handle_request(
             remote_addr,
             request_body_size: 0,
             response_size,
+            metadata,
         };
         server.dispatcher.dispatch(&mut complete_event);
 
@@ -114,7 +125,7 @@ pub async fn handle_request(
     let result = if server.request_timeout > Duration::ZERO {
         match tokio::time::timeout(
             server.request_timeout,
-            dispatch_request(parts, body, server, remote_addr, &request_id),
+            dispatch_request(parts, body, server, remote_addr, &request_id, &mut metadata),
         )
         .await
         {
@@ -136,7 +147,7 @@ pub async fn handle_request(
             }
         }
     } else {
-        dispatch_request(parts, body, server, remote_addr, &request_id).await
+        dispatch_request(parts, body, server, remote_addr, &request_id, &mut metadata).await
     };
 
     let (response, request_body_size) = match result {
@@ -154,14 +165,16 @@ pub async fn handle_request(
     };
 
     // ── ResponseBuilding event ──
-    // Handlers: ErrorPagesHandler (60), ServerHeaderHandler (100)
+    // Handlers: TraceContextResponseHandler (-95), ErrorPagesHandler (60), ServerHeaderHandler (100)
     let mut building_event = ResponseBuilding {
         request_id, // move in (handlers only read &str)
         response,
+        metadata,
     };
     server.dispatcher.dispatch(&mut building_event);
     let response = building_event.response;
     let request_id = building_event.request_id; // move back out
+    let metadata = std::mem::take(&mut building_event.metadata);
 
     // ── Brotli compression (after error pages, before metrics/logging) ──
     let response = if supports_brotli {
@@ -190,6 +203,7 @@ pub async fn handle_request(
         remote_addr,
         request_body_size: request_body_size as u64,
         response_size,
+        metadata,
     };
     server.dispatcher.dispatch(&mut complete_event);
 
@@ -203,6 +217,7 @@ async fn dispatch_request(
     server: &Server,
     remote_addr: SocketAddr,
     request_id: &str,
+    metadata: &mut Vec<(String, String)>,
 ) -> Result<(Response<ResponseBody>, usize), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -313,6 +328,9 @@ async fn dispatch_request(
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
                 timeout_us: server.request_timeout.as_micros() as u64,
+                trace_id: metadata_get(metadata, "trace_id").to_string(),
+                span_id: metadata_get(metadata, "span_id").to_string(),
+                parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),
             };
 
             let queue_start = Instant::now();
@@ -322,17 +340,25 @@ async fn dispatch_request(
             let script_response = match execute_result {
                 ExecuteResult::Immediate(resp) => {
                     server.metrics.request_dequeued();
-                    server
-                        .metrics
-                        .record_queue_wait(queue_start.elapsed().as_micros() as u64);
+                    let queue_wait_us = queue_start.elapsed().as_micros();
+                    server.metrics.record_queue_wait(queue_wait_us as u64);
+                    metadata.push(("oxphp.queue_wait_us".into(), queue_wait_us.to_string()));
+                    metadata.push((
+                        "oxphp.php_exec_us".into(),
+                        resp.execution_time_us.to_string(),
+                    ));
                     resp
                 }
                 ExecuteResult::Deferred(rx) => match rx.await {
                     Ok(resp) => {
                         server.metrics.request_dequeued();
-                        server
-                            .metrics
-                            .record_queue_wait(queue_start.elapsed().as_micros() as u64);
+                        let queue_wait_us = queue_start.elapsed().as_micros();
+                        server.metrics.record_queue_wait(queue_wait_us as u64);
+                        metadata.push(("oxphp.queue_wait_us".into(), queue_wait_us.to_string()));
+                        metadata.push((
+                            "oxphp.php_exec_us".into(),
+                            resp.execution_time_us.to_string(),
+                        ));
                         resp
                     }
                     Err(_) => {

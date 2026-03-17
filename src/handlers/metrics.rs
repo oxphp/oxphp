@@ -102,6 +102,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_body_size: 100,
             response_size: 500,
+            metadata: Vec::new(),
         };
 
         let result = handler.handle(&mut event);

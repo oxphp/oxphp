@@ -118,6 +118,8 @@ pub struct RequestComplete {
     pub request_body_size: u64,
     /// Response body size in bytes.
     pub response_size: u64,
+    /// Plugin metadata propagated through the event pipeline.
+    pub metadata: Vec<(String, String)>,
 }
 
 impl Event for RequestComplete {
@@ -181,6 +183,8 @@ impl Event for ScriptExecutionComplete {
 pub struct ResponseBuilding {
     pub request_id: String,
     pub response: Response<ResponseBody>,
+    /// Plugin metadata propagated through the event pipeline.
+    pub metadata: Vec<(String, String)>,
 }
 
 impl Event for ResponseBuilding {

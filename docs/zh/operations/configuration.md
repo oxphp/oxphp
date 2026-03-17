@@ -89,6 +89,29 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 |------|--------|------|
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩，`1`-`11` 设置质量级别 |
 
+### 分布式追踪
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TRACE_CONTEXT` | `false` | 启用 W3C Trace Context 传播。解析传入的 `traceparent`/`tracestate` 头，生成 trace ID，注入到响应和 PHP `$_SERVER` 中。当 `OTEL_ENABLED=true` 时自动启用 |
+
+### OpenTelemetry（`plugin-otel` 特性）
+
+W3C Trace Context 传播始终可用（零依赖）。OpenTelemetry Span 导出需要使用 `--features plugin-otel` 构建。
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry Span 导出。隐含 `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP 收集器端点 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc`（端口 4317）或 `http/protobuf`（端口 4318） |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(无)* | 托管后端的认证头（`key=value,key=value`） |
+| `OTEL_SERVICE_NAME` | `oxphp` | 导出追踪中的服务名称 |
+| `OTEL_SERVICE_VERSION` | *(无)* | 导出追踪中的服务版本 |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(无)* | 附加到每个 Span 的资源属性（`key=value,key=value`） |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样策略：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 基于比率的采样器的采样比率（0.0-1.0） |
+
 ## 工作线程模式
 
 `PHP_WORKERS` 变量控制 PHP 工作池使用固定大小还是动态伸缩。
@@ -230,6 +253,8 @@ services:
       COMPRESSION_LEVEL: "4"
       # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
       # ASYNC_WORKERS: "4"            # Async worker threads for oxphp_async() (default: 0 = disabled)
+      # TRACE_CONTEXT: "true"         # Enable W3C Trace Context propagation
+      # OTEL_ENABLED: "true"          # Enable OpenTelemetry span export (implies TRACE_CONTEXT=true)
     volumes:
       - ./src:/var/www/html
     healthcheck:
@@ -308,4 +333,5 @@ curl -s http://localhost:9090/config | jq .
 - [TLS](/features/tls.md) --- TLS 配置和证书要求
 - [速率限制](/features/rate-limiting.md) --- 按 IP 速率限制详情
 - [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 进行并行 PHP 执行
+- [分布式追踪](/features/distributed-tracing.md) --- W3C Trace Context 与 OpenTelemetry 配置
 - [工作池](/architecture/worker-pool.md) --- 静态和动态工作池架构

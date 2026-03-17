@@ -24,6 +24,7 @@ description: Пошаговый обзор обработки HTTP-запрос�
 ┌──────────────────┐
 │ RequestReceived  │  Event dispatch (priority order):
 │ Event            │    -100  RequestIdGenerator
+│                  │    -95   TraceContextHandler
 │                  │    -50   RateLimitHandler
 │                  │      0   MetricsRequestHandler
 └────────┬─────────┘
@@ -61,7 +62,8 @@ description: Пошаговый обзор обработки HTTP-запрос�
           ▼
 ┌───────────────────┐
 │ ResponseBuilding  │  Event dispatch (priority order):
-│ Event             │     60   ErrorPagesHandler
+│ Event             │    -95   TraceContextHandler
+│                   │     60   ErrorPagesHandler
 │                   │    100   ServerHeaderHandler
 └────────┬──────────┘
          ▼
@@ -125,11 +127,12 @@ let (parts, body) = req.into_parts();
 
 ### 4. Событие RequestReceived
 
-Первая диспетчеризация событий запускает три обработчика в порядке приоритета:
+Первая диспетчеризация событий запускает четыре обработчика в порядке приоритета:
 
 | Приоритет | Обработчик | Действие |
 |---|---|---|
 | -100 | `RequestIdGenerator` | Генерирует `{timestamp_hex:08x}{counter:08x}` (16 hex-символов) или сохраняет входящий `X-Request-ID` |
+| -95 | `TraceContextRequestHandler` | Разбирает/генерирует контекст трассировки W3C, записывает `trace_id`/`span_id` в метаданные |
 | -50 | `RateLimitHandler` | Проверяет скользящее окно по IP; устанавливает `early_response` при превышении лимита |
 | 0 | `MetricsRequestHandler` | Вызывает `metrics.record_request(&method)` |
 
@@ -266,6 +269,7 @@ let response_rx = ctx.executor.execute(script_request);
 
 | Приоритет | Обработчик | Действие |
 |---|---|---|
+| -95 | `TraceContextResponseHandler` | Вставляет `traceparent`/`tracestate` в заголовки ответа |
 | 60 | `ErrorPagesHandler` | Заменяет тело ответа пользовательской HTML-страницей для статуса >= 400 |
 | 100 | `ServerHeaderHandler` | Добавляет заголовки `Server: OxPHP` и `X-Request-ID` |
 

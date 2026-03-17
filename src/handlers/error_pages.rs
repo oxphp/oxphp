@@ -74,6 +74,7 @@ mod tests {
         let mut event = ResponseBuilding {
             request_id: "test".to_string(),
             response: make_response(404),
+            metadata: Vec::new(),
         };
 
         handler.handle(&mut event);
@@ -92,6 +93,7 @@ mod tests {
         let mut event = ResponseBuilding {
             request_id: "test".to_string(),
             response: make_response(200),
+            metadata: Vec::new(),
         };
 
         handler.handle(&mut event);
@@ -108,6 +110,7 @@ mod tests {
         let mut event = ResponseBuilding {
             request_id: "test".to_string(),
             response: make_response(403),
+            metadata: Vec::new(),
         };
 
         handler.handle(&mut event);

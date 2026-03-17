@@ -24,6 +24,7 @@ description: Пакрокавы агляд таго, як OxPHP апрацоўв
 ┌──────────────────┐
 │ RequestReceived  │  Event dispatch (priority order):
 │ Event            │    -100  RequestIdGenerator
+│                  │    -95   TraceContextHandler
 │                  │    -50   RateLimitHandler
 │                  │      0   MetricsRequestHandler
 └────────┬─────────┘
@@ -61,7 +62,8 @@ description: Пакрокавы агляд таго, як OxPHP апрацоўв
           ▼
 ┌───────────────────┐
 │ ResponseBuilding  │  Event dispatch (priority order):
-│ Event             │     60   ErrorPagesHandler
+│ Event             │    -95   TraceContextHandler
+│                   │     60   ErrorPagesHandler
 │                   │    100   ServerHeaderHandler
 └────────┬──────────┘
          ▼
@@ -125,11 +127,12 @@ let (parts, body) = req.into_parts();
 
 ### 4. Падзея RequestReceived
 
-Першая дыспетчарызацыя падзей запускае тры апрацоўшчыкі ў парадку прыярытэту:
+Першая дыспетчарызацыя падзей запускае чатыры апрацоўшчыкі ў парадку прыярытэту:
 
 | Прыярытэт | Апрацоўшчык | Дзеянне |
 |---|---|---|
 | -100 | `RequestIdGenerator` | Генеруе `{timestamp_hex:08x}{counter:08x}` (16 hex-сімвалаў) або захоўвае ўваходны `X-Request-ID` |
+| -95 | `TraceContextRequestHandler` | Разбірае/генеруе кантэкст трасіроўкі W3C, запісвае `trace_id`/`span_id` у метададзеныя |
 | -50 | `RateLimitHandler` | Правярае слізгальнае акно па IP; усталёўвае `early_response`, калі ліміт перавышаны |
 | 0 | `MetricsRequestHandler` | Выклікае `metrics.record_request(&method)` |
 
@@ -266,6 +269,7 @@ let response_rx = ctx.executor.execute(script_request);
 
 | Прыярытэт | Апрацоўшчык | Дзеянне |
 |---|---|---|
+| -95 | `TraceContextResponseHandler` | Устаўляе `traceparent`/`tracestate` у загалоўкі адказу |
 | 60 | `ErrorPagesHandler` | Замяняе цела адказу на карыстальніцкую HTML-старонку для статусу >= 400 |
 | 100 | `ServerHeaderHandler` | Дадае загалоўкі `Server: OxPHP` і `X-Request-ID` |
 

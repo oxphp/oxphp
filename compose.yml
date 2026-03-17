@@ -4,7 +4,7 @@ services:
       context: .
       args:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-         CARGO_FEATURES: ""
+         CARGO_FEATURES: "plugin-otel"
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -131,6 +131,46 @@ services:
 
       # Max memory (MB) before recycling a worker (0 = unlimited).
       # - WORKER_MAX_MEMORY_MIB=0
+
+      # ── Trace Context (W3C) ────────────────────────────────────
+
+      # Enable W3C Trace Context propagation (traceparent/tracestate).
+      # Parses incoming headers, generates trace_id/span_id, injects into
+      # response headers and PHP $_SERVER (OXPHP_TRACE_ID, OXPHP_SPAN_ID).
+      # Automatically enabled when OTEL_ENABLED=true.
+      # - TRACE_CONTEXT=false
+
+      # ── OpenTelemetry (requires CARGO_FEATURES: "plugin-otel") ──
+
+      # Enable OpenTelemetry span export. Implies TRACE_CONTEXT=true.
+      # - OTEL_ENABLED=false
+
+      # OTLP collector endpoint.
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+      # Export protocol: "grpc" (default, port 4317) or "http/protobuf" (port 4318).
+      # - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+
+      # Export timeout in milliseconds.
+      # - OTEL_EXPORTER_OTLP_TIMEOUT=10000
+
+      # Additional headers for exporter authentication (key=value,key2=value2).
+      # Required by hosted backends (Grafana Cloud, New Relic, Honeycomb).
+      # - OTEL_EXPORTER_OTLP_HEADERS=
+
+      # Service identity in traces.
+      # - OTEL_SERVICE_NAME=oxphp
+      # - OTEL_SERVICE_VERSION=
+
+      # Additional resource attributes (key=value,key2=value2).
+      # Example: deployment.environment=production,host.name=web-01
+      # - OTEL_RESOURCE_ATTRIBUTES=
+
+      # Sampling strategy: always_on, always_off, traceidratio, parentbased_traceidratio.
+      # - OTEL_TRACES_SAMPLER=parentbased_traceidratio
+
+      # Sampling ratio for ratio-based samplers (0.0–1.0).
+      # - OTEL_TRACES_SAMPLER_ARG=1.0
 
       # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
 

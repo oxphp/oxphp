@@ -66,7 +66,22 @@ Every access log entry includes the `request_id` field:
 
 You can filter logs by request ID to trace the full lifecycle of a single request, including any PHP errors that reference the same ID.
 
+## Trace-derived Request IDs
+
+When OpenTelemetry is enabled (`OTEL_ENABLED=true`), the request ID format changes to a trace-derived format:
+
+```
+{trace_id[0:16]}-{span_id[0:8]}
+```
+
+This produces a 25-character string (e.g., `4bf92f3577b16e82-a1b2c3d4`) that enables direct correlation between request IDs and distributed traces in Jaeger, Grafana Tempo, or other tracing backends.
+
+When OTel is disabled, request IDs use the standard 16-character hex format.
+
+> **Note:** When OTel is active, client-supplied `X-Request-ID` values are replaced with the trace-derived format to ensure consistent trace correlation across services.
+
 ## See Also
 
 - [Access Logging](access-logging.md) -- every log entry includes the `request_id` field
+- [Distributed Tracing](distributed-tracing.md) -- W3C Trace Context and OpenTelemetry integration
 - [Rate Limiting](rate-limiting.md) -- rate-limited responses include the `X-Request-ID` header

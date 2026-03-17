@@ -41,6 +41,8 @@ ACCESS_LOG=error
   "level": "INFO",
   "fields": {
     "request_id": "67890abc00000042",
+    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
+    "span_id": "a1b2c3d4e5f6a7b8",
     "method": "GET",
     "path": "/api/users",
     "status": 200,
@@ -50,6 +52,8 @@ ACCESS_LOG=error
   }
 }
 ```
+
+当 `TRACE_CONTEXT` 禁用时，`trace_id` 和 `span_id` 字段将从日志条目中省略。
 
 ### 字段
 
@@ -61,6 +65,8 @@ ACCESS_LOG=error
 | `status` | number | HTTP 响应状态码 |
 | `duration_us` | number | 请求处理总时间（微秒） |
 | `remote_addr` | string | 客户端 IP 地址和端口 |
+| `trace_id` | string | W3C trace ID（32 个十六进制字符）。仅当 `TRACE_CONTEXT=true` 时存在 |
+| `span_id` | string | Span ID（16 个十六进制字符）。仅当 `TRACE_CONTEXT=true` 时存在 |
 
 ## 工作原理
 
@@ -101,4 +107,5 @@ RUST_LOG=warn,access_log=info
 ## 另请参阅
 
 - [请求 ID](request-ids.md) -- 请求 ID 如何生成和透传
+- [分布式追踪](distributed-tracing.md) -- 日志条目中的 `trace_id` 和 `span_id` 字段
 - [速率限制](rate-limiting.md) -- 被限速的请求仍然会出现在访问日志中

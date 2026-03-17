@@ -24,6 +24,7 @@ OxPHP 中的每个 HTTP 请求都会经过一系列管道阶段，从 TCP 接受
 ┌──────────────────┐
 │ RequestReceived  │  Event dispatch (priority order):
 │ Event            │    -100  RequestIdGenerator
+│                  │    -95   TraceContextHandler
 │                  │    -50   RateLimitHandler
 │                  │      0   MetricsRequestHandler
 └────────┬─────────┘
@@ -61,7 +62,8 @@ OxPHP 中的每个 HTTP 请求都会经过一系列管道阶段，从 TCP 接受
           ▼
 ┌───────────────────┐
 │ ResponseBuilding  │  Event dispatch (priority order):
-│ Event             │     60   ErrorPagesHandler
+│ Event             │    -95   TraceContextHandler
+│                   │     60   ErrorPagesHandler
 │                   │    100   ServerHeaderHandler
 └────────┬──────────┘
          ▼
@@ -125,11 +127,12 @@ let (parts, body) = req.into_parts();
 
 ### 4. RequestReceived 事件
 
-第一次事件分发按优先级顺序运行三个处理器：
+第一次事件分发按优先级顺序运行四个处理器：
 
 | 优先级 | 处理器 | 操作 |
 |---|---|---|
 | -100 | `RequestIdGenerator` | 生成 `{timestamp_hex:08x}{counter:08x}`（16 位十六进制字符）或保留传入的 `X-Request-ID` |
+| -95 | `TraceContextRequestHandler` | 解析/生成 W3C trace context，将 `trace_id`/`span_id` 写入 metadata |
 | -50 | `RateLimitHandler` | 检查每 IP 滑动窗口；超出限制时设置 `early_response` |
 | 0 | `MetricsRequestHandler` | 调用 `metrics.record_request(&method)` |
 
@@ -266,6 +269,7 @@ Tokio 任务等待 `oneshot::Receiver`。当 PHP 工作线程完成时，它发�
 
 | 优先级 | 处理器 | 操作 |
 |---|---|---|
+| -95 | `TraceContextResponseHandler` | 在响应头中注入 `traceparent`/`tracestate` |
 | 60 | `ErrorPagesHandler` | 对状态码 >= 400 的响应，用自定义 HTML 页面替换响应体 |
 | 100 | `ServerHeaderHandler` | 添加 `Server: OxPHP` 和 `X-Request-ID` 头 |
 

@@ -20,16 +20,42 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
             return Propagation::Continue;
         }
 
-        tracing::info!(
-            target: "access_log",
-            request_id = %event.request_id,
-            method = %event.method,
-            path = %event.path,
-            status = event.status,
-            duration_us = event.duration.as_micros() as u64,
-            remote_addr = %event.remote_addr,
-            "request completed"
-        );
+        let trace_id = event
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "trace_id")
+            .map(|(_, v)| v.as_str());
+        let span_id = event
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "span_id")
+            .map(|(_, v)| v.as_str());
+
+        if let (Some(tid), Some(sid)) = (trace_id, span_id) {
+            tracing::info!(
+                target: "access_log",
+                request_id = %event.request_id,
+                trace_id = tid,
+                span_id = sid,
+                method = %event.method,
+                path = %event.path,
+                status = event.status,
+                duration_us = event.duration.as_micros() as u64,
+                remote_addr = %event.remote_addr,
+                "request completed"
+            );
+        } else {
+            tracing::info!(
+                target: "access_log",
+                request_id = %event.request_id,
+                method = %event.method,
+                path = %event.path,
+                status = event.status,
+                duration_us = event.duration.as_micros() as u64,
+                remote_addr = %event.remote_addr,
+                "request completed"
+            );
+        }
         Propagation::Continue
     }
 
@@ -55,6 +81,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_body_size: 0,
             response_size: 0,
+            metadata: Vec::new(),
         }
     }
 

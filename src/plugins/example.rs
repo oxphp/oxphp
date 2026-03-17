@@ -405,6 +405,7 @@ mod tests {
             rid,
             headers,
             PluginCookies { cookies: vec![] },
+            &[],
         )
     }
 
@@ -565,7 +566,7 @@ mod tests {
     fn test_example_response_handler() {
         let handler = ExampleResponseHandler { verbose: false };
         let resp_headers = http::HeaderMap::new();
-        let view = PluginResponseView::new(http::StatusCode::OK, "req123", &resp_headers);
+        let view = PluginResponseView::new(http::StatusCode::OK, "req123", &resp_headers, &[]);
         let mut actions = PluginResponseActions::new("example");
 
         handler.handle(&view, &mut actions);
@@ -581,7 +582,7 @@ mod tests {
     fn test_example_cookie_set_via_response() {
         let handler = ExampleResponseHandler { verbose: false };
         let resp_headers = http::HeaderMap::new();
-        let view = PluginResponseView::new(http::StatusCode::OK, "req1", &resp_headers);
+        let view = PluginResponseView::new(http::StatusCode::OK, "req1", &resp_headers, &[]);
         let mut actions = PluginResponseActions::new("example");
         handler.handle(&view, &mut actions);
 
@@ -760,14 +761,17 @@ mod tests {
     #[test]
     fn test_example_complete_handler() {
         let handler = ExampleCompleteHandler;
-        let view = PluginCompleteView {
-            request_id: "req123",
-            method: "GET",
-            path: "/test",
-            status: 200,
-            duration: std::time::Duration::from_millis(42),
-            remote_addr: "127.0.0.1:12345".parse().unwrap(),
-        };
+        let view = PluginCompleteView::new(
+            "req123",
+            "GET",
+            "/test",
+            200,
+            std::time::Duration::from_millis(42),
+            "127.0.0.1:12345".parse().unwrap(),
+            0,
+            1024,
+            &[],
+        );
         handler.handle(&view); // should not panic
     }
 

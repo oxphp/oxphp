@@ -30,6 +30,7 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
                 &event.request_id,
                 &event.parts.headers,
                 cookies,
+                &event.metadata,
             );
 
             let mut actions = PluginRequestActions::new();
@@ -41,6 +42,9 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
             Ok(actions) => {
                 if let Some(resp) = actions.early_response {
                     event.early_response = Some(resp);
+                }
+                if let Some(id) = actions.request_id_override {
+                    event.request_id = id;
                 }
                 event.metadata.extend(actions.metadata);
             }
@@ -75,6 +79,7 @@ impl<H: PluginResponseHandler + 'static> EventHandler<ResponseBuilding>
                 event.response.status(),
                 &event.request_id,
                 event.response.headers(),
+                &event.metadata,
             );
 
             let mut actions = PluginResponseActions::new(&self.plugin_name);
@@ -125,14 +130,17 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
 {
     fn handle(&self, event: &mut RequestComplete) -> Propagation {
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            let view = PluginCompleteView {
-                request_id: &event.request_id,
-                method: event.method.as_str(),
-                path: &event.path,
-                status: event.status,
-                duration: event.duration,
-                remote_addr: event.remote_addr,
-            };
+            let view = PluginCompleteView::new(
+                &event.request_id,
+                event.method.as_str(),
+                &event.path,
+                event.status,
+                event.duration,
+                event.remote_addr,
+                event.request_body_size,
+                event.response_size,
+                &event.metadata,
+            );
             self.handler.handle(&view);
         }));
 
@@ -219,6 +227,7 @@ mod tests {
         let mut event = ResponseBuilding {
             request_id: "test123".into(),
             response,
+            metadata: Vec::new(),
         };
         let result = EventHandler::<ResponseBuilding>::handle(&wrapper, &mut event);
         assert_eq!(result, Propagation::Continue);
@@ -247,6 +256,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_body_size: 0,
             response_size: 0,
+            metadata: Vec::new(),
         };
         let result = EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert_eq!(result, Propagation::Continue);
@@ -304,6 +314,7 @@ mod tests {
         let mut event = ResponseBuilding {
             request_id: "req1".into(),
             response,
+            metadata: Vec::new(),
         };
         EventHandler::<ResponseBuilding>::handle(&wrapper, &mut event);
 
@@ -347,6 +358,7 @@ mod tests {
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
             request_body_size: 0,
             response_size: 0,
+            metadata: Vec::new(),
         };
         EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert!(called.load(Ordering::SeqCst));

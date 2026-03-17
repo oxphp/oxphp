@@ -34,6 +34,8 @@ OxPHP -- гэта асінхронны сервер PHP-дадаткаў, нап
 - **Стрымінг SSE** -- Server-Sent Events у рэальным часе праз аўтавызначэнне `Content-Type: text/event-stream` або `oxphp_stream_flush()`
 - **Ранні адказ** праз `oxphp_finish_request()` -- неадкладная адпраўка HTTP-адказу з працягам фонавай апрацоўкі
 - **Рэжым воркера** -- персістэнтныя PHP-працэсы з мяккім скідам паміж запытамі, аўтаматычным рэцыклінгам і метрыкамі кожнага воркера
+- **W3C Trace Context** -- распаўсюджванне `traceparent`/`tracestate` з trace ID, даступнымі ў PHP праз `$_SERVER`
+- **OpenTelemetry** -- экспарт спанаў праз OTLP (gRPC/HTTP) з наладжвальным семплінгам і семантычнымі канвенцыямі
 - **Ізаляцыя панік** праз `catch_unwind` -- аварыйны збой PHP не спыняе ўвесь сервер
 
 ## Ліцэнзія
@@ -67,6 +69,7 @@ OxPHP ліцэнзаваны на ўмовах [AGPL-3.0](https://www.gnu.org/li
 - [Ідэнтыфікатары запытаў](features/request-ids.md) -- генерацыя X-Request-ID
 - [Тайм-аўты](features/timeouts.md) -- тайм-аўты загалоўкаў, запытаў і прастою
 - [Лагіраванне доступу](features/access-logging.md) -- структураванае JSON-лагіраванне доступу
+- [Размеркаваная трасіроўка](features/distributed-tracing.md) -- W3C Trace Context і OpenTelemetry
 
 ### Інтэграцыя з PHP
 

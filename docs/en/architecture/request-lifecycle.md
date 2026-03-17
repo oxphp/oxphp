@@ -24,6 +24,7 @@ Every HTTP request in OxPHP passes through a pipeline of stages, from TCP accept
 ┌──────────────────┐
 │ RequestReceived  │  Event dispatch (priority order):
 │ Event            │    -100  RequestIdGenerator
+│                  │    -95   TraceContextHandler
 │                  │    -50   RateLimitHandler
 │                  │      0   MetricsRequestHandler
 └────────┬─────────┘
@@ -61,7 +62,8 @@ Every HTTP request in OxPHP passes through a pipeline of stages, from TCP accept
           ▼
 ┌───────────────────┐
 │ ResponseBuilding  │  Event dispatch (priority order):
-│ Event             │     60   ErrorPagesHandler
+│ Event             │    -95   TraceContextHandler
+│                   │     60   ErrorPagesHandler
 │                   │    100   ServerHeaderHandler
 └────────┬──────────┘
          ▼
@@ -130,6 +132,7 @@ The first event dispatch runs three handlers in priority order:
 | Priority | Handler | Action |
 |---|---|---|
 | -100 | `RequestIdGenerator` | Generates `{timestamp_hex:08x}{counter:08x}` (16 hex chars) or preserves incoming `X-Request-ID` |
+| -95 | `TraceContextRequestHandler` | Parses/generates W3C trace context, writes `trace_id`/`span_id` to metadata |
 | -50 | `RateLimitHandler` | Checks per-IP sliding window; sets `early_response` if limit exceeded |
 | 0 | `MetricsRequestHandler` | Calls `metrics.record_request(&method)` |
 
@@ -266,6 +269,7 @@ After the response is built (from either static file serving or PHP execution), 
 
 | Priority | Handler | Action |
 |---|---|---|
+| -95 | `TraceContextResponseHandler` | Injects `traceparent`/`tracestate` into response headers |
 | 60 | `ErrorPagesHandler` | Replaces the response body with a custom HTML page for status >= 400 |
 | 100 | `ServerHeaderHandler` | Adds `Server: OxPHP` and `X-Request-ID` headers |
 

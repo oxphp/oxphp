@@ -56,6 +56,12 @@ pub struct ScriptRequest {
     pub document_root: Arc<PathBuf>,
     /// Execution deadline in microseconds (0 = no deadline).
     pub timeout_us: u64,
+    /// W3C Trace Context: trace ID (32 hex chars, empty if tracing disabled).
+    pub trace_id: String,
+    /// W3C Trace Context: span ID (16 hex chars, empty if tracing disabled).
+    pub span_id: String,
+    /// W3C Trace Context: parent span ID (16 hex chars or empty).
+    pub parent_span_id: String,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.

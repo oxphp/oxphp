@@ -41,6 +41,8 @@ ACCESS_LOG=error
   "level": "INFO",
   "fields": {
     "request_id": "67890abc00000042",
+    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
+    "span_id": "a1b2c3d4e5f6a7b8",
     "method": "GET",
     "path": "/api/users",
     "status": 200,
@@ -50,6 +52,8 @@ ACCESS_LOG=error
   }
 }
 ```
+
+Калі `TRACE_CONTEXT` адключаны, палі `trace_id` і `span_id` апускаюцца ў запісах журнала.
 
 ### Палі
 
@@ -61,6 +65,8 @@ ACCESS_LOG=error
 | `status` | number | Код стану HTTP-адказу |
 | `duration_us` | number | Агульны час апрацоўкі запыту ў мікрасекундах |
 | `remote_addr` | string | IP-адрас і порт кліента |
+| `trace_id` | string | W3C trace ID (32 шаснаццатковыя сімвалы). Прысутнічае толькі калі `TRACE_CONTEXT=true` |
+| `span_id` | string | Span ID (16 шаснаццатковых сімвалаў). Прысутнічае толькі калі `TRACE_CONTEXT=true` |
 
 ## Як гэта працуе
 
@@ -101,4 +107,5 @@ RUST_LOG=warn,access_log=info
 ## Глядзіце таксама
 
 - [Ідэнтыфікатары запытаў](request-ids.md) -- як ідэнтыфікатары запытаў генеруюцца і перадаюцца
+- [Размеркаваная трасіроўка](distributed-tracing.md) -- палі `trace_id` і `span_id` у запісах журнала
 - [Абмежаванне хуткасці](rate-limiting.md) -- запыты з абмежаваннем хуткасці ўсё роўна з'яўляюцца ў журналах доступу

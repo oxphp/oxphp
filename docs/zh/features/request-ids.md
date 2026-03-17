@@ -66,7 +66,22 @@ error_log("Processing request $requestId");
 
 您可以按请求 ID 过滤日志，追踪单个请求的完整生命周期，包括引用相同 ID 的 PHP 错误。
 
+## 追踪衍生请求 ID
+
+当 OpenTelemetry 启用时（`OTEL_ENABLED=true`），请求 ID 格式变为追踪衍生格式：
+
+```
+{trace_id[0:16]}-{span_id[0:8]}
+```
+
+这会生成一个 25 字符的字符串（例如 `4bf92f3577b16e82-a1b2c3d4`），可在 Jaeger、Grafana Tempo 或其他追踪后端中直接关联请求 ID 和分布式追踪。
+
+当 OTel 禁用时，请求 ID 使用标准的 16 字符十六进制格式。
+
+> **注意：** 当 OTel 激活时，客户端提供的 `X-Request-ID` 值将被追踪衍生格式替换，以确保跨服务的一致追踪关联。
+
 ## 另请参阅
 
 - [访问日志](access-logging.md) -- 每条日志条目都包含 `request_id` 字段
+- [分布式追踪](distributed-tracing.md) -- W3C Trace Context 与 OpenTelemetry 集成
 - [速率限制](rate-limiting.md) -- 被限速的响应包含 `X-Request-ID` 头

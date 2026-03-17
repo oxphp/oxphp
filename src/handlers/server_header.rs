@@ -43,6 +43,7 @@ mod tests {
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))
                 .unwrap(),
+            metadata: Vec::new(),
         };
 
         handler.handle(&mut event);
@@ -68,6 +69,7 @@ mod tests {
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))
                 .unwrap(),
+            metadata: Vec::new(),
         };
 
         handler.handle(&mut event);

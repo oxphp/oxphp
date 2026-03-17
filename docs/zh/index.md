@@ -34,6 +34,8 @@ OxPHP 是一个用 Rust 编写的异步 PHP 应用服务器。它用单个二进
 - **SSE 流式传输** -- 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现实时 Server-Sent Events
 - **提前响应**，通过 `oxphp_finish_request()` -- 立即发送 HTTP 响应并继续后台处理
 - **工作进程模式** -- 持久化 PHP 进程，请求间软重置，自动回收，以及每工作进程指标
+- **W3C Trace Context** 传播（`traceparent`/`tracestate`），通过 `$_SERVER` 向 PHP 暴露 trace ID
+- **OpenTelemetry** Span 导出，通过 OTLP（gRPC/HTTP）实现，支持可配置采样和语义化约定
 - **Panic 隔离**，通过 `catch_unwind` 实现 -- PHP 崩溃不会导致服务器宕机
 
 ## 许可证
@@ -67,6 +69,7 @@ OxPHP 使用 [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html) 许可证。
 - [请求 ID](features/request-ids.md) -- X-Request-ID 生成
 - [超时](features/timeouts.md) -- 请求头、请求和空闲超时
 - [访问日志](features/access-logging.md) -- 结构化 JSON 访问日志
+- [分布式追踪](features/distributed-tracing.md) -- W3C Trace Context 与 OpenTelemetry
 
 ### PHP 集成
 
