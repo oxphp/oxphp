@@ -350,6 +350,26 @@ int oxphp_bridge_worker_wait(void);
 /** Call Rust worker_send callback. Returns 0 on success. */
 int oxphp_bridge_worker_send_response(void);
 
+/* ─── Fiber Scheduler Callbacks ────────────────────────── */
+
+/** Rust callback: non-blocking receive. Returns 0=ready, 1=empty, -1=shutdown. */
+typedef int (*oxphp_worker_try_recv_fn_t)(void);
+
+/** Rust callback: set up TLS for a request received via try_recv. Returns 1=ok, 0=no pending. */
+typedef int (*oxphp_prepare_request_fn_t)(void);
+
+/** Register Rust fiber scheduler callbacks. */
+void oxphp_bridge_set_fiber_callbacks(
+    oxphp_worker_try_recv_fn_t try_recv_fn,
+    oxphp_prepare_request_fn_t prepare_fn
+);
+
+/** Non-blocking receive: returns 0=ready, 1=empty, -1=shutdown. */
+int oxphp_bridge_worker_try_recv(void);
+
+/** Prepare TLS for pending request. Returns 1=ok, 0=nothing pending. */
+int oxphp_bridge_prepare_request(void);
+
 /** Set the cancellation flag (called from Rust when client disconnects). */
 void oxphp_bridge_set_cancelled(bool cancelled);
 

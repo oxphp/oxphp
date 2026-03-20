@@ -2112,6 +2112,17 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     }
 }
 
+/// Register fiber scheduler callbacks with the C bridge.
+/// Called once from main.rs after worker threads are ready.
+pub fn register_fiber_callbacks() {
+    unsafe {
+        crate::bridge::ffi::oxphp_bridge_set_fiber_callbacks(
+            Some(worker_try_recv_callback),
+            Some(prepare_received_request_callback),
+        );
+    }
+}
+
 /// Register the async dispatch callbacks with the C bridge.
 ///
 /// This must be called after the async pool is started and before PHP workers

@@ -486,6 +486,33 @@ int oxphp_bridge_worker_send_response(void) {
     return -1;
 }
 
+/* ─── Fiber Scheduler Callbacks ────────────────────────── */
+
+static oxphp_worker_try_recv_fn_t rust_worker_try_recv = NULL;
+static oxphp_prepare_request_fn_t rust_prepare_request = NULL;
+
+void oxphp_bridge_set_fiber_callbacks(
+    oxphp_worker_try_recv_fn_t try_recv_fn,
+    oxphp_prepare_request_fn_t prepare_fn
+) {
+    rust_worker_try_recv = try_recv_fn;
+    rust_prepare_request = prepare_fn;
+}
+
+int oxphp_bridge_worker_try_recv(void) {
+    if (__builtin_expect(rust_worker_try_recv != NULL, 1)) {
+        return rust_worker_try_recv();
+    }
+    return -1;
+}
+
+int oxphp_bridge_prepare_request(void) {
+    if (__builtin_expect(rust_prepare_request != NULL, 1)) {
+        return rust_prepare_request();
+    }
+    return 0;
+}
+
 void oxphp_bridge_set_cancelled(bool cancelled) {
     ctx.cancelled = cancelled;
 }

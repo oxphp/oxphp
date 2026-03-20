@@ -293,6 +293,13 @@ pub unsafe fn oxphp_bridge_set_timer_callbacks(
 ) {
 }
 
+// ── Fiber scheduler callbacks ──
+pub unsafe fn oxphp_bridge_set_fiber_callbacks(
+    _try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
+    _prepare_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
+) {
+}
+
 // Async task execution
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn oxphp_execute_async_task(
