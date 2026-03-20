@@ -320,7 +320,7 @@ let mut complete_event = RequestComplete {
 | Тело слишком большое | 413 | Сбор тела через `Limited` |
 | Тайм-аут запроса | 504 | `tokio::time::timeout` |
 | Ошибка воркера PHP | 500 | Сломанный oneshot-канал |
-| Очередь заполнена | 503 | `SapiExecutor::execute()` через `try_send` |
+| Очередь заполнена | 529 | `SapiExecutor::execute()` через `try_send` |
 | Файл не найден | 404 | Разрешение маршрута |
 | Внутренняя ошибка | 500 | Универсальный обработчик в `handle_request` |
 

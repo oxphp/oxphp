@@ -28,6 +28,7 @@ errors/
   500.html
   502.html
   503.html
+  529.html
 ```
 
 Only status codes in the 400-599 range are loaded. Files with non-numeric names, names outside this range, or non-`.html` extensions are ignored.

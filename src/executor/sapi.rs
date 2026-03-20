@@ -327,18 +327,16 @@ impl ScriptExecutor for SapiExecutor {
 
         if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
             let (status, body) = match e {
-                TrySendError::Full(_) => {
-                    (503, Bytes::from_static(b"Service Unavailable: queue full"))
-                }
+                TrySendError::Full(_) => (529, Bytes::from_static(b"Site is overloaded")),
                 TrySendError::Disconnected(_) => {
                     (500, Bytes::from_static(b"PHP worker pool unavailable"))
                 }
             };
             let mut headers = Vec::new();
-            if status == 503 {
+            if status == 529 {
                 headers.push((
                     HeaderName::from_static("retry-after"),
-                    HeaderValue::from_static("1"),
+                    HeaderValue::from_static("3"),
                 ));
             }
             return crate::executor::ExecuteResult::Immediate(ScriptResponse {
@@ -1192,5 +1190,60 @@ mod tests {
         // Should be after 2020 and before 2100
         assert!(ms > 1_577_836_800_000); // 2020-01-01
         assert!(ms < 4_102_444_800_000); // 2100-01-01
+    }
+
+    #[test]
+    fn test_backpressure_returns_529_with_retry_after() {
+        use crate::executor::ExecuteResult;
+        use http::{HeaderMap, Method, Uri};
+        use std::path::PathBuf;
+
+        // Create a zero-capacity channel — any send will fail with Full
+        let (tx, rx) = crossbeam_channel::bounded::<WorkerRequest>(0);
+        let metrics = Arc::new(Metrics::new());
+
+        let executor = SapiExecutor {
+            request_tx: Some(tx),
+            request_rx: rx,
+            workers: Arc::new(Mutex::new(Vec::new())),
+            mode: WorkerMode::Static(1),
+            global_shutdown: Arc::new(AtomicBool::new(false)),
+            metrics,
+            idle_timeout_seconds: 30,
+            worker_mode_config: None,
+            worker_metrics: None,
+        };
+
+        let request = ScriptRequest {
+            request_id: String::new(),
+            script_path: PathBuf::from("/var/www/public/index.php"),
+            method: Method::GET,
+            uri: Uri::from_static("/"),
+            query_string: String::new(),
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+            remote_addr: "127.0.0.1:0".parse().unwrap(),
+            document_root: Arc::new(PathBuf::from("/var/www/public")),
+            timeout_us: 0,
+            trace_id: String::new(),
+            span_id: String::new(),
+            parent_span_id: String::new(),
+        };
+
+        let result = executor.execute(request);
+
+        match result {
+            ExecuteResult::Immediate(resp) => {
+                assert_eq!(resp.status, 529, "backpressure should return 529");
+                assert_eq!(resp.body, Bytes::from_static(b"Site is overloaded"));
+                let retry_after = resp
+                    .headers
+                    .iter()
+                    .find(|(n, _)| n.as_str() == "retry-after");
+                assert!(retry_after.is_some(), "should include Retry-After header");
+                assert_eq!(retry_after.unwrap().1, "3");
+            }
+            ExecuteResult::Deferred(_) => panic!("expected Immediate, got Deferred"),
+        }
     }
 }

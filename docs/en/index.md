@@ -17,7 +17,7 @@ The server uses a configurable Tokio async runtime (multi-threaded by default wi
 - **Three routing modes**: Traditional (direct file mapping), Framework (front controller), and SPA (single-page application fallback)
 - **PHP execution** via a custom SAPI (`oxphp`) with full superglobal support (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`)
 - **Dynamic worker scaling** -- auto-scales PHP worker threads between configurable min/max bounds based on load
-- **Bounded request queue** with backpressure -- returns 503 when the queue is full instead of accepting unbounded work
+- **Bounded request queue** with backpressure -- returns 529 when the queue is full instead of accepting unbounded work
 - **Plugin system** with lifecycle hooks, PHP function registration, and topological dependency sorting
 - **Event system** with typed events and priority-ordered handlers at every request lifecycle point
 - **Brotli compression** for compressible response types

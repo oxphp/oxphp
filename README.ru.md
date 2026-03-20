@@ -59,7 +59,7 @@ OxPHP объединяет все три в один бинарный файл �
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
 | Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 503 | manual | ❌ | ❌ | ✅ built-in |
+| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
 | Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
 | Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
 | Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
@@ -122,7 +122,7 @@ OxPHP объединяет все три в один бинарный файл �
 - **Генерация Request ID** и проброс (`X-Request-ID`); формат на основе трейсов при активном OTel
 
 ### Надёжность и эксплуатация
-- **Ограниченная очередь запросов** с противодавлением (503) при переполнении
+- **Ограниченная очередь запросов** с противодавлением (529) при переполнении
 - **Ограничение частоты запросов по IP** с заголовками `X-RateLimit-*` и ответами 429
 - **Пользовательские страницы ошибок** — загружаются при старте, без I/O на горячем пути
 - **Защита от path traversal** с обнаружением выхода за пределы через символические ссылки
@@ -148,7 +148,7 @@ OxPHP объединяет все три в один бинарный файл �
                            │
                     ┌──────▼───────┐
                     │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  503 when full
+                    │(backpressure)│  529 when full
                     └──────┬───────┘
                            │
               ┌────────────┼────────────┐
@@ -196,7 +196,7 @@ OxPHP объединяет все три в один бинарный файл �
 | `EXECUTOR` | `sapi` | Исполнитель PHP: `sapi` (настоящий PHP) или `stub` (режим тестирования) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1) | Пул воркеров: `N` = фиксированный, `MIN:MAX` = динамический, `0` = авто |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Таймаут простоя перед завершением динамического воркера |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Размер ограниченного канала; 503 при переполнении |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Размер ограниченного канала; 529 при переполнении |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Таймаут ожидания завершения запросов при плавной остановке |
 | `LOG_LEVEL` | `info` | Детализация логов: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(не задано)* | Внутренний сервер для health/metrics/config (например `0.0.0.0:9090`) |

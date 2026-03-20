@@ -30,7 +30,7 @@ pub trait ScriptExecutor: Send + Sync {
 | `is_healthy()` | Праверка спраўнасці для ўнутранай канцавой кропкі `/health` |
 | `start_scale_manager()` | Запусціць фонавую задачу маштабавання (у stub не робіць нічога; статычны рэжым запускае манітор здароўя) |
 
-Трэйт вяртае `ExecuteResult`, а не сыры `Future` або `oneshot::Receiver`. Гэта дазваляе экзекутару вярнуць адказ з памылкай неадкладна (напр., 503 калі чарга запоўнена) без удзелу патоку воркера, пры гэтым падтрымліваючы адкладзены выпадак, калі задача Tokio чакае `oneshot::Receiver` для адказу.
+Трэйт вяртае `ExecuteResult`, а не сыры `Future` або `oneshot::Receiver`. Гэта дазваляе экзекутару вярнуць адказ з памылкай неадкладна (напр., 529 калі чарга запоўнена) без удзелу патоку воркера, пры гэтым падтрымліваючы адкладзены выпадак, калі задача Tokio чакае `oneshot::Receiver` для адказу.
 
 ```rust
 pub enum ExecuteResult {
@@ -271,7 +271,7 @@ ScaleManager здымае блакіроўку Mutex перад запускам
 ```rust
 if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
     let (status, body) = match e {
-        TrySendError::Full(_) => (503, "Service Unavailable: queue full"),
+        TrySendError::Full(_) => (529, "Site is overloaded"),
         TrySendError::Disconnected(_) => (500, "PHP worker pool unavailable"),
     };
     return ExecuteResult::Immediate(ScriptResponse {
@@ -286,10 +286,10 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
 | Умова | Паводзіны |
 |---|---|
 | Чарга мае месца | Запыт дадаецца ў чаргу, задача Tokio чакае адказу праз oneshot |
-| Чарга запоўнена | 503 Service Unavailable вяртаецца неадкладна з загалоўкам `Retry-After: 1` |
+| Чарга запоўнена | 529 Site is overloaded вяртаецца неадкладна з загалоўкам `Retry-After: 3` |
 | Воркеры адключаны | 500 Internal Server Error (пул воркераў непрацаздольны) |
 
-Гэты дызайн забяспечвае зваротны ціск: калі воркеры PHP не паспяваюць, новыя запыты адхіляюцца неадкладна, а не ставяцца ў чаргу бясконца. Загаловак `Retry-After: 1` сігналізуе кліентам паўтарыць спробу праз кароткі прамежак часу.
+Гэты дызайн забяспечвае зваротны ціск: калі воркеры PHP не паспяваюць, новыя запыты адхіляюцца неадкладна, а не ставяцца ў чаргу бясконца. Загаловак `Retry-After: 3` сігналізуе кліентам паўтарыць спробу праз кароткі прамежак часу.
 
 ### Метрыкі
 

@@ -62,7 +62,7 @@ curl http://localhost:9090/metrics
 | 指标 | 类型 | 说明 |
 |------|------|------|
 | `oxphp_pending_requests` | gauge | 当前在 PHP 工作队列中等待的请求数 |
-| `oxphp_dropped_requests_total` | counter | 因队列满而被 503 拒绝的请求数 |
+| `oxphp_dropped_requests_total` | counter | 因队列满而被 529 拒绝的请求数 |
 | `oxphp_busy_workers` | gauge | 当前正在处理请求的工作线程数 |
 | `oxphp_queue_wait_us` | histogram | 在队列中等待工作线程拾取的时间（微秒） |
 
@@ -187,7 +187,7 @@ oxphp_active_connections 7
 # TYPE oxphp_pending_requests gauge
 oxphp_pending_requests 2
 
-# HELP oxphp_dropped_requests_total Requests dropped (503).
+# HELP oxphp_dropped_requests_total Requests dropped (529).
 # TYPE oxphp_dropped_requests_total counter
 oxphp_dropped_requests_total 0
 
@@ -405,7 +405,7 @@ rate(oxphp_response_time_us_total[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 
-**丢弃率（每秒 503 拒绝数）：**
+**丢弃率（每秒 529 拒绝数）：**
 
 ```promql
 rate(oxphp_dropped_requests_total[5m])
@@ -533,7 +533,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "OxPHP is dropping requests (503)"
+          summary: "OxPHP is dropping requests (529)"
 
       - alert: OxPHPWorkerErrorRecycles
         expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0

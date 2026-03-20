@@ -24,7 +24,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | `EXECUTOR` | `sapi` | PHP 执行器类型。`sapi` 为真实 PHP 执行，`stub` 为占位响应（用于基准测试） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作池模式。设置 `N` 为固定池，或 `MIN:MAX` 为动态伸缩。参见[工作线程模式](#工作线程模式) |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作线程空闲超过此秒数后被回收。仅在动态模式下生效 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | PHP 队列中等待的最大请求数。队列满时，新的 PHP 请求将收到 `503 Service Unavailable` 响应。动态模式下使用初始工作线程数计算 |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | PHP 队列中等待的最大请求数。队列满时，新的 PHP 请求将收到 `529 Site is overloaded` 响应。动态模式下使用初始工作线程数计算 |
 
 ### 日志
 
@@ -60,7 +60,7 @@ OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `INTERNAL_ADDR` | *(无)* | 内部服务器地址（健康检查、指标、配置）。未设置时不启动 |
-| `ERROR_PAGES_DIR` | *(无)* | 自定义错误页面 HTML 文件目录，文件名格式为 `{status}.html`（例如 `404.html`、`503.html`） |
+| `ERROR_PAGES_DIR` | *(无)* | 自定义错误页面 HTML 文件目录，文件名格式为 `{status}.html`（例如 `404.html`、`503.html`、`529.html`） |
 
 ### 工作进程模式
 

@@ -161,7 +161,7 @@ src/
 
 | Канал | Напрамак | Тып | Прызначэнне |
 |---|---|---|---|
-| `crossbeam_channel::bounded` | Tokio → воркер PHP | `ScriptRequest` | Абмежаваная чарга са зваротным ціскам (503 пры запаўненні) |
+| `crossbeam_channel::bounded` | Tokio → воркер PHP | `ScriptRequest` | Абмежаваная чарга са зваротным ціскам (529 пры запаўненні) |
 | `tokio::sync::oneshot` | Воркер PHP → Tokio | `ScriptResponse` | Адзін адказ на запыт |
 
 `ScriptExecutor::execute()` вяртае пералічэнне `ExecuteResult`, а не сырой `oneshot::Receiver`. Гэта дазваляе экзекутару вярнуць адказ з памылкай неадкладна (без патоку воркера), калі чарга запоўнена або пул воркераў недаступны:

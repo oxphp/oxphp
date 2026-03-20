@@ -62,7 +62,7 @@ This histogram covers all requests (static files and PHP), unlike `oxphp_worker_
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_pending_requests` | gauge | Requests currently waiting in the PHP worker queue |
-| `oxphp_dropped_requests_total` | counter | Requests rejected with 503 because the queue was full |
+| `oxphp_dropped_requests_total` | counter | Requests rejected with 529 because the queue was full |
 | `oxphp_busy_workers` | gauge | Worker threads currently processing a request |
 | `oxphp_queue_wait_us` | histogram | Time waiting in queue before worker pickup (microseconds) |
 
@@ -187,7 +187,7 @@ oxphp_active_connections 7
 # TYPE oxphp_pending_requests gauge
 oxphp_pending_requests 2
 
-# HELP oxphp_dropped_requests_total Requests dropped (503).
+# HELP oxphp_dropped_requests_total Requests dropped (529).
 # TYPE oxphp_dropped_requests_total counter
 oxphp_dropped_requests_total 0
 
@@ -405,7 +405,7 @@ rate(oxphp_response_time_us_total[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 
-**Drop rate (503 rejections per second):**
+**Drop rate (529 rejections per second):**
 
 ```promql
 rate(oxphp_dropped_requests_total[5m])
@@ -533,7 +533,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "OxPHP is dropping requests (503)"
+          summary: "OxPHP is dropping requests (529)"
 
       - alert: OxPHPWorkerErrorRecycles
         expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0

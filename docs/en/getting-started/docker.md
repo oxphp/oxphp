@@ -102,7 +102,7 @@ services:
 | `EXECUTOR` | `sapi` | PHP executor type: `sapi` (real PHP) or `stub` (placeholder) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before a dynamic worker is retired |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded request queue size. 503 returned when full |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded request queue size. 529 returned when full |
 | `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `INTERNAL_ADDR` | _(unset)_ | Address for internal server. Unset disables it |

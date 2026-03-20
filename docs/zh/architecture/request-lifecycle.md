@@ -320,7 +320,7 @@ let mut complete_event = RequestComplete {
 | 请求体过大 | 413 | `Limited` 体收集 |
 | 请求超时 | 504 | `tokio::time::timeout` |
 | PHP 工作线程错误 | 500 | oneshot channel 断开 |
-| 队列已满 | 503 | `SapiExecutor::execute()` 通过 `try_send` |
+| 队列已满 | 529 | `SapiExecutor::execute()` 通过 `try_send` |
 | 文件未找到 | 404 | 路由解析 |
 | 内部错误 | 500 | `handle_request` 中的兜底处理 |
 
