@@ -1500,7 +1500,7 @@ pub fn await_is_ready(promise_id: u64) -> bool {
     // Try to poll the oneshot receiver — must remove first to get ownership
     let entry = PROMISE_MAP.with(|m| m.borrow_mut().remove(&promise_id));
     match entry {
-        Some((rx, cancelled)) => match rx.try_recv() {
+        Some((mut rx, cancelled)) => match rx.try_recv() {
             Ok(result) => {
                 // Result is ready — store in READY_RESULTS for later take
                 READY_RESULTS.with(|m| {

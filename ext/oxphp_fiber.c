@@ -15,7 +15,10 @@
 #include "bridge/oxphp_bridge.h"
 
 #include "SAPI.h"
-#include "php_output.h"
+#include "Zend/zend_exceptions.h"
+#include "main/php_main.h"
+#include "main/php_output.h"
+#include "ext/standard/basic_functions.h"
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
 
