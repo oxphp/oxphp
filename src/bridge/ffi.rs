@@ -181,6 +181,13 @@ extern "C" {
     pub fn oxphp_bridge_capture_fatal(msg: *const c_char, len: usize);
     pub fn oxphp_bridge_pop_fatal() -> *mut c_char;
 
+    // ── Fiber timer service ──
+    pub fn oxphp_bridge_set_timer_callbacks(
+        register_fn: Option<unsafe extern "C" fn(u64) -> u64>,
+        poll_fn: Option<unsafe extern "C" fn(*mut u64, u32) -> u32>,
+        remove_fn: Option<unsafe extern "C" fn(u64)>,
+    );
+
     // Async task execution
     pub fn oxphp_execute_async_task(
         op_array: *const c_void,

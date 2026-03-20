@@ -281,6 +281,14 @@ pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {
     std::ptr::null_mut()
 }
 
+// ── Fiber timer service ──
+pub unsafe fn oxphp_bridge_set_timer_callbacks(
+    _register_fn: Option<unsafe extern "C" fn(u64) -> u64>,
+    _poll_fn: Option<unsafe extern "C" fn(*mut u64, u32) -> u32>,
+    _remove_fn: Option<unsafe extern "C" fn(u64)>,
+) {
+}
+
 // Async task execution
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn oxphp_execute_async_task(

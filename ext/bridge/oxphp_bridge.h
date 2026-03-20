@@ -373,6 +373,16 @@ uint64_t oxphp_bridge_get_memory_usage(void);
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);
 
+/* ─── Fiber Timer Service ──────────────────────────────── */
+typedef uint64_t (*oxphp_timer_register_fn_t)(uint64_t duration_ms);
+typedef uint32_t (*oxphp_timer_poll_fn_t)(uint64_t *out_ids, uint32_t max_count);
+typedef void     (*oxphp_timer_remove_fn_t)(uint64_t timer_id);
+
+void oxphp_bridge_set_timer_callbacks(oxphp_timer_register_fn_t, oxphp_timer_poll_fn_t, oxphp_timer_remove_fn_t);
+uint64_t oxphp_bridge_timer_register(uint64_t duration_ms);
+uint32_t oxphp_bridge_timer_poll(uint64_t *out_ids, uint32_t max_count);
+void     oxphp_bridge_timer_remove(uint64_t timer_id);
+
 /* === Async Promise Support === */
 
 /* Async worker state (no PHP types — safe without php.h) */

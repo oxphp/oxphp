@@ -1443,3 +1443,43 @@ void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
     zend_update_property_long(borrow_proxy_ce, Z_OBJ_P(dst),
         "promiseId", sizeof("promiseId") - 1, (zend_long)promise_id);
 }
+
+/* ─── Fiber Timer Service ──────────────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. Same pattern as worker/async callbacks.
+ */
+static oxphp_timer_register_fn_t rust_timer_register = NULL;
+static oxphp_timer_poll_fn_t     rust_timer_poll     = NULL;
+static oxphp_timer_remove_fn_t   rust_timer_remove   = NULL;
+
+void oxphp_bridge_set_timer_callbacks(
+    oxphp_timer_register_fn_t reg,
+    oxphp_timer_poll_fn_t poll,
+    oxphp_timer_remove_fn_t rem
+) {
+    rust_timer_register = reg;
+    rust_timer_poll     = poll;
+    rust_timer_remove   = rem;
+}
+
+uint64_t oxphp_bridge_timer_register(uint64_t duration_ms) {
+    if (__builtin_expect(rust_timer_register != NULL, 1)) {
+        return rust_timer_register(duration_ms);
+    }
+    return 0;
+}
+
+uint32_t oxphp_bridge_timer_poll(uint64_t *out_ids, uint32_t max_count) {
+    if (__builtin_expect(rust_timer_poll != NULL, 1)) {
+        return rust_timer_poll(out_ids, max_count);
+    }
+    return 0;
+}
+
+void oxphp_bridge_timer_remove(uint64_t timer_id) {
+    if (__builtin_expect(rust_timer_remove != NULL, 1)) {
+        rust_timer_remove(timer_id);
+    }
+}
