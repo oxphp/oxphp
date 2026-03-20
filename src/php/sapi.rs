@@ -1779,6 +1779,48 @@ pub unsafe extern "C" fn await_dispatch_callback(
 
     let id = promise_id as u64;
 
+    // Fast path: check if result was pre-fetched by the scheduler's poll loop
+    // (fiber-aware await resumes after the scheduler detects readiness via await_poll)
+    if let Some(mut result) = take_ready_result(id) {
+        cleanup_promise(id);
+
+        if result.success {
+            if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                let rc = ffi::oxphp_portable_deserialize(
+                    result.serialized_value,
+                    result.serialized_value_len,
+                    1,
+                    retval,
+                );
+                ffi::oxphp_portable_free(result.serialized_value);
+                result.serialized_value = std::ptr::null_mut(); // prevent double-free in Drop
+                if rc != 0 {
+                    return -1;
+                }
+            }
+            return 0;
+        } else {
+            // Store exception details in bridge TLS for the C extension
+            if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
+                let cls_c = CString::new(cls.as_str()).unwrap_or_default();
+                let msg_c = CString::new(msg.as_str()).unwrap_or_default();
+                let trace_c = result
+                    .exception_trace
+                    .as_deref()
+                    .map(|t| CString::new(t).unwrap_or_default());
+                ffi::oxphp_bridge_set_async_exception(
+                    cls_c.as_ptr(),
+                    msg_c.as_ptr(),
+                    trace_c
+                        .as_ref()
+                        .map(|c| c.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                );
+            }
+            return -1;
+        }
+    }
+
     // Take promise from map
     let (rx, cancelled) = match take_promise(id) {
         Some(p) => p,

@@ -567,6 +567,44 @@ PHP_FUNCTION(oxphp_async_await)
         Z_PARAM_DOUBLE(timeout)
     ZEND_PARSE_PARAMETERS_END();
 
+    /* Fiber-aware path: if inside a fiber, suspend instead of blocking */
+    if (oxphp_current_fiber != NULL) {
+        oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_AWAIT;
+        oxphp_current_fiber->suspend_data.promise_id = (int64_t)promise_id;
+
+        zend_fiber_transfer transfer = {
+            .context = oxphp_current_fiber->scheduler,
+            .flags = 0
+        };
+        ZVAL_NULL(&transfer.value);
+
+        oxphp_current_fiber = NULL;
+        zend_fiber_switch_context(&transfer);
+        /* --- RESUMED by scheduler when promise result is ready --- */
+
+        /* The result is now in READY_RESULTS (Rust TLS).
+         * Call the regular dispatch which has a fast path for ready results. */
+        int rc = oxphp_bridge_await_dispatch((int64_t)promise_id, 0.0, return_value);
+        if (rc == -2) {
+            zend_throw_exception(oxphp_async_timeout_ce, "Unexpected timeout after fiber resume", 0);
+            return;
+        }
+        if (rc == -1) {
+            /* Read exception details from bridge TLS */
+            const char *cls = oxphp_bridge_get_async_exc_class();
+            const char *msg = oxphp_bridge_get_async_exc_message();
+            zend_string *zmsg = zend_strpprintf(0, "Async task failed: [%s] %s",
+                cls ? cls : "?", msg ? msg : "?");
+            zend_throw_exception(oxphp_async_exception_ce, ZSTR_VAL(zmsg), 0);
+            zend_string_release(zmsg);
+            oxphp_bridge_clear_async_exception();
+            return;
+        }
+        /* rc == 0: return_value already populated */
+        return;
+    }
+
+    /* Traditional blocking path (non-fiber mode) */
     int result = oxphp_bridge_await_dispatch((int64_t)promise_id, timeout, return_value);
 
     if (result == -2) {
