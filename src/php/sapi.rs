@@ -83,6 +83,11 @@ thread_local! {
 
     /// True on async worker threads, false on HTTP workers.
     static IS_ASYNC_WORKER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+
+    /// Pre-fetched async results waiting to be consumed by `take_ready_result`.
+    /// Populated by `await_is_ready` when a non-blocking poll finds a completed promise.
+    static READY_RESULTS: RefCell<HashMap<u64, AsyncResult>>
+        = RefCell::new(HashMap::new());
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -1473,6 +1478,84 @@ pub fn is_async_worker() -> bool {
     IS_ASYNC_WORKER.with(|c| c.get())
 }
 
+// ─── Non-Blocking Await Poll ──────────────────────────────────
+
+/// Non-blocking check if a promise result is ready.
+///
+/// 1. Check `READY_RESULTS` — if already pre-fetched, return true.
+/// 2. Check `PROMISE_MAP`:
+///    - Remove entry to get ownership (avoids double-borrow).
+///    - `try_recv()` on the oneshot receiver:
+///      - `Ok(result)` → move to `READY_RESULTS`, return true.
+///      - `TryRecvError::Empty` → put back into `PROMISE_MAP`, return false.
+///      - `TryRecvError::Closed` → drop (task was cancelled/dropped), return false.
+pub fn await_is_ready(promise_id: u64) -> bool {
+    // Fast path: already pre-fetched
+    let already = READY_RESULTS.with(|m| m.borrow().contains_key(&promise_id));
+    if already {
+        return true;
+    }
+
+    // Try to poll the oneshot receiver — must remove first to get ownership
+    let entry = PROMISE_MAP.with(|m| m.borrow_mut().remove(&promise_id));
+    match entry {
+        Some((rx, cancelled)) => match rx.try_recv() {
+            Ok(result) => {
+                // Result is ready — store in READY_RESULTS for later take
+                READY_RESULTS.with(|m| {
+                    m.borrow_mut().insert(promise_id, result);
+                });
+                // Put cancelled flag back? No — the promise completed, we keep the
+                // cancellation Arc in PROMISE_CLEANUP for cleanup_promise.
+                // But we need to keep the cancelled flag accessible... actually no,
+                // the rx is consumed so there's no need to re-store. The cancelled
+                // flag is only relevant for the async worker (which already finished).
+                // We do NOT re-insert into PROMISE_MAP since the result is consumed.
+                true
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                // Not ready yet — put back
+                PROMISE_MAP.with(|m| {
+                    m.borrow_mut().insert(promise_id, (rx, cancelled));
+                });
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                // Sender dropped (task was cancelled or pool shut down)
+                false
+            }
+        },
+        None => false, // Unknown promise ID
+    }
+}
+
+/// Remove and return a pre-fetched result from `READY_RESULTS`.
+///
+/// Called after `await_is_ready` returns true to consume the result.
+pub fn take_ready_result(promise_id: u64) -> Option<AsyncResult> {
+    READY_RESULTS.with(|m| m.borrow_mut().remove(&promise_id))
+}
+
+/// C-callable callback for non-blocking await poll.
+/// Returns 1 if the promise result is ready, 0 if not.
+///
+/// # Safety
+/// Called from C code via function pointer.
+unsafe extern "C" fn await_poll_callback(promise_id: i64) -> c_int {
+    if await_is_ready(promise_id as u64) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Register the await poll callback with the C bridge.
+pub fn register_await_poll_callback() {
+    unsafe {
+        crate::bridge::ffi::oxphp_bridge_set_await_poll(Some(await_poll_callback));
+    }
+}
+
 /// Process-global async task sender — set once after the AsyncWorkerPool is started,
 /// read by PHP worker threads to clone a per-thread sender without needing to pass
 /// it through spawn_worker (workers are started before the pool exists).
@@ -2102,6 +2185,68 @@ mod tests {
         RESPONSE.with(|r| r.borrow_mut().status_code = 404);
         set_fatal_error_status_if_default();
         RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 404));
+    }
+
+    #[test]
+    fn await_poll_returns_false_for_unknown_id() {
+        // Unknown promise ID should return false
+        assert!(!await_is_ready(99999));
+    }
+
+    #[test]
+    fn await_poll_returns_true_when_result_sent() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let promise_id = 42424242u64;
+
+        // Store the promise
+        store_promise(promise_id, rx, cancelled);
+
+        // Before sending, should not be ready
+        assert!(!await_is_ready(promise_id));
+
+        // Send a result
+        let result = AsyncResult {
+            success: true,
+            serialized_value: std::ptr::null_mut(),
+            serialized_value_len: 0,
+            exception_class: None,
+            exception_message: None,
+            exception_trace: None,
+        };
+        tx.send(result).unwrap();
+
+        // Now it should be ready
+        assert!(await_is_ready(promise_id));
+
+        // Calling again should still return true (cached in READY_RESULTS)
+        assert!(await_is_ready(promise_id));
+
+        // Consume the result
+        let taken = take_ready_result(promise_id);
+        assert!(taken.is_some());
+        assert!(taken.unwrap().success);
+
+        // After take, should no longer be ready
+        assert!(!await_is_ready(promise_id));
+    }
+
+    #[test]
+    fn await_poll_returns_false_when_sender_dropped() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let promise_id = 77777777u64;
+
+        store_promise(promise_id, rx, cancelled);
+
+        // Drop the sender without sending
+        drop(tx);
+
+        // Should return false (channel closed)
+        assert!(!await_is_ready(promise_id));
+
+        // Promise should be removed from map (consumed by try_recv)
+        assert!(take_promise(promise_id).is_none());
     }
 
     #[test]

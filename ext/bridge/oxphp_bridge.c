@@ -650,6 +650,20 @@ int oxphp_bridge_await_any_dispatch(
     return -1;
 }
 
+/* ─── Non-Blocking Await Poll ──────────────────────────────── */
+static oxphp_await_poll_fn_t rust_await_poll = NULL;
+
+void oxphp_bridge_set_await_poll(oxphp_await_poll_fn_t fn) {
+    rust_await_poll = fn;
+}
+
+int oxphp_bridge_await_poll(int64_t promise_id) {
+    if (__builtin_expect(rust_await_poll != NULL, 1)) {
+        return rust_await_poll(promise_id);
+    }
+    return 0;
+}
+
 /* ─── Async Promise Cleanup ─────────────────────────────────── */
 static oxphp_cleanup_promises_fn_t rust_cleanup_promises = NULL;
 

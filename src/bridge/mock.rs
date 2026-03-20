@@ -166,6 +166,10 @@ pub unsafe fn oxphp_bridge_set_await_any_dispatch(
 ) {
 }
 
+// ── Non-blocking await poll ──
+
+pub unsafe fn oxphp_bridge_set_await_poll(_f: Option<unsafe extern "C" fn(i64) -> c_int>) {}
+
 // ── Async promise cleanup ──
 
 pub unsafe fn oxphp_bridge_set_cleanup_promises(_f: Option<unsafe extern "C" fn()>) {}

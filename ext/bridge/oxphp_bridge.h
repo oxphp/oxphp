@@ -434,6 +434,11 @@ int oxphp_bridge_await_any_dispatch(
     int64_t *out_winner_id, void *retval
 );
 
+/* ─── Non-Blocking Await Poll ──────────────────────────────── */
+typedef int (*oxphp_await_poll_fn_t)(int64_t promise_id);
+void oxphp_bridge_set_await_poll(oxphp_await_poll_fn_t fn);
+int  oxphp_bridge_await_poll(int64_t promise_id);
+
 /* ─── Async Promise Cleanup ─────────────────────────────────── */
 typedef void (*oxphp_cleanup_promises_fn_t)(void);
 void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn);

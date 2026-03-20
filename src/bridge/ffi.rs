@@ -102,6 +102,9 @@ extern "C" {
         f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
     );
 
+    // ── Non-blocking await poll ──
+    pub fn oxphp_bridge_set_await_poll(f: Option<unsafe extern "C" fn(i64) -> c_int>);
+
     // ── Async promise cleanup ──
     pub fn oxphp_bridge_set_cleanup_promises(f: Option<unsafe extern "C" fn()>);
     pub fn oxphp_bridge_cleanup_outstanding_promises();
