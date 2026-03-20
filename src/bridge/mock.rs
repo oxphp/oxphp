@@ -293,6 +293,14 @@ pub unsafe fn oxphp_bridge_set_timer_callbacks(
 ) {
 }
 
+// ── Fiber TLS context callbacks ──
+pub unsafe fn oxphp_bridge_set_fiber_ctx_callbacks(
+    _save_fn: Option<unsafe extern "C" fn(u64)>,
+    _restore_fn: Option<unsafe extern "C" fn(u64)>,
+    _drop_fn: Option<unsafe extern "C" fn(u64)>,
+) {
+}
+
 // ── Fiber scheduler callbacks ──
 pub unsafe fn oxphp_bridge_set_fiber_callbacks(
     _try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,

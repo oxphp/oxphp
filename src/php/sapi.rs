@@ -18,10 +18,11 @@ use crate::types::{ScriptRequest, ScriptResponse};
 
 /// Per-request response state consolidated in a single thread-local
 /// to avoid 3 separate TLS lookups + RefCell borrows on the hot path.
-struct ResponseBuffers {
-    output: Vec<u8>,
-    headers: Vec<(String, String)>,
-    status_code: u16,
+#[derive(Default)]
+pub(crate) struct ResponseBuffers {
+    pub(crate) output: Vec<u8>,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) status_code: u16,
 }
 
 impl ResponseBuffers {
@@ -41,7 +42,7 @@ pub struct WorkerIncomingRequest {
 }
 
 thread_local! {
-    static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
+    pub(crate) static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
     static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
     /// Holds the oneshot sender + request start time for early response delivery
     /// via `oxphp_finish_request()`. Set before script execution, consumed when early send triggers.

@@ -191,6 +191,13 @@ extern "C" {
         remove_fn: Option<unsafe extern "C" fn(u64)>,
     );
 
+    // ── Fiber TLS context callbacks ──
+    pub fn oxphp_bridge_set_fiber_ctx_callbacks(
+        save_fn: Option<unsafe extern "C" fn(u64)>,
+        restore_fn: Option<unsafe extern "C" fn(u64)>,
+        drop_fn: Option<unsafe extern "C" fn(u64)>,
+    );
+
     // ── Fiber scheduler callbacks ──
     pub fn oxphp_bridge_set_fiber_callbacks(
         try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,

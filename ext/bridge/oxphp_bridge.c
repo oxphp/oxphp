@@ -1485,6 +1485,44 @@ void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
         "promiseId", sizeof("promiseId") - 1, (zend_long)promise_id);
 }
 
+/* ─── Fiber TLS Context Callbacks ──────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. Same pattern as worker/async callbacks.
+ */
+static oxphp_fiber_save_ctx_fn_t    rust_fiber_save_ctx    = NULL;
+static oxphp_fiber_restore_ctx_fn_t rust_fiber_restore_ctx = NULL;
+static oxphp_fiber_drop_ctx_fn_t    rust_fiber_drop_ctx    = NULL;
+
+void oxphp_bridge_set_fiber_ctx_callbacks(
+    oxphp_fiber_save_ctx_fn_t save_fn,
+    oxphp_fiber_restore_ctx_fn_t restore_fn,
+    oxphp_fiber_drop_ctx_fn_t drop_fn
+) {
+    rust_fiber_save_ctx    = save_fn;
+    rust_fiber_restore_ctx = restore_fn;
+    rust_fiber_drop_ctx    = drop_fn;
+}
+
+void oxphp_bridge_fiber_save_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_save_ctx != NULL, 1)) {
+        rust_fiber_save_ctx(fiber_id);
+    }
+}
+
+void oxphp_bridge_fiber_restore_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_restore_ctx != NULL, 1)) {
+        rust_fiber_restore_ctx(fiber_id);
+    }
+}
+
+void oxphp_bridge_fiber_drop_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_drop_ctx != NULL, 1)) {
+        rust_fiber_drop_ctx(fiber_id);
+    }
+}
+
 /* ─── Fiber Timer Service ──────────────────────────────── */
 
 /*

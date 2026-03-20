@@ -393,6 +393,33 @@ uint64_t oxphp_bridge_get_memory_usage(void);
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);
 
+/* ─── Fiber TLS Context Callbacks ──────────────────────── */
+
+/** Rust callback: save current fiber's TLS context. */
+typedef void (*oxphp_fiber_save_ctx_fn_t)(uint64_t fiber_id);
+
+/** Rust callback: restore a fiber's TLS context. */
+typedef void (*oxphp_fiber_restore_ctx_fn_t)(uint64_t fiber_id);
+
+/** Rust callback: drop a fiber's TLS slot (fiber completed/destroyed). */
+typedef void (*oxphp_fiber_drop_ctx_fn_t)(uint64_t fiber_id);
+
+/** Register Rust fiber TLS context callbacks (called once at init). */
+void oxphp_bridge_set_fiber_ctx_callbacks(
+    oxphp_fiber_save_ctx_fn_t save_fn,
+    oxphp_fiber_restore_ctx_fn_t restore_fn,
+    oxphp_fiber_drop_ctx_fn_t drop_fn
+);
+
+/** Save current fiber's Rust TLS context into per-fiber slot. */
+void oxphp_bridge_fiber_save_ctx(uint64_t fiber_id);
+
+/** Restore a fiber's Rust TLS context from per-fiber slot. */
+void oxphp_bridge_fiber_restore_ctx(uint64_t fiber_id);
+
+/** Drop a fiber's Rust TLS slot (cleanup on fiber destruction). */
+void oxphp_bridge_fiber_drop_ctx(uint64_t fiber_id);
+
 /* ─── Fiber Timer Service ──────────────────────────────── */
 typedef uint64_t (*oxphp_timer_register_fn_t)(uint64_t duration_ms);
 typedef uint32_t (*oxphp_timer_poll_fn_t)(uint64_t *out_ids, uint32_t max_count);
