@@ -30,7 +30,7 @@ pub trait ScriptExecutor: Send + Sync {
 | `is_healthy()` | `/health` 内部端点的健康检查 |
 | `start_scale_manager()` | 启动后台伸缩任务（stub 中无操作；静态模式生成健康监控器） |
 
-该 trait 返回 `ExecuteResult` 而非裸的 `Future` 或 `oneshot::Receiver`。这使得执行器可以在不涉及工作线程的情况下立即返回错误响应（例如队列满时返回 503），同时仍支持 Tokio 任务等待 `oneshot::Receiver` 的延迟场景。
+该 trait 返回 `ExecuteResult` 而非裸的 `Future` 或 `oneshot::Receiver`。这使得执行器可以在不涉及工作线程的情况下立即返回错误响应（例如队列满时返回 529），同时仍支持 Tokio 任务等待 `oneshot::Receiver` 的延迟场景。
 
 ```rust
 pub enum ExecuteResult {
@@ -271,7 +271,7 @@ Tokio 与 PHP 工作线程之间的 channel 使用 `crossbeam_channel::bounded(Q
 ```rust
 if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
     let (status, body) = match e {
-        TrySendError::Full(_) => (503, "Service Unavailable: queue full"),
+        TrySendError::Full(_) => (529, "Site is overloaded"),
         TrySendError::Disconnected(_) => (500, "PHP worker pool unavailable"),
     };
     return ExecuteResult::Immediate(ScriptResponse {
@@ -286,10 +286,10 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
 | 条件 | 行为 |
 |---|---|
 | 队列有空间 | 请求入队，Tokio 任务等待 oneshot 响应 |
-| 队列已满 | 立即返回 503 Service Unavailable，带 `Retry-After: 1` 头 |
+| 队列已满 | 立即返回 529 Site is overloaded，带 `Retry-After: 3` 头 |
 | 工作线程断开 | 500 Internal Server Error（工作线程池已停止） |
 
-此设计提供背压：当 PHP 工作线程跟不上时，新请求立即被拒绝而非无限排队。`Retry-After: 1` 头信号客户端在短暂延迟后重试。
+此设计提供背压：当 PHP 工作线程跟不上时，新请求立即被拒绝而非无限排队。`Retry-After: 3` 头信号客户端在短暂延迟后重试。
 
 ### 指标
 

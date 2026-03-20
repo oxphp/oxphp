@@ -30,7 +30,7 @@ pub trait ScriptExecutor: Send + Sync {
 | `is_healthy()` | Health check for the `/health` internal endpoint |
 | `start_scale_manager()` | Start the background scaling task (no-op in stub; static mode spawns a health monitor) |
 
-The trait returns `ExecuteResult` rather than a raw `Future` or `oneshot::Receiver`. This allows the executor to return an error response immediately (e.g., 503 when the queue is full) without involving a worker thread, while still supporting the deferred case where the Tokio task awaits a `oneshot::Receiver` for the response.
+The trait returns `ExecuteResult` rather than a raw `Future` or `oneshot::Receiver`. This allows the executor to return an error response immediately (e.g., 529 when the queue is full) without involving a worker thread, while still supporting the deferred case where the Tokio task awaits a `oneshot::Receiver` for the response.
 
 ```rust
 pub enum ExecuteResult {
@@ -271,7 +271,7 @@ The channel between Tokio and PHP workers uses `crossbeam_channel::bounded(QUEUE
 ```rust
 if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
     let (status, body) = match e {
-        TrySendError::Full(_) => (503, "Service Unavailable: queue full"),
+        TrySendError::Full(_) => (529, "Site is overloaded"),
         TrySendError::Disconnected(_) => (500, "PHP worker pool unavailable"),
     };
     return ExecuteResult::Immediate(ScriptResponse {
@@ -286,10 +286,10 @@ if let Err(e) = self.request_tx.as_ref().unwrap().try_send(worker_request) {
 | Condition | Behavior |
 |---|---|
 | Queue has space | Request is enqueued, Tokio task awaits the oneshot response |
-| Queue is full | 503 Service Unavailable returned immediately with `Retry-After: 1` header |
+| Queue is full | 529 Site is overloaded returned immediately with `Retry-After: 3` header |
 | Workers disconnected | 500 Internal Server Error (worker pool is down) |
 
-This design provides backpressure: when PHP workers cannot keep up, new requests are rejected immediately rather than queued indefinitely. The `Retry-After: 1` header signals clients to retry after a brief delay.
+This design provides backpressure: when PHP workers cannot keep up, new requests are rejected immediately rather than queued indefinitely. The `Retry-After: 3` header signals clients to retry after a brief delay.
 
 ### Metrics
 

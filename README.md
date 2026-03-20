@@ -59,7 +59,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
 | Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 503 | manual | ❌ | ❌ | ✅ built-in |
+| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
 | Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
 | Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
 | Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
@@ -122,7 +122,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 - **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled
 
 ### Reliability & Operations
-- **Bounded request queue** with 503 backpressure when full
+- **Bounded request queue** with 529 backpressure when full
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path
 - **Path traversal protection** with symlink escape detection
@@ -148,7 +148,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
                            │
                     ┌──────▼───────┐
                     │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  503 when full
+                    │(backpressure)│  529 when full
                     └──────┬───────┘
                            │
               ┌────────────┼────────────┐
@@ -196,7 +196,7 @@ All settings are via environment variables — no config files required.
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool: `N` = fixed, `MIN:MAX` = dynamic, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before retiring a dynamic worker |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 503 when full |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 529 when full |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Graceful shutdown drain timeout |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config (e.g. `0.0.0.0:9090`) |

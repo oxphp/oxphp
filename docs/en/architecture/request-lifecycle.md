@@ -320,7 +320,7 @@ Errors at each stage produce appropriate HTTP status codes:
 | Body too large | 413 | `Limited` body collection |
 | Request timeout | 504 | `tokio::time::timeout` |
 | PHP worker error | 500 | Broken oneshot channel |
-| Queue full | 503 | `SapiExecutor::execute()` via `try_send` |
+| Queue full | 529 | `SapiExecutor::execute()` via `try_send` |
 | File not found | 404 | Route resolution |
 | Internal error | 500 | Catch-all in `handle_request` |
 

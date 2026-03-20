@@ -161,7 +161,7 @@ The async and synchronous halves of OxPHP communicate through two channel types:
 
 | Channel | Direction | Type | Purpose |
 |---|---|---|---|
-| `crossbeam_channel::bounded` | Tokio → PHP worker | `ScriptRequest` | Bounded queue with backpressure (503 on full) |
+| `crossbeam_channel::bounded` | Tokio → PHP worker | `ScriptRequest` | Bounded queue with backpressure (529 on full) |
 | `tokio::sync::oneshot` | PHP worker → Tokio | `ScriptResponse` | Single response per request |
 
 `ScriptExecutor::execute()` returns an `ExecuteResult` enum rather than a raw `oneshot::Receiver`. This allows the executor to return an error response immediately (without a worker thread) when the queue is full or the worker pool is unavailable:

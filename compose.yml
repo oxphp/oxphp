@@ -52,7 +52,7 @@ services:
       # - PHP_WORKERS_IDLE_SECONDS=30
 
       # Bounded channel capacity between HTTP and PHP workers.
-      # Requests beyond this limit get 503. Default: PHP_WORKERS * 128.
+      # Requests beyond this limit get 529. Default: PHP_WORKERS * 128.
       # - QUEUE_CAPACITY=0
 
       # ── Connections ───────────────────────────────────────────────

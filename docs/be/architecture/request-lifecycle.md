@@ -320,7 +320,7 @@ let mut complete_event = RequestComplete {
 | Цела занадта вялікае | 413 | Збор цела `Limited` |
 | Таймаўт запыту | 504 | `tokio::time::timeout` |
 | Памылка воркера PHP | 500 | Разарваны канал oneshot |
-| Чарга запоўнена | 503 | `SapiExecutor::execute()` праз `try_send` |
+| Чарга запоўнена | 529 | `SapiExecutor::execute()` праз `try_send` |
 | Файл не знойдзены | 404 | Разрашэнне маршруту |
 | Унутраная памылка | 500 | Агульная апрацоўка ў `handle_request` |
 

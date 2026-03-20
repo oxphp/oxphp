@@ -59,7 +59,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
 | Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 503 | manual | ❌ | ❌ | ✅ built-in |
+| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
 | Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
 | Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
 | Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
@@ -122,7 +122,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 - **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式
 
 ### 可靠性与运维
-- **有界请求队列** — 队列满时返回 503 进行背压控制
+- **有界请求队列** — 队列满时返回 529 进行背压控制
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
 - **自定义错误页面** — 启动时预加载，热路径零 I/O
 - **路径穿越防护** — 包含符号链接逃逸检测
@@ -148,7 +148,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
                            │
                     ┌──────▼───────┐
                     │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  503 when full
+                    │(backpressure)│  529 when full
                     └──────┬───────┘
                            │
               ┌────────────┼────────────┐
@@ -196,7 +196,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下工作线程的空闲超时时间 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 503 |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 529 |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时 |
 | `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |

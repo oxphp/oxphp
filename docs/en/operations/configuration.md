@@ -24,7 +24,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `EXECUTOR` | `sapi` | PHP executor type. `sapi` for real PHP execution, `stub` for a placeholder response (benchmarking) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. Set `N` for a fixed pool, or `MIN:MAX` for dynamic scaling. See [Worker Modes](#worker-modes) |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker must be idle before it is retired. Only applies in dynamic mode |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Maximum requests waiting in the PHP queue. When full, new PHP requests receive a `503 Service Unavailable` response. Uses initial worker count for dynamic mode |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Maximum requests waiting in the PHP queue. When full, new PHP requests receive a `529 Site is overloaded` response. Uses initial worker count for dynamic mode |
 
 ### Logging
 
@@ -60,7 +60,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `INTERNAL_ADDR` | *(none)* | Address for the internal server (health checks, metrics, config). Not started when unset |
-| `ERROR_PAGES_DIR` | *(none)* | Directory containing custom error page HTML files named `{status}.html` (e.g., `404.html`, `503.html`) |
+| `ERROR_PAGES_DIR` | *(none)* | Directory containing custom error page HTML files named `{status}.html` (e.g., `404.html`, `503.html`, `529.html`) |
 
 ### Worker Mode
 

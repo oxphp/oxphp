@@ -62,7 +62,7 @@ curl http://localhost:9090/metrics
 | Метрыка | Тып | Апісанне |
 |--------|------|-------------|
 | `oxphp_pending_requests` | gauge | Запыты, якія зараз чакаюць у чарзе PHP-воркераў |
-| `oxphp_dropped_requests_total` | counter | Запыты, адхіленыя з кодам 503, бо чарга была поўная |
+| `oxphp_dropped_requests_total` | counter | Запыты, адхіленыя з кодам 529, бо чарга была поўная |
 | `oxphp_busy_workers` | gauge | Патокі воркераў, якія зараз апрацоўваюць запыт |
 | `oxphp_queue_wait_us` | histogram | Час чакання ў чарзе да падхопу воркерам (мікрасекунды) |
 
@@ -187,7 +187,7 @@ oxphp_active_connections 7
 # TYPE oxphp_pending_requests gauge
 oxphp_pending_requests 2
 
-# HELP oxphp_dropped_requests_total Requests dropped (503).
+# HELP oxphp_dropped_requests_total Requests dropped (529).
 # TYPE oxphp_dropped_requests_total counter
 oxphp_dropped_requests_total 0
 
@@ -405,7 +405,7 @@ rate(oxphp_response_time_us_total[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 
-**Хуткасць адхіленняў (адхіленні 503 у секунду):**
+**Хуткасць адхіленняў (адхіленні 529 у секунду):**
 
 ```promql
 rate(oxphp_dropped_requests_total[5m])
@@ -533,7 +533,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "OxPHP is dropping requests (503)"
+          summary: "OxPHP is dropping requests (529)"
 
       - alert: OxPHPWorkerErrorRecycles
         expr: rate(oxphp_worker_recycles_by_reason_total{reason="error"}[5m]) > 0

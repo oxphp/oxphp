@@ -161,7 +161,7 @@ OxPHP 的异步和同步两半通过两种 channel 类型通信：
 
 | Channel | 方向 | 类型 | 用途 |
 |---|---|---|---|
-| `crossbeam_channel::bounded` | Tokio → PHP 工作线程 | `ScriptRequest` | 带背压的有界队列（满时返回 503） |
+| `crossbeam_channel::bounded` | Tokio → PHP 工作线程 | `ScriptRequest` | 带背压的有界队列（满时返回 529） |
 | `tokio::sync::oneshot` | PHP 工作线程 → Tokio | `ScriptResponse` | 每请求单次响应 |
 
 `ScriptExecutor::execute()` 返回 `ExecuteResult` 枚举而非裸的 `oneshot::Receiver`。这使得执行器在队列已满或工作线程池不可用时，可以不经过工作线程直接返回错误响应：

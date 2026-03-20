@@ -102,7 +102,7 @@ services:
 | `EXECUTOR` | `sapi` | PHP 执行器类型：`sapi`（真实 PHP）或 `stub`（占位符） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | Worker 池模式。`N` = 固定池，`MIN:MAX` = 动态扩缩容 |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态 worker 退出前的空闲超时时间 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界请求队列大小。队列满时返回 503 |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界请求队列大小。队列满时返回 529 |
 | `LOG_LEVEL` | `info` | 日志级别：`trace`、`debug`、`info`、`warn`、`error` |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `INTERNAL_ADDR` | _(未设置)_ | 内部服务器地址。未设置则禁用 |

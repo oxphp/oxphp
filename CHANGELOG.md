@@ -13,7 +13,7 @@ and built-in observability.
 - Async HTTP/1.1 server built on Hyper + Tokio with graceful shutdown
 - Custom PHP SAPI (`oxphp`) with full superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`)
 - C bridge library (`liboxphp_bridge.so`) for zero-copy Rust↔PHP communication via direct zval access
-- PHP ZTS (Zend Thread Safety) multi-threaded worker pool with bounded queue and 503 backpressure
+- PHP ZTS (Zend Thread Safety) multi-threaded worker pool with bounded queue and 529 backpressure
 - Three routing modes: Traditional (direct file mapping), Framework (front controller), SPA (fallback to `index.html`)
 - Static file serving with in-memory cache, MIME detection, and HTTP caching (ETag, Last-Modified, 304 responses)
 - Brotli compression with configurable quality level (0–11) and minimum size threshold

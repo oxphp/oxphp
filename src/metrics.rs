@@ -474,7 +474,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_dropped_requests_total Requests dropped (503)."
+            "# HELP oxphp_dropped_requests_total Requests dropped (529)."
         );
         let _ = writeln!(out, "# TYPE oxphp_dropped_requests_total counter");
         let _ = writeln!(
