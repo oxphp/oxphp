@@ -59,6 +59,8 @@ thread_local! {
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Pending request from non-blocking try_recv, awaiting prepare_received_request().
+    static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
 }
 
 thread_local! {
@@ -1149,56 +1151,8 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 
     match incoming {
         Some(req) => {
-            // Single syscall for both last_active and request_time (#6: avoid double syscall)
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
-
-            // Update last_active timestamp for dynamic scaling
-            WORKER_LAST_ACTIVE.with(|slot| {
-                if let Some(ref la) = *slot.borrow() {
-                    la.store(now.as_millis() as u64, Ordering::Relaxed);
-                }
-            });
-
-            // Clear previous response buffers
-            clear_buffers();
-
-            // Reset bridge TLS per-request fields (request_id, deadline, cancelled, etc.)
-            // before populating new request data.
-            bindings::oxphp_bridge_reset_request_ctx();
-
-            // Set up SAPI data for the new request — populates SG(request_info)
-            // with method, query_string, content_type, content_length, and stores
-            // server vars + cookie/body data in thread-local RequestData.
-            // The C-side soft_reset reads cookies and POST data via SAPI callbacks
-            // after this point.
-            set_request_data(&req.script);
-
-            let start = Instant::now();
-            set_early_tx(start, req.response_tx);
-
-            // Store request start time for duration histogram
-            WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
-
-            // Increment soft_resets counter
-            WORKER_METRICS_TLS.with(|slot| {
-                if let Some(ref wm) = *slot.borrow() {
-                    wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-
-            // Set request_time BEFORE superglobals are populated
-            bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
-
-            // Set execution deadline
-            if req.script.timeout_us > 0 {
-                let now_us = now.as_micros() as i64;
-                let deadline =
-                    now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
-                bindings::oxphp_bridge_set_deadline(deadline);
-            }
-
+            // Direct call — no PENDING_REQUEST round-trip on the blocking path
+            setup_request_tls(req);
             0 // success
         }
         None => -1, // channel closed = shutdown
@@ -1303,6 +1257,150 @@ pub fn get_worker_wait_callback() -> Option<unsafe extern "C" fn() -> std::os::r
 /// Get the worker send callback function pointer for registering with the bridge.
 pub fn get_worker_send_callback() -> Option<unsafe extern "C" fn() -> std::os::raw::c_int> {
     Some(worker_send_callback)
+}
+
+// ─── Non-Blocking Try-Recv for Fiber Scheduler ──────────────
+
+/// Result of a non-blocking channel receive attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvResult {
+    /// A request is available and has been stored in PENDING_REQUEST.
+    Ready,
+    /// No request available yet (channel empty).
+    Empty,
+    /// Channel is closed (worker should shut down).
+    Disconnected,
+}
+
+/// Non-blocking check of the worker channel.
+/// On success, stores the request in PENDING_REQUEST for later processing
+/// via `prepare_received_request()`.
+fn try_recv_inner() -> TryRecvResult {
+    WORKER_RX.with(|slot| {
+        let rx = slot.borrow();
+        match rx.as_ref() {
+            None => TryRecvResult::Disconnected,
+            Some(rx) => match rx.try_recv() {
+                Ok(req) => {
+                    PENDING_REQUEST.with(|p| {
+                        *p.borrow_mut() = Some(req);
+                    });
+                    TryRecvResult::Ready
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => TryRecvResult::Empty,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => TryRecvResult::Disconnected,
+            },
+        }
+    })
+}
+
+/// Non-blocking try-recv callback for the fiber scheduler.
+/// Returns: 0 = request ready (stored in PENDING_REQUEST),
+///          1 = channel empty (no request available),
+///         -1 = channel disconnected (shutdown).
+///
+/// # Safety
+/// Called from C code via function pointer. Must only be called from a worker thread
+/// with WORKER_RX set.
+unsafe extern "C" fn worker_try_recv_callback() -> c_int {
+    match try_recv_inner() {
+        TryRecvResult::Ready => 0,
+        TryRecvResult::Empty => 1,
+        TryRecvResult::Disconnected => -1,
+    }
+}
+
+/// Get the non-blocking try-recv callback function pointer.
+pub fn get_worker_try_recv_callback() -> Option<unsafe extern "C" fn() -> c_int> {
+    Some(worker_try_recv_callback)
+}
+
+/// Prepare a pending request from PENDING_REQUEST for execution.
+/// Core TLS setup for a received request. Accepts the request by value to
+/// avoid unnecessary round-trips through PENDING_REQUEST on the blocking path.
+///
+/// Called by both `worker_wait_callback` (direct) and `prepare_received_request`
+/// (via PENDING_REQUEST staging slot for the non-blocking fiber path).
+fn setup_request_tls(req: WorkerIncomingRequest) {
+    // Single syscall for both last_active and request_time
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    // Update last_active timestamp for dynamic scaling
+    WORKER_LAST_ACTIVE.with(|slot| {
+        if let Some(ref la) = *slot.borrow() {
+            la.store(now.as_millis() as u64, Ordering::Relaxed);
+        }
+    });
+
+    // Clear previous response buffers
+    clear_buffers();
+
+    // Reset bridge TLS per-request fields
+    unsafe { bindings::oxphp_bridge_reset_request_ctx() };
+
+    // Set up SAPI data for the new request
+    set_request_data(&req.script);
+
+    let start = Instant::now();
+    set_early_tx(start, req.response_tx);
+
+    // Store request start time for duration histogram
+    WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
+    // Increment soft_resets counter
+    WORKER_METRICS_TLS.with(|slot| {
+        if let Some(ref wm) = *slot.borrow() {
+            wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // Set request_time BEFORE superglobals are populated
+    unsafe { bindings::oxphp_bridge_set_request_time(now.as_secs_f64()) };
+
+    // Set execution deadline
+    if req.script.timeout_us > 0 {
+        let now_us = now.as_micros() as i64;
+        let deadline = now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
+        unsafe { bindings::oxphp_bridge_set_deadline(deadline) };
+    }
+}
+
+/// Takes a pending request from `PENDING_REQUEST` TLS (deposited by
+/// `try_recv_inner`) and runs `setup_request_tls`. Used by the fiber
+/// scheduler's non-blocking path.
+///
+/// Returns `true` if a pending request was found and prepared, `false` if
+/// PENDING_REQUEST was empty.
+fn prepare_received_request() -> bool {
+    let incoming = PENDING_REQUEST.with(|p| p.borrow_mut().take());
+    match incoming {
+        Some(req) => {
+            setup_request_tls(req);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Prepare-received-request callback for the fiber scheduler.
+/// Returns: 1 = request prepared successfully, 0 = nothing pending.
+///
+/// # Safety
+/// Called from C code via function pointer. Must only be called from a worker thread
+/// after a successful `worker_try_recv_callback()` call.
+unsafe extern "C" fn prepare_received_request_callback() -> c_int {
+    if prepare_received_request() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Get the prepare-received-request callback function pointer.
+pub fn get_prepare_received_request_callback() -> Option<unsafe extern "C" fn() -> c_int> {
+    Some(prepare_received_request_callback)
 }
 
 // ─── Async Promise TLS Accessors ──────────────────────────────
@@ -2004,5 +2102,31 @@ mod tests {
         RESPONSE.with(|r| r.borrow_mut().status_code = 404);
         set_fatal_error_status_if_default();
         RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 404));
+    }
+
+    #[test]
+    fn try_recv_returns_disconnected_when_no_rx() {
+        // Ensure WORKER_RX is None (default state for test threads)
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        assert_eq!(try_recv_inner(), TryRecvResult::Disconnected);
+    }
+
+    #[test]
+    fn try_recv_returns_empty_on_empty_channel() {
+        let (tx, rx) = crossbeam_channel::bounded::<WorkerIncomingRequest>(8);
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = Some(rx);
+        });
+
+        // Channel is empty — should return Empty
+        assert_eq!(try_recv_inner(), TryRecvResult::Empty);
+
+        // Clean up: drop tx so channel closes, then clear WORKER_RX
+        drop(tx);
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
     }
 }
