@@ -159,6 +159,71 @@ PHP_FUNCTION(oxphp_stream_flush)
 }
 /* }}} */
 
+/* ─── Cooperative Sleep ───────────────────────────────────── */
+
+/* Internal: register timer and suspend current fiber.
+ * duration_us is the sleep duration in microseconds.
+ * Returns 1 if fiber-suspended, 0 if no fiber (use blocking fallback). */
+static int oxphp_fiber_sleep_us(uint64_t duration_us)
+{
+    if (oxphp_current_fiber == NULL) return 0;
+
+    uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
+    if (duration_ms == 0) duration_ms = 1;
+
+    uint64_t timer_id = oxphp_bridge_timer_register(duration_ms);
+
+    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    oxphp_current_fiber->suspend_data.timer_id = timer_id;
+
+    zend_fiber_transfer transfer = {
+        .context = oxphp_current_fiber->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    return 1;
+}
+
+/* {{{ oxphp_sleep(float $seconds): void
+ * Cooperative sleep: suspends the current fiber (if inside one) to let other
+ * requests proceed, falling back to blocking usleep when not in a fiber. */
+PHP_FUNCTION(oxphp_sleep)
+{
+    double seconds;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_DOUBLE(seconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (seconds <= 0.0) return;
+
+    uint64_t duration_us = (uint64_t)(seconds * 1000000.0);
+    if (oxphp_fiber_sleep_us(duration_us)) return;
+
+    usleep((useconds_t)duration_us);
+}
+/* }}} */
+
+/* {{{ oxphp_usleep(int $microseconds): void
+ * Cooperative microsecond sleep: suspends the current fiber (if inside one)
+ * to let other requests proceed, falling back to blocking usleep. */
+PHP_FUNCTION(oxphp_usleep)
+{
+    zend_long microseconds;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(microseconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (microseconds <= 0) return;
+
+    if (oxphp_fiber_sleep_us((uint64_t)microseconds)) return;
+
+    usleep((useconds_t)microseconds);
+}
+/* }}} */
+
 /* ─── Worker Mode: soft reset between requests ─────────────── */
 
 /**
@@ -807,6 +872,14 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_flush, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_sleep, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, seconds, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_usleep, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, microseconds, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker, 0, 1, _IS_BOOL, 0)
     ZEND_ARG_CALLABLE_INFO(0, handler, 0)
 ZEND_END_ARG_INFO()
@@ -842,6 +915,8 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
+    PHP_FE(oxphp_sleep,             arginfo_oxphp_sleep)
+    PHP_FE(oxphp_usleep,            arginfo_oxphp_usleep)
     PHP_FE(oxphp_worker,            arginfo_oxphp_worker)
     PHP_FE(oxphp_async,             arginfo_oxphp_async)
     PHP_FE(oxphp_async_await,             arginfo_oxphp_async_await)
