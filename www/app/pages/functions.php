@@ -121,6 +121,45 @@ while (($row = fgetcsv($handle)) !== false) {
 fclose($handle);',
     ],
     [
+        'name'    => 'oxphp_sleep',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_sleep(float $seconds): void',
+        'params'  => [
+            ['name' => '$seconds', 'type' => 'float', 'desc' => 'Duration to sleep in seconds (e.g. 0.5 for 500ms).'],
+        ],
+        'return'  => 'void',
+        'desc'    => 'Cooperative sleep that suspends the current fiber, allowing the worker thread to handle other requests during the wait. When called inside a fiber (worker mode with multiplexing), the fiber is suspended and a timer is registered. The scheduler resumes it after the specified duration. Falls back to blocking <code>usleep()</code> outside a fiber.',
+        'example' => 'oxphp_worker(function () {
+    // Non-blocking: other requests proceed during sleep
+    oxphp_sleep(0.1);  // 100ms cooperative sleep
+    echo "done";
+});
+
+// SSE with cooperative sleep
+oxphp_worker(function () {
+    header("Content-Type: text/event-stream");
+    for ($i = 0; $i < 10; $i++) {
+        echo "data: " . json_encode(["counter" => $i]) . "\n\n";
+        oxphp_stream_flush();
+        oxphp_sleep(1.0); // yields fiber, worker handles other requests
+    }
+});',
+    ],
+    [
+        'name'    => 'oxphp_usleep',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_usleep(int $microseconds): void',
+        'params'  => [
+            ['name' => '$microseconds', 'type' => 'int', 'desc' => 'Duration to sleep in microseconds.'],
+        ],
+        'return'  => 'void',
+        'desc'    => 'Cooperative microsecond sleep. Identical to <code>oxphp_sleep()</code> but accepts microseconds as an integer, consistent with PHP\'s built-in <code>usleep()</code>. Falls back to blocking <code>usleep()</code> when not inside a fiber.',
+        'example' => 'oxphp_worker(function () {
+    oxphp_usleep(50000);  // 50ms cooperative sleep
+    echo "done";
+});',
+    ],
+    [
         'name'    => 'oxphp_worker',
         'sig'     => 'oxphp_worker(callable $handler): bool',
         'params'  => [
@@ -248,6 +287,8 @@ foreach ($functions as $fn) {
             'oxphp_request_heartbeat' => '<span class="mono">' . (oxphp_request_heartbeat() ? 'true' : 'false') . '</span>',
             'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',
             'oxphp_finish_request'    => '<span class="mono dim">not called &mdash; would end response</span>',
+            'oxphp_sleep'             => '<span class="mono dim">not called &mdash; would suspend fiber</span>',
+            'oxphp_usleep'            => '<span class="mono dim">not called &mdash; would suspend fiber</span>',
             'oxphp_worker'            => '<span class="mono dim">not called &mdash; enters worker loop</span>',
             'oxphp_async'             => '<span class="mono dim">not called &mdash; dispatches closure to async pool</span>',
             'oxphp_async_await'       => '<span class="mono dim">not called &mdash; blocks until promise completes</span>',

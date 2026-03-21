@@ -347,6 +347,11 @@ $sapi       = PHP_SAPI;
                 <h3>Async Promises</h3>
                 <p>Dispatch closures to a dedicated async thread pool with <code>oxphp_async()</code>. Await single, all, or race with <code>oxphp_async_await()</code>, <code>oxphp_async_await_all()</code>, <code>oxphp_async_await_any()</code>.</p>
             </div>
+            <div class="feature-card">
+                <div class="icon">&#x1F9F6;</div>
+                <h3>Fiber Multiplexing</h3>
+                <p>Each worker handles multiple concurrent requests via cooperative fibers. <code>oxphp_sleep()</code> and <code>oxphp_async_await()</code> yield the worker thread to other requests instead of blocking.</p>
+            </div>
         </div>
 
         <!-- ── Quick Start ── -->
@@ -588,6 +593,14 @@ docker run -p 8080:8080 \
             <div class="fn-item">
                 <code>oxphp_async_await_any(array $ids, ?float $timeout): array</code>
                 <p>Races promises, returns the first to complete (fastest wins).</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_sleep(float $seconds): void</code>
+                <p>Cooperative sleep — suspends the fiber, letting the worker handle other requests.</p>
+            </div>
+            <div class="fn-item">
+                <code>oxphp_usleep(int $microseconds): void</code>
+                <p>Cooperative microsecond sleep. Same as oxphp_sleep() with microsecond granularity.</p>
             </div>
         </div>
 
