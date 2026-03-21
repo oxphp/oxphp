@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers fifteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers sixteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -580,6 +580,46 @@ $r3 = oxphp_async_await($p3); // 3
 
 ---
 
+## `oxphp_register_decorator`
+
+Registers a PHP class as an attribute-based decorator. See [Decorators](../features/decorators.md) for the full guide.
+
+```php
+oxphp_register_decorator(string $class): bool
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `$class` | `string` | Fully qualified class name |
+
+**Return value:** `true` on success. `false` with an `E_WARNING` if:
+- The class does not exist
+- The class does not implement `OxPHP\Decorator\AttributeInterface`
+- The class is not marked with `#[Attribute(...)]`
+
+**Example:**
+
+```php
+<?php
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Timer implements OxPHP\Decorator\AttributeInterface {
+    public function __construct(public readonly string $label = '') {}
+    public function before(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+    public function after(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+}
+
+oxphp_register_decorator(Timer::class);
+```
+
+**Notes:**
+- Call once during application bootstrap (e.g., after autoloader setup).
+- The decorator takes effect immediately — any subsequent function call with the matching attribute will be intercepted.
+- Both Rust-native and PHP decorators coexist in the same registry.
+
+---
+
 ## Plugin Functions
 
 Plugins can register custom PHP functions that are callable from your scripts. These functions are registered during PHP module initialization (`MINIT`) and dispatched through the C bridge to Rust handler code.
@@ -629,11 +669,13 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [12] => oxphp_async_await
 //     [13] => oxphp_async_await_all
 //     [14] => oxphp_async_await_any
+//     [15] => oxphp_register_decorator
 // )
 ```
 
 ## See Also
 
+- [Decorators](/features/decorators.md) --- attribute-based function/method interception with `oxphp_register_decorator()`
 - [Async Promises](/features/async-promises.md) --- parallel execution with `oxphp_async()` and `oxphp_async_await()`
 - [Fiber-Based Request Multiplexing](/features/fiber-multiplexing.md) --- cooperative multitasking with `oxphp_sleep()` and fiber-aware `oxphp_async_await()`
 - [Superglobals](superglobals.md) --- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
