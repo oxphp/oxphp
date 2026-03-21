@@ -70,6 +70,7 @@ OxPHP распространяется по лицензии [AGPL-3.0](https://
 - [Таймауты](features/timeouts.md) -- таймауты заголовков, запросов и простоя
 - [Логирование доступа](features/access-logging.md) -- структурированный JSON-лог доступа
 - [Распределённая трассировка](features/distributed-tracing.md) -- W3C Trace Context и OpenTelemetry
+- [Декораторы](features/decorators.md) -- перехват вызовов функций/методов на основе атрибутов
 
 ### Интеграция с PHP
 
