@@ -503,7 +503,7 @@ int oxphp_bridge_worker_try_recv(void) {
     if (__builtin_expect(rust_worker_try_recv != NULL, 1)) {
         return rust_worker_try_recv();
     }
-    return -1;
+    return 1; /* empty, not shutdown — safe fallback if callbacks not registered */
 }
 
 int oxphp_bridge_prepare_request(void) {

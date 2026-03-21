@@ -20,6 +20,24 @@ typedef enum {
 
 /* ─── Per-Fiber Saved PHP State ────────────────────────── */
 
+/* ─── Per-Fiber VM State ───────────────────────────────── */
+
+/* Replicates zend_fiber_vm_state from zend_fibers.c (internal/static).
+ * The low-level fiber API (zend_fiber_switch_context) does NOT save VM state —
+ * only the high-level API (zend_fiber_start/resume) does. We must do it
+ * ourselves for each context switch. */
+typedef struct {
+    zend_vm_stack vm_stack;
+    zval *vm_stack_top;
+    zval *vm_stack_end;
+    zend_execute_data *current_execute_data;
+    int error_reporting;
+    JMP_BUF *bailout;
+    zend_fiber *active_fiber;
+} oxphp_fiber_vm_state;
+
+/* ─── Per-Fiber PHP State ──────────────────────────────── */
+
 typedef struct {
     /* Superglobals: saved PG(http_globals) values */
     zval http_globals[6]; /* TRACK_VARS_POST .. TRACK_VARS_FILES */
@@ -28,6 +46,9 @@ typedef struct {
     zend_llist sapi_headers;
     int http_response_code;
     bool headers_sent;
+
+    /* Zend VM state (vm_stack, execute_data, bailout, etc.) */
+    oxphp_fiber_vm_state vm_state;
 
     /* Output buffer: we flush OB to ub_write on suspend,
      * so no OB state needs saving. The output is in Rust RESPONSE TLS. */
@@ -68,8 +89,16 @@ typedef struct _oxphp_request_fiber {
     zend_fcall_info *fci;
     zend_fcall_info_cache *fcc;
 
+    /* Stack limits for this fiber's C stack (set in coroutine entry,
+     * saved on suspend, restored on resume). Needed because the low-level
+     * fiber API doesn't manage EG(stack_base/limit). */
+    void *saved_stack_base;
+    void *saved_stack_limit;
+
     /* Handler result tracking */
     bool handler_failed;
+    bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
+    bool started;            /* true after first start — reused fibers skip zend_fiber_init_context */
     int consecutive_errors;
 
     /* Linked list pointers for the scheduler's fiber list */

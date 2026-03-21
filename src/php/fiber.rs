@@ -143,17 +143,18 @@ pub(crate) struct ResponseBuffers {
 
 /// Saved per-fiber TLS state.
 ///
-/// Currently saves RESPONSE only. Other TLS variables will be added
-/// as their types are made moveable:
-///   - EARLY_TX: Option<(Instant, oneshot::Sender<ScriptResponse>)>
-///   - REQUEST_DATA: RequestData (server vars, cookies, body)
-///   - WORKER_REQUEST_START: Option<Instant>
-#[allow(dead_code)] // Fields read via save/restore in php builds; directly in tests
+/// Saves RESPONSE, EARLY_TX, and WORKER_REQUEST_START per fiber.
+/// REQUEST_DATA is not yet saved (TODO — needs CString pointer safety analysis).
+#[allow(dead_code)]
 struct FiberTlsSlot {
     response: ResponseBuffers,
-    // TODO: early_tx — needs Option<(Instant, oneshot::Sender<ScriptResponse>)> to be moveable
-    // TODO: request_data — needs RequestData to be pub(crate) and moveable
-    // TODO: worker_request_start — needs Cell<Option<Instant>> save/restore
+    #[cfg(feature = "php")]
+    early_tx: Option<(
+        Instant,
+        tokio::sync::oneshot::Sender<crate::types::ScriptResponse>,
+    )>,
+    #[cfg(feature = "php")]
+    request_start: Option<Instant>,
 }
 
 thread_local! {
@@ -168,10 +169,17 @@ pub fn save_fiber_tls(fiber_id: u64) {
     #[cfg(feature = "php")]
     {
         let response = RESPONSE.with(|r| std::mem::take(&mut *r.borrow_mut()));
+        let early_tx = super::sapi::take_early_tx();
+        let request_start = super::sapi::take_request_start();
         FIBER_TLS_SLOTS.with(|slots| {
-            slots
-                .borrow_mut()
-                .insert(fiber_id, FiberTlsSlot { response });
+            slots.borrow_mut().insert(
+                fiber_id,
+                FiberTlsSlot {
+                    response,
+                    early_tx,
+                    request_start,
+                },
+            );
         });
     }
     #[cfg(not(feature = "php"))]
@@ -192,6 +200,8 @@ pub fn restore_fiber_tls(fiber_id: u64) {
                 RESPONSE.with(|r| {
                     *r.borrow_mut() = slot.response;
                 });
+                super::sapi::restore_early_tx(slot.early_tx);
+                super::sapi::restore_request_start(slot.request_start);
             }
         });
     }

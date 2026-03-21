@@ -369,69 +369,31 @@ PHP_FUNCTION(oxphp_worker)
 
     while (1) {
         if (sched.fiber_count == 0) {
-            /* ── Fast path: no active fibers ──────────────────────────
-             * Block-wait for next request, then execute handler directly
-             * (zero fiber overhead). This is the common case for handlers
-             * that don't call oxphp_async_await or oxphp_sleep. */
+            /* ── No active fibers: block-wait for next request ──────── */
 
             if (oxphp_bridge_worker_wait() != 0) {
-                ctx->exit_reason = 0; /* shutdown */
+                ctx->exit_reason = 0;
                 break;
             }
 
-            /* Full soft reset is safe — no other fibers to clobber */
             oxphp_soft_reset();
 
-            /* Execute handler synchronously (same as pre-fiber code) */
-            int handler_failed = 0;
-            zval retval;
-            zend_execute_data *saved = EG(current_execute_data);
-            ZVAL_UNDEF(&retval);
+            /* Create or reuse a fiber for the request */
+            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, &fci, &fcc);
+            if (!fiber) break;
 
-            zend_try {
-                fci.retval = &retval;
-                fci.param_count = 0;
-                fci.params = NULL;
-                if (zend_call_function(&fci, &fcc) == SUCCESS) {
-                    zval_ptr_dtor(&retval);
-                }
-                if (EG(exception)) {
-                    if (zend_is_unwind_exit(EG(exception)) || zend_is_graceful_exit(EG(exception))) {
-                        /* exit/die — not a failure */
-                    } else {
-                        handler_failed = 1;
-                    }
-                    OBJ_RELEASE(EG(exception));
-                    EG(exception) = NULL;
-                }
-            } zend_catch {
-                handler_failed = 1;
-                EG(current_execute_data) = saved;
-                if (EG(exception)) {
-                    OBJ_RELEASE(EG(exception));
-                    EG(exception) = NULL;
-                }
-                CG(unclean_shutdown) = 0;
-            } zend_end_try();
-
-            php_call_shutdown_functions();
-            php_free_shutdown_functions();
-
-            /* If no fibers were created during handler execution
-             * (handler didn't suspend), use the fast path. */
-            if (sched.fiber_count == 0) {
-                ctx->current_memory_bytes = (uint64_t)zend_memory_usage(0);
-                ctx->handler_failed = handler_failed ? true : false;
-                oxphp_bridge_worker_send_response();
-                ctx->requests_done++;
-
-                if (handler_failed) {
-                    consecutive_errors++;
-                } else {
-                    consecutive_errors = 0;
-                }
+            if (fiber->started) {
+                /* Reused fiber — coroutine is looping, just resume it */
+                oxphp_scheduler_resume_fiber(&sched, fiber, NULL);
+            } else {
+                /* New fiber — start the coroutine for the first time */
+                fiber->started = true;
+                oxphp_scheduler_start_fiber(&sched, fiber);
             }
-            /* else: handler created fibers (future extension) — fall through to event loop */
+
+            if (fiber->completed) {
+                oxphp_scheduler_finalize_fiber(&sched, fiber);
+            }
 
         } else {
             /* ── Event loop: active fibers exist ──────────────────────

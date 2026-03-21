@@ -192,6 +192,23 @@ pub fn set_early_tx(start: Instant, tx: oneshot::Sender<ScriptResponse>) {
     });
 }
 
+/// Restore EARLY_TX into TLS (for per-fiber restore).
+pub(crate) fn restore_early_tx(val: Option<(Instant, oneshot::Sender<ScriptResponse>)>) {
+    EARLY_TX.with(|slot| {
+        *slot.borrow_mut() = val;
+    });
+}
+
+/// Take WORKER_REQUEST_START from TLS (for per-fiber save).
+pub(crate) fn take_request_start() -> Option<Instant> {
+    WORKER_REQUEST_START.with(|cell| cell.take())
+}
+
+/// Restore WORKER_REQUEST_START into TLS (for per-fiber restore).
+pub(crate) fn restore_request_start(val: Option<Instant>) {
+    WORKER_REQUEST_START.with(|cell| cell.set(val));
+}
+
 /// Parse raw header strings into typed `HeaderName`/`HeaderValue` pairs.
 /// Shared between early send and normal response paths.
 pub fn parse_raw_headers(raw: Vec<(String, String)>) -> Vec<(HeaderName, HeaderValue)> {
@@ -2155,13 +2172,33 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     }
 }
 
-/// Register fiber scheduler callbacks with the C bridge.
-/// Called once from main.rs after worker threads are ready.
+/// Register all fiber scheduler callbacks with the C bridge.
+/// Called once from main.rs before PHP workers start.
+///
+/// Registers: try_recv, prepare_request, timer service, await poll, fiber ctx save/restore.
 pub fn register_fiber_callbacks() {
     unsafe {
+        // Non-blocking channel receive + request preparation
         crate::bridge::ffi::oxphp_bridge_set_fiber_callbacks(
             Some(worker_try_recv_callback),
             Some(prepare_received_request_callback),
+        );
+
+        // Timer service for oxphp_sleep/oxphp_usleep
+        crate::bridge::ffi::oxphp_bridge_set_timer_callbacks(
+            Some(crate::php::fiber::timer_register_callback),
+            Some(crate::php::fiber::timer_poll_callback),
+            Some(crate::php::fiber::timer_remove_callback),
+        );
+
+        // Non-blocking await poll for fiber-aware oxphp_async_await
+        crate::bridge::ffi::oxphp_bridge_set_await_poll(Some(await_poll_callback));
+
+        // Per-fiber TLS save/restore/drop
+        crate::bridge::ffi::oxphp_bridge_set_fiber_ctx_callbacks(
+            Some(crate::php::fiber::fiber_save_ctx_callback),
+            Some(crate::php::fiber::fiber_restore_ctx_callback),
+            Some(crate::php::fiber::fiber_drop_ctx_callback),
         );
     }
 }
