@@ -18,10 +18,11 @@ use crate::types::{ScriptRequest, ScriptResponse};
 
 /// Per-request response state consolidated in a single thread-local
 /// to avoid 3 separate TLS lookups + RefCell borrows on the hot path.
-struct ResponseBuffers {
-    output: Vec<u8>,
-    headers: Vec<(String, String)>,
-    status_code: u16,
+#[derive(Default)]
+pub(crate) struct ResponseBuffers {
+    pub(crate) output: Vec<u8>,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) status_code: u16,
 }
 
 impl ResponseBuffers {
@@ -41,7 +42,7 @@ pub struct WorkerIncomingRequest {
 }
 
 thread_local! {
-    static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
+    pub(crate) static RESPONSE: RefCell<ResponseBuffers> = RefCell::new(ResponseBuffers::new());
     static REQUEST_DATA: RefCell<RequestData> = RefCell::new(RequestData::new());
     /// Holds the oneshot sender + request start time for early response delivery
     /// via `oxphp_finish_request()`. Set before script execution, consumed when early send triggers.
@@ -59,6 +60,8 @@ thread_local! {
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Pending request from non-blocking try_recv, awaiting prepare_received_request().
+    static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
 }
 
 thread_local! {
@@ -81,6 +84,11 @@ thread_local! {
 
     /// True on async worker threads, false on HTTP workers.
     static IS_ASYNC_WORKER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+
+    /// Pre-fetched async results waiting to be consumed by `take_ready_result`.
+    /// Populated by `await_is_ready` when a non-blocking poll finds a completed promise.
+    static READY_RESULTS: RefCell<HashMap<u64, AsyncResult>>
+        = RefCell::new(HashMap::new());
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
@@ -182,6 +190,23 @@ pub fn set_early_tx(start: Instant, tx: oneshot::Sender<ScriptResponse>) {
     EARLY_TX.with(|slot| {
         *slot.borrow_mut() = Some((start, tx));
     });
+}
+
+/// Restore EARLY_TX into TLS (for per-fiber restore).
+pub(crate) fn restore_early_tx(val: Option<(Instant, oneshot::Sender<ScriptResponse>)>) {
+    EARLY_TX.with(|slot| {
+        *slot.borrow_mut() = val;
+    });
+}
+
+/// Take WORKER_REQUEST_START from TLS (for per-fiber save).
+pub(crate) fn take_request_start() -> Option<Instant> {
+    WORKER_REQUEST_START.with(|cell| cell.take())
+}
+
+/// Restore WORKER_REQUEST_START into TLS (for per-fiber restore).
+pub(crate) fn restore_request_start(val: Option<Instant>) {
+    WORKER_REQUEST_START.with(|cell| cell.set(val));
 }
 
 /// Parse raw header strings into typed `HeaderName`/`HeaderValue` pairs.
@@ -1149,56 +1174,8 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 
     match incoming {
         Some(req) => {
-            // Single syscall for both last_active and request_time (#6: avoid double syscall)
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default();
-
-            // Update last_active timestamp for dynamic scaling
-            WORKER_LAST_ACTIVE.with(|slot| {
-                if let Some(ref la) = *slot.borrow() {
-                    la.store(now.as_millis() as u64, Ordering::Relaxed);
-                }
-            });
-
-            // Clear previous response buffers
-            clear_buffers();
-
-            // Reset bridge TLS per-request fields (request_id, deadline, cancelled, etc.)
-            // before populating new request data.
-            bindings::oxphp_bridge_reset_request_ctx();
-
-            // Set up SAPI data for the new request — populates SG(request_info)
-            // with method, query_string, content_type, content_length, and stores
-            // server vars + cookie/body data in thread-local RequestData.
-            // The C-side soft_reset reads cookies and POST data via SAPI callbacks
-            // after this point.
-            set_request_data(&req.script);
-
-            let start = Instant::now();
-            set_early_tx(start, req.response_tx);
-
-            // Store request start time for duration histogram
-            WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
-
-            // Increment soft_resets counter
-            WORKER_METRICS_TLS.with(|slot| {
-                if let Some(ref wm) = *slot.borrow() {
-                    wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
-                }
-            });
-
-            // Set request_time BEFORE superglobals are populated
-            bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
-
-            // Set execution deadline
-            if req.script.timeout_us > 0 {
-                let now_us = now.as_micros() as i64;
-                let deadline =
-                    now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
-                bindings::oxphp_bridge_set_deadline(deadline);
-            }
-
+            // Direct call — no PENDING_REQUEST round-trip on the blocking path
+            setup_request_tls(req);
             0 // success
         }
         None => -1, // channel closed = shutdown
@@ -1305,6 +1282,150 @@ pub fn get_worker_send_callback() -> Option<unsafe extern "C" fn() -> std::os::r
     Some(worker_send_callback)
 }
 
+// ─── Non-Blocking Try-Recv for Fiber Scheduler ──────────────
+
+/// Result of a non-blocking channel receive attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryRecvResult {
+    /// A request is available and has been stored in PENDING_REQUEST.
+    Ready,
+    /// No request available yet (channel empty).
+    Empty,
+    /// Channel is closed (worker should shut down).
+    Disconnected,
+}
+
+/// Non-blocking check of the worker channel.
+/// On success, stores the request in PENDING_REQUEST for later processing
+/// via `prepare_received_request()`.
+fn try_recv_inner() -> TryRecvResult {
+    WORKER_RX.with(|slot| {
+        let rx = slot.borrow();
+        match rx.as_ref() {
+            None => TryRecvResult::Disconnected,
+            Some(rx) => match rx.try_recv() {
+                Ok(req) => {
+                    PENDING_REQUEST.with(|p| {
+                        *p.borrow_mut() = Some(req);
+                    });
+                    TryRecvResult::Ready
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => TryRecvResult::Empty,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => TryRecvResult::Disconnected,
+            },
+        }
+    })
+}
+
+/// Non-blocking try-recv callback for the fiber scheduler.
+/// Returns: 0 = request ready (stored in PENDING_REQUEST),
+///          1 = channel empty (no request available),
+///         -1 = channel disconnected (shutdown).
+///
+/// # Safety
+/// Called from C code via function pointer. Must only be called from a worker thread
+/// with WORKER_RX set.
+unsafe extern "C" fn worker_try_recv_callback() -> c_int {
+    match try_recv_inner() {
+        TryRecvResult::Ready => 0,
+        TryRecvResult::Empty => 1,
+        TryRecvResult::Disconnected => -1,
+    }
+}
+
+/// Get the non-blocking try-recv callback function pointer.
+pub fn get_worker_try_recv_callback() -> Option<unsafe extern "C" fn() -> c_int> {
+    Some(worker_try_recv_callback)
+}
+
+/// Prepare a pending request from PENDING_REQUEST for execution.
+/// Core TLS setup for a received request. Accepts the request by value to
+/// avoid unnecessary round-trips through PENDING_REQUEST on the blocking path.
+///
+/// Called by both `worker_wait_callback` (direct) and `prepare_received_request`
+/// (via PENDING_REQUEST staging slot for the non-blocking fiber path).
+fn setup_request_tls(req: WorkerIncomingRequest) {
+    // Single syscall for both last_active and request_time
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    // Update last_active timestamp for dynamic scaling
+    WORKER_LAST_ACTIVE.with(|slot| {
+        if let Some(ref la) = *slot.borrow() {
+            la.store(now.as_millis() as u64, Ordering::Relaxed);
+        }
+    });
+
+    // Clear previous response buffers
+    clear_buffers();
+
+    // Reset bridge TLS per-request fields
+    unsafe { bindings::oxphp_bridge_reset_request_ctx() };
+
+    // Set up SAPI data for the new request
+    set_request_data(&req.script);
+
+    let start = Instant::now();
+    set_early_tx(start, req.response_tx);
+
+    // Store request start time for duration histogram
+    WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
+    // Increment soft_resets counter
+    WORKER_METRICS_TLS.with(|slot| {
+        if let Some(ref wm) = *slot.borrow() {
+            wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // Set request_time BEFORE superglobals are populated
+    unsafe { bindings::oxphp_bridge_set_request_time(now.as_secs_f64()) };
+
+    // Set execution deadline
+    if req.script.timeout_us > 0 {
+        let now_us = now.as_micros() as i64;
+        let deadline = now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
+        unsafe { bindings::oxphp_bridge_set_deadline(deadline) };
+    }
+}
+
+/// Takes a pending request from `PENDING_REQUEST` TLS (deposited by
+/// `try_recv_inner`) and runs `setup_request_tls`. Used by the fiber
+/// scheduler's non-blocking path.
+///
+/// Returns `true` if a pending request was found and prepared, `false` if
+/// PENDING_REQUEST was empty.
+fn prepare_received_request() -> bool {
+    let incoming = PENDING_REQUEST.with(|p| p.borrow_mut().take());
+    match incoming {
+        Some(req) => {
+            setup_request_tls(req);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Prepare-received-request callback for the fiber scheduler.
+/// Returns: 1 = request prepared successfully, 0 = nothing pending.
+///
+/// # Safety
+/// Called from C code via function pointer. Must only be called from a worker thread
+/// after a successful `worker_try_recv_callback()` call.
+unsafe extern "C" fn prepare_received_request_callback() -> c_int {
+    if prepare_received_request() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Get the prepare-received-request callback function pointer.
+pub fn get_prepare_received_request_callback() -> Option<unsafe extern "C" fn() -> c_int> {
+    Some(prepare_received_request_callback)
+}
+
 // ─── Async Promise TLS Accessors ──────────────────────────────
 
 pub fn next_promise_id() -> u64 {
@@ -1373,6 +1494,84 @@ pub fn set_is_async_worker(val: bool) {
 
 pub fn is_async_worker() -> bool {
     IS_ASYNC_WORKER.with(|c| c.get())
+}
+
+// ─── Non-Blocking Await Poll ──────────────────────────────────
+
+/// Non-blocking check if a promise result is ready.
+///
+/// 1. Check `READY_RESULTS` — if already pre-fetched, return true.
+/// 2. Check `PROMISE_MAP`:
+///    - Remove entry to get ownership (avoids double-borrow).
+///    - `try_recv()` on the oneshot receiver:
+///      - `Ok(result)` → move to `READY_RESULTS`, return true.
+///      - `TryRecvError::Empty` → put back into `PROMISE_MAP`, return false.
+///      - `TryRecvError::Closed` → drop (task was cancelled/dropped), return false.
+pub fn await_is_ready(promise_id: u64) -> bool {
+    // Fast path: already pre-fetched
+    let already = READY_RESULTS.with(|m| m.borrow().contains_key(&promise_id));
+    if already {
+        return true;
+    }
+
+    // Try to poll the oneshot receiver — must remove first to get ownership
+    let entry = PROMISE_MAP.with(|m| m.borrow_mut().remove(&promise_id));
+    match entry {
+        Some((mut rx, cancelled)) => match rx.try_recv() {
+            Ok(result) => {
+                // Result is ready — store in READY_RESULTS for later take
+                READY_RESULTS.with(|m| {
+                    m.borrow_mut().insert(promise_id, result);
+                });
+                // Put cancelled flag back? No — the promise completed, we keep the
+                // cancellation Arc in PROMISE_CLEANUP for cleanup_promise.
+                // But we need to keep the cancelled flag accessible... actually no,
+                // the rx is consumed so there's no need to re-store. The cancelled
+                // flag is only relevant for the async worker (which already finished).
+                // We do NOT re-insert into PROMISE_MAP since the result is consumed.
+                true
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                // Not ready yet — put back
+                PROMISE_MAP.with(|m| {
+                    m.borrow_mut().insert(promise_id, (rx, cancelled));
+                });
+                false
+            }
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                // Sender dropped (task was cancelled or pool shut down)
+                false
+            }
+        },
+        None => false, // Unknown promise ID
+    }
+}
+
+/// Remove and return a pre-fetched result from `READY_RESULTS`.
+///
+/// Called after `await_is_ready` returns true to consume the result.
+pub fn take_ready_result(promise_id: u64) -> Option<AsyncResult> {
+    READY_RESULTS.with(|m| m.borrow_mut().remove(&promise_id))
+}
+
+/// C-callable callback for non-blocking await poll.
+/// Returns 1 if the promise result is ready, 0 if not.
+///
+/// # Safety
+/// Called from C code via function pointer.
+unsafe extern "C" fn await_poll_callback(promise_id: i64) -> c_int {
+    if await_is_ready(promise_id as u64) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Register the await poll callback with the C bridge.
+pub fn register_await_poll_callback() {
+    unsafe {
+        crate::bridge::ffi::oxphp_bridge_set_await_poll(Some(await_poll_callback));
+    }
 }
 
 /// Process-global async task sender — set once after the AsyncWorkerPool is started,
@@ -1596,6 +1795,48 @@ pub unsafe extern "C" fn await_dispatch_callback(
     use std::time::Duration;
 
     let id = promise_id as u64;
+
+    // Fast path: check if result was pre-fetched by the scheduler's poll loop
+    // (fiber-aware await resumes after the scheduler detects readiness via await_poll)
+    if let Some(mut result) = take_ready_result(id) {
+        cleanup_promise(id);
+
+        if result.success {
+            if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                let rc = ffi::oxphp_portable_deserialize(
+                    result.serialized_value,
+                    result.serialized_value_len,
+                    1,
+                    retval,
+                );
+                ffi::oxphp_portable_free(result.serialized_value);
+                result.serialized_value = std::ptr::null_mut(); // prevent double-free in Drop
+                if rc != 0 {
+                    return -1;
+                }
+            }
+            return 0;
+        } else {
+            // Store exception details in bridge TLS for the C extension
+            if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
+                let cls_c = CString::new(cls.as_str()).unwrap_or_default();
+                let msg_c = CString::new(msg.as_str()).unwrap_or_default();
+                let trace_c = result
+                    .exception_trace
+                    .as_deref()
+                    .map(|t| CString::new(t).unwrap_or_default());
+                ffi::oxphp_bridge_set_async_exception(
+                    cls_c.as_ptr(),
+                    msg_c.as_ptr(),
+                    trace_c
+                        .as_ref()
+                        .map(|c| c.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                );
+            }
+            return -1;
+        }
+    }
 
     // Take promise from map
     let (rx, cancelled) = match take_promise(id) {
@@ -1931,6 +2172,37 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     }
 }
 
+/// Register all fiber scheduler callbacks with the C bridge.
+/// Called once from main.rs before PHP workers start.
+///
+/// Registers: try_recv, prepare_request, timer service, await poll, fiber ctx save/restore.
+pub fn register_fiber_callbacks() {
+    unsafe {
+        // Non-blocking channel receive + request preparation
+        crate::bridge::ffi::oxphp_bridge_set_fiber_callbacks(
+            Some(worker_try_recv_callback),
+            Some(prepare_received_request_callback),
+        );
+
+        // Timer service for oxphp_sleep/oxphp_usleep
+        crate::bridge::ffi::oxphp_bridge_set_timer_callbacks(
+            Some(crate::php::fiber::timer_register_callback),
+            Some(crate::php::fiber::timer_poll_callback),
+            Some(crate::php::fiber::timer_remove_callback),
+        );
+
+        // Non-blocking await poll for fiber-aware oxphp_async_await
+        crate::bridge::ffi::oxphp_bridge_set_await_poll(Some(await_poll_callback));
+
+        // Per-fiber TLS save/restore/drop
+        crate::bridge::ffi::oxphp_bridge_set_fiber_ctx_callbacks(
+            Some(crate::php::fiber::fiber_save_ctx_callback),
+            Some(crate::php::fiber::fiber_restore_ctx_callback),
+            Some(crate::php::fiber::fiber_drop_ctx_callback),
+        );
+    }
+}
+
 /// Register the async dispatch callbacks with the C bridge.
 ///
 /// This must be called after the async pool is started and before PHP workers
@@ -2004,5 +2276,93 @@ mod tests {
         RESPONSE.with(|r| r.borrow_mut().status_code = 404);
         set_fatal_error_status_if_default();
         RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 404));
+    }
+
+    #[test]
+    fn await_poll_returns_false_for_unknown_id() {
+        // Unknown promise ID should return false
+        assert!(!await_is_ready(99999));
+    }
+
+    #[test]
+    fn await_poll_returns_true_when_result_sent() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let promise_id = 42424242u64;
+
+        // Store the promise
+        store_promise(promise_id, rx, cancelled);
+
+        // Before sending, should not be ready
+        assert!(!await_is_ready(promise_id));
+
+        // Send a result
+        let result = AsyncResult {
+            success: true,
+            serialized_value: std::ptr::null_mut(),
+            serialized_value_len: 0,
+            exception_class: None,
+            exception_message: None,
+            exception_trace: None,
+        };
+        tx.send(result).unwrap();
+
+        // Now it should be ready
+        assert!(await_is_ready(promise_id));
+
+        // Calling again should still return true (cached in READY_RESULTS)
+        assert!(await_is_ready(promise_id));
+
+        // Consume the result
+        let taken = take_ready_result(promise_id);
+        assert!(taken.is_some());
+        assert!(taken.unwrap().success);
+
+        // After take, should no longer be ready
+        assert!(!await_is_ready(promise_id));
+    }
+
+    #[test]
+    fn await_poll_returns_false_when_sender_dropped() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let promise_id = 77777777u64;
+
+        store_promise(promise_id, rx, cancelled);
+
+        // Drop the sender without sending
+        drop(tx);
+
+        // Should return false (channel closed)
+        assert!(!await_is_ready(promise_id));
+
+        // Promise should be removed from map (consumed by try_recv)
+        assert!(take_promise(promise_id).is_none());
+    }
+
+    #[test]
+    fn try_recv_returns_disconnected_when_no_rx() {
+        // Ensure WORKER_RX is None (default state for test threads)
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        assert_eq!(try_recv_inner(), TryRecvResult::Disconnected);
+    }
+
+    #[test]
+    fn try_recv_returns_empty_on_empty_channel() {
+        let (tx, rx) = crossbeam_channel::bounded::<WorkerIncomingRequest>(8);
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = Some(rx);
+        });
+
+        // Channel is empty — should return Empty
+        assert_eq!(try_recv_inner(), TryRecvResult::Empty);
+
+        // Clean up: drop tx so channel closes, then clear WORKER_RX
+        drop(tx);
+        WORKER_RX.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
     }
 }

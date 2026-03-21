@@ -3,7 +3,7 @@ title: PHP Extension Functions
 description: API reference for the oxphp_sapi PHP extension
 ---
 
-The `oxphp_sapi` PHP extension registers thirteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+The `oxphp_sapi` PHP extension registers fifteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
 
 Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
 
@@ -286,6 +286,77 @@ for ($i = 0; $i < 10; $i++) {
 
 ---
 
+## `oxphp_sleep`
+
+Cooperative sleep that suspends the current fiber, allowing the worker thread to handle other requests during the wait. Falls back to blocking `usleep()` when called outside a fiber.
+
+```php
+oxphp_sleep(float $seconds): void
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `$seconds` | `float` | Duration to sleep in seconds (e.g., `0.5` for 500ms) |
+
+**Return value:** None (void).
+
+**Example:**
+
+```php
+<?php
+oxphp_worker(function() {
+    header('Content-Type: text/event-stream');
+    for ($i = 0; $i < 10; $i++) {
+        echo "data: " . json_encode(['counter' => $i]) . "\n\n";
+        oxphp_stream_flush();
+        oxphp_sleep(1.0); // yields fiber, worker handles other requests
+    }
+});
+```
+
+**Notes:**
+- In worker mode with the fiber scheduler active, this registers a timer and suspends the current fiber. The scheduler resumes the fiber after the specified duration.
+- Outside a fiber (traditional mode), falls back to blocking `usleep()`.
+- Values less than or equal to zero return immediately with no effect.
+- Timer resolution is millisecond granularity (durations are rounded up to the nearest millisecond).
+
+---
+
+## `oxphp_usleep`
+
+Cooperative microsecond sleep. Identical to `oxphp_sleep()` but accepts microseconds as an integer.
+
+```php
+oxphp_usleep(int $microseconds): void
+```
+
+**Parameters:**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `$microseconds` | `int` | Duration to sleep in microseconds |
+
+**Return value:** None (void).
+
+**Example:**
+
+```php
+<?php
+oxphp_worker(function() {
+    oxphp_usleep(50000); // 50ms cooperative sleep
+    echo "done";
+});
+```
+
+**Notes:**
+- Behavior is identical to `oxphp_sleep()` with microsecond granularity.
+- In fiber mode, the timer is registered with millisecond precision (rounded up).
+- Values less than or equal to zero return immediately with no effect.
+
+---
+
 ## `oxphp_worker`
 
 Enters the persistent worker mode loop. Calls the provided handler callback for each incoming HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers, response headers, error state) without destroying the PHP heap, so bootstrap state (autoloaders, database connections, cached config) persists across requests.
@@ -551,17 +622,20 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [5] => oxphp_is_worker
 //     [6] => oxphp_is_streaming
 //     [7] => oxphp_stream_flush
-//     [8] => oxphp_worker
-//     [9] => oxphp_async
-//     [10] => oxphp_async_await
-//     [11] => oxphp_async_await_all
-//     [12] => oxphp_async_await_any
+//     [8] => oxphp_sleep
+//     [9] => oxphp_usleep
+//     [10] => oxphp_worker
+//     [11] => oxphp_async
+//     [12] => oxphp_async_await
+//     [13] => oxphp_async_await_all
+//     [14] => oxphp_async_await_any
 // )
 ```
 
 ## See Also
 
 - [Async Promises](/features/async-promises.md) --- parallel execution with `oxphp_async()` and `oxphp_async_await()`
+- [Fiber-Based Request Multiplexing](/features/fiber-multiplexing.md) --- cooperative multitasking with `oxphp_sleep()` and fiber-aware `oxphp_async_await()`
 - [Superglobals](superglobals.md) --- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
 - [OPcache Compatibility](opcache.md) --- how the `request_time` callback enables OPcache
 - [Request IDs](/features/request-ids.md) --- how request IDs are generated and propagated

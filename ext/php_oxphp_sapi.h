@@ -24,6 +24,8 @@ PHP_FUNCTION(oxphp_request_heartbeat);
 PHP_FUNCTION(oxphp_finish_request);
 PHP_FUNCTION(oxphp_is_streaming);
 PHP_FUNCTION(oxphp_stream_flush);
+PHP_FUNCTION(oxphp_sleep);
+PHP_FUNCTION(oxphp_usleep);
 PHP_FUNCTION(oxphp_worker);
 
 ZEND_FUNCTION(oxphp_plugin_dispatch);

@@ -1,6 +1,7 @@
 #include "php_oxphp_sapi.h"
 #include "SAPI.h"
 #include "oxphp_bridge.h"
+#include "oxphp_fiber.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
@@ -158,6 +159,71 @@ PHP_FUNCTION(oxphp_stream_flush)
 }
 /* }}} */
 
+/* ─── Cooperative Sleep ───────────────────────────────────── */
+
+/* Internal: register timer and suspend current fiber.
+ * duration_us is the sleep duration in microseconds.
+ * Returns 1 if fiber-suspended, 0 if no fiber (use blocking fallback). */
+static int oxphp_fiber_sleep_us(uint64_t duration_us)
+{
+    if (oxphp_current_fiber == NULL) return 0;
+
+    uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
+    if (duration_ms == 0) duration_ms = 1;
+
+    uint64_t timer_id = oxphp_bridge_timer_register(duration_ms);
+
+    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    oxphp_current_fiber->suspend_data.timer_id = timer_id;
+
+    zend_fiber_transfer transfer = {
+        .context = oxphp_current_fiber->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    return 1;
+}
+
+/* {{{ oxphp_sleep(float $seconds): void
+ * Cooperative sleep: suspends the current fiber (if inside one) to let other
+ * requests proceed, falling back to blocking usleep when not in a fiber. */
+PHP_FUNCTION(oxphp_sleep)
+{
+    double seconds;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_DOUBLE(seconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (seconds <= 0.0) return;
+
+    uint64_t duration_us = (uint64_t)(seconds * 1000000.0);
+    if (oxphp_fiber_sleep_us(duration_us)) return;
+
+    usleep((useconds_t)duration_us);
+}
+/* }}} */
+
+/* {{{ oxphp_usleep(int $microseconds): void
+ * Cooperative microsecond sleep: suspends the current fiber (if inside one)
+ * to let other requests proceed, falling back to blocking usleep. */
+PHP_FUNCTION(oxphp_usleep)
+{
+    zend_long microseconds;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(microseconds)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (microseconds <= 0) return;
+
+    if (oxphp_fiber_sleep_us((uint64_t)microseconds)) return;
+
+    usleep((useconds_t)microseconds);
+}
+/* }}} */
+
 /* ─── Worker Mode: soft reset between requests ─────────────── */
 
 /**
@@ -263,9 +329,14 @@ static void oxphp_soft_reset(void) {
 }
 
 /* {{{ oxphp_worker(callable $handler): bool
- * Enter worker mode loop. Calls $handler for each HTTP request.
- * Between requests, a soft reset cleans per-request state without
- * destroying the PHP heap (bootstrap state persists).
+ * Enter worker mode loop with fiber-based request multiplexing.
+ *
+ * When only one request is in flight (no fibers suspended), the handler runs
+ * directly via zend_call_function — zero fiber overhead (fast path).
+ *
+ * When a handler calls oxphp_async_await() or oxphp_sleep(), it suspends its
+ * fiber, and the event loop picks up new requests or resumes ready fibers.
+ *
  * Returns true on graceful shutdown, false if not in worker mode. */
 PHP_FUNCTION(oxphp_worker)
 {
@@ -284,109 +355,93 @@ PHP_FUNCTION(oxphp_worker)
 
     /* Prevent handler closure from being GC'd during worker lifetime */
     zend_fcc_addref(&fcc);
-    zval retval;
 
-    /* GC cycle collection interval — trades p99 latency for memory.
-     * Every N requests, run a full mark-and-sweep to reclaim cyclic refs. */
+    /* Initialize the fiber scheduler */
+    oxphp_fiber_scheduler sched;
+    oxphp_scheduler_init(&sched);
+    sched.shared_fci = &fci;
+    sched.shared_fcc = &fcc;
+
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
 
+    int consecutive_errors = 0;
+
     while (1) {
-        /* 1. Wait for next request (blocks in Rust via channel recv) */
-        if (oxphp_bridge_worker_wait() != 0) {
-            ctx->exit_reason = 0; /* shutdown */
-            break;
-        }
+        if (sched.fiber_count == 0) {
+            /* ── No active fibers: block-wait for next request ──────── */
 
-        /* 2. Soft reset: cleans per-request state and repopulates superglobals.
-         * worker_wait_callback (Rust) already set SG(request_info) via
-         * set_request_data() before returning, so soft_reset can read
-         * cookies and POST data from the SAPI callbacks. */
-        oxphp_soft_reset();
-
-        /* 3. Call handler with zend_try protection.
-         * Save execute_data so we can restore it after a bailout — longjmp
-         * leaves the pointer dangling at the frame that was executing. */
-        int handler_failed = 0;
-        zend_execute_data *saved_execute_data = EG(current_execute_data);
-        ZVAL_UNDEF(&retval);
-
-        zend_try {
-            fci.retval = &retval;
-            fci.param_count = 0;
-            fci.params = NULL;
-            if (zend_call_function(&fci, &fcc) == SUCCESS) {
-                zval_ptr_dtor(&retval);
-            }
-            /* PHP 8.4: exit/die throws UnwindExit exception instead of bailout.
-             * zend_call_function returns SUCCESS but EG(exception) is set.
-             * Clear it so the worker can continue serving requests. */
-            if (EG(exception)) {
-                if (zend_is_unwind_exit(EG(exception)) || zend_is_graceful_exit(EG(exception))) {
-                    /* exit/die is NOT a handler failure — just ends current request */
-                } else {
-                    /* Unexpected lingering exception — treat as error */
-                    handler_failed = 1;
-                }
-                OBJ_RELEASE(EG(exception));
-                EG(exception) = NULL;
-            }
-        } zend_catch {
-            /* Actual zend_bailout: fatal error, timeout, cancellation.
-             * Restore execution context and clean up stale engine state. */
-            handler_failed = 1;
-            EG(current_execute_data) = saved_execute_data;
-            if (EG(exception)) {
-                OBJ_RELEASE(EG(exception));
-                EG(exception) = NULL;
-            }
-            CG(unclean_shutdown) = 0;
-        } zend_end_try();
-
-        /* 4. Run shutdown functions (register_shutdown_function support) */
-        php_call_shutdown_functions();
-        php_free_shutdown_functions();
-
-        /* 5. Capture memory usage and handler failure state before send */
-        ctx->current_memory_bytes = (uint64_t)zend_memory_usage(0);
-        ctx->handler_failed = handler_failed ? true : false;
-
-        /* 5b. Send response back to HTTP layer */
-        oxphp_bridge_worker_send_response();
-
-        /* 6. Track completed requests (after response sent, so limits check sees current count) */
-        ctx->requests_done++;
-
-        /* 7. GC cycle collection — periodic, not per-request.
-         * Full cycle collection is expensive (~1ms+ with many objects).
-         * Running every WORKER_GC_INTERVAL requests avoids p99 spikes
-         * while still preventing cycle leaks in long-lived workers. */
-        if (ctx->requests_done % WORKER_GC_INTERVAL == 0) {
-            gc_collect_cycles();
-        }
-
-        /* 8. Check limits — set exit_reason before breaking */
-        if (handler_failed) {
-            ctx->consecutive_errors++;
-            if (ctx->consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
-                ctx->exit_reason = 3; /* too many consecutive errors */
+            if (oxphp_bridge_worker_wait() != 0) {
+                ctx->exit_reason = 0;
                 break;
             }
-            /* Isolated error — continue serving next request */
+
+            oxphp_soft_reset();
+
+            /* Create or reuse a fiber for the request */
+            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, &fci, &fcc);
+            if (!fiber) break;
+
+            if (fiber->started) {
+                /* Reused fiber — coroutine is looping, just resume it */
+                oxphp_scheduler_resume_fiber(&sched, fiber, NULL);
+            } else {
+                /* New fiber — start the coroutine for the first time */
+                fiber->started = true;
+                oxphp_scheduler_start_fiber(&sched, fiber);
+            }
+
+            if (fiber->completed) {
+                oxphp_scheduler_finalize_fiber(&sched, fiber);
+            }
+
         } else {
-            ctx->consecutive_errors = 0;
+            /* ── Event loop: active fibers exist ──────────────────────
+             * Run one tick: accept new requests, check await results,
+             * check timers, resume ready fibers. */
+
+            int rc = oxphp_scheduler_tick(&sched);
+            if (rc == -1) {
+                ctx->exit_reason = 0; /* shutdown */
+                break;
+            }
+
+            /* Sync scheduler-level counters */
+            consecutive_errors = sched.consecutive_errors;
+            ctx->requests_done = sched.total_requests_done;
+
+            if (rc == 0) {
+                /* No work done — brief sleep to avoid busy-wait.
+                 * 100μs is short enough for responsive SSE,
+                 * long enough to avoid CPU spin. */
+                usleep(100);
+            }
+        }
+
+        /* ── Check exit conditions (same as current) ────────────── */
+        if (consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
+            ctx->exit_reason = 3;
+            break;
         }
         if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) {
-            ctx->exit_reason = 1; /* max_requests */
+            ctx->exit_reason = 1;
             break;
         }
         if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
-            ctx->exit_reason = 2; /* max_memory */
+            ctx->exit_reason = 2;
             break;
+        }
+
+        /* GC every N requests */
+        if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0) {
+            gc_collect_cycles();
         }
     }
 
+    /* Cleanup: finalize any remaining fibers */
+    oxphp_scheduler_destroy(&sched);
     zend_fcc_dtor(&fcc);
+
     RETURN_TRUE;
 }
 /* }}} */
@@ -539,6 +594,44 @@ PHP_FUNCTION(oxphp_async_await)
         Z_PARAM_DOUBLE(timeout)
     ZEND_PARSE_PARAMETERS_END();
 
+    /* Fiber-aware path: if inside a fiber, suspend instead of blocking */
+    if (oxphp_current_fiber != NULL) {
+        oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_AWAIT;
+        oxphp_current_fiber->suspend_data.promise_id = (int64_t)promise_id;
+
+        zend_fiber_transfer transfer = {
+            .context = oxphp_current_fiber->scheduler,
+            .flags = 0
+        };
+        ZVAL_NULL(&transfer.value);
+
+        oxphp_current_fiber = NULL;
+        zend_fiber_switch_context(&transfer);
+        /* --- RESUMED by scheduler when promise result is ready --- */
+
+        /* The result is now in READY_RESULTS (Rust TLS).
+         * Call the regular dispatch which has a fast path for ready results. */
+        int rc = oxphp_bridge_await_dispatch((int64_t)promise_id, 0.0, return_value);
+        if (rc == -2) {
+            zend_throw_exception(oxphp_async_timeout_ce, "Unexpected timeout after fiber resume", 0);
+            return;
+        }
+        if (rc == -1) {
+            /* Read exception details from bridge TLS */
+            const char *cls = oxphp_bridge_get_async_exc_class();
+            const char *msg = oxphp_bridge_get_async_exc_message();
+            zend_string *zmsg = zend_strpprintf(0, "Async task failed: [%s] %s",
+                cls ? cls : "?", msg ? msg : "?");
+            zend_throw_exception(oxphp_async_exception_ce, ZSTR_VAL(zmsg), 0);
+            zend_string_release(zmsg);
+            oxphp_bridge_clear_async_exception();
+            return;
+        }
+        /* rc == 0: return_value already populated */
+        return;
+    }
+
+    /* Traditional blocking path (non-fiber mode) */
     int result = oxphp_bridge_await_dispatch((int64_t)promise_id, timeout, return_value);
 
     if (result == -2) {
@@ -741,6 +834,14 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_flush, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_sleep, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, seconds, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_usleep, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, microseconds, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker, 0, 1, _IS_BOOL, 0)
     ZEND_ARG_CALLABLE_INFO(0, handler, 0)
 ZEND_END_ARG_INFO()
@@ -776,6 +877,8 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
+    PHP_FE(oxphp_sleep,             arginfo_oxphp_sleep)
+    PHP_FE(oxphp_usleep,            arginfo_oxphp_usleep)
     PHP_FE(oxphp_worker,            arginfo_oxphp_worker)
     PHP_FE(oxphp_async,             arginfo_oxphp_async)
     PHP_FE(oxphp_async_await,             arginfo_oxphp_async_await)

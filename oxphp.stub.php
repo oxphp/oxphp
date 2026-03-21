@@ -149,6 +149,46 @@ function oxphp_request_heartbeat(int $time = 10): bool {}
 function oxphp_stream_flush(): bool {}
 
 /**
+ * Cooperative sleep: suspends the current fiber to let other requests
+ * proceed on this worker thread.
+ *
+ * When called inside a fiber (worker mode with multiplexing), the fiber
+ * is suspended and a timer is registered. The scheduler resumes it after
+ * the specified duration. Other requests can be handled in the meantime.
+ *
+ * When called outside a fiber (traditional mode), falls back to blocking usleep().
+ *
+ * @param float $seconds Duration to sleep in seconds (e.g. 0.5 for 500ms)
+ * @return void
+ *
+ * @example
+ * oxphp_worker(function () {
+ *     // Non-blocking: other requests proceed during sleep
+ *     oxphp_sleep(0.1);  // 100ms cooperative sleep
+ *     echo "done";
+ * });
+ */
+function oxphp_sleep(float $seconds): void {}
+
+/**
+ * Cooperative microsecond sleep: suspends the current fiber to let other
+ * requests proceed on this worker thread.
+ *
+ * Identical to oxphp_sleep() but accepts microseconds as an integer.
+ * Falls back to blocking usleep() when not inside a fiber.
+ *
+ * @param int $microseconds Duration to sleep in microseconds
+ * @return void
+ *
+ * @example
+ * oxphp_worker(function () {
+ *     oxphp_usleep(50000);  // 50ms cooperative sleep
+ *     echo "done";
+ * });
+ */
+function oxphp_usleep(int $microseconds): void {}
+
+/**
  * Enter worker mode loop. The handler is called for each HTTP request.
  *
  * Between requests, a soft reset cleans per-request state (output buffers,

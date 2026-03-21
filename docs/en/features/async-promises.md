@@ -240,6 +240,8 @@ $result = oxphp_async_await($p1);
 
 The async pool is a **separate** set of OS threads from the HTTP PHP worker pool. This separation prevents deadlocks: if all HTTP workers dispatched async tasks and then blocked on `oxphp_async_await()`, a shared pool would deadlock.
 
+> **Fiber-Aware Behavior:** In worker mode with the fiber scheduler active, `oxphp_async_await()` suspends the current request fiber instead of blocking the worker thread. This allows other requests to be processed while waiting for async results. See [Fiber-Based Request Multiplexing](fiber-multiplexing.md) for details.
+
 ```
 HTTP Worker Thread              Async Worker Thread
 ─────────────────              ────────────────────
@@ -555,6 +557,7 @@ try {
 ## See Also
 
 - [PHP Extension Functions](../php/functions.md) --- full function reference including `oxphp_async`, `oxphp_async_await`, `oxphp_async_await_all`, `oxphp_async_await_any`
+- [Fiber-Based Request Multiplexing](fiber-multiplexing.md) --- fiber-aware `oxphp_async_await()` suspends instead of blocking the worker
 - [Worker Pool](../architecture/worker-pool.md) --- HTTP worker pool architecture (separate from async pool)
 - [Metrics](../operations/metrics.md#async-tasks) --- Prometheus metrics including async task counters
 - [Configuration](../operations/configuration.md#async-pool) --- `ASYNC_WORKERS` and `ASYNC_QUEUE_CAPACITY`

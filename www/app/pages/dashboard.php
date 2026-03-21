@@ -56,6 +56,7 @@ $features = [
     ['Static Files',  'MIME detection, in-memory cache ≤1 MiB, streaming >1 MiB, HTTP caching (ETag/304)'],
     ['Observability', '/health, /metrics (Prometheus), /config (internal server)'],
     ['Async Promises', 'oxphp_async() + oxphp_async_await() — parallel closures on dedicated thread pool'],
+    ['Fiber Multiplexing', 'Cooperative multitasking — oxphp_sleep() / oxphp_async_await() yield the worker to other requests'],
     ['Worker Pool',   'PHP ZTS threads — static (N) or dynamic (MIN:MAX)'],
     ['OPcache + JIT', 'Shared memory bytecode cache with JIT compilation'],
 ];

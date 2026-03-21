@@ -22,7 +22,7 @@ COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build/ext
-COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ./
+COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/oxphp_fiber.c ./
 COPY ext/bridge/oxphp_bridge.h ./bridge/
 
 RUN phpize && \

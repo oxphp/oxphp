@@ -486,6 +486,33 @@ int oxphp_bridge_worker_send_response(void) {
     return -1;
 }
 
+/* ─── Fiber Scheduler Callbacks ────────────────────────── */
+
+static oxphp_worker_try_recv_fn_t rust_worker_try_recv = NULL;
+static oxphp_prepare_request_fn_t rust_prepare_request = NULL;
+
+void oxphp_bridge_set_fiber_callbacks(
+    oxphp_worker_try_recv_fn_t try_recv_fn,
+    oxphp_prepare_request_fn_t prepare_fn
+) {
+    rust_worker_try_recv = try_recv_fn;
+    rust_prepare_request = prepare_fn;
+}
+
+int oxphp_bridge_worker_try_recv(void) {
+    if (__builtin_expect(rust_worker_try_recv != NULL, 1)) {
+        return rust_worker_try_recv();
+    }
+    return 1; /* empty, not shutdown — safe fallback if callbacks not registered */
+}
+
+int oxphp_bridge_prepare_request(void) {
+    if (__builtin_expect(rust_prepare_request != NULL, 1)) {
+        return rust_prepare_request();
+    }
+    return 0;
+}
+
 void oxphp_bridge_set_cancelled(bool cancelled) {
     ctx.cancelled = cancelled;
 }
@@ -648,6 +675,20 @@ int oxphp_bridge_await_any_dispatch(
         return rust_await_any_dispatch(promise_ids, count, timeout, out_winner_id, retval);
     }
     return -1;
+}
+
+/* ─── Non-Blocking Await Poll ──────────────────────────────── */
+static oxphp_await_poll_fn_t rust_await_poll = NULL;
+
+void oxphp_bridge_set_await_poll(oxphp_await_poll_fn_t fn) {
+    rust_await_poll = fn;
+}
+
+int oxphp_bridge_await_poll(int64_t promise_id) {
+    if (__builtin_expect(rust_await_poll != NULL, 1)) {
+        return rust_await_poll(promise_id);
+    }
+    return 0;
 }
 
 /* ─── Async Promise Cleanup ─────────────────────────────────── */
@@ -1442,4 +1483,82 @@ void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
     object_init_ex(dst, borrow_proxy_ce);
     zend_update_property_long(borrow_proxy_ce, Z_OBJ_P(dst),
         "promiseId", sizeof("promiseId") - 1, (zend_long)promise_id);
+}
+
+/* ─── Fiber TLS Context Callbacks ──────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. Same pattern as worker/async callbacks.
+ */
+static oxphp_fiber_save_ctx_fn_t    rust_fiber_save_ctx    = NULL;
+static oxphp_fiber_restore_ctx_fn_t rust_fiber_restore_ctx = NULL;
+static oxphp_fiber_drop_ctx_fn_t    rust_fiber_drop_ctx    = NULL;
+
+void oxphp_bridge_set_fiber_ctx_callbacks(
+    oxphp_fiber_save_ctx_fn_t save_fn,
+    oxphp_fiber_restore_ctx_fn_t restore_fn,
+    oxphp_fiber_drop_ctx_fn_t drop_fn
+) {
+    rust_fiber_save_ctx    = save_fn;
+    rust_fiber_restore_ctx = restore_fn;
+    rust_fiber_drop_ctx    = drop_fn;
+}
+
+void oxphp_bridge_fiber_save_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_save_ctx != NULL, 1)) {
+        rust_fiber_save_ctx(fiber_id);
+    }
+}
+
+void oxphp_bridge_fiber_restore_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_restore_ctx != NULL, 1)) {
+        rust_fiber_restore_ctx(fiber_id);
+    }
+}
+
+void oxphp_bridge_fiber_drop_ctx(uint64_t fiber_id) {
+    if (__builtin_expect(rust_fiber_drop_ctx != NULL, 1)) {
+        rust_fiber_drop_ctx(fiber_id);
+    }
+}
+
+/* ─── Fiber Timer Service ──────────────────────────────── */
+
+/*
+ * Global (not __thread) — set once at startup BEFORE any worker threads
+ * are spawned, so no data race. Same pattern as worker/async callbacks.
+ */
+static oxphp_timer_register_fn_t rust_timer_register = NULL;
+static oxphp_timer_poll_fn_t     rust_timer_poll     = NULL;
+static oxphp_timer_remove_fn_t   rust_timer_remove   = NULL;
+
+void oxphp_bridge_set_timer_callbacks(
+    oxphp_timer_register_fn_t reg,
+    oxphp_timer_poll_fn_t poll,
+    oxphp_timer_remove_fn_t rem
+) {
+    rust_timer_register = reg;
+    rust_timer_poll     = poll;
+    rust_timer_remove   = rem;
+}
+
+uint64_t oxphp_bridge_timer_register(uint64_t duration_ms) {
+    if (__builtin_expect(rust_timer_register != NULL, 1)) {
+        return rust_timer_register(duration_ms);
+    }
+    return 0;
+}
+
+uint32_t oxphp_bridge_timer_poll(uint64_t *out_ids, uint32_t max_count) {
+    if (__builtin_expect(rust_timer_poll != NULL, 1)) {
+        return rust_timer_poll(out_ids, max_count);
+    }
+    return 0;
+}
+
+void oxphp_bridge_timer_remove(uint64_t timer_id) {
+    if (__builtin_expect(rust_timer_remove != NULL, 1)) {
+        rust_timer_remove(timer_id);
+    }
 }

@@ -166,6 +166,10 @@ pub unsafe fn oxphp_bridge_set_await_any_dispatch(
 ) {
 }
 
+// ── Non-blocking await poll ──
+
+pub unsafe fn oxphp_bridge_set_await_poll(_f: Option<unsafe extern "C" fn(i64) -> c_int>) {}
+
 // ── Async promise cleanup ──
 
 pub unsafe fn oxphp_bridge_set_cleanup_promises(_f: Option<unsafe extern "C" fn()>) {}
@@ -279,6 +283,29 @@ pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
 pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {
     std::ptr::null_mut()
+}
+
+// ── Fiber timer service ──
+pub unsafe fn oxphp_bridge_set_timer_callbacks(
+    _register_fn: Option<unsafe extern "C" fn(u64) -> u64>,
+    _poll_fn: Option<unsafe extern "C" fn(*mut u64, u32) -> u32>,
+    _remove_fn: Option<unsafe extern "C" fn(u64)>,
+) {
+}
+
+// ── Fiber TLS context callbacks ──
+pub unsafe fn oxphp_bridge_set_fiber_ctx_callbacks(
+    _save_fn: Option<unsafe extern "C" fn(u64)>,
+    _restore_fn: Option<unsafe extern "C" fn(u64)>,
+    _drop_fn: Option<unsafe extern "C" fn(u64)>,
+) {
+}
+
+// ── Fiber scheduler callbacks ──
+pub unsafe fn oxphp_bridge_set_fiber_callbacks(
+    _try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
+    _prepare_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
+) {
 }
 
 // Async task execution

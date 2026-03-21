@@ -86,6 +86,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 
 ### Worker Model
 - **Worker mode** — persistent PHP processes with soft reset, keeping autoloaders and DB connections alive across requests
+- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the fiber instead of blocking the worker
 - **Automatic recycling** by request count or memory threshold
 - **Worker health monitoring** — dead workers are automatically detected and respawned
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work
@@ -102,7 +103,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 - **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
 - **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
 - **3 routing modes** — Traditional, Framework (`index.php`), SPA (`index.html`)
-- **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()`
+- **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing
 - **Configurable timeouts** — header read, request, and keep-alive
 
 ### Performance
@@ -297,6 +298,7 @@ curl http://localhost:9090/metrics
 | **Database Connection Pool** | Built-in connection pooling via `sqlx`, reducing per-request connection overhead |
 | **gRPC Server** | *(speculative)* An alternative server mode — gRPC instead of HTTP; very uncertain, may not happen |
 | ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |
+| ~~**Fiber Multiplexing**~~ | ✅ Implemented — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` / `oxphp_usleep()` and `oxphp_async_await()` yield the fiber cooperatively |
 | **Diagnostics** | Production doctor: checks OS limits (ulimit, TCP backlog, epoll/kqueue, container settings), identifies performance bottlenecks (worker queue depth, lock contention, GC/alloc pressure, ZTS stats), and gives specific actionable recommendations |
 
 ## Documentation

@@ -5,7 +5,6 @@ pub mod events;
 pub mod executor;
 pub mod handlers;
 pub mod metrics;
-#[cfg(feature = "php")]
 pub mod php;
 pub mod plugin;
 pub mod plugins;

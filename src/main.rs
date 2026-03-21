@@ -108,6 +108,10 @@ async fn async_main(
         oxphp::php::sapi::set_async_metrics(Arc::clone(&metrics));
     }
 
+    // Register fiber scheduler callbacks (try_recv, prepare_request)
+    #[cfg(feature = "php")]
+    oxphp::php::sapi::register_fiber_callbacks();
+
     let _log_guard = logging::init(&config.log_level)?;
 
     let mode = if config.worker_file.is_some() {

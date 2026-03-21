@@ -350,6 +350,26 @@ int oxphp_bridge_worker_wait(void);
 /** Call Rust worker_send callback. Returns 0 on success. */
 int oxphp_bridge_worker_send_response(void);
 
+/* ─── Fiber Scheduler Callbacks ────────────────────────── */
+
+/** Rust callback: non-blocking receive. Returns 0=ready, 1=empty, -1=shutdown. */
+typedef int (*oxphp_worker_try_recv_fn_t)(void);
+
+/** Rust callback: set up TLS for a request received via try_recv. Returns 1=ok, 0=no pending. */
+typedef int (*oxphp_prepare_request_fn_t)(void);
+
+/** Register Rust fiber scheduler callbacks. */
+void oxphp_bridge_set_fiber_callbacks(
+    oxphp_worker_try_recv_fn_t try_recv_fn,
+    oxphp_prepare_request_fn_t prepare_fn
+);
+
+/** Non-blocking receive: returns 0=ready, 1=empty, -1=shutdown. */
+int oxphp_bridge_worker_try_recv(void);
+
+/** Prepare TLS for pending request. Returns 1=ok, 0=nothing pending. */
+int oxphp_bridge_prepare_request(void);
+
 /** Set the cancellation flag (called from Rust when client disconnects). */
 void oxphp_bridge_set_cancelled(bool cancelled);
 
@@ -372,6 +392,43 @@ uint64_t oxphp_bridge_get_memory_usage(void);
 
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);
+
+/* ─── Fiber TLS Context Callbacks ──────────────────────── */
+
+/** Rust callback: save current fiber's TLS context. */
+typedef void (*oxphp_fiber_save_ctx_fn_t)(uint64_t fiber_id);
+
+/** Rust callback: restore a fiber's TLS context. */
+typedef void (*oxphp_fiber_restore_ctx_fn_t)(uint64_t fiber_id);
+
+/** Rust callback: drop a fiber's TLS slot (fiber completed/destroyed). */
+typedef void (*oxphp_fiber_drop_ctx_fn_t)(uint64_t fiber_id);
+
+/** Register Rust fiber TLS context callbacks (called once at init). */
+void oxphp_bridge_set_fiber_ctx_callbacks(
+    oxphp_fiber_save_ctx_fn_t save_fn,
+    oxphp_fiber_restore_ctx_fn_t restore_fn,
+    oxphp_fiber_drop_ctx_fn_t drop_fn
+);
+
+/** Save current fiber's Rust TLS context into per-fiber slot. */
+void oxphp_bridge_fiber_save_ctx(uint64_t fiber_id);
+
+/** Restore a fiber's Rust TLS context from per-fiber slot. */
+void oxphp_bridge_fiber_restore_ctx(uint64_t fiber_id);
+
+/** Drop a fiber's Rust TLS slot (cleanup on fiber destruction). */
+void oxphp_bridge_fiber_drop_ctx(uint64_t fiber_id);
+
+/* ─── Fiber Timer Service ──────────────────────────────── */
+typedef uint64_t (*oxphp_timer_register_fn_t)(uint64_t duration_ms);
+typedef uint32_t (*oxphp_timer_poll_fn_t)(uint64_t *out_ids, uint32_t max_count);
+typedef void     (*oxphp_timer_remove_fn_t)(uint64_t timer_id);
+
+void oxphp_bridge_set_timer_callbacks(oxphp_timer_register_fn_t, oxphp_timer_poll_fn_t, oxphp_timer_remove_fn_t);
+uint64_t oxphp_bridge_timer_register(uint64_t duration_ms);
+uint32_t oxphp_bridge_timer_poll(uint64_t *out_ids, uint32_t max_count);
+void     oxphp_bridge_timer_remove(uint64_t timer_id);
 
 /* === Async Promise Support === */
 
@@ -423,6 +480,11 @@ int oxphp_bridge_await_any_dispatch(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
 );
+
+/* ─── Non-Blocking Await Poll ──────────────────────────────── */
+typedef int (*oxphp_await_poll_fn_t)(int64_t promise_id);
+void oxphp_bridge_set_await_poll(oxphp_await_poll_fn_t fn);
+int  oxphp_bridge_await_poll(int64_t promise_id);
 
 /* ─── Async Promise Cleanup ─────────────────────────────────── */
 typedef void (*oxphp_cleanup_promises_fn_t)(void);
