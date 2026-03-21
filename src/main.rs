@@ -48,6 +48,23 @@ fn main() -> Result<(), types::BoxError> {
         }
     }
 
+    #[cfg(feature = "php")]
+    {
+        // Create decorator registry and populate with plugin-registered decorators
+        let decorator_defs = plugin_manager.take_decorators();
+        if !decorator_defs.is_empty() {
+            let registry = oxphp::decorator::DecoratorRegistry::new();
+            for def in decorator_defs {
+                registry.register_rust(std::sync::Arc::from(def.decorator));
+            }
+            // TODO(task-5a): install bridge callbacks via oxphp::decorator::dispatch::install_bridge_callbacks()
+            tracing::info!(
+                count = registry.rust_decorator_count(),
+                "Decorator registry initialized"
+            );
+        }
+    }
+
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
     let executor: Arc<dyn executor::ScriptExecutor> =

@@ -95,6 +95,11 @@ impl DecoratorRegistry {
         self.resolved.get(&fn_id)
     }
 
+    /// Returns the number of registered Rust-native decorators.
+    pub fn rust_decorator_count(&self) -> usize {
+        self.rust_decorators.len()
+    }
+
     /// Clear resolution cache (called at RSHUTDOWN in traditional mode).
     pub fn clear_cache(&self) {
         self.resolved.clear();
