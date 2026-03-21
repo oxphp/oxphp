@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了十三个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了十五个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -286,6 +286,77 @@ for ($i = 0; $i < 10; $i++) {
 
 ---
 
+## `oxphp_sleep`
+
+协作式 sleep，挂起当前 Fiber，允许工作线程在等待期间处理其他请求。在 Fiber 外部调用时回退为阻塞 `usleep()`。
+
+```php
+oxphp_sleep(float $seconds): void
+```
+
+**参数：**
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `$seconds` | `float` | 休眠时间（秒），例如 `0.5` 表示 500ms |
+
+**返回值：** 无（void）。
+
+**示例：**
+
+```php
+<?php
+oxphp_worker(function() {
+    header('Content-Type: text/event-stream');
+    for ($i = 0; $i < 10; $i++) {
+        echo "data: " . json_encode(['counter' => $i]) . "\n\n";
+        oxphp_stream_flush();
+        oxphp_sleep(1.0); // yields fiber, worker handles other requests
+    }
+});
+```
+
+**注意事项：**
+- 在启用了 Fiber 调度器的工作进程模式下，此函数注册计时器并挂起当前 Fiber。调度器在指定时间后恢复 Fiber。
+- 在 Fiber 外部（传统模式）回退为阻塞 `usleep()`。
+- 小于或等于零的值立即返回，无任何效果。
+- 计时器分辨率为毫秒粒度（时间向上取整到最近的毫秒）。
+
+---
+
+## `oxphp_usleep`
+
+协作式微秒级 sleep。与 `oxphp_sleep()` 功能相同，但接受微秒整数作为参数。
+
+```php
+oxphp_usleep(int $microseconds): void
+```
+
+**参数：**
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `$microseconds` | `int` | 休眠时间（微秒） |
+
+**返回值：** 无（void）。
+
+**示例：**
+
+```php
+<?php
+oxphp_worker(function() {
+    oxphp_usleep(50000); // 50ms cooperative sleep
+    echo "done";
+});
+```
+
+**注意事项：**
+- 行为与 `oxphp_sleep()` 相同，使用微秒粒度。
+- 在 Fiber 模式下，计时器以毫秒精度注册（向上取整）。
+- 小于或等于零的值立即返回，无任何效果。
+
+---
+
 ## `oxphp_worker`
 
 进入持久化工作进程模式循环。对每个传入的 HTTP 请求调用提供的处理器回调。请求之间会进行软重置，清理每请求状态（超全局变量、输出缓冲区、响应头、错误状态），而不销毁 PHP 堆，因此引导状态（自动加载器、数据库连接、缓存配置）在请求间保持不变。
@@ -551,17 +622,20 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [5] => oxphp_is_worker
 //     [6] => oxphp_is_streaming
 //     [7] => oxphp_stream_flush
-//     [8] => oxphp_worker
-//     [9] => oxphp_async
-//     [10] => oxphp_async_await
-//     [11] => oxphp_async_await_all
-//     [12] => oxphp_async_await_any
+//     [8] => oxphp_sleep
+//     [9] => oxphp_usleep
+//     [10] => oxphp_worker
+//     [11] => oxphp_async
+//     [12] => oxphp_async_await
+//     [13] => oxphp_async_await_all
+//     [14] => oxphp_async_await_any
 // )
 ```
 
 ## 另请参阅
 
 - [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 和 `oxphp_async_await()` 进行并行执行
+- [基于 Fiber 的请求多路复用](/features/fiber-multiplexing.md) --- 使用 `oxphp_sleep()` 进行协作式多任务处理，以及支持 Fiber 的 `oxphp_async_await()`
 - [超全局变量](superglobals.md) --- OxPHP 如何填充 `$_SERVER`、`$_GET`、`$_POST` 及其他超全局变量
 - [OPcache 兼容性](opcache.md) --- `request_time` 回调如何启用 OPcache
 - [请求 ID](/features/request-ids.md) --- 请求 ID 如何生成和传播

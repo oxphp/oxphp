@@ -86,6 +86,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 
 ### 工作进程模型
 - **工作进程模式** — 持久化 PHP 进程，请求间软重置，保持自动加载器和数据库连接跨请求存活
+- **Fiber 多路复用** — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` 和 `oxphp_async_await()` 让出 Fiber 而非阻塞工作线程
 - **自动回收** — 按请求数或内存阈值自动回收工作进程
 - **工作线程健康监控** — 自动检测崩溃线程并重启
 - **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
@@ -102,7 +103,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 - **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
 - **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
 - **3 种路由模式** — 传统模式、框架模式（`index.php`）、SPA 模式（`index.html`）
-- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现
+- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行
 - **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
 
 ### 性能
@@ -254,7 +255,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ## 开发
 
 ```bash
-# 完整验证（宿主机，167 个测试）
+# 完整验证（宿主机）
 cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
 
 # Docker 冒烟测试
@@ -297,6 +298,7 @@ curl http://localhost:9090/metrics
 | **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
 | **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
+| ~~**Fiber Multiplexing**~~ | ✅ 已实现 — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` / `oxphp_usleep()` 和 `oxphp_async_await()` 协作式让出 Fiber |
 | **Diagnostics** | 生产诊断工具：检查操作系统限制（ulimit、TCP backlog、epoll/kqueue、容器设置），识别性能瓶颈（工作队列深度、锁竞争、GC/内存分配压力、ZTS 统计），并给出针对性的可操作建议 |
 
 ## 文档

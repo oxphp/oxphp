@@ -240,6 +240,8 @@ $result = oxphp_async_await($p1);
 
 异步池是与 HTTP PHP 工作池**分离**的一组操作系统线程。这种分离防止了死锁：如果所有 HTTP 工作线程都分发了异步任务然后在 `oxphp_async_await()` 上阻塞，共享池将会死锁。
 
+> **Fiber 感知行为：** 在启用了 Fiber 调度器的工作进程模式下，`oxphp_async_await()` 会挂起当前请求的 Fiber，而非阻塞工作线程。这允许在等待异步结果的同时处理其他请求。详见[基于 Fiber 的请求多路复用](fiber-multiplexing.md)。
+
 ```
 HTTP Worker Thread              Async Worker Thread
 ─────────────────              ────────────────────
@@ -555,6 +557,7 @@ try {
 ## 另请参阅
 
 - [PHP 扩展函数](../php/functions.md) --- 完整函数参考，包括 `oxphp_async`、`oxphp_async_await`、`oxphp_async_await_all`、`oxphp_async_await_any`
+- [基于 Fiber 的请求多路复用](fiber-multiplexing.md) --- Fiber 感知的 `oxphp_async_await()` 挂起而非阻塞工作线程
 - [工作池](../architecture/worker-pool.md) --- HTTP 工作池架构（与异步池分离）
 - [指标](../operations/metrics.md#async-tasks) --- Prometheus 指标，包括异步任务计数器
 - [配置](../operations/configuration.md#async-pool) --- `ASYNC_WORKERS` 和 `ASYNC_QUEUE_CAPACITY`
