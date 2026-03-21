@@ -1,6 +1,7 @@
 pub mod async_types;
 pub(crate) mod bridge;
 pub mod config;
+pub mod decorator;
 pub mod events;
 pub mod executor;
 pub mod handlers;
