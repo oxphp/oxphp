@@ -67,6 +67,50 @@ extern "C" {
         f: Option<unsafe extern "C" fn(*const c_char, *mut c_void, u32, *mut c_void) -> c_int>,
     );
 
+    // ── Decorator system ──
+    pub fn oxphp_bridge_set_decorator_registry(ptr: *const c_void);
+
+    pub fn oxphp_bridge_set_decorator_resolve(
+        f: Option<
+            unsafe extern "C" fn(
+                fn_id: usize,
+                attr_names: *const *const c_char,
+                attr_count: u32,
+            ) -> c_int,
+        >,
+    );
+
+    pub fn oxphp_bridge_set_decorator_begin(
+        f: Option<
+            unsafe extern "C" fn(
+                fn_id: usize,
+                target: *const c_char,
+                class_name: *const c_char,
+                object_id: u64,
+                timestamp_ns: u64,
+            ) -> c_int,
+        >,
+    );
+
+    pub fn oxphp_bridge_set_decorator_end(
+        f: Option<
+            unsafe extern "C" fn(
+                fn_id: usize,
+                elapsed_ns: u64,
+                success: c_int,
+                exception_class: *const c_char,
+            ),
+        >,
+    );
+
+    pub fn oxphp_bridge_get_decorator_reject_reason(out_len: *mut usize) -> *const c_char;
+
+    pub fn oxphp_bridge_set_decorator_reject_reason(reason: *const c_char, len: usize);
+
+    pub fn oxphp_bridge_clear_decorator_reject_reason();
+
+    pub fn oxphp_bridge_register_php_decorator(class_name: *const c_char, targets: u32);
+
     // ── Call PHP ──
     pub fn oxphp_call_php_native(
         name: *const c_char,

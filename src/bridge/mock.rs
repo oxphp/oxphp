@@ -117,6 +117,56 @@ pub unsafe fn oxphp_bridge_set_native_dispatch(
 ) {
 }
 
+// ── Decorator system ──
+
+pub unsafe fn oxphp_bridge_set_decorator_registry(_ptr: *const c_void) {}
+
+pub unsafe fn oxphp_bridge_set_decorator_resolve(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            attr_names: *const *const c_char,
+            attr_count: u32,
+        ) -> c_int,
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_begin(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            target: *const c_char,
+            class_name: *const c_char,
+            object_id: u64,
+            timestamp_ns: u64,
+        ) -> c_int,
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_end(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            elapsed_ns: u64,
+            success: c_int,
+            exception_class: *const c_char,
+        ),
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_get_decorator_reject_reason(_out_len: *mut usize) -> *const c_char {
+    std::ptr::null()
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_reject_reason(_reason: *const c_char, _len: usize) {}
+
+pub unsafe fn oxphp_bridge_clear_decorator_reject_reason() {}
+
+pub unsafe fn oxphp_bridge_register_php_decorator(_class_name: *const c_char, _targets: u32) {}
+
 // ── Call PHP ──
 
 pub unsafe fn oxphp_call_php_native(
