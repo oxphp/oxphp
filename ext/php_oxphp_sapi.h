@@ -35,4 +35,6 @@ PHP_FUNCTION(oxphp_async_await);
 PHP_FUNCTION(oxphp_async_await_all);
 PHP_FUNCTION(oxphp_async_await_any);
 
+PHP_FUNCTION(oxphp_register_decorator);
+
 #endif /* PHP_OXPHP_SAPI_H */
