@@ -252,6 +252,36 @@ $winner = oxphp_async_await_any([$p1, $p2]);
 // ["id" => $p2, "value" => ...]  (fastest wins)
 $other = oxphp_async_await($p1); // still awaitable',
     ],
+    [
+        'name'    => 'oxphp_register_decorator',
+        'version' => '0.2.0',
+        'sig'     => 'oxphp_register_decorator(string $class): bool',
+        'params'  => [
+            ['name' => '$class', 'type' => 'string', 'desc' => 'Fully qualified class name implementing <code>OxPHP\Decorator\AttributeInterface</code>.'],
+        ],
+        'return'  => 'bool — <code>true</code> on success, <code>false</code> with <code>E_WARNING</code> on validation failure.',
+        'desc'    => 'Registers a PHP class as an attribute-based decorator. The class must implement <code>OxPHP\Decorator\AttributeInterface</code> and be marked with <code>#[Attribute(...)]</code>. Once registered, any function, method, or class annotated with this attribute will have <code>before()</code>/<code>after()</code> called around each invocation. Call once during application bootstrap.',
+        'example' => '#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Timer implements OxPHP\Decorator\AttributeInterface {
+    public function __construct(
+        public readonly string $label = "",
+    ) {}
+
+    public function before(OxPHP\Decorator\Context $ctx): void {
+        $this->start = hrtime(true);
+    }
+
+    public function after(OxPHP\Decorator\Context $ctx): void {
+        $ms = (hrtime(true) - $this->start) / 1e6;
+        error_log("[Timer] {$ctx->target}: {$ms}ms");
+    }
+}
+
+oxphp_register_decorator(Timer::class);
+
+#[Timer(label: "api")]
+function handle_request(): void { /* ... */ }',
+    ],
 ];
 
 // ── Build function sections ──────────────────────────
@@ -294,6 +324,7 @@ foreach ($functions as $fn) {
             'oxphp_async_await'       => '<span class="mono dim">not called &mdash; blocks until promise completes</span>',
             'oxphp_async_await_all'   => '<span class="mono dim">not called &mdash; awaits multiple promises</span>',
             'oxphp_async_await_any'   => '<span class="mono dim">not called &mdash; races promises, returns fastest</span>',
+            'oxphp_register_decorator' => '<span class="mono dim">not called &mdash; registers a decorator class</span>',
             default                   => '',
         };
         $live = '<div class="fn-live"><span class="fn-live-label">Live result</span>' . $val . '</div>';
