@@ -222,7 +222,9 @@ The decorator system is designed for minimal overhead:
 
 - **Zero cost for undecorated functions** — the observer init returns `{NULL, NULL}` for functions without registered decorator attributes. PHP caches this result per op_array, so subsequent calls skip the check entirely.
 - **One-time resolution** — attribute-to-decorator mapping happens once per function (on first call), not on every invocation.
+- **Instance caching** — PHP decorator objects are instantiated once per function-decorator pair (with constructor arguments read from the attribute), then cached in per-thread TLS for the request (or worker) lifetime. No object creation on subsequent calls.
 - **Arc\<str\> string reuse** — target/class/method strings are allocated once during resolution and shared across all calls via reference counting.
+- **Rust decorators skip PHP overhead entirely** — `on_begin()`/`on_end()` are called directly via FFI with no PHP object creation, method dispatch, or zval manipulation.
 
 ## See Also
 
