@@ -32,6 +32,15 @@ pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
             crate::bridge::ffi::oxphp_bridge_set_decorator_resolve(Some(resolve_callback));
             crate::bridge::ffi::oxphp_bridge_set_decorator_begin(Some(begin_callback));
             crate::bridge::ffi::oxphp_bridge_set_decorator_end(Some(end_callback));
+            crate::bridge::ffi::oxphp_bridge_set_php_decorator_count(Some(
+                php_decorator_count_callback,
+            ));
+            crate::bridge::ffi::oxphp_bridge_set_php_decorator_class(Some(
+                php_decorator_class_callback,
+            ));
+            crate::bridge::ffi::oxphp_bridge_set_php_decorator_cache_key(Some(
+                php_decorator_cache_key_callback,
+            ));
         }
     }
 }
@@ -166,6 +175,37 @@ unsafe extern "C" fn end_callback(
         if let ResolvedDecorator::Rust(ref decorator) = dec {
             decorator.on_end(&ctx, &result);
         }
+    }
+}
+
+/// Returns the number of PHP decorators for fn_id.
+#[allow(dead_code)]
+unsafe extern "C" fn php_decorator_count_callback(fn_id: usize) -> u32 {
+    get_registry().php_decorator_count(fn_id) as u32
+}
+
+/// Returns the class name of the PHP decorator at php_index.
+/// Writes to a __thread buffer in the bridge and returns a pointer.
+#[allow(dead_code)]
+unsafe extern "C" fn php_decorator_class_callback(fn_id: usize, php_index: u32) -> *const c_char {
+    match get_registry().php_decorator_at(fn_id, php_index as usize) {
+        Some((name, _)) => {
+            crate::bridge::ffi::oxphp_bridge_set_decorator_class_buf(
+                name.as_ptr() as *const c_char,
+                name.len(),
+            );
+            crate::bridge::ffi::oxphp_bridge_get_decorator_class_buf()
+        }
+        None => std::ptr::null(),
+    }
+}
+
+/// Returns the cache key for the PHP decorator at php_index.
+#[allow(dead_code)]
+unsafe extern "C" fn php_decorator_cache_key_callback(fn_id: usize, php_index: u32) -> u64 {
+    match get_registry().php_decorator_at(fn_id, php_index as usize) {
+        Some((_, key)) => key,
+        None => u64::MAX,
     }
 }
 

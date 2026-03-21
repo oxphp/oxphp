@@ -383,6 +383,33 @@ void oxphp_bridge_clear_decorator_reject_reason(void) {
     decorator_reject_buf[0] = '\0';
 }
 
+/* ── PHP decorator query callbacks ── */
+static oxphp_php_dec_count_fn_t php_dec_count_fn = NULL;
+static oxphp_php_dec_class_fn_t php_dec_class_fn = NULL;
+static oxphp_php_dec_cache_key_fn_t php_dec_cache_key_fn = NULL;
+
+void oxphp_bridge_set_php_decorator_count(oxphp_php_dec_count_fn_t fn) { php_dec_count_fn = fn; }
+oxphp_php_dec_count_fn_t oxphp_bridge_get_php_decorator_count(void) { return php_dec_count_fn; }
+
+void oxphp_bridge_set_php_decorator_class(oxphp_php_dec_class_fn_t fn) { php_dec_class_fn = fn; }
+oxphp_php_dec_class_fn_t oxphp_bridge_get_php_decorator_class(void) { return php_dec_class_fn; }
+
+void oxphp_bridge_set_php_decorator_cache_key(oxphp_php_dec_cache_key_fn_t fn) { php_dec_cache_key_fn = fn; }
+oxphp_php_dec_cache_key_fn_t oxphp_bridge_get_php_decorator_cache_key(void) { return php_dec_cache_key_fn; }
+
+/* TLS buffer for passing class name strings from Rust to C */
+static __thread char decorator_class_buf[256];
+
+void oxphp_bridge_set_decorator_class_buf(const char *s, size_t len) {
+    if (len > sizeof(decorator_class_buf) - 1) len = sizeof(decorator_class_buf) - 1;
+    memcpy(decorator_class_buf, s, len);
+    decorator_class_buf[len] = '\0';
+}
+
+const char *oxphp_bridge_get_decorator_class_buf(void) {
+    return decorator_class_buf;
+}
+
 /* ── PHP decorator registration pass-through ── */
 void oxphp_bridge_register_php_decorator(const char *class_name, uint32_t targets) {
     if (decorator_register_php_fn) {

@@ -690,6 +690,118 @@ static void oxphp_create_decorator_context(zval *ctx_zval, oxphp_decorator_ctx_t
     }
 }
 
+/* Get or create a cached PHP decorator instance.
+ * cache_key is used as the index into decorator_instance_cache.
+ * Returns a pointer to the cached zval (valid for the request lifetime). */
+static zval *oxphp_get_cached_decorator(const char *class_name, uint64_t cache_key,
+                                         zend_function *decorated_func, uint32_t attr_index)
+{
+    /* Use cache_key as index — it's unique per (fn_id, decorator_index) */
+    int idx = (int)(cache_key % OXPHP_DEC_CACHE_MAX);
+
+    /* Check if already cached */
+    if (Z_TYPE(decorator_instance_cache[idx]) == IS_OBJECT) {
+        return &decorator_instance_cache[idx];
+    }
+
+    /* Look up the decorator class */
+    zend_string *cls = zend_string_init(class_name, strlen(class_name), 0);
+    zend_class_entry *ce = zend_lookup_class(cls);
+    zend_string_release(cls);
+    if (!ce) return NULL;
+
+    /* Create instance */
+    zval *cached = &decorator_instance_cache[idx];
+    object_init_ex(cached, ce);
+
+    /* Find the matching attribute to get constructor args */
+    zend_attribute *attr = NULL;
+    if (decorated_func->common.attributes) {
+        uint32_t i = 0;
+        zend_attribute *a;
+        ZEND_HASH_FOREACH_PTR(decorated_func->common.attributes, a) {
+            if (strcmp(ZSTR_VAL(a->name), class_name) == 0) {
+                if (i == attr_index) {
+                    attr = a;
+                    break;
+                }
+                i++;
+            }
+        } ZEND_HASH_FOREACH_END();
+
+        /* Also check class-level attributes */
+        if (!attr && decorated_func->common.scope && decorated_func->common.scope->attributes) {
+            ZEND_HASH_FOREACH_PTR(decorated_func->common.scope->attributes, a) {
+                if (strcmp(ZSTR_VAL(a->name), class_name) == 0) {
+                    if (i == attr_index) {
+                        attr = a;
+                        break;
+                    }
+                    i++;
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+    }
+
+    /* Call constructor with attribute args if any */
+    if (attr && attr->argc > 0) {
+        zend_function *ctor = ce->constructor;
+        if (ctor) {
+            /* Evaluate attribute arguments and pass to constructor */
+            zval *args = safe_emalloc(attr->argc, sizeof(zval), 0);
+            uint32_t valid_argc = 0;
+            for (uint32_t i = 0; i < attr->argc; i++) {
+                if (SUCCESS == zend_get_attribute_value(&args[i], attr, i, ce)) {
+                    valid_argc++;
+                } else {
+                    ZVAL_NULL(&args[i]);
+                    valid_argc++;
+                }
+            }
+
+            /* Call __construct */
+            zval retval;
+            ZVAL_UNDEF(&retval);
+            zend_call_known_function(ctor, Z_OBJ_P(cached), ce, &retval,
+                                     valid_argc, args, NULL);
+            zval_ptr_dtor(&retval);
+
+            for (uint32_t i = 0; i < valid_argc; i++) {
+                zval_ptr_dtor(&args[i]);
+            }
+            efree(args);
+
+            if (EG(exception)) {
+                zval_ptr_dtor(cached);
+                ZVAL_UNDEF(cached);
+                return NULL;
+            }
+        }
+    } else {
+        /* No-arg constructor */
+        zend_function *ctor = ce->constructor;
+        if (ctor) {
+            zval retval;
+            ZVAL_UNDEF(&retval);
+            zend_call_known_function(ctor, Z_OBJ_P(cached), ce, &retval, 0, NULL, NULL);
+            zval_ptr_dtor(&retval);
+
+            if (EG(exception)) {
+                zval_ptr_dtor(cached);
+                ZVAL_UNDEF(cached);
+                return NULL;
+            }
+        }
+    }
+
+    Z_TRY_ADDREF_P(cached);
+    if (idx >= decorator_instance_count) {
+        decorator_instance_count = idx + 1;
+    }
+
+    return cached;
+}
+
 static zend_observer_fcall_handlers oxphp_decorator_observer_init(
     zend_execute_data *execute_data
 ) {
@@ -773,9 +885,75 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
         }
     }
 
-    /* PHP decorator dispatch: call before() on cached instances.
-     * This is a future enhancement — for now only Rust decorators are dispatched.
-     * TODO: iterate resolved PHP decorators, instantiate/cache, call $dec->before($ctx) */
+    /* Dispatch to PHP decorators: call before() on cached instances */
+    {
+        oxphp_php_dec_count_fn_t count_fn = oxphp_bridge_get_php_decorator_count();
+        oxphp_php_dec_class_fn_t class_fn = oxphp_bridge_get_php_decorator_class();
+        oxphp_php_dec_cache_key_fn_t key_fn = oxphp_bridge_get_php_decorator_cache_key();
+
+        if (count_fn && class_fn && key_fn) {
+            uint32_t php_count = count_fn(dctx->fn_id);
+
+            for (uint32_t i = 0; i < php_count; i++) {
+                const char *cls = class_fn(dctx->fn_id, i);
+                uint64_t cache_key = key_fn(dctx->fn_id, i);
+                if (!cls) continue;
+
+                zval *dec_instance = oxphp_get_cached_decorator(
+                    cls, cache_key, func, i);
+                if (!dec_instance) continue;
+
+                /* Create context for before() */
+                zval ctx_zval;
+                oxphp_create_decorator_context(&ctx_zval, dctx, 0, NULL);
+
+                /* Call $dec->before($ctx) */
+                zval retval;
+                ZVAL_UNDEF(&retval);
+                zend_call_method_with_1_params(
+                    Z_OBJ_P(dec_instance), Z_OBJCE_P(dec_instance),
+                    NULL, "before", &retval, &ctx_zval);
+                zval_ptr_dtor(&retval);
+                zval_ptr_dtor(&ctx_zval);
+
+                if (EG(exception)) {
+                    /* Cleanup: call after() on previously-succeeded decorators in reverse */
+                    zval cleanup_ctx;
+                    oxphp_create_decorator_context(&cleanup_ctx, dctx, 0, NULL);
+                    for (int j = (int)dctx->decorator_count - 1; j >= 0; j--) {
+                        const char *prev_cls = class_fn(dctx->fn_id, (uint32_t)j);
+                        uint64_t prev_key = key_fn(dctx->fn_id, (uint32_t)j);
+                        if (!prev_cls) continue;
+                        int prev_idx = (int)(prev_key % OXPHP_DEC_CACHE_MAX);
+                        if (Z_TYPE(decorator_instance_cache[prev_idx]) != IS_OBJECT) continue;
+
+                        zval cleanup_ret;
+                        ZVAL_UNDEF(&cleanup_ret);
+                        /* Save and clear exception to allow after() to run */
+                        zend_object *saved_exception = EG(exception);
+                        EG(exception) = NULL;
+                        zend_call_method_with_1_params(
+                            Z_OBJ(decorator_instance_cache[prev_idx]),
+                            Z_OBJCE(decorator_instance_cache[prev_idx]),
+                            NULL, "after", &cleanup_ret, &cleanup_ctx);
+                        zval_ptr_dtor(&cleanup_ret);
+                        /* Restore original exception */
+                        if (EG(exception) && saved_exception) {
+                            /* Discard cleanup exception, keep original */
+                            zend_clear_exception();
+                        }
+                        if (!EG(exception)) {
+                            EG(exception) = saved_exception;
+                        }
+                    }
+                    zval_ptr_dtor(&cleanup_ctx);
+                    return; /* PHP engine will skip the function */
+                }
+
+                dctx->decorator_count++;
+            }
+        }
+    }
 }
 
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
@@ -798,7 +976,41 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
         end_fn(dctx->fn_id, elapsed_ns, success, exc_class);
     }
 
-    /* TODO: dispatch to PHP decorators in reverse order — call $dec->after($ctx) */
+    /* Dispatch to PHP decorators in reverse order: call after() */
+    {
+        oxphp_php_dec_count_fn_t count_fn = oxphp_bridge_get_php_decorator_count();
+        oxphp_php_dec_class_fn_t class_fn = oxphp_bridge_get_php_decorator_class();
+        oxphp_php_dec_cache_key_fn_t key_fn = oxphp_bridge_get_php_decorator_cache_key();
+
+        if (count_fn && class_fn && key_fn && dctx->decorator_count > 0) {
+            /* Create context with result for after() */
+            zval ctx_zval;
+            int has_result = success && retval && Z_TYPE_P(retval) != IS_UNDEF;
+            oxphp_create_decorator_context(&ctx_zval, dctx, has_result, retval);
+
+            for (int i = (int)dctx->decorator_count - 1; i >= 0; i--) {
+                const char *cls = class_fn(dctx->fn_id, (uint32_t)i);
+                uint64_t cache_key = key_fn(dctx->fn_id, (uint32_t)i);
+                if (!cls) continue;
+
+                int idx = (int)(cache_key % OXPHP_DEC_CACHE_MAX);
+                if (Z_TYPE(decorator_instance_cache[idx]) != IS_OBJECT) continue;
+
+                zval after_ret;
+                ZVAL_UNDEF(&after_ret);
+                zend_call_method_with_1_params(
+                    Z_OBJ(decorator_instance_cache[idx]),
+                    Z_OBJCE(decorator_instance_cache[idx]),
+                    NULL, "after", &after_ret, &ctx_zval);
+                zval_ptr_dtor(&after_ret);
+
+                /* If after() throws, stop dispatching remaining decorators */
+                if (EG(exception)) break;
+            }
+
+            zval_ptr_dtor(&ctx_zval);
+        }
+    }
 
     oxphp_decorator_ctx_pop();
 }

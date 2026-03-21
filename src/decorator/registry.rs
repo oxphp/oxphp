@@ -100,6 +100,41 @@ impl DecoratorRegistry {
         self.rust_decorators.len()
     }
 
+    /// Get the number of PHP decorators resolved for a function.
+    pub fn php_decorator_count(&self, fn_id: usize) -> usize {
+        match self.resolved.get(&fn_id) {
+            Some(resolved) => resolved
+                .iter()
+                .filter(|d| matches!(d, ResolvedDecorator::Php { .. }))
+                .count(),
+            None => 0,
+        }
+    }
+
+    /// Get PHP decorator info at a given index (only counting PHP decorators).
+    /// Returns (class_name, cache_key) or None.
+    pub fn php_decorator_at(&self, fn_id: usize, php_index: usize) -> Option<(String, u64)> {
+        match self.resolved.get(&fn_id) {
+            Some(resolved) => {
+                let mut count = 0;
+                for dec in resolved.iter() {
+                    if let ResolvedDecorator::Php {
+                        class_name,
+                        cache_key,
+                    } = dec
+                    {
+                        if count == php_index {
+                            return Some((class_name.clone(), *cache_key));
+                        }
+                        count += 1;
+                    }
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
     /// Clear resolution cache (called at RSHUTDOWN in traditional mode).
     pub fn clear_cache(&self) {
         self.resolved.clear();
@@ -231,5 +266,78 @@ mod tests {
         // Registrations are still present.
         assert!(registry.is_registered("App\\Timer"));
         assert!(registry.is_registered("App\\Cache"));
+    }
+
+    #[test]
+    fn test_php_decorator_count() {
+        let registry = DecoratorRegistry::new();
+        let rust_dec = Arc::new(MockDecorator {
+            name: "App\\Timer",
+            targets: AttributeTargets::FUNCTION,
+        });
+        registry.register_rust(rust_dec);
+        registry.register_php("App\\Cache".to_string(), AttributeTargets::METHOD);
+        registry.register_php("App\\Log".to_string(), AttributeTargets::FUNCTION);
+
+        let attrs = vec![
+            "App\\Timer".to_string(),
+            "App\\Cache".to_string(),
+            "App\\Log".to_string(),
+        ];
+        registry.resolve(10, &attrs);
+
+        // Only PHP decorators counted (App\\Cache and App\\Log)
+        assert_eq!(registry.php_decorator_count(10), 2);
+        // Non-existent fn_id returns 0
+        assert_eq!(registry.php_decorator_count(999), 0);
+    }
+
+    #[test]
+    fn test_php_decorator_at() {
+        let registry = DecoratorRegistry::new();
+        let rust_dec = Arc::new(MockDecorator {
+            name: "App\\Timer",
+            targets: AttributeTargets::FUNCTION,
+        });
+        registry.register_rust(rust_dec);
+        registry.register_php("App\\Cache".to_string(), AttributeTargets::METHOD);
+        registry.register_php("App\\Log".to_string(), AttributeTargets::FUNCTION);
+
+        let attrs = vec![
+            "App\\Timer".to_string(),
+            "App\\Cache".to_string(),
+            "App\\Log".to_string(),
+        ];
+        registry.resolve(20, &attrs);
+
+        // Index 0 = first PHP decorator (App\\Cache)
+        let (name, _key) = registry.php_decorator_at(20, 0).unwrap();
+        assert_eq!(name, "App\\Cache");
+
+        // Index 1 = second PHP decorator (App\\Log)
+        let (name, _key) = registry.php_decorator_at(20, 1).unwrap();
+        assert_eq!(name, "App\\Log");
+
+        // Index 2 = out of bounds
+        assert!(registry.php_decorator_at(20, 2).is_none());
+
+        // Non-existent fn_id
+        assert!(registry.php_decorator_at(999, 0).is_none());
+    }
+
+    #[test]
+    fn test_php_decorator_count_no_php_decorators() {
+        let registry = DecoratorRegistry::new();
+        let rust_dec = Arc::new(MockDecorator {
+            name: "App\\Timer",
+            targets: AttributeTargets::ALL,
+        });
+        registry.register_rust(rust_dec);
+
+        let attrs = vec!["App\\Timer".to_string()];
+        registry.resolve(30, &attrs);
+
+        assert_eq!(registry.php_decorator_count(30), 0);
+        assert!(registry.php_decorator_at(30, 0).is_none());
     }
 }

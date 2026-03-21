@@ -292,6 +292,23 @@ void oxphp_bridge_clear_decorator_reject_reason(void);
 
 void oxphp_bridge_register_php_decorator(const char *class_name, uint32_t targets);
 
+/* ── PHP decorator query callbacks ── */
+typedef uint32_t (*oxphp_php_dec_count_fn_t)(uintptr_t fn_id);
+typedef const char * (*oxphp_php_dec_class_fn_t)(uintptr_t fn_id, uint32_t index);
+typedef uint64_t (*oxphp_php_dec_cache_key_fn_t)(uintptr_t fn_id, uint32_t index);
+
+void oxphp_bridge_set_php_decorator_count(oxphp_php_dec_count_fn_t fn);
+oxphp_php_dec_count_fn_t oxphp_bridge_get_php_decorator_count(void);
+
+void oxphp_bridge_set_php_decorator_class(oxphp_php_dec_class_fn_t fn);
+oxphp_php_dec_class_fn_t oxphp_bridge_get_php_decorator_class(void);
+
+void oxphp_bridge_set_php_decorator_cache_key(oxphp_php_dec_cache_key_fn_t fn);
+oxphp_php_dec_cache_key_fn_t oxphp_bridge_get_php_decorator_cache_key(void);
+
+void oxphp_bridge_set_decorator_class_buf(const char *s, size_t len);
+const char *oxphp_bridge_get_decorator_class_buf(void);
+
 #define OXPHP_DECORATOR_CTX_STACK_MAX 32
 
 typedef struct {
