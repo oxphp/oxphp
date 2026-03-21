@@ -6,7 +6,7 @@ pub mod manager;
 pub mod php;
 pub mod wrappers;
 
-pub use context::PluginContext;
+pub use context::{PluginContext, PluginDecoratorDef};
 pub use cookies::{CookieOptions, PluginCookies, PluginSetCookie, SameSite};
 pub use handler::{
     PluginCompleteHandler, PluginCompleteView, PluginInternalHandler, PluginInternalRequest,

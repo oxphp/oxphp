@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 
+use crate::decorator::Decorator;
 use crate::events::EventDispatcher;
 
 use super::handler::{
@@ -9,6 +10,11 @@ use super::handler::{
 };
 use super::php::{PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
 use super::wrappers::{PluginCompleteWrapper, PluginRequestWrapper, PluginResponseWrapper};
+
+/// Definition collected during plugin init for a Rust-native decorator.
+pub struct PluginDecoratorDef {
+    pub decorator: Box<dyn Decorator>,
+}
 
 /// Restricted API passed to `Plugin::init()`.
 /// Plugins can register handlers, config, services, and PHP functions through this.
@@ -21,6 +27,7 @@ pub struct PluginContext<'a> {
     metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
     internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
     native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
+    decorators: &'a mut Vec<PluginDecoratorDef>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -34,6 +41,7 @@ impl<'a> PluginContext<'a> {
         metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
         native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
+        decorators: &'a mut Vec<PluginDecoratorDef>,
     ) -> Self {
         Self {
             plugin_name,
@@ -44,6 +52,7 @@ impl<'a> PluginContext<'a> {
             metrics_collectors,
             internal_routes,
             native_php_functions,
+            decorators,
         }
     }
 
@@ -140,6 +149,14 @@ impl<'a> PluginContext<'a> {
         });
     }
 
+    /// Register a Rust-native decorator.
+    /// The decorator's `attribute_name()` is the fully qualified PHP attribute class name.
+    pub fn register_decorator(&mut self, decorator: impl Decorator + 'static) {
+        self.decorators.push(PluginDecoratorDef {
+            decorator: Box::new(decorator),
+        });
+    }
+
     /// Plugin name.
     pub fn plugin_name(&self) -> &str {
         &self.plugin_name
@@ -149,6 +166,9 @@ impl<'a> PluginContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decorator::{
+        AttributeTargets, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
+    };
     use crate::events::EventDispatcher;
     use crate::plugin::handler::PluginInternalRequest;
 
@@ -159,6 +179,7 @@ mod tests {
         metrics_collectors: &'a mut Vec<Box<dyn PluginMetricsCollector>>,
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
         native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
+        decorators: &'a mut Vec<PluginDecoratorDef>,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "test_plugin".into(),
@@ -169,6 +190,7 @@ mod tests {
             metrics_collectors,
             internal_routes,
             native_php_functions,
+            decorators,
         )
     }
 
@@ -183,6 +205,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -191,6 +214,7 @@ mod tests {
             &mut metrics,
             &mut routes,
             &mut native_php,
+            &mut decorators,
         );
 
         assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
@@ -212,6 +236,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -220,6 +245,7 @@ mod tests {
             &mut metrics,
             &mut routes,
             &mut native_php,
+            &mut decorators,
         );
 
         assert_eq!(ctx.plugin_name(), "test_plugin");
@@ -233,6 +259,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
 
         {
             let mut ctx = make_context(
@@ -242,6 +269,7 @@ mod tests {
                 &mut metrics,
                 &mut routes,
                 &mut native_php,
+                &mut decorators,
             );
 
             // Valid path
@@ -273,6 +301,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -281,6 +310,7 @@ mod tests {
             &mut metrics,
             &mut routes,
             &mut native_php,
+            &mut decorators,
         );
 
         ctx.register_service("my_pool", Box::new(42u32));
@@ -297,6 +327,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -305,6 +336,7 @@ mod tests {
             &mut metrics,
             &mut routes,
             &mut native_php,
+            &mut decorators,
         );
 
         ctx.expose_config("verbose", serde_json::json!(true));
@@ -319,6 +351,7 @@ mod tests {
         let mut metrics = Vec::new();
         let mut routes = HashMap::new();
         let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -327,6 +360,7 @@ mod tests {
             &mut metrics,
             &mut routes,
             &mut native_php_functions,
+            &mut decorators,
         );
 
         ctx.register_function(
@@ -340,5 +374,46 @@ mod tests {
 
         assert_eq!(native_php_functions.len(), 1);
         assert_eq!(native_php_functions[0].name, "oxphp_test_plugin_echo_upper");
+    }
+
+    #[test]
+    fn test_register_decorator() {
+        struct TestDecorator;
+        impl Decorator for TestDecorator {
+            fn attribute_name(&self) -> &str {
+                "App\\TestDec"
+            }
+            fn targets(&self) -> AttributeTargets {
+                AttributeTargets::ALL
+            }
+            fn on_begin(&self, _: &DecoratorCallContext) -> DecoratorAction {
+                DecoratorAction::Continue
+            }
+            fn on_end(&self, _: &DecoratorCallContext, _: &DecoratorCallResult) {}
+        }
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+        );
+
+        ctx.register_decorator(TestDecorator);
+        drop(ctx);
+
+        assert_eq!(decorators.len(), 1);
+        assert_eq!(decorators[0].decorator.attribute_name(), "App\\TestDec");
     }
 }
