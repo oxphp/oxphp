@@ -25,11 +25,12 @@
 | `src/plugin/manager.rs` | Modify:13-31,43-64,136-140 | Add `decorators` field, wire through init, add `take_decorators()` |
 | `src/plugin/mod.rs` | Modify:9-17 | Re-export decorator types |
 | `src/main.rs` | Modify:43-49 | Wire decorator registry to bridge after plugin init |
-| `src/bridge/ffi.rs` | Modify:65-68 | Add extern declarations for 5 new bridge functions |
+| `src/decorator/dispatch.rs` | Create | Rust-side `unsafe extern "C" fn` dispatch callbacks for bridge |
+| `src/bridge/ffi.rs` | Modify:65-68 | Add extern declarations for bridge functions |
 | `src/bridge/mock.rs` | Modify | Add no-op stubs for new bridge functions |
 | `ext/bridge/oxphp_bridge.h` | Modify | Add decorator typedefs, function declarations |
 | `ext/bridge/oxphp_bridge.c` | Modify | Add static globals, setter/getter, TLS for reject reason and context stack |
-| `ext/oxphp_sapi.c` | Modify | Register observer, PHP classes (`AttributeInterface`, `Context`), `oxphp_register_decorator()`, begin/end handlers, instance caching |
+| `ext/oxphp_sapi.c` | Modify | Register observer, PHP classes (`AttributeInterface`, `Context`), `oxphp_register_decorator()`, begin/end handlers, instance caching, PHP decorator dispatch |
 
 ---
 
@@ -192,12 +193,17 @@ Create `src/decorator/mod.rs`:
 ```rust
 pub mod types;
 pub mod registry;
+pub mod dispatch;
 
 pub use types::{
     AttributeTargets, Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
 };
-pub use registry::{DecoratorRegistry, PhpDecoratorMeta, ResolvedDecorator};
 ```
+
+Note: `registry` re-exports are added in Task 2 after the module is implemented. `dispatch` re-exports are added in Task 5a. Create empty placeholders for both:
+
+`src/decorator/registry.rs`: `// Implemented in Task 2.`
+`src/decorator/dispatch.rs`: `// Implemented in Task 5a.`
 
 Add to `src/lib.rs` after line 4 (`pub mod events;`):
 
@@ -608,7 +614,15 @@ In `src/bridge/ffi.rs`, add after `oxphp_bridge_set_native_dispatch` (line ~68):
     // ── Decorator system ──
     pub fn oxphp_bridge_set_decorator_registry(ptr: *const c_void);
 
-    pub fn oxphp_bridge_set_decorator_dispatch(
+    pub fn oxphp_bridge_set_decorator_resolve(
+        f: Option<unsafe extern "C" fn(
+            fn_id: usize,
+            attr_names: *const *const c_char,
+            attr_count: u32,
+        ) -> c_int>,
+    );
+
+    pub fn oxphp_bridge_set_decorator_begin(
         f: Option<unsafe extern "C" fn(
             fn_id: usize,
             target: *const c_char,
@@ -618,7 +632,7 @@ In `src/bridge/ffi.rs`, add after `oxphp_bridge_set_native_dispatch` (line ~68):
         ) -> c_int>,
     );
 
-    pub fn oxphp_bridge_set_decorator_end_dispatch(
+    pub fn oxphp_bridge_set_decorator_end(
         f: Option<unsafe extern "C" fn(
             fn_id: usize,
             elapsed_ns: u64,
@@ -627,17 +641,23 @@ In `src/bridge/ffi.rs`, add after `oxphp_bridge_set_native_dispatch` (line ~68):
         )>,
     );
 
-    pub fn oxphp_bridge_set_decorator_resolve(
-        f: Option<unsafe extern "C" fn(
-            fn_id: usize,
-            attr_names: *const *const c_char,
-            attr_count: u32,
-        ) -> c_int>,
-    );
-
     pub fn oxphp_bridge_get_decorator_reject_reason(
         out_len: *mut usize,
-    ) -> *const u8;
+    ) -> *const c_char;
+
+    pub fn oxphp_bridge_set_decorator_reject_reason(
+        reason: *const c_char,
+        len: usize,
+    );
+
+    pub fn oxphp_bridge_clear_decorator_reject_reason();
+
+    /// Register a PHP-side decorator in the Rust registry.
+    /// Called from oxphp_register_decorator() via bridge.
+    pub fn oxphp_bridge_register_php_decorator(
+        class_name: *const c_char,
+        targets: u32,
+    );
 ```
 
 - [ ] **Step 2: Add mock stubs**
@@ -670,19 +690,15 @@ In `src/main.rs`, inside the `#[cfg(feature = "php")]` block (line 43), after th
 ```rust
         // Register decorator definitions with the decorator registry
         let decorator_defs = plugin_manager.take_decorators();
-        if !decorator_defs.is_empty() {
-            let registry = oxphp::decorator::DecoratorRegistry::new();
-            for def in decorator_defs {
-                registry.register_rust(std::sync::Arc::from(def.decorator));
-            }
-            // Store registry as global Arc — bridge will hold a raw pointer
-            let registry = std::sync::Arc::new(registry);
-            // TODO: Task 6 — pass to bridge via oxphp_bridge_set_decorator_registry
-            // and install Rust dispatch callbacks
+        let registry = std::sync::Arc::new(oxphp::decorator::DecoratorRegistry::new());
+        for def in decorator_defs {
+            registry.register_rust(std::sync::Arc::from(def.decorator));
         }
+        // Install Rust dispatch callbacks and pass registry to bridge
+        oxphp::decorator::dispatch::install_bridge_callbacks(std::sync::Arc::clone(&registry));
+        // Leak the Arc so the raw pointer in the bridge is valid for the process lifetime
+        std::mem::forget(registry);
 ```
-
-Note: The full bridge wiring (calling `set_decorator_registry`, installing callbacks) will be completed in Task 6 when the C bridge functions exist. For now this is the Rust-side plumbing.
 
 - [ ] **Step 2: Run compilation check**
 
@@ -694,6 +710,268 @@ Expected: compiles clean. The `#[cfg(feature = "php")]` block is not compiled wi
 ```bash
 git add src/main.rs
 git commit -m "feat(decorator): wire decorator registry creation in main.rs startup"
+```
+
+---
+
+### Task 5a: Rust Dispatch Callbacks — `src/decorator/dispatch.rs`
+
+**Files:**
+- Create: `src/decorator/dispatch.rs` (replace placeholder)
+- Modify: `src/decorator/mod.rs` (add re-export)
+
+This is the critical missing piece — the `unsafe extern "C" fn` functions that the C bridge calls into Rust. They look up resolved decorators in the registry and call `on_begin()`/`on_end()`.
+
+- [ ] **Step 1: Implement dispatch callbacks**
+
+Replace `src/decorator/dispatch.rs`:
+
+```rust
+//! Rust-side dispatch callbacks installed into the C bridge.
+//! These are called from observer begin/end handlers on PHP worker threads.
+
+use std::ffi::{c_char, c_int, CStr};
+use std::sync::Arc;
+
+use super::registry::DecoratorRegistry;
+use super::types::{DecoratorAction, DecoratorCallContext, DecoratorCallResult};
+
+/// Global registry pointer — set once at startup, read from worker threads.
+static mut REGISTRY: Option<Arc<DecoratorRegistry>> = None;
+
+/// Install all bridge callbacks and store the registry globally.
+///
+/// # Safety
+/// Must be called exactly once, before any worker threads are spawned.
+pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
+    unsafe {
+        REGISTRY = Some(registry);
+        #[cfg(feature = "php")]
+        {
+            crate::bridge::ffi::oxphp_bridge_set_decorator_resolve(Some(resolve_callback));
+            crate::bridge::ffi::oxphp_bridge_set_decorator_begin(Some(begin_callback));
+            crate::bridge::ffi::oxphp_bridge_set_decorator_end(Some(end_callback));
+        }
+    }
+}
+
+fn get_registry() -> &'static DecoratorRegistry {
+    unsafe { REGISTRY.as_ref().expect("decorator registry not initialized") }
+}
+
+/// Called by observer init — resolve which decorators apply to this function.
+unsafe extern "C" fn resolve_callback(
+    fn_id: usize,
+    attr_names: *const *const c_char,
+    attr_count: u32,
+) -> c_int {
+    let registry = get_registry();
+    let mut names = Vec::with_capacity(attr_count as usize);
+    for i in 0..attr_count as usize {
+        let ptr = *attr_names.add(i);
+        if let Ok(s) = CStr::from_ptr(ptr).to_str() {
+            names.push(s.to_string());
+        }
+    }
+    if registry.resolve(fn_id, &names) { 1 } else { 0 }
+}
+
+/// Called by observer begin — dispatch on_begin to Rust decorators (in order).
+/// Returns 0=Continue, 1=Reject.
+unsafe extern "C" fn begin_callback(
+    fn_id: usize,
+    target: *const c_char,
+    class_name: *const c_char,
+    object_id: u64,
+    timestamp_ns: u64,
+) -> c_int {
+    let registry = get_registry();
+    let resolved = match registry.get_resolved(fn_id) {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    let target_str: Arc<str> = Arc::from(
+        CStr::from_ptr(target).to_str().unwrap_or("")
+    );
+    let class_str = if class_name.is_null() {
+        None
+    } else {
+        Some(Arc::from(CStr::from_ptr(class_name).to_str().unwrap_or("")))
+    };
+
+    let ctx = DecoratorCallContext {
+        target: Arc::clone(&target_str),
+        class: class_str.clone(),
+        method: if class_str.is_some() { Some(Arc::clone(&target_str)) } else { None },
+        function: if class_str.is_none() { Some(Arc::clone(&target_str)) } else { None },
+        object_id,
+        request_id: String::new(), // TODO: read from bridge TLS
+        trace_id: String::new(),   // TODO: read from $_SERVER
+        timestamp_ns,
+    };
+
+    for dec in resolved.iter() {
+        if let super::registry::ResolvedDecorator::Rust(ref decorator) = dec {
+            match decorator.on_begin(&ctx) {
+                DecoratorAction::Continue => {}
+                DecoratorAction::Reject(reason) => {
+                    // Store reject reason in TLS for C to read
+                    #[cfg(feature = "php")]
+                    {
+                        let bytes = reason.as_bytes();
+                        crate::bridge::ffi::oxphp_bridge_set_decorator_reject_reason(
+                            bytes.as_ptr() as *const c_char,
+                            bytes.len(),
+                        );
+                    }
+                    return 1;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Called by observer end — dispatch on_end to Rust decorators (in reverse order).
+unsafe extern "C" fn end_callback(
+    fn_id: usize,
+    elapsed_ns: u64,
+    success: c_int,
+    exception_class: *const c_char,
+) {
+    let registry = get_registry();
+    let resolved = match registry.get_resolved(fn_id) {
+        Some(r) => r,
+        None => return,
+    };
+
+    let exc = if exception_class.is_null() {
+        None
+    } else {
+        CStr::from_ptr(exception_class).to_str().ok().map(String::from)
+    };
+
+    let result = DecoratorCallResult {
+        success: success != 0,
+        elapsed_ns,
+        exception_class: exc,
+    };
+
+    // Build a minimal context (target/class come from the resolved cache in a real impl,
+    // for now use empty — the begin_callback already gave full context)
+    let ctx = DecoratorCallContext {
+        target: Arc::from(""),
+        class: None,
+        method: None,
+        function: None,
+        object_id: 0,
+        request_id: String::new(),
+        trace_id: String::new(),
+        timestamp_ns: 0,
+    };
+
+    // Reverse order — stack semantics
+    for dec in resolved.iter().rev() {
+        if let super::registry::ResolvedDecorator::Rust(ref decorator) = dec {
+            decorator.on_end(&ctx, &result);
+        }
+    }
+}
+
+/// Register a PHP-side decorator from the bridge (called by oxphp_register_decorator).
+#[cfg(feature = "php")]
+pub unsafe extern "C" fn register_php_decorator_callback(
+    class_name: *const c_char,
+    targets: u32,
+) {
+    let registry = get_registry();
+    if let Ok(name) = CStr::from_ptr(class_name).to_str() {
+        use super::types::AttributeTargets;
+        registry.register_php(name.to_string(), AttributeTargets::from_bits_truncate(targets));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decorator::types::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct CountingDecorator {
+        begin_count: AtomicU32,
+        end_count: AtomicU32,
+    }
+
+    impl Decorator for CountingDecorator {
+        fn attribute_name(&self) -> &str { "Test\\Counter" }
+        fn targets(&self) -> AttributeTargets { AttributeTargets::ALL }
+        fn on_begin(&self, _ctx: &DecoratorCallContext) -> DecoratorAction {
+            self.begin_count.fetch_add(1, Ordering::Relaxed);
+            DecoratorAction::Continue
+        }
+        fn on_end(&self, _ctx: &DecoratorCallContext, _result: &DecoratorCallResult) {
+            self.end_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn test_registry_dispatch_round_trip() {
+        let registry = DecoratorRegistry::new();
+        let dec = Arc::new(CountingDecorator {
+            begin_count: AtomicU32::new(0),
+            end_count: AtomicU32::new(0),
+        });
+        let dec_ref = Arc::clone(&dec);
+        registry.register_rust(dec);
+
+        let attrs = vec!["Test\\Counter".to_string()];
+        assert!(registry.resolve(0x1, &attrs));
+
+        // Simulate begin dispatch
+        let resolved = registry.get_resolved(0x1).unwrap();
+        let ctx = DecoratorCallContext {
+            target: Arc::from("test_fn"),
+            class: None, method: None, function: Some(Arc::from("test_fn")),
+            object_id: 0, request_id: String::new(), trace_id: String::new(),
+            timestamp_ns: 0,
+        };
+        for d in resolved.iter() {
+            if let super::super::registry::ResolvedDecorator::Rust(ref decorator) = d {
+                assert_eq!(decorator.on_begin(&ctx), DecoratorAction::Continue);
+            }
+        }
+        assert_eq!(dec_ref.begin_count.load(Ordering::Relaxed), 1);
+
+        // Simulate end dispatch (reverse order)
+        let result = DecoratorCallResult { success: true, elapsed_ns: 100, exception_class: None };
+        for d in resolved.iter().rev() {
+            if let super::super::registry::ResolvedDecorator::Rust(ref decorator) = d {
+                decorator.on_end(&ctx, &result);
+            }
+        }
+        assert_eq!(dec_ref.end_count.load(Ordering::Relaxed), 1);
+    }
+}
+```
+
+- [ ] **Step 2: Update mod.rs re-exports**
+
+Add to `src/decorator/mod.rs`:
+```rust
+pub use registry::{DecoratorRegistry, PhpDecoratorMeta, ResolvedDecorator};
+```
+
+- [ ] **Step 3: Run tests**
+
+Run: `cargo test --no-default-features --lib decorator::dispatch`
+Expected: `test_registry_dispatch_round_trip` passes.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/decorator/dispatch.rs src/decorator/mod.rs
+git commit -m "feat(decorator): add Rust-side dispatch callbacks for bridge integration"
 ```
 
 ---
@@ -1319,12 +1597,26 @@ git commit -m "test(decorator): add end-to-end decorator flow test"
 
 ## Notes for Implementation
 
-1. **The C code in Tasks 6-7 is pseudocode-quality.** The Zend API calls (especially attribute iteration with `ZEND_HASH_PACKED_FOREACH_PTR` and `zend_get_attribute_str`) need verification against PHP 8.4 headers. Check `Zend/zend_attributes.h` in the Docker build image.
+1. **The C code in Tasks 6-7 is guide-level, not copy-paste.** Verify all Zend API calls against PHP 8.4 headers (`Zend/zend_attributes.h`, `Zend/zend_observer.h`). Key things to check:
+   - Use `ZEND_HASH_FOREACH_PTR` (not `ZEND_HASH_PACKED_FOREACH_PTR`) for attribute hash tables
+   - Use `zend_declare_typed_property()` with `ZEND_ACC_READONLY` instead of `zend_declare_property_string()` — the latter with `ZEND_ACC_READONLY` causes a fatal error in PHP 8.2+
 
-2. **PHP decorator `before()`/`after()` dispatch** (the `TODO` comments in observer begin/end) requires creating a `Context` object, populating its properties, and calling `zend_call_method()` on cached decorator instances. This is the most complex C code and may need to be split into sub-steps during implementation.
+2. **PHP decorator `before()`/`after()` dispatch** (TODO comments in observer begin/end) is the most complex C code. Implementation steps:
+   - Create `OxPHP\Decorator\Context` instance via `object_init_ex()`
+   - Populate readonly properties via internal setter (before `ZEND_ACC_READONLY` takes effect)
+   - Store `execute_data` pointer as internal property for lazy `getParams()`
+   - Call `zend_call_method_with_1_params()` for `before()` / `after()`
+   - Track `ctx->decorator_count` — if `before()` throws, call `after()` on previously-succeeded decorators in reverse (cleanup semantics)
+   - In `after()`: store `retval` pointer before calling PHP methods so `getResult()`/`hasResult()` work
 
-3. **The `getParams()` lazy method** on `Context` needs access to `execute_data` which is stored in the TLS context stack. Implementation: store `execute_data` pointer in an internal object property, build array on first call via `ZEND_CALL_ARG()`.
+3. **`oxphp_register_decorator()` completion** — the TODO in Task 7 Step 3 needs to call `register_php_decorator_callback` from `dispatch.rs` through the bridge. Add a C bridge function `oxphp_bridge_register_php_decorator()` that calls the Rust callback.
 
-4. **`getResult()` / `hasResult()`** — the `retval` pointer is only available in the end handler. Store it as an internal property on the Context object before calling PHP `after()` methods.
+4. **`Context.getParams()` lazy method**: store `execute_data` pointer in an internal zval property (invisible to PHP). On first `getParams()` call, iterate `ZEND_CALL_ARG(execute_data, n)` for `n = 1..ZEND_NUM_ARGS()` and build array. Cache the array for subsequent calls.
 
-5. **Attribute iteration macro** — PHP 8.4 may use `ZEND_HASH_FOREACH_PTR` instead of `ZEND_HASH_PACKED_FOREACH_PTR` for attribute hash tables. Verify during Docker build.
+5. **`Context.getResult()` / `hasResult()`**: the `retval` pointer is only available in end handler. Before calling PHP `after()` methods, store `retval` as internal property on Context. `getResult()` returns it; `hasResult()` returns `retval != NULL && !EG(exception)`.
+
+6. **RSHUTDOWN resolution cache**: add a bridge call `oxphp_bridge_decorator_clear_cache()` in `PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)` that calls `DecoratorRegistry::clear_cache()`. This prevents unbounded cache growth in traditional (non-worker) mode.
+
+7. **Repeatable attributes**: the current `resolve()` implementation handles these naturally — each `zend_attribute` in the hash table is a separate entry, and the cache key `(fn_id, decorator_index)` distinguishes instances. Verify this works during integration testing.
+
+8. **`cache_key` in `ResolvedDecorator::Php`**: use `index as u64` alone (scoped to the fn_id's resolved vec), not a composite key with fn_id shift — avoids overflow on 64-bit pointers.
