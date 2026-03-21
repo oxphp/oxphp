@@ -7,14 +7,29 @@ pub enum DecoratorAction {
     Reject(String),
 }
 
-bitflags::bitflags! {
-    /// Which PHP attribute targets this decorator supports.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct AttributeTargets: u32 {
-        const FUNCTION = 0x01;
-        const METHOD   = 0x02;
-        const CLASS    = 0x04;
-        const ALL      = Self::FUNCTION.bits() | Self::METHOD.bits() | Self::CLASS.bits();
+/// Which PHP attribute targets this decorator supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttributeTargets(u32);
+
+impl AttributeTargets {
+    pub const FUNCTION: Self = Self(0x01);
+    pub const METHOD: Self = Self(0x02);
+    pub const CLASS: Self = Self(0x04);
+    pub const ALL: Self = Self(0x01 | 0x02 | 0x04);
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn from_bits_truncate(bits: u32) -> Self {
+        Self(bits & 0x07)
+    }
+}
+
+impl std::ops::BitOr for AttributeTargets {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
     }
 }
 
