@@ -243,6 +243,71 @@ typedef int (*oxphp_native_dispatch_fn_t)(
 void oxphp_bridge_set_native_dispatch(oxphp_native_dispatch_fn_t fn);
 oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void);
 
+/* ── Decorator system ── */
+
+typedef int (*oxphp_decorator_resolve_fn_t)(
+    uintptr_t fn_id,
+    const char **attr_names,
+    uint32_t attr_count
+);
+
+typedef int (*oxphp_decorator_begin_fn_t)(
+    uintptr_t fn_id,
+    const char *target,
+    const char *class_name,
+    uint64_t object_id,
+    uint64_t timestamp_ns
+);
+
+typedef void (*oxphp_decorator_end_fn_t)(
+    uintptr_t fn_id,
+    uint64_t elapsed_ns,
+    int success,
+    const char *exception_class
+);
+
+typedef void (*oxphp_decorator_register_php_fn_t)(
+    const char *class_name,
+    uint32_t targets
+);
+
+void oxphp_bridge_set_decorator_registry(void *ptr);
+void *oxphp_bridge_get_decorator_registry(void);
+
+void oxphp_bridge_set_decorator_resolve(oxphp_decorator_resolve_fn_t fn);
+oxphp_decorator_resolve_fn_t oxphp_bridge_get_decorator_resolve(void);
+
+void oxphp_bridge_set_decorator_begin(oxphp_decorator_begin_fn_t fn);
+oxphp_decorator_begin_fn_t oxphp_bridge_get_decorator_begin(void);
+
+void oxphp_bridge_set_decorator_end(oxphp_decorator_end_fn_t fn);
+oxphp_decorator_end_fn_t oxphp_bridge_get_decorator_end(void);
+
+void oxphp_bridge_set_decorator_register_php(oxphp_decorator_register_php_fn_t fn);
+oxphp_decorator_register_php_fn_t oxphp_bridge_get_decorator_register_php(void);
+
+void oxphp_bridge_set_decorator_reject_reason(const char *reason, size_t len);
+const char *oxphp_bridge_get_decorator_reject_reason(size_t *out_len);
+void oxphp_bridge_clear_decorator_reject_reason(void);
+
+void oxphp_bridge_register_php_decorator(const char *class_name, uint32_t targets);
+
+#define OXPHP_DECORATOR_CTX_STACK_MAX 32
+
+typedef struct {
+    uintptr_t fn_id;
+    const char *target;
+    const char *class_name;
+    uint64_t object_id;
+    uint64_t timestamp_ns;
+    void *execute_data;
+    int decorator_count;
+} oxphp_decorator_ctx_t;
+
+oxphp_decorator_ctx_t *oxphp_decorator_ctx_push(void);
+oxphp_decorator_ctx_t *oxphp_decorator_ctx_peek(void);
+void oxphp_decorator_ctx_pop(void);
+
 /* ── Call PHP function from Rust (native, no serialization) ── */
 int oxphp_call_php_native(
     const char *func_name, void *args, uint32_t argc, void *result
