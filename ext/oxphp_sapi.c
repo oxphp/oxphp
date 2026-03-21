@@ -7,6 +7,7 @@
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_observer.h"
 #include "Zend/zend_attributes.h"
+#include "Zend/zend_interfaces.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "ext/standard/basic_functions.h"

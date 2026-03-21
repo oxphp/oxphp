@@ -50,19 +50,18 @@ fn main() -> Result<(), types::BoxError> {
 
     #[cfg(feature = "php")]
     {
-        // Create decorator registry and populate with plugin-registered decorators
+        // Create decorator registry — always, even without Rust plugins,
+        // because PHP decorators register at runtime via oxphp_register_decorator()
+        let registry = std::sync::Arc::new(oxphp::decorator::DecoratorRegistry::new());
         let decorator_defs = plugin_manager.take_decorators();
-        if !decorator_defs.is_empty() {
-            let registry = oxphp::decorator::DecoratorRegistry::new();
-            for def in decorator_defs {
-                registry.register_rust(std::sync::Arc::from(def.decorator));
-            }
-            // TODO(task-5a): install bridge callbacks via oxphp::decorator::dispatch::install_bridge_callbacks()
-            tracing::info!(
-                count = registry.rust_decorator_count(),
-                "Decorator registry initialized"
-            );
+        for def in decorator_defs {
+            registry.register_rust(std::sync::Arc::from(def.decorator));
         }
+        oxphp::decorator::dispatch::install_bridge_callbacks(std::sync::Arc::clone(&registry));
+        tracing::info!(
+            rust_decorators = registry.rust_decorator_count(),
+            "Decorator registry initialized"
+        );
     }
 
     // Create executor AFTER plugin functions are on the bridge —

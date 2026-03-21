@@ -111,6 +111,10 @@ extern "C" {
 
     pub fn oxphp_bridge_register_php_decorator(class_name: *const c_char, targets: u32);
 
+    pub fn oxphp_bridge_set_decorator_register_php(
+        f: Option<unsafe extern "C" fn(class_name: *const c_char, targets: u32)>,
+    );
+
     // ── PHP decorator query callbacks ──
     pub fn oxphp_bridge_set_php_decorator_count(
         f: Option<unsafe extern "C" fn(fn_id: usize) -> u32>,

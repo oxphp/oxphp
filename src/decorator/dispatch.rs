@@ -41,6 +41,9 @@ pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
             crate::bridge::ffi::oxphp_bridge_set_php_decorator_cache_key(Some(
                 php_decorator_cache_key_callback,
             ));
+            crate::bridge::ffi::oxphp_bridge_set_decorator_register_php(Some(
+                register_php_decorator_callback,
+            ));
         }
     }
 }

@@ -167,6 +167,11 @@ pub unsafe fn oxphp_bridge_clear_decorator_reject_reason() {}
 
 pub unsafe fn oxphp_bridge_register_php_decorator(_class_name: *const c_char, _targets: u32) {}
 
+pub unsafe fn oxphp_bridge_set_decorator_register_php(
+    _f: Option<unsafe extern "C" fn(*const c_char, u32)>,
+) {
+}
+
 // ── PHP decorator query callbacks ──
 pub unsafe fn oxphp_bridge_set_php_decorator_count(_f: Option<unsafe extern "C" fn(usize) -> u32>) {
 }
