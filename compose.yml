@@ -6,7 +6,8 @@ services:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
          CARGO_FEATURES: "plugin-otel"
     ports:
-      - "8080:8080"
+      - "80:80"
+      - "443:443"
       - "9090:9090"
     volumes:
       - ./www:/var/www/html:ro
@@ -16,10 +17,10 @@ services:
       # ── Server ────────────────────────────────────────────────────
 
       # Address and port the server binds to.
-      - LISTEN_ADDR=0.0.0.0:8080
+      # - LISTEN_ADDR=0.0.0.0:80
 
       # Root directory for serving files and PHP scripts.
-      - DOCUMENT_ROOT=/var/www/html/public
+      # - DOCUMENT_ROOT=/var/www/html/public
 
       # Front-controller file. Determines routing mode:
       #   (unset)      — traditional: direct file mapping, / → index.php or index.html

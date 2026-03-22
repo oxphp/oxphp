@@ -140,6 +140,6 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 
 USER www-data
 
-EXPOSE 8080
+EXPOSE 80 443
 
 CMD ["oxphp"]

@@ -62,6 +62,8 @@ pub struct ScriptRequest {
     pub span_id: String,
     /// W3C Trace Context: parent span ID (16 hex chars or empty).
     pub parent_span_id: String,
+    /// Whether this request arrived over TLS.
+    pub is_tls: bool,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.

@@ -337,6 +337,10 @@ mod tests {
                 headers: vec![("X-Fiber".to_string(), "1".to_string())],
                 status_code: 200,
             },
+            #[cfg(feature = "php")]
+            early_tx: None,
+            #[cfg(feature = "php")]
+            request_start: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -349,6 +353,10 @@ mod tests {
                 headers: vec![("X-Fiber".to_string(), "2".to_string())],
                 status_code: 404,
             },
+            #[cfg(feature = "php")]
+            early_tx: None,
+            #[cfg(feature = "php")]
+            request_start: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -393,6 +401,10 @@ mod tests {
                 headers: Vec::new(),
                 status_code: 200,
             },
+            #[cfg(feature = "php")]
+            early_tx: None,
+            #[cfg(feature = "php")]
+            request_start: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);

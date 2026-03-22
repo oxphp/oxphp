@@ -45,6 +45,7 @@ pub struct AsyncTask {
 unsafe impl Send for AsyncTask {}
 
 /// The result of executing an async task, sent back to the originating PHP worker.
+#[derive(Debug)]
 pub struct AsyncResult {
     /// Whether the closure executed successfully (true) or threw an exception (false).
     pub success: bool,

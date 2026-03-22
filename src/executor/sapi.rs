@@ -1228,6 +1228,7 @@ mod tests {
             trace_id: String::new(),
             span_id: String::new(),
             parent_span_id: String::new(),
+            is_tls: false,
         };
 
         let result = executor.execute(request);
