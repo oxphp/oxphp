@@ -368,6 +368,7 @@ pub fn set_request_data(req: &ScriptRequest) {
         let path = req.uri.path();
         push_server_var(vars, "SCRIPT_NAME", path);
         push_server_var(vars, "PHP_SELF", path);
+        push_server_var(vars, "DOCUMENT_URI", path);
 
         // SCRIPT_FILENAME: absolute filesystem path to the script
         push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());
