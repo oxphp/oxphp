@@ -56,6 +56,8 @@ pub struct Config {
     pub async_workers: usize,
     /// Bounded channel capacity for pending async tasks. 0 = auto (async_workers * 64).
     pub async_queue_capacity: usize,
+    /// W3C Trace Context propagation enabled.
+    pub trace_context: bool,
 }
 
 /// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
@@ -169,6 +171,10 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
+        let trace_context = std::env::var("TRACE_CONTEXT")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         Ok(Self {
             server,
             log_level,
@@ -190,6 +196,7 @@ impl Config {
             static_cache_ttl,
             async_workers,
             async_queue_capacity,
+            trace_context,
         })
     }
 
@@ -223,6 +230,7 @@ impl Config {
             } else {
                 self.async_workers * 64
             },
+            "trace_context": self.trace_context,
         })
     }
 }
