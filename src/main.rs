@@ -234,16 +234,13 @@ async fn async_main(
         tracing::info!("Error pages handler registered");
     }
 
-    let trace_context_enabled = std::env::var("TRACE_CONTEXT")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
     dispatcher.on(handlers::trace_context::TraceContextRequestHandler::new(
-        trace_context_enabled,
+        config.trace_context,
     ));
     dispatcher.on(handlers::trace_context::TraceContextResponseHandler::new(
-        trace_context_enabled,
+        config.trace_context,
     ));
-    if trace_context_enabled {
+    if config.trace_context {
         tracing::info!("Trace context handler registered");
     }
 
