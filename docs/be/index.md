@@ -70,6 +70,7 @@ OxPHP ліцэнзаваны на ўмовах [AGPL-3.0](https://www.gnu.org/li
 - [Тайм-аўты](features/timeouts.md) -- тайм-аўты загалоўкаў, запытаў і прастою
 - [Лагіраванне доступу](features/access-logging.md) -- структураванае JSON-лагіраванне доступу
 - [Размеркаваная трасіроўка](features/distributed-tracing.md) -- W3C Trace Context і OpenTelemetry
+- [Дэкаратары](features/decorators.md) -- перахоп выклікаў функцый/метадаў на аснове атрыбутаў
 
 ### Інтэграцыя з PHP
 

@@ -36,6 +36,7 @@ The server uses a configurable Tokio async runtime (multi-threaded by default wi
 - **Worker mode** -- persistent PHP processes with soft reset between requests, automatic recycling, and per-worker metrics
 - **W3C Trace Context** propagation (`traceparent`/`tracestate`) with trace IDs exposed to PHP via `$_SERVER`
 - **OpenTelemetry** span export via OTLP (gRPC/HTTP) with configurable sampling and semantic conventions
+- **Attribute-based decorators** -- intercept function/method calls using PHP 8+ attributes with zero overhead on undecorated code
 - **Panic isolation** via `catch_unwind` -- a PHP crash does not take down the server
 
 ## License
@@ -70,6 +71,7 @@ OxPHP is licensed under [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html).
 - [Timeouts](features/timeouts.md) -- header, request, and idle timeouts
 - [Access Logging](features/access-logging.md) -- structured JSON access log
 - [Distributed Tracing](features/distributed-tracing.md) -- W3C Trace Context and OpenTelemetry
+- [Decorators](features/decorators.md) -- attribute-based function/method interception
 
 ### PHP Integration
 

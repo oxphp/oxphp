@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::events::EventDispatcher;
 
-use super::context::PluginContext;
+use super::context::{PluginContext, PluginDecoratorDef};
 use super::handler::{PluginInternalHandler, PluginInternalRequest, PluginMetricsCollector};
 use super::php::PluginNativeFunctionDef;
 use super::{Plugin, PluginError, PluginHealth};
@@ -17,6 +17,7 @@ pub struct PluginManager {
     metrics_collectors: Vec<Box<dyn PluginMetricsCollector>>,
     internal_routes: HashMap<String, Box<dyn PluginInternalHandler>>,
     native_php_functions: Vec<PluginNativeFunctionDef>,
+    decorators: Vec<PluginDecoratorDef>,
 }
 
 impl PluginManager {
@@ -28,6 +29,7 @@ impl PluginManager {
             metrics_collectors: Vec::new(),
             internal_routes: HashMap::new(),
             native_php_functions: Vec::new(),
+            decorators: Vec::new(),
         }
     }
 
@@ -62,6 +64,7 @@ impl PluginManager {
                 &mut self.metrics_collectors,
                 &mut self.internal_routes,
                 &mut self.native_php_functions,
+                &mut self.decorators,
             );
 
             plugin.init(&mut ctx)?;
@@ -137,6 +140,12 @@ impl PluginManager {
     /// Call after init_all(), before wrapping manager in Arc.
     pub fn take_native_php_functions(&mut self) -> Vec<PluginNativeFunctionDef> {
         std::mem::take(&mut self.native_php_functions)
+    }
+
+    /// Take decorator definitions (empties the internal vec).
+    /// Call after init_all(), before wrapping manager in Arc.
+    pub fn take_decorators(&mut self) -> Vec<PluginDecoratorDef> {
+        std::mem::take(&mut self.decorators)
     }
 
     /// Validate dependencies and return topological init order (Kahn's algorithm).

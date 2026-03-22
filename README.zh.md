@@ -82,6 +82,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 - **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
 - **原生 Rust↔PHP 桥接** — 通过 C 访问函数直接操作 `zval`，零序列化开销
 - **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
+- **基于属性的装饰器** — 通过 PHP 8+ 属性拦截函数/方法调用，对未装饰代码零开销；支持 `TARGET_FUNCTION`、`TARGET_METHOD`、`TARGET_CLASS`
 - **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
 
 ### 工作进程模型
@@ -288,7 +289,7 @@ curl http://localhost:9090/metrics
 | ~~**Trace Context (W3C)**~~ | ✅ 已实现 — 自动传播 `traceparent` / `tracestate` 头（W3C 规范），通过 `TRACE_CONTEXT=true` 启用 |
 | ~~**OpenTelemetry**~~ | ✅ 已实现 — 通过 `plugin-otel` 特性进行 OTLP 追踪导出，W3C context 传播，每请求 Span 支持标准语义化约定 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
-| **Built-in PHP Profiler** | 无需 xdebug 或外部代理的低开销性能分析，直接集成在服务器中 |
+| **Built-in PHP Profiler** | 通过属性装饰器（`#[Timer]`、`#[Span]`）实现低开销性能分析，与服务器指标和追踪直接集成 |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |
 | **Non-Docker Install** | 通过系统包管理器（apt、brew 等）原生安装 |
 | **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |

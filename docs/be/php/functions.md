@@ -3,7 +3,7 @@ title: Функцыі PHP-пашырэння
 description: Даведка па API пашырэння oxphp_sapi для PHP
 ---
 
-Пашырэнне `oxphp_sapi` для PHP рэгіструе пятнаццаць убудаваных функцый, якія даюць вашаму PHP-коду доступ да ўнутраных механізмаў сервера OxPHP. Гэтыя функцыі даступныя ў кожным PHP-скрыпце, які выконвае OxPHP — дырэктыва `extension=` не патрэбна, бо пашырэнне скампілявана ў карыстальніцкі SAPI.
+Пашырэнне `oxphp_sapi` для PHP рэгіструе шаснаццаць убудаваных функцый, якія даюць вашаму PHP-коду доступ да ўнутраных механізмаў сервера OxPHP. Гэтыя функцыі даступныя ў кожным PHP-скрыпце, які выконвае OxPHP — дырэктыва `extension=` не патрэбна, бо пашырэнне скампілявана ў карыстальніцкі SAPI.
 
 Плагіны могуць рэгістраваць дадатковыя PHP-функцыі пры запуску. Гэтыя функцыі, прадастаўленыя плагінамі, рэгіструюцца падчас `MINIT` праз C-мост і з'яўляюцца побач з убудаванымі.
 
@@ -580,6 +580,46 @@ $r3 = oxphp_async_await($p3); // 3
 
 ---
 
+## `oxphp_register_decorator`
+
+Рэгіструе PHP-клас як дэкаратар на аснове атрыбутаў. Гл. [Дэкаратары](../features/decorators.md) для поўнага кіраўніцтва.
+
+```php
+oxphp_register_decorator(string $class): bool
+```
+
+**Параметры:**
+
+| Імя | Тып | Апісанне |
+|-----|-----|----------|
+| `$class` | `string` | Поўнакваліфікаваная назва класа |
+
+**Вяртаемае значэнне:** `true` пры поспеху. `false` з `E_WARNING`, калі:
+- Клас не існуе
+- Клас не рэалізуе `OxPHP\Decorator\AttributeInterface`
+- Клас не пазначаны `#[Attribute(...)]`
+
+**Прыклад:**
+
+```php
+<?php
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Timer implements OxPHP\Decorator\AttributeInterface {
+    public function __construct(public readonly string $label = '') {}
+    public function before(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+    public function after(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+}
+
+oxphp_register_decorator(Timer::class);
+```
+
+**Заўвагі:**
+- Выклічце адзін раз падчас ініцыялізацыі прыкладання (напрыклад, пасля наладкі аўтазагрузчыка).
+- Дэкаратар уступае ў сілу неадкладна — любы наступны выклік функцыі з адпаведным атрыбутам будзе перахоплены.
+- Rust-натыўныя і PHP-дэкаратары суіснуюць у адным рэестры.
+
+---
+
 ## Функцыі плагінаў
 
 Плагіны могуць рэгістраваць карыстальніцкія PHP-функцыі, якія можна выклікаць з вашых скрыптоў. Гэтыя функцыі рэгіструюцца падчас ініцыялізацыі PHP-модуля (`MINIT`) і адпраўляюцца праз C-мост у код апрацоўшчыка на Rust.
@@ -629,11 +669,13 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [12] => oxphp_async_await
 //     [13] => oxphp_async_await_all
 //     [14] => oxphp_async_await_any
+//     [15] => oxphp_register_decorator
 // )
 ```
 
 ## Глядзіце таксама
 
+- [Дэкаратары](/be/features/decorators.md) --- перахоп выклікаў функцый/метадаў на аснове атрыбутаў праз `oxphp_register_decorator()`
 - [Асінхронныя промісы](/be/features/async-promises.md) --- паралельнае выкананне з `oxphp_async()` і `oxphp_async_await()`
 - [Мультыплексаванне запытаў на файберах](/features/fiber-multiplexing.md) --- кааператыўная шматзадачнасць з `oxphp_sleep()` і файбер-сумяшчальны `oxphp_async_await()`
 - [Суперглабальныя зменныя](superglobals.md) --- як OxPHP запаўняе `$_SERVER`, `$_GET`, `$_POST` і іншыя суперглабальныя зменныя

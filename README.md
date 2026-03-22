@@ -82,6 +82,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
 - **Native Rust↔PHP bridge** — zero-serialization via direct `zval` access through C accessor functions
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
+- **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS`
 - **Panic isolation** via `catch_unwind` — a PHP crash does not take down the server
 
 ### Worker Model
@@ -288,7 +289,7 @@ curl http://localhost:9090/metrics
 | ~~**Trace Context (W3C)**~~ | ✅ Implemented — automatic propagation of `traceparent` / `tracestate` headers (W3C spec), enabled via `TRACE_CONTEXT=true` |
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
-| **Built-in PHP Profiler** | Low-overhead profiling without xdebug or external agents, integrated directly into the server |
+| **Built-in PHP Profiler** | Low-overhead profiling via attribute decorators (`#[Timer]`, `#[Span]`), integrated with server metrics and tracing |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |
 | **Non-Docker Install** | Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |

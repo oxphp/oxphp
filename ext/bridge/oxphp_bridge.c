@@ -340,6 +340,103 @@ static oxphp_native_dispatch_fn_t native_dispatch_fn = NULL;
 void oxphp_bridge_set_native_dispatch(oxphp_native_dispatch_fn_t fn) { native_dispatch_fn = fn; }
 oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void)    { return native_dispatch_fn; }
 
+/* ── Decorator system — global callbacks (set once before worker threads) ── */
+static void *decorator_registry_ptr = NULL;
+static oxphp_decorator_resolve_fn_t decorator_resolve_fn = NULL;
+static oxphp_decorator_begin_fn_t decorator_begin_fn = NULL;
+static oxphp_decorator_end_fn_t decorator_end_fn = NULL;
+static oxphp_decorator_register_php_fn_t decorator_register_php_fn = NULL;
+
+void oxphp_bridge_set_decorator_registry(void *ptr) { decorator_registry_ptr = ptr; }
+void *oxphp_bridge_get_decorator_registry(void) { return decorator_registry_ptr; }
+
+void oxphp_bridge_set_decorator_resolve(oxphp_decorator_resolve_fn_t fn) { decorator_resolve_fn = fn; }
+oxphp_decorator_resolve_fn_t oxphp_bridge_get_decorator_resolve(void) { return decorator_resolve_fn; }
+
+void oxphp_bridge_set_decorator_begin(oxphp_decorator_begin_fn_t fn) { decorator_begin_fn = fn; }
+oxphp_decorator_begin_fn_t oxphp_bridge_get_decorator_begin(void) { return decorator_begin_fn; }
+
+void oxphp_bridge_set_decorator_end(oxphp_decorator_end_fn_t fn) { decorator_end_fn = fn; }
+oxphp_decorator_end_fn_t oxphp_bridge_get_decorator_end(void) { return decorator_end_fn; }
+
+void oxphp_bridge_set_decorator_register_php(oxphp_decorator_register_php_fn_t fn) { decorator_register_php_fn = fn; }
+oxphp_decorator_register_php_fn_t oxphp_bridge_get_decorator_register_php(void) { return decorator_register_php_fn; }
+
+/* ── Reject reason — per-thread TLS ── */
+static __thread char decorator_reject_buf[256];
+static __thread size_t decorator_reject_len = 0;
+
+void oxphp_bridge_set_decorator_reject_reason(const char *reason, size_t len) {
+    if (len > sizeof(decorator_reject_buf) - 1) len = sizeof(decorator_reject_buf) - 1;
+    memcpy(decorator_reject_buf, reason, len);
+    decorator_reject_buf[len] = '\0';
+    decorator_reject_len = len;
+}
+
+const char *oxphp_bridge_get_decorator_reject_reason(size_t *out_len) {
+    if (out_len) *out_len = decorator_reject_len;
+    return decorator_reject_buf;
+}
+
+void oxphp_bridge_clear_decorator_reject_reason(void) {
+    decorator_reject_len = 0;
+    decorator_reject_buf[0] = '\0';
+}
+
+/* ── PHP decorator query callbacks ── */
+static oxphp_php_dec_count_fn_t php_dec_count_fn = NULL;
+static oxphp_php_dec_class_fn_t php_dec_class_fn = NULL;
+static oxphp_php_dec_cache_key_fn_t php_dec_cache_key_fn = NULL;
+
+void oxphp_bridge_set_php_decorator_count(oxphp_php_dec_count_fn_t fn) { php_dec_count_fn = fn; }
+oxphp_php_dec_count_fn_t oxphp_bridge_get_php_decorator_count(void) { return php_dec_count_fn; }
+
+void oxphp_bridge_set_php_decorator_class(oxphp_php_dec_class_fn_t fn) { php_dec_class_fn = fn; }
+oxphp_php_dec_class_fn_t oxphp_bridge_get_php_decorator_class(void) { return php_dec_class_fn; }
+
+void oxphp_bridge_set_php_decorator_cache_key(oxphp_php_dec_cache_key_fn_t fn) { php_dec_cache_key_fn = fn; }
+oxphp_php_dec_cache_key_fn_t oxphp_bridge_get_php_decorator_cache_key(void) { return php_dec_cache_key_fn; }
+
+/* TLS buffer for passing class name strings from Rust to C */
+static __thread char decorator_class_buf[256];
+
+void oxphp_bridge_set_decorator_class_buf(const char *s, size_t len) {
+    if (len > sizeof(decorator_class_buf) - 1) len = sizeof(decorator_class_buf) - 1;
+    memcpy(decorator_class_buf, s, len);
+    decorator_class_buf[len] = '\0';
+}
+
+const char *oxphp_bridge_get_decorator_class_buf(void) {
+    return decorator_class_buf;
+}
+
+/* ── PHP decorator registration pass-through ── */
+void oxphp_bridge_register_php_decorator(const char *class_name, uint32_t targets) {
+    if (decorator_register_php_fn) {
+        decorator_register_php_fn(class_name, targets);
+    }
+}
+
+/* ── Decorator context stack — per-thread TLS ── */
+static __thread oxphp_decorator_ctx_t decorator_ctx_stack[OXPHP_DECORATOR_CTX_STACK_MAX];
+static __thread int decorator_ctx_depth = 0;
+
+oxphp_decorator_ctx_t *oxphp_decorator_ctx_push(void) {
+    if (decorator_ctx_depth >= OXPHP_DECORATOR_CTX_STACK_MAX) {
+        return &decorator_ctx_stack[OXPHP_DECORATOR_CTX_STACK_MAX - 1];
+    }
+    return &decorator_ctx_stack[decorator_ctx_depth++];
+}
+
+oxphp_decorator_ctx_t *oxphp_decorator_ctx_peek(void) {
+    if (decorator_ctx_depth <= 0) return NULL;
+    return &decorator_ctx_stack[decorator_ctx_depth - 1];
+}
+
+void oxphp_decorator_ctx_pop(void) {
+    if (decorator_ctx_depth > 0) decorator_ctx_depth--;
+}
+
 /* ── PHP → Rust native call ── */
 
 int oxphp_call_php_native(const char *func_name, void *args, uint32_t argc, void *result) {

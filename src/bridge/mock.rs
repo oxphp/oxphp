@@ -117,6 +117,77 @@ pub unsafe fn oxphp_bridge_set_native_dispatch(
 ) {
 }
 
+// ── Decorator system ──
+
+pub unsafe fn oxphp_bridge_set_decorator_registry(_ptr: *const c_void) {}
+
+pub unsafe fn oxphp_bridge_set_decorator_resolve(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            attr_names: *const *const c_char,
+            attr_count: u32,
+        ) -> c_int,
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_begin(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            target: *const c_char,
+            class_name: *const c_char,
+            object_id: u64,
+            timestamp_ns: u64,
+        ) -> c_int,
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_end(
+    _f: Option<
+        unsafe extern "C" fn(
+            fn_id: usize,
+            elapsed_ns: u64,
+            success: c_int,
+            exception_class: *const c_char,
+        ),
+    >,
+) {
+}
+
+pub unsafe fn oxphp_bridge_get_decorator_reject_reason(_out_len: *mut usize) -> *const c_char {
+    std::ptr::null()
+}
+
+pub unsafe fn oxphp_bridge_set_decorator_reject_reason(_reason: *const c_char, _len: usize) {}
+
+pub unsafe fn oxphp_bridge_clear_decorator_reject_reason() {}
+
+pub unsafe fn oxphp_bridge_register_php_decorator(_class_name: *const c_char, _targets: u32) {}
+
+pub unsafe fn oxphp_bridge_set_decorator_register_php(
+    _f: Option<unsafe extern "C" fn(*const c_char, u32)>,
+) {
+}
+
+// ── PHP decorator query callbacks ──
+pub unsafe fn oxphp_bridge_set_php_decorator_count(_f: Option<unsafe extern "C" fn(usize) -> u32>) {
+}
+pub unsafe fn oxphp_bridge_set_php_decorator_class(
+    _f: Option<unsafe extern "C" fn(usize, u32) -> *const c_char>,
+) {
+}
+pub unsafe fn oxphp_bridge_set_php_decorator_cache_key(
+    _f: Option<unsafe extern "C" fn(usize, u32) -> u64>,
+) {
+}
+pub unsafe fn oxphp_bridge_set_decorator_class_buf(_s: *const c_char, _len: usize) {}
+pub unsafe fn oxphp_bridge_get_decorator_class_buf() -> *const c_char {
+    std::ptr::null()
+}
+
 // ── Call PHP ──
 
 pub unsafe fn oxphp_call_php_native(

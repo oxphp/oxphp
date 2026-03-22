@@ -3,7 +3,7 @@ title: PHP 扩展函数
 description: oxphp_sapi PHP 扩展的 API 参考
 ---
 
-`oxphp_sapi` PHP 扩展注册了十五个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
+`oxphp_sapi` PHP 扩展注册了十六个内置函数，使你的 PHP 代码能够访问 OxPHP 服务器内部信息。这些函数在 OxPHP 执行的每个 PHP 脚本中均可用 --- 无需 `extension=` 指令，因为该扩展已编译到自定义 SAPI 中。
 
 插件可以在启动时注册额外的 PHP 函数。这些由插件提供的函数在 `MINIT` 期间通过 C 桥接注册，与内置函数一起出现。
 
@@ -580,6 +580,46 @@ $r3 = oxphp_async_await($p3); // 3
 
 ---
 
+## `oxphp_register_decorator`
+
+将 PHP 类注册为基于属性的装饰器。完整指南请参阅[装饰器](../features/decorators.md)。
+
+```php
+oxphp_register_decorator(string $class): bool
+```
+
+**参数：**
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `$class` | `string` | 完全限定类名 |
+
+**返回值：** 成功返回 `true`。在以下情况返回 `false` 并触发 `E_WARNING`：
+- 类不存在
+- 类未实现 `OxPHP\Decorator\AttributeInterface`
+- 类未标记 `#[Attribute(...)]`
+
+**示例：**
+
+```php
+<?php
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Timer implements OxPHP\Decorator\AttributeInterface {
+    public function __construct(public readonly string $label = '') {}
+    public function before(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+    public function after(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+}
+
+oxphp_register_decorator(Timer::class);
+```
+
+**注意事项：**
+- 在应用启动时调用一次（例如自动加载器设置完成后）。
+- 装饰器立即生效——任何后续带有匹配属性的函数调用都将被拦截。
+- Rust 原生装饰器和 PHP 装饰器共存于同一注册表中。
+
+---
+
 ## 插件函数
 
 插件可以注册自定义 PHP 函数，供脚本调用。这些函数在 PHP 模块初始化（`MINIT`）期间注册，通过 C 桥接分发到 Rust 处理代码。
@@ -629,11 +669,13 @@ print_r(get_extension_funcs('oxphp_sapi'));
 //     [12] => oxphp_async_await
 //     [13] => oxphp_async_await_all
 //     [14] => oxphp_async_await_any
+//     [15] => oxphp_register_decorator
 // )
 ```
 
 ## 另请参阅
 
+- [装饰器](/features/decorators.md) --- 使用 `oxphp_register_decorator()` 实现基于属性的函数/方法拦截
 - [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 和 `oxphp_async_await()` 进行并行执行
 - [基于 Fiber 的请求多路复用](/features/fiber-multiplexing.md) --- 使用 `oxphp_sleep()` 进行协作式多任务处理，以及支持 Fiber 的 `oxphp_async_await()`
 - [超全局变量](superglobals.md) --- OxPHP 如何填充 `$_SERVER`、`$_GET`、`$_POST` 及其他超全局变量

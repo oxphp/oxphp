@@ -429,6 +429,7 @@ mod tests {
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
 
         let mut ctx = PluginContext::new(
             "example".into(),
@@ -439,6 +440,7 @@ mod tests {
             &mut metrics_collectors,
             &mut internal_routes,
             &mut native_php_functions,
+            &mut decorators,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);

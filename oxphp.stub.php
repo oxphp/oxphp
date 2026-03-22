@@ -312,6 +312,27 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  */
 function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
 
+/**
+ * Register a PHP class as an attribute-based decorator.
+ *
+ * The class must implement OxPHP\Decorator\AttributeInterface and be
+ * marked with #[Attribute(...)]. Once registered, any function, method,
+ * or class annotated with this attribute will have before()/after()
+ * called around each invocation.
+ *
+ * Call once during application bootstrap (after autoloader setup).
+ *
+ * @param string $class Fully qualified class name
+ * @return bool true on success, false with E_WARNING on validation failure
+ *
+ * @example
+ * oxphp_register_decorator(Timer::class);
+ *
+ * #[Timer(label: 'api')]
+ * function handle_request(): void { ... }
+ */
+function oxphp_register_decorator(string $class): bool {}
+
 namespace OxPHP {
     /**
      * Thrown when an async task fails — the closure threw an exception,
@@ -332,4 +353,91 @@ namespace OxPHP {
      * write protection; currently not thrown by the runtime.
      */
     class AsyncBorrowException extends \Exception {}
+}
+
+namespace OxPHP\Decorator {
+    /**
+     * Interface for attribute-based decorators.
+     *
+     * Implement this interface and register with oxphp_register_decorator()
+     * to intercept function/method calls via PHP 8+ attributes.
+     *
+     * @example
+     * #[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+     * class Timer implements AttributeInterface {
+     *     public function before(Context $ctx): void {
+     *         // called before the decorated function
+     *     }
+     *     public function after(Context $ctx): void {
+     *         // called after the decorated function
+     *     }
+     * }
+     */
+    interface AttributeInterface {
+        public function before(Context $ctx): void;
+        public function after(Context $ctx): void;
+    }
+
+    /**
+     * Context passed to decorator before()/after() methods.
+     *
+     * Properties are populated by the server before each call.
+     * Lazy methods (getParams, getResult) avoid overhead when not used.
+     */
+    final class Context {
+        /** Full target name: "App\Service::method" or "my_function" */
+        public readonly string $target;
+
+        /** Class name, or "" for standalone functions */
+        public readonly string $class;
+
+        /** Method name, or "" for standalone functions */
+        public readonly string $method;
+
+        /** Function name for TARGET_FUNCTION, or "" for methods */
+        public readonly string $function;
+
+        /** spl_object_id for method calls, 0 for functions */
+        public readonly int $objectId;
+
+        /** Current request ID from the server */
+        public readonly string $requestId;
+
+        /** W3C trace ID (if distributed tracing is enabled) */
+        public readonly string $traceId;
+
+        /**
+         * Get the arguments passed to the decorated function.
+         *
+         * Lazy: the array is built from zvals on demand. Zero cost if not called.
+         *
+         * @return array Indexed array of argument values
+         */
+        public function getParams(): array {}
+
+        /**
+         * Get the return value of the decorated function.
+         *
+         * Only meaningful in after(). Returns null in before() or when
+         * the function threw an exception.
+         *
+         * @return mixed Return value, or null
+         */
+        public function getResult(): mixed {}
+
+        /**
+         * Check whether the decorated function returned a value.
+         *
+         * Returns false in before(), or in after() when the function threw.
+         *
+         * @return bool true if getResult() has a meaningful value
+         */
+        public function hasResult(): bool {}
+    }
+
+    /**
+     * Thrown when a Rust-native decorator rejects a function call
+     * via DecoratorAction::Reject.
+     */
+    class RejectedException extends \Exception {}
 }

@@ -70,6 +70,7 @@ OxPHP 使用 [AGPL-3.0](https://www.gnu.org/licenses/agpl-3.0.html) 许可证。
 - [超时](features/timeouts.md) -- 请求头、请求和空闲超时
 - [访问日志](features/access-logging.md) -- 结构化 JSON 访问日志
 - [分布式追踪](features/distributed-tracing.md) -- W3C Trace Context 与 OpenTelemetry
+- [装饰器](features/decorators.md) -- 基于属性的函数/方法拦截
 
 ### PHP 集成
 

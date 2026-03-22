@@ -48,6 +48,22 @@ fn main() -> Result<(), types::BoxError> {
         }
     }
 
+    #[cfg(feature = "php")]
+    {
+        // Create decorator registry — always, even without Rust plugins,
+        // because PHP decorators register at runtime via oxphp_register_decorator()
+        let registry = std::sync::Arc::new(oxphp::decorator::DecoratorRegistry::new());
+        let decorator_defs = plugin_manager.take_decorators();
+        for def in decorator_defs {
+            registry.register_rust(std::sync::Arc::from(def.decorator));
+        }
+        oxphp::decorator::dispatch::install_bridge_callbacks(std::sync::Arc::clone(&registry));
+        tracing::info!(
+            rust_decorators = registry.rust_decorator_count(),
+            "Decorator registry initialized"
+        );
+    }
+
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
     let executor: Arc<dyn executor::ScriptExecutor> =
