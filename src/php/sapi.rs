@@ -388,6 +388,13 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(vars, "HTTPS", "on");
         }
 
+        // REQUEST_SCHEME: "http" or "https" (PHP-FPM / nginx convention)
+        push_server_var(
+            vars,
+            "REQUEST_SCHEME",
+            if req.is_tls { "https" } else { "http" },
+        );
+
         // SERVER_NAME and SERVER_PORT from Host header
         let default_port = if req.is_tls { "443" } else { "80" };
         if let Some(host) = req.headers.get(header::HOST) {
