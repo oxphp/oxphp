@@ -852,7 +852,6 @@ async fn run_scale_manager(
 
         // Update metrics
         metrics.set_workers_current(total);
-        metrics.set_workers_idle(idle_count);
 
         // Scale-up: no idle workers and under max
         let needs_scale_up =

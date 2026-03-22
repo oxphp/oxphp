@@ -136,7 +136,6 @@ pub struct Metrics {
     workers_current: AtomicUsize,
     workers_min: AtomicUsize,
     workers_max: AtomicUsize,
-    workers_idle: AtomicUsize,
     workers_spawned_total: AtomicU64,
     workers_retired_total: AtomicU64,
     worker_metrics: std::sync::OnceLock<Arc<WorkerMetrics>>,
@@ -237,7 +236,6 @@ impl Metrics {
             workers_current: AtomicUsize::new(0),
             workers_min: AtomicUsize::new(0),
             workers_max: AtomicUsize::new(0),
-            workers_idle: AtomicUsize::new(0),
             workers_spawned_total: AtomicU64::new(0),
             workers_retired_total: AtomicU64::new(0),
             worker_metrics: std::sync::OnceLock::new(),
@@ -320,10 +318,6 @@ impl Metrics {
 
     pub fn set_workers_max(&self, n: usize) {
         self.workers_max.store(n, Ordering::Relaxed);
-    }
-
-    pub fn set_workers_idle(&self, n: usize) {
-        self.workers_idle.store(n, Ordering::Relaxed);
     }
 
     pub fn worker_spawned(&self) {
@@ -540,7 +534,9 @@ impl Metrics {
         let _ = writeln!(
             out,
             "oxphp_workers_idle {}",
-            self.workers_idle.load(Ordering::Relaxed)
+            self.workers_current
+                .load(Ordering::Relaxed)
+                .saturating_sub(self.busy_workers.load(Ordering::Relaxed))
         );
 
         let _ = writeln!(
@@ -984,7 +980,6 @@ mod tests {
         m.set_workers_current(4);
         m.set_workers_min(2);
         m.set_workers_max(16);
-        m.set_workers_idle(2);
         m.worker_spawned();
         m.worker_spawned();
         m.worker_retired();
@@ -992,7 +987,6 @@ mod tests {
         assert_eq!(m.workers_current(), 4);
         assert_eq!(m.workers_min.load(Ordering::Relaxed), 2);
         assert_eq!(m.workers_max.load(Ordering::Relaxed), 16);
-        assert_eq!(m.workers_idle.load(Ordering::Relaxed), 2);
         assert_eq!(m.workers_spawned_total.load(Ordering::Relaxed), 2);
         assert_eq!(m.workers_retired_total.load(Ordering::Relaxed), 1);
     }
@@ -1008,6 +1002,27 @@ mod tests {
         assert!(output.contains("oxphp_workers_current 8"));
         assert!(output.contains("oxphp_workers_min 2"));
         assert!(output.contains("oxphp_workers_max 16"));
+        // workers_idle is computed as workers_current - busy_workers
+        assert!(output.contains("oxphp_workers_idle 8"));
+    }
+
+    #[test]
+    fn test_workers_idle_computed_from_current_minus_busy() {
+        let m = Metrics::new();
+        m.set_workers_current(7);
+        m.request_queued();
+        m.request_queued();
+        m.request_queued();
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_workers_idle 4"));
+
+        m.request_dequeued();
+        m.request_dequeued();
+        m.request_dequeued();
+
+        let output = m.to_prometheus();
+        assert!(output.contains("oxphp_workers_idle 7"));
     }
 
     #[test]
