@@ -383,7 +383,13 @@ pub fn set_request_data(req: &ScriptRequest) {
         push_server_var(vars, "REMOTE_ADDR", &req.remote_addr.ip().to_string());
         push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
 
+        // HTTPS indicator (CGI/1.1: "on" when TLS is active)
+        if req.is_tls {
+            push_server_var(vars, "HTTPS", "on");
+        }
+
         // SERVER_NAME and SERVER_PORT from Host header
+        let default_port = if req.is_tls { "443" } else { "80" };
         if let Some(host) = req.headers.get(header::HOST) {
             if let Ok(host_str) = host.to_str() {
                 if let Some(colon) = host_str.rfind(':') {
@@ -391,12 +397,12 @@ pub fn set_request_data(req: &ScriptRequest) {
                     push_server_var(vars, "SERVER_PORT", &host_str[colon + 1..]);
                 } else {
                     push_server_var(vars, "SERVER_NAME", host_str);
-                    push_server_var(vars, "SERVER_PORT", "80");
+                    push_server_var(vars, "SERVER_PORT", default_port);
                 }
             }
         } else {
             push_server_var(vars, "SERVER_NAME", "localhost");
-            push_server_var(vars, "SERVER_PORT", "80");
+            push_server_var(vars, "SERVER_PORT", default_port);
         }
 
         // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)

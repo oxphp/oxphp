@@ -331,6 +331,7 @@ async fn dispatch_request(
                 trace_id: metadata_get(metadata, "trace_id").to_string(),
                 span_id: metadata_get(metadata, "span_id").to_string(),
                 parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),
+                is_tls: server.is_tls(),
             };
 
             let queue_start = Instant::now();

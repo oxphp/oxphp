@@ -105,6 +105,11 @@ impl Server {
         &self.metrics
     }
 
+    /// Whether TLS is enabled on this server instance.
+    pub(crate) fn is_tls(&self) -> bool {
+        self.tls_acceptor.is_some()
+    }
+
     /// Signal the server to stop accepting new connections.
     pub fn shutdown(&self) {
         self.executor.shutdown();

@@ -23,8 +23,7 @@ impl ServerConfig {
     }
 
     pub fn from_env() -> Result<Self, crate::types::BoxError> {
-        let listen_addr =
-            std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:80".to_string());
         let document_root: PathBuf = std::env::var("DOCUMENT_ROOT")
             .unwrap_or_else(|_| "/var/www/html/public".to_string())
             .into();
