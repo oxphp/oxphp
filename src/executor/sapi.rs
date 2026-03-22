@@ -272,6 +272,9 @@ impl SapiExecutor {
 
         // Set initial metrics
         metrics.set_workers_current(initial_count);
+        for _ in 0..initial_count {
+            metrics.worker_spawned();
+        }
         match &mode {
             WorkerMode::Static(n) => {
                 metrics.set_workers_min(*n);
