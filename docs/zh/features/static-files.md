@@ -1,16 +1,34 @@
 ---
 title: 静态文件
-description: 支持 MIME 检测、LRU 缓存、HTTP 缓存和大文件流式传输的文件服务
+description: OxPHP 提供自动 MIME 检测、内存缓存、HTTP 缓存头和条件 304 响应的静态文件服务。
 ---
 
-OxPHP 直接从文档根目录提供静态文件，支持自动 MIME 类型检测、三级 LRU 缓存、HTTP 缓存（ETag / Last-Modified / 304）和大文件流式传输。
+# 静态文件
 
-## MIME 类型检测
+OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服务具备自动 MIME 类型检测、用于快速重复访问的内存缓存，以及完整的 HTTP 缓存支持（包括 ETag 和条件请求）。
 
-MIME 类型通过 `mime_guess` crate 根据文件扩展名确定。如果无法确定类型，服务器回退到 `application/octet-stream`。常见映射包括：
+## 工作原理
+
+当请求匹配到静态文件时：
+
+1. **文件匹配** — 路由层将 URL 路径解析到磁盘上的文件
+2. **MIME 检测** — 根据文件扩展名确定内容类型
+3. **缓存检查** — 在访问文件系统之前检查文件缓存
+4. **条件检查** — 如果请求携带 `If-None-Match` 或 `If-Modified-Since`，OxPHP 会评估条件，并可能在不发送响应体的情况下返回 `304 Not Modified`
+5. **响应** — 1 MiB 以内的文件从内存缓存提供；更大的文件直接从磁盘流式传输
+
+## 配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `STATIC_CACHE_TTL` | `30d` | 静态文件的 Cache-Control max-age。接受 `30s`、`5m`、`2h`、`30d`、`1w`、`1y`，纯秒数（如 `3600`），或 `off`（完全禁用缓存头） |
+
+## MIME 检测
+
+MIME 类型根据文件扩展名自动确定。如果无法确定类型，服务器回退到 `application/octet-stream`。常见映射包括：
 
 | 扩展名 | Content-Type |
-|-----------|-------------|
+|--------|-------------|
 | `.html` | `text/html` |
 | `.css` | `text/css` |
 | `.js` | `application/javascript` |
@@ -21,145 +39,90 @@ MIME 类型通过 `mime_guess` crate 根据文件扩展名确定。如果无法�
 
 ## 文件缓存
 
-文件缓存减少了路由和服务过程中的文件系统系统调用。它使用 `RwLock<FileCacheInner>` 封装三个独立的 HashMap（元数据、内容和规范路径缓存），采用基于计数器的 LRU 淘汰策略，分为三级运作：
+OxPHP 使用内存缓存来减少频繁请求文件的磁盘 I/O：
 
-### 元数据缓存
+- **1 MiB 以内**（1,048,576 字节）的文件会被读入内存并缓存。总缓存容量为 64 MiB（67,108,864 字节）。当超出容量时，最近最少使用的条目会被驱逐以腾出空间。
+- **大于 1 MiB** 的文件始终直接从磁盘流式传输。`Content-Length` 头从文件元数据中设置，以便客户端提前知道总大小。
 
-存储路径指向的是文件、目录还是不存在。路由器在每次请求时检查此缓存，以决定是提供文件、执行脚本还是返回 404，无需访问文件系统。
-
-- 容量：200 条目（编译时可配置）
-- 淘汰：按访问计数器 LRU
-- 缓存未命中触发异步 `tokio::fs::metadata()` 调用
-
-### 内容缓存
-
-存储小文件的完整内容，使重复请求直接从内存提供，无需磁盘 I/O。
-
-- 单文件上限：1 MB
-- 总缓存预算：64 MB
-- 淘汰：当总字节数超过预算时按 LRU 淘汰
-- 数据存储为 `Bytes`（引用计数，零拷贝克隆）
-- MIME 类型与内容一起存储为 `Arc<str>`
-
-大于 1 MB 的文件永不缓存，始终从磁盘流式传输。
-
-### 规范路径缓存
-
-存储用于符号链接逃逸防护的 `canonicalize()` 调用结果。这避免了对相同路径的重复 `realpath(3)` 系统调用。
-
-- 与元数据缓存共享 200 条目的容量
-- 存储 `Option<PathBuf>` -- `None` 表示缓存时文件不存在
-- 淘汰：按访问计数器 LRU
+文件缓存在首次请求时填充，并在后续请求中保留。缓存条目不会被手动失效——它们会持续存在，直到被 LRU 策略驱逐。
 
 ## HTTP 缓存
 
-OxPHP 支持静态文件的 HTTP 缓存，包括 ETag 验证和条件请求，通过 `STATIC_CACHE_TTL` 环境变量控制。
+### Cache-Control
 
-### 配置
+当设置了 `STATIC_CACHE_TTL` 时（默认为 `30d`），每个静态文件响应都包含 `Cache-Control` 头：
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `STATIC_CACHE_TTL` | `30d` | 静态文件的缓存 TTL。支持灵活的时间格式或 `off` 禁用 |
+```http
+Cache-Control: public, max-age=2592000
+```
 
-支持的时间格式：
+`max-age` 值是 TTL 转换为秒数后的结果。设置 `STATIC_CACHE_TTL=off` 可完全省略此头。
 
-| 格式 | 示例 | 秒数 |
-|------|------|------|
-| 秒 | `30s` | 30 |
-| 分钟 | `5m` | 300 |
-| 小时 | `2h` | 7,200 |
-| 天 | `30d` | 2,592,000 |
-| 周 | `1w` | 604,800 |
-| 年 | `1y` | 31,536,000 |
-| 纯数字 | `3600` | 3,600 |
-| 禁用 | `off` | *（不发送缓存头）* |
+### ETag 和 Last-Modified
 
-### 响应头
+每个静态文件响应都包含：
 
-启用缓存时，每个静态文件响应包含：
+- **ETag** — 格式为 `W/"<size>-<mtime_hex>"` 的弱 ETag，由文件大小和最后修改时间派生
+- **Last-Modified** — 基于文件修改时间的 RFC 7231 HTTP 日期
 
-| 头部 | 值 | 示例 |
-|------|-----|------|
-| `Cache-Control` | `public, max-age={ttl}` | `public, max-age=2592000` |
-| `ETag` | 基于文件大小和修改时间的弱 ETag | `W/"1024-65a1b2c3"` |
-| `Last-Modified` | RFC 7231 HTTP 日期 | `Tue, 14 Nov 2023 18:13:20 GMT` |
+这些头允许浏览器和 CDN 在不重新下载文件的情况下验证缓存副本。
 
-### 条件请求（304 Not Modified）
+### 条件请求（304）
 
-当客户端发送 `If-None-Match` 或 `If-Modified-Since` 头时，OxPHP 会根据文件当前的元数据进行验证：
+OxPHP 评估条件请求头，以避免发送未更改的文件内容：
 
-1. **If-None-Match** 优先（根据 RFC 7232 §3.3）。ETag 与逗号分隔的标签列表进行比较。`*` 值始终匹配。
-2. **If-Modified-Since** 作为回退检查。文件的修改时间（截断到秒精度）与头部值进行比较。
+- **If-None-Match** — 客户端发送其已缓存的 ETag。如果匹配当前文件，OxPHP 返回无响应体的 `304 Not Modified`。
+- **If-Modified-Since** — 客户端发送一个时间戳。如果文件在该时间之后未被修改，OxPHP 返回 304。
 
-如果文件未更改，OxPHP 返回 `304 Not Modified` 响应，包含 `ETag`、`Last-Modified` 和 `Cache-Control` 头但无响应体。此检查在任何文件 I/O **之前**运行：
-
-- 对于**已缓存的文件**：条件检查在读锁下运行，不克隆任何数据
-- 对于**未缓存的文件**：条件检查在 `fs::metadata()` 之后但在 `fs::read()` 之前运行，避免对未更改的文件进行磁盘读取
-
-### ETag 格式
-
-ETag 使用弱格式 `W/"<size>-<mtime_hex>"`，其中：
-
-- `<size>` 是文件大小（十进制字节数）
-- `<mtime_hex>` 是最后修改时间的 Unix 时间戳（小写十六进制）
-
-弱 ETag 表示语义等价 — 响应在字节级别可能不同（例如经过 Brotli 压缩后），但代表相同的内容。
+按照 RFC 7232，`If-None-Match` 优先于 `If-Modified-Since`。对于已在内存缓存中的文件，条件检查无需任何磁盘 I/O 即可完成。
 
 ### 禁用缓存
 
-设置 `STATIC_CACHE_TTL=off` 可禁用所有缓存头。不会发送 `Cache-Control`、`ETag` 或 `Last-Modified` 头，也不会评估条件请求。
+设置 `STATIC_CACHE_TTL=off` 可禁用所有 HTTP 缓存头。不发送 `Cache-Control`、`ETag` 或 `Last-Modified` 头，也不评估条件请求。在开发时使用此设置可始终看到最新文件内容。
 
-## 服务行为
+## 故障排除
 
-当静态文件请求到达时：
+### 浏览器一直提供过期文件
 
-1. **条件检查（已缓存）** -- 如果文件在内容缓存中且匹配条件头，立即返回 304
-2. **内容缓存检查** -- 如果文件已缓存，使用存储的 MIME 类型和缓存头返回
-3. **MIME 类型查找** -- 根据文件扩展名计算内容类型
-4. **TOCTOU 重新验证** -- 如果启用了符号链接防护，在读取前重新规范化路径
-5. **元数据 + 条件检查（未缓存）** -- 读取文件元数据；如果条件头匹配，在读取文件前返回 304
-6. **大小检查** -- 根据文件大小确定服务策略
+如果在开发中未使用 `STATIC_CACHE_TTL=off`，浏览器会积极缓存文件。可以在开发环境中设置 `STATIC_CACHE_TTL=off`，或使用浏览器的强制刷新（Shift+F5 或 Cmd+Shift+R）来绕过缓存。
 
-### 小文件（不超过 1 MB）
+### 文件以 `application/octet-stream` 提供
 
-使用 `tokio::fs::read()` 将整个文件读入内存，插入内容缓存，并作为缓冲响应体返回。`Content-Length` 头设置为精确的字节数。
+OxPHP 使用文件扩展名来确定 MIME 类型。如果扩展名缺失或无法识别，则回退到 `application/octet-stream`。请为文件添加正确的扩展名，或确保您的框架在 PHP 响应中显式设置 `Content-Type` 头。
 
-### 大文件（超过 1 MB）
+### 大文件访问速度慢
 
-使用 `tokio::fs::File::open()` 打开文件，通过 `ReaderStream` 流式传输给客户端。`Content-Length` 头根据文件元数据设置，以便客户端知道总大小。
+大于 1 MiB 的文件在每次请求时都从磁盘流式传输，不缓存在内存中。对于非常大的文件，请在 OxPHP 前面放置 CDN 以在边缘节点缓存它们。或者，重新组织您的静态资源，使频繁提供的文件保持在 1 MiB 以下。
 
-## 响应头
+### 预期 200 响应却收到 304
 
-每个静态文件响应包含：
+304 表示客户端已拥有当前版本，这是正常行为。如果在开发时需要强制获取新响应，请设置 `STATIC_CACHE_TTL=off`，这样就不会发送 `ETag` 或 `Last-Modified` 头。
 
-| 头部 | 值 |
-|--------|-------|
-| `Content-Type` | 检测到的 MIME 类型 |
-| `Content-Length` | 文件大小（字节） |
-| `Cache-Control` | `public, max-age={ttl}` *（启用缓存时）* |
-| `ETag` | `W/"<size>-<mtime_hex>"` *（启用缓存时）* |
-| `Last-Modified` | RFC 7231 HTTP 日期 *（启用缓存时）* |
+## Docker 示例
 
-## 缓存指标
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - STATIC_CACHE_TTL=1y
+```
 
-文件缓存提供两个 Prometheus 计数器用于监控缓存效率：
+## 最佳实践
 
-| 指标 | 说明 |
-|------|------|
-| `oxphp_static_cache_hits_total` | 从内容缓存提供的请求数（无磁盘 I/O） |
-| `oxphp_static_cache_misses_total` | 需要从磁盘读取的请求数 |
+- **在生产环境中使用带缓存破坏文件名的长 TTL**（如 `app.a1b2c3.js`）。设置 `STATIC_CACHE_TTL=1y` 以最大化浏览器和 CDN 缓存。
+- **在开发环境中设置 `STATIC_CACHE_TTL=off`**，确保始终能看到最新更改，无需清除浏览器缓存。
+- **在 OxPHP 前面放置 CDN** 以应对高流量站点。`ETag`、`Last-Modified` 和 `Cache-Control` 头与所有主流 CDN 提供商兼容。
+- **让构建工具处理静态资源哈希。** Vite 和 Laravel Mix 等框架会自动生成带哈希的文件名，使长缓存 TTL 变得安全。
 
-缓存命中率可计算为 `hits / (hits + misses)`。低命中率可能表明内容缓存预算（64 MB）对于工作集来说太小，或者大多数请求的文件超过了 1 MB 的单文件缓存限制。
+## 参见
 
-## 错误处理
-
-- **文件未找到**：返回 404，带纯文本响应体
-- **权限错误**：作为 500 错误传播
-- **元数据检查后读取失败**：返回 404（文件可能在检查和读取之间被删除）
-
-## 另请参阅
-
-- [路由](routing.md) -- URL 路径如何解析到磁盘文件
-- [压缩](compression.md) -- 可压缩静态文件响应的 Brotli 压缩；`Vary: Accept-Encoding` 由压缩层添加，而非静态文件服务
-- [指标](/operations/metrics.md) -- `oxphp_static_cache_hits_total` 和 `oxphp_static_cache_misses_total` 计数器
-- [自定义错误页面](error-pages.md) -- 错误响应的自定义 HTML 页面
+- [压缩](compression.md) — 对可压缩静态文件响应进行 Brotli 压缩
+- [路由](routing.md) — URL 路径如何解析到磁盘上的文件
+- [配置参考](../operations/configuration.md) — 完整的环境变量列表

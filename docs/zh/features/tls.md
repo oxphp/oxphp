@@ -1,45 +1,56 @@
 ---
 title: TLS
-description: 通过 rustls 实现 HTTPS 支持，支持自动 ALPN 协商
+description: 在 OxPHP 中配置原生 TLS 终止，支持 TLS 1.2、TLS 1.3、HTTP/2 ALPN 协商和 PEM 证书。
 ---
 
-OxPHP 使用 rustls 直接终结 TLS，不依赖 OpenSSL。配置 TLS 后，服务器接受 HTTPS 连接并通过 ALPN 协商 HTTP/2 或 HTTP/1.1。
+# TLS
 
-## 配置
-
-| 变量 | 描述 | 默认值 |
-|----------|-------------|---------|
-| `TLS_CERT` | PEM 编码证书文件的路径 | *（未设置）* |
-| `TLS_KEY` | PEM 编码私钥文件的路径 | *（未设置）* |
-
-两个变量都必须设置才能启用 TLS。如果只提供了其中一个，TLS 不会启用。
-
-```bash
-TLS_CERT=/etc/oxphp/cert.pem
-TLS_KEY=/etc/oxphp/key.pem
-LISTEN_ADDR=0.0.0.0:443
-```
+OxPHP 原生处理 TLS 终止——无需反向代理或外部 SSL 库。配置完成后，服务器接受 HTTPS 连接并自动协商最佳可用协议。
 
 ## 工作原理
 
-启动时，OxPHP 读取证书和密钥文件，将其解析为 PEM 格式，并从 rustls 配置创建 `TlsAcceptor`。
+要启用 TLS，请将 `TLS_CERT` 和 `TLS_KEY` 指向您的 PEM 编码证书和私钥文件。一旦两者都设置，服务器就会在 `LISTEN_ADDR` 指定的地址上监听 HTTPS 连接。
 
-TLS 配置包括：
+TLS 握手发生在任何 HTTP 处理之前：
 
-- **加密提供者**：ring（通过 `rustls::crypto::ring::default_provider()`）
-- **协议版本**：rustls 选择的安全默认值（TLS 1.2 和 1.3）
-- **客户端认证**：已禁用（不进行客户端证书验证）
-- **ALPN 协议**：`h2` 和 `http/1.1`，按此顺序
+1. TCP 连接到达 `LISTEN_ADDR`。
+2. 服务器使用配置的证书和密钥执行 TLS 握手。
+3. 协议协商（ALPN）根据客户端支持选择 HTTP/2（`h2`）或 HTTP/1.1。
+4. 加密连接被传递到 HTTP 层进行正常的请求处理。
 
-当 TCP 连接到达时，服务器调用 `acceptor.accept(stream)` 执行 TLS 握手，然后将加密流传递给 hyper 进行 HTTP 处理。
+> **注意：** 启用 TLS 时，请求头和请求超时在 TLS 握手完成后按请求应用。
 
-## 证书格式
+## 配置
 
-证书文件必须包含一个或多个 PEM 编码的证书（服务器证书，后跟中间证书（如适用））。密钥文件必须包含单个 PEM 编码的私钥（RSA、ECDSA 或 Ed25519）。
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `TLS_CERT` | *(未设置)* | PEM 编码证书文件的路径。必须同时设置 `TLS_CERT` 和 `TLS_KEY` 才能启用 TLS |
+| `TLS_KEY` | *(未设置)* | PEM 编码私钥文件的路径 |
+| `LISTEN_ADDR` | `0.0.0.0:80` | 监听的地址和端口。使用 TLS 时请更改为 `0.0.0.0:443` |
 
-### 开发用自签名证书
+如果只提供了 `TLS_CERT` 或 `TLS_KEY` 中的一个，TLS 不会启用，服务器以纯 HTTP 模式启动。
 
-为本地开发生成自签名证书：
+## 支持的协议
+
+| 能力 | 详情 |
+|------|------|
+| TLS 版本 | TLS 1.2 和 TLS 1.3 |
+| ALPN 协议 | `h2`（HTTP/2）和 `http/1.1`，按此顺序协商 |
+| 客户端证书 | 不支持（无双向 TLS） |
+
+## 支持的密钥类型
+
+私钥文件必须包含以下格式之一的单个 PEM 编码密钥：
+
+- **RSA**
+- **ECDSA**（如 prime256v1、secp384r1）
+- **Ed25519**
+
+证书文件可以包含一个或多个 PEM 编码证书。用于生产环境时，请包含完整的证书链：服务器证书后跟任何中间证书。
+
+## 用于开发的自签名证书
+
+为本地开发生成自签名 ECDSA 证书：
 
 ```bash
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
@@ -47,40 +58,91 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
   -subj "/CN=localhost"
 ```
 
-然后配置 OxPHP：
+然后配置 OxPHP 使用生成的文件：
 
 ```bash
 TLS_CERT=./cert.pem
 TLS_KEY=./key.pem
+LISTEN_ADDR=0.0.0.0:443
 ```
 
-### Docker 示例
+## 故障排除
 
-将证书挂载到容器中：
+### 服务器启动但 TLS 未激活
+
+OxPHP 要求**同时**设置 `TLS_CERT` 和 `TLS_KEY`。如果其中任一缺失，服务器将以纯 HTTP 模式启动，不发出任何警告。请确认两个变量都已设置：
+
+```bash
+docker exec <container> env | grep TLS
+```
+
+### 启动时出现 `no private key found in PEM file` 错误
+
+密钥文件为空、损坏或只包含证书。请验证密钥文件是否包含 `-----BEGIN ... PRIVATE KEY-----` 块：
+
+```bash
+grep "PRIVATE KEY" key.pem
+```
+
+如果密钥缺失，请重新生成证书和密钥对。
+
+### 启动时出现 `no certificates found in PEM file` 错误
+
+证书文件为空或损坏。请验证证书文件是否包含至少一个 `-----BEGIN CERTIFICATE-----` 块：
+
+```bash
+grep "BEGIN CERTIFICATE" cert.pem
+```
+
+### 客户端看到证书链错误
+
+服务器只发送了叶证书，未包含中间证书。请将完整的证书链合并到单个 PEM 文件中：
+
+```bash
+cat cert.pem intermediate.pem > fullchain.pem
+```
+
+然后设置 `TLS_CERT=./fullchain.pem`。
+
+### 证书已过期
+
+OxPHP 在启动时读取证书文件并将其保存在内存中。在磁盘上更新证书文件不会有任何效果，直到服务器重启。
+
+**修复：** 证书更新后重启 OxPHP。使用证书更新工具自动化此操作（如 certbot 的 `--deploy-hook` 选项）。
+
+### 无法在同一端口上同时提供 HTTP 和 HTTPS
+
+OxPHP 监听单个端口。要同时支持两种协议，请使用处理 HTTP 到 HTTPS 重定向的反向代理（Caddy、Traefik、nginx），或在 80 端口上运行第二个专门用于重定向流量的 OxPHP 实例。
+
+## Docker 示例
 
 ```yaml
 services:
-  oxphp:
-    image: oxphp:latest
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
       - "443:443"
     environment:
       LISTEN_ADDR: "0.0.0.0:443"
-      TLS_CERT: /certs/cert.pem
-      TLS_KEY: /certs/key.pem
+      TLS_CERT: "/etc/ssl/oxphp/cert.pem"
+      TLS_KEY: "/etc/ssl/oxphp/key.pem"
     volumes:
-      - ./certs:/certs:ro
+      - ./app:/var/www/html:ro
+      - ./certs:/etc/ssl/oxphp:ro
 ```
 
-## 混合模式运行
+## 最佳实践
 
-OxPHP 不在同一个监听器上同时提供 HTTP 和 HTTPS 服务。要支持两种协议，可以运行两个实例或使用反向代理进行 HTTP 到 HTTPS 的重定向。
+- **在 PEM 链中包含中间证书。** 将服务器证书放在首位，然后按顺序排列中间证书，以便客户端能够验证完整的信任路径。
+- **自动化证书更新。** 使用 certbot 或 acme.sh 在证书过期前更新证书，然后重启 OxPHP 以加载新文件。
+- **使用反向代理处理 HTTP 到 HTTPS 的重定向。** OxPHP 不能在同一端口上同时提供 HTTP 和 HTTPS 服务。
 
-## 无 OpenSSL 依赖
+## 注意事项
 
-使用 rustls 意味着服务器二进制文件完全不链接 OpenSSL。这消除了生产部署中常见的 CVE 来源，并简化了容器镜像（无需 `libssl` 包）。
+- OxPHP 不依赖 OpenSSL。TLS 由内置实现处理，消除了外部库 CVE 的常见来源。
+- 证书和密钥文件只在启动时读取。在磁盘上更新证书需要重启服务器。
 
-## 另请参阅
+## 参见
 
-- [超时](timeouts.md) -- 头部读取超时在 TLS 握手完成后开始计时
-- [速率限制](rate-limiting.md) -- 每 IP 速率限制适用于 HTTP 和 HTTPS 连接
+- [配置参考](../operations/configuration.md) — 完整的环境变量列表
+- [Docker 指南](../getting-started/docker.md) — Docker 中的卷挂载和证书管理

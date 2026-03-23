@@ -1,102 +1,125 @@
 ---
 title: 路由
-description: 支持传统 PHP、框架和单页应用的三种路由模式
+description: 通过四种模式配置 OxPHP 路由——传统文件映射、框架前端控制器、SPA 回退和 Worker 模式。
 ---
 
-OxPHP 支持三种路由模式，通过单个环境变量进行控制。每种模式决定了传入的 URL 路径如何映射到磁盘上的文件。
+# 路由
 
-## 路由模式
+OxPHP 使用四种模式之一处理传入的 HTTP 请求，通过单个环境变量进行控制。所选模式决定了 URL 路径如何映射到磁盘上的文件。
 
-`INDEX_FILE` 环境变量用于选择路由模式：
+## 工作原理
 
-| 模式 | `INDEX_FILE` 值 | 适用场景 |
-|------|-------------------|----------|
-| 传统模式 | *（未设置）* | 经典 PHP 托管，WordPress 逐文件路由 |
-| 框架模式 | `index.php` | Laravel、Symfony 或任何前端控制器框架 |
-| SPA 模式 | `index.html` | React、Vue、Angular 等客户端路由应用 |
+当请求到达时，OxPHP 在将其解析为文件之前，会通过安全管道处理 URL 路径：
 
-### 传统模式
-
-当 `INDEX_FILE` 未设置时，OxPHP 将 URL 直接映射到磁盘文件。
-
-- `/style.css` 提供 `DOCUMENT_ROOT/style.css`
-- `/about.php` 执行 `DOCUMENT_ROOT/about.php`
-- `/` 解析为 `index.php`（如果存在），否则为 `index.html`
-- `/subdir/` 依次尝试 `subdir/index.php`、`subdir/index.html`
-- 找不到的文件返回 404
-
-```bash
-# 不设置 INDEX_FILE —— 默认为传统模式
-DOCUMENT_ROOT=/var/www/html/public
-```
-
-### 框架模式
-
-当 `INDEX_FILE=index.php` 时，所有不匹配现有静态文件的请求都会路由到前端控制器。
-
-- `/style.css` 直接提供静态文件
-- `/api/users` 执行 `index.php`（文件在磁盘上不存在）
-- `/about.php` 返回 404（禁止直接访问 `.php` 文件）
-- `/index.php` 返回 404（禁止直接访问索引文件）
-
-```bash
-INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html/public
-```
-
-禁止直接访问 `.php` 文件可以防止 URL 泄露，并确保所有 PHP 请求都通过框架的路由器处理。
-
-### SPA 模式
-
-当 `INDEX_FILE=index.html` 时，找不到的路径会回退到 HTML 入口文件。PHP 文件仍然正常执行。
-
-- `/style.css` 提供静态文件
-- `/app/dashboard` 提供 `index.html`（由客户端路由器处理）
-- `/api.php` 执行 PHP 脚本
-- `/index.html` 返回 404（禁止直接访问索引文件）
-
-```bash
-INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html/public
-```
-
-## 根路径解析
-
-对 `/` 的请求使用预计算路径，以避免每次请求都进行内存分配。服务器先检查 `index.php`，然后检查 `index.html`。如果两者都不存在，返回 404。
-
-带有尾部斜杠的子目录路径（如 `/blog/`）遵循相同的索引解析逻辑：先 `index.php`，后 `index.html`。
-
-## 路径净化
-
-每个传入的 URI 路径在到达文件系统之前都会经过净化处理流程：
-
-1. **百分号解码** -- `%2e%2e` 在净化捕获之前被解码为 `..`
-2. **路径段过滤** -- `..`、`.` 和空段被移除
-3. **符号链接验证** -- 解析后的路径会与规范化的文档根目录进行比对检查
-
-类似 `/%2e%2e/etc/passwd` 的请求会被解码为 `/../etc/passwd`，净化为 `etc/passwd`，然后验证是否在文档根目录范围内。
-
-## 符号链接逃逸防护
-
-启动时，OxPHP 会规范化文档根目录路径。每个解析后的文件路径都会被规范化，并检查是否仍在文档根目录内。这可以阻止指向服务目录外部的符号链接。
-
-规范路径结果会被缓存，以避免重复的 `realpath(3)` 系统调用。规范路径缓存与元数据缓存共享 200 条目的容量限制，但存储在独立的 HashMap 中，独立进行淘汰。
-
-如果启动时无法规范化文档根目录（例如目录尚不存在），符号链接防护将被禁用，并记录一条警告日志。
-
-### TOCTOU 缓解
-
-路由缓存缓存已验证的 `RouteResult` 条目。TOCTOU 重新规范化在每次请求时执行，发生在 `static_file::serve()` 中、读取磁盘之前，而不是在路由层。这可以缓解在路由解析和文件读取之间替换符号链接的检查时间与使用时间攻击。
+1. **百分号解码** — 将 `%2e%2e` 等编码字符解码为字面值
+2. **路径段过滤** — 去除路径遍历段（`..`）、当前目录段（`.`）和空段
+3. **基于模式的路由** — 根据当前激活的路由模式，将经过清理的路径与文件系统进行匹配
+4. **符号链接验证** — 检查解析后的文件系统路径是否在文档根目录范围内，以防止符号链接逃逸
 
 ## 配置
 
-| 变量 | 描述 | 默认值 |
-|----------|-------------|---------|
-| `DOCUMENT_ROOT` | 提供文件的文件系统路径 | `/var/www/html/public` |
-| `INDEX_FILE` | 索引文件名，控制路由模式 | *（未设置）* |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 用于提供文件和 PHP 脚本的根目录 |
+| `INDEX_FILE` | *(未设置)* | 决定路由模式。未设置 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
 
-## 另请参阅
+## 传统模式
 
-- [静态文件](static-files.md) -- 文件缓存、MIME 检测和流式传输
-- [压缩](compression.md) -- 应用于静态文件响应的 Brotli 压缩
-- [自定义错误页面](error-pages.md) -- 404 等错误响应的自定义 HTML 页面
+当未设置 `INDEX_FILE` 时，传统模式生效。URL 直接映射到磁盘上的文件，类似于使用 Apache 或 nginx 的经典 PHP 托管方式。
+
+- `/about.php` 执行 `DOCUMENT_ROOT/about.php`
+- `/style.css` 提供 `DOCUMENT_ROOT/style.css`
+- `/` 解析为 `index.php`（若存在），否则为 `index.html`
+- `/blog/` 依次尝试 `blog/index.php`，然后是 `blog/index.html`
+- 任何不匹配文件的路径返回 404
+
+此模式适用于 WordPress、传统 PHP 应用程序，或任何每个 URL 对应特定文件的项目。
+
+## 框架模式
+
+当 `INDEX_FILE=index.php` 时，框架模式生效。所有不匹配现有静态文件的请求都会路由到前端控制器，这与 Laravel、Symfony 等 PHP 框架的预期行为完全一致。
+
+- `/style.css` 直接提供静态文件（若磁盘上存在）
+- `/api/users` 执行 `index.php`（该路径不作为文件存在）
+- `/about.php` 返回 404（直接访问 `.php` 文件被阻止）
+- `/index.php` 返回 404（直接访问前端控制器被阻止）
+
+阻止直接访问 `.php` 文件可以防止 URL 泄露，并强制所有 PHP 请求通过框架的路由器。
+
+## SPA 模式
+
+当 `INDEX_FILE=index.html` 时，SPA 模式生效。不匹配现有文件的请求会回退到 HTML 入口点，允许客户端路由器（React Router、Vue Router 等）处理该路径。
+
+- `/style.css` 提供静态文件
+- `/app/dashboard` 提供 `index.html`（客户端路由器处理该路径）
+- `/api.php` 若磁盘上存在该 PHP 脚本，则执行它
+- `/index.html` 返回 404（直接访问索引文件被阻止）
+
+## Worker 模式
+
+当设置了 `WORKER_FILE` 时，Worker 模式路由会自动激活。所有不匹配磁盘上静态文件的传入请求都会被分发到持久化 PHP Worker 进程，而不是返回 404。
+
+- `/style.css` 直接提供静态文件
+- `/api/users` 分发到 Worker（该路径不存在对应文件）
+- `/` 若不存在 `index.php` 或 `index.html`，则分发到 Worker
+
+Worker 模式与 `INDEX_FILE` 兼容。同时设置 `WORKER_FILE` 和 `INDEX_FILE=index.php` 可将 Worker 模式路由与框架模式静态文件处理相结合——静态文件直接提供，其他所有内容都发送到 Worker。
+
+详细配置请参见 [Worker 模式](worker-mode.md)。
+
+## 路径安全
+
+OxPHP 应用多层防护来阻止目录遍历和符号链接逃逸攻击：
+
+- **百分号解码**在清理之前运行，因此像 `/%2e%2e/etc/passwd` 这样的编码遍历尝试会被捕获
+- **路径段过滤**从解析后的路径中移除 `..`、`.` 和空段
+- **符号链接验证**将每个解析后的路径规范化，并验证其仍在文档根目录内。指向被服务目录之外的符号链接会被阻止
+
+> **注意：** 如果文档根目录在启动时不存在，服务器将以致命错误退出。符号链接逃逸保护需要一个有效的、可解析的文档根目录路径。
+
+## 故障排除
+
+### 所有请求都返回 404
+
+验证 `DOCUMENT_ROOT` 指向正确的目录，且该目录在磁盘上存在。如果文档根目录无法解析，OxPHP 在启动时会退出，所以正在运行的服务器表示该目录在启动时是存在的——但卷挂载错误或路径错误仍会导致每个请求都找不到文件。
+
+**检查：** 在容器内确认文档根路径：
+
+```bash
+docker exec <container> ls /var/www/html/public
+```
+
+**修复：** 更正 `DOCUMENT_ROOT` 或确保卷挂载了正确的路径。
+
+### 框架模式对 PHP 路由返回 404
+
+在框架模式下，直接访问 `.php` 文件是被有意阻止的。如果您的应用直接链接到 `.php` 文件，请切换到传统模式（取消设置 `INDEX_FILE`），或将链接更新为使用简洁 URL。
+
+### 含特殊字符的 URL 返回 404
+
+OxPHP 在路由前对 URL 进行百分号解码。对 `/café/menu` 等路径的请求可以正常工作。如果路径仍然返回 404，请确认磁盘上存在使用解码名称的文件。
+
+### 文档根目录内的符号链接返回 404
+
+指向文档根目录之外的符号链接被设计阻止。请将目标内容移入文档根目录，或将其作为目录挂载到正确路径。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+```
+
+## 参见
+
+- [静态文件](static-files.md) — 提供文件的 MIME 检测、缓存和流式传输
+- [Worker 模式](worker-mode.md) — 持久化 PHP 进程和 Worker 模式路由
+- [配置参考](../operations/configuration.md) — 完整的环境变量列表

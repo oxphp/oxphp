@@ -1,51 +1,33 @@
 ---
 title: Compression
-description: Brotli compression for compressible response types
+description: OxPHP compresses responses with Brotli by default, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
 ---
 
-OxPHP compresses HTTP responses using Brotli when the client supports it and the response type is compressible. Compression is enabled by default and the quality level can be configured with an environment variable.
+# Compression
+
+OxPHP compresses HTTP responses using Brotli encoding by default. Compression applies automatically to text-based content types when the client supports it, reducing transfer sizes without any application code changes.
+
+## How It Works
+
+1. **Accept-Encoding check** — the client's `Accept-Encoding` header is parsed for `br` (Brotli) support. Requests without `br` in this header are never compressed.
+2. **Content type check** — the response MIME type is verified against the list of compressible types.
+3. **Already encoded check** — responses with an existing `Content-Encoding` header are skipped to avoid double-compression.
+4. **Size range check** — only responses between 256 bytes and 3 MB are compressed. Smaller responses see little benefit; larger responses are streamed without buffering.
+5. **Compression** — Brotli encoding is applied. If the compressed output is not smaller than the original, the uncompressed response is sent instead.
+
+Compression happens after PHP execution and after static file serving. The entire compressed body is held in memory briefly, which is why responses above 3 MB are excluded.
 
 ## Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `COMPRESSION_LEVEL` | Brotli compression quality level (0-11) | `4` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMPRESSION_LEVEL` | `4` | Brotli quality level (0–11). Higher values produce smaller output at the cost of more CPU time. Set to `0` to disable compression entirely |
 
-To disable compression:
+The default level of `4` provides a good balance between compression ratio and CPU usage for web serving. Levels 9–11 are better suited for offline or build-time compression.
 
-```bash
-COMPRESSION_LEVEL=0
-```
+## Compressible Content Types
 
-Setting the level to `0` disables compression. Values `1`-`11` set the Brotli quality level, where higher values produce better compression ratios at the cost of more CPU time. The default level `4` is a good balance for web serving.
-
-## How it works
-
-The compression pipeline runs after the response is built and before it is sent to the client. It is only invoked when the request includes an `Accept-Encoding` header -- requests without this header skip the compression function entirely, avoiding async overhead.
-
-### Decision flow
-
-1. **Accept-Encoding check** -- parse the header, split on `,`, extract the encoding name before any `;` quality parameter, and look for `br`
-2. **Content-Type check** -- verify the response MIME type is in the compressible list
-3. **Already encoded check** -- skip if the response already has a `Content-Encoding` header
-4. **Content-Length guard** -- skip if the `Content-Length` header is present and outside the 256 B to 3 MB range
-5. **Body size hint guard** -- skip if the body size hint (when no `Content-Length` is present) is outside the 256 B to 3 MB range
-6. **Collect body** -- materialize the response body into memory
-7. **Runtime size check** -- verify the collected body is within range (for responses without an upfront size hint)
-8. **Compress** -- apply Brotli and discard the result if the compressed output is not smaller than the original
-
-### Brotli parameters
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Quality | 4 | Balances speed and ratio for web serving |
-| Window size | 20 | 1 MB window, suitable for typical web responses |
-
-Quality level 4 is chosen as a compromise: it compresses well enough for text-based web content without the CPU cost of higher quality levels (9-11) that are better suited for offline compression.
-
-## Compressible types
-
-Compression is applied to the following 19 MIME types (matched exactly, not by prefix):
+Compression applies to the following MIME types:
 
 **Text types:**
 - `text/html`
@@ -65,7 +47,7 @@ Compression is applied to the following 19 MIME types (matched exactly, not by p
 - `application/ld+json`
 - `application/wasm`
 
-**Other:**
+**Other types:**
 - `image/svg+xml`
 - `font/ttf`
 - `font/otf`
@@ -73,42 +55,74 @@ Compression is applied to the following 19 MIME types (matched exactly, not by p
 - `application/x-font-opentype`
 - `application/vnd.ms-fontobject`
 
-Types like `image/png`, `image/jpeg`, `font/woff2`, and `application/zip` are not compressed because they already use internal compression.
+## Not Compressed
 
-## Size limits
+Responses are sent without compression when any of the following conditions are met:
 
-| Limit | Value | Reason |
-|-------|-------|--------|
-| Minimum | 256 bytes | Small responses are unlikely to benefit from compression |
-| Maximum | 3 MB | Larger responses should stream from disk without being collected into memory |
+- The client does not advertise `br` in the `Accept-Encoding` header
+- The response already has a `Content-Encoding` header (e.g. pre-compressed content)
+- The response body is smaller than 256 bytes or larger than 3 MB
+- The content type is not in the compressible list (e.g. `image/png`, `image/jpeg`, `font/woff2`, `application/zip` — these formats already use internal compression)
 
-Responses outside this range are sent uncompressed.
+## Response Headers
 
-## Response headers
-
-When compression is applied, the following headers are set:
+When compression is applied, OxPHP sets the following headers:
 
 | Header | Value |
 |--------|-------|
 | `Content-Encoding` | `br` |
-| `Content-Length` | Updated to the compressed size |
-| `Vary` | `Accept-Encoding` (appended) |
+| `Content-Length` | Updated to the compressed body size |
+| `Vary` | `Accept-Encoding` is appended, ensuring HTTP caches store separate versions for clients with and without Brotli support |
 
-The `Vary` header ensures that HTTP caches store separate versions for clients that support Brotli and those that do not.
+## Troubleshooting
 
-## Metrics
+### Responses are not compressed
 
-When compression is applied, two Prometheus counters are incremented:
+Verify that the client sends `Accept-Encoding: br`. Most modern browsers do, but some HTTP testing tools do not include it by default.
 
-| Metric | Description |
-|--------|-------------|
-| `oxphp_compressed_responses_total` | Total responses compressed with Brotli |
-| `oxphp_compression_bytes_saved_total` | Total bytes saved (original size - compressed size) |
+**Check** with curl:
 
-These counters only increment when a response is actually compressed (the compressed output is smaller than the original). If compression produces a larger result, the original response is sent uncompressed and the counters are not updated.
+```bash
+curl -H "Accept-Encoding: br" -I http://localhost/
+```
+
+Look for `Content-Encoding: br` in the response headers. If it is absent, check that:
+
+1. `COMPRESSION_LEVEL` is not set to `0`
+2. The response body is at least 256 bytes
+3. The response `Content-Type` is in the compressible list above
+
+### Compression is making responses larger
+
+For very small responses (under a few hundred bytes), Brotli overhead occasionally produces a larger output than the original. OxPHP detects this and sends the uncompressed response automatically — no configuration change is needed.
+
+### High CPU usage from compression
+
+Higher quality levels (8–11) compress significantly better but use much more CPU. If you observe high CPU consumption from compression:
+
+**Fix:** Lower `COMPRESSION_LEVEL` to `4` or `5`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost.
+
+### Pre-compressed assets are being compressed again
+
+If your build pipeline generates `.br` files and sets the `Content-Encoding: br` header on those files, OxPHP skips re-compression automatically. If your pre-compressed content is being compressed again, verify that the `Content-Encoding` header is present in the original response before compression runs.
+
+## Docker Example
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - COMPRESSION_LEVEL=6
+```
 
 ## See Also
 
-- [Static Files](static-files.md) -- file serving and content caching
-- [Metrics](/operations/metrics.md) -- full Prometheus metrics reference including compression counters
-- [Timeouts](timeouts.md) -- request timeout applies to the full pipeline including compression
+- [Static Files](static-files.md) — file serving, MIME detection, and HTTP caching
+- [Configuration Reference](../operations/configuration.md) — full list of environment variables

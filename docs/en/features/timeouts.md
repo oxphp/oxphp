@@ -1,72 +1,118 @@
 ---
 title: Timeouts
-description: Configurable connection and request timeouts
+description: Configure header read and request processing timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
 ---
 
-OxPHP enforces configurable timeouts to protect against slow clients and runaway requests. Each timeout is configurable via an environment variable.
+# Timeouts
 
-## Configuration
+OxPHP enforces two independent timeouts that protect against slow clients and runaway requests. The header timeout guards the connection phase, while the request timeout bounds total processing time including PHP execution.
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `HEADER_TIMEOUT_SECONDS` | Maximum time to receive HTTP headers after TCP connect | `5` |
-| `REQUEST_TIMEOUT_SECONDS` | Maximum total time for request handling (including PHP execution) | `120` |
+## How It Works
 
-```bash
-HEADER_TIMEOUT_SECONDS=5
-REQUEST_TIMEOUT_SECONDS=120
-```
+Each request passes through two sequential timeout phases:
 
-Setting `HEADER_TIMEOUT_SECONDS=0` skips registering the header read timeout with hyper. Setting `REQUEST_TIMEOUT_SECONDS=0` disables the request timeout entirely.
+1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
+2. **Headers received** — the header timeout ends. The request timeout starts and covers routing, PHP execution, and response building.
+3. **PHP processes the request** — application code runs within the request timeout boundary.
+4. **Response sent** — both timeouts have elapsed. On keep-alive connections, the cycle repeats from step 1.
 
-## Timeout types
-
-### Header read timeout
-
-Controls how long the server waits for a client to send a complete set of HTTP headers after the TCP connection is established (or after the TLS handshake completes).
-
-This protects against slowloris-style attacks where a client sends headers one byte at a time to hold a connection open indefinitely.
-
-**Implementation note**: hyper-util requires a timer to be registered with `builder.http1().timer(TokioTimer::new())` before `header_read_timeout` can be set. OxPHP always registers this timer. If the timeout is set to zero, the `header_read_timeout` call is skipped.
-
-### Request timeout
-
-Controls the maximum total time for processing a single request, from route resolution through PHP execution, response building, and compression. Implemented as a `tokio::time::timeout` wrapper around the dispatch pipeline. This applies to both regular script execution and handler mode requests.
-
-When the timeout fires, the server returns a `504 Gateway Timeout` response with a warning log entry that includes the request ID and path.
-
-For PHP requests, the request timeout is the outer boundary. PHP's own `max_execution_time` may trigger first, but the request timeout ensures the server-side resources are reclaimed even if PHP does not respect its own time limit.
-
-## How timeouts interact
-
-The header read timeout and request timeout cover different phases of a request:
-
-```
+```text
 TCP connect (+ TLS handshake if enabled)
   |
   +-- [HEADER_TIMEOUT_SECONDS] --> headers received
-  |                               |
-  |                               +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
-  |                                                                |
-  |                                                                +-- next request or close
-  |                                                                     |
-  |                                                                     +-- [HEADER_TIMEOUT_SECONDS] --> ...
+                                   |
+                                   +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
+                                                                    |
+                                                                    +-- next request (keep-alive)
 ```
 
-On a keep-alive connection, the header timeout and request timeout apply to each request individually.
+On keep-alive connections, both timeouts apply independently to each request in the connection.
 
-## Recommended values
+> **Note:** When TLS is enabled, the header timeout starts after the TLS handshake completes, not when the TCP connection is accepted.
 
-| Scenario | Header | Request |
-|----------|--------|---------|
-| General web serving | 5s | 120s |
-| API server | 3s | 30s |
-| Long-running PHP tasks | 5s | 300s |
-| High-security / anti-slowloris | 2s | 30s |
+The header timeout protects against slowloris-style attacks, where a client sends headers one byte at a time to hold connections open indefinitely. The request timeout ensures server resources are reclaimed even if PHP does not respect its own `max_execution_time` setting.
 
-Adjust these based on your application's characteristics. If your PHP scripts perform long-running operations (report generation, data imports), increase the request timeout accordingly.
+When the request timeout fires, OxPHP returns a `504 Gateway Timeout` response and logs a warning with the request ID and configured timeout value.
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive request headers after the connection is accepted. Protects against slowloris attacks. Set to `0` to disable |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum seconds for total request processing including PHP execution. Returns `504` on timeout. Set to `0` to disable |
+
+## Recommended Values
+
+| Scenario | Header Timeout | Request Timeout |
+|----------|----------------|-----------------|
+| API server | 5s | 30s |
+| General web serving | 5s | 60s |
+| File uploads | 10s | 300s |
+| SSE / long-polling | 5s | 0 (disabled) |
+
+Adjust these values based on your application's characteristics. If your PHP scripts perform long-running operations such as report generation or data imports, increase the request timeout accordingly. For SSE endpoints, disable the request timeout so long-lived connections are not terminated prematurely.
+
+## Troubleshooting
+
+### Clients receive 504 Gateway Timeout unexpectedly
+
+The request timeout is firing before PHP finishes executing.
+
+**Check:** Query the `/config` endpoint to confirm the active timeout value:
+
+```bash
+curl http://localhost:9090/config | grep request_timeout
+```
+
+**Fix:** Increase the timeout or investigate which PHP operation is slow. For known long-running operations, raise the limit:
+
+```bash
+REQUEST_TIMEOUT_SECONDS=300
+```
+
+For SSE or streaming endpoints where connections must stay open indefinitely, disable the timeout:
+
+```bash
+REQUEST_TIMEOUT_SECONDS=0
+```
+
+### Connections are dropped before headers arrive
+
+The header timeout is too short for clients on high-latency links or behind slow load balancers.
+
+**Fix:** Increase the header timeout:
+
+```bash
+HEADER_TIMEOUT_SECONDS=15
+```
+
+### OPcache causes the first request after a script change to timeout
+
+OPcache recompilation adds latency on the first request after a file change. This is more common in development environments with many files. Raise the timeout or disable it during development.
+
+## Docker Example
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:8080"
+    environment:
+      HEADER_TIMEOUT_SECONDS: "5"
+      REQUEST_TIMEOUT_SECONDS: "30"
+    volumes:
+      - ./app:/var/www/html:ro
+```
+
+## Best Practices
+
+- **Never disable the request timeout in production** unless you have SSE or long-polling endpoints that require indefinite connections. A missing timeout allows runaway PHP scripts to occupy workers indefinitely.
+- **Use shorter timeouts for API servers.** APIs have predictable response times. A 30-second request timeout catches stuck requests quickly without affecting normal traffic.
+- **Combine with rate limiting.** Timeouts protect individual requests; rate limiting protects against high request volume. Together they provide comprehensive protection against slow and fast attack patterns.
 
 ## See Also
 
-- [TLS](tls.md) -- header read timeout starts after the TLS handshake completes
-- [Rate Limiting](rate-limiting.md) -- rate-limited requests bypass the request timeout (returned as early responses)
+- [Rate Limiting](rate-limiting.md) -- per-IP request rate limiting
+- [Server-Sent Events (SSE)](sse.md) -- guidance on disabling timeouts for streaming endpoints
+- [Configuration Reference](../operations/configuration.md) -- complete environment variable reference

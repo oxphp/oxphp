@@ -1,93 +1,97 @@
 ---
-title: PHP Extension Functions
-description: API reference for the oxphp_sapi PHP extension
+title: PHP Functions
+description: Complete reference for all oxphp_* PHP functions provided by OxPHP, including async, streaming, worker mode, and decorator APIs.
 ---
 
-The `oxphp_sapi` PHP extension registers sixteen built-in functions that give your PHP code access to OxPHP server internals. These functions are available in every PHP script executed by OxPHP --- no `extension=` directive is needed because the extension is compiled into the custom SAPI.
+# PHP Functions
 
-Plugins can register additional PHP functions at startup. These plugin-provided functions are registered during `MINIT` via the C bridge and appear alongside the built-in ones.
+OxPHP registers its functions through the `oxphp_sapi` extension, which loads automatically for every PHP script the server executes. No `extension=` directive and no manual loading are required — every function listed here is available from the first line of your PHP code.
 
-## `oxphp_request_id`
+## Table of Contents
 
-Returns the unique request identifier assigned to the current request.
+- [oxphp_request_id()](#oxphp_request_id)
+- [oxphp_worker_id()](#oxphp_worker_id)
+- [oxphp_server_info()](#oxphp_server_info)
+- [oxphp_finish_request()](#oxphp_finish_request)
+- [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
+- [oxphp_is_worker()](#oxphp_is_worker)
+- [oxphp_worker()](#oxphp_worker)
+- [oxphp_is_streaming()](#oxphp_is_streaming)
+- [oxphp_stream_flush()](#oxphp_stream_flush)
+- [oxphp_sleep()](#oxphp_sleep)
+- [oxphp_usleep()](#oxphp_usleep)
+- [oxphp_async()](#oxphp_async)
+- [oxphp_async_await()](#oxphp_async_await)
+- [oxphp_async_await_all()](#oxphp_async_await_all)
+- [oxphp_async_await_any()](#oxphp_async_await_any)
+- [oxphp_register_decorator()](#oxphp_register_decorator)
+
+---
+
+## oxphp_request_id()
 
 ```php
 oxphp_request_id(): string
 ```
 
-**Parameters:** None.
+Returns the unique request identifier for the current request. This is the same value sent in the `X-Request-ID` response header. If the client sends an `X-Request-ID` header, OxPHP passes it through unchanged instead of generating a new one.
 
-**Return value:** A 20-character hexadecimal string. The format is `{timestamp:08x}{process:04x}{counter:08x}`, where the first 8 characters are the Unix timestamp, the next 4 are a per-process identifier (PID XOR startup nanos), and the last 8 are a monotonic counter. Returns an empty string if no request ID has been set (should not happen during normal request processing).
+**Returns:** A 16-character hexadecimal string when OxPHP generates the ID (e.g. `"67b9a3c11a2b0042"`). When the client sends an `X-Request-ID` header, that value is returned as-is (1–64 characters, alphanumeric plus `-`, `_`, `.`).
 
 **Example:**
 
 ```php
 <?php
-$requestId = oxphp_request_id();
-// "67a3b1c4a1f200000042"
+$id = oxphp_request_id();
+error_log("[$id] Processing order #1234");
 
-header("X-Request-Id: $requestId");
-
-// Use in application logging
-error_log("[$requestId] Processing payment for order #1234");
+// Propagate the ID to downstream services
+header("X-Correlation-ID: $id");
 ```
-
-**Notes:**
-- The request ID is set by the server before PHP execution begins.
-- The same ID is available on the Rust side for access logging and response headers.
-- The ID is unique across processes and restarts thanks to the process identifier component.
 
 ---
 
-## `oxphp_worker_id`
-
-Returns the index of the PHP worker thread handling the current request.
+## oxphp_worker_id()
 
 ```php
 oxphp_worker_id(): int
 ```
 
-**Parameters:** None.
+Returns the zero-based index of the PHP worker thread handling the current request. Worker indices range from `0` to `PHP_WORKERS - 1`.
 
-**Return value:** A zero-based integer identifying the worker thread. Values range from `0` to `PHP_WORKERS - 1` for static workers. Dynamic workers receive IDs above the initial range.
+**Returns:** An integer identifying the current worker thread.
 
 **Example:**
 
 ```php
 <?php
 $workerId = oxphp_worker_id();
-// 3
 
-// Use for worker-specific temp directories or debugging
-$tmpDir = "/tmp/oxphp-worker-$workerId";
+// Use per-worker temp files to avoid collisions
+$tmp = "/tmp/worker_{$workerId}_buffer.dat";
+
+error_log("Worker $workerId handling request");
 ```
-
-**Notes:**
-- Worker IDs are stable for the lifetime of the worker thread.
-- In dynamic scaling mode, workers spawned after startup receive incrementing IDs above the initial pool size.
-- Useful for debugging concurrency issues or partitioning worker-specific resources.
 
 ---
 
-## `oxphp_server_info`
-
-Returns an associative array with server and worker metadata.
+## oxphp_server_info()
 
 ```php
 oxphp_server_info(): array
 ```
 
-**Parameters:** None.
+Returns an associative array with server and request metadata.
 
-**Return value:** An associative array with the following keys:
+**Returns:** An array with the following keys:
 
 | Key | Type | Description |
 |-----|------|-------------|
 | `sapi` | `string` | Always `"oxphp"` |
-| `version` | `string` | Server version (currently `"0.1.0"`) |
+| `version` | `string` | Server version (e.g. `"0.1.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
-| `worker_mode` | `bool` | `true` if running in worker mode, `false` in traditional mode |
+| `worker_mode` | `bool` | Whether the current process runs in worker mode |
 
 **Example:**
 
@@ -102,159 +106,168 @@ $info = oxphp_server_info();
 //     "worker_mode"  => true,
 // ]
 
-// Calculate elapsed time
 $elapsed = microtime(true) - $info['request_time'];
-echo "Request processing took {$elapsed}s so far";
+echo "Processing took {$elapsed}s so far";
 ```
-
-**Notes:**
-- `request_time` reads from the C bridge library's thread-local storage, which is set before `php_request_startup()`.
-- This value is also used by OPcache's `file_update_protection` check.
 
 ---
 
-## `oxphp_request_heartbeat`
-
-Extends the execution deadline by the given number of seconds from now. Use this in long-running scripts to prevent the cooperative watchdog from killing the request.
-
-```php
-oxphp_request_heartbeat(int $time = 10): bool
-```
-
-**Parameters:**
-
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `$time` | `int` | `10` | Number of seconds to extend the deadline from now |
-
-**Return value:** Returns `true` on success. Returns `false` if `$time` is zero or negative, or if no execution deadline is set.
-
-**Example:**
-
-```php
-<?php
-// Long-running data import
-foreach ($records as $record) {
-    process($record);
-    oxphp_request_heartbeat(30); // Extend deadline by 30 seconds
-}
-```
-
-**Notes:**
-- The deadline is checked cooperatively every 128 `ub_write` calls (i.e., every 128 output operations). It is not a hard real-time guarantee.
-- The initial deadline is set from `REQUEST_TIMEOUT_SECONDS` before PHP execution begins.
-- If no timeout is configured (deadline is 0), calling this function has no effect and returns `false`.
-
----
-
-## `oxphp_finish_request`
-
-Marks the current request as finished, allowing the server to send the response to the client while the PHP script continues executing in the background. This is the OxPHP equivalent of `fastcgi_finish_request()`.
+## oxphp_finish_request()
 
 ```php
 oxphp_finish_request(): bool
 ```
 
-**Parameters:** None.
+Flushes the response to the client and continues PHP execution in the background. The client receives the complete HTTP response immediately; the script keeps running until it exits naturally. This is the OxPHP equivalent of `fastcgi_finish_request()` in PHP-FPM.
 
-**Return value:** Returns `true` on the first call. Returns `false` if the request was already finished (i.e., the function was called more than once in the same request).
+**Returns:** `true` on success, `false` if already called on this request.
+
+> **Note:** The PHP worker thread remains occupied until the script finishes. Keep background work short or offload heavy processing to a queue.
 
 **Example:**
 
 ```php
 <?php
-// Send response to client immediately
+http_response_code(202);
 echo json_encode(['status' => 'accepted']);
 oxphp_finish_request();
 
-// Continue with background work — the client has already received the response
-send_notification_email($userId);
-update_analytics($eventData);
-cleanup_temp_files();
+// The client already has its 202 response; continue working
+send_notification_email($user);
+update_analytics($event);
 ```
-
-**Notes:**
-- After calling this function, any further output from `echo` or `print` is discarded from the client response.
-- The PHP worker thread remains occupied until the script finishes executing, so long background tasks reduce the available worker pool.
-- Calling this function twice in the same request returns `false` on the second call.
 
 ---
 
-## `oxphp_is_worker`
+## oxphp_request_heartbeat()
 
-Checks whether the server is running in worker mode.
+```php
+oxphp_request_heartbeat(int $time = 10): bool
+```
+
+Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the moment of the call. Call this periodically in long-running loops to prevent OxPHP from killing the request mid-processing.
+
+**Parameters:**
+- `$time` — Seconds to extend the timeout deadline by. Default: `10`
+
+**Returns:** `true` on success, `false` if `$time` is zero or negative.
+
+> **Note:** Each call sets a new deadline relative to the current time, not the original request start. Calling `oxphp_request_heartbeat(30)` at the 100-second mark of a 120-second timeout extends the deadline to 130 seconds from now.
+
+**Example:**
+
+```php
+<?php
+foreach ($large_dataset as $row) {
+    oxphp_request_heartbeat(30); // extend by 30 seconds from now
+    process($row);
+}
+```
+
+---
+
+## oxphp_is_worker()
 
 ```php
 oxphp_is_worker(): bool
 ```
 
-**Parameters:** None.
+Returns whether the server is running in worker mode. Worker mode activates when `WORKER_FILE` is set.
 
-**Return value:** `true` if the current request is handled by a persistent worker process (i.e., `WORKER_FILE` is set), `false` if running in traditional mode where each request spawns a fresh PHP process.
+**Returns:** `true` if running in worker mode, `false` in traditional mode.
 
 **Example:**
 
 ```php
 <?php
 if (oxphp_is_worker()) {
-    // Worker mode: reuse persistent database connection
-    $db = $GLOBALS['db'] ?? ($GLOBALS['db'] = new PDO($dsn));
+    // Reuse persistent connections across requests
+    $db = $GLOBALS['db'] ??= new PDO($dsn);
 } else {
-    // Traditional mode: connect per request
+    // Traditional mode: create a new connection per request
     $db = new PDO($dsn);
 }
 ```
 
-**Notes:**
-- This function can be called both inside and outside the `oxphp_worker()` handler callback.
-- The same value is available via `oxphp_server_info()['worker_mode']`.
-- Useful for libraries and frameworks that need to adapt behavior depending on the execution model (e.g., connection pooling, static caches, session handling).
+---
+
+## oxphp_worker()
+
+```php
+oxphp_worker(callable $handler): bool
+```
+
+Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests.
+
+**Parameters:**
+- `$handler` — Called once per request. The handler receives no arguments; use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) for request data.
+
+**Returns:** `true` on graceful shutdown, `false` if not in worker mode.
+
+The worker loop exits when any of the following conditions are met:
+- The server shuts down gracefully
+- The handler raises 3 consecutive uncaught exceptions or fatal errors
+- The worker reaches `WORKER_MAX_REQUESTS`
+- The worker exceeds `WORKER_MAX_MEMORY_MIB`
+
+> **Note:** `oxphp_worker()` only works when `WORKER_FILE` is configured. In traditional mode it logs a warning and returns `false`.
+
+**Example:**
+
+```php
+<?php
+// worker.php — runs once per worker process lifetime
+
+// Bootstrap: executed once on startup
+require __DIR__ . '/vendor/autoload.php';
+$app = new App();
+
+// Handle requests in a loop
+oxphp_worker(function () use ($app) {
+    $app->handle();
+});
+
+// Code after oxphp_worker() runs during shutdown
+$app->terminate();
+```
 
 ---
 
-## `oxphp_is_streaming`
-
-Checks whether the current request is in streaming mode.
+## oxphp_is_streaming()
 
 ```php
 oxphp_is_streaming(): bool
 ```
 
-**Parameters:** None.
+Returns whether the current request is in streaming mode. Streaming mode activates on the first call to `oxphp_stream_flush()` or automatically when PHP sets `Content-Type: text/event-stream`.
 
-**Return value:** `true` if streaming mode is active, `false` otherwise.
+**Returns:** `true` if streaming mode is active, `false` otherwise.
 
 **Example:**
 
 ```php
 <?php
 if (oxphp_is_streaming()) {
-    // Flush output incrementally
     echo "data: " . json_encode($event) . "\n\n";
-    flush();
+    oxphp_stream_flush();
 } else {
-    // Buffer the complete response
     echo json_encode($allData);
 }
 ```
 
-**Notes:**
-- Streaming mode is activated automatically when the `Content-Type: text/event-stream` header is set, or manually via `oxphp_stream_flush()`.
-- This function is useful for scripts that need to adapt their output behavior depending on the transport mode.
-
 ---
 
-## `oxphp_stream_flush`
-
-Activates streaming mode (if not already active) and flushes the current output buffer to the client as a chunk. This is the primary function for implementing Server-Sent Events (SSE) in OxPHP.
+## oxphp_stream_flush()
 
 ```php
 oxphp_stream_flush(): bool
 ```
 
-**Parameters:** None.
+Activates streaming mode and flushes any buffered output to the client as an HTTP chunk. On the first call, HTTP headers are sent immediately and streaming begins. Each subsequent call flushes output written since the last flush.
 
-**Return value:** Returns `true` on success. Returns `false` if the request has already been finished via `oxphp_finish_request()`.
+**Returns:** `true` on success, `false` if `oxphp_finish_request()` was already called.
+
+> **Note:** Streaming mode also activates automatically when PHP sets `Content-Type: text/event-stream`. In that case you can use PHP's built-in `flush()`, but call `ob_end_flush()` first to bypass PHP's output buffering layer.
 
 **Example:**
 
@@ -265,405 +278,281 @@ header('Cache-Control: no-cache');
 
 for ($i = 0; $i < 10; $i++) {
     echo "id: $i\n";
-    echo "data: " . json_encode(['counter' => $i, 'time' => microtime(true)]) . "\n\n";
+    echo "data: " . json_encode(['counter' => $i]) . "\n\n";
     oxphp_stream_flush();
     sleep(1);
 }
 ```
 
-**How it works:**
-
-1. On the first call, activates streaming mode via the C bridge (`oxphp_bridge_set_stream_mode`)
-2. Flushes all PHP output buffers (`php_output_flush_all`)
-3. Triggers the SAPI flush callback, which sends buffered output as an HTTP chunk to the client
-
-**Notes:**
-- Headers are sent to the client on the first flush. Subsequent calls only send body chunks.
-- You can also use native PHP `flush()` with `Content-Type: text/event-stream` — OxPHP auto-detects the SSE content type and activates streaming mode. In that case, call `ob_end_flush()` first to disable PHP's output buffering layer.
-- If `oxphp_finish_request()` was called before, this function returns `false` and does nothing.
-- The HTTP connection closes automatically when the PHP script ends and the streaming channel is closed.
-- Backpressure is applied via a bounded channel (capacity 64) — if the client is slow, `oxphp_stream_flush()` blocks until the client catches up.
-
 ---
 
-## `oxphp_sleep`
-
-Cooperative sleep that suspends the current fiber, allowing the worker thread to handle other requests during the wait. Falls back to blocking `usleep()` when called outside a fiber.
+## oxphp_sleep()
 
 ```php
 oxphp_sleep(float $seconds): void
 ```
 
+Sleeps for the specified duration. Inside a worker mode handler running in a fiber, this call is cooperative — it suspends the current fiber so other requests can be processed during the wait. Outside a fiber, it falls back to a standard blocking `usleep()`.
+
 **Parameters:**
+- `$seconds` — Duration to sleep in seconds. Fractional values are accepted (e.g. `0.5` for 500 milliseconds). Values of `0` or less return immediately.
 
-| Name | Type | Description |
-|------|------|-------------|
-| `$seconds` | `float` | Duration to sleep in seconds (e.g., `0.5` for 500ms) |
-
-**Return value:** None (void).
+**Returns:** `void`
 
 **Example:**
 
 ```php
 <?php
-oxphp_worker(function() {
-    header('Content-Type: text/event-stream');
-    for ($i = 0; $i < 10; $i++) {
-        echo "data: " . json_encode(['counter' => $i]) . "\n\n";
-        oxphp_stream_flush();
-        oxphp_sleep(1.0); // yields fiber, worker handles other requests
-    }
+oxphp_worker(function () {
+    // In worker mode with fiber multiplexing:
+    // this suspends the fiber rather than blocking the thread
+    oxphp_sleep(1.0);
+    echo json_encode(['done' => true]);
 });
 ```
 
-**Notes:**
-- In worker mode with the fiber scheduler active, this registers a timer and suspends the current fiber. The scheduler resumes the fiber after the specified duration.
-- Outside a fiber (traditional mode), falls back to blocking `usleep()`.
-- Values less than or equal to zero return immediately with no effect.
-- Timer resolution is millisecond granularity (durations are rounded up to the nearest millisecond).
-
 ---
 
-## `oxphp_usleep`
-
-Cooperative microsecond sleep. Identical to `oxphp_sleep()` but accepts microseconds as an integer.
+## oxphp_usleep()
 
 ```php
 oxphp_usleep(int $microseconds): void
 ```
 
+Sleeps for the specified number of microseconds. Like `oxphp_sleep()`, this is cooperative inside a fiber and falls back to blocking `usleep()` otherwise.
+
 **Parameters:**
+- `$microseconds` — Duration to sleep in microseconds. Values of `0` or less return immediately.
 
-| Name | Type | Description |
-|------|------|-------------|
-| `$microseconds` | `int` | Duration to sleep in microseconds |
-
-**Return value:** None (void).
+**Returns:** `void`
 
 **Example:**
 
 ```php
 <?php
-oxphp_worker(function() {
-    oxphp_usleep(50000); // 50ms cooperative sleep
-    echo "done";
-});
-```
-
-**Notes:**
-- Behavior is identical to `oxphp_sleep()` with microsecond granularity.
-- In fiber mode, the timer is registered with millisecond precision (rounded up).
-- Values less than or equal to zero return immediately with no effect.
-
----
-
-## `oxphp_worker`
-
-Enters the persistent worker mode loop. Calls the provided handler callback for each incoming HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers, response headers, error state) without destroying the PHP heap, so bootstrap state (autoloaders, database connections, cached config) persists across requests.
-
-```php
-oxphp_worker(callable $handler): bool
-```
-
-**Parameters:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `$handler` | `callable` | A callback invoked once per HTTP request. Receives no arguments. |
-
-**Return value:** Returns `true` on graceful shutdown (server stopping). Returns `false` immediately if worker mode is not enabled (i.e., `WORKER_FILE` is not set).
-
-**Example:**
-
-```php
-<?php
-// worker.php — persistent worker entry point
-
-// Bootstrap: runs once per worker lifetime
-require __DIR__ . '/vendor/autoload.php';
-$db = new PDO('mysql:host=localhost;dbname=app', 'root', '');
-$config = json_decode(file_get_contents(__DIR__ . '/config.json'), true);
-
-// Handle requests in a loop
-oxphp_worker(function () use ($db, $config) {
-    $uri = $_SERVER['REQUEST_URI'];
-    $method = $_SERVER['REQUEST_METHOD'];
-
-    // Route and handle the request
-    if ($uri === '/api/users' && $method === 'GET') {
-        $users = $db->query('SELECT id, name FROM users')->fetchAll();
-        header('Content-Type: application/json');
-        echo json_encode($users);
-    } else {
-        http_response_code(404);
-        echo 'Not Found';
+oxphp_worker(function () {
+    // Poll for a condition every 100ms without blocking other requests
+    while (!$condition_met()) {
+        oxphp_usleep(100_000);
     }
+    echo "ready";
 });
 ```
 
-**How it works:**
-
-1. The handler callback is called for each HTTP request received from the Rust layer.
-2. Between requests, a soft reset occurs:
-   - Superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`) are repopulated with the new request data
-   - Output buffers are cleared
-   - HTTP response headers are reset
-   - Shutdown functions registered with `register_shutdown_function()` are called and cleared
-3. Garbage collection runs periodically (every 100 requests) to reclaim cyclic references without impacting per-request latency.
-4. The loop exits when:
-   - The server shuts down (graceful shutdown signal)
-   - The handler fails 3 times in a row (exit reason: `consecutive_errors`) — isolated errors are tolerated and the counter resets on success
-   - The worker hits `WORKER_MAX_REQUESTS` (exit reason: `max_requests`)
-   - The worker exceeds `WORKER_MAX_MEMORY_MIB` (exit reason: `max_memory`)
-
-**Notes:**
-- This function only works when `WORKER_FILE` is set. Calling it from a regular PHP script emits an `E_WARNING` and returns `false`.
-- Variables declared outside the handler closure persist across requests. Use this for database connections, configuration, and other expensive initialization.
-- The handler's `use` clause captures variables by reference or value as usual. Variables captured by reference share state across requests.
-- Worker recycling (via `WORKER_MAX_REQUESTS` or `WORKER_MAX_MEMORY_MIB`) causes the worker process to exit and respawn, which re-executes the entire worker script including bootstrap.
-- Worker mode metrics (`oxphp_worker_requests_handled_total`, `oxphp_worker_recycles_total`, etc.) are available on the `/metrics` endpoint when the internal server is running.
-
 ---
 
-## `oxphp_async`
-
-Dispatches a closure for asynchronous execution on the dedicated async worker pool. The closure's `use` variables and arguments are serialized on the source thread and deserialized as independent copies on the async worker thread.
+## oxphp_async()
 
 ```php
-oxphp_async(Closure $closure, mixed ...$args): int|false
+oxphp_async(Closure $closure, mixed ...$args): int
 ```
 
+Dispatches a closure for execution on a dedicated async worker thread and returns a promise ID immediately. The caller continues executing without waiting for the closure to finish. Use `oxphp_async_await()` to retrieve the result.
+
 **Parameters:**
+- `$closure` — A user-defined `Closure` to run on an async worker thread
+- `...$args` — Arguments to pass to the closure. Only scalar values (`null`, `bool`, `int`, `float`, `string`) and arrays of scalars are accepted. Objects and resources cannot be passed across threads.
 
-| Name | Type | Description |
-|------|------|-------------|
-| `$closure` | `Closure` | The closure to execute on an async worker thread |
-| `...$args` | `mixed` | Arguments serialized to the worker. Scalars, strings, and arrays are supported. Resources and objects are rejected with `E_WARNING` |
+**Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()`.
 
-**Return value:** A promise ID (positive integer) on success. Returns `false` if the async pool is not configured (`ASYNC_WORKERS=0`) or the queue is full.
+**Throws:** `OxPHP\AsyncException` if the closure is not user-defined, if the async pool is full, or if arguments contain objects or resources.
+
+> **Note:** Use-vars captured via `use` in the closure follow the same restrictions — objects and resources are rejected.
 
 **Example:**
 
 ```php
 <?php
-$promise = oxphp_async(function(int $x, int $y): int {
-    return $x + $y;
-}, 10, 20);
+// Dispatch two independent tasks concurrently
+$p1 = oxphp_async(function () {
+    return fetch_from_api('/users');
+});
 
-$result = oxphp_async_await($promise);
-// 30
+$p2 = oxphp_async(function () {
+    return fetch_from_api('/posts');
+});
+
+// Retrieve both results
+$users = oxphp_async_await($p1);
+$posts = oxphp_async_await($p2);
 ```
-
-**Notes:**
-- The closure executes on a separate OS thread with its own PHP ZTS state. Variables captured via `use` are serialized as independent copies — the source variables remain writable.
-- The async pool must be enabled via the `ASYNC_WORKERS` environment variable.
-- When the queue is full, the task is rejected and `oxphp_async()` returns `false`.
 
 ---
 
-## `oxphp_async_await`
-
-Blocks the current thread until the specified async task completes and returns its result.
+## oxphp_async_await()
 
 ```php
-oxphp_async_await(int $promise_id, ?float $timeout = null): mixed
+oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 ```
 
+Blocks until the specified async promise completes and returns its result. Inside a worker mode fiber, this suspends the current fiber cooperatively rather than blocking the thread.
+
 **Parameters:**
+- `$promise_id` — A promise ID returned by `oxphp_async()`
+- `$timeout` — Maximum seconds to wait. `0.0` means wait indefinitely. Default: `0.0`
 
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `$promise_id` | `int` | *(required)* | The promise ID returned by `oxphp_async()` |
-| `$timeout` | `?float` | `null` | Maximum seconds to wait. `null` waits indefinitely |
-
-**Return value:** The return value of the closure. All scalar types, strings, and arrays (including nested) are supported.
+**Returns:** The return value of the async closure.
 
 **Throws:**
-
-| Exception | Condition |
-|-----------|-----------|
-| `OxPHP\AsyncException` | The closure threw an exception, or called `die()` / `exit()` |
-| `OxPHP\AsyncTimeoutException` | The timeout expired before the task completed |
+- `OxPHP\AsyncException` if the async task threw an exception
+- `OxPHP\AsyncTimeoutException` if `$timeout` is exceeded
 
 **Example:**
 
 ```php
 <?php
-$p = oxphp_async(function(): string {
-    usleep(100_000);
-    return 'done';
-});
+$promise = oxphp_async(function (int $n) {
+    return array_sum(range(1, $n));
+}, 1_000_000);
 
+$result = oxphp_async_await($promise);
+echo $result; // 500000500000
+
+// With timeout
 try {
-    $result = oxphp_async_await($p, 0.5); // 500ms timeout
+    $result = oxphp_async_await($promise, 5.0);
 } catch (\OxPHP\AsyncTimeoutException $e) {
-    $result = 'timed out';
+    echo "Task took too long";
 }
 ```
 
-**Notes:**
-- The return value is deserialized from the async worker thread onto the current thread's heap.
-- Each promise ID can only be awaited once. Awaiting the same ID twice results in undefined behavior.
-- Non-awaited promises are cleaned up automatically at request end (RSHUTDOWN) with a 5-second timeout.
-
 ---
 
-## `oxphp_async_await_all`
-
-Awaits multiple promises and returns all results as an associative array.
+## oxphp_async_await_all()
 
 ```php
-oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array
+oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 ```
 
+Awaits all promises in the array and returns an associative array mapping each promise ID to its result. Promises are awaited in array order.
+
 **Parameters:**
+- `$promise_ids` — An array of integer promise IDs returned by `oxphp_async()`
+- `$timeout` — Maximum seconds to wait per promise. `0.0` means wait indefinitely. Default: `0.0`
 
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `$promise_ids` | `array` | *(required)* | Array of promise IDs returned by `oxphp_async()` |
-| `$timeout` | `?float` | `null` | Per-promise timeout in seconds |
+**Returns:** An associative array where each key is a promise ID (integer) and each value is the result of that promise.
 
-**Return value:** An associative array mapping each promise ID to its result value.
-
-**Throws:** `OxPHP\AsyncException` or `OxPHP\AsyncTimeoutException` if any promise fails or times out.
+**Throws:**
+- `OxPHP\AsyncException` if any promise fails
+- `OxPHP\AsyncTimeoutException` if any promise exceeds `$timeout`
 
 **Example:**
 
 ```php
 <?php
-$p1 = oxphp_async(function(): int { return 1; });
-$p2 = oxphp_async(function(): int { return 2; });
-$p3 = oxphp_async(function(): int { return 3; });
+$promises = [
+    oxphp_async(fn() => slow_query('users')),
+    oxphp_async(fn() => slow_query('orders')),
+    oxphp_async(fn() => slow_query('products')),
+];
 
-$results = oxphp_async_await_all([$p1, $p2, $p3]);
-// [$p1 => 1, $p2 => 2, $p3 => 3]
+$results = oxphp_async_await_all($promises);
+
+foreach ($results as $promiseId => $result) {
+    // process $result
+}
 ```
 
 ---
 
-## `oxphp_async_await_any`
-
-Races multiple promises and returns the first to complete, regardless of array order. Uses `futures::select_all` internally for true concurrent race semantics.
+## oxphp_async_await_any()
 
 ```php
-oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array
+oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 ```
 
+Races multiple promises and returns the first one to complete. The other promises are not cancelled — they continue running and remain awaitable with `oxphp_async_await()`.
+
 **Parameters:**
+- `$promise_ids` — An array of at least one integer promise ID returned by `oxphp_async()`. Must not be empty.
+- `$timeout` — Maximum seconds to wait for any promise to complete. `0.0` means wait indefinitely. Default: `0.0`
 
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `$promise_ids` | `array` | *(required)* | Array of promise IDs returned by `oxphp_async()` |
-| `$timeout` | `?float` | `null` | Overall timeout in seconds for any promise to complete |
+**Returns:** An associative array with two keys:
+- `id` (`int`) — The promise ID of the winner
+- `value` (`mixed`) — The return value of the winning promise
 
-**Return value:** An associative array with two keys: `id` (the promise ID that completed first) and `value` (its result).
-
-**Throws:** `OxPHP\AsyncException` if the winning promise threw an exception. `OxPHP\AsyncTimeoutException` if no promise completes within the timeout.
-
-**Remaining promises:** Non-winning promises stay in flight and can be awaited individually via `oxphp_async_await()`. On timeout, all specified promises are cancelled.
+**Throws:**
+- `OxPHP\AsyncException` if the winning promise failed
+- `OxPHP\AsyncTimeoutException` if no promise completes within `$timeout`
 
 **Example:**
 
 ```php
 <?php
-$p1 = oxphp_async(function(): int { sleep(2); return 1; });
-$p2 = oxphp_async(function(): int { usleep(100_000); return 2; });
-$p3 = oxphp_async(function(): int { sleep(1); return 3; });
+// Try two mirror endpoints; use whichever responds first
+$p1 = oxphp_async(fn() => fetch('https://mirror-1.example.com/data'));
+$p2 = oxphp_async(fn() => fetch('https://mirror-2.example.com/data'));
 
-$winner = oxphp_async_await_any([$p1, $p2, $p3]);
-// ['id' => $p2, 'value' => 2]  (fastest to complete, ~100ms)
-
-// Non-winning promises are still awaitable
-$r1 = oxphp_async_await($p1); // 1
-$r3 = oxphp_async_await($p3); // 3
+$winner = oxphp_async_await_any([$p1, $p2], timeout: 10.0);
+echo "Mirror {$winner['id']} won: " . json_encode($winner['value']);
 ```
 
 ---
 
-## `oxphp_register_decorator`
-
-Registers a PHP class as an attribute-based decorator. See [Decorators](../features/decorators.md) for the full guide.
+## oxphp_register_decorator()
 
 ```php
 oxphp_register_decorator(string $class): bool
 ```
 
+Registers a PHP class as a decorator that wraps function and method calls. The class must implement `OxPHP\Decorator\AttributeInterface`. Once registered, OxPHP invokes the decorator's `before()` and `after()` hooks around every function or method call that matches the decorator's `#[Attribute]` targets.
+
 **Parameters:**
+- `$class` — The fully qualified class name of the decorator to register
 
-| Name | Type | Description |
-|------|------|-------------|
-| `$class` | `string` | Fully qualified class name |
-
-**Return value:** `true` on success. `false` with an `E_WARNING` if:
-- The class does not exist
-- The class does not implement `OxPHP\Decorator\AttributeInterface`
-- The class is not marked with `#[Attribute(...)]`
+**Returns:** `true` on success, `false` if the class does not exist or does not implement `OxPHP\Decorator\AttributeInterface`.
 
 **Example:**
 
 ```php
 <?php
-#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
-class Timer implements OxPHP\Decorator\AttributeInterface {
-    public function __construct(public readonly string $label = '') {}
-    public function before(OxPHP\Decorator\Context $ctx): void { /* ... */ }
-    public function after(OxPHP\Decorator\Context $ctx): void { /* ... */ }
+use OxPHP\Decorator\AttributeInterface;
+use OxPHP\Decorator\Context;
+
+#[\Attribute(\Attribute::TARGET_METHOD)]
+class LogDecorator implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        error_log("Calling {$ctx->target} (request {$ctx->requestId})");
+    }
+
+    public function after(Context $ctx): void
+    {
+        error_log("Finished {$ctx->target}");
+    }
 }
 
-oxphp_register_decorator(Timer::class);
+// Register once at bootstrap (or worker startup)
+oxphp_register_decorator(LogDecorator::class);
 ```
-
-**Notes:**
-- Call once during application bootstrap (e.g., after autoloader setup).
-- The decorator takes effect immediately — any subsequent function call with the matching attribute will be intercepted.
-- Both Rust-native and PHP decorators coexist in the same registry.
 
 ---
 
-## Plugin Functions
+## Extension Verification
 
-Plugins can register custom PHP functions that are callable from your scripts. These functions are registered during PHP module initialization (`MINIT`) and dispatched through the C bridge to Rust handler code.
-
-Plugin functions use the native bridge for zero-serialization dispatch. Arguments and return values are passed as raw `zval` pointers — Rust reads and writes them directly through C accessor functions, with no JSON encoding overhead. If the handler returns an error, a PHP `E_WARNING` is emitted and `NULL` is returned.
+You can verify that the OxPHP extension is loaded and inspect all registered functions:
 
 ```php
 <?php
-// Example: calling a plugin-registered function
-$result = some_plugin_function('arg1', 42, ['key' => 'value']);
-```
+if (extension_loaded('oxphp_sapi')) {
+    echo "OxPHP extension is loaded\n";
+}
 
-Plugin functions are listed alongside built-in functions in `phpinfo()` output, but they are registered globally (not under the `oxphp_sapi` extension), so they do not appear in `get_extension_funcs('oxphp_sapi')`.
-
-## Extension Information
-
-The extension metadata is visible in `phpinfo()` output:
-
-| Field | Value |
-|-------|-------|
-| Extension name | `oxphp_sapi` |
-| Version | `0.1.0` |
-
-You can verify the extension is loaded:
-
-```php
-<?php
-var_dump(extension_loaded('oxphp_sapi'));
-// bool(true)
-
-// List built-in extension functions
-print_r(get_extension_funcs('oxphp_sapi'));
+$functions = get_extension_funcs('oxphp_sapi');
+print_r($functions);
 // Array
 // (
-//     [0] => oxphp_request_id
-//     [1] => oxphp_worker_id
-//     [2] => oxphp_server_info
-//     [3] => oxphp_request_heartbeat
-//     [4] => oxphp_finish_request
-//     [5] => oxphp_is_worker
-//     [6] => oxphp_is_streaming
-//     [7] => oxphp_stream_flush
-//     [8] => oxphp_sleep
-//     [9] => oxphp_usleep
+//     [0]  => oxphp_request_id
+//     [1]  => oxphp_worker_id
+//     [2]  => oxphp_server_info
+//     [3]  => oxphp_request_heartbeat
+//     [4]  => oxphp_finish_request
+//     [5]  => oxphp_is_worker
+//     [6]  => oxphp_is_streaming
+//     [7]  => oxphp_stream_flush
+//     [8]  => oxphp_sleep
+//     [9]  => oxphp_usleep
 //     [10] => oxphp_worker
 //     [11] => oxphp_async
 //     [12] => oxphp_async_await
@@ -673,14 +562,35 @@ print_r(get_extension_funcs('oxphp_sapi'));
 // )
 ```
 
+## Compatibility with PHP-FPM
+
+If your code must run on both OxPHP and PHP-FPM, use fallback wrappers:
+
+```php
+<?php
+function finish_request(): bool
+{
+    if (function_exists('oxphp_finish_request')) {
+        return oxphp_finish_request();
+    }
+    if (function_exists('fastcgi_finish_request')) {
+        return fastcgi_finish_request();
+    }
+    return false;
+}
+
+// Worker-aware bootstrap
+if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
+    // OxPHP worker mode
+} else {
+    // PHP-FPM or OxPHP traditional mode
+}
+```
+
 ## See Also
 
-- [Decorators](/features/decorators.md) --- attribute-based function/method interception with `oxphp_register_decorator()`
-- [Async Promises](/features/async-promises.md) --- parallel execution with `oxphp_async()` and `oxphp_async_await()`
-- [Fiber-Based Request Multiplexing](/features/fiber-multiplexing.md) --- cooperative multitasking with `oxphp_sleep()` and fiber-aware `oxphp_async_await()`
-- [Superglobals](superglobals.md) --- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
-- [OPcache Compatibility](opcache.md) --- how the `request_time` callback enables OPcache
-- [Request IDs](/features/request-ids.md) --- how request IDs are generated and propagated
-- [SAPI Bridge](/architecture/sapi-bridge.md) --- the C bridge that connects Rust and PHP
-- [Worker Pool](/architecture/worker-pool.md#worker-mode-persistent-php) --- worker mode architecture, recycling, and metrics
-- [Configuration](/operations/configuration.md#worker-mode) --- `WORKER_FILE`, `WORKER_MAX_REQUESTS`, `WORKER_MAX_MEMORY_MIB`
+- [Worker Mode](../features/worker-mode.md) -- persistent worker loop and request lifecycle
+- [Server-Sent Events](../features/sse.md) -- real-time streaming with `oxphp_stream_flush()`
+- [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`
+- [Superglobals](superglobals.md) -- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
+- [Configuration Reference](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars

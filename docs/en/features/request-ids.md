@@ -1,87 +1,114 @@
 ---
 title: Request IDs
-description: Unique request identifiers for tracing and correlation
+description: Automatic unique request identifiers in OxPHP for distributed tracing and log correlation across your stack.
 ---
 
-Every request processed by OxPHP receives a unique request ID. This ID appears in access logs, error logs, and response headers, providing a single value to correlate a request across all layers of the stack.
+# Request IDs
 
-## Configuration
+Every request processed by OxPHP receives a unique identifier for tracing and log correlation. The ID appears in response headers and access logs, giving you a single value to trace a request across every layer of your stack.
 
-Request ID generation is always enabled. No configuration is required.
+## How It Works
 
-## How it works
+1. OxPHP assigns a unique ID to each incoming request before any other processing occurs.
+2. If the client sends an `X-Request-ID` header — for example, from a load balancer or API gateway — OxPHP validates and preserves the value. To pass validation, the header must be 1–64 characters long and contain only alphanumerics, hyphens (`-`), underscores (`_`), or dots (`.`). If validation fails, OxPHP generates a new ID instead.
+3. When no valid `X-Request-ID` header is present, OxPHP generates a 20-character lowercase hexadecimal ID (for example, `67890abc12341a2b0042`). The ID encodes a timestamp, a process-unique value, and a monotonic counter, making collisions across containers and restarts extremely unlikely.
+4. The ID appears in the `X-Request-ID` response header on every response.
+5. When access logging is enabled, the ID appears in the `request_id` field of every access log entry.
+6. PHP scripts can read the ID via `oxphp_request_id()`.
 
-The `RequestIdGenerator` event handler runs at priority **-100** (the lowest priority value, meaning it runs first). It either preserves an incoming request ID or generates a new one.
+## Response Header
 
-### Passthrough
+Every HTTP response from OxPHP includes the `X-Request-ID` header:
 
-If the incoming request contains an `X-Request-ID` header, its value is used as-is. This allows upstream load balancers or API gateways to assign request IDs that propagate through OxPHP.
-
-### Generation
-
-When no `X-Request-ID` header is present, OxPHP generates an ID in the format:
-
+```http
+HTTP/1.1 200 OK
+X-Request-ID: 67890abc12341a2b0042
+Content-Type: text/html; charset=utf-8
 ```
-{timestamp:08x}{counter:08x}
-```
 
-- **timestamp** (8 hex chars): the current Unix timestamp in seconds, truncated to 32 bits
-- **counter** (8 hex chars): a process-wide atomic counter using the full `u32` range
+When an upstream load balancer or gateway provides an `X-Request-ID` on the incoming request, the same value is echoed back in the response, preserving end-to-end traceability across your infrastructure.
 
-This produces a 16-character lowercase hexadecimal string. For example: `67890abc00000042`.
+## PHP Examples
 
-The counter uses `Relaxed` memory ordering because uniqueness is guaranteed by the atomic increment -- no happens-before relationship with other data is needed.
-
-### Response header
-
-The request ID is included in every HTTP response as the `X-Request-ID` header. This is set by the server header handler during the `ResponseBuilding` event.
-
-## Accessing the request ID in PHP
-
-The request ID is available in PHP through the `oxphp_request_id()` function provided by the OxPHP PHP extension:
+Read the current request ID from PHP using `oxphp_request_id()`:
 
 ```php
 <?php
 $requestId = oxphp_request_id();
-header("X-Correlation-ID: $requestId");
-error_log("Processing request $requestId");
+
+// Include in application logs for correlation
+$logger->info('Processing order', [
+    'request_id' => $requestId,
+    'order_id'   => $orderId,
+]);
 ```
 
-The function returns the same 16-character hex string (or the passthrough value) that appears in the response header and access logs.
+Forward the request ID to downstream services to maintain traceability across API calls:
 
-## Access log correlation
+```php
+<?php
+$requestId = oxphp_request_id();
 
-Every access log entry includes the `request_id` field:
+$ch = curl_init('https://api.example.com/users');
+curl_setopt($ch, CURLOPT_HTTPHEADER, [
+    "X-Request-ID: $requestId",
+]);
+$response = curl_exec($ch);
+curl_close($ch);
+```
+
+## Examples
+
+When access logging is enabled, every log entry includes the `request_id` field:
 
 ```json
 {
-  "request_id": "67890abc00000042",
-  "method": "GET",
-  "path": "/api/users",
-  "status": 200,
-  "duration_us": 1234,
-  "remote_addr": "10.0.0.1:54321"
+  "timestamp": "2026-02-11T12:34:56.789Z",
+  "level": "INFO",
+  "fields": {
+    "request_id": "67890abc12341a2b0042",
+    "method": "GET",
+    "path": "/api/users",
+    "status": 200,
+    "duration_us": 1234,
+    "remote_addr": "10.0.0.1:54321",
+    "message": "request completed"
+  }
 }
 ```
 
-You can filter logs by request ID to trace the full lifecycle of a single request, including any PHP errors that reference the same ID.
+Filter your log aggregator by `request_id` to trace the full lifecycle of a single request, including any PHP errors or application log entries that reference the same ID.
 
-## Trace-derived Request IDs
+## Troubleshooting
 
-When OpenTelemetry is enabled (`OTEL_ENABLED=true`), the request ID format changes to a trace-derived format:
+### The `X-Request-ID` header is missing from responses
 
+This is unexpected — OxPHP adds the header to every response. If the header is absent, an intermediate proxy may be stripping it.
+
+**Check:** Test directly against OxPHP without any proxy in the path:
+
+```bash
+curl -v http://localhost:8080/ 2>&1 | grep -i x-request-id
 ```
-{trace_id[0:16]}-{span_id[0:8]}
+
+### An upstream ID is not being preserved
+
+The incoming `X-Request-ID` value may be failing validation. OxPHP rejects IDs that are empty, longer than 64 characters, or contain characters other than alphanumerics, hyphens, underscores, or dots.
+
+**Check:** Inspect the value your upstream sends and verify it meets the character and length requirements. Common failures include values with slashes, spaces, or brace characters.
+
+### `oxphp_request_id()` returns an empty string
+
+This function is only available within OxPHP. If you run the same PHP code under PHP-FPM or CLI, the function is not defined. Guard calls with a compatibility check:
+
+```php
+<?php
+$requestId = function_exists('oxphp_request_id')
+    ? oxphp_request_id()
+    : ($_SERVER['HTTP_X_REQUEST_ID'] ?? uniqid('', true));
 ```
-
-This produces a 25-character string (e.g., `4bf92f3577b16e82-a1b2c3d4`) that enables direct correlation between request IDs and distributed traces in Jaeger, Grafana Tempo, or other tracing backends.
-
-When OTel is disabled, request IDs use the standard 16-character hex format.
-
-> **Note:** When OTel is active, client-supplied `X-Request-ID` values are replaced with the trace-derived format to ensure consistent trace correlation across services.
 
 ## See Also
 
 - [Access Logging](access-logging.md) -- every log entry includes the `request_id` field
-- [Distributed Tracing](distributed-tracing.md) -- W3C Trace Context and OpenTelemetry integration
-- [Rate Limiting](rate-limiting.md) -- rate-limited responses include the `X-Request-ID` header
+- [PHP Functions](../php/functions.md) -- full reference for `oxphp_request_id()` and other built-in functions

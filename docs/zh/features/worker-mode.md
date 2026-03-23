@@ -1,0 +1,185 @@
+---
+title: Worker 模式
+description: 持久化 PHP 进程只启动一次并处理多个请求，消除 OxPHP 中每次请求的启动开销。
+---
+
+# Worker 模式
+
+Worker 模式运行持久化 PHP 进程，这些进程只启动一次并处理多个请求，从而消除每次请求的启动开销。您的应用无需在每次请求时拆除并重建 PHP 状态，而是只需加载一次自动加载器、配置和数据库连接，并在 Worker 的整个生命周期内复用它们。
+
+## 工作原理
+
+1. **设置 `WORKER_FILE`** 为您的引导脚本路径。这将为池中所有 PHP Worker 启用 Worker 模式。
+2. **PHP 启动并只运行一次外部作用域** — 自动加载器注册、配置加载、数据库连接以及任何其他初始化代码只执行一次。
+3. **调用 `oxphp_worker(callback)`** 进入请求循环。OxPHP 开始将传入的 HTTP 请求分发到您的回调函数。
+4. **请求之间**，超全局变量（`$_GET`、`$_POST`、`$_SERVER`、`$_COOKIE`、`$_FILES`、`php://input`）、输出缓冲区和响应头会自动重置。软重置会清理每次请求的状态，同时保留外部作用域中已引导的资源。
+5. **外部作用域持久化** — 在 `oxphp_worker()` 之前定义的变量、静态属性、数据库连接和自动加载器在该 Worker 处理的所有请求中保持可用。
+
+> **注意：** 设置 `WORKER_FILE` 还会更改路由行为。所有不匹配磁盘上静态文件的请求都会分发到 Worker，而不是返回 404。详情请参见[路由](routing.md)。
+
+## 配置
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `WORKER_FILE` | *(未设置)* | Worker PHP 脚本的路径。设置此项将启用 Worker 模式 |
+| `WORKER_MAX_REQUESTS` | `0` | Worker 在回收之前处理的最大请求数。`0` = 无限制 |
+| `WORKER_MAX_MEMORY_MIB` | `0` | Worker 回收前每个 Worker 的最大 PHP 内存（MiB）。`0` = 无限制 |
+
+## 编写 Worker 脚本
+
+Worker 脚本由两部分组成：在启动时运行一次的外部作用域，以及传递给 `oxphp_worker()` 的回调函数（每次请求时运行）。
+
+```php
+<?php
+// 外部作用域：在启动时运行一次
+require __DIR__ . '/../vendor/autoload.php';
+
+$config = parse_ini_file(__DIR__ . '/../config/app.ini');
+$db = new PDO($config['dsn'], $config['user'], $config['pass'], [
+    PDO::ATTR_PERSISTENT => true,
+]);
+
+$app = new MyApp\Application($config, $db);
+
+// 请求循环：每次请求时运行
+oxphp_worker(function () use ($app) {
+    $app->handle();
+});
+
+// 关闭：Worker 退出时运行
+$app->terminate();
+```
+
+## 请求之间重置的内容
+
+OxPHP 在请求之间执行软重置。以下状态会自动清理：
+
+- **超全局变量** — `$_GET`、`$_POST`、`$_SERVER`、`$_COOKIE`、`$_FILES` 和 `php://input` 会用新请求数据重新填充
+- **输出缓冲区** — 所有输出缓冲区被刷新并清空
+- **响应头** — HTTP 状态码和响应头重置为默认值
+- **错误状态** — 最后的错误信息（消息、文件、行号、类型）和连接状态被清除。用户注册的错误处理器（`set_error_handler()`）、异常处理器（`set_exception_handler()`）以及 `error_reporting()` 级别在请求之间保持不变
+
+## 持久化的内容
+
+以下状态在同一 Worker 处理的请求之间保持存在：
+
+- **外部作用域中的变量** — 在 `oxphp_worker()` 之前定义并通过 `use` 捕获的任何内容
+- **静态属性** — 类的静态属性保留其值
+- **数据库连接** — PDO、MySQLi 及其他持久连接保持打开状态
+- **自动加载器** — 已注册的自动加载器（Composer、自定义）保持活跃
+- **已加载的类和函数** — 所有之前加载的类、接口、trait 和函数
+
+## 回收
+
+当满足以下任一条件时，Worker 会自动回收（以全新 PHP 进程重启）：
+
+- **达到最大请求数** — Worker 已处理 `WORKER_MAX_REQUESTS` 次请求
+- **超出最大内存** — Worker 的 PHP 内存使用量超过 `WORKER_MAX_MEMORY_MIB` MiB
+- **连续错误** — Worker 遇到 3 次连续的处理器失败（致命错误、超时或未处理的异常）。注意 `exit()`/`die()` 调用不计为失败
+
+当 Worker 被回收时，PHP 进程终止，新进程启动，重新执行 Worker 脚本的外部作用域。对于最大请求数和最大内存回收，当前请求会正常完成后 Worker 才退出。对于基于错误的回收，Worker 在失败的请求之后退出。
+
+## 故障排除
+
+### 请求挂起且永不完成
+
+如果引导脚本中从未调用 `oxphp_worker()`，则不会分发任何请求，每个请求都会无限等待。请验证您的脚本在正常代码路径中无条件调用了 `oxphp_worker()`。
+
+### 请求之间的状态泄露
+
+在 `oxphp_worker()` 回调内部定义的变量会被 PHP 的垃圾收集器清理，但在外部作用域中定义的静态属性和全局变量会持续存在。如果您看到某次请求的数据出现在另一次请求中，请检查是否有在调用之间累积状态的静态属性或全局变量。
+
+**修复：** 在每次请求回调开始时显式重置静态状态，或避免在静态变量中存储每次请求的状态。
+
+### Worker 立即回收（内存限制）
+
+Worker 内存限制在每次请求后使用 PHP 报告的内存使用量进行检查。如果您的引导阶段分配了大量内存（如加载大型缓存），初始内存占用可能已经接近限制。
+
+**修复：** 增大 `WORKER_MAX_MEMORY_MIB` 或将大型分配推迟到第一次请求时进行。
+
+### Worker 立即回收（错误限制）
+
+三次连续的处理器失败会触发回收。请检查您的应用日志，查看请求回调中发生的异常或致命错误。
+
+**检查：** 在访问日志或结构化日志输出中查找错误：
+
+```bash
+docker logs <container> 2>&1 | grep '"level":"error"'
+```
+
+### 空闲后数据库连接断开
+
+如果您的数据库服务器关闭了空闲连接，下一次请求中的重连尝试可能会失败。请使用能处理重连的连接池，或捕获异常并手动重连。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - WORKER_FILE=/var/www/html/worker.php
+      - WORKER_MAX_REQUESTS=10000
+      - WORKER_MAX_MEMORY_MIB=128
+```
+
+## PHP 示例
+
+### 检测 Worker 模式
+
+使用 `oxphp_is_worker()` 检查当前进程是否在 Worker 模式下运行。这对于编写能在传统模式和 Worker 模式下都能工作的代码非常有用。
+
+```php
+<?php
+if (oxphp_is_worker()) {
+    // 复用持久连接
+    $redis = new Redis();
+    $redis->pconnect('redis', 6379);
+} else {
+    // 传统模式：每次请求时连接
+    $redis = new Redis();
+    $redis->connect('redis', 6379);
+}
+```
+
+### Symfony Worker 脚本
+
+```php
+<?php
+use App\Kernel;
+
+require __DIR__ . '/../vendor/autoload.php';
+
+$kernel = new Kernel('prod', false);
+$kernel->boot();
+
+oxphp_worker(function () use ($kernel) {
+    $request = Symfony\Component\HttpFoundation\Request::createFromGlobals();
+    $response = $kernel->handle($request);
+    $response->send();
+    $kernel->terminate($request, $response);
+});
+
+$kernel->shutdown();
+```
+
+## 最佳实践
+
+- **同时设置 `WORKER_MAX_REQUESTS` 和 `WORKER_MAX_MEMORY_MIB`** 以防止资源无限增长。从 `10000` 次请求和 `128` MiB 开始。
+- **避免在静态属性或全局变量中存储每次请求的状态。** 由于这些会跨请求持久化，某次请求遗留的状态可能泄露到另一次请求中。
+- **先用 `WORKER_MAX_REQUESTS=1` 进行测试**，再逐步增加。这可以在提交长寿命 Worker 之前验证您的应用能正确处理软重置。
+- **处理数据库空闲超时。** 如果您的数据库驱动在空闲一段时间后断开连接，请捕获异常并重连，或使用能自动处理重连的连接池。
+- **保持外部作用域简洁。** 只引导真正需要持久化的内容——自动加载器、配置和共享服务。将请求特定的设置推迟到回调函数中。
+
+## 参见
+
+- [路由](routing.md) — `WORKER_FILE` 如何影响 URL 路由
+- [提前响应](early-response.md) — 立即发送响应并继续后台处理
+- [PHP 函数](../php/functions.md) — `oxphp_worker()`、`oxphp_is_worker()` 及其他内置函数的完整参考
+- [配置参考](../operations/configuration.md) — 完整的环境变量列表

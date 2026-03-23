@@ -1,233 +1,363 @@
 ---
-title: Атрибутные декораторы
-description: Перехват вызовов PHP-функций и методов с помощью атрибутов PHP 8+
+title: Декораторы
+description: Перехватывайте вызовы PHP-функций и методов с помощью декораторов на основе атрибутов для логирования, измерения времени, кэширования и управления доступом.
 ---
 
-OxPHP предоставляет систему декораторов на основе атрибутов, которая перехватывает вызовы PHP-функций и методов на уровне движка. Декораторы используют PHP 8+ Observer API (`zend_observer_fcall`) для перехвата без накладных расходов для недекорированных функций и прозрачного оборачивания декорированных.
+# Декораторы
 
-Система предоставляет только **механизм перехвата**. За то, что декораторы делают (измерение времени, метрики, circuit breaking, кеширование), отвечает реализация декоратора.
+Декораторы OxPHP перехватывают вызовы PHP-функций и методов с использованием атрибутов PHP 8. Добавьте атрибут к любой функции или методу, и OxPHP вызовет методы `before()` и `after()` вашего декоратора вокруг каждого вызова — без единого изменения исходного кода.
 
 ## Как это работает
 
-1. PHP-класс реализует `OxPHP\Decorator\AttributeInterface` и помечается `#[Attribute]`
-2. Класс регистрируется в OxPHP через `oxphp_register_decorator()`
-3. Когда атрибут размещается на функции, методе или классе, OxPHP перехватывает каждый вызов
-4. Методы `before()` и `after()` декоратора вызываются вокруг исходной функции
+1. **Определите** класс декоратора, реализующий `OxPHP\Decorator\AttributeInterface` и аннотированный `#[Attribute]`
+2. **Зарегистрируйте** его один раз при инициализации через `oxphp_register_decorator(ClassName::class)`
+3. **Примените** атрибут к любой функции, методу или классу
+4. При первом вызове декорированной функции OxPHP обнаруживает атрибут и устанавливает хуки перехвата
+5. При каждом последующем вызове `before()` выполняется перед функцией, а `after()` — после её возврата
+
+## Написание декоратора
+
+Классу декоратора нужны две вещи: аннотация `#[Attribute]` и реализация `AttributeInterface`.
 
 ```php
+<?php
+
+use OxPHP\Decorator\AttributeInterface;
+use OxPHP\Decorator\Context;
+
 #[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
-class Timer implements OxPHP\Decorator\AttributeInterface {
-    private float $startTime;
+class Timer implements AttributeInterface
+{
+    private float $start;
 
     public function __construct(
         public readonly string $label = '',
     ) {}
 
-    public function before(OxPHP\Decorator\Context $ctx): void {
-        $this->startTime = hrtime(true);
+    public function before(Context $ctx): void
+    {
+        $this->start = hrtime(true);
     }
 
-    public function after(OxPHP\Decorator\Context $ctx): void {
-        $elapsed = hrtime(true) - $this->startTime;
-        error_log(sprintf('[Timer] %s: %.2fms', $this->label ?: $ctx->target, $elapsed / 1e6));
+    public function after(Context $ctx): void
+    {
+        $elapsed = (hrtime(true) - $this->start) / 1e6;
+        error_log(sprintf('[Timer] %s: %.2fms', $this->label ?: $ctx->target, $elapsed));
     }
 }
+```
 
-// Регистрируется один раз при инициализации приложения
+Зарегистрируйте декоратор во время инициализации, до вызова любой декорированной функции:
+
+```php
+<?php
+require __DIR__ . '/../vendor/autoload.php';
+
 oxphp_register_decorator(Timer::class);
 ```
 
-После регистрации атрибут можно использовать на любой функции или методе:
+Примените его к функциям и методам:
 
 ```php
-#[Timer(label: 'get_user')]
-function getUser(int $id): User {
-    return $db->find($id);
+<?php
+
+#[Timer]
+function processOrder(int $orderId): void
+{
+    // Timer::before() выполняется до этого
+    // Timer::after() выполняется после этого
 }
 
-class OrderService {
-    #[Timer(label: 'place_order')]
-    public function placeOrder(array $items): Order {
+#[Timer(label: 'db-query')]
+function fetchUser(int $id): array
+{
+    return $db->query('SELECT * FROM users WHERE id = ?', [$id]);
+}
+
+class PaymentService
+{
+    #[Timer(label: 'payment')]
+    public function charge(float $amount): bool
+    {
         // ...
     }
 }
 ```
 
-## PHP API
+### Декораторы уровня класса
 
-### `OxPHP\Decorator\AttributeInterface`
-
-Интерфейс, который должны реализовывать все классы декораторов:
+Примените атрибут к классу, чтобы декорировать все его методы:
 
 ```php
-namespace OxPHP\Decorator;
+<?php
 
-interface AttributeInterface {
-    public function before(Context $ctx): void;
-    public function after(Context $ctx): void;
+#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_METHOD)]
+class Audit implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        error_log("Calling {$ctx->target}");
+    }
+
+    public function after(Context $ctx): void
+    {
+        $status = $ctx->hasResult() ? 'ok' : 'error';
+        error_log("Finished {$ctx->target}: {$status}");
+    }
+}
+
+// Регистрация
+oxphp_register_decorator(Audit::class);
+
+// Каждый метод этого класса теперь аудируется
+#[Audit]
+class OrderService
+{
+    public function create(array $data): int { /* ... */ }
+    public function cancel(int $id): void { /* ... */ }
 }
 ```
 
-### `OxPHP\Decorator\Context`
+## Объект Context
 
-Объект контекста (только для чтения), передаваемый в `before()` и `after()`:
+Оба метода — `before()` и `after()` — получают объект `OxPHP\Decorator\Context` с информацией о декорированном вызове.
+
+### Свойства
 
 | Свойство | Тип | Описание |
 |----------|-----|----------|
-| `$target` | `string` | Полное имя цели (`App\Service::method` или `my_function`) |
-| `$class` | `string` | Имя класса или `""` для функций |
-| `$method` | `string` | Имя метода или `""` для функций |
-| `$function` | `string` | Имя функции для `TARGET_FUNCTION` или `""` для методов |
-| `$objectId` | `int` | `spl_object_id` для методов, `0` для функций |
+| `$target` | `string` | Полное имя цели: `App\Service::method` или `my_function` |
+| `$class` | `string` | Имя класса, или `""` для обычных функций |
+| `$method` | `string` | Имя метода, или `""` для обычных функций |
+| `$function` | `string` | Имя функции для обычных функций, или `""` для методов |
+| `$objectId` | `int` | `spl_object_id()` вызываемого объекта, `0` для функций и статических методов |
 | `$requestId` | `string` | Идентификатор текущего запроса |
-| `$traceId` | `string` | Идентификатор трейса W3C (если трассировка включена) |
 
-| Метод | Возвращает | Описание |
+### Методы
+
+| Метод | Доступен в | Описание |
 |-------|-----------|----------|
-| `getParams()` | `array` | Аргументы, переданные в декорированную функцию (ленивые, без накладных расходов, если не вызывается) |
-| `getResult()` | `mixed` | Возвращаемое значение декорированной функции (только в `after()`, возвращает `null` в `before()`) |
-| `hasResult()` | `bool` | `true` в `after()`, когда функция вернула значение успешно, `false` иначе |
+| `getParams(): array` | `before()` и `after()` | Аргументы, переданные в декорированную функцию |
+| `getResult(): mixed` | только `after()` | Возвращаемое значение декорированной функции. Возвращает `null` в `before()` или после исключения |
+| `hasResult(): bool` | только `after()` | `true`, если функция вернула результат без выброса исключения |
 
-### `OxPHP\Decorator\RejectedException`
+### Проверка аргументов
 
-Исключение, выбрасываемое, когда Rust-нативный декоратор отклоняет вызов через `DecoratorAction::Reject`. Расширяет `\Exception`.
-
-### `oxphp_register_decorator()`
+`getParams()` возвращает аргументы в виде массива с числовыми индексами:
 
 ```php
-oxphp_register_decorator(string $class): bool
+<?php
+
+#[Attribute(Attribute::TARGET_FUNCTION)]
+class ValidateArgs implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        $params = $ctx->getParams();
+        foreach ($params as $i => $value) {
+            if ($value === null) {
+                throw new \InvalidArgumentException(
+                    "Argument {$i} of {$ctx->target} must not be null"
+                );
+            }
+        }
+    }
+
+    public function after(Context $ctx): void {}
+}
 ```
 
-Регистрирует PHP-класс как декоратор. Класс должен реализовывать `OxPHP\Decorator\AttributeInterface` и быть помечен `#[Attribute(...)]`. Возвращает `true` при успехе, `false` с `E_WARNING` при ошибке валидации.
+## Несколько декораторов
 
-## Цели атрибутов
-
-Атрибуты декораторов не обязаны поддерживать все цели. Каждый класс декоратора объявляет свои цели через PHP `#[Attribute(...)]`:
+Вы можете накапливать несколько декораторов на одной функции. Они выполняются в порядке объявления для `before()` и в обратном порядке для `after()`:
 
 ```php
-// Только методы
-#[Attribute(Attribute::TARGET_METHOD)]
-class RequireAuth implements OxPHP\Decorator\AttributeInterface { ... }
+<?php
 
-// Только классы — before()/after() срабатывает для каждого метода класса
-#[Attribute(Attribute::TARGET_CLASS)]
-class Audited implements OxPHP\Decorator\AttributeInterface { ... }
-
-// Все три
-#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
-class Timer implements OxPHP\Decorator\AttributeInterface { ... }
-```
-
-PHP проверяет цели во время компиляции. Размещение атрибута там, где его флаги цели не разрешают, вызывает ошибку PHP до выполнения какой-либо логики декоратора.
-
-### Семантика TARGET_CLASS
-
-Когда атрибут декоратора размещается на классе, система вызывает `before()`/`after()` для **каждого вызова метода** этого класса. Сам декоратор решает, что делать — измерять время каждого метода, отслеживать время жизни объекта или что-то ещё:
-
-```php
+#[RateLimit(maxCalls: 100, windowSeconds: 60)]
 #[Timer]
-class PaymentProcessor {
-    public function charge() { ... }  // Timer срабатывает
-    public function refund() { ... }  // Timer срабатывает
+#[Cache(ttl: 300)]
+function getProduct(int $id): array
+{
+    // Порядок выполнения:
+    // 1. RateLimit::before()
+    // 2. Timer::before()
+    // 3. Cache::before()
+    // 4. getProduct() выполняется
+    // 5. Cache::after()
+    // 6. Timer::after()
+    // 7. RateLimit::after()
 }
 ```
 
-Декоратор в стиле жизненного цикла может фильтровать по имени метода:
+Если `before()` выбрасывает исключение, функция не выполняется, а `after()` вызывается в обратном порядке для всех декораторов, которые уже завершили свой `before()`.
+
+## Остановка выполнения
+
+Декоратор может предотвратить выполнение функции, выбросив `OxPHP\Decorator\RejectedException` из `before()`:
 
 ```php
-public function before(OxPHP\Decorator\Context $ctx): void {
-    if ($ctx->method === '__construct') {
-        // начать отслеживание времени жизни объекта
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class RequireRole implements AttributeInterface
+{
+    public function __construct(
+        public readonly string $role,
+    ) {}
+
+    public function before(Context $ctx): void
+    {
+        if (!current_user_has_role($this->role)) {
+            throw new \OxPHP\Decorator\RejectedException(
+                "Access denied: requires role '{$this->role}'"
+            );
+        }
+    }
+
+    public function after(Context $ctx): void {}
+}
+```
+
+## Поведение в режиме воркера
+
+В режиме воркера экземпляры декораторов сохраняются между запросами в рамках одного воркера — они создаются один раз и переиспользуются. Это означает:
+
+- Логика конструктора выполняется один раз на воркер для каждой декорированной функции (не на каждый запрос)
+- Состояние экземпляра в свойствах переносится между запросами
+- Экземпляры пересоздаются при перезапуске воркера
+
+Проектируйте декораторы так, чтобы они не хранили состояние между запросами. Если вам нужно состояние для конкретного запроса, устанавливайте его в `before()` и читайте в `after()`:
+
+```php
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class RequestTimer implements AttributeInterface
+{
+    // Состояние для запроса: устанавливается в before(), читается в after()
+    private float $start;
+
+    public function before(Context $ctx): void
+    {
+        $this->start = hrtime(true);
+    }
+
+    public function after(Context $ctx): void
+    {
+        $elapsed = (hrtime(true) - $this->start) / 1e6;
+        // Безопасно: $this->start всегда задаётся заново в before()
     }
 }
 ```
 
-## Порядок выполнения
+## Ограничения
 
-При применении нескольких декораторов они выполняются в **порядке атрибутов** (сверху вниз), а `after()` — в обратном порядке:
+- **Только пользовательские функции** — встроенные функции PHP не могут быть декорированы. Перехватить можно только функции и методы, определённые в PHP-коде
+- **Регистрация до первого вызова** — декораторы должны быть зарегистрированы до первого вызова любой целевой функции. Регистрируйте во время инициализации
+- **Скалярные аргументы конструктора** — аргументы конструктора атрибута вычисляются один раз при первом вызове. Сложные выражения или значения времени выполнения в атрибутах не поддерживаются
+- **Максимум 32 уровня вложенности** — стек контекста декоратора поддерживает до 32 уровней вложенных вызовов декорированных функций
+- **Максимум 256 кэшированных экземпляров на воркер** — экземпляры декораторов кэшируются в потоке воркера. Коллизии возможны в приложениях с более чем 256 уникальными парами «декоратор — функция»
+
+## Устранение неполадок
+
+### Декоратор не перехватывает вызовы
+
+Декоратор зарегистрирован после того, как функция уже была вызвана, или атрибут не распознан.
+
+**Проверьте:** убедитесь, что `oxphp_register_decorator()` вызывается до первого вызова любой декорированной функции. В режиме воркера регистрируйте во внешней области видимости до `oxphp_worker()`.
+
+### "Class not found" при регистрации
+
+Класс декоратора не загружен на момент вызова `oxphp_register_decorator()`.
+
+**Решение:** убедитесь, что автозагрузчик зарегистрирован первым:
 
 ```php
-#[DecoratorA]
-#[DecoratorB]
-function foo() { ... }
+<?php
+require __DIR__ . '/../vendor/autoload.php';
+
+// Теперь класс можно найти
+oxphp_register_decorator(Timer::class);
 ```
 
-```
-A.before() → B.before() → foo() → B.after() → A.after()
-```
+### Аргументы конструктора не обновляются между запросами
 
-Это стековая семантика — самый внешний декоратор видит полное выполнение, включая внутренние декораторы.
+Экземпляры декораторов кэшируются на воркер. Конструктор выполняется один раз, а не при каждом запросе.
 
-## Повторяемые атрибуты
+**Решение:** используйте `before()` для инициализации, специфичной для запроса, а не конструктор. Конструктор должен принимать только статическую конфигурацию из атрибута.
 
-Декораторы могут быть помечены `IS_REPEATABLE`, что позволяет разместить несколько экземпляров на одной цели. Каждый получает собственный кешированный экземпляр со своими аргументами конструктора:
+## Примеры PHP
+
+### Декоратор кэширования
 
 ```php
-#[Attribute(Attribute::TARGET_METHOD | Attribute::IS_REPEATABLE)]
-class Notify implements OxPHP\Decorator\AttributeInterface { ... }
+<?php
 
-class OrderService {
-    #[Notify(channel: 'slack')]
-    #[Notify(channel: 'email')]
-    public function placeOrder(): void { ... }
-}
-```
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Cache implements AttributeInterface
+{
+    private static array $store = [];
 
-## Обработка исключений
+    public function __construct(
+        public readonly int $ttl = 60,
+    ) {}
 
-| Сценарий | Поведение |
-|----------|-----------|
-| `before()` выбрасывает исключение | Функция НЕ выполняется. Ранее успешно выполненные декораторы получают `after()` в обратном порядке (очистка). |
-| Функция выбрасывает исключение | `after()` всех декораторов ВЫЗЫВАЕТСЯ. `$ctx->hasResult()` возвращает `false`. |
-| `after()` выбрасывает исключение | Распространяется до вызывающей стороны. `after()` оставшихся декораторов пропускается. |
-
-## Rust Plugin API
-
-Плагины могут регистрировать декораторы в Rust с помощью трейта `Decorator`. Они эффективнее PHP-декораторов — нет накладных расходов на создание PHP-объектов или диспетчеризацию методов.
-
-```rust
-use oxphp::decorator::{Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult, AttributeTargets};
-
-struct TimerDecorator;
-
-impl Decorator for TimerDecorator {
-    fn attribute_name(&self) -> &str { "App\\Profiler\\Timer" }
-    fn targets(&self) -> AttributeTargets { AttributeTargets::ALL }
-
-    fn on_begin(&self, ctx: &DecoratorCallContext) -> DecoratorAction {
-        // начать измерение времени
-        DecoratorAction::Continue
+    public function before(Context $ctx): void
+    {
+        $key = $ctx->target . ':' . serialize($ctx->getParams());
+        if (isset(self::$store[$key]) && self::$store[$key]['expires'] > time()) {
+            // Пропустить выполнение функции — вернуть кэшированное значение
+            // Примечание: нельзя прервать выполнение из PHP-декораторов.
+            // Используйте этот шаблон вместе с проверкой внешнего кэша в самой функции.
+        }
     }
 
-    fn on_end(&self, ctx: &DecoratorCallContext, result: &DecoratorCallResult) {
-        // записать прошедшее время
+    public function after(Context $ctx): void
+    {
+        if ($ctx->hasResult()) {
+            $key = $ctx->target . ':' . serialize($ctx->getParams());
+            self::$store[$key] = [
+                'value' => $ctx->getResult(),
+                'expires' => time() + $this->ttl,
+            ];
+        }
     }
 }
 ```
 
-Регистрация во время инициализации плагина:
+### Декоратор логирования с контекстом запроса
 
-```rust
-fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-    ctx.register_decorator(TimerDecorator);
-    Ok(())
+```php
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class LogCall implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        error_log(json_encode([
+            'event' => 'call_start',
+            'target' => $ctx->target,
+            'request_id' => $ctx->requestId,
+            'params' => $ctx->getParams(),
+        ]));
+    }
+
+    public function after(Context $ctx): void
+    {
+        error_log(json_encode([
+            'event' => 'call_end',
+            'target' => $ctx->target,
+            'request_id' => $ctx->requestId,
+            'success' => $ctx->hasResult(),
+        ]));
+    }
 }
 ```
 
-Декораторы Rust и PHP используют один `DecoratorRegistry` и могут сосуществовать на одних и тех же функциях.
+## См. также
 
-## Производительность
-
-Система декораторов разработана с минимальными накладными расходами:
-
-- **Нулевая стоимость для недекорированных функций** — инициализация observer возвращает `{NULL, NULL}` для функций без зарегистрированных атрибутов декораторов. PHP кеширует этот результат для каждого op_array, так что последующие вызовы полностью пропускают проверку.
-- **Однократное разрешение** — сопоставление атрибут-декоратор происходит один раз для каждой функции (при первом вызове), а не при каждом вызове.
-- **Кеширование экземпляров** — PHP-объекты декораторов создаются один раз для каждой пары функция-декоратор (с аргументами конструктора, прочитанными из атрибута), затем кешируются в потоко-локальном TLS на время запроса (или воркера). При последующих вызовах объекты не создаются.
-- **Повторное использование строк `Arc<str>`** — строки target/class/method выделяются один раз во время разрешения и разделяются между всеми вызовами через подсчёт ссылок.
-- **Декораторы Rust полностью обходят накладные расходы PHP** — `on_begin()`/`on_end()` вызываются напрямую через FFI без создания PHP-объектов, диспетчеризации методов или манипуляций с zval.
-
-## Смотрите также
-
-- [Функции PHP](../php/functions.md) — справочник `oxphp_register_decorator()`
-- [Система событий](../architecture/event-system.md) — диспетчеризация событий (декораторы работают на уровне функций, а не на уровне запросов)
-- [SAPI и мост](../architecture/sapi-bridge.md) — C-мост, соединяющий PHP и Rust
+- [PHP Functions](../php/functions.md) — справочник по `oxphp_register_decorator()`
+- [Worker Mode](worker-mode.md) — как постоянные воркеры влияют на время жизни экземпляров декораторов
+- [Distributed Tracing](distributed-tracing.md) — использование декораторов с контекстом трассировки для пользовательских спанов

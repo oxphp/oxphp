@@ -1,51 +1,33 @@
 ---
 title: 压缩
-description: 针对可压缩响应类型的 Brotli 压缩
+description: OxPHP 默认使用 Brotli 压缩响应，减少文本、JSON、SVG 及其他可压缩内容类型的传输大小。
 ---
 
-当客户端支持且响应类型可压缩时，OxPHP 使用 Brotli 压缩 HTTP 响应。压缩默认启用，可通过环境变量配置质量级别。
+# 压缩
 
-## 配置
-
-| 变量 | 描述 | 默认值 |
-|----------|-------------|---------|
-| `COMPRESSION_LEVEL` | Brotli 压缩质量级别（0-11） | `4` |
-
-禁用压缩：
-
-```bash
-COMPRESSION_LEVEL=0
-```
-
-设为 `0` 禁用压缩。`1`-`11` 设置 Brotli 质量级别，值越高压缩比越好，但 CPU 开销越大。默认级别 `4` 是 Web 服务的良好平衡点。
+OxPHP 默认使用 Brotli 编码压缩 HTTP 响应。对于文本类内容类型，当客户端支持时，压缩会自动应用，无需修改任何应用代码即可减少传输大小。
 
 ## 工作原理
 
-压缩流程在响应构建完成后、发送给客户端之前执行。仅当请求包含 `Accept-Encoding` 头时才会触发 -- 没有该头的请求会完全跳过压缩函数，避免异步开销。
+1. **Accept-Encoding 检查** — 解析客户端的 `Accept-Encoding` 头，检查是否支持 `br`（Brotli）。不含 `br` 的请求永远不会被压缩。
+2. **内容类型检查** — 验证响应 MIME 类型是否在可压缩类型列表中。
+3. **已编码检查** — 跳过已有 `Content-Encoding` 头的响应，以避免重复压缩。
+4. **大小范围检查** — 只压缩 256 字节到 3 MB 之间的响应。过小的响应收益甚微；过大的响应则不经缓冲直接流式传输。
+5. **压缩** — 应用 Brotli 编码。如果压缩后的输出不小于原始大小，则发送未压缩的响应。
 
-### 决策流程
+压缩发生在 PHP 执行之后和静态文件服务之后。整个压缩后的响应体会短暂保存在内存中，这也是排除 3 MB 以上响应的原因。
 
-1. **Accept-Encoding 检查** -- 解析头部，按 `,` 分割，提取 `;` 质量参数之前的编码名称，查找 `br`
-2. **Content-Type 检查** -- 验证响应 MIME 类型是否在可压缩列表中
-3. **已编码检查** -- 如果响应已有 `Content-Encoding` 头则跳过
-4. **Content-Length 守卫** -- 如果 `Content-Length` 头存在且不在 256 B 到 3 MB 范围内则跳过
-5. **Body 大小提示守卫** -- 如果没有 `Content-Length` 时 body 大小提示不在 256 B 到 3 MB 范围内则跳过
-6. **收集 body** -- 将响应体物化到内存中
-7. **运行时大小检查** -- 验证收集的 body 是否在范围内（用于没有预先大小提示的响应）
-8. **压缩** -- 应用 Brotli，如果压缩后的输出不比原始数据小则丢弃结果
+## 配置
 
-### Brotli 参数
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `COMPRESSION_LEVEL` | `4` | Brotli 质量级别（0–11）。值越高输出越小，但 CPU 消耗越多。设为 `0` 可完全禁用压缩 |
 
-| 参数 | 值 | 说明 |
-|-----------|-------|-------|
-| 质量 | 4 | 在 Web 服务场景下平衡速度和压缩比 |
-| 窗口大小 | 20 | 1 MB 窗口，适合典型的 Web 响应 |
+默认级别 `4` 在压缩率和 CPU 使用量之间为 Web 服务提供了良好的平衡。9–11 级更适合离线或构建时压缩。
 
-选择质量级别 4 作为折中方案：它对文本类 Web 内容的压缩效果足够好，同时避免了更高质量级别（9-11）的 CPU 开销 -- 那些更适合离线压缩。
+## 可压缩的内容类型
 
-## 可压缩类型
-
-压缩应用于以下 19 种 MIME 类型（精确匹配，非前缀匹配）：
+压缩适用于以下 MIME 类型：
 
 **文本类型：**
 - `text/html`
@@ -54,7 +36,7 @@ COMPRESSION_LEVEL=0
 - `text/xml`
 - `text/javascript`
 
-**应用类型：**
+**应用程序类型：**
 - `application/javascript`
 - `application/json`
 - `application/xml`
@@ -65,7 +47,7 @@ COMPRESSION_LEVEL=0
 - `application/ld+json`
 - `application/wasm`
 
-**其他：**
+**其他类型：**
 - `image/svg+xml`
 - `font/ttf`
 - `font/otf`
@@ -73,42 +55,74 @@ COMPRESSION_LEVEL=0
 - `application/x-font-opentype`
 - `application/vnd.ms-fontobject`
 
-`image/png`、`image/jpeg`、`font/woff2` 和 `application/zip` 等类型不会被压缩，因为它们已使用内部压缩。
+## 不压缩的情况
 
-## 大小限制
+当满足以下任一条件时，响应将不经压缩直接发送：
 
-| 限制 | 值 | 原因 |
-|-------|-------|--------|
-| 最小值 | 256 字节 | 小响应不太可能从压缩中获益 |
-| 最大值 | 3 MB | 更大的响应应从磁盘流式传输，而不是收集到内存中 |
-
-超出此范围的响应将以未压缩形式发送。
+- 客户端的 `Accept-Encoding` 头中未声明 `br`
+- 响应已有 `Content-Encoding` 头（如预压缩内容）
+- 响应体小于 256 字节或大于 3 MB
+- 内容类型不在可压缩列表中（如 `image/png`、`image/jpeg`、`font/woff2`、`application/zip`——这些格式内部已使用压缩）
 
 ## 响应头
 
-应用压缩时，设置以下头部：
+应用压缩时，OxPHP 会设置以下响应头：
 
-| 头部 | 值 |
-|--------|-------|
+| 响应头 | 值 |
+|--------|-----|
 | `Content-Encoding` | `br` |
-| `Content-Length` | 更新为压缩后的大小 |
-| `Vary` | `Accept-Encoding`（追加） |
+| `Content-Length` | 更新为压缩后的响应体大小 |
+| `Vary` | 追加 `Accept-Encoding`，确保 HTTP 缓存为支持和不支持 Brotli 的客户端分别存储不同版本 |
 
-`Vary` 头确保 HTTP 缓存为支持 Brotli 和不支持的客户端分别存储不同版本。
+## 故障排除
 
-## 指标
+### 响应未被压缩
 
-应用压缩时，两个 Prometheus 计数器会递增：
+请验证客户端是否发送了 `Accept-Encoding: br`。大多数现代浏览器会发送，但部分 HTTP 测试工具默认不包含此头。
 
-| 指标 | 说明 |
-|------|------|
-| `oxphp_compressed_responses_total` | 使用 Brotli 压缩的响应总数 |
-| `oxphp_compression_bytes_saved_total` | 压缩节省的总字节数（原始大小 - 压缩后大小） |
+**使用 curl 检查：**
 
-这些计数器仅在响应确实被压缩（压缩输出小于原始数据）时递增。如果压缩产生了更大的结果，则发送原始响应，计数器不会更新。
+```bash
+curl -H "Accept-Encoding: br" -I http://localhost/
+```
 
-## 另请参阅
+在响应头中查找 `Content-Encoding: br`。如果不存在，请检查：
 
-- [静态文件](static-files.md) -- 文件服务和内容缓存
-- [指标](/operations/metrics.md) -- 完整的 Prometheus 指标参考，包括压缩计数器
-- [超时](timeouts.md) -- 请求超时适用于包括压缩在内的完整处理流程
+1. `COMPRESSION_LEVEL` 未设置为 `0`
+2. 响应体至少有 256 字节
+3. 响应的 `Content-Type` 在上述可压缩列表中
+
+### 压缩后响应反而更大
+
+对于非常小的响应（几百字节以下），Brotli 的开销偶尔会产生比原始内容更大的输出。OxPHP 会自动检测这种情况并发送未压缩的响应——无需任何配置更改。
+
+### 压缩导致 CPU 使用率高
+
+较高的质量级别（8–11）压缩效果明显更好，但 CPU 消耗也大得多。如果观察到来自压缩的高 CPU 消耗：
+
+**修复：** 将 `COMPRESSION_LEVEL` 降低至 `4` 或 `5`。这些级别以极小的 CPU 代价提供了最高质量 80–90% 的大小缩减效果。
+
+### 预压缩资源被再次压缩
+
+如果您的构建流水线生成了 `.br` 文件，并在这些文件上设置了 `Content-Encoding: br` 响应头，OxPHP 会自动跳过重新压缩。如果您的预压缩内容仍被再次压缩，请验证在压缩运行之前原始响应中是否已存在 `Content-Encoding` 响应头。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - COMPRESSION_LEVEL=6
+```
+
+## 参见
+
+- [静态文件](static-files.md) — 文件服务、MIME 检测和 HTTP 缓存
+- [配置参考](../operations/configuration.md) — 完整的环境变量列表

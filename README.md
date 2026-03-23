@@ -307,7 +307,6 @@ curl http://localhost:9090/metrics
 - [English](docs/en/)
 - [中文](docs/zh/)
 - [Русский](docs/ru/)
-- [Беларуская](docs/be/)
 
 ## License
 

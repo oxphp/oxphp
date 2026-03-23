@@ -1,35 +1,27 @@
 ---
 title: 访问日志
-description: 通过 tracing 框架实现的结构化 JSON 访问日志
+description: OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，支持记录所有请求或仅记录错误请求两种模式。
 ---
 
-OxPHP 为每个完成的 HTTP 请求生成结构化的 JSON 日志条目。日志通过非阻塞后台写入器写入 stdout，因此日志 I/O 永远不会阻塞请求处理流程。
+# 访问日志
+
+OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输出（stdout）。日志写入是异步的，不会阻塞请求处理。
+
+## 工作原理
+
+1. 设置 `ACCESS_LOG` 后，OxPHP 在每个请求完成后向 stdout 写入一行 JSON 日志。
+2. 日志写入通过后台写入线程进行缓冲，不会阻塞请求处理流水线。
+3. `ACCESS_LOG=all` 记录所有请求；`ACCESS_LOG=error` 仅记录状态码为 400 及以上的响应。
+4. 每行日志包含 `request_id` 字段，可将访问日志条目与应用日志关联起来。
+5. 启用 W3C Trace Context 传播时，日志条目还会包含 `trace_id` 和 `span_id` 字段。
 
 ## 配置
 
-| 变量 | 描述 | 默认值 |
-|----------|-------------|---------|
-| `ACCESS_LOG` | 访问日志级别：`all`、`error` 或 空/未设置（关闭） | *(关闭)* |
-| `LOG_LEVEL` | 最低日志级别（trace、debug、info、warn、error） | `info` |
+| 变量 | 默认值 | 说明 |
+|----------|---------|-------------|
+| `ACCESS_LOG` | *（未设置）* | 访问日志模式。`all` 记录所有请求；`error` 仅记录 4xx 和 5xx 响应。留空或不设置则禁用 |
 
-访问日志默认关闭。设置 `ACCESS_LOG` 控制日志详细程度：
-
-- **`all`** — 记录每个完成的请求（方法、路径、状态码、耗时）
-- **`error`** — 仅记录错误响应（HTTP 状态码 >= 400：404、403、500 等）
-- **空/未设置** — 不记录访问日志
-
-```bash
-# 记录所有请求
-ACCESS_LOG=all
-
-# 仅记录错误（4xx/5xx）
-ACCESS_LOG=error
-
-# 关闭访问日志（默认）
-# ACCESS_LOG=
-```
-
-`RUST_LOG` 环境变量也受支持，设置后优先于 `LOG_LEVEL`。这遵循标准的 `tracing`/`env_filter` 约定。
+> **注意：** 仅接受 `all` 和 `error` 两个值。设置无效值时会记录警告并禁用访问日志。
 
 ## 日志格式
 
@@ -40,9 +32,7 @@ ACCESS_LOG=error
   "timestamp": "2026-02-11T12:34:56.789Z",
   "level": "INFO",
   "fields": {
-    "request_id": "67890abc00000042",
-    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
-    "span_id": "a1b2c3d4e5f6a7b8",
+    "request_id": "67890abc12341a2b0042",
     "method": "GET",
     "path": "/api/users",
     "status": 200,
@@ -53,59 +43,114 @@ ACCESS_LOG=error
 }
 ```
 
-当 `TRACE_CONTEXT` 禁用时，`trace_id` 和 `span_id` 字段将从日志条目中省略。
+启用 W3C Trace Context 时，`trace_id` 和 `span_id` 会与标准字段一起出现：
 
-### 字段
+```json
+{
+  "timestamp": "2026-02-11T12:34:56.789Z",
+  "level": "INFO",
+  "fields": {
+    "request_id": "67890abc12341a2b0042",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "method": "POST",
+    "path": "/api/orders",
+    "status": 201,
+    "duration_us": 8421,
+    "remote_addr": "10.0.0.1:54322",
+    "message": "request completed"
+  }
+}
+```
 
-| 字段 | 类型 | 描述 |
+## 字段说明
+
+| 字段 | 类型 | 说明 |
 |-------|------|-------------|
-| `request_id` | string | 唯一请求标识符（参见[请求 ID](/features/request-ids/)） |
+| `request_id` | string | 唯一请求标识符。参见[请求 ID](request-ids.md) |
 | `method` | string | HTTP 方法（`GET`、`POST` 等） |
 | `path` | string | 请求 URI 路径 |
 | `status` | number | HTTP 响应状态码 |
-| `duration_us` | number | 请求处理总时间（微秒） |
+| `duration_us` | number | 请求总处理时间（微秒） |
 | `remote_addr` | string | 客户端 IP 地址和端口 |
-| `trace_id` | string | W3C trace ID（32 个十六进制字符）。仅当 `TRACE_CONTEXT=true` 时存在 |
-| `span_id` | string | Span ID（16 个十六进制字符）。仅当 `TRACE_CONTEXT=true` 时存在 |
+| `trace_id` | string | W3C trace ID（仅在 `TRACE_CONTEXT=true` 时存在） |
+| `span_id` | string | W3C span ID（仅在 `TRACE_CONTEXT=true` 时存在） |
 
-## 工作原理
+## 精细化过滤
 
-访问日志作为事件处理器实现，监听优先级 **100** 的 `RequestComplete` 事件（在同优先级的处理器中最后运行）。处理器发出带有 `access_log` 目标的 `tracing::info!` 调用。
-
-日志基础设施使用：
-
-- **tracing** 用于结构化事件输出
-- **tracing-subscriber** 搭配 JSON 格式化器用于输出
-- **tracing-appender** 搭配非阻塞写入器用于异步 I/O
-
-非阻塞写入器启动一个专用后台线程来缓冲日志写入并刷新到 stdout。初始化返回的 `WorkerGuard` 必须持有到关机时，以确保所有缓冲条目被刷新。
-
-## 日志目标
-
-OxPHP 对不同的日志类型使用不同的 tracing 目标：
-
-- `access_log` -- 每请求访问日志条目
-- 默认目标 -- 服务器生命周期事件、错误、警告
-
-您可以使用 `RUST_LOG` 独立控制它们：
+OxPHP 使用 `access_log` 日志目标输出访问日志条目。使用 `RUST_LOG` 变量可独立于其他日志输出过滤访问日志：
 
 ```bash
-# 显示 info 级别的访问日志，抑制其他 info 级别的消息
+# 抑制通用 info 消息，保留访问日志
 RUST_LOG=warn,access_log=info
 ```
 
-## 与日志聚合工具集成
+## 故障排除
 
-由于日志是 stdout 上的 JSON 行，它们可以直接与容器日志驱动和聚合工具集成：
+### 没有访问日志条目出现
 
-- **Docker**：通过容器的日志驱动自动收集
-- **Kubernetes**：由节点的日志代理（Fluentd、Fluent Bit 等）采集
-- **journald**：以 systemd 服务运行时，通过 stdout 日志捕获
+`ACCESS_LOG` 未设置或为空时，访问日志处于禁用状态。
+
+**修复：** 将该变量设置为 `all` 或 `error`：
+
+```bash
+ACCESS_LOG=all
+```
+
+### 访问日志为 `error` 模式，但成功请求缺失
+
+`ACCESS_LOG=error` 仅记录状态码为 400 及以上的响应。这是预期行为——确认该值后，如需记录所有请求，请切换至 `all`。
+
+**检查：** 确认当前生效的设置：
+
+```bash
+curl http://localhost:9090/config | grep access_log
+```
+
+### 日志条目中没有 `trace_id` 和 `span_id`
+
+Trace context 字段仅在启用 W3C Trace Context 传播时存在。
+
+**修复：** 通过以下方式启用：
+
+```bash
+TRACE_CONTEXT=true
+```
+
+并确保上游客户端或负载均衡器在请求中发送 `traceparent` 请求头。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./src:/var/www/html:ro
+    environment:
+      ACCESS_LOG: "all"
+      INDEX_FILE: "index.php"
+```
+
+## 最佳实践
+
+- 在生产环境中使用 `ACCESS_LOG=error`，可在仍然捕获所有失败请求的同时减少日志量。成功请求不会被记录，但状态码 400 及以上的错误始终会被捕获。
+- 在应用日志中通过 `oxphp_request_id()` 包含请求 ID，以便将 PHP 层的日志条目与访问日志条目关联起来。
+- 使用 Elasticsearch、Loki 或 Datadog 等结构化日志聚合器高效查询和过滤 JSON 日志行。
+
+## 集成
+
+由于日志是 stdout 上的 JSON 行，它们可直接与容器日志驱动和聚合工具集成：
+
+- **Docker** — 通过容器日志驱动自动收集（json-file、fluentd 等）
+- **Kubernetes** — 由节点日志代理（Fluentd、Fluent Bit、Filebeat 等）采集
+- **systemd** — 作为 systemd 服务运行时，通过 journald 的 stdout 日志捕获
 
 无需 sidecar 或基于文件的日志传输。
 
-## 另请参阅
+## 参见
 
-- [请求 ID](request-ids.md) -- 请求 ID 如何生成和透传
-- [分布式追踪](distributed-tracing.md) -- 日志条目中的 `trace_id` 和 `span_id` 字段
-- [速率限制](rate-limiting.md) -- 被限速的请求仍然会出现在访问日志中
+- [请求 ID](request-ids.md) -- 每条日志条目均包含用于追踪的 `request_id`
+- [配置参考](../operations/configuration.md) -- 完整的环境变量参考

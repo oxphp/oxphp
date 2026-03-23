@@ -1,117 +1,179 @@
 ---
-title: OPcache Compatibility
-description: How OPcache works with OxPHP's custom SAPI
+title: OPcache and JIT
+description: Configure OPcache and JIT compilation for optimal PHP performance with OxPHP, including preloading and development settings.
 ---
 
-OPcache works out of the box with OxPHP. PHP scripts are compiled once and cached in shared memory, reused across all worker threads for the lifetime of the server process.
+# OPcache and JIT
 
-## How It Works
+OPcache works out of the box with OxPHP. All PHP worker threads share a single OPcache memory segment — scripts are compiled once at first execution and served from the cache by every worker thereafter. No special setup is required to enable this sharing.
 
-OxPHP uses a custom SAPI that identifies itself as `cli-server` to PHP. OPcache recognizes this SAPI name, but it does not activate for the cli-server SAPI by default. The bundled `oxphp.ini` includes `opcache.enable_cli = 1`, which is what enables OPcache for this SAPI. Without that setting, OPcache would not activate regardless of other configuration.
+## How OPcache Works with OxPHP
 
-Because OxPHP uses PHP ZTS (Zend Thread Safety), all worker threads share the same OPcache shared memory segment. A script compiled by one worker is immediately available to all other workers. This gives you the compilation-once-execute-many behavior of OPcache with the concurrency of multiple worker threads.
+OxPHP registers itself as a named SAPI, and OPcache treats it identically to other server SAPIs. The key characteristics are:
 
-## The Request Time Requirement
+- **Shared cache across workers**: all PHP worker threads use the same compiled opcode cache. One worker compiles a file; all workers benefit.
+- **No per-request compilation**: after the first request for each script, subsequent requests skip the parse and compile step entirely.
+- `opcache.enable_cli` is irrelevant — that setting applies only to the `cli` and `phpdbg` SAPIs. OxPHP is neither.
 
-OPcache's `file_update_protection` feature prevents caching files that were modified very recently (within 2 seconds by default). During each request's initialization, OPcache compares the file's modification time against the current request time.
-
-OxPHP's SAPI provides a `get_request_time` callback that returns the current Unix timestamp. This callback is called by PHP during `php_request_startup()`, which means the request time **must** be available before that point.
-
-### What Happens Without Request Time
-
-If the request time returns `0` (the zero epoch), OPcache's file protection check compares every file's `mtime` against January 1, 1970. Since all files were modified after that date, OPcache considers them "too recent" and refuses to cache them. The result is a **0% cache hit rate** --- every request recompiles every script.
-
-OxPHP avoids this by implementing the `get_request_time` SAPI callback to return `SystemTime::now()` as a Unix timestamp with microsecond precision.
-
-## Verifying OPcache Status
-
-Create a diagnostic script to confirm OPcache is active:
-
-```php
-<?php
-// www/opcache_check.php
-if (!function_exists('opcache_get_status')) {
-    echo "OPcache extension is not loaded\n";
-    exit(1);
-}
-
-$status = opcache_get_status();
-
-echo "OPcache enabled: " . ($status['opcache_enabled'] ? 'yes' : 'no') . "\n";
-echo "Cached scripts:  " . $status['opcache_statistics']['num_cached_scripts'] . "\n";
-echo "Cache hits:      " . $status['opcache_statistics']['hits'] . "\n";
-echo "Cache misses:    " . $status['opcache_statistics']['misses'] . "\n";
-echo "Hit rate:        " . round($status['opcache_statistics']['opcache_hit_rate'], 1) . "%\n";
-echo "Memory used:     " . round($status['memory_usage']['used_memory'] / 1048576, 1) . " MB\n";
-echo "Memory free:     " . round($status['memory_usage']['free_memory'] / 1048576, 1) . " MB\n";
-```
-
-Test it:
-
-```bash
-curl http://localhost:8080/opcache_check.php
-# First request: miss (script is compiled and cached)
-curl http://localhost:8080/opcache_check.php
-# Second request: hit (script served from cache)
-```
-
-A healthy OPcache installation shows a hit rate climbing toward 100% after the initial warmup period.
-
-## JIT Compilation
-
-OPcache's JIT compiler is supported when running PHP 8.0+. Enable it in your `php.ini`:
+To enable OPcache, at minimum:
 
 ```ini
-opcache.enable=1
-opcache.jit=tracing
-opcache.jit_buffer_size=64M
-```
+zend_extension=opcache
 
-JIT provides the most benefit for CPU-intensive PHP code (math, loops, string processing). For I/O-bound applications (database queries, API calls), the improvement is minimal.
-
-## Recommended Settings
-
-These settings match the bundled `oxphp.ini` and are optimized for production container deployments where PHP files do not change at runtime:
-
-```ini
 [opcache]
 opcache.enable=1
-opcache.enable_cli=1
+```
+
+## Recommended Production Settings
+
+These settings are optimized for production container deployments where PHP files do not change at runtime. Disable timestamp validation and preload compiled files at startup for maximum throughput.
+
+```ini
+zend_extension=opcache
+
+[opcache]
+opcache.enable=1
 opcache.memory_consumption=128
+opcache.interned_strings_buffer=16
 opcache.max_accelerated_files=10000
 opcache.validate_timestamps=0
 opcache.revalidate_freq=0
 opcache.file_update_protection=0
-opcache.save_comments=1
+opcache.jit_buffer_size=64M
+opcache.jit=tracing
+```
+
+| Setting | Recommended Value | Description |
+|---------|-------------------|-------------|
+| `memory_consumption` | `128` | Shared memory in MB for compiled scripts. Increase if `opcache_get_status()` shows low free memory. |
+| `interned_strings_buffer` | `16` | Memory in MB for interned strings shared across all workers. |
+| `max_accelerated_files` | `10000` | Maximum number of cached scripts. Set this higher than your total `.php` file count. |
+| `validate_timestamps` | `0` | When `0`, OPcache never checks the filesystem for changes. Restart the container or call `opcache_reset()` to pick up code changes. |
+| `revalidate_freq` | `0` | Seconds between filesystem checks. Has no effect when `validate_timestamps=0`. |
+| `file_update_protection` | `0` | Seconds after file modification before the file is eligible for caching. Set to `0` to cache immediately at startup. |
+
+## Development Settings
+
+For development, enable timestamp validation so code changes take effect without restarting the container. Disable JIT to get clearer stack traces during debugging.
+
+```ini
+zend_extension=opcache
+
+[opcache]
+opcache.enable=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=10000
+opcache.validate_timestamps=1
+opcache.revalidate_freq=2
+opcache.jit_buffer_size=0
+opcache.jit=disable
+```
+
+With `validate_timestamps=1`, OPcache checks file modification times every `revalidate_freq` seconds. This adds a small per-request overhead but lets you edit PHP files and see changes on the next request.
+
+## JIT Compilation
+
+OPcache's JIT compiler translates PHP opcodes into native machine code at runtime. Use `tracing` mode for the best optimization:
+
+```ini
 opcache.jit=tracing
 opcache.jit_buffer_size=64M
 ```
 
-| Setting | Description |
-|---------|-------------|
-| `enable_cli` | Required to activate OPcache for the cli-server SAPI used by OxPHP. |
-| `memory_consumption` | Shared memory in MB for compiled scripts. Increase if `opcache_get_status()` shows low free memory. |
-| `max_accelerated_files` | Maximum number of cached scripts. Set higher than your total `.php` file count. |
-| `validate_timestamps` | When `0`, OPcache never checks the filesystem for changes after a script is cached. You must restart the container (or call `opcache_reset()`) to pick up code changes. |
-| `revalidate_freq` | Seconds between file modification checks. Only applies when `validate_timestamps=1`. |
-| `file_update_protection` | Seconds after file modification before caching. Set to `0` in production to avoid the protection window. |
-| `save_comments` | Keep doc comments in cached scripts. Required by frameworks that use annotation-based routing (e.g., Symfony, Laravel). |
+JIT provides the most benefit for CPU-bound PHP code — math-heavy loops, string processing, image manipulation, and template rendering. For I/O-bound applications that spend most of their time waiting on database queries or external API calls, the improvement is minimal.
 
-These are production-optimized settings that assume PHP files are immutable for the lifetime of the container. For development, you may want to use `validate_timestamps=1` and `revalidate_freq=2` so that code changes take effect without restarting the server.
+To disable JIT:
 
-## ZTS and Shared Memory
+```ini
+opcache.jit=disable
+opcache.jit_buffer_size=0
+```
 
-OxPHP runs PHP in ZTS mode, where each worker thread has its own execution context but all threads share the same OPcache shared memory segment. This means:
+## Preloading
 
-- A script compiled by worker 0 is immediately available to workers 1, 2, 3, etc.
-- OPcache's internal locking handles concurrent compilation safely.
-- Memory consumption does not scale with the number of workers --- one copy of each compiled script serves all threads.
+OPcache preloading compiles and caches PHP files at server startup, before any requests are handled. This eliminates first-request compilation cost entirely and makes classes and functions available globally without any `require` or autoload overhead.
 
-This is more memory-efficient than PHP-FPM, where each process maintains its own OPcache segment (unless you use `opcache.file_cache` with `file_cache_only=1` for shared storage).
+Configure preloading in your INI file:
+
+```ini
+opcache.preload=/var/www/html/preload.php
+opcache.preload_user=www-data
+```
+
+Create a `preload.php` script that loads your most frequently used files:
+
+```php
+<?php
+// preload.php — runs once at server startup
+
+require __DIR__ . '/vendor/autoload.php';
+
+// Preload framework core files
+$files = glob(__DIR__ . '/vendor/symfony/http-kernel/**.php');
+foreach ($files as $file) {
+    opcache_compile_file($file);
+}
+
+// Preload hot application paths
+opcache_compile_file(__DIR__ . '/src/Controller/ApiController.php');
+opcache_compile_file(__DIR__ . '/src/Service/UserService.php');
+```
+
+> **Note:** Preloaded classes and functions are permanently available to all requests. They cannot be changed without restarting the server.
+
+## Applying the PHP Configuration
+
+OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker volume or a `COPY` instruction to supply your custom INI file.
+
+**Docker run:**
+
+```bash
+docker run -p 8080:8080 \
+  -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
+  ghcr.io/oxphp/oxphp:0.1.0
+```
+
+**Dockerfile:**
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:0.1.0
+
+COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+COPY --chown=www-data:www-data . /var/www/html
+```
+
+**Docker Compose:**
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./src:/var/www/html
+```
+
+## Monitoring Cache Status
+
+Inspect the live OPcache status from PHP to verify it is working:
+
+```php
+<?php
+$status = opcache_get_status();
+
+echo "Cached scripts: " . $status['opcache_statistics']['num_cached_scripts'] . "\n";
+echo "Cache hits: "     . $status['opcache_statistics']['hits'] . "\n";
+echo "Cache misses: "   . $status['opcache_statistics']['misses'] . "\n";
+echo "Free memory: "    . $status['memory_usage']['free_memory'] . " bytes\n";
+```
+
+If `free_memory` is consistently low, increase `opcache.memory_consumption`.
 
 ## See Also
 
-- [PHP Extension Functions](functions.md) --- the `oxphp_server_info()` function exposes `request_time`
-- [Superglobals](superglobals.md) --- how `$_SERVER` and other globals are populated before OPcache's RINIT
-- [Worker Pool](/architecture/worker-pool.md) --- ZTS worker threads and shared memory architecture
-- [SAPI Bridge](/architecture/sapi-bridge.md) --- the C bridge that provides the `get_request_time` callback
+- [Docker Guide](../getting-started/docker.md) -- container setup and mounting configuration files
+- [Configuration Reference](../operations/configuration.md) -- environment variables for OxPHP
+- [Worker Mode](../features/worker-mode.md) -- persistent PHP processes that benefit most from OPcache
