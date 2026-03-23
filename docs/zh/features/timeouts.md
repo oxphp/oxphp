@@ -1,72 +1,118 @@
 ---
-title: 超时
-description: 可配置的连接和请求超时
+title: 超时配置
+description: 在 OxPHP 中配置请求头读取超时和请求处理超时，防止慢速客户端和失控 PHP 脚本占用资源。
 ---
 
-OxPHP 通过可配置的超时来防护慢速客户端和失控请求。每个超时都可通过环境变量配置。
+# 超时配置
+
+OxPHP 强制执行两个独立的超时机制，防止慢速客户端和失控请求占用资源。请求头超时保护连接阶段，请求超时则限制包含 PHP 执行在内的总处理时间。
+
+## 工作原理
+
+每个请求依次经历两个超时阶段：
+
+1. **连接已接受** — 请求头超时开始计时。OxPHP 等待客户端发送完整的 HTTP 请求头。
+2. **请求头已接收** — 请求头超时结束。请求超时开始计时，涵盖路由、PHP 执行和响应构建。
+3. **PHP 处理请求** — 应用代码在请求超时范围内运行。
+4. **响应已发送** — 两个超时均已结束。在 keep-alive 连接上，循环从第 1 步重新开始。
+
+```text
+TCP 连接（如启用 TLS 则包含 TLS 握手）
+  |
+  +-- [HEADER_TIMEOUT_SECONDS] --> 请求头已接收
+                                   |
+                                   +-- [REQUEST_TIMEOUT_SECONDS] --> 响应已发送
+                                                                    |
+                                                                    +-- 下一个请求（keep-alive）
+```
+
+在 keep-alive 连接上，两个超时均独立应用于连接中的每个请求。
+
+> **注意：** 启用 TLS 时，请求头超时从 TLS 握手完成后开始计时，而非从 TCP 连接建立时开始。
+
+请求头超时可防御 slowloris 风格的攻击——攻击者每次只发送一个字节的请求头，以无限期地占用连接。请求超时确保即使 PHP 不遵守自身的 `max_execution_time` 设置，服务器资源也能被及时回收。
+
+当请求超时触发时，OxPHP 返回 `504 Gateway Timeout` 响应，并记录一条包含请求 ID 和已配置超时值的警告日志。
 
 ## 配置
 
-| 变量 | 描述 | 默认值 |
-|----------|-------------|---------|
-| `HEADER_TIMEOUT_SECONDS` | TCP 连接后接收 HTTP 头的最大时间 | `5` |
-| `REQUEST_TIMEOUT_SECONDS` | 请求处理的最大总时间（包括 PHP 执行） | `120` |
-
-```bash
-HEADER_TIMEOUT_SECONDS=5
-REQUEST_TIMEOUT_SECONDS=120
-```
-
-设置 `HEADER_TIMEOUT_SECONDS=0` 将跳过向 hyper 注册头部读取超时。设置 `REQUEST_TIMEOUT_SECONDS=0` 将完全禁用请求超时。
-
-## 超时类型
-
-### 头部读取超时
-
-控制服务器在 TCP 连接建立（或 TLS 握手完成）后等待客户端发送完整 HTTP 头的时间。
-
-这可以防护 slowloris 类型的攻击，即客户端每次发送一个字节的头部来无限期占用连接。
-
-**实现说明**：hyper-util 要求在设置 `header_read_timeout` 之前通过 `builder.http1().timer(TokioTimer::new())` 注册一个计时器。OxPHP 始终注册此计时器。如果超时设置为零，则跳过 `header_read_timeout` 调用。
-
-### 请求超时
-
-控制处理单个请求的最大总时间，从路由解析到 PHP 执行、响应构建和压缩。通过 `tokio::time::timeout` 包装分发流程实现。适用于常规脚本执行和处理器模式请求。
-
-超时触发时，服务器返回 `504 Gateway Timeout` 响应，并记录包含请求 ID 和路径的警告日志。
-
-对于 PHP 请求，请求超时是外层边界。PHP 自身的 `max_execution_time` 可能先触发，但请求超时确保即使 PHP 不遵守自身的时间限制，服务器端资源也能被回收。
-
-## 超时的交互方式
-
-头部读取超时和请求超时覆盖请求的不同阶段：
-
-```
-TCP connect (+ TLS handshake if enabled)
-  |
-  +-- [HEADER_TIMEOUT_SECONDS] --> headers received
-  |                               |
-  |                               +-- [REQUEST_TIMEOUT_SECONDS] --> response sent
-  |                                                                |
-  |                                                                +-- next request or close
-  |                                                                     |
-  |                                                                     +-- [HEADER_TIMEOUT_SECONDS] --> ...
-```
-
-在 keep-alive 连接上，头部超时和请求超时对每个请求独立应用。
+| 变量 | 默认值 | 说明 |
+|----------|---------|-------------|
+| `HEADER_TIMEOUT_SECONDS` | `5` | 连接建立后接收请求头的最长秒数。防御 slowloris 攻击。设为 `0` 可禁用 |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 包含 PHP 执行在内的请求总处理最长秒数。超时时返回 `504`。设为 `0` 可禁用 |
 
 ## 推荐值
 
-| 场景 | 头部超时 | 请求超时 |
-|----------|--------|---------|
-| 通用 Web 服务 | 5s | 120s |
-| API 服务器 | 3s | 30s |
-| 长时间运行的 PHP 任务 | 5s | 300s |
-| 高安全性 / 防 slowloris | 2s | 30s |
+| 场景 | 请求头超时 | 请求超时 |
+|----------|----------------|-----------------|
+| API 服务器 | 5s | 30s |
+| 通用 Web 服务 | 5s | 60s |
+| 文件上传 | 10s | 300s |
+| SSE / 长轮询 | 5s | 0（禁用） |
 
-请根据应用特性调整这些值。如果 PHP 脚本执行长时间运行的操作（报表生成、数据导入），请相应增加请求超时。
+请根据应用特点调整这些值。如果 PHP 脚本需要执行耗时操作（如报表生成或数据导入），请相应增大请求超时值。对于 SSE 端点，应禁用请求超时，以避免长连接被提前终止。
 
-## 另请参阅
+## 故障排除
 
-- [TLS](tls.md) -- 头部读取超时在 TLS 握手完成后开始计时
-- [速率限制](rate-limiting.md) -- 被限速的请求绕过请求超时（作为提前响应返回）
+### 客户端意外收到 504 Gateway Timeout
+
+请求超时在 PHP 执行完成之前触发。
+
+**检查：** 查询 `/config` 端点确认当前超时值：
+
+```bash
+curl http://localhost:9090/config | grep request_timeout
+```
+
+**修复：** 增大超时值，或排查哪个 PHP 操作耗时过长。对于已知耗时较长的操作，提高限制值：
+
+```bash
+REQUEST_TIMEOUT_SECONDS=300
+```
+
+对于需要无限期保持连接的 SSE 或流式端点，禁用超时：
+
+```bash
+REQUEST_TIMEOUT_SECONDS=0
+```
+
+### 连接在请求头到达前被断开
+
+对于高延迟链路或慢速负载均衡器后面的客户端，请求头超时设置过短。
+
+**修复：** 增大请求头超时值：
+
+```bash
+HEADER_TIMEOUT_SECONDS=15
+```
+
+### OPcache 导致脚本变更后的第一个请求超时
+
+脚本文件变更后，首次请求时 OPcache 重新编译会增加延迟。在包含大量文件的开发环境中更为常见。可适当增大超时值或在开发期间禁用超时。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:8080"
+    environment:
+      HEADER_TIMEOUT_SECONDS: "5"
+      REQUEST_TIMEOUT_SECONDS: "30"
+    volumes:
+      - ./app:/var/www/html:ro
+```
+
+## 最佳实践
+
+- **生产环境中绝不禁用请求超时**，除非有需要无限期连接的 SSE 或长轮询端点。缺少超时会导致失控的 PHP 脚本无限期占用 Worker。
+- **为 API 服务器使用较短的超时值。** API 的响应时间通常可预测。30 秒的请求超时可快速捕获卡死的请求，同时不影响正常流量。
+- **结合速率限制使用。** 超时保护单个请求，速率限制防御高请求量。两者结合可全面防御慢速和快速两种攻击模式。
+
+## 参见
+
+- [速率限制](rate-limiting.md) -- 基于 IP 的请求速率限制
+- [服务器推送事件（SSE）](sse.md) -- 流式端点禁用超时的指导说明
+- [配置参考](../operations/configuration.md) -- 完整的环境变量参考

@@ -1,145 +1,77 @@
 ---
 title: Graceful Shutdown
-description: How OxPHP handles shutdown signals and drains connections
+description: How OxPHP handles SIGTERM and SIGINT signals to drain connections and shut down cleanly, with Kubernetes and Docker configuration examples.
 ---
 
-OxPHP implements graceful shutdown to ensure in-flight requests complete before the process exits. This is essential for zero-downtime deployments, rolling updates, and container orchestration.
+# Graceful Shutdown
+
+OxPHP handles `SIGTERM` and `SIGINT` signals to ensure in-flight requests complete before the process exits. This is essential for zero-downtime deployments and rolling updates in container orchestration.
 
 ## Signal Handling
 
-OxPHP listens for two shutdown signals:
+OxPHP responds to two shutdown signals:
 
 | Signal | Source | Behavior |
 |--------|--------|----------|
-| `SIGTERM` | Container orchestrators, `kill`, `docker stop` | Initiates graceful shutdown |
+| `SIGTERM` | Container orchestrators, `docker stop`, `kill` | Initiates graceful shutdown |
 | `SIGINT` | Terminal Ctrl+C | Initiates graceful shutdown |
 
-Both signals trigger the same shutdown sequence. The first signal received starts the drain process. The server does not require a second signal to force-quit.
+Both signals trigger the same shutdown sequence. Only the first signal is needed — the server begins draining immediately.
 
 ## Shutdown Sequence
 
-When a shutdown signal is received, the signal handler spawns a task that runs the shutdown sequence concurrently with the still-running accept loop. The accept loop continues to process new connections until it observes the shutdown flag:
+When a shutdown signal is received, OxPHP follows this sequence:
 
-1. **Spawn shutdown task** --- a Tokio task is spawned that calls `plugin_manager.shutdown_all()` followed by `server.shutdown()`. These two calls run sequentially inside the task, but the task itself runs concurrently with the accept loop.
+1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port and shuts down plugins. PHP workers continue running to process in-flight requests.
+2. **Drain in-flight requests** — active connections are allowed to finish processing. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
+3. **Enforce drain timeout** — if connections remain active after `DRAIN_TIMEOUT_SECONDS`, the server logs a warning and proceeds. Remaining connections are dropped.
+4. **Shut down async pool** — the background async task pool is stopped.
+5. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
+6. **Exit** — the process exits with status code 0.
 
-2. **Shut down plugins** --- inside the spawned task, `PluginManager::shutdown_all()` is called first, shutting down plugins in reverse priority order from initialization.
-
-3. **Stop accepting connections** --- also inside the spawned task, `server.shutdown()` sets the `shutdown` flag via an `AtomicBool`. The accept loop exits on the next iteration after it observes this flag.
-
-4. **Drain in-flight connections** --- the server waits for all active connections to complete, checking every 100ms.
-
-5. **Enforce the drain timeout** --- if connections are still active after `DRAIN_TIMEOUT_SECONDS`, the server logs a warning and proceeds with shutdown. Remaining connections are dropped.
-
-6. **Abort the internal server** --- the health/metrics server task is cancelled.
-
-7. **Shut down the PHP executor** --- when the `SapiExecutor` is dropped, it closes the request channel, joins all worker threads, and calls `php_module_shutdown()`.
-
-8. **Exit** --- the process exits with status 0.
-
-```
-SIGTERM received
-  └── spawn shutdown task (runs concurrently with accept loop)
-        ├── plugin_manager.shutdown_all() (reverse priority order)
-        └── server.shutdown() (sets AtomicBool; accept loop exits on next check)
-accept loop exits after observing shutdown flag
-  ├── drain loop (wait for active connections, 100ms poll)
-  │   ├── all drained → "All connections drained"
-  │   └── timeout reached → "Drain timeout reached, forcing shutdown"
-  ├── abort internal server
-  ├── drop executor (close channel, join workers, PHP shutdown)
-  └── exit
-```
+> **Note:** PHP workers shut down implicitly when the request queue closes. Worker threads exit after finishing any in-progress request.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections to complete |
-| `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections (enforced by a Tokio semaphore) |
-
-### Choosing a Drain Timeout
+| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections to complete before forcing shutdown |
 
 Set `DRAIN_TIMEOUT_SECONDS` to accommodate your slowest expected request:
 
-- **API servers** with fast responses: `10`--`15` seconds
-- **Applications** with file uploads or long queries: `30`--`60` seconds
-- **Batch processing** endpoints: match your longest expected operation
-
-In Kubernetes, set `DRAIN_TIMEOUT_SECONDS` to less than the pod's `terminationGracePeriodSeconds` to ensure the drain completes before the kubelet sends `SIGKILL`:
-
-```yaml
-spec:
-  terminationGracePeriodSeconds: 45
-  containers:
-    - name: oxphp
-      env:
-        - name: DRAIN_TIMEOUT_SECONDS
-          value: "30"
-```
-
-## Connection Limiting
-
-OxPHP uses a Tokio `Semaphore` to enforce the `MAX_CONNECTIONS` limit. Each accepted connection acquires a permit. When all permits are taken, new connections wait in the TCP backlog until a permit is released.
-
-### ConnectionGuard
-
-Active connections are tracked through a RAII guard pattern. When a connection is accepted, `Metrics::connection_opened()` increments the active connection counter. When the `ConnectionGuard` is dropped (the connection handler returns or the task is cancelled), `Metrics::connection_closed()` decrements it automatically.
-
-```
-TCP accept
-  ├── acquire semaphore permit
-  ├── connection_opened() (increment counter)
-  ├── serve HTTP requests (may be multiple via keep-alive)
-  └── drop ConnectionGuard → connection_closed() (decrement counter)
-      └── drop permit (release semaphore slot)
-```
-
-This guarantees the counter is always accurate, even when connections are dropped due to errors or timeouts.
-
-## PHP Worker Shutdown
-
-When the `SapiExecutor` is dropped:
-
-1. The global shutdown flag is set, signaling the ScaleManager (if running) to stop.
-2. The request channel sender is dropped, which causes the bounded channel to close.
-3. Each worker's per-thread shutdown flag is set, and the main thread joins each worker.
-4. Workers in static mode see the closed channel on their next `recv()` and exit. Workers in dynamic mode see either the closed channel or the shutdown flag on their next `recv_timeout()`.
-5. After all workers have joined, `php_module_shutdown()`, `sapi_shutdown()`, and `tsrm_shutdown()` are called to cleanly tear down the PHP engine.
-
-This means PHP scripts in progress are allowed to complete. No request is interrupted mid-execution.
-
-## Docker
-
-Docker sends `SIGTERM` when you run `docker stop`. The default Docker stop timeout is 10 seconds, after which Docker sends `SIGKILL`.
-
-To give OxPHP enough time to drain, increase the Docker stop timeout:
-
-```bash
-docker stop --time 45 oxphp
-```
-
-Or set it in `docker-compose.yml`:
-
-```yaml
-services:
-  oxphp:
-    stop_grace_period: 45s
-    environment:
-      DRAIN_TIMEOUT_SECONDS: "30"
-```
+- **API servers** with fast responses: `10`–`15` seconds
+- **Applications** with file uploads or long queries: `30`–`60` seconds
+- **Worker mode** with background processing: match your longest expected operation
 
 ## Kubernetes
 
-For rolling updates in Kubernetes, the shutdown flow is:
+In Kubernetes, the shutdown flow during a rolling update is:
 
 1. Kubernetes sends `SIGTERM` to the pod.
-2. The pod is removed from the Service's endpoint list (readiness probe starts failing).
-3. OxPHP drains in-flight connections.
+2. The pod is removed from the Service endpoint list.
+3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`.
 4. If the pod is still running after `terminationGracePeriodSeconds`, Kubernetes sends `SIGKILL`.
+
+Set `DRAIN_TIMEOUT_SECONDS` lower than `terminationGracePeriodSeconds` to ensure the drain completes before the forced kill:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: oxphp
+          image: ghcr.io/oxphp/oxphp:0.1.0
+          env:
+            - name: DRAIN_TIMEOUT_SECONDS
+              value: "30"
+```
 
 ### Pre-Stop Hook
 
-If your service receives traffic from external load balancers that propagate endpoint changes slowly, add a pre-stop hook to delay shutdown:
+If your service receives traffic from external load balancers that propagate endpoint changes slowly, add a pre-stop hook to delay the shutdown sequence:
 
 ```yaml
 lifecycle:
@@ -150,9 +82,32 @@ lifecycle:
 
 This gives the load balancer time to remove the pod from its target list before OxPHP stops accepting connections.
 
-## Monitoring Shutdown
+## Docker
 
-The server logs structured JSON messages during the shutdown sequence:
+Docker sends `SIGTERM` when you run `docker stop`. The default Docker stop timeout is 10 seconds, after which Docker sends `SIGKILL`.
+
+To give OxPHP enough time to drain, increase the stop timeout:
+
+```bash
+docker stop --time 45 my-oxphp-container
+```
+
+Or set it in your Compose file:
+
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    stop_grace_period: 45s
+    environment:
+      DRAIN_TIMEOUT_SECONDS: "30"
+```
+
+## Log Messages
+
+During a graceful shutdown, OxPHP emits structured log messages you can monitor:
+
+**Successful drain:**
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
@@ -161,17 +116,18 @@ The server logs structured JSON messages during the shutdown sequence:
 {"level":"INFO","message":"Server stopped"}
 ```
 
-If the drain timeout is reached before all connections finish:
+**Drain timeout reached:**
 
 ```json
+{"level":"INFO","message":"Received shutdown signal, draining connections"}
 {"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
+{"level":"INFO","message":"Server stopped"}
 ```
 
-You can use these log messages to set up alerts if the server regularly hits the drain timeout, which may indicate `DRAIN_TIMEOUT_SECONDS` needs to be increased or long-running requests need investigation.
+If you regularly see the "Drain timeout reached" warning, increase `DRAIN_TIMEOUT_SECONDS` or investigate long-running requests using the `oxphp_request_duration_us` histogram.
 
 ## See Also
 
-- [Configuration](configuration.md) --- `DRAIN_TIMEOUT_SECONDS`, `MAX_CONNECTIONS`, and other environment variables
-- [Health Checks](health-checks.md) --- how readiness probes interact with graceful shutdown
-- [Metrics](metrics.md) --- `oxphp_active_connections` tracks connections during drain
-- [Worker Pool](/architecture/worker-pool.md) --- how PHP workers shut down and join
+- [Health Checks](health-checks.md) — readiness probes and shutdown interaction
+- [Configuration Reference](configuration.md) — all environment variables including `DRAIN_TIMEOUT_SECONDS`
+- [Metrics](metrics.md) — `oxphp_active_connections` tracks connections during drain

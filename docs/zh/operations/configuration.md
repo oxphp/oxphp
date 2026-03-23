@@ -1,184 +1,114 @@
 ---
-title: 配置
-description: OxPHP 环境变量完整参考
+title: 配置参考
+description: OxPHP 完整的环境变量参考。每项配置、默认值及其作用——尽在一处。
 ---
 
-OxPHP 完全通过环境变量进行配置，没有配置文件。每个变量都有合理的默认值，因此零配置部署即可在开发环境中直接使用。
+# 配置参考
 
-## 环境变量参考
+OxPHP 完全通过环境变量进行配置。无需管理任何配置文件——每项配置都有合理的默认值，因此无需任何配置即可开箱即用。
 
-### 服务器
+## 服务器
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | 主 HTTP 服务器的监听地址和端口 |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | 文件和 PHP 脚本的根目录 |
-| `INDEX_FILE` | *(空)* | 控制路由模式。参见[路由模式](#路由模式) |
-| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | Tokio 异步 I/O 线程数。`0` = 自动检测（CPU / 2，最少 1），`1` = 单线程运行时，`N` = 使用 N 个工作线程的多线程运行时 |
-| `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数。超过此限制的新连接将等待信号量许可 |
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `LISTEN_ADDR` | `0.0.0.0:80` | 主 HTTP 服务器的地址和端口 |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件和 PHP 脚本的根目录 |
+| `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
+| `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数 |
+| `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N` = 固定线程数，`0` = 自动检测 |
 
-### PHP 执行
+## PHP 工作进程
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `EXECUTOR` | `sapi` | PHP 执行器类型。`sapi` 为真实 PHP 执行，`stub` 为占位响应（用于基准测试） |
-| `PHP_WORKERS` | `0`（CPU / 2，最少 1，静态） | 工作池模式。设置 `N` 为固定池，或 `MIN:MAX` 为动态伸缩。参见[工作线程模式](#工作线程模式) |
-| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作线程空闲超过此秒数后被回收。仅在动态模式下生效 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | PHP 队列中等待的最大请求数。队列满时，新的 PHP 请求将收到 `529 Site is overloaded` 响应。动态模式下使用初始工作线程数计算 |
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `EXECUTOR` | `sapi` | PHP 执行器后端。`sapi` 用于 PHP 执行，`stub` 用于不依赖 PHP 的基准测试 |
+| `PHP_WORKERS` | CPU / 2（最少 1） | 工作进程池大小。`N` = 固定进程池，`MIN:MAX` = 动态扩缩容，`0` = 自动检测 |
+| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作进程在空闲多少秒后退出（仅动态模式） |
+| `QUEUE_CAPACITY` | 初始工作进程数 × 128 | PHP 队列中最大待处理请求数。队列满时返回 503。对于动态进程池（`MIN:MAX`），初始工作进程数等于最小值 |
 
-### 日志
+### 静态进程池与动态进程池
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `LOG_LEVEL` | `info` | 日志级别。可选值：`trace`、`debug`、`info`、`warn`、`error` |
-| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 访问日志。值：`all`（所有请求）、`error`（仅 4xx/5xx）、空/未设置 = 关闭 |
-
-### 超时
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `HEADER_TIMEOUT_SECONDS` | `5` | TCP 连接建立后等待请求头的最大秒数 |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | 整个请求-响应周期的最大秒数。设为 `0` 可禁用 |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭期间等待进行中连接完成的最大秒数 |
-
-### 速率限制
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `RATE_LIMIT` | `0` | 每个 IP 地址在时间窗口内的最大请求数。`0` 表示禁用速率限制 |
-| `RATE_WINDOW_SECONDS` | `60` | 速率限制窗口时长（秒） |
-
-### TLS
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `TLS_CERT` | *(无)* | TLS 证书 PEM 文件路径。必须同时设置 `TLS_CERT` 和 `TLS_KEY` 才能启用 TLS |
-| `TLS_KEY` | *(无)* | TLS 私钥 PEM 文件路径 |
-
-### 可观测性
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `INTERNAL_ADDR` | *(无)* | 内部服务器地址（健康检查、指标、配置）。未设置时不启动 |
-| `ERROR_PAGES_DIR` | *(无)* | 自定义错误页面 HTML 文件目录，文件名格式为 `{status}.html`（例如 `404.html`、`503.html`、`529.html`） |
-
-### 工作进程模式
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `WORKER_FILE` | *(无)* | PHP 工作脚本路径（相对于 `DOCUMENT_ROOT`）。设置后启用持久化工作进程模式，PHP 进程在请求间保持存活 |
-| `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` 表示不限制 |
-| `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前使用的最大内存（兆字节）。`0` 表示不限制 |
-
-### 异步池
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数。`0` 禁用异步池 |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 待处理异步任务的有界通道大小。队列满时任务将被拒绝 |
-
-### 静态文件缓存
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `STATIC_CACHE_TTL` | `30d` | 静态文件响应的缓存 TTL。控制 `Cache-Control`、`ETag` 和 `Last-Modified` 头。支持：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`）或 `off` 禁用 |
-
-### 压缩
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量级别（0-11）。`0` 禁用压缩，`1`-`11` 设置质量级别 |
-
-### 分布式追踪
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `TRACE_CONTEXT` | `false` | 启用 W3C Trace Context 传播。解析传入的 `traceparent`/`tracestate` 头，生成 trace ID，注入到响应和 PHP `$_SERVER` 中。当 `OTEL_ENABLED=true` 时自动启用 |
-
-### OpenTelemetry（`plugin-otel` 特性）
-
-W3C Trace Context 传播始终可用（零依赖）。OpenTelemetry Span 导出需要使用 `--features plugin-otel` 构建。
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry Span 导出。隐含 `TRACE_CONTEXT=true` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP 收集器端点 |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc`（端口 4317）或 `http/protobuf`（端口 4318） |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
-| `OTEL_EXPORTER_OTLP_HEADERS` | *(无)* | 托管后端的认证头（`key=value,key=value`） |
-| `OTEL_SERVICE_NAME` | `oxphp` | 导出追踪中的服务名称 |
-| `OTEL_SERVICE_VERSION` | *(无)* | 导出追踪中的服务版本 |
-| `OTEL_RESOURCE_ATTRIBUTES` | *(无)* | 附加到每个 Span 的资源属性（`key=value,key=value`） |
-| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样策略：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 基于比率的采样器的采样比率（0.0-1.0） |
-
-## 工作线程模式
-
-`PHP_WORKERS` 变量控制 PHP 工作池使用固定大小还是动态伸缩。
-
-### 静态模式（默认）
-
-将 `PHP_WORKERS` 设为一个数字（或留空/设为 `0` 自动检测）：
+将 `PHP_WORKERS` 设置为单个数字以使用固定进程池：
 
 ```bash
-PHP_WORKERS=8      # 固定 8 个工作线程
+PHP_WORKERS=8      # 固定 8 个工作进程
 PHP_WORKERS=0      # 自动检测：CPU / 2（最少 1）
 ```
 
-工作线程在启动时创建，之后不会改变。每个工作线程使用阻塞 `recv()`，空闲时 CPU 开销为零。
-
-### 动态模式
-
-将 `PHP_WORKERS` 设为 `MIN:MAX` 启用自动伸缩：
+将 `PHP_WORKERS` 设置为 `MIN:MAX` 以启用自动扩缩容：
 
 ```bash
-PHP_WORKERS=2:16       # 在 2 到 16 个工作线程之间伸缩
-PHP_WORKERS=4:0        # 最少 4 个，最多自动检测（CPU * 2）
-PHP_WORKERS=0:0        # 两者均自动检测（最少 CPU/4（至少 1），最多 CPU*2）
+PHP_WORKERS=2:16   # 在 2 到 16 个工作进程之间扩缩容
+PHP_WORKERS=4:0    # 最少 4 个，最多自动检测（CPU × 2）
 ```
 
-ScaleManager 每 500ms 运行一次：
-- 当所有工作线程都在忙碌且池大小低于 MAX 时**扩容**（500ms 冷却期）
-- 当工作线程空闲超过 `PHP_WORKERS_IDLE_SECONDS` 且池大小高于 MIN 时**缩容**（5s 冷却期）
+在动态模式下，当所有工作进程均处于繁忙状态时，OxPHP 会增加工作进程；当工作进程空闲时间超过 `PHP_WORKERS_IDLE_SECONDS` 时，OxPHP 会减少工作进程。
 
-动态工作线程使用 `recv_timeout(200ms)` 以便定期检查关闭标志。
+## 工作进程模式
 
-## 路由模式
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本的路径。设置后启用持久化工作进程模式 |
+| `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` = 不限制 |
+| `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前允许使用的最大内存（MiB）。`0` = 不限制 |
 
-`INDEX_FILE` 变量控制 OxPHP 如何路由传入请求。共有三种模式：
+当 `WORKER_FILE` 设置后，PHP 进程在多个请求间保持存活，将引导状态（自动加载器、数据库连接）保留在内存中。工作进程在达到请求数或内存限制时会被自动回收。
 
-| 模式 | `INDEX_FILE` 值 | 行为 |
-|------|-----------------|------|
-| 传统模式 | *(空 / 未设置)* | 直接文件映射。`/about.php` 提供 `about.php`。`/` 提供 `index.php` 或 `index.html`（如果存在） |
-| 框架模式 | `index.php` | 所有非文件请求路由到 `index.php`（前端控制器）。直接访问 `.php` 被阻止 |
-| SPA 模式 | `index.html` | 找不到文件时回退到 `index.html`。`.php` 文件仍正常执行 |
+## 超时
 
-### 传统模式（默认）
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `HEADER_TIMEOUT_SECONDS` | `5` | 连接建立后接收 HTTP 头部的最大秒数（Slowloris 防护） |
+| `REQUEST_TIMEOUT_SECONDS` | `120` | 整个请求-响应周期的最大秒数。`0` = 禁用 |
+| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭期间等待进行中连接完成的最大秒数 |
 
-URL 直接映射到磁盘上的文件。这是经典 PHP 应用的标准行为。
+## 限流
 
-```bash
-# 未设置 INDEX_FILE — 传统模式为默认模式
-DOCUMENT_ROOT=/var/www/html/public
-```
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `RATE_LIMIT` | `0`（关闭） | 每个 IP 在时间窗口内的最大请求数。`0` 禁用限流 |
+| `RATE_WINDOW_SECONDS` | `60` | 限流窗口持续时间（秒） |
 
-### 框架模式
+## TLS
 
-所有请求通过单一入口点。这是 Laravel、Symfony 等框架的标准模式。
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `TLS_CERT` | *(未设置)* | PEM 编码 TLS 证书的路径。`TLS_CERT` 和 `TLS_KEY` 均设置后才会启用 TLS |
+| `TLS_KEY` | *(未设置)* | PEM 编码 TLS 私钥的路径 |
 
-```bash
-INDEX_FILE=index.php
-DOCUMENT_ROOT=/var/www/html/public
-```
+## 静态文件
 
-### SPA 模式
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `STATIC_CACHE_TTL` | `30d` | 静态文件的缓存 TTL。接受以下格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`），或 `off` 禁用缓存 |
+| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0–11）。`0` 禁用压缩 |
 
-静态资源直接提供。所有其他请求返回 `index.html`，由 JavaScript 路由器处理导航。
+## 日志
 
-```bash
-INDEX_FILE=index.html
-DOCUMENT_ROOT=/var/www/html/dist
-```
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | 日志详细程度：`trace`、`debug`、`info`、`warn`、`error` |
+| `ACCESS_LOG` | *(未设置)* | 按请求记录访问日志：`all` = 所有请求，`error` = 仅 4xx/5xx，未设置 = 关闭 |
+
+> **注意：** `ACCESS_LOG` 接受 `all` 或 `error`。不设置则完全禁用访问日志。
+
+## 可观测性
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址（`/health`、`/metrics`、`/config`）。未设置时不启动内部服务器 |
+| `ERROR_PAGES_DIR` | *(未设置)* | 包含自定义错误页面的目录，文件名格式为 `{status}.html`（如 `404.html`、`503.html`） |
+| `MAX_QUERY_BODY` | `524288` | 内部查询端点的最大请求体大小（字节，512 KiB） |
+| `TRACE_CONTEXT` | `false` | 启用 W3C Trace Context 传播（`true` 或 `1`）。读取 `traceparent`/`tracestate` 头部并通过 `$_SERVER` 转发给 PHP |
+
+## 异步工作进程
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `ASYNC_WORKERS` | `0`（禁用） | 用于后台任务处理的专用异步工作线程数。`0` 禁用异步进程池 |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | 异步队列中的最大待处理任务数。`0` = 自动（工作进程数 × 64） |
+
+异步工作进程池处理从 PHP 分发的即发即忘后台任务。它独立于 PHP 工作进程池，标准请求处理不需要它。
 
 ## 配置示例
 
@@ -186,21 +116,23 @@ DOCUMENT_ROOT=/var/www/html/dist
 
 ```bash
 LISTEN_ADDR=127.0.0.1:8080
-DOCUMENT_ROOT=./www
+DOCUMENT_ROOT=./public
 LOG_LEVEL=debug
+ACCESS_LOG=all
 PHP_WORKERS=1
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-### Laravel 生产环境（静态池）
+### 生产环境（框架模式）
 
 ```bash
-LISTEN_ADDR=0.0.0.0:8080
+LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
 INDEX_FILE=index.php
 PHP_WORKERS=8
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
+ACCESS_LOG=error
 MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
@@ -212,62 +144,10 @@ COMPRESSION_LEVEL=4
 STATIC_CACHE_TTL=30d
 ```
 
-### Laravel 生产环境（动态池）
+### 生产环境（工作进程模式）
 
 ```bash
-LISTEN_ADDR=0.0.0.0:8080
-DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
-PHP_WORKERS=4:32
-PHP_WORKERS_IDLE_SECONDS=60
-QUEUE_CAPACITY=512
-LOG_LEVEL=warn
-MAX_CONNECTIONS=10000
-INTERNAL_ADDR=127.0.0.1:9090
-RATE_LIMIT=100
-RATE_WINDOW_SECONDS=60
-HEADER_TIMEOUT_SECONDS=5
-REQUEST_TIMEOUT_SECONDS=60
-DRAIN_TIMEOUT_SECONDS=30
-COMPRESSION_LEVEL=4
-STATIC_CACHE_TTL=30d
-```
-
-### Docker Compose
-
-```yaml
-services:
-  oxphp:
-    image: oxphp:latest
-    ports:
-      - "8080:8080"
-    environment:
-      LISTEN_ADDR: "0.0.0.0:8080"
-      DOCUMENT_ROOT: "/var/www/html/public"
-      INDEX_FILE: "index.php"
-      PHP_WORKERS: "4"             # Or "2:16" for dynamic scaling
-      # PHP_WORKERS_IDLE_SECONDS: "30" # Idle timeout (dynamic mode only)
-      QUEUE_CAPACITY: "512"
-      LOG_LEVEL: "info"
-      INTERNAL_ADDR: "127.0.0.1:9090"
-      COMPRESSION_LEVEL: "4"
-      # STATIC_CACHE_TTL: "30d"       # Static file cache TTL (default: 30d)
-      # ASYNC_WORKERS: "4"            # Async worker threads for oxphp_async() (default: 0 = disabled)
-      # TRACE_CONTEXT: "true"         # Enable W3C Trace Context propagation
-      # OTEL_ENABLED: "true"          # Enable OpenTelemetry span export (implies TRACE_CONTEXT=true)
-    volumes:
-      - ./src:/var/www/html
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-```
-
-### 工作进程模式（持久化 PHP）
-
-```bash
-LISTEN_ADDR=0.0.0.0:8080
+LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
 WORKER_FILE=../worker.php
 PHP_WORKERS=8
@@ -275,24 +155,23 @@ WORKER_MAX_REQUESTS=10000
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
+ACCESS_LOG=error
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-工作进程模式使 PHP 进程在请求间保持存活。工作脚本调用 `oxphp_worker()` 并传入处理器回调。当工作进程达到 `WORKER_MAX_REQUESTS` 或 `WORKER_MAX_MEMORY_MIB` 时自动回收。将两者均设为 `0` 可禁用回收。
-
-### TLS 终止
+### TLS
 
 ```bash
 LISTEN_ADDR=0.0.0.0:443
-TLS_CERT=/etc/oxphp/tls/cert.pem
-TLS_KEY=/etc/oxphp/tls/key.pem
+TLS_CERT=/etc/ssl/oxphp/cert.pem
+TLS_KEY=/etc/ssl/oxphp/key.pem
+DOCUMENT_ROOT=/var/www/html/public
+INDEX_FILE=index.php
 ```
-
-OxPHP 使用 rustls 实现 TLS，因此不依赖 OpenSSL。证书和密钥必须为 PEM 格式。
 
 ## 查看当前配置
 
-当内部服务器运行时，可以查看已解析的配置：
+当内部服务器运行时，查询 `/config` 端点以查看已解析的配置：
 
 ```bash
 curl -s http://localhost:9090/config | jq .
@@ -300,38 +179,43 @@ curl -s http://localhost:9090/config | jq .
 
 ```json
 {
-  "listen_addr": "0.0.0.0:8080",
+  "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
-  "idle_timeout_seconds": 60,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": "/etc/oxphp/error-pages",
+  "error_pages_dir": null,
   "compression_level": 4,
-  "static_cache_ttl": 2592000,
   "access_log": "all",
-  "async_workers": 4,
-  "async_queue_capacity": 256,
+  "max_query_body": 524288,
+  "worker_mode": false,
+  "worker_file": null,
+  "worker_max_requests": 0,
+  "worker_max_memory_mib": 0,
+  "static_cache_ttl": 2592000,
+  "async_workers": 0,
+  "async_queue_capacity": 0,
+  "trace_context": false,
   "plugins": {}
 }
 ```
 
-输出中不包含 TLS 密钥和证书路径。`tls_enabled` 布尔值表示 TLS 是否已启用。`plugins` 对象包含已加载插件的配置。
+> **注意：** TLS 证书和私钥路径不包含在输出中。`tls_enabled` 字段表示 TLS 是否已启用。
 
-## 另请参阅
+## 参见
 
-- [路由](/features/routing.md) --- 三种路由模式的详细说明
-- [健康检查](health-checks.md) --- 内部服务器的 `/health`、`/metrics` 和 `/config` 端点
-- [指标](metrics.md) --- Prometheus 兼容指标参考
-- [优雅关闭](graceful-shutdown.md) --- `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程
-- [TLS](/features/tls.md) --- TLS 配置和证书要求
-- [速率限制](/features/rate-limiting.md) --- 按 IP 速率限制详情
-- [异步 Promise](/features/async-promises.md) --- 使用 `oxphp_async()` 进行并行 PHP 执行
-- [分布式追踪](/features/distributed-tracing.md) --- W3C Trace Context 与 OpenTelemetry 配置
-- [工作池](/architecture/worker-pool.md) --- 静态和动态工作池架构
+- [路由](../features/routing.md) — 路由模式与 `INDEX_FILE` 行为
+- [健康检查](health-checks.md) — 内部服务器端点
+- [指标](metrics.md) — Prometheus 兼容指标参考
+- [优雅关闭](graceful-shutdown.md) — `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程
+- [TLS](../features/tls.md) — TLS 配置与证书要求
+- [限流](../features/rate-limiting.md) — 基于 IP 的限流详情
+- [工作进程模式](../features/worker-mode.md) — 持久化 PHP 工作进程架构
+- [压缩](../features/compression.md) — Brotli 压缩详情
+- [静态文件](../features/static-files.md) — 缓存与文件服务

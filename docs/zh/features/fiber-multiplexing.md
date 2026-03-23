@@ -1,188 +1,247 @@
 ---
-title: 基于 Fiber 的请求多路复用
-description: 协作式多任务处理，让 PHP 工作线程同时处理多个并发请求
+title: Fiber 多路复用
+description: 使用协作式多任务处理，在单个 PHP Worker 线程上处理数百个并发请求。
 ---
 
-OxPHP 的 Fiber 调度器使每个 PHP 工作线程能够同时处理多个并发 HTTP 请求。当请求调用挂起点（如 `oxphp_async_await()` 或 `oxphp_sleep()`）时，Fiber 让出控制权，工作线程转而处理其他请求，而非阻塞等待。
+# Fiber 多路复用
+
+OxPHP 使用 PHP Fiber 在单个 Worker 线程上并发处理多个 HTTP 请求。当某个请求调用 `oxphp_sleep()` 或 `oxphp_async_await()` 时，它会挂起，Worker 线程立即处理下一个请求。这使得一个 Worker 无需额外线程就能管理数百个正在处理中的请求。
 
 ## 工作原理
 
-每个 HTTP 请求在自己的 Fiber（PHP 8.4 底层 Fiber API 中的 `zend_fiber_context`）中运行。Fiber 的 C 栈通过 `mmap` 分配一次，并通过**循环协程**在请求间复用 —— 协程在循环中处理请求，每次请求之间挂起。这避免了每次请求都进行 `mmap`/`munmap` 的开销。
+1. 请求到达后，调度器将其分配给一个 fiber——一个拥有独立栈和 PHP 状态的轻量级执行上下文
+2. fiber 运行 `oxphp_worker()` 处理器。如果处理器完成时没有挂起，响应会被发送，fiber 被回收——与单请求 Worker 相比开销为零
+3. 如果处理器调用了挂起函数（`oxphp_sleep()`、`oxphp_usleep()`、`oxphp_async_await()`），fiber 会将控制权交回调度器
+4. 调度器接收新的传入请求（创建新 fiber），并恢复等待条件已满足的挂起 fiber（计时器到期、异步结果就绪）
+5. 每个 fiber 的 PHP 状态——超全局变量、响应头、输出缓冲区、虚拟机栈——在挂起时保存，在恢复时还原。fiber 之间完全隔离
 
-工作线程运行一个事件循环：
-
-1. **接收新请求** —— 从有界通道非阻塞接收（`try_recv`）
-2. **检查已完成的异步结果** —— 用于等待 `oxphp_async_await()` 的 Fiber
-3. **检查已到期的计时器** —— 用于等待 `oxphp_sleep()` / `oxphp_usleep()` 的 Fiber
-4. **恢复就绪的 Fiber** —— 恢复其状态并切换到对应的 Fiber 上下文
-
-每个 Fiber 拥有自己的隔离状态：
-- **PHP VM 状态**：`EG(vm_stack)`、`EG(execute_data)`、`EG(bailout)` —— 每次上下文切换时保存和恢复
-- **PHP 超全局变量**：`$_SERVER`、`$_GET`、`$_POST` 等 —— 在 TLS 和每 Fiber 存储之间移动（非复制）
-- **SAPI 头部**：响应头和 HTTP 状态码
-- **C 栈限制**：`EG(stack_base)` / `EG(stack_limit)` —— 按 Fiber 设置，防止误判栈溢出
-- **Rust TLS**：响应输出缓冲区、EARLY_TX（响应通道）、请求开始时间
-
-从 PHP 脚本的角度来看，执行是连续的 —— 挂起和恢复对用户代码不可见。
-
-### 顺序请求（无多路复用）
-
-当请求处理器在未调用任何挂起点的情况下完成时，循环协程处理它并立即等待下一个请求。只有一个 Fiber 处于活跃状态，其 C 栈在每个请求中复用。性能等同于 Fiber 之前的工作循环 —— 无额外 `mmap`、无状态保存/恢复、无事件循环轮询。
-
-### 多路复用请求
-
-当处理器调用挂起点时，Fiber 挂起，调度器进入事件循环。事件循环接收新请求（按需创建额外的 Fiber）并恢复挂起条件已满足的 Fiber。每个额外的 Fiber 分配自己的 C 栈（一次），并通过循环协程复用。
-
+```text
+Worker 线程
+  │
+  ├─ Fiber A: 处理 /api/users ──── oxphp_sleep(0.5) ──── [已挂起] ──── [已恢复] ──── 响应
+  │
+  ├─ Fiber B: 处理 /api/orders ──── oxphp_async_await($p) ──── [已挂起] ──── [已恢复] ──── 响应
+  │
+  └─ Fiber C: 处理 /health ──── 响应（无挂起，零开销）
 ```
-Worker Thread
-===========================
-                          ┌─ try_recv ──► new request? ──► create/reuse fiber, start handler
-                          │
-loop ─────────────────────┤─ poll awaits ► result ready? ─► resume waiting fiber
-                          │
-                          └─ poll timers ► timer expired? ► resume sleeping fiber
-
-                          (fibers that complete are finalized and their response is sent)
-```
-
-## 挂起点
-
-以下函数在 worker 处理器内部调用时会触发 Fiber 挂起：
-
-| 函数 | 行为 |
-|------|------|
-| `oxphp_async_await(int $promise_id, ?float $timeout = null)` | 挂起直到异步任务完成或超时 |
-| `oxphp_async_await_all(array $promise_ids, ?float $timeout = null)` | v1 回退为阻塞（未来版本支持 Fiber 感知） |
-| `oxphp_async_await_any(array $promise_ids, ?float $timeout = null)` | v1 回退为阻塞（未来版本支持 Fiber 感知） |
-| `oxphp_sleep(float $seconds)` | 挂起指定时间（协作式） |
-| `oxphp_usleep(int $microseconds)` | 以微秒为单位挂起指定时间（协作式） |
-
-在 Fiber 外部调用时（传统模式），这些函数回退为各自的阻塞等效实现。
 
 ## 配置
 
-启用工作进程模式后，Fiber 多路复用自动生效。无需额外的环境变量。
+当 Worker 模式启用时，fiber 多路复用会自动激活。没有额外的环境变量。
 
-| 常量 | 值 | 说明 |
-|------|-----|------|
-| `OXPHP_MAX_FIBERS` | `256` | 每个工作线程的最大并发 Fiber 数（编译时常量） |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `WORKER_FILE` | *(未设置)* | Worker 脚本的路径。设置此项将启用 Worker 模式和 fiber 多路复用 |
+| `PHP_WORKERS` | CPU / 2（最少 1） | Worker 线程数。每个线程运行其独立的调度器，最多支持 256 个并发 fiber |
 
-Fiber 限制防止单个工作线程积累过多挂起的请求。达到限制时，事件循环停止接收新请求，直到有活跃的 Fiber 完成。
+每个 Worker 线程的最大并发 fiber 数为 256。使用 4 个 Worker 线程时，OxPHP 最多可以同时处理 1,024 个正在处理中的请求。
 
-### 多工作线程扩展
+## 挂起点
 
-每个 PHP 工作线程运行自己的独立 Fiber 调度器。所有状态（Fiber、计时器、TLS 槽位）都是线程本地的。多个工作线程线性扩展：
+以下函数会挂起当前 fiber，让其他请求在同一线程上运行：
 
-| 工作线程数 | `/bench`（req/s） | `/sleep?ms=20` c40（req/s） |
-|-----------|------------------|---------------------------|
-| 1 | 40,144 | 867 |
-| 2 | 66,619 | 1,378 |
+| 函数 | 行为说明 |
+|------|----------|
+| `oxphp_sleep(float $seconds)` | 将 fiber 挂起指定时长。其他 fiber 继续运行 |
+| `oxphp_usleep(int $microseconds)` | 与 `oxphp_sleep()` 相同，但精度为微秒（最小 1 毫秒） |
+| `oxphp_async_await(int $promise_id)` | 挂起 fiber 直到异步任务在后台线程池上完成 |
 
-设置 `PHP_WORKERS=N` 控制工作线程数。默认值：`CPU / 2`。
+以下函数**不会**挂起 fiber：
 
-## PHP API
+| 函数 | 行为说明 |
+|------|----------|
+| `oxphp_stream_flush()` | 立即将数据块发送给客户端并返回。在 SSE 循环中与 `oxphp_sleep()` 配合使用 |
+| `oxphp_finish_request()` | 发送完整响应并继续 PHP 执行。不产生让步 |
 
-### `oxphp_sleep`
+> **注意：** PHP 内置的 `sleep()` 和 `usleep()` 会阻塞整个 Worker 线程。请始终使用 `oxphp_sleep()` 和 `oxphp_usleep()` 以获得协作式行为。
 
-协作式 sleep，挂起当前 Fiber，允许工作线程在等待期间处理其他请求。
+## PHP 示例
 
-```php
-oxphp_sleep(float $seconds): void
-```
+### 基本并发处理
 
-**参数：**
-
-| 名称 | 类型 | 说明 |
-|------|------|------|
-| `$seconds` | `float` | 休眠时间（秒），例如 `0.5` 表示 500ms |
-
-**行为：**
-- 在工作进程模式下：注册计时器并挂起 Fiber。调度器在指定时间后恢复它。
-- 在 Fiber 外部（传统模式）：回退为阻塞 `usleep()`。
-- 小于或等于零的值立即返回，无任何效果。
-
-### `oxphp_usleep`
-
-协作式微秒级 sleep。与 `oxphp_sleep()` 功能相同，但接受微秒整数作为参数，与 PHP 内置 `usleep()` 保持一致。
-
-```php
-oxphp_usleep(int $microseconds): void
-```
-
-**参数：**
-
-| 名称 | 类型 | 说明 |
-|------|------|------|
-| `$microseconds` | `int` | 休眠时间（微秒） |
-
-**行为：** 与 `oxphp_sleep()` 相同，但使用微秒粒度。小于或等于零的值立即返回。
-
-## 向后兼容性
-
-Fiber 多路复用完全向后兼容：
-
-- **不调用挂起点的处理器**通过循环协程运行，零额外开销。Fiber 的 C 栈被复用，不进行状态保存/恢复。性能等同于 Fiber 之前的工作循环。
-- **`oxphp_sleep()` 和 `oxphp_usleep()` 在工作进程模式外部**回退为阻塞 `usleep()`。
-- **`oxphp_async_await()` 在 Fiber 外部**回退为在 oneshot 通道上阻塞。
-- **无需新的环境变量**。
-- **多工作线程配置**行为完全相同 —— 每个工作线程拥有自己的独立 Fiber 调度器。
-
-## 限制（v1）
-
-- **带自定义回调的 `ob_start()`** 在挂起点之间可能有意外行为。输出缓冲区在挂起时会刷新到 Rust 响应缓冲区，因此自定义 OB 回调在挂起边界处看到的是部分输出。
-- **共享可变闭包变量**（`use (&$var)`）在挂起点处可能交错执行。两个挂起点之间的代码不会被中断。在每个挂起点，其他请求可能在同一工作线程上执行。这与 Node.js 的 `async`/`await` 并发模型相同。
-- **`oxphp_async_await_all` 和 `oxphp_async_await_any`** 在 Fiber 模式下回退为阻塞（v1）。未来版本将添加 Fiber 感知的实现。
-- **每个工作线程最多 256 个并发 Fiber。** 这是编译时常量（`OXPHP_MAX_FIBERS`）。
-- **REQUEST_DATA**（服务器变量、cookie、请求体）尚未按 Fiber 保存/恢复。当多个 Fiber 处于活跃状态时，它们共享最近加载的请求数据。这会影响多路复用场景中挂起点之后的 `$_SERVER`、`$_GET`、`$_POST`。
-
-## 示例
-
-### 使用协作式 sleep 的 SSE
-
-此示例在事件间延迟期间让出工作线程，流式传输 Server-Sent Events。在每次 `oxphp_sleep()` 调用期间处理其他请求。
+不挂起的请求以全速运行，fiber 开销为零：
 
 ```php
 <?php
-oxphp_worker(function() {
+oxphp_worker(function () {
+    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+
+    if ($path === '/health') {
+        echo json_encode(['status' => 'ok']);
+        return; // 无挂起——以全速运行
+    }
+
+    if ($path === '/slow') {
+        oxphp_sleep(2.0); // 让步 2 秒——其他请求继续运行
+        echo "Done after 2s delay";
+        return;
+    }
+
+    echo "Hello";
+});
+```
+
+### 非阻塞 API 调用
+
+将 `oxphp_async()` 与 `oxphp_async_await()` 结合使用，在不阻塞 Worker 的情况下发起外部 API 调用：
+
+```php
+<?php
+oxphp_worker(function () {
+    // 将两个 API 调用分发到异步线程池
+    $p1 = oxphp_async(fn() => file_get_contents('https://api.example.com/users'));
+    $p2 = oxphp_async(fn() => file_get_contents('https://api.example.com/orders'));
+
+    // 等待两个结果——fiber 挂起，同一线程上的其他请求继续运行
+    $users  = oxphp_async_await($p1);
+    $orders = oxphp_async_await($p2);
+
+    header('Content-Type: application/json');
+    echo json_encode(['users' => json_decode($users), 'orders' => json_decode($orders)]);
+});
+```
+
+### 使用协作式睡眠的 SSE
+
+使用 `oxphp_stream_flush()` 和 `oxphp_sleep()` 将 Server-Sent Events 与其他请求交错处理：
+
+```php
+<?php
+oxphp_worker(function () {
     header('Content-Type: text/event-stream');
     header('Cache-Control: no-cache');
 
-    for ($i = 0; $i < 10; $i++) {
-        echo "data: " . json_encode(['counter' => $i]) . "\n\n";
-        oxphp_stream_flush();
-        oxphp_sleep(1.0); // yields fiber, worker handles other requests
+    for ($i = 0; $i < 30; $i++) {
+        echo "data: " . json_encode(['count' => $i, 'time' => time()]) . "\n\n";
+        oxphp_stream_flush(); // 立即发送数据块（不挂起）
+        oxphp_sleep(1.0);     // 让步 1 秒（其他请求继续运行）
     }
-
-    echo "event: done\ndata: {}\n\n";
-    oxphp_stream_flush();
 });
 ```
 
-### 带多路复用的异步等待
+## 阻塞 I/O
 
-当 `oxphp_async_await()` 挂起 Fiber 时，工作线程在等待异步结果期间处理其他 HTTP 请求：
+Fiber 多路复用是**协作式的，不是抢占式的**。调用阻塞函数的 fiber 会冻结整个 Worker 线程——该线程上的其他 fiber 无法继续执行。
+
+### 会阻塞 Worker 的函数
+
+- `file_get_contents()`、`fopen()`、`fread()`
+- `curl_exec()`、`curl_multi_exec()`
+- PDO 查询、`mysqli_query()`
+- PHP 的 `sleep()`、`usleep()`（请改用 `oxphp_sleep()`）
+- DNS 解析（`gethostbyname()`）
+- 任何同步网络或磁盘 I/O
+
+### 如何避免阻塞
+
+将阻塞操作封装在 `oxphp_async()` 中，在异步线程池上运行：
 
 ```php
 <?php
-oxphp_worker(function() {
-    $config = ['dsn' => 'mysql:host=localhost;dbname=app', 'user' => 'root', 'pass' => ''];
+// 错误——阻塞整个 Worker 线程
+$html = file_get_contents('https://example.com');
 
-    // Dispatch async task
-    $promise = oxphp_async(function() use ($config): array {
-        $pdo = new PDO($config['dsn'], $config['user'], $config['pass']);
-        return $pdo->query('SELECT count(*) as c FROM users')->fetch();
-    });
-
-    // Fiber suspends here — worker handles other requests
-    $result = oxphp_async_await($promise);
-
-    header('Content-Type: application/json');
-    echo json_encode($result);
-});
+// 正确——在异步池上运行，fiber 让步
+$promise = oxphp_async(fn() => file_get_contents('https://example.com'));
+$html = oxphp_async_await($promise);
 ```
 
-## 另请参阅
+对于数据库查询：
 
-- [异步 Promise](async-promises.md) --- 使用 `oxphp_async()` 和 `oxphp_async_await()` 进行并行执行
-- [工作池](../architecture/worker-pool.md) --- HTTP 工作池架构和工作进程模式
-- [PHP 扩展函数](../php/functions.md) --- 完整函数参考，包括 `oxphp_sleep` 和 `oxphp_usleep`
+```php
+<?php
+$db = new PDO('mysql:host=db;dbname=app', 'root', 'secret');
+
+// 错误——阻塞 Worker
+$users = $db->query('SELECT * FROM users WHERE active = 1')->fetchAll();
+
+// 正确——查询在异步线程上运行，fiber 让步
+$promise = oxphp_async(function () {
+    $db = new PDO('mysql:host=db;dbname=app', 'root', 'secret');
+    return $db->query('SELECT * FROM users WHERE active = 1')->fetchAll();
+});
+$users = oxphp_async_await($promise);
+```
+
+> **注意：** 数据库连接不能传递给 `oxphp_async()`，因为对象无法跨线程序列化。请在异步闭包内部创建连接，或者如果查询足够快速以至于阻塞是可以接受的，则直接在 fiber 中使用查询。
+
+## Fiber 的回收方式
+
+Fiber 的 C 栈只分配一次，并跨请求复用。当 fiber 完成一次请求处理后，它不会被销毁——而是挂起回调度器并被添加到空闲列表中。下一个请求复用现有的 C 栈，避免了昂贵的内存分配。
+
+PHP 虚拟机栈（用于函数调用帧）在每次请求时全新分配，并在处理器返回时释放。
+
+## Docker 示例
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "80:80"
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - WORKER_FILE=worker.php
+      - PHP_WORKERS=4
+      - ASYNC_WORKERS=8
+```
+
+使用此配置，4 个 Worker 线程中的每个都可以处理最多 256 个并发 fiber，阻塞 I/O 被卸载到 8 个异步 Worker 线程。
+
+## 故障排除
+
+### 某个请求执行大量 I/O 时所有请求都变慢
+
+某个 fiber 在没有使用 `oxphp_async()` 的情况下调用了阻塞函数（数据库查询、HTTP 请求、文件读取）。这会阻塞整个 Worker 线程。
+
+**修复：** 将阻塞调用封装在 `oxphp_async()` 中：
+
+```php
+<?php
+$promise = oxphp_async(fn() => file_get_contents($url));
+$result = oxphp_async_await($promise);
+```
+
+### 使用 oxphp_async() 时出现"Failed to dispatch async task"
+
+异步池已满或被禁用。
+
+**修复：** 将 `ASYNC_WORKERS` 设置为大于 0 的值，并在需要时增大 `ASYNC_QUEUE_CAPACITY`：
+
+```bash
+ASYNC_WORKERS=8
+ASYNC_QUEUE_CAPACITY=512
+```
+
+### oxphp_sleep() 没有向其他请求让步
+
+Fiber 多路复用仅在 Worker 模式下工作。在传统模式下，`oxphp_sleep()` 回退到阻塞式 `usleep()`。
+
+**修复：** 通过设置 `WORKER_FILE` 启用 Worker 模式。
+
+### 并发请求多时内存使用量高
+
+每个 fiber 使用一个 C 栈（默认 8 MiB，由 PHP 的 `fiber.stack_size` ini 设置配置）以及每次请求的 PHP 虚拟机栈。在 256 个并发 fiber 的情况下，每个 Worker 线程最坏情况下的 C 栈内存为 2 GiB。
+
+**修复：** 如果您的应用不使用深层递归，请在 `php.ini` 中减小 `fiber.stack_size`：
+
+```ini
+fiber.stack_size = 512K
+```
+
+## 限制
+
+- **仅限 Worker 模式** — fiber 多路复用在传统模式下不可用
+- **每个 Worker 最多 256 个 fiber** — 硬性限制，运行时不可配置
+- **仅协作式** — CPU 密集型代码（紧密循环、大量计算）会使其他 fiber 饥饿。没有抢占机制
+- **阻塞 I/O 会阻塞线程** — 所有阻塞调用必须封装在 `oxphp_async()` 中才能实现真正的并发
+- **PHP 原生的 `sleep()`/`usleep()` 不感知 fiber** — 请使用 `oxphp_sleep()`/`oxphp_usleep()`
+- **`oxphp_async_await_all()` 和 `oxphp_async_await_any()` 不产生让步** — 即使在 fiber 内部它们目前也会阻塞。对于 fiber 友好的行为，请使用顺序的 `oxphp_async_await()` 调用
+
+## 参见
+
+- [Worker 模式](worker-mode.md) — 持久化 PHP 进程和 `oxphp_worker()` API
+- [异步 Promise](async-promises.md) — 用于卸载阻塞 I/O 的后台线程池
+- [SSE](sse.md) — 结合基于 fiber 的协作式睡眠的实时流式传输
+- [PHP 函数](../php/functions.md) — `oxphp_sleep()`、`oxphp_usleep()` 及其他感知 fiber 的函数
+- [配置参考](../operations/configuration.md) — `WORKER_FILE`、`PHP_WORKERS`、`ASYNC_WORKERS`

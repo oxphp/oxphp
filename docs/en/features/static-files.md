@@ -1,13 +1,31 @@
 ---
 title: Static Files
-description: File serving with MIME detection, LRU caching, HTTP caching, and streaming for large files
+description: OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, and conditional 304 responses.
 ---
 
-OxPHP serves static files directly from the document root with automatic MIME type detection, a three-tier LRU cache, HTTP caching (ETag / Last-Modified / 304), and streaming for large files.
+# Static Files
 
-## MIME type detection
+OxPHP serves static files directly from the document root without invoking PHP. Files are served with automatic MIME type detection, an in-memory cache for fast repeated access, and full HTTP caching support including ETags and conditional requests.
 
-MIME types are determined from the file extension using the `mime_guess` crate. If no type can be determined, the server falls back to `application/octet-stream`. Common mappings include:
+## How It Works
+
+When a request matches a static file:
+
+1. **File matched** — the routing layer resolves the URL path to a file on disk
+2. **MIME detection** — the content type is determined from the file extension
+3. **Cache check** — the file cache is checked before touching the filesystem
+4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
+5. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STATIC_CACHE_TTL` | `30d` | Cache-Control max-age for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely |
+
+## MIME Detection
+
+MIME types are determined automatically from the file extension. If no type can be determined, the server falls back to `application/octet-stream`. Common mappings include:
 
 | Extension | Content-Type |
 |-----------|-------------|
@@ -19,147 +37,92 @@ MIME types are determined from the file extension using the `mime_guess` crate. 
 | `.svg` | `image/svg+xml` |
 | `.woff2` | `font/woff2` |
 
-## File cache
+## File Caching
 
-The file cache reduces filesystem syscalls during routing and serving. It uses an `RwLock<FileCacheInner>` wrapping three separate HashMaps (metadata, content, and canonical path caches) with counter-based LRU eviction and operates on three tiers:
+OxPHP uses an in-memory cache to reduce disk I/O for frequently requested files:
 
-### Metadata cache
+- Files **up to 1 MiB** (1,048,576 bytes) are read into memory and cached. The total cache budget is 64 MiB (67,108,864 bytes). When the budget is exceeded, the least recently used entries are evicted to make room.
+- Files **larger than 1 MiB** are always streamed directly from disk. The `Content-Length` header is set from file metadata so the client knows the total size upfront.
 
-Stores whether a path refers to a file, a directory, or does not exist. The router checks this cache on every request to decide whether to serve, execute, or return 404 without hitting the filesystem.
+The file cache is populated on the first request to each file and retained across subsequent requests. Cache entries are never manually invalidated — they persist until evicted by the LRU policy.
 
-- Capacity: 200 entries (configurable at compile time)
-- Eviction: LRU by access counter
-- Cache miss triggers an async `tokio::fs::metadata()` call
+## HTTP Caching
 
-### Content cache
+### Cache-Control
 
-Stores the full file contents for small files so repeated requests are served from memory without disk I/O.
+When `STATIC_CACHE_TTL` is set (the default is `30d`), every static file response includes a `Cache-Control` header:
 
-- Per-file maximum: 1 MB
-- Total cache budget: 64 MB
-- Eviction: LRU when total bytes exceed the budget
-- Data stored as `Bytes` (reference-counted, zero-copy clone)
-- MIME type stored alongside content as `Arc<str>`
+```http
+Cache-Control: public, max-age=2592000
+```
 
-Files larger than 1 MB are never cached and are always streamed from disk.
+The `max-age` value is the TTL converted to seconds. Set `STATIC_CACHE_TTL=off` to omit this header entirely.
 
-### Canonical path cache
-
-Stores the result of `canonicalize()` calls used for symlink escape protection. This avoids repeated `realpath(3)` syscalls on the same paths.
-
-- Shares the same 200-entry capacity as the metadata cache
-- Stores `Option<PathBuf>` -- `None` means the file did not exist at cache time
-- Eviction: LRU by access counter
-
-## HTTP caching
-
-OxPHP supports HTTP caching for static files with ETag validation and conditional requests, controlled by the `STATIC_CACHE_TTL` environment variable.
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STATIC_CACHE_TTL` | `30d` | Cache TTL for static files. Supports flexible duration formats or `off` to disable |
-
-Supported duration formats:
-
-| Format | Example | Seconds |
-|--------|---------|---------|
-| Seconds | `30s` | 30 |
-| Minutes | `5m` | 300 |
-| Hours | `2h` | 7,200 |
-| Days | `30d` | 2,592,000 |
-| Weeks | `1w` | 604,800 |
-| Years | `1y` | 31,536,000 |
-| Bare number | `3600` | 3,600 |
-| Disabled | `off` | *(no caching headers)* |
-
-### Response headers
-
-When caching is enabled, every static file response includes:
-
-| Header | Value | Example |
-|--------|-------|---------|
-| `Cache-Control` | `public, max-age={ttl}` | `public, max-age=2592000` |
-| `ETag` | Weak ETag from file size and mtime | `W/"1024-65a1b2c3"` |
-| `Last-Modified` | RFC 7231 HTTP date | `Tue, 14 Nov 2023 18:13:20 GMT` |
-
-### Conditional requests (304 Not Modified)
-
-When a client sends `If-None-Match` or `If-Modified-Since` headers, OxPHP validates them against the file's current metadata:
-
-1. **If-None-Match** takes priority (per RFC 7232 §3.3). The ETag is compared against a comma-separated list of tags. A `*` value always matches.
-2. **If-Modified-Since** is checked as a fallback. The file's modification time (truncated to second precision) is compared against the header value.
-
-If the file has not changed, OxPHP returns a `304 Not Modified` response with `ETag`, `Last-Modified`, and `Cache-Control` headers but no body. This check runs **before** any file I/O:
-
-- For **cached files**: the conditional check runs under a read lock without cloning any data
-- For **uncached files**: the conditional check runs after `fs::metadata()` but before `fs::read()`, avoiding disk reads for unchanged files
-
-### ETag format
-
-ETags use the weak format `W/"<size>-<mtime_hex>"` where:
-
-- `<size>` is the file size in bytes (decimal)
-- `<mtime_hex>` is the Unix timestamp of the last modification (lowercase hex)
-
-Weak ETags indicate semantic equivalence — the response may differ at the byte level (e.g., after Brotli compression) but represents the same content.
-
-### Disabling caching
-
-Set `STATIC_CACHE_TTL=off` to disable all caching headers. No `Cache-Control`, `ETag`, or `Last-Modified` headers will be sent, and conditional requests will not be evaluated.
-
-## Serving behavior
-
-When a static file request arrives:
-
-1. **Conditional check (cached)** -- if the file is in the content cache and has matching conditional headers, return 304 immediately
-2. **Content cache check** -- if the file is cached, return it with the stored MIME type and caching headers
-3. **MIME type lookup** -- compute the content type from the file extension
-4. **TOCTOU re-validation** -- if symlink protection is enabled, re-canonicalize the path before reading
-5. **Metadata + conditional check (uncached)** -- read file metadata; if conditional headers match, return 304 before reading the file
-6. **Size check** -- determine the serving strategy based on file size
-
-### Small files (up to 1 MB)
-
-The entire file is read into memory with `tokio::fs::read()`, inserted into the content cache, and returned as a buffered response body. The `Content-Length` header is set to the exact byte count.
-
-### Large files (over 1 MB)
-
-The file is opened with `tokio::fs::File::open()` and streamed to the client using `ReaderStream`. The `Content-Length` header is set from the file metadata so the client knows the total size.
-
-## Response headers
+### ETag and Last-Modified
 
 Every static file response includes:
 
-| Header | Value |
-|--------|-------|
-| `Content-Type` | Detected MIME type |
-| `Content-Length` | File size in bytes |
-| `Cache-Control` | `public, max-age={ttl}` *(when caching enabled)* |
-| `ETag` | `W/"<size>-<mtime_hex>"` *(when caching enabled)* |
-| `Last-Modified` | RFC 7231 HTTP date *(when caching enabled)* |
+- **ETag** — a weak ETag in the format `W/"<size>-<mtime_hex>"`, derived from the file size and last modification time
+- **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
-## Cache metrics
+These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
 
-The file cache exposes two Prometheus counters for monitoring cache effectiveness:
+### Conditional Requests (304)
 
-| Metric | Description |
-|--------|-------------|
-| `oxphp_static_cache_hits_total` | Requests served from the content cache (no disk I/O) |
-| `oxphp_static_cache_misses_total` | Requests that required reading from disk |
+OxPHP evaluates conditional request headers to avoid sending unchanged file content:
 
-Cache hit ratio can be computed as `hits / (hits + misses)`. A low hit ratio may indicate the content cache budget (64 MB) is too small for the working set, or that most requested files exceed the 1 MB per-file cache limit.
+- **If-None-Match** — the client sends the ETag it has cached. If it matches the current file, OxPHP returns `304 Not Modified` with no body.
+- **If-Modified-Since** — the client sends a timestamp. If the file has not been modified since that time, OxPHP returns 304.
 
-## Error handling
+`If-None-Match` takes priority over `If-Modified-Since` per RFC 7232. For files already in the in-memory cache, the conditional check runs without any disk I/O.
 
-- **File not found**: returns 404 with a plain text body
-- **Permission errors**: propagated as a 500 error
-- **Read failures after metadata check**: returns 404 (file may have been deleted between check and read)
+### Disabling Caching
+
+Set `STATIC_CACHE_TTL=off` to disable all HTTP caching headers. No `Cache-Control`, `ETag`, or `Last-Modified` headers are sent, and conditional requests are not evaluated. Use this during development to always see the latest file contents.
+
+## Troubleshooting
+
+### Browser keeps serving stale files
+
+If you are not using `STATIC_CACHE_TTL=off` during development, browsers cache files aggressively. Either set `STATIC_CACHE_TTL=off` in development, or use your browser's hard reload (Shift+F5 or Cmd+Shift+R) to bypass the cache.
+
+### Files are served with `application/octet-stream`
+
+OxPHP uses the file extension to determine the MIME type. If an extension is missing or not recognized, it falls back to `application/octet-stream`. Add the correct extension to your file, or ensure your framework sets the `Content-Type` header explicitly in PHP responses.
+
+### Large files seem slow
+
+Files larger than 1 MiB are streamed from disk on every request and are not cached in memory. For very large files, place a CDN in front of OxPHP to cache them at the edge. Alternatively, restructure your assets so frequently served files stay under 1 MiB.
+
+### 304 responses are returned when you expect 200
+
+A 304 means the client already has the current version. This is correct behavior. If you need to force a fresh response during development, set `STATIC_CACHE_TTL=off` so no `ETag` or `Last-Modified` headers are sent.
+
+## Docker Example
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/var/www/html
+    environment:
+      - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - STATIC_CACHE_TTL=1y
+```
+
+## Best Practices
+
+- **Use long TTLs with cache-busting filenames** in production (e.g. `app.a1b2c3.js`). Set `STATIC_CACHE_TTL=1y` for maximum browser and CDN caching.
+- **Set `STATIC_CACHE_TTL=off` during development** to ensure you always see the latest changes without clearing browser caches.
+- **Place a CDN in front of OxPHP** for high-traffic sites. The `ETag`, `Last-Modified`, and `Cache-Control` headers work with all major CDN providers.
+- **Let your build tool handle asset hashing.** Frameworks like Vite and Laravel Mix generate hashed filenames automatically, making long cache TTLs safe.
 
 ## See Also
 
-- [Routing](routing.md) -- how URL paths are resolved to files on disk
-- [Compression](compression.md) -- Brotli compression for compressible static file responses; `Vary: Accept-Encoding` is added by the compression layer, not by static file serving
-- [Metrics](/operations/metrics.md) -- `oxphp_static_cache_hits_total` and `oxphp_static_cache_misses_total` counters
-- [Error Pages](error-pages.md) -- custom HTML pages for error responses
+- [Compression](compression.md) — Brotli compression for compressible static file responses
+- [Routing](routing.md) — how URL paths are resolved to files on disk
+- [Configuration Reference](../operations/configuration.md) — full list of environment variables

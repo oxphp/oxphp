@@ -1,13 +1,15 @@
 ---
-title: Docker
-description: Docker image usage, compose.yml reference, and deployment tips
+title: Docker Guide
+description: Run OxPHP with Docker. Covers minimal and multi-stage Dockerfiles, Compose configuration, PHP ini mounts, health checks, and port reference.
 ---
 
-OxPHP is distributed as a pre-built Docker image at `ghcr.io/oxphp/oxphp:0.1.0`. This page covers how to use the image, configure it with `compose.yml`, and common deployment considerations.
+# Docker Guide
 
-## Using the Image
+OxPHP is designed to run as a container. This guide covers everything you need to build, configure, and operate OxPHP with Docker — from a minimal single-stage image to a full multi-stage setup with separate development and production targets.
 
-The simplest way to run OxPHP is to extend the base image with your application files:
+## Minimal Dockerfile
+
+The simplest way to containerize your application:
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -15,154 +17,273 @@ FROM ghcr.io/oxphp/oxphp:0.1.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The image includes:
+This copies your application into the container and serves it from `/var/www/html/public`. The server listens on port `80` by default.
 
-- The `oxphp` binary
-- PHP 8.4 ZTS runtime (`libphp.so`)
-- Bridge library (`liboxphp_bridge.so`)
-- PHP extension (`oxphp_sapi.so`) with `oxphp_request_id()`, `oxphp_server_info()`, and other functions
-- Alpine Linux base with minimal runtime dependencies
-- `www-data` user (UID 82, GID 82) for non-root execution
+## Multi-Stage Dockerfile
 
-The default document root is `/var/www/html/public`. The server listens on port 8080. The `CMD` is `["oxphp"]`.
+For real-world applications, use a multi-stage Dockerfile with separate `dev` and `prod` targets. The `dev` target includes PHP CLI, Composer, and Xdebug. The `prod` target builds on the minimal OxPHP image with only what's needed in production.
 
-## compose.yml Reference
+```dockerfile
+# ── Stage: php-base — shared PHP extensions ──────────────────
+FROM php:8.4-zts-alpine3.23 AS php-base
+
+RUN apk add --no-cache \
+        icu-dev \
+        icu-libs \
+        postgresql-dev \
+        libpq \
+    && docker-php-ext-install \
+        pdo \
+        pdo_mysql \
+        pdo_pgsql \
+        intl \
+    && apk del icu-dev postgresql-dev
+
+# ── Stage: php-dev — add Xdebug on top of base ───────────────
+FROM php-base AS php-dev
+
+RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
+    && pecl install xdebug \
+    && docker-php-ext-enable xdebug \
+    && apk del $PHPIZE_DEPS linux-headers
+
+# ── Stage: composer ───────────────────────────────────────────
+FROM composer:2 AS composer
+
+# ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
+FROM ghcr.io/oxphp/oxphp:0.1.0 AS oxphp
+
+# ── Target: dev ──────────────────────────────────────────────
+# Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
+FROM php-dev AS dev
+
+RUN apk add --no-cache libgcc
+
+# Composer
+COPY --from=composer /usr/bin/composer /usr/local/bin/composer
+
+# OxPHP binary
+COPY --from=oxphp /usr/local/bin/oxphp /usr/local/bin/oxphp
+
+# Bridge library
+COPY --from=oxphp /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+
+# OxPHP PHP extension
+RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
+    echo "$EXT_DIR" > /tmp/ext_dir
+COPY --from=oxphp /usr/local/lib/php/extensions/ /tmp/oxphp-ext/
+RUN cp /tmp/oxphp-ext/*/oxphp_sapi.so "$(cat /tmp/ext_dir)/" && \
+    rm -rf /tmp/oxphp-ext /tmp/ext_dir
+
+# PHP config
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp-ext.ini
+
+# Dev-friendly OPcache (validates timestamps)
+RUN { \
+        echo "[opcache]"; \
+        echo "opcache.enable=1"; \
+        echo "opcache.enable_cli=1"; \
+        echo "opcache.validate_timestamps=1"; \
+        echo "opcache.revalidate_freq=0"; \
+    } > /usr/local/etc/php/conf.d/opcache-dev.ini
+
+# Xdebug — connect back to host
+RUN { \
+        echo "[xdebug]"; \
+        echo "xdebug.mode=debug"; \
+        echo "xdebug.start_with_request=trigger"; \
+        echo "xdebug.client_host=host.docker.internal"; \
+        echo "xdebug.client_port=9003"; \
+    } > /usr/local/etc/php/conf.d/xdebug-config.ini
+
+RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
+RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
+
+COPY --chown=www-data:www-data . /var/www/html
+
+EXPOSE 80 443
+
+CMD ["oxphp"]
+
+# ── Stage: prod-extensions — compile extensions for prod ─────
+FROM php-base AS prod-extensions
+
+RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
+    mkdir -p /ext-out && \
+    cp "$EXT_DIR"/pdo.so \
+       "$EXT_DIR"/pdo_mysql.so \
+       "$EXT_DIR"/pdo_pgsql.so \
+       "$EXT_DIR"/intl.so \
+       /ext-out/
+
+# ── Target: prod — minimal, based on OxPHP image ─────────────
+FROM oxphp AS prod
+
+USER root
+RUN apk add --no-cache icu-libs libpq
+
+COPY --from=prod-extensions /ext-out/*.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+RUN { \
+        echo "extension=pdo_mysql.so"; \
+        echo "extension=pdo_pgsql.so"; \
+        echo "extension=intl.so"; \
+    } > /usr/local/etc/php/conf.d/app-extensions.ini
+
+COPY --chown=www-data:www-data . /var/www/html
+
+USER www-data
+
+EXPOSE 80 443
+
+CMD ["oxphp"]
+```
+
+Build each target:
+
+```bash
+# Development image (includes PHP CLI, Composer, Xdebug)
+docker build --target dev -t myapp:dev .
+
+# Production image (minimal)
+docker build --target prod -t myapp:prod .
+```
+
+> **Note:** The `dev` target is based on `php:8.4-zts-alpine` with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
+
+## Docker Compose
+
+### Production
 
 ```yaml
 services:
   oxphp:
-    build: .
+    build:
+      context: .
+      target: prod
     ports:
-      - "8080:8080"   # Main HTTP server
-      - "9090:9090"   # Internal server (health/metrics/config)
-    volumes:
-      - ./www:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
-      - ./certs:/etc/ssl/oxphp:ro
+      - "80:80"
+      - "443:443"
+      - "9090:9090"
     environment:
-      # Server
-      - LISTEN_ADDR=0.0.0.0:8080
+      - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
-      # - INDEX_FILE=index.php       # Enables Framework routing mode
-      - EXECUTOR=sapi                # "sapi" or "stub"
-      # - PHP_WORKERS=0              # Static: 0 = CPU/2, or fixed N
-      # - PHP_WORKERS=2:16           # Dynamic: scale between 2 and 16
-      # - PHP_WORKERS_IDLE_SECONDS=30    # Idle timeout for dynamic scale-down
-      # - QUEUE_CAPACITY=512         # Default: PHP_WORKERS * 128
-
-      # Logging
-      - LOG_LEVEL=info
-
-      # Internal server
+      - INDEX_FILE=index.php
       - INTERNAL_ADDR=0.0.0.0:9090
-
-      # Timeouts (seconds)
-      - HEADER_TIMEOUT_SECONDS=5
+      - LOG_LEVEL=info
+      - ACCESS_LOG=error
+      - PHP_WORKERS=4
       - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
-
-      # Rate limiting (0 = disabled)
-      # - RATE_LIMIT=100
-      # - RATE_WINDOW_SECONDS=60
-
-      # TLS
-      # - TLS_CERT=/etc/ssl/oxphp/server.pem
-      # - TLS_KEY=/etc/ssl/oxphp/server.key
-
-      # Error pages
-      # - ERROR_PAGES_DIR=/var/www/errors
-
-      # Compression level (0-11, 0=disabled, default: 4)
-      # - COMPRESSION_LEVEL=4
+      - COMPRESSION_LEVEL=4
     restart: unless-stopped
 ```
 
-For development, you can mount your source directory as a volume instead of copying files into the image:
+### Development
+
+Mount your source directory as a volume so file changes are reflected without rebuilding. The `dev` target has OPcache timestamp validation enabled, so PHP picks up changes automatically.
 
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    build:
+      context: .
+      target: dev
     ports:
-      - "8080:8080"
+      - "80:80"
+      - "9090:9090"
     volumes:
-      - ./www:/var/www/html:ro
+      - ./src:/var/www/html:ro
+      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
     environment:
-      - LISTEN_ADDR=0.0.0.0:8080
+      - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
+      - INDEX_FILE=index.php
+      - INTERNAL_ADDR=0.0.0.0:9090
+      - LOG_LEVEL=debug
+      - ACCESS_LOG=all
 ```
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port for the main HTTP server |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files |
-| `INDEX_FILE` | _(unset)_ | Set to `index.php` for Framework mode or `index.html` for SPA mode |
-| `EXECUTOR` | `sapi` | PHP executor type: `sapi` (real PHP) or `stub` (placeholder) |
-| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool mode. `N` = fixed pool, `MIN:MAX` = dynamic scaling |
-| `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before a dynamic worker is retired |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded request queue size. 529 returned when full |
-| `LOG_LEVEL` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |
-| `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
-| `INTERNAL_ADDR` | _(unset)_ | Address for internal server. Unset disables it |
-| `HEADER_TIMEOUT_SECONDS` | `5` | Timeout for reading request headers |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum request processing time. 0 disables the timeout |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Grace period for in-flight connections during shutdown |
-| `RATE_LIMIT` | `0` | Max requests per IP per window. 0 disables rate limiting |
-| `RATE_WINDOW_SECONDS` | `60` | Rate limiting window in seconds |
-| `TLS_CERT` | _(unset)_ | Path to TLS certificate PEM file |
-| `TLS_KEY` | _(unset)_ | Path to TLS private key PEM file |
-| `ERROR_PAGES_DIR` | _(unset)_ | Directory containing `{status}.html` error page files |
-| `COMPRESSION_LEVEL` | `4` | Brotli compression quality level (0-11). `0` disables compression |
-| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Tokio async runtime threads (0 = auto) |
-| `ACCESS_LOG` | *(off)* | Per-request JSON access log: `all`, `error` (4xx/5xx only), empty = off |
-
-
-### Ports
-
-| Port | Purpose |
-|------|---------|
-| `8080` | Main HTTP server (or HTTPS if TLS is configured) |
-| `9090` | Internal server: `/health`, `/metrics`, `/config` |
-
-### Volume Mounts
+## Volume Mounts
 
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
-| `./www` | `/var/www/html` | Application files (PHP scripts, static assets). Mount as `:ro` |
-| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP configuration (OPcache, sessions). Mount as `:ro` |
-| `./certs` | `/etc/ssl/oxphp` | TLS certificate and key files. Mount as `:ro` |
+| `./src` | `/var/www/html` | Application files (PHP scripts, static assets). Use `:ro` in production |
+| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP runtime configuration (OPcache, sessions, JIT). Use `:ro` |
+| `./certs` | `/etc/ssl/oxphp` | TLS certificate and private key. Use `:ro` |
+
+## Port Reference
+
+| Port | Environment Variable | Purpose |
+|------|---------------------|---------|
+| `80` | `LISTEN_ADDR` | Main HTTP server |
+| `443` | `LISTEN_ADDR` | Main HTTPS server (when TLS is configured) |
+| `9090` | `INTERNAL_ADDR` | Internal server: `/health`, `/metrics`, `/config` |
+
+> **Note:** The internal server is disabled by default. Set `INTERNAL_ADDR` to enable it. In production, keep the internal port reachable only by your orchestrator or monitoring system — do not expose it publicly.
 
 ## PHP Configuration
 
-To customize PHP settings (OPcache, JIT, sessions, etc.), create an `oxphp.ini` file and mount it into the container:
+Customize PHP settings by creating an `oxphp.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
 
 ```ini
+zend_extension=opcache
+
 [opcache]
-opcache.enable=1
-opcache.jit=1255
-opcache.jit_buffer_size=64M
+opcache.enable = 1
+opcache.enable_cli = 1
+opcache.memory_consumption = 128
+opcache.interned_strings_buffer = 16
+opcache.max_accelerated_files = 10000
+opcache.validate_timestamps = 0
+opcache.jit_buffer_size = 64M
+opcache.jit = tracing
+
+[Session]
+session.save_path = /tmp
+session.use_cookies = 1
+session.use_only_cookies = 1
 ```
+
+In development, set `opcache.validate_timestamps = 1` and `opcache.revalidate_freq = 0` so PHP picks up file changes without a container restart.
+
+See [OPcache](../php/opcache.md) for recommended settings and JIT configuration.
+
+## Health Checks
+
+Add a Docker health check to let Docker or your orchestrator monitor container health. This requires `INTERNAL_ADDR` to be set.
+
+In `compose.yaml`:
 
 ```yaml
-volumes:
-  - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+services:
+  oxphp:
+    environment:
+      - INTERNAL_ADDR=0.0.0.0:9090
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 ```
 
-See [OPcache](../php/opcache.md) for recommended settings.
+In a `Dockerfile`:
 
-## Alpine www-data User
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=5s \
+    CMD wget --quiet --tries=1 --spider http://localhost:9090/health || exit 1
+```
 
-The image runs as `www-data` (UID 82, GID 82) for compatibility with nginx and Apache conventions. If your application needs to write to specific directories (sessions, cache, uploads), ensure those directories are writable by UID 82.
+The `/health` endpoint returns `200` when the server is healthy and `503` when degraded. The response JSON includes uptime, total request count, and active connection count. For Kubernetes, use the same endpoint as both a liveness and readiness probe.
 
-## Building from Source
+## What's Next
 
-If you need to build OxPHP from source (for example, to enable custom Cargo features or modify the server), refer to the [Installation](installation.md) guide for source build instructions. The OxPHP repository includes a multi-stage Dockerfile that compiles the bridge library, PHP extension, and Rust binary from source.
-
-## See Also
-
-- [Installation](installation.md) -- source build prerequisites and instructions
-- [Quick Start](quick-start.md) -- get OxPHP running in under 5 minutes
-- [Configuration](../operations/configuration.md) -- full environment variable reference
-- [Graceful Shutdown](../operations/graceful-shutdown.md) -- drain behavior and timeout settings
+- [Configuration](../operations/configuration.md) — full environment variable reference
+- [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
+- [Worker Mode](../features/worker-mode.md) — persistent PHP processes for framework applications
+- [TLS](../features/tls.md) — HTTPS with built-in TLS termination
+- [Health Checks](../operations/health-checks.md) — health endpoint details and Kubernetes integration
+- [Graceful Shutdown](../operations/graceful-shutdown.md) — drain behavior and shutdown sequence

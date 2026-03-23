@@ -1,233 +1,363 @@
 ---
-title: Attribute-Based Decorators
-description: Intercept PHP function and method calls using PHP 8+ attributes
+title: Decorators
+description: Intercept PHP function and method calls with attribute-based decorators for logging, timing, caching, and access control.
 ---
 
-OxPHP provides an attribute-based decorator system that intercepts PHP function and method calls at the engine level. Decorators use the PHP 8+ Observer API (`zend_observer_fcall`) for zero-overhead interception of undecorated functions and transparent wrapping of decorated ones.
+# Decorators
 
-The system provides only the **interception mechanism**. What decorators do (timing, metrics, circuit breaking, caching) is the responsibility of the decorator implementation.
+OxPHP decorators intercept PHP function and method calls using PHP 8 attributes. Add an attribute to any function or method, and OxPHP calls your decorator's `before()` and `after()` methods around every invocation — with zero changes to the original code.
 
 ## How It Works
 
-1. A PHP class implements `OxPHP\Decorator\AttributeInterface` and is marked with `#[Attribute]`
-2. The class is registered with OxPHP via `oxphp_register_decorator()`
-3. When the attribute is placed on a function, method, or class, OxPHP intercepts every call
-4. The decorator's `before()` and `after()` methods fire around the original function
+1. **Define** a decorator class that implements `OxPHP\Decorator\AttributeInterface` and is annotated with `#[Attribute]`
+2. **Register** it once at bootstrap with `oxphp_register_decorator(ClassName::class)`
+3. **Apply** the attribute to any function, method, or class
+4. On the first call to a decorated function, OxPHP detects the attribute and installs interception hooks
+5. On every subsequent call, `before()` runs before the function and `after()` runs after it returns
+
+## Writing a Decorator
+
+A decorator class needs two things: the `#[Attribute]` annotation and the `AttributeInterface` implementation.
 
 ```php
+<?php
+
+use OxPHP\Decorator\AttributeInterface;
+use OxPHP\Decorator\Context;
+
 #[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
-class Timer implements OxPHP\Decorator\AttributeInterface {
-    private float $startTime;
+class Timer implements AttributeInterface
+{
+    private float $start;
 
     public function __construct(
         public readonly string $label = '',
     ) {}
 
-    public function before(OxPHP\Decorator\Context $ctx): void {
-        $this->startTime = hrtime(true);
+    public function before(Context $ctx): void
+    {
+        $this->start = hrtime(true);
     }
 
-    public function after(OxPHP\Decorator\Context $ctx): void {
-        $elapsed = hrtime(true) - $this->startTime;
-        error_log(sprintf('[Timer] %s: %.2fms', $this->label ?: $ctx->target, $elapsed / 1e6));
+    public function after(Context $ctx): void
+    {
+        $elapsed = (hrtime(true) - $this->start) / 1e6;
+        error_log(sprintf('[Timer] %s: %.2fms', $this->label ?: $ctx->target, $elapsed));
     }
 }
+```
 
-// Register once at application bootstrap
+Register the decorator during bootstrap, before any decorated function is called:
+
+```php
+<?php
+require __DIR__ . '/../vendor/autoload.php';
+
 oxphp_register_decorator(Timer::class);
 ```
 
-Once registered, use the attribute on any function or method:
+Apply it to functions and methods:
 
 ```php
-#[Timer(label: 'get_user')]
-function getUser(int $id): User {
-    return $db->find($id);
+<?php
+
+#[Timer]
+function processOrder(int $orderId): void
+{
+    // Timer::before() runs before this
+    // Timer::after() runs after this
 }
 
-class OrderService {
-    #[Timer(label: 'place_order')]
-    public function placeOrder(array $items): Order {
+#[Timer(label: 'db-query')]
+function fetchUser(int $id): array
+{
+    return $db->query('SELECT * FROM users WHERE id = ?', [$id]);
+}
+
+class PaymentService
+{
+    #[Timer(label: 'payment')]
+    public function charge(float $amount): bool
+    {
         // ...
     }
 }
 ```
 
-## PHP API
+### Class-Level Decorators
 
-### `OxPHP\Decorator\AttributeInterface`
-
-The interface that all decorator classes must implement:
+Apply an attribute to a class to decorate all its methods:
 
 ```php
-namespace OxPHP\Decorator;
+<?php
 
-interface AttributeInterface {
-    public function before(Context $ctx): void;
-    public function after(Context $ctx): void;
+#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_METHOD)]
+class Audit implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        error_log("Calling {$ctx->target}");
+    }
+
+    public function after(Context $ctx): void
+    {
+        $status = $ctx->hasResult() ? 'ok' : 'error';
+        error_log("Finished {$ctx->target}: {$status}");
+    }
+}
+
+// Register
+oxphp_register_decorator(Audit::class);
+
+// Every method in this class is now audited
+#[Audit]
+class OrderService
+{
+    public function create(array $data): int { /* ... */ }
+    public function cancel(int $id): void { /* ... */ }
 }
 ```
 
-### `OxPHP\Decorator\Context`
+## The Context Object
 
-Read-only context object passed to `before()` and `after()`:
+Both `before()` and `after()` receive an `OxPHP\Decorator\Context` object with information about the decorated call.
+
+### Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `$target` | `string` | Full target name (`App\Service::method` or `my_function`) |
-| `$class` | `string` | Class name, or `""` for functions |
-| `$method` | `string` | Method name, or `""` for functions |
-| `$function` | `string` | Function name for `TARGET_FUNCTION`, or `""` for methods |
-| `$objectId` | `int` | `spl_object_id` for methods, `0` for functions |
+| `$target` | `string` | Full target name: `App\Service::method` or `my_function` |
+| `$class` | `string` | Class name, or `""` for standalone functions |
+| `$method` | `string` | Method name, or `""` for standalone functions |
+| `$function` | `string` | Function name for standalone functions, or `""` for methods |
+| `$objectId` | `int` | `spl_object_id()` of the called object, `0` for functions and static methods |
 | `$requestId` | `string` | Current request ID |
-| `$traceId` | `string` | W3C trace ID (if tracing enabled) |
 
-| Method | Return | Description |
-|--------|--------|-------------|
-| `getParams()` | `array` | Arguments passed to the decorated function (lazy, zero cost if not called) |
-| `getResult()` | `mixed` | Return value of the decorated function (only in `after()`, returns `null` in `before()`) |
-| `hasResult()` | `bool` | `true` in `after()` when the function returned successfully, `false` otherwise |
+### Methods
 
-### `OxPHP\Decorator\RejectedException`
+| Method | Available in | Description |
+|--------|-------------|-------------|
+| `getParams(): array` | `before()` and `after()` | Arguments passed to the decorated function |
+| `getResult(): mixed` | `after()` only | Return value of the decorated function. Returns `null` in `before()` or after an exception |
+| `hasResult(): bool` | `after()` only | `true` if the function returned successfully without throwing |
 
-Exception thrown when a Rust-native decorator rejects a call via `DecoratorAction::Reject`. Extends `\Exception`.
+### Inspecting Arguments
 
-### `oxphp_register_decorator()`
+`getParams()` returns the arguments as a numerically-indexed array:
 
 ```php
-oxphp_register_decorator(string $class): bool
+<?php
+
+#[Attribute(Attribute::TARGET_FUNCTION)]
+class ValidateArgs implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        $params = $ctx->getParams();
+        foreach ($params as $i => $value) {
+            if ($value === null) {
+                throw new \InvalidArgumentException(
+                    "Argument {$i} of {$ctx->target} must not be null"
+                );
+            }
+        }
+    }
+
+    public function after(Context $ctx): void {}
+}
 ```
 
-Registers a PHP class as a decorator. The class must implement `OxPHP\Decorator\AttributeInterface` and be marked with `#[Attribute(...)]`. Returns `true` on success, `false` with an `E_WARNING` on validation failure.
+## Multiple Decorators
 
-## Attribute Targets
-
-Decorator attributes are not required to support all targets. Each decorator class declares its own targets via PHP's `#[Attribute(...)]`:
+Stack multiple decorators on the same function. They execute in declaration order for `before()` and reverse order for `after()`:
 
 ```php
-// Methods only
-#[Attribute(Attribute::TARGET_METHOD)]
-class RequireAuth implements OxPHP\Decorator\AttributeInterface { ... }
+<?php
 
-// Classes only — before()/after() fires on every method of the class
-#[Attribute(Attribute::TARGET_CLASS)]
-class Audited implements OxPHP\Decorator\AttributeInterface { ... }
-
-// All three
-#[Attribute(Attribute::TARGET_CLASS | Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
-class Timer implements OxPHP\Decorator\AttributeInterface { ... }
-```
-
-PHP validates targets at compile time. Placing an attribute where its target flags don't allow produces a PHP error before any decorator logic runs.
-
-### TARGET_CLASS Semantics
-
-When a decorator attribute is placed on a class, the system calls `before()`/`after()` on **every method call** of that class. The decorator itself decides what to do — time each method, track object lifetime, or anything else:
-
-```php
+#[RateLimit(maxCalls: 100, windowSeconds: 60)]
 #[Timer]
-class PaymentProcessor {
-    public function charge() { ... }  // Timer fires
-    public function refund() { ... }  // Timer fires
+#[Cache(ttl: 300)]
+function getProduct(int $id): array
+{
+    // Execution order:
+    // 1. RateLimit::before()
+    // 2. Timer::before()
+    // 3. Cache::before()
+    // 4. getProduct() executes
+    // 5. Cache::after()
+    // 6. Timer::after()
+    // 7. RateLimit::after()
 }
 ```
 
-A lifecycle-style decorator can filter by method name:
+If `before()` throws an exception, the function does not execute, and `after()` is called in reverse order on all decorators that already completed their `before()`.
+
+## Stopping Execution
+
+A decorator can prevent the function from executing by throwing `OxPHP\Decorator\RejectedException` from `before()`:
 
 ```php
-public function before(OxPHP\Decorator\Context $ctx): void {
-    if ($ctx->method === '__construct') {
-        // start tracking object lifetime
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class RequireRole implements AttributeInterface
+{
+    public function __construct(
+        public readonly string $role,
+    ) {}
+
+    public function before(Context $ctx): void
+    {
+        if (!current_user_has_role($this->role)) {
+            throw new \OxPHP\Decorator\RejectedException(
+                "Access denied: requires role '{$this->role}'"
+            );
+        }
+    }
+
+    public function after(Context $ctx): void {}
+}
+```
+
+## Worker Mode Behavior
+
+In worker mode, decorator instances persist across requests within the same worker — they are created once and reused. This means:
+
+- Constructor logic runs once per worker per decorated function (not per request)
+- Instance state in properties carries over between requests
+- Instances are recreated when the worker is recycled
+
+Design decorators to be stateless between requests. If you need per-request state, set it in `before()` and read it in `after()`:
+
+```php
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class RequestTimer implements AttributeInterface
+{
+    // Per-request state: set in before(), read in after()
+    private float $start;
+
+    public function before(Context $ctx): void
+    {
+        $this->start = hrtime(true);
+    }
+
+    public function after(Context $ctx): void
+    {
+        $elapsed = (hrtime(true) - $this->start) / 1e6;
+        // Safe: $this->start is always set fresh in before()
     }
 }
 ```
 
-## Execution Order
+## Limitations
 
-When multiple decorators are applied, they execute in **attribute order** (top to bottom), with `after()` in reverse:
+- **User functions only** — built-in PHP functions cannot be decorated. Only functions and methods defined in PHP code are interceptable
+- **Registration before first call** — decorators must be registered before the first invocation of any function they target. Register during bootstrap
+- **Scalar constructor arguments** — attribute constructor arguments are evaluated once at first call. Complex expressions or runtime values in attributes are not supported
+- **Max 32 nesting levels** — the decorator context stack supports up to 32 levels of nested decorated function calls
+- **Max 256 cached instances per worker** — decorator instances are cached per worker thread. Collisions are possible in applications with more than 256 unique decorator-function pairs
+
+## Troubleshooting
+
+### Decorator not intercepting calls
+
+The decorator is registered after the function was already called, or the attribute is not recognized.
+
+**Check:** Ensure `oxphp_register_decorator()` is called before any decorated function is invoked. In worker mode, register in the outer scope before `oxphp_worker()`.
+
+### "Class not found" when registering
+
+The decorator class is not loaded when `oxphp_register_decorator()` is called.
+
+**Fix:** Ensure the autoloader is registered first:
 
 ```php
-#[DecoratorA]
-#[DecoratorB]
-function foo() { ... }
+<?php
+require __DIR__ . '/../vendor/autoload.php';
+
+// Now the class can be found
+oxphp_register_decorator(Timer::class);
 ```
 
-```
-A.before() → B.before() → foo() → B.after() → A.after()
-```
+### Constructor arguments not updating between requests
 
-This is stack semantics — the outermost decorator sees the full execution including inner decorators.
+Decorator instances are cached per worker. The constructor runs once, not per request.
 
-## Repeatable Attributes
+**Fix:** Use `before()` for per-request initialization, not the constructor. The constructor should only accept static configuration from the attribute.
 
-Decorators can be marked `IS_REPEATABLE`, allowing multiple instances on the same target. Each gets its own cached instance with its own constructor arguments:
+## PHP Examples
+
+### Caching Decorator
 
 ```php
-#[Attribute(Attribute::TARGET_METHOD | Attribute::IS_REPEATABLE)]
-class Notify implements OxPHP\Decorator\AttributeInterface { ... }
+<?php
 
-class OrderService {
-    #[Notify(channel: 'slack')]
-    #[Notify(channel: 'email')]
-    public function placeOrder(): void { ... }
-}
-```
+#[Attribute(Attribute::TARGET_FUNCTION | Attribute::TARGET_METHOD)]
+class Cache implements AttributeInterface
+{
+    private static array $store = [];
 
-## Exception Handling
+    public function __construct(
+        public readonly int $ttl = 60,
+    ) {}
 
-| Scenario | Behavior |
-|----------|----------|
-| `before()` throws | Function does NOT execute. Previously-succeeded decorators get `after()` in reverse order (cleanup). |
-| Function throws | All decorators' `after()` IS called. `$ctx->hasResult()` returns `false`. |
-| `after()` throws | Propagated to the caller. Remaining decorators' `after()` are skipped. |
-
-## Rust Plugin API
-
-Plugins can register decorators in Rust using the `Decorator` trait. These are more efficient than PHP decorators — no PHP object creation or method dispatch overhead.
-
-```rust
-use oxphp::decorator::{Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult, AttributeTargets};
-
-struct TimerDecorator;
-
-impl Decorator for TimerDecorator {
-    fn attribute_name(&self) -> &str { "App\\Profiler\\Timer" }
-    fn targets(&self) -> AttributeTargets { AttributeTargets::ALL }
-
-    fn on_begin(&self, ctx: &DecoratorCallContext) -> DecoratorAction {
-        // start timing
-        DecoratorAction::Continue
+    public function before(Context $ctx): void
+    {
+        $key = $ctx->target . ':' . serialize($ctx->getParams());
+        if (isset(self::$store[$key]) && self::$store[$key]['expires'] > time()) {
+            // Skip function execution — return cached value
+            // Note: you cannot short-circuit execution from PHP decorators.
+            // Use this pattern with an external cache check in the function itself.
+        }
     }
 
-    fn on_end(&self, ctx: &DecoratorCallContext, result: &DecoratorCallResult) {
-        // record elapsed time
+    public function after(Context $ctx): void
+    {
+        if ($ctx->hasResult()) {
+            $key = $ctx->target . ':' . serialize($ctx->getParams());
+            self::$store[$key] = [
+                'value' => $ctx->getResult(),
+                'expires' => time() + $this->ttl,
+            ];
+        }
     }
 }
 ```
 
-Register during plugin initialization:
+### Logging Decorator with Request Context
 
-```rust
-fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-    ctx.register_decorator(TimerDecorator);
-    Ok(())
+```php
+<?php
+
+#[Attribute(Attribute::TARGET_METHOD)]
+class LogCall implements AttributeInterface
+{
+    public function before(Context $ctx): void
+    {
+        error_log(json_encode([
+            'event' => 'call_start',
+            'target' => $ctx->target,
+            'request_id' => $ctx->requestId,
+            'params' => $ctx->getParams(),
+        ]));
+    }
+
+    public function after(Context $ctx): void
+    {
+        error_log(json_encode([
+            'event' => 'call_end',
+            'target' => $ctx->target,
+            'request_id' => $ctx->requestId,
+            'success' => $ctx->hasResult(),
+        ]));
+    }
 }
 ```
-
-Both Rust and PHP decorators feed into the same `DecoratorRegistry` and coexist on the same functions.
-
-## Performance
-
-The decorator system is designed for minimal overhead:
-
-- **Zero cost for undecorated functions** — the observer init returns `{NULL, NULL}` for functions without registered decorator attributes. PHP caches this result per op_array, so subsequent calls skip the check entirely.
-- **One-time resolution** — attribute-to-decorator mapping happens once per function (on first call), not on every invocation.
-- **Instance caching** — PHP decorator objects are instantiated once per function-decorator pair (with constructor arguments read from the attribute), then cached in per-thread TLS for the request (or worker) lifetime. No object creation on subsequent calls.
-- **Arc\<str\> string reuse** — target/class/method strings are allocated once during resolution and shared across all calls via reference counting.
-- **Rust decorators skip PHP overhead entirely** — `on_begin()`/`on_end()` are called directly via FFI with no PHP object creation, method dispatch, or zval manipulation.
 
 ## See Also
 
-- [PHP Functions](../php/functions.md) — `oxphp_register_decorator()` reference
-- [Event System](../architecture/event-system.md) — event dispatch (decorators work at the function level, not the request level)
-- [SAPI and Bridge](../architecture/sapi-bridge.md) — the C bridge that connects PHP to Rust
+- [PHP Functions](../php/functions.md) -- `oxphp_register_decorator()` reference
+- [Worker Mode](worker-mode.md) -- how persistent workers affect decorator instance lifetime
+- [Distributed Tracing](distributed-tracing.md) -- using decorators with trace context for custom spans

@@ -1,9 +1,11 @@
 ---
 title: Quick Start
-description: Get OxPHP running in under 5 minutes
+description: Get OxPHP running in under 5 minutes. Create a project, write a PHP app, start the server, and make your first request.
 ---
 
-This guide walks you through running OxPHP with Docker and serving your first PHP file.
+# Quick Start
+
+Get OxPHP running in under 5 minutes with Docker Compose. This guide takes you from an empty directory to a working PHP application with health checks and structured logging.
 
 ## 1. Create a Project Directory
 
@@ -19,27 +21,31 @@ FROM ghcr.io/oxphp/oxphp:0.1.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-## 3. Add a compose.yml
+The official image includes the server binary, PHP 8.4 ZTS, the OxPHP PHP extension, and all runtime dependencies.
 
-Create a `compose.yml`:
+## 3. Add a compose.yaml
 
 ```yaml
 services:
   oxphp:
     build: .
     ports:
-      - "8080:8080"
+      - "80:80"
       - "9090:9090"
     environment:
-      - LISTEN_ADDR=0.0.0.0:8080
+      - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
       - INTERNAL_ADDR=0.0.0.0:9090
+      - LOG_LEVEL=info
+      - ACCESS_LOG=all
 ```
 
-## 4. Create a Test PHP File
+Port `80` serves your application. Port `9090` exposes the internal server for health checks, Prometheus metrics, and the active configuration snapshot.
+
+## 4. Create a PHP Application
 
 ```bash
-mkdir -p www
+mkdir -p public
 ```
 
 Create `public/index.php`:
@@ -47,54 +53,54 @@ Create `public/index.php`:
 ```php
 <?php
 
-$info = oxphp_server_info();
 $requestId = oxphp_request_id();
+$info      = oxphp_server_info();
 
 echo "<h1>OxPHP</h1>\n";
 echo "<p>Request ID: {$requestId}</p>\n";
+echo "<p>Worker: {$info['worker_id']}</p>\n";
 echo "<p>SAPI: {$info['sapi']}</p>\n";
 echo "<p>Version: {$info['version']}</p>\n";
-echo "<p>Worker: {$info['worker_id']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-## 5. Start the Server
+`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `sapi`, `version`, `worker_id`, and `worker_mode`.
+
+## 5. Build and Start
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 ## 6. Test Your Application
 
-Open your browser to `http://localhost:8080/` or use curl:
-
 ```bash
-curl http://localhost:8080/
+curl http://localhost/
 ```
 
-You should see output similar to:
+Expected output:
 
 ```html
 <h1>OxPHP</h1>
-<p>Request ID: 67a4b3c100000001</p>
+<p>Request ID: 67a4b3c11a2b00000001</p>
+<p>Worker: 0</p>
 <p>SAPI: oxphp</p>
 <p>Version: 0.1.0</p>
-<p>Worker: 0</p>
-<p>Time: 2026-02-11T12:00:00+00:00</p>
+<p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
-## 7. Check Server Health
+Each request gets a unique ID. The worker ID shows which PHP worker thread handled it.
 
-The internal server exposes health and metrics endpoints on port 9090:
+## 7. Check the Internal Endpoints
 
 ```bash
-# Health check — returns 200 with {"status":"ok"}
+# Health check — 200 when healthy, 503 when degraded
 curl http://localhost:9090/health
 
 # Prometheus-compatible metrics
 curl http://localhost:9090/metrics
 
-# Current server configuration (sensitive values redacted)
+# Active configuration (TLS paths redacted)
 curl http://localhost:9090/config
 ```
 
@@ -104,17 +110,12 @@ curl http://localhost:9090/config
 docker compose logs -f oxphp
 ```
 
-OxPHP outputs structured JSON logs. Each request produces an access log entry with the method, path, status code, response time, and request ID.
+Because `ACCESS_LOG=all` is set, every request appears as a structured JSON log line with method, path, status, response time, and request ID.
 
-## Next Steps
+## What's Next
 
-- [Docker guide](docker.md) -- compose.yml reference, volume mounts, and deployment tips
-- [Configuration](../operations/configuration.md) -- full list of environment variables
-- [Routing](../features/routing.md) -- Traditional, Framework, and SPA routing modes
-- [PHP Integration](../php/functions.md) -- available PHP extension functions
-
-## See Also
-
-- [Installation](installation.md) -- source build instructions and prerequisites
-- [Architecture Overview](../architecture/overview.md) -- runtime model and component map
-- [Worker Pool](../architecture/worker-pool.md) -- PHP worker thread scaling and queue behavior
+- [Docker Guide](docker.md) — development and production Dockerfiles, Compose configuration, PHP ini mounts, and health check setup
+- [Configuration](../operations/configuration.md) — full environment variable reference
+- [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
+- [Worker Mode](../features/worker-mode.md) — persistent PHP processes that bootstrap once and handle multiple requests
+- [PHP Functions](../php/functions.md) — all OxPHP built-in PHP functions

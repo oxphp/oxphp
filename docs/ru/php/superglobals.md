@@ -1,50 +1,81 @@
 ---
 title: Суперглобальные переменные
-description: Как OxPHP заполняет суперглобальные массивы PHP
+description: Как OxPHP заполняет $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES и php://input для каждого запроса.
 ---
 
-OxPHP заполняет все стандартные суперглобальные переменные PHP, чтобы существующий PHP-код работал без модификации. Каждое значение устанавливается **до** вызова `php_request_startup()`, поэтому суперглобальные переменные доступны с первой строки вашего скрипта --- в том числе внутри расширений вроде OPcache, которые читают их во время инициализации запроса.
+# Суперглобальные переменные
 
-## `$_SERVER`
+OxPHP заполняет все стандартные суперглобальные переменные PHP до выполнения вашего скрипта, воспроизводя поведение, которое PHP-разработчики ожидают от традиционных серверных окружений. Каждое значение доступно с первой строки вашего кода — никакой инициализации не требуется.
 
-Пользовательский SAPI регистрирует полный набор CGI/1.1-переменных через callback `register_server_variables`. Эти переменные формируются из HTTP-запроса и внедряются в `$_SERVER` во время инициализации PHP-запроса.
+## $_SERVER
 
-### Стандартные CGI-переменные
+OxPHP формирует `$_SERVER` из входящего HTTP-запроса в соответствии со спецификацией CGI/1.1. Переменные окружения процесса импортируются первыми; CGI-переменные устанавливаются после, поэтому значения, специфичные для запроса, всегда перекрывают совпадающие ключи окружения.
 
-| Переменная | Источник | Пример |
-|------------|----------|--------|
-| `REQUEST_METHOD` | HTTP-метод | `GET` |
-| `REQUEST_URI` | Полный URI с query-строкой | `/app?page=2` |
-| `QUERY_STRING` | Query-часть URI | `page=2` |
-| `SERVER_PROTOCOL` | Всегда `HTTP/1.1` | `HTTP/1.1` |
-| `SCRIPT_NAME` | Путь URI без query-строки | `/app` |
-| `PHP_SELF` | То же, что `SCRIPT_NAME` | `/app` |
-| `SCRIPT_FILENAME` | Абсолютный путь к скрипту в файловой системе | `/var/www/html/public/index.php` |
-| `DOCUMENT_ROOT` | Корневая директория веб-сервера | `/var/www/html/public` |
+### Стандартные переменные
+
+| Переменная | Описание | Пример |
+|-----------|---------|--------|
+| `SCRIPT_FILENAME` | Абсолютный путь в файловой системе к выполняемому PHP-скрипту | `/var/www/html/public/index.php` |
+| `DOCUMENT_ROOT` | Корневая директория веб-сервера, настроенная через переменную окружения `DOCUMENT_ROOT` | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Идентификатор сервера | `OxPHP/0.1.0` |
-| `GATEWAY_INTERFACE` | Версия CGI | `CGI/1.1` |
+| `SERVER_PROTOCOL` | Всегда `HTTP/1.1` | `HTTP/1.1` |
+| `REQUEST_METHOD` | HTTP-метод | `GET` |
+| `REQUEST_URI` | Полный URI со строкой запроса | `/app?page=2` |
+| `SCRIPT_NAME` | Путь URI без строки запроса | `/app` |
+| `DOCUMENT_URI` | Псевдоним `SCRIPT_NAME` для совместимости с nginx/PHP-FPM | `/app` |
+| `PHP_SELF` | То же, что и `SCRIPT_NAME` | `/app` |
+| `QUERY_STRING` | Часть URI со строкой запроса (пустая строка при отсутствии) | `page=2` |
+| `SERVER_NAME` | Имя хоста из заголовка `Host` | `example.com` |
+| `SERVER_PORT` | Порт из заголовка `Host` | `8080` |
 | `REMOTE_ADDR` | IP-адрес клиента | `172.17.0.1` |
-| `REMOTE_PORT` | Порт клиента | `54321` |
-| `SERVER_NAME` | Из заголовка `Host` (часть хоста) | `example.com` |
-| `SERVER_PORT` | Из заголовка `Host` (часть порта) | `8080` |
-| `CONTENT_TYPE` | Из заголовка `Content-Type` | `application/json` |
-| `CONTENT_LENGTH` | Из заголовка `Content-Length` | `128` |
+| `REMOTE_PORT` | Номер порта клиента | `54321` |
+| `HTTPS` | Устанавливается в `"on"` при соединении через TLS; отсутствует в других случаях | `on` |
+| `REQUEST_SCHEME` | `"https"` для TLS-соединений, `"http"` в остальных случаях | `https` |
+| `CONTENT_TYPE` | Значение заголовка `Content-Type` (без префикса `HTTP_`) | `application/json` |
+| `CONTENT_LENGTH` | Значение заголовка `Content-Length` (без префикса `HTTP_`) | `128` |
+| `REQUEST_TIME` | Unix-timestamp (целое число) в момент начала запроса | `1738800000` |
+| `REQUEST_TIME_FLOAT` | Unix-timestamp с точностью до микросекунды | `1738800000.123456` |
+| `GATEWAY_INTERFACE` | Строка версии CGI | `CGI/1.1` |
 
-Когда заголовок `Host` отсутствует, `SERVER_NAME` по умолчанию равен `localhost`, а `SERVER_PORT` --- `80`.
+При отсутствии заголовка `Host` значение `SERVER_NAME` по умолчанию равно `localhost`, а `SERVER_PORT` — `80` (или `443` для TLS).
 
 ### Заголовки HTTP-запроса
 
-Все заголовки HTTP-запроса добавляются в `$_SERVER` с префиксом `HTTP_` и заменой дефисов на подчёркивания, в соответствии со стандартными соглашениями CGI:
+Все заголовки HTTP-запроса добавляются в `$_SERVER` с префиксом `HTTP_`. Имена заголовков преобразуются в верхний регистр, а дефисы заменяются подчёркиваниями согласно соглашениям CGI/1.1:
 
+```text
+Accept: text/html            -> HTTP_ACCEPT
+X-Forwarded-For: 1.2.3.4    -> HTTP_X_FORWARDED_FOR
+Authorization: Bearer abc    -> HTTP_AUTHORIZATION
+Cookie: session=xyz          -> HTTP_COOKIE
 ```
-Accept: text/html         → HTTP_ACCEPT = "text/html"
-X-Forwarded-For: 1.2.3.4 → HTTP_X_FORWARDED_FOR = "1.2.3.4"
-Authorization: Bearer ... → HTTP_AUTHORIZATION = "Bearer ..."
-```
 
-`Content-Type` и `Content-Length` **не** получают префикс `HTTP_` --- они добавляются как `CONTENT_TYPE` и `CONTENT_LENGTH` напрямую, как того требует спецификация CGI.
+> **Примечание:** `Content-Type` и `Content-Length` присутствуют без префикса `HTTP_` — как `CONTENT_TYPE` и `CONTENT_LENGTH` — согласно требованиям спецификации CGI.
 
-### Пример использования
+### Переменные контекста трассировки
+
+При включённой распределённой трассировке OxPHP добавляет в `$_SERVER` переменные контекста трассировки:
+
+| Переменная | Описание | Пример |
+|-----------|---------|--------|
+| `OXPHP_TRACE_ID` | W3C trace ID для текущего запроса | `4bf92f3577b34da6a3ce929d0e0e4736` |
+| `OXPHP_SPAN_ID` | Span ID для серверного спана OxPHP | `00f067aa0ba902b7` |
+| `OXPHP_PARENT_SPAN_ID` | Parent span ID от вышестоящего сервиса (пусто для корневого спана) | `b9c7c989f97918e1` |
+
+Эти переменные присутствуют только при получении корректного заголовка `traceparent` или при генерации OxPHP нового трейса. Если трассировка не настроена, эти ключи отсутствуют.
+
+### Отличия от PHP-FPM
+
+Следующие переменные ведут себя иначе по сравнению со стандартной конфигурацией PHP-FPM:
+
+| Переменная | Поведение |
+|-----------|---------|
+| `SERVER_ADDR` | Не устанавливается. OxPHP не заполняет локальный IP-адрес сервера. |
+| `PATH_INFO` / `PATH_TRANSLATED` | Не устанавливаются. OxPHP не выполняет разбиение path-info. |
+| `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Не извлекаются из заголовка `Authorization`. Читайте `$_SERVER['HTTP_AUTHORIZATION']` напрямую. |
+| `REDIRECT_STATUS` | Не устанавливается. OxPHP не использует механизм внутреннего перенаправления. |
+
+### Пример
 
 ```php
 <?php
@@ -52,16 +83,25 @@ $method  = $_SERVER['REQUEST_METHOD'];
 $uri     = $_SERVER['REQUEST_URI'];
 $ip      = $_SERVER['REMOTE_ADDR'];
 $host    = $_SERVER['SERVER_NAME'];
-$docroot = $_SERVER['DOCUMENT_ROOT'];
+$scheme  = $_SERVER['REQUEST_SCHEME'];  // "http" или "https"
 
-// Доступ к пользовательским заголовкам
-$token   = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-$xff     = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+// Читаем произвольный заголовок
+$token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+
+// Предпочитаем X-Forwarded-For за доверенным обратным прокси
+$xff  = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+
+// Проверяем TLS без проверки порта
+if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
+    // Защищённое соединение
+}
 ```
 
-## `$_GET`
+---
 
-Параметры query-строки разбираются стандартным движком PHP из серверной переменной `QUERY_STRING`. OxPHP устанавливает `QUERY_STRING` из URI запроса, а PHP автоматически заполняет `$_GET` во время инициализации запроса.
+## $_GET
+
+Параметры строки запроса автоматически разбираются из URI запроса.
 
 ```php
 <?php
@@ -70,69 +110,117 @@ $query = $_GET['q'];     // "oxphp"
 $page  = $_GET['page'];  // "2"
 ```
 
-## `$_POST`
-
-SAPI предоставляет callback `read_post`, который передаёт тело запроса стандартному парсеру POST в PHP. PHP обрабатывает оба типа содержимого: `application/x-www-form-urlencoded` и `multipart/form-data`. Тело читается инкрементально --- PHP вызывает callback повторно, пока тот не вернёт 0 байт.
+Синтаксис массивов работает ожидаемым образом:
 
 ```php
 <?php
-// Запрос: POST /login с телом application/x-www-form-urlencoded
-$username = $_POST['username'];
-$password = $_POST['password'];
+// Запрос: GET /filter?tags[]=php&tags[]=async
+$tags = $_GET['tags'];  // ["php", "async"]
 ```
 
-Сырое тело запроса также доступно через `php://input`:
+---
+
+## $_POST
+
+OxPHP поддерживает два стандартных типа содержимого для отправки форм:
+
+- `application/x-www-form-urlencoded` — стандартные данные HTML-формы
+- `multipart/form-data` — загрузка файлов вместе с полями формы
 
 ```php
 <?php
-$json = json_decode(file_get_contents('php://input'), true);
+// Запрос: POST /login
+// Content-Type: application/x-www-form-urlencoded
+// Body: username=admin&password=secret
+
+$username = $_POST['username'];  // "admin"
+$password = $_POST['password'];  // "secret"
 ```
 
-## `$_COOKIE`
-
-SAPI предоставляет callback `read_cookies`, который возвращает сырую строку заголовка `Cookie`. Движок PHP разбирает её в массив `$_COOKIE` во время инициализации запроса.
+Для JSON или других типов содержимого используйте `php://input`:
 
 ```php
 <?php
-// Запрос с Cookie: session=abc123; theme=dark
+// Запрос: POST /api/users
+// Content-Type: application/json
+// Body: {"name":"Alice","email":"alice@example.com"}
+
+$data  = json_decode(file_get_contents('php://input'), true);
+$name  = $data['name'];   // "Alice"
+$email = $data['email'];  // "alice@example.com"
+```
+
+---
+
+## $_COOKIE
+
+Куки разбираются из заголовка запроса `Cookie`.
+
+```php
+<?php
+// Запрос с: Cookie: session=abc123; theme=dark
 $session = $_COOKIE['session'];  // "abc123"
 $theme   = $_COOKIE['theme'];    // "dark"
 ```
 
-## `$_REQUEST`
+> **Примечание:** Куки с префиксом `__oxp_` зарезервированы для внутренних плагинов OxPHP. Они удаляются из заголовка `Cookie` до того, как тот поступает в PHP, и не появятся в `$_COOKIE`.
 
-`$_REQUEST` заполняется PHP на основе INI-директивы `request_order` (по умолчанию: `"GP"` --- GET, затем POST). Он объединяет `$_GET` и `$_POST` (и, опционально, `$_COOKIE`) в указанном порядке. OxPHP не переопределяет это поведение.
+---
 
-## `$_FILES`
+## $_FILES
 
-Загруженные файлы, отправленные через `multipart/form-data`, разбираются стандартным механизмом `read_post` PHP. Массив `$_FILES` заполняется автоматически, включая `name`, `type`, `tmp_name`, `error` и `size` для каждого загруженного файла.
+Загруженные файлы, отправленные через `multipart/form-data`, заполняют массив `$_FILES` со стандартной структурой PHP:
 
 ```php
 <?php
+// Структура $_FILES['avatar']:
+// [
+//     'name'     => 'photo.jpg',       // Оригинальное имя файла, отправленное клиентом
+//     'type'     => 'image/jpeg',      // MIME-тип, указанный клиентом
+//     'tmp_name' => '/tmp/phpAb12Cd',  // Путь к временному файлу на сервере
+//     'error'    => 0,                 // UPLOAD_ERR_OK (0 означает отсутствие ошибки)
+//     'size'     => 204800,            // Размер файла в байтах
+// ]
+
 if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
     $tmp  = $_FILES['avatar']['tmp_name'];
-    $name = $_FILES['avatar']['name'];
+    $name = basename($_FILES['avatar']['name']);
     move_uploaded_file($tmp, "/uploads/$name");
 }
 ```
 
-## Детали реализации
+---
 
-### Паттерн пакетных FFI-вызовов
+## $_REQUEST
 
-OxPHP формирует все пары ключ-значение `$_SERVER` в одном Rust-векторе `Vec<(CString, CString)>` и сохраняет его в локальном хранилище потока до начала запроса PHP. Во время callback `register_server_variables` весь вектор обходится за один проход, вызывая `php_register_variable_safe()` для каждой записи. Это позволяет избежать FFI-вызовов на каждую переменную и сохраняет постоянные накладные расходы независимо от количества заголовков.
+`$_REQUEST` — это объединённый массив `$_GET`, `$_POST` и при необходимости `$_COOKIE`, формируемый PHP согласно INI-директиве `request_order` (по умолчанию: `"GP"` — GET, затем POST). OxPHP не изменяет это поведение.
 
-### Требования к времени жизни данных
+```php
+<?php
+// GET /form?action=preview с телом POST: action=submit
+$action = $_REQUEST['action'];  // "submit" (POST перекрывает GET при порядке по умолчанию)
+```
 
-Все данные, привязанные к запросу --- серверные переменные, строка cookie и тело запроса --- должны быть сохранены в локальном хранилище потока **до** вызова `php_request_startup()`. Эти значения должны оставаться действительными до `php_request_shutdown()`, поскольку движок PHP хранит сырые указатели на них. OxPHP хранит их в структуре `RequestData` внутри `thread_local! { RefCell }` и очищает только после полного завершения запроса.
+---
 
-### Мост с локальным хранилищем потока
+## php://input
 
-C-библиотека моста (`liboxphp_bridge.so`) использует `__thread` TLS для передачи контекста запроса (идентификатор запроса, идентификатор воркера, время запроса) между Rust и PHP-расширением. И бинарный файл Rust, и PHP-расширение линкуются с одной и той же разделяемой библиотекой, получая доступ к одному и тому же локальному хранилищу потока. Это единственный надёжный механизм для обмена состоянием через границы `dlopen`.
+Сырое тело запроса доступно через поток `php://input`. Это стандартный способ чтения JSON-нагрузки, XML или любого другого типа содержимого, кроме отправки форм.
 
-## Смотрите также
+```php
+<?php
+$body = file_get_contents('php://input');
+$data = json_decode($body, true);
+```
 
-- [Функции PHP-расширения](functions.md) --- встроенные функции для доступа к идентификаторам запросов, информации о воркерах и метаданным сервера
-- [Совместимость с OPcache](opcache.md) --- как время запроса обеспечивает работу `file_update_protection` в OPcache
-- [Мост SAPI](/architecture/sapi-bridge.md) --- C-библиотека моста и механизм локального хранилища потока
-- [Жизненный цикл запроса](/architecture/request-lifecycle.md) --- как данные запроса передаются из Rust в PHP
+`php://input` поддерживает перемотку и может читаться несколько раз в рамках одного запроса.
+
+> **Примечание:** `php://input` пуст для запросов с `multipart/form-data`. Для таких запросов используйте `$_POST` и `$_FILES`.
+
+---
+
+## См. также
+
+- [PHP-функции](functions.md) — `oxphp_request_id()`, `oxphp_worker_id()` и другие функции расширения
+- [Режим Worker](../features/worker-mode.md) — как суперглобальные переменные обновляются между запросами воркера
+- [Справочник по конфигурации](../operations/configuration.md) — `DOCUMENT_ROOT` и другие переменные конфигурации сервера

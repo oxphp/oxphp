@@ -1,31 +1,33 @@
 ---
 title: 健康检查
-description: 用于健康监控和容器编排的内部服务器端点
+description: 用于健康监控、Prometheus 指标采集和运行时配置检查的内部服务器端点。
 ---
 
-OxPHP 在独立端口上运行一个内部 HTTP 服务器，用于健康检查、指标和配置查看。该服务器与主流量端口隔离，监控流量不会与应用请求竞争。
+# 健康检查
 
-## 启用内部服务器
+OxPHP 在独立端口上提供内部 HTTP 服务器，用于健康监控、指标采集和配置检查。该服务器与应用流量相互隔离，确保监控操作不会与用户请求竞争资源。
 
-设置 `INTERNAL_ADDR` 环境变量以启动内部服务器：
+## 配置
+
+设置 `INTERNAL_ADDR` 以启动内部服务器：
 
 ```bash
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-未设置此变量时，内部服务器不会启动。
+当 `INTERNAL_ADDR` 未设置时，内部服务器不会启动，健康端点也不可用。
 
-## 端点
+> **注意：** 在生产环境中请绑定到 `127.0.0.1`，除非内部服务器部署在防火墙之后。`/config` 端点会暴露不应公开的运维详情。
 
-### `GET /health`
+## GET /health
 
-以 JSON 格式返回服务器健康状态。
+以 JSON 格式返回服务器健康状态。此端点可用于就绪探针和存活探针。
 
 ```bash
 curl http://localhost:9090/health
 ```
 
-**响应（健康）：**
+**健康响应（200 OK）：**
 
 ```json
 {
@@ -38,7 +40,7 @@ curl http://localhost:9090/health
 }
 ```
 
-**响应（降级）：**
+**降级响应（503 Service Unavailable）：**
 
 ```json
 {
@@ -47,82 +49,119 @@ curl http://localhost:9090/health
   "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": false,
-  "plugins": {
-    "example_plugin": "failed"
-  }
+  "plugins": {}
 }
 ```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `status` | `string` | 所有子系统健康时为 `"ok"`，否则为 `"degraded"` |
-| `uptime_secs` | `integer` | 服务器启动后经过的秒数 |
-| `total_requests` | `integer` | 主端口处理的 HTTP 请求总数 |
-| `active_connections` | `integer` | 主端口当前打开的连接数 |
-| `executor_healthy` | `boolean` | PHP 工作池是否正在接受请求 |
-| `plugins` | `object` | 每个已加载插件的健康状态。值为 `"healthy"` 或 `"failed"` |
+| 字段 | 类型 | 描述 |
+|-------|------|-------------|
+| `status` | string | 所有子系统健康时为 `"ok"`，否则为 `"degraded"` |
+| `uptime_secs` | integer | 服务器启动后的运行秒数 |
+| `total_requests` | integer | 主端口处理的 HTTP 请求总数 |
+| `active_connections` | integer | 主端口当前打开的连接数 |
+| `executor_healthy` | boolean | PHP 工作进程池是否正在接受请求 |
 
 **HTTP 状态码：**
 
 | 状态码 | 含义 |
-|--------|------|
-| `200 OK` | 执行器和所有插件均健康 |
-| `503 Service Unavailable` | 执行器或任何插件报告失败状态 |
+|------|---------|
+| `200 OK` | 所有子系统均健康 |
+| `503 Service Unavailable` | PHP 工作进程池降级或不可用，或某个插件报告故障 |
 
-`executor_healthy` 检查调用 PHP 执行器的 `is_healthy()` 方法。如果工作池已关闭或无法处理请求，此值返回 `false`。此外，如果任何插件报告 `Failed` 健康状态，整体状态为 `"degraded"` 且端点返回 503。
+`/health` 端点非常轻量——它仅读取内存计数器，不涉及磁盘 I/O、数据库访问或 PHP 执行。
 
-### `GET /metrics`
+## GET /metrics
 
-以 Prometheus 文本格式返回兼容的指标。完整指标参考请参阅[指标](metrics.md)页面。插件可以向此输出贡献额外的指标。
+以文本展示格式返回 Prometheus 兼容指标。完整指标参考请参见 [Prometheus 指标](metrics.md)。
 
 ```bash
 curl http://localhost:9090/metrics
 ```
 
-### `GET /config`
+## GET /config
 
-以 JSON 格式返回当前服务器配置。敏感值（TLS 密钥路径）已脱敏。插件配置包含在 `plugins` 键下。
+以 JSON 格式返回服务器当前配置。出于安全考虑，TLS 证书和私钥路径会被省略。
 
 ```bash
-curl http://localhost:9090/config
+curl -s http://localhost:9090/config | jq .
 ```
 
 ```json
 {
-  "listen_addr": "0.0.0.0:8080",
+  "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
   "executor_type": "sapi",
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
-  "idle_timeout_seconds": 60,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": "/etc/oxphp/error-pages",
-  "compression_enabled": true,
-  "access_log": true,
+  "error_pages_dir": null,
+  "compression_level": 4,
+  "access_log": "all",
+  "max_query_body": 524288,
+  "worker_mode": false,
+  "worker_file": null,
+  "worker_max_requests": 0,
+  "worker_max_memory_mib": 0,
+  "static_cache_ttl": 2592000,
+  "async_workers": 0,
+  "async_queue_capacity": 0,
+  "trace_context": false,
   "plugins": {}
 }
 ```
 
-### 插件内部路由
+> **注意：** TLS 证书和私钥路径已省略。`tls_enabled` 布尔值表示 TLS 是否已启用。
 
-以 `/__` 开头的路径保留给插件定义的内部端点。如果没有插件处理该路径，将返回 `404 Not Found` 响应。
+## Kubernetes 集成
 
-其他任何路径均返回 `404 Not Found`。
-
-## 容器健康检查
-
-### Docker
+将 `/health` 端点同时用于存活探针和就绪探针：
 
 ```yaml
-# docker-compose.yml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: oxphp
+          image: ghcr.io/oxphp/oxphp:0.1.0
+          env:
+            - name: INTERNAL_ADDR
+              value: "0.0.0.0:9090"
+          ports:
+            - containerPort: 8080
+            - containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+```
+
+`/health` 返回 `503` 时，Kubernetes 会根据探针类型将 Pod 从 Service 端点列表中移除（就绪探针）或重启它（存活探针）。
+
+## Docker Compose 健康检查
+
+```yaml
 services:
   oxphp:
-    image: oxphp:latest
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:80"
     environment:
       INTERNAL_ADDR: "127.0.0.1:9090"
     healthcheck:
@@ -133,63 +172,10 @@ services:
       start_period: 5s
 ```
 
-### Dockerfile HEALTHCHECK
+在配置的重试次数失败后，Docker 会将容器标记为 `unhealthy`，这可能触发重启策略或负载均衡器移除。
 
-```dockerfile
-HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:9090/health || exit 1
-```
+## 参见
 
-### Kubernetes
-
-```yaml
-# 存活探针 — 如果服务器无响应则重启 Pod
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 9090
-  initialDelaySeconds: 5
-  periodSeconds: 10
-  failureThreshold: 3
-
-# 就绪探针 — 如果降级则从 Service 中移除 Pod
-readinessProbe:
-  httpGet:
-    path: /health
-    port: 9090
-  initialDelaySeconds: 2
-  periodSeconds: 5
-  failureThreshold: 2
-```
-
-对于 Kubernetes，使用 `executor_healthy` 字段和 HTTP 状态码驱动就绪状态。`503` 响应表示 PHP 工作池或某个插件处于降级状态，应将 Pod 从 Service 的端点列表中移除直到恢复。
-
-## 负载均衡器集成
-
-大多数负载均衡器支持 HTTP 健康检查。将它们指向内部端口：
-
-| 负载均衡器 | 健康检查目标 |
-|------------|-------------|
-| AWS ALB/NLB | `http://instance:9090/health` |
-| HAProxy | `option httpchk GET /health` on port 9090 |
-| nginx upstream | `proxy_pass http://backend:9090/health` |
-| Traefik | `traefik.http.services.oxphp.loadbalancer.healthcheck.path=/health` |
-
-`/health` 端点非常轻量 --- 它读取原子计数器并调用执行器的 `is_healthy()`。不涉及磁盘 I/O、数据库访问或 PHP 执行。
-
-## 安全注意事项
-
-内部服务器默认绑定到 `127.0.0.1`，仅可从本机访问。如果需要从监控网络访问，请绑定到特定接口：
-
-```bash
-# 从监控网络可访问
-INTERNAL_ADDR=10.0.1.5:9090
-```
-
-**不要**在生产环境中将内部服务器绑定到 `0.0.0.0`，除非它位于防火墙或网络策略后面以限制访问。`/config` 端点会暴露不应公开的运维细节。
-
-## 另请参阅
-
-- [指标](metrics.md) --- Prometheus 兼容指标完整参考
-- [配置](configuration.md) --- 所有环境变量及其默认值
-- [优雅关闭](graceful-shutdown.md) --- 健康检查如何与关闭排空交互
+- [Prometheus 指标](metrics.md) — 所有暴露指标的完整参考
+- [优雅关闭](graceful-shutdown.md) — 健康探针与关闭排空的交互
+- [配置参考](configuration.md) — 所有环境变量，包括 `INTERNAL_ADDR`

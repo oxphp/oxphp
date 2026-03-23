@@ -1,207 +1,280 @@
 ---
 title: Distributed Tracing
-description: W3C Trace Context propagation and OpenTelemetry span export
+description: W3C Trace Context propagation, OpenTelemetry integration, and end-to-end observability with OxPHP.
 ---
 
-OxPHP supports distributed tracing through two layers: W3C Trace Context propagation (built-in, zero dependencies) and OpenTelemetry span export (opt-in via the `plugin-otel` feature).
+# Distributed Tracing
 
-## Architecture
+OxPHP supports W3C Trace Context propagation and OpenTelemetry (OTel) export. Incoming `traceparent` headers are parsed and continued, trace IDs are available in PHP via `$_SERVER`, access logs include trace fields, and spans can be exported to Jaeger, Grafana Tempo, Zipkin, or any OTLP-compatible backend.
 
-### Layer 1: W3C Trace Context (built-in)
+## How It Works
 
-When `TRACE_CONTEXT=true`, OxPHP:
+1. **Incoming request** — OxPHP reads the `traceparent` and `tracestate` headers per the W3C Trace Context specification
+2. **New span** — a new span ID is generated for this hop. The incoming span ID becomes the parent
+3. **Propagation to PHP** — trace IDs are injected into `$_SERVER['OXPHP_TRACE_ID']`, `$_SERVER['OXPHP_SPAN_ID']`, and `$_SERVER['OXPHP_PARENT_SPAN_ID']`
+4. **Access log** — structured JSON logs include `trace_id` and `span_id` fields for log correlation
+5. **Response headers** — the updated `traceparent` header (with OxPHP's span ID) is added to the response, so downstream services can continue the trace
+6. **OTel export** (optional) — when the OTel plugin is enabled, each request becomes a span exported via OTLP with HTTP semantic convention attributes
 
-1. Parses incoming `traceparent` and `tracestate` headers per the [W3C Trace Context](https://www.w3.org/TR/trace-context/) specification
-2. Generates a new trace ID and span ID when no `traceparent` is present
-3. Injects `traceparent` and `tracestate` into the HTTP response
-4. Exposes trace IDs to PHP via `$_SERVER` superglobals
-5. Includes `trace_id` and `span_id` in access log entries
-
-This layer has no external dependencies and adds no third-party crates to the build.
-
-### Layer 2: OpenTelemetry Export (`plugin-otel` feature)
-
-When built with `--features plugin-otel` and `OTEL_ENABLED=true`, OxPHP additionally:
-
-1. Creates OpenTelemetry spans for each request with semantic HTTP conventions
-2. Exports spans to an OTLP collector via gRPC or HTTP/protobuf
-3. Supports configurable sampling, resource attributes, and authentication headers
-
-Enabling `OTEL_ENABLED` automatically sets `TRACE_CONTEXT=true`.
+If no `traceparent` header is present, OxPHP generates a new trace ID and span ID, starting a fresh trace.
 
 ## Configuration
 
+### W3C Trace Context (Built-in)
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TRACE_CONTEXT` | `false` | Enable W3C Trace Context propagation |
-| `OTEL_ENABLED` | `false` | Enable OpenTelemetry span export (implies `TRACE_CONTEXT=true`) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
+| `TRACE_CONTEXT` | `false` | Enable W3C Trace Context propagation. Set to `true` or `1` |
+
+### OpenTelemetry Plugin
+
+The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it automatically sets `TRACE_CONTEXT=true`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | Enable the OpenTelemetry plugin. Set to `true` or `1` |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
-| `OTEL_EXPORTER_OTLP_HEADERS` | *(none)* | Authentication headers (`key=value,key=value`) |
-| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported traces |
-| `OTEL_SERVICE_VERSION` | *(none)* | Service version in exported traces |
-| `OTEL_RESOURCE_ATTRIBUTES` | *(none)* | Resource attributes (`key=value,key=value`) |
-| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0-1.0) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Authentication headers: `key=value,key2=value2` |
+| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported spans |
+| `OTEL_SERVICE_VERSION` | *(unset)* | Service version attribute |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Additional resource attributes: `env=prod,region=us-east-1` |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) for ratio-based samplers |
 
-See [Configuration](/operations/configuration.md) for the full environment variable reference.
+## Trace Context in PHP
 
-## PHP Integration
+When `TRACE_CONTEXT=true`, three `$_SERVER` variables are available in your PHP scripts:
 
-When trace context is active, four `$_SERVER` variables are populated for every request:
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `OXPHP_TRACE_ID` | W3C trace ID (32 hex chars) | `4bf92f3577b34da6a3ce929d0e0e4736` |
+| `OXPHP_SPAN_ID` | OxPHP's span ID for this request (16 hex chars) | `00f067aa0ba902b7` |
+| `OXPHP_PARENT_SPAN_ID` | Incoming parent span ID (16 hex chars, empty if new trace) | `a3ce929d0e0e4736` |
 
-| Variable | Description |
-|----------|-------------|
-| `$_SERVER['OXPHP_TRACE_ID']` | W3C trace ID (32 hex chars) |
-| `$_SERVER['OXPHP_SPAN_ID']` | Current span ID (16 hex chars) |
-| `$_SERVER['OXPHP_PARENT_SPAN_ID']` | Parent span ID from incoming `traceparent` (empty if no parent) |
-| `$_SERVER['HTTP_TRACEPARENT']` | Raw `traceparent` header value |
-
-### Log correlation
-
-Use the trace ID in your application logs to correlate PHP-level logs with distributed traces:
-
-```php
-<?php
-$traceId = $_SERVER['OXPHP_TRACE_ID'] ?? '';
-$spanId  = $_SERVER['OXPHP_SPAN_ID'] ?? '';
-
-error_log(json_encode([
-    'trace_id' => $traceId,
-    'span_id'  => $spanId,
-    'message'  => 'Processing payment',
-    'order_id' => $orderId,
-]));
-```
-
-### Downstream propagation
-
-When making outbound HTTP calls, forward the `traceparent` header to maintain the trace chain:
+Use these to propagate trace context to downstream services:
 
 ```php
 <?php
 $traceId  = $_SERVER['OXPHP_TRACE_ID'] ?? '';
 $spanId   = $_SERVER['OXPHP_SPAN_ID'] ?? '';
 
-// Generate a new span ID for the downstream call
-$childSpanId = bin2hex(random_bytes(8));
-$traceparent = "00-{$traceId}-{$childSpanId}-01";
+if ($traceId) {
+    // Build a traceparent header for downstream calls
+    $traceparent = "00-{$traceId}-{$spanId}-01";
 
-$ch = curl_init('https://api.internal/orders');
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    "traceparent: {$traceparent}",
+    $response = file_get_contents('https://api.example.com/data', false,
+        stream_context_create([
+            'http' => [
+                'header' => "traceparent: {$traceparent}\r\n",
+            ],
+        ])
+    );
+}
+```
+
+### With Guzzle
+
+```php
+<?php
+$traceId = $_SERVER['OXPHP_TRACE_ID'] ?? '';
+$spanId  = $_SERVER['OXPHP_SPAN_ID'] ?? '';
+
+$client = new \GuzzleHttp\Client();
+$response = $client->get('https://api.example.com/users', [
+    'headers' => [
+        'traceparent' => "00-{$traceId}-{$spanId}-01",
+    ],
 ]);
-curl_exec($ch);
 ```
 
 ## Access Log Correlation
 
-When `TRACE_CONTEXT` is enabled, every access log entry includes `trace_id` and `span_id`:
+When trace context is enabled, structured JSON access logs include `trace_id` and `span_id` fields:
 
 ```json
 {
-  "timestamp": "2026-02-11T12:34:56.789Z",
+  "timestamp": "2026-03-23T10:15:30.123Z",
   "level": "INFO",
-  "fields": {
-    "request_id": "67890abc00000042",
-    "trace_id": "4bf92f3577b16e8264cabd64a999f321",
-    "span_id": "a1b2c3d4e5f6a7b8",
-    "method": "GET",
-    "path": "/api/users",
-    "status": 200,
-    "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
-    "message": "request completed"
-  }
+  "target": "access_log",
+  "request_id": "4bf92f35-00f067aa",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "method": "GET",
+  "path": "/api/users",
+  "status": 200,
+  "duration_us": 1523
 }
 ```
 
-When `TRACE_CONTEXT` is disabled, these fields are omitted.
+This enables searching logs by trace ID in log aggregation systems (Loki, Elasticsearch, Splunk, CloudWatch) to find all log entries for a distributed trace.
 
-## Quick Start
+## Response Headers
 
-### Jaeger (local development)
+OxPHP adds the `traceparent` header to every response, with OxPHP's own span ID:
+
+```http
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+```
+
+If the incoming request included a `tracestate` header, it is forwarded in the response as well.
+
+## OpenTelemetry Integration
+
+When the OTel plugin is enabled, each HTTP request becomes a span exported to your tracing backend via OTLP.
+
+### Span Attributes
+
+Exported spans include standard HTTP semantic convention attributes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `http.request.method` | HTTP method (GET, POST, etc.) |
+| `url.path` | Request path |
+| `http.response.status_code` | Response status code |
+| `client.address` | Client IP address |
+| `server.address` | Server listen address |
+| `oxphp.request_id` | OxPHP request ID |
+| `http.request.body.size` | Request body size in bytes (if non-zero) |
+| `http.response.body.size` | Response body size in bytes (if non-zero) |
+
+5xx responses are marked as error spans.
+
+### Request ID with OTel
+
+When the OTel plugin is active, request IDs are derived from the trace context: the first 16 characters of the trace ID and first 8 characters of the span ID, separated by a dash. This appears in logs, the `X-Request-ID` response header, and `oxphp_request_id()` in PHP.
+
+## Docker Example
+
+### Trace Context Only
+
+Enable W3C trace propagation without an external backend:
 
 ```yaml
 services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "80:80"
+    environment:
+      - TRACE_CONTEXT=true
+      - INTERNAL_ADDR=0.0.0.0:9090
+```
+
+### With Jaeger
+
+Full observability stack with Jaeger as the tracing backend:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "80:80"
+    environment:
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=my-app
+      - OTEL_SERVICE_VERSION=1.0.0
+      - OTEL_RESOURCE_ATTRIBUTES=env=production
+      - INTERNAL_ADDR=0.0.0.0:9090
+
   jaeger:
     image: jaegertracing/all-in-one:latest
     ports:
       - "16686:16686"   # Jaeger UI
       - "4317:4317"     # OTLP gRPC
+```
 
-  oxphp:
-    image: oxphp:latest
-    environment:
-      OTEL_ENABLED: "true"
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
-      OTEL_SERVICE_NAME: "my-app"
+### With Grafana Tempo
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
-      - "8080:8080"
+      - "80:80"
+    environment:
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
+      - OTEL_SERVICE_NAME=my-app
+
+  tempo:
+    image: grafana/tempo:latest
+    ports:
+      - "4317:4317"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
 ```
 
-Open `http://localhost:16686` to view traces.
+## The Observability Stack
 
-### Datadog
+OxPHP provides three observability pillars that work together:
+
+| Pillar | Feature | Correlation |
+|--------|---------|-------------|
+| **Metrics** | Prometheus counters and histograms at `/metrics` | Aggregate performance data |
+| **Logging** | Structured JSON access logs with `ACCESS_LOG` | Per-request detail, searchable by `trace_id` |
+| **Tracing** | W3C Trace Context + OTLP export | End-to-end distributed request flow |
+
+All three share the same `trace_id` and `request_id`, enabling seamless drill-down from a Grafana dashboard alert → Tempo trace → Loki log lines for a single request.
+
+## Troubleshooting
+
+### Trace headers not appearing in responses
+
+`TRACE_CONTEXT` is not enabled.
+
+**Fix:** Set `TRACE_CONTEXT=true` or enable the OTel plugin with `OTEL_ENABLED=true` (which enables trace context automatically).
+
+### $_SERVER trace variables are empty
+
+Trace context is disabled, or the variables are being checked outside of OxPHP.
+
+**Check:** The `OXPHP_TRACE_ID`, `OXPHP_SPAN_ID`, and `OXPHP_PARENT_SPAN_ID` variables only exist when `TRACE_CONTEXT=true` and the request is served by OxPHP. Test with:
+
+```php
+<?php
+echo $_SERVER['OXPHP_TRACE_ID'] ?? 'trace context not enabled';
+```
+
+### Spans not appearing in Jaeger/Tempo
+
+**Check:** Verify the OTLP endpoint is reachable from the OxPHP container:
 
 ```bash
-OTEL_ENABLED=true
-OTEL_EXPORTER_OTLP_ENDPOINT=http://datadog-agent:4317
-OTEL_SERVICE_NAME=my-app
-OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production
+docker compose exec app curl -v http://jaeger:4317
 ```
 
-The Datadog Agent accepts OTLP on port 4317 when `DD_OTLP_CONFIG_RECEIVER_PROTOCOLS_GRPC_ENDPOINT` is configured.
-
-### New Relic
+**Check:** Verify the plugin is enabled:
 
 ```bash
-OTEL_ENABLED=true
-OTEL_EXPORTER_OTLP_ENDPOINT=https://otlp.nr-data.net:4317
-OTEL_EXPORTER_OTLP_HEADERS=api-key=YOUR_INGEST_LICENSE_KEY
-OTEL_SERVICE_NAME=my-app
+curl -s http://localhost:9090/config | jq '.plugins'
 ```
 
-### Grafana Tempo
+**Fix:** Ensure `OTEL_ENABLED=true` and the `OTEL_EXPORTER_OTLP_ENDPOINT` points to the correct collector address.
 
-```bash
-OTEL_ENABLED=true
-OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4317
-OTEL_SERVICE_NAME=my-app
-```
+### High sampling volume in production
 
-For Grafana Cloud, use the HTTPS endpoint with authentication headers:
+Exporting every span is expensive at high traffic volumes.
 
-```bash
-OTEL_EXPORTER_OTLP_ENDPOINT=https://tempo-us-central1.grafana.net:443
-OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic YOUR_BASE64_CREDENTIALS
-```
-
-## Sampling
-
-The `OTEL_TRACES_SAMPLER` variable controls which requests generate spans:
-
-| Sampler | Behavior |
-|---------|----------|
-| `always_on` | Export every request |
-| `always_off` | Export nothing (trace context still propagated) |
-| `traceidratio` | Export a percentage of requests based on trace ID hash |
-| `parentbased_traceidratio` | Respect the parent's sampling decision; sample root spans by ratio |
-
-Use `OTEL_TRACES_SAMPLER_ARG` to set the ratio for ratio-based samplers. For example, to sample 10% of root traces:
+**Fix:** Reduce the sampling ratio:
 
 ```bash
 OTEL_TRACES_SAMPLER=parentbased_traceidratio
-OTEL_TRACES_SAMPLER_ARG=0.1
+OTEL_TRACES_SAMPLER_ARG=0.1   # Sample 10% of traces
 ```
 
-The `parentbased_traceidratio` sampler (default) is recommended for production. It respects upstream sampling decisions while applying a ratio to locally-originated traces.
+Parent-based sampling means that if an incoming request carries a sampled trace, it will always be sampled regardless of the ratio. New traces started at OxPHP are sampled at the configured rate.
 
 ## See Also
 
-- [Request IDs](request-ids.md) -- trace-derived request IDs when OTel is active
-- [Access Logging](access-logging.md) -- `trace_id` and `span_id` fields in log entries
-- [Request Lifecycle](/architecture/request-lifecycle.md) -- TraceContextHandler in the event pipeline
-- [Configuration](/operations/configuration.md) -- full environment variable reference
+- [Access Logging](access-logging.md) -- structured JSON logs with trace fields
+- [Request IDs](request-ids.md) -- how request IDs interact with trace context
+- [Metrics](../operations/metrics.md) -- Prometheus metrics reference
+- [Health Checks](../operations/health-checks.md) -- `/config` endpoint showing trace context status
+- [Configuration Reference](../operations/configuration.md) -- all environment variables

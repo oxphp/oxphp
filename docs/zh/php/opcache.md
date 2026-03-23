@@ -1,117 +1,179 @@
 ---
-title: OPcache 兼容性
-description: OPcache 如何与 OxPHP 的自定义 SAPI 协同工作
+title: OPcache 与 JIT
+description: 为 OxPHP 配置 OPcache 和 JIT 编译以获得最佳 PHP 性能，包括预加载和开发环境设置。
 ---
 
-OPcache 与 OxPHP 开箱即用。PHP 脚本编译一次并缓存在共享内存中，在服务器进程的整个生命周期内被所有工作线程复用。
+# OPcache 与 JIT
 
-## 工作原理
+OPcache 开箱即用，无需额外配置即可与 OxPHP 协同工作。所有 PHP Worker 线程共享同一块 OPcache 内存段——脚本在首次执行时编译一次，此后所有 Worker 均从缓存中提供服务。无需任何特殊设置即可启用此共享机制。
 
-OxPHP 使用自定义 SAPI，向 PHP 标识为 `cli-server`。OPcache 识别此 SAPI 名称，但默认不会为 cli-server SAPI 激活。附带的 `oxphp.ini` 包含 `opcache.enable_cli = 1`，这正是为此 SAPI 启用 OPcache 的设置。没有该设置，无论其他配置如何，OPcache 都不会激活。
+## OPcache 与 OxPHP 的工作原理
 
-由于 OxPHP 使用 PHP ZTS（Zend 线程安全），所有工作线程共享同一个 OPcache 共享内存段。一个工作线程编译的脚本立即可供所有其他工作线程使用。这在多工作线程并发的同时实现了编译一次、多次执行的行为。
+OxPHP 将自身注册为具名 SAPI，OPcache 将其与其他服务器 SAPI 同等对待。主要特性如下：
 
-## 请求时间要求
+- **跨 Worker 共享缓存**：所有 PHP Worker 线程使用同一份编译后的操作码缓存。一个 Worker 编译文件后，所有 Worker 均可受益。
+- **无逐请求编译**：每个脚本首次请求后，后续请求完全跳过解析和编译步骤。
+- `opcache.enable_cli` 与此无关——该设置仅适用于 `cli` 和 `phpdbg` SAPI。OxPHP 两者都不是。
 
-OPcache 的 `file_update_protection` 功能防止缓存最近修改过的文件（默认 2 秒内）。在每个请求的初始化期间，OPcache 将文件的修改时间与当前请求时间进行比较。
-
-OxPHP 的 SAPI 提供 `get_request_time` 回调，返回当前 Unix 时间戳。此回调在 `php_request_startup()` 期间被 PHP 调用，这意味着请求时间**必须**在此之前可用。
-
-### 没有请求时间会怎样
-
-如果请求时间返回 `0`（零纪元），OPcache 的文件保护检查会将每个文件的 `mtime` 与 1970 年 1 月 1 日进行比较。由于所有文件都在该日期之后修改，OPcache 认为它们"太新"而拒绝缓存。结果是 **0% 的缓存命中率** --- 每个请求都重新编译每个脚本。
-
-OxPHP 通过实现 `get_request_time` SAPI 回调来避免这个问题，该回调返回 `SystemTime::now()` 作为具有微秒精度的 Unix 时间戳。
-
-## 验证 OPcache 状态
-
-创建一个诊断脚本确认 OPcache 已激活：
-
-```php
-<?php
-// www/opcache_check.php
-if (!function_exists('opcache_get_status')) {
-    echo "OPcache extension is not loaded\n";
-    exit(1);
-}
-
-$status = opcache_get_status();
-
-echo "OPcache enabled: " . ($status['opcache_enabled'] ? 'yes' : 'no') . "\n";
-echo "Cached scripts:  " . $status['opcache_statistics']['num_cached_scripts'] . "\n";
-echo "Cache hits:      " . $status['opcache_statistics']['hits'] . "\n";
-echo "Cache misses:    " . $status['opcache_statistics']['misses'] . "\n";
-echo "Hit rate:        " . round($status['opcache_statistics']['opcache_hit_rate'], 1) . "%\n";
-echo "Memory used:     " . round($status['memory_usage']['used_memory'] / 1048576, 1) . " MB\n";
-echo "Memory free:     " . round($status['memory_usage']['free_memory'] / 1048576, 1) . " MB\n";
-```
-
-测试：
-
-```bash
-curl http://localhost:8080/opcache_check.php
-# 第一次请求：未命中（脚本被编译并缓存）
-curl http://localhost:8080/opcache_check.php
-# 第二次请求：命中（脚本从缓存提供）
-```
-
-健康的 OPcache 安装在初始预热期后命中率会趋近 100%。
-
-## JIT 编译
-
-运行 PHP 8.0+ 时支持 OPcache 的 JIT 编译器。在 `php.ini` 中启用：
+要启用 OPcache，至少需要以下配置：
 
 ```ini
-opcache.enable=1
-opcache.jit=tracing
-opcache.jit_buffer_size=64M
-```
+zend_extension=opcache
 
-JIT 对 CPU 密集型 PHP 代码（数学运算、循环、字符串处理）收益最大。对于 I/O 密集型应用（数据库查询、API 调用），改进微乎其微。
-
-## 推荐设置
-
-以下设置与附带的 `oxphp.ini` 一致，针对 PHP 文件在运行时不变的生产容器部署进行了优化：
-
-```ini
 [opcache]
 opcache.enable=1
-opcache.enable_cli=1
+```
+
+## 推荐生产环境配置
+
+以下配置针对 PHP 文件在运行时不会更改的生产容器部署场景进行了优化。禁用时间戳验证并在启动时预加载编译后的文件，以获得最大吞吐量。
+
+```ini
+zend_extension=opcache
+
+[opcache]
+opcache.enable=1
 opcache.memory_consumption=128
+opcache.interned_strings_buffer=16
 opcache.max_accelerated_files=10000
 opcache.validate_timestamps=0
 opcache.revalidate_freq=0
 opcache.file_update_protection=0
-opcache.save_comments=1
+opcache.jit_buffer_size=64M
+opcache.jit=tracing
+```
+
+| 配置项 | 推荐值 | 描述 |
+|--------|--------|------|
+| `memory_consumption` | `128` | 编译脚本使用的共享内存（MB）。若 `opcache_get_status()` 显示可用内存不足，请增大此值。 |
+| `interned_strings_buffer` | `16` | 所有 Worker 共享的驻留字符串内存（MB）。 |
+| `max_accelerated_files` | `10000` | 可缓存脚本的最大数量。应设置为高于项目中 `.php` 文件的总数。 |
+| `validate_timestamps` | `0` | 设为 `0` 时，OPcache 不检查文件系统变更。重启容器或调用 `opcache_reset()` 以使代码变更生效。 |
+| `revalidate_freq` | `0` | 文件系统检查的间隔秒数。当 `validate_timestamps=0` 时无效。 |
+| `file_update_protection` | `0` | 文件修改后多少秒才允许缓存该文件。设为 `0` 以在启动时立即缓存。 |
+
+## 开发环境配置
+
+在开发环境中，启用时间戳验证以使代码变更无需重启容器即可生效。禁用 JIT 以在调试时获得更清晰的堆栈追踪信息。
+
+```ini
+zend_extension=opcache
+
+[opcache]
+opcache.enable=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=10000
+opcache.validate_timestamps=1
+opcache.revalidate_freq=2
+opcache.jit_buffer_size=0
+opcache.jit=disable
+```
+
+设置 `validate_timestamps=1` 后，OPcache 每隔 `revalidate_freq` 秒检查一次文件修改时间。这会带来少量的逐请求开销，但允许你编辑 PHP 文件后在下次请求时立即看到变更。
+
+## JIT 编译
+
+OPcache 的 JIT 编译器在运行时将 PHP 操作码转译为本机机器码。建议使用 `tracing` 模式以获得最佳优化效果：
+
+```ini
 opcache.jit=tracing
 opcache.jit_buffer_size=64M
 ```
 
-| 设置 | 说明 |
-|------|------|
-| `enable_cli` | 为 OxPHP 使用的 cli-server SAPI 激活 OPcache 所必需。 |
-| `memory_consumption` | 编译脚本的共享内存（MB）。如果 `opcache_get_status()` 显示可用内存不足，请增大此值。 |
-| `max_accelerated_files` | 缓存脚本的最大数量。设置为高于 `.php` 文件总数的值。 |
-| `validate_timestamps` | 设为 `0` 时，OPcache 在脚本被缓存后不再检查文件系统变更。你必须重启容器（或调用 `opcache_reset()`）才能应用代码更改。 |
-| `revalidate_freq` | 文件修改检查之间的秒数。仅在 `validate_timestamps=1` 时适用。 |
-| `file_update_protection` | 文件修改后等待多少秒才缓存。在生产环境中设为 `0` 以避免保护窗口。 |
-| `save_comments` | 在缓存脚本中保留文档注释。使用基于注解路由的框架（如 Symfony、Laravel）需要此设置。 |
+JIT 对 CPU 密集型 PHP 代码提升最为显著——计算密集型循环、字符串处理、图像处理和模板渲染。对于大部分时间花费在等待数据库查询或外部 API 调用上的 I/O 密集型应用，提升效果有限。
 
-这些是假定 PHP 文件在容器生命周期内不可变的生产优化设置。在开发环境中，你可能需要使用 `validate_timestamps=1` 和 `revalidate_freq=2`，这样代码更改无需重启服务器即可生效。
+禁用 JIT：
 
-## ZTS 与共享内存
+```ini
+opcache.jit=disable
+opcache.jit_buffer_size=0
+```
 
-OxPHP 以 ZTS 模式运行 PHP，每个工作线程有自己的执行上下文，但所有线程共享同一个 OPcache 共享内存段。这意味着：
+## 预加载
 
-- 工作线程 0 编译的脚本立即可供工作线程 1、2、3 等使用。
-- OPcache 的内部锁机制安全地处理并发编译。
-- 内存消耗不随工作线程数量增长 --- 每个编译脚本的一份副本服务所有线程。
+OPcache 预加载会在服务器启动时、处理任何请求之前编译并缓存 PHP 文件。这完全消除了首次请求的编译开销，并使类和函数无需任何 `require` 或自动加载开销即可全局使用。
 
-这比 PHP-FPM 更节省内存，因为在 PHP-FPM 中每个进程维护自己的 OPcache 段（除非使用 `opcache.file_cache` 配合 `file_cache_only=1` 实现共享存储）。
+在 INI 文件中配置预加载：
 
-## 另请参阅
+```ini
+opcache.preload=/var/www/html/preload.php
+opcache.preload_user=www-data
+```
 
-- [PHP 扩展函数](functions.md) --- `oxphp_server_info()` 函数暴露 `request_time`
-- [超全局变量](superglobals.md) --- `$_SERVER` 和其他全局变量如何在 OPcache 的 RINIT 之前填充
-- [工作池](/architecture/worker-pool.md) --- ZTS 工作线程和共享内存架构
-- [SAPI 桥接](/architecture/sapi-bridge.md) --- 提供 `get_request_time` 回调的 C 桥接
+创建一个 `preload.php` 脚本，加载最常用的文件：
+
+```php
+<?php
+// preload.php — 在服务器启动时运行一次
+
+require __DIR__ . '/vendor/autoload.php';
+
+// 预加载框架核心文件
+$files = glob(__DIR__ . '/vendor/symfony/http-kernel/**.php');
+foreach ($files as $file) {
+    opcache_compile_file($file);
+}
+
+// 预加载热点应用路径
+opcache_compile_file(__DIR__ . '/src/Controller/ApiController.php');
+opcache_compile_file(__DIR__ . '/src/Service/UserService.php');
+```
+
+> **注意：** 预加载的类和函数对所有请求永久可用。在重启服务器之前无法更改它们。
+
+## 应用 PHP 配置
+
+OxPHP 从标准的 `conf.d` 目录读取 PHP 配置。使用 Docker 卷挂载或 `COPY` 指令提供自定义 INI 文件。
+
+**Docker run：**
+
+```bash
+docker run -p 8080:8080 \
+  -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
+  ghcr.io/oxphp/oxphp:0.1.0
+```
+
+**Dockerfile：**
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:0.1.0
+
+COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+COPY --chown=www-data:www-data . /var/www/html
+```
+
+**Docker Compose：**
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.1.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./src:/var/www/html
+```
+
+## 监控缓存状态
+
+从 PHP 中检查实时 OPcache 状态以验证其正常工作：
+
+```php
+<?php
+$status = opcache_get_status();
+
+echo "Cached scripts: " . $status['opcache_statistics']['num_cached_scripts'] . "\n";
+echo "Cache hits: "     . $status['opcache_statistics']['hits'] . "\n";
+echo "Cache misses: "   . $status['opcache_statistics']['misses'] . "\n";
+echo "Free memory: "    . $status['memory_usage']['free_memory'] . " bytes\n";
+```
+
+若 `free_memory` 持续偏低，请增大 `opcache.memory_consumption` 的值。
+
+## 参见
+
+- [Docker 指南](../getting-started/docker.md) -- 容器配置与挂载配置文件
+- [配置参考](../operations/configuration.md) -- OxPHP 的环境变量
+- [Worker 模式](../features/worker-mode.md) -- 从 OPcache 中获益最多的持久 PHP 进程

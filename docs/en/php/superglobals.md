@@ -1,50 +1,81 @@
 ---
 title: Superglobals
-description: How OxPHP populates PHP superglobal arrays
+description: How OxPHP populates $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES, and php://input for each request.
 ---
 
-OxPHP populates all standard PHP superglobals so that existing PHP code works without modification. Every value is set **before** `php_request_startup()` runs, so superglobals are available from the first line of your script --- including inside extensions like OPcache that read them during request initialization.
+# Superglobals
 
-## `$_SERVER`
+OxPHP populates all standard PHP superglobals before your script executes, matching the behavior PHP developers expect from traditional server setups. Every value is available from the first line of your code — no initialization required.
 
-The custom SAPI registers a full set of CGI/1.1 variables through the `register_server_variables` callback. These variables are built from the HTTP request and injected into `$_SERVER` during PHP request startup.
+## $_SERVER
 
-### Standard CGI Variables
+OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 specification. Process environment variables are imported first; CGI variables are set afterward, so request-specific values always override any colliding environment keys.
 
-| Variable | Source | Example |
-|----------|--------|---------|
+### Standard Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
+| `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
+| `SERVER_SOFTWARE` | Server identifier | `OxPHP/0.1.0` |
+| `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
-| `QUERY_STRING` | Query portion of the URI | `page=2` |
-| `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
 | `SCRIPT_NAME` | URI path without query string | `/app` |
+| `DOCUMENT_URI` | Alias for `SCRIPT_NAME`, for nginx/PHP-FPM compatibility | `/app` |
 | `PHP_SELF` | Same as `SCRIPT_NAME` | `/app` |
-| `SCRIPT_FILENAME` | Absolute filesystem path to the script | `/var/www/html/public/index.php` |
-| `DOCUMENT_ROOT` | Web root directory | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier | `OxPHP/0.1.0` |
-| `GATEWAY_INTERFACE` | CGI version | `CGI/1.1` |
+| `QUERY_STRING` | Query portion of the URI (empty string when absent) | `page=2` |
+| `SERVER_NAME` | Hostname from the `Host` header | `example.com` |
+| `SERVER_PORT` | Port from the `Host` header | `8080` |
 | `REMOTE_ADDR` | Client IP address | `172.17.0.1` |
-| `REMOTE_PORT` | Client port | `54321` |
-| `SERVER_NAME` | From `Host` header (host part) | `example.com` |
-| `SERVER_PORT` | From `Host` header (port part) | `8080` |
-| `CONTENT_TYPE` | From `Content-Type` header | `application/json` |
-| `CONTENT_LENGTH` | From `Content-Length` header | `128` |
+| `REMOTE_PORT` | Client port number | `54321` |
+| `HTTPS` | Set to `"on"` when the connection uses TLS; absent otherwise | `on` |
+| `REQUEST_SCHEME` | `"https"` for TLS connections, `"http"` otherwise | `https` |
+| `CONTENT_TYPE` | Value of the `Content-Type` header (no `HTTP_` prefix) | `application/json` |
+| `CONTENT_LENGTH` | Value of the `Content-Length` header (no `HTTP_` prefix) | `128` |
+| `REQUEST_TIME` | Unix timestamp (integer) when the request started | `1738800000` |
+| `REQUEST_TIME_FLOAT` | Unix timestamp with microsecond precision | `1738800000.123456` |
+| `GATEWAY_INTERFACE` | CGI version string | `CGI/1.1` |
 
-When the `Host` header is missing, `SERVER_NAME` defaults to `localhost` and `SERVER_PORT` defaults to `80`.
+When the `Host` header is absent, `SERVER_NAME` defaults to `localhost` and `SERVER_PORT` defaults to `80` (or `443` for TLS).
 
 ### HTTP Request Headers
 
-All HTTP request headers are added to `$_SERVER` with the `HTTP_` prefix and dashes converted to underscores, following standard CGI conventions:
+All HTTP request headers are added to `$_SERVER` with an `HTTP_` prefix. Header names are converted to uppercase with dashes replaced by underscores, following CGI/1.1 conventions:
 
+```text
+Accept: text/html            -> HTTP_ACCEPT
+X-Forwarded-For: 1.2.3.4    -> HTTP_X_FORWARDED_FOR
+Authorization: Bearer abc    -> HTTP_AUTHORIZATION
+Cookie: session=xyz          -> HTTP_COOKIE
 ```
-Accept: text/html         → HTTP_ACCEPT = "text/html"
-X-Forwarded-For: 1.2.3.4 → HTTP_X_FORWARDED_FOR = "1.2.3.4"
-Authorization: Bearer ... → HTTP_AUTHORIZATION = "Bearer ..."
-```
 
-`Content-Type` and `Content-Length` are **not** prefixed with `HTTP_` --- they appear as `CONTENT_TYPE` and `CONTENT_LENGTH` directly, as required by the CGI specification.
+> **Note:** `Content-Type` and `Content-Length` appear without the `HTTP_` prefix — as `CONTENT_TYPE` and `CONTENT_LENGTH` — as required by the CGI specification.
 
-### Usage Example
+### Trace Context Variables
+
+When distributed tracing is enabled, OxPHP adds trace context variables to `$_SERVER`:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `OXPHP_TRACE_ID` | W3C trace ID for the current request | `4bf92f3577b34da6a3ce929d0e0e4736` |
+| `OXPHP_SPAN_ID` | Span ID for the OxPHP server span | `00f067aa0ba902b7` |
+| `OXPHP_PARENT_SPAN_ID` | Parent span ID from the upstream service (empty if root) | `b9c7c989f97918e1` |
+
+These variables are only present when a valid `traceparent` header arrives or when OxPHP generates a new trace. If tracing is not configured, these keys are absent.
+
+### Differences from PHP-FPM
+
+The following variables behave differently compared to a standard PHP-FPM setup:
+
+| Variable | Behavior |
+|----------|----------|
+| `SERVER_ADDR` | Not set. OxPHP does not populate the local server IP address. |
+| `PATH_INFO` / `PATH_TRANSLATED` | Not set. OxPHP does not perform path-info splitting. |
+| `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Not extracted from the `Authorization` header. Read `$_SERVER['HTTP_AUTHORIZATION']` directly. |
+| `REDIRECT_STATUS` | Not set. OxPHP does not use an internal redirect mechanism. |
+
+### Example
 
 ```php
 <?php
@@ -52,16 +83,25 @@ $method  = $_SERVER['REQUEST_METHOD'];
 $uri     = $_SERVER['REQUEST_URI'];
 $ip      = $_SERVER['REMOTE_ADDR'];
 $host    = $_SERVER['SERVER_NAME'];
-$docroot = $_SERVER['DOCUMENT_ROOT'];
+$scheme  = $_SERVER['REQUEST_SCHEME'];  // "http" or "https"
 
-// Access custom headers
-$token   = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-$xff     = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+// Read a custom header
+$token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+
+// Prefer X-Forwarded-For when behind a trusted reverse proxy
+$xff  = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+
+// Check TLS without checking the port
+if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
+    // Secure connection
+}
 ```
 
-## `$_GET`
+---
 
-Query string parameters are parsed by PHP's standard engine from the `QUERY_STRING` server variable. OxPHP sets `QUERY_STRING` from the request URI, and PHP populates `$_GET` automatically during request startup.
+## $_GET
+
+Query string parameters are parsed automatically from the request URI.
 
 ```php
 <?php
@@ -70,69 +110,117 @@ $query = $_GET['q'];     // "oxphp"
 $page  = $_GET['page'];  // "2"
 ```
 
-## `$_POST`
-
-The SAPI provides a `read_post` callback that feeds the request body to PHP's standard POST parser. PHP handles both `application/x-www-form-urlencoded` and `multipart/form-data` content types. The body is read incrementally --- PHP calls the callback repeatedly until it returns 0 bytes.
+Array syntax works as expected:
 
 ```php
 <?php
-// Request: POST /login with application/x-www-form-urlencoded body
-$username = $_POST['username'];
-$password = $_POST['password'];
+// Request: GET /filter?tags[]=php&tags[]=async
+$tags = $_GET['tags'];  // ["php", "async"]
 ```
 
-The raw request body is also available through `php://input`:
+---
+
+## $_POST
+
+OxPHP supports the two standard content types for form submissions:
+
+- `application/x-www-form-urlencoded` — standard HTML form data
+- `multipart/form-data` — file uploads combined with form fields
 
 ```php
 <?php
-$json = json_decode(file_get_contents('php://input'), true);
+// Request: POST /login
+// Content-Type: application/x-www-form-urlencoded
+// Body: username=admin&password=secret
+
+$username = $_POST['username'];  // "admin"
+$password = $_POST['password'];  // "secret"
 ```
 
-## `$_COOKIE`
-
-The SAPI provides a `read_cookies` callback that returns the raw `Cookie` header string. PHP's engine parses it into the `$_COOKIE` array during request startup.
+For JSON or other content types, use `php://input` instead:
 
 ```php
 <?php
-// Request with Cookie: session=abc123; theme=dark
+// Request: POST /api/users
+// Content-Type: application/json
+// Body: {"name":"Alice","email":"alice@example.com"}
+
+$data  = json_decode(file_get_contents('php://input'), true);
+$name  = $data['name'];   // "Alice"
+$email = $data['email'];  // "alice@example.com"
+```
+
+---
+
+## $_COOKIE
+
+Cookies are parsed from the `Cookie` request header.
+
+```php
+<?php
+// Request with: Cookie: session=abc123; theme=dark
 $session = $_COOKIE['session'];  // "abc123"
 $theme   = $_COOKIE['theme'];    // "dark"
 ```
 
-## `$_REQUEST`
+> **Note:** Cookies with the `__oxp_` prefix are reserved for internal OxPHP plugins. They are stripped from the `Cookie` header before it reaches PHP and will not appear in `$_COOKIE`.
 
-`$_REQUEST` is populated by PHP based on the `request_order` INI directive (default: `"GP"` --- GET then POST). It merges `$_GET` and `$_POST` (and optionally `$_COOKIE`) in the configured order. OxPHP does not override this behavior.
+---
 
-## `$_FILES`
+## $_FILES
 
-File uploads sent via `multipart/form-data` are parsed by PHP's standard `read_post` mechanism. The `$_FILES` array is populated automatically, including `name`, `type`, `tmp_name`, `error`, and `size` for each uploaded file.
+File uploads sent via `multipart/form-data` populate the `$_FILES` array with the standard PHP structure:
 
 ```php
 <?php
+// $_FILES['avatar'] structure:
+// [
+//     'name'     => 'photo.jpg',       // Original filename sent by the client
+//     'type'     => 'image/jpeg',      // MIME type declared by the client
+//     'tmp_name' => '/tmp/phpAb12Cd',  // Temporary file path on the server
+//     'error'    => 0,                 // UPLOAD_ERR_OK (0 means no error)
+//     'size'     => 204800,            // File size in bytes
+// ]
+
 if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
     $tmp  = $_FILES['avatar']['tmp_name'];
-    $name = $_FILES['avatar']['name'];
+    $name = basename($_FILES['avatar']['name']);
     move_uploaded_file($tmp, "/uploads/$name");
 }
 ```
 
-## Implementation Details
+---
 
-### Batch FFI Pattern
+## $_REQUEST
 
-OxPHP builds all `$_SERVER` key-value pairs in a single Rust `Vec<(CString, CString)>` and stores them in a thread-local before PHP starts the request. During the `register_server_variables` callback, the entire vector is iterated in one pass, calling `php_register_variable_safe()` for each entry. This avoids per-variable FFI calls and keeps the overhead constant regardless of the number of headers.
+`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). OxPHP does not modify this behavior.
 
-### Data Lifetime Requirements
+```php
+<?php
+// GET /form?action=preview with POST body: action=submit
+$action = $_REQUEST['action'];  // "submit" (POST overrides GET with default order)
+```
 
-All per-request data --- server variables, the cookie string, and the request body --- must be stored in thread-local storage **before** `php_request_startup()` is called. These values must remain valid through `php_request_shutdown()` because PHP's engine holds raw pointers into them. OxPHP stores them in a `RequestData` struct inside a `thread_local! { RefCell }` and clears them only after the request is fully shut down.
+---
 
-### Thread-Local Bridge
+## php://input
 
-The C bridge library (`liboxphp_bridge.so`) uses `__thread` TLS to share per-request context (request ID, worker ID, request time) between Rust and the PHP extension. Both the Rust binary and the PHP extension link against the same shared library, giving them access to the same thread-local storage. This is the only reliable mechanism for sharing state across `dlopen` boundaries.
+The raw request body is available through the `php://input` stream. This is the standard way to read JSON payloads, XML, or any content type other than form submissions.
+
+```php
+<?php
+$body = file_get_contents('php://input');
+$data = json_decode($body, true);
+```
+
+`php://input` is rewindable and can be read multiple times within the same request.
+
+> **Note:** `php://input` is empty for `multipart/form-data` requests. Use `$_POST` and `$_FILES` for those.
+
+---
 
 ## See Also
 
-- [PHP Extension Functions](functions.md) --- built-in functions for accessing request IDs, worker info, and server metadata
-- [OPcache Compatibility](opcache.md) --- how request time enables OPcache's `file_update_protection`
-- [SAPI Bridge](/architecture/sapi-bridge.md) --- the C bridge library and thread-local storage mechanism
-- [Request Lifecycle](/architecture/request-lifecycle.md) --- how request data flows from Rust to PHP
+- [PHP Functions](functions.md) -- `oxphp_request_id()`, `oxphp_worker_id()`, and other extension functions
+- [Worker Mode](../features/worker-mode.md) -- how superglobals are refreshed between worker requests
+- [Configuration Reference](../operations/configuration.md) -- `DOCUMENT_ROOT` and other server configuration variables
