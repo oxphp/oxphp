@@ -150,6 +150,27 @@ fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
     }
 }
 
+/// Parse a Host header value into (server_name, server_port).
+/// Handles IPv6 literals per RFC 9110 §7.2 / RFC 3986 §3.2.2.
+fn parse_host<'a>(host: &'a str, default_port: &'a str) -> (&'a str, &'a str) {
+    if host.starts_with('[') {
+        // IPv6 literal: find closing bracket, then optional :port
+        if let Some(bracket_end) = host.find(']') {
+            if host.get(bracket_end + 1..bracket_end + 2) == Some(":") {
+                (&host[..bracket_end + 1], &host[bracket_end + 2..])
+            } else {
+                (host, default_port)
+            }
+        } else {
+            (host, default_port)
+        }
+    } else if let Some(colon) = host.rfind(':') {
+        (&host[..colon], &host[colon + 1..])
+    } else {
+        (host, default_port)
+    }
+}
+
 /// Set minimal $_SERVER variables for the worker mode boot phase.
 /// Called once before php_request_startup() so the worker script
 /// sees SCRIPT_FILENAME, DOCUMENT_ROOT, etc. during bootstrap.
@@ -407,13 +428,9 @@ pub fn set_request_data(req: &ScriptRequest) {
         let default_port = if req.is_tls { "443" } else { "80" };
         if let Some(host) = req.headers.get(header::HOST) {
             if let Ok(host_str) = host.to_str() {
-                if let Some(colon) = host_str.rfind(':') {
-                    push_server_var(vars, "SERVER_NAME", &host_str[..colon]);
-                    push_server_var(vars, "SERVER_PORT", &host_str[colon + 1..]);
-                } else {
-                    push_server_var(vars, "SERVER_NAME", host_str);
-                    push_server_var(vars, "SERVER_PORT", default_port);
-                }
+                let (name, port) = parse_host(host_str, default_port);
+                push_server_var(vars, "SERVER_NAME", name);
+                push_server_var(vars, "SERVER_PORT", port);
             }
         } else {
             push_server_var(vars, "SERVER_NAME", "localhost");
@@ -2389,5 +2406,51 @@ mod tests {
         WORKER_RX.with(|slot| {
             *slot.borrow_mut() = None;
         });
+    }
+
+    #[test]
+    fn parse_host_ipv6_bare() {
+        assert_eq!(parse_host("[::1]", "80"), ("[::1]", "80"));
+    }
+
+    #[test]
+    fn parse_host_ipv6_with_port() {
+        assert_eq!(parse_host("[::1]:8080", "80"), ("[::1]", "8080"));
+    }
+
+    #[test]
+    fn parse_host_ipv6_full_bare() {
+        assert_eq!(parse_host("[2001:db8::1]", "443"), ("[2001:db8::1]", "443"));
+    }
+
+    #[test]
+    fn parse_host_ipv6_full_with_port() {
+        assert_eq!(
+            parse_host("[2001:db8::1]:9000", "443"),
+            ("[2001:db8::1]", "9000")
+        );
+    }
+
+    #[test]
+    fn parse_host_domain_with_port() {
+        assert_eq!(
+            parse_host("example.com:8080", "80"),
+            ("example.com", "8080")
+        );
+    }
+
+    #[test]
+    fn parse_host_domain_without_port() {
+        assert_eq!(parse_host("example.com", "80"), ("example.com", "80"));
+    }
+
+    #[test]
+    fn parse_host_ipv4_with_port() {
+        assert_eq!(parse_host("127.0.0.1:3000", "80"), ("127.0.0.1", "3000"));
+    }
+
+    #[test]
+    fn parse_host_ipv4_without_port() {
+        assert_eq!(parse_host("127.0.0.1", "80"), ("127.0.0.1", "80"));
     }
 }
