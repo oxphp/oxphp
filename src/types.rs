@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
 use hyper::body::Frame;
 
@@ -64,6 +64,8 @@ pub struct ScriptRequest {
     pub parent_span_id: String,
     /// Whether this request arrived over TLS.
     pub is_tls: bool,
+    /// HTTP version of the request (e.g., HTTP/1.0, HTTP/1.1, HTTP/2).
+    pub version: Version,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.

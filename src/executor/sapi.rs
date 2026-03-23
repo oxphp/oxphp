@@ -1231,6 +1231,7 @@ mod tests {
             span_id: String::new(),
             parent_span_id: String::new(),
             is_tls: false,
+            version: http::Version::HTTP_11,
         };
 
         let result = executor.execute(request);
