@@ -332,6 +332,7 @@ async fn dispatch_request(
                 span_id: metadata_get(metadata, "span_id").to_string(),
                 parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),
                 is_tls: server.is_tls(),
+                version: parts.version,
             };
 
             let queue_start = Instant::now();

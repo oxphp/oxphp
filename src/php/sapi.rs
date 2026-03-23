@@ -362,7 +362,14 @@ pub fn set_request_data(req: &ScriptRequest) {
                 .unwrap_or("/"),
         );
         push_server_var(vars, "QUERY_STRING", &req.query_string);
-        push_server_var(vars, "SERVER_PROTOCOL", "HTTP/1.1");
+        let protocol = match req.version {
+            http::Version::HTTP_10 => "HTTP/1.0",
+            http::Version::HTTP_11 => "HTTP/1.1",
+            http::Version::HTTP_2 => "HTTP/2",
+            http::Version::HTTP_3 => "HTTP/3",
+            _ => "HTTP/1.1",
+        };
+        push_server_var(vars, "SERVER_PROTOCOL", protocol);
 
         // SCRIPT_NAME: URI path without query string
         let path = req.uri.path();
