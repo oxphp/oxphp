@@ -455,6 +455,13 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(vars, &header_buf, val_str);
         }
 
+        // REQUEST_TIME and REQUEST_TIME_FLOAT from bridge (set in setup_request_tls)
+        let rt = unsafe { bindings::oxphp_bridge_get_request_time() };
+        if rt > 0.0 {
+            push_server_var(vars, "REQUEST_TIME", &(rt as u64).to_string());
+            push_server_var(vars, "REQUEST_TIME_FLOAT", &format!("{rt:.6}"));
+        }
+
         // Trace context variables (when tracing is enabled)
         if !req.trace_id.is_empty() {
             push_server_var(vars, "OXPHP_TRACE_ID", &req.trace_id);
@@ -1000,10 +1007,7 @@ unsafe extern "C" fn oxphp_error_cb(
 
 unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_result {
     if !request_time.is_null() {
-        *request_time = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
+        *request_time = bindings::oxphp_bridge_get_request_time();
     }
     0 // SUCCESS
 }
@@ -1384,6 +1388,9 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     // Reset bridge TLS per-request fields
     unsafe { bindings::oxphp_bridge_reset_request_ctx() };
 
+    // Set request_time BEFORE set_request_data so server vars can read it
+    unsafe { bindings::oxphp_bridge_set_request_time(now.as_secs_f64()) };
+
     // Set up SAPI data for the new request
     set_request_data(&req.script);
 
@@ -1399,9 +1406,6 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
             wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
         }
     });
-
-    // Set request_time BEFORE superglobals are populated
-    unsafe { bindings::oxphp_bridge_set_request_time(now.as_secs_f64()) };
 
     // Set execution deadline
     if req.script.timeout_us > 0 {
