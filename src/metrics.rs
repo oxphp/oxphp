@@ -479,17 +479,6 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_response_time_us_total Total response time in microseconds."
-        );
-        let _ = writeln!(out, "# TYPE oxphp_response_time_us_total counter");
-        let _ = writeln!(
-            out,
-            "oxphp_response_time_us_total {}",
-            self.total_response_time_us.load(Ordering::Relaxed)
-        );
-
-        let _ = writeln!(
-            out,
             "# HELP oxphp_busy_workers Currently busy worker threads."
         );
         let _ = writeln!(out, "# TYPE oxphp_busy_workers gauge");
@@ -1035,7 +1024,6 @@ mod tests {
         assert!(output.contains("oxphp_requests_total 1"));
         assert!(output.contains("oxphp_requests_by_method_total{method=\"GET\"} 1"));
         assert!(output.contains("oxphp_responses_by_status_total{status=\"2xx\"} 1"));
-        assert!(output.contains("oxphp_response_time_us_total 1000"));
         assert!(output.contains("oxphp_request_bytes_total 50"));
         assert!(output.contains("oxphp_response_bytes_total 500"));
         // _count derived from responses_by_status_class (one 200 → count=1)

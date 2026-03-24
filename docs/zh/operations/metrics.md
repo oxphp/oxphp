@@ -27,7 +27,6 @@ curl http://localhost:9090/metrics
 |--------|------|-------------|
 | `oxphp_uptime_seconds` | gauge | 服务器进程启动后的运行秒数 |
 | `oxphp_requests_total` | counter | 主端口接收的 HTTP 请求总数 |
-| `oxphp_response_time_us_total` | counter | 所有请求累计响应时间（微秒） |
 
 ## 请求指标
 
@@ -157,7 +156,7 @@ rate(oxphp_requests_total[5m])
 **平均响应时间（毫秒）：**
 
 ```text
-rate(oxphp_response_time_us_total[5m])
+rate(oxphp_request_duration_us_sum[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 
