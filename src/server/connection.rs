@@ -139,9 +139,9 @@ pub async fn handle_request(
                 );
                 Ok((
                     Response::builder()
-                        .status(StatusCode::GATEWAY_TIMEOUT)
+                        .status(StatusCode::REQUEST_TIMEOUT)
                         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .body(full_body(Bytes::from_static(b"504 Gateway Timeout")))
+                        .body(full_body(Bytes::from_static(b"408 Request Timeout")))
                         .unwrap(),
                     0usize,
                 ))
