@@ -335,7 +335,10 @@ impl ScriptExecutor for SapiExecutor {
                     (500, Bytes::from_static(b"PHP worker pool unavailable"))
                 }
             };
-            let mut headers = Vec::new();
+            let mut headers = vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )];
             if status == 529 {
                 headers.push((
                     HeaderName::from_static("retry-after"),

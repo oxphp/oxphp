@@ -415,6 +415,7 @@ pub async fn serve(
         );
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .body(full_body(Bytes::from_static(b"404 Not Found")))?);
     }
 
@@ -424,6 +425,7 @@ pub async fn serve(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(full_body(Bytes::from_static(b"404 Not Found")))?);
         }
         Err(e) => return Err(e.into()),
@@ -452,6 +454,7 @@ pub async fn serve(
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                     .body(full_body(Bytes::from_static(b"404 Not Found")))?);
             }
             Err(e) => return Err(e.into()),
@@ -485,6 +488,7 @@ pub async fn serve(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(full_body(Bytes::from_static(b"404 Not Found")))?);
         }
         Err(e) => return Err(e.into()),

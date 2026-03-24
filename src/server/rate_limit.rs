@@ -57,6 +57,7 @@ impl RateLimiter {
 
             let mut response = Response::builder()
                 .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .header("retry-after", reset_secs.to_string())
                 .header("x-ratelimit-limit", self.max_requests.to_string())
                 .header("x-ratelimit-remaining", remaining.to_string())
