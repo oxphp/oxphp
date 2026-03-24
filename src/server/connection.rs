@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use http::{Method, Request, Response, StatusCode};
+use http::{header, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::Body as _;
 use hyper::body::Incoming;
@@ -140,6 +140,7 @@ pub async fn handle_request(
                 Ok((
                     Response::builder()
                         .status(StatusCode::GATEWAY_TIMEOUT)
+                        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                         .body(full_body(Bytes::from_static(b"504 Gateway Timeout")))
                         .unwrap(),
                     0usize,
@@ -157,6 +158,7 @@ pub async fn handle_request(
             (
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                     .body(full_body(Bytes::from_static(b"500 Internal Server Error")))
                     .unwrap(),
                 0,
@@ -258,6 +260,7 @@ async fn dispatch_request(
                 return Ok((
                     Response::builder()
                         .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                         .body(full_body(Bytes::from_static(
                             b"415 Unsupported Media Type: QUERY requires Content-Type",
                         )))?,
@@ -284,6 +287,7 @@ async fn dispatch_request(
                         return Ok((
                             Response::builder()
                                 .status(StatusCode::PAYLOAD_TOO_LARGE)
+                                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                                 .body(full_body(Bytes::from_static(b"413 Payload Too Large")))?,
                             0,
                         ));
@@ -301,6 +305,7 @@ async fn dispatch_request(
                             return Ok((
                                 Response::builder()
                                     .status(StatusCode::PAYLOAD_TOO_LARGE)
+                                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                                     .body(full_body(Bytes::from_static(
                                         b"413 Payload Too Large",
                                     )))?,
@@ -368,6 +373,7 @@ async fn dispatch_request(
                         return Ok((
                             Response::builder()
                                 .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                                 .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
                                 .unwrap(),
                             request_body_size,
@@ -389,6 +395,7 @@ async fn dispatch_request(
         }
         RouteResult::NotFound => Response::builder()
             .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
             .body(full_body(Bytes::from_static(b"404 Not Found")))?,
     };
 
