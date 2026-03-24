@@ -58,6 +58,12 @@ pub struct Config {
     pub async_queue_capacity: usize,
     /// W3C Trace Context propagation enabled.
     pub trace_context: bool,
+    /// PHP worker pool description (e.g. "4", "2:8", "4 (auto)").
+    pub php_workers: String,
+    /// Effective number of Tokio runtime threads.
+    pub tokio_workers: usize,
+    /// Bounded channel capacity for PHP request queue.
+    pub queue_capacity: usize,
 }
 
 /// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
@@ -175,6 +181,34 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let cpu = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let default_workers = (cpu / 2).max(1);
+
+        let (php_workers, php_worker_count) = match std::env::var("PHP_WORKERS") {
+            Ok(val) if !val.is_empty() => {
+                // Parse worker count for queue_capacity default.
+                let count = if let Some((min_s, _)) = val.split_once(':') {
+                    min_s.parse::<usize>().unwrap_or(default_workers)
+                } else {
+                    val.parse::<usize>().unwrap_or(default_workers)
+                };
+                (val, count)
+            }
+            _ => (format!("{default_workers} (auto)"), default_workers),
+        };
+
+        let tokio_workers = std::env::var("TOKIO_WORKERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(default_workers);
+
+        let queue_capacity = std::env::var("QUEUE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(php_worker_count * 128);
+
         Ok(Self {
             server,
             log_level,
@@ -197,6 +231,9 @@ impl Config {
             async_workers,
             async_queue_capacity,
             trace_context,
+            php_workers,
+            tokio_workers,
+            queue_capacity,
         })
     }
 
@@ -207,9 +244,14 @@ impl Config {
             "listen_addr": self.server.listen_addr,
             "document_root": self.server.document_root.display().to_string(),
             "index_file": self.server.index_file,
+            "log_level": self.log_level,
             "executor_type": self.executor_type,
+            "php_workers": self.php_workers,
+            "tokio_workers": self.tokio_workers,
+            "queue_capacity": self.queue_capacity,
             "max_connections": self.max_connections,
             "drain_timeout_seconds": self.drain_timeout_seconds,
+            "internal_addr": self.internal_addr,
             "header_timeout_seconds": self.server.header_read_timeout.as_secs(),
             "request_timeout_seconds": self.server.request_timeout.as_secs(),
             "rate_limit": self.rate_limit,
