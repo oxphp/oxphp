@@ -27,7 +27,6 @@ curl http://localhost:9090/metrics
 |--------|------|-------------|
 | `oxphp_uptime_seconds` | gauge | Seconds since the server process started |
 | `oxphp_requests_total` | counter | Total HTTP requests received on the main port |
-| `oxphp_response_time_us_total` | counter | Cumulative response time in microseconds across all requests |
 
 ## Request Metrics
 
@@ -157,7 +156,7 @@ rate(oxphp_requests_total[5m])
 **Average response time (milliseconds):**
 
 ```text
-rate(oxphp_response_time_us_total[5m])
+rate(oxphp_request_duration_us_sum[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 

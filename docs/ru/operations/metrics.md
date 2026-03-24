@@ -27,7 +27,6 @@ curl http://localhost:9090/metrics
 |--------|-----|---------|
 | `oxphp_uptime_seconds` | gauge | Секунды с момента запуска серверного процесса |
 | `oxphp_requests_total` | counter | Общее количество HTTP-запросов, полученных на основном порту |
-| `oxphp_response_time_us_total` | counter | Суммарное время ответа в микросекундах по всем запросам |
 
 ## Метрики запросов
 
@@ -157,7 +156,7 @@ rate(oxphp_requests_total[5m])
 **Среднее время ответа (миллисекунды):**
 
 ```text
-rate(oxphp_response_time_us_total[5m])
+rate(oxphp_request_duration_us_sum[5m])
 / rate(oxphp_requests_total[5m]) / 1000
 ```
 
