@@ -75,6 +75,7 @@ OxPHP 镜像包含服务器二进制文件、PHP 8.4、带 JIT 的 OPcache 及�
 
 ## PHP
 
+- [HTTP 请求对象 API](php/request-api.md) —— 通过 `oxphp_http_request()` 以面向对象方式访问请求数据：查询参数、解析后的请求体、请求头、Cookie、文件上传等
 - [函数](php/functions.md) —— OxPHP 提供的内置 PHP 函数（`oxphp_worker()`、`oxphp_request_id()`、`oxphp_server_info()` 等）
 - [超全局变量](php/superglobals.md) —— `$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES` 和 `php://input` 的填充方式
 - [OPcache 与 JIT](php/opcache.md) —— OPcache 配置和 JIT 编译设置

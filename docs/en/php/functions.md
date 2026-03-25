@@ -9,6 +9,8 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 
 ## Table of Contents
 
+- [oxphp_http_request()](#oxphp_http_request)
+- [oxphp_superglobals_enabled()](#oxphp_superglobals_enabled)
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
@@ -25,6 +27,68 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+
+---
+
+## oxphp_http_request()
+
+```php
+oxphp_http_request(): \OxPHP\Http\RequestInterface
+```
+
+Returns the request object for the current HTTP request. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
+
+**Returns:** An `\OxPHP\Http\RequestInterface` instance backed by the request data in the current PHP worker thread.
+
+**Throws:** An exception from the `OxPHP\Http\Exception` namespace when called outside an active request:
+
+| Exception | Situation |
+|-----------|-----------|
+| `\OxPHP\Http\Exception\WorkerIdleException` | Worker mode, between requests |
+| `\OxPHP\Http\Exception\AsyncContextException` | Inside an `oxphp_async()` callback |
+| `\OxPHP\Http\Exception\NoActiveRequestException` | Any other context without an active request |
+
+In normal request-handling code, no exception handling is required.
+
+**Example:**
+
+```php
+<?php
+$request = oxphp_http_request();
+
+$method  = $request->method();             // "POST"
+$path    = $request->path();               // "/api/users"
+$email   = $request->payload('email');     // from JSON or form body
+$token   = $request->header('Authorization');
+$theme   = $request->cookie('theme', 'light');
+```
+
+For the complete interface reference, see the [HTTP Request API](request-api.md) documentation.
+
+---
+
+## oxphp_superglobals_enabled()
+
+```php
+oxphp_superglobals_enabled(): bool
+```
+
+Returns whether superglobal population is enabled for this server instance. The value reflects the `SUPERGLOBALS_ENABLED` environment variable and does not change during the server's lifetime.
+
+When `false`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `$_SERVER` are empty arrays. The HTTP Object API (`oxphp_http_request()`), `php://input`, and PHP session functions are unaffected.
+
+**Returns:** `true` when `SUPERGLOBALS_ENABLED` is `true` (the default), `false` otherwise.
+
+**Example:**
+
+```php
+<?php
+if (oxphp_superglobals_enabled()) {
+    $query = $_GET['page'] ?? 1;
+} else {
+    $query = oxphp_http_request()->query('page', 1);
+}
+```
 
 ---
 
@@ -543,22 +607,24 @@ $functions = get_extension_funcs('oxphp_sapi');
 print_r($functions);
 // Array
 // (
-//     [0]  => oxphp_request_id
-//     [1]  => oxphp_worker_id
-//     [2]  => oxphp_server_info
-//     [3]  => oxphp_request_heartbeat
-//     [4]  => oxphp_finish_request
-//     [5]  => oxphp_is_worker
-//     [6]  => oxphp_is_streaming
-//     [7]  => oxphp_stream_flush
-//     [8]  => oxphp_sleep
-//     [9]  => oxphp_usleep
-//     [10] => oxphp_worker
-//     [11] => oxphp_async
-//     [12] => oxphp_async_await
-//     [13] => oxphp_async_await_all
-//     [14] => oxphp_async_await_any
-//     [15] => oxphp_register_decorator
+//     [0]  => oxphp_http_request
+//     [1]  => oxphp_superglobals_enabled
+//     [2]  => oxphp_request_id
+//     [3]  => oxphp_worker_id
+//     [4]  => oxphp_server_info
+//     [5]  => oxphp_request_heartbeat
+//     [6]  => oxphp_finish_request
+//     [7]  => oxphp_is_worker
+//     [8]  => oxphp_is_streaming
+//     [9]  => oxphp_stream_flush
+//     [10] => oxphp_sleep
+//     [11] => oxphp_usleep
+//     [12] => oxphp_worker
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
 // )
 ```
 
@@ -589,6 +655,7 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 
 ## See Also
 
+- [HTTP Request API](request-api.md) -- object-oriented access to request data via `oxphp_http_request()`
 - [Worker Mode](../features/worker-mode.md) -- persistent worker loop and request lifecycle
 - [Server-Sent Events](../features/sse.md) -- real-time streaming with `oxphp_stream_flush()`
 - [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`

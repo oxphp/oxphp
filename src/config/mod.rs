@@ -58,6 +58,9 @@ pub struct Config {
     pub async_queue_capacity: usize,
     /// W3C Trace Context propagation enabled.
     pub trace_context: bool,
+    /// Whether PHP superglobals ($_GET, $_POST, etc.) are populated.
+    /// When false, only the object API (oxphp_http_request()) provides request data.
+    pub superglobals_enabled: bool,
     /// PHP worker pool description (e.g. "4", "2:8", "4 (auto)").
     pub php_workers: String,
     /// Effective number of Tokio runtime threads.
@@ -181,6 +184,10 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let superglobals_enabled = std::env::var("SUPERGLOBALS_ENABLED")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
         let cpu = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -231,6 +238,7 @@ impl Config {
             async_workers,
             async_queue_capacity,
             trace_context,
+            superglobals_enabled,
             php_workers,
             tokio_workers,
             queue_capacity,
@@ -273,6 +281,7 @@ impl Config {
                 self.async_workers * 64
             },
             "trace_context": self.trace_context,
+            "superglobals_enabled": self.superglobals_enabled,
         })
     }
 }

@@ -219,8 +219,38 @@ $data = json_decode($body, true);
 
 ---
 
+## 禁用超全局变量
+
+设置 `SUPERGLOBALS_ENABLED=false` 可禁用 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES` 和 `$_SERVER` 的填充。禁用后这些数组将为空。请改用 [HTTP 请求对象 API](request-api.md)（`oxphp_http_request()`）访问请求数据。
+
+```bash
+SUPERGLOBALS_ENABLED=false   # 超全局变量为空数组
+```
+
+无论此设置如何，以下内容始终可用：
+
+| 内容 | 原因 |
+|------|------|
+| `$_SESSION` | 由 PHP 会话模块管理，非 SAPI |
+| `php://input` | 流，非超全局变量 |
+| `header()`、`headers_list()` 等 | SAPI 函数，非超全局变量 |
+| `session_start()` 及其他 `session_*()` 函数 | PHP 原生函数 |
+| `oxphp_http_request()` | 始终可用 — 推荐替代方案 |
+
+可在运行时检查当前设置：
+
+```php
+if (!oxphp_superglobals_enabled()) {
+    $request = oxphp_http_request();
+    $page = $request->query('page', 1);
+}
+```
+
+---
+
 ## 参见
 
+- [HTTP 请求对象 API](request-api.md) -- 类型化、惰性加载的请求对象，作为超全局变量的替代方案
 - [PHP 函数](functions.md) -- `oxphp_request_id()`、`oxphp_worker_id()` 及其他扩展函数
 - [Worker 模式](../features/worker-mode.md) -- Worker 请求之间超全局变量如何刷新
 - [配置参考](../operations/configuration.md) -- `DOCUMENT_ROOT` 及其他服务器配置变量

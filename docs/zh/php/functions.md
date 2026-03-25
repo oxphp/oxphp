@@ -9,6 +9,8 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 
 ## 目录
 
+- [oxphp_http_request()](#oxphp_http_request)
+- [oxphp_superglobals_enabled()](#oxphp_superglobals_enabled)
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
@@ -25,6 +27,68 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+
+---
+
+## oxphp_http_request()
+
+```php
+oxphp_http_request(): \OxPHP\Http\RequestInterface
+```
+
+返回当前 HTTP 请求的请求对象。该对象提供对 HTTP 方法、URI、查询参数、解析后的请求体、请求头、Cookie、上传文件、客户端 IP 和请求时间的类型化访问。
+
+**返回值：** 一个 `\OxPHP\Http\RequestInterface` 实例，由当前 PHP Worker 线程中的请求数据支撑。
+
+**抛出异常：** 在没有活跃请求的上下文中调用时，抛出 `OxPHP\Http\Exception` 命名空间下的异常：
+
+| 异常 | 触发情形 |
+|------|----------|
+| `\OxPHP\Http\Exception\WorkerIdleException` | Worker 模式下，两次请求之间 |
+| `\OxPHP\Http\Exception\AsyncContextException` | 在 `oxphp_async()` 回调内部 |
+| `\OxPHP\Http\Exception\NoActiveRequestException` | 其他无活跃请求的上下文 |
+
+在普通的请求处理代码中，不需要异常处理。
+
+**示例：**
+
+```php
+<?php
+$request = oxphp_http_request();
+
+$method  = $request->method();             // "POST"
+$path    = $request->path();               // "/api/users"
+$email   = $request->payload('email');     // 来自 JSON 或表单请求体
+$token   = $request->header('Authorization');
+$theme   = $request->cookie('theme', 'light');
+```
+
+完整的接口参考请参阅 [HTTP 请求对象 API](request-api.md) 文档。
+
+---
+
+## oxphp_superglobals_enabled()
+
+```php
+oxphp_superglobals_enabled(): bool
+```
+
+返回当前服务器实例是否启用了超全局变量填充。该值反映 `SUPERGLOBALS_ENABLED` 环境变量的设置，在服务器运行期间不会改变。
+
+当返回 `false` 时，`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES` 和 `$_SERVER` 均为空数组。HTTP 对象 API（`oxphp_http_request()`）、`php://input` 和 PHP session 函数不受影响。
+
+**返回值：** `SUPERGLOBALS_ENABLED` 为 `true`（默认值）时返回 `true`，否则返回 `false`。
+
+**示例：**
+
+```php
+<?php
+if (oxphp_superglobals_enabled()) {
+    $query = $_GET['page'] ?? 1;
+} else {
+    $query = oxphp_http_request()->query('page', 1);
+}
+```
 
 ---
 
@@ -543,22 +607,24 @@ $functions = get_extension_funcs('oxphp_sapi');
 print_r($functions);
 // Array
 // (
-//     [0]  => oxphp_request_id
-//     [1]  => oxphp_worker_id
-//     [2]  => oxphp_server_info
-//     [3]  => oxphp_request_heartbeat
-//     [4]  => oxphp_finish_request
-//     [5]  => oxphp_is_worker
-//     [6]  => oxphp_is_streaming
-//     [7]  => oxphp_stream_flush
-//     [8]  => oxphp_sleep
-//     [9]  => oxphp_usleep
-//     [10] => oxphp_worker
-//     [11] => oxphp_async
-//     [12] => oxphp_async_await
-//     [13] => oxphp_async_await_all
-//     [14] => oxphp_async_await_any
-//     [15] => oxphp_register_decorator
+//     [0]  => oxphp_http_request
+//     [1]  => oxphp_superglobals_enabled
+//     [2]  => oxphp_request_id
+//     [3]  => oxphp_worker_id
+//     [4]  => oxphp_server_info
+//     [5]  => oxphp_request_heartbeat
+//     [6]  => oxphp_finish_request
+//     [7]  => oxphp_is_worker
+//     [8]  => oxphp_is_streaming
+//     [9]  => oxphp_stream_flush
+//     [10] => oxphp_sleep
+//     [11] => oxphp_usleep
+//     [12] => oxphp_worker
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
 // )
 ```
 
@@ -589,6 +655,7 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 
 ## 参见
 
+- [HTTP 请求对象 API](request-api.md) -- 通过 `oxphp_http_request()` 以面向对象方式访问请求数据
 - [Worker 模式](../features/worker-mode.md) -- 持久 Worker 循环与请求生命周期
 - [Server-Sent Events](../features/sse.md) -- 使用 `oxphp_stream_flush()` 实现实时流式传输
 - [提前响应](../features/early-response.md) -- 使用 `oxphp_finish_request()` 进行后台处理

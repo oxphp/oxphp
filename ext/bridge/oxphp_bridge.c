@@ -533,6 +533,146 @@ size_t oxphp_zval_size(void) {
  * Global (not __thread) — set once at startup BEFORE any worker threads
  * are spawned, so no data race. All workers share the same callback pointers.
  */
+/* ─── Superglobals Configuration ─── */
+static bool g_superglobals_enabled = true;
+
+void oxphp_bridge_set_superglobals_enabled(bool enabled) {
+    g_superglobals_enabled = enabled;
+}
+
+bool oxphp_bridge_get_superglobals_enabled(void) {
+    return g_superglobals_enabled;
+}
+
+/* ─── HTTP Request Data Accessors ─── */
+static oxphp_req_str_fn_t     g_req_method_fn = NULL;
+static oxphp_req_str_fn_t     g_req_path_fn = NULL;
+static oxphp_req_str_fn_t     g_req_full_uri_fn = NULL;
+static oxphp_req_str_fn_t     g_req_scheme_fn = NULL;
+static oxphp_req_str_fn_t     g_req_host_fn = NULL;
+static oxphp_req_u16_fn_t     g_req_port_fn = NULL;
+static oxphp_req_str_fn_t     g_req_query_string_fn = NULL;
+static oxphp_req_str_key_fn_t g_req_header_fn = NULL;
+static oxphp_req_str_key_fn_t g_req_cookie_fn = NULL;
+static oxphp_req_str_fn_t     g_req_ip_fn = NULL;
+static oxphp_req_str_fn_t     g_req_protocol_version_fn = NULL;
+static oxphp_req_double_fn_t  g_req_start_time_fn = NULL;
+static oxphp_req_bool_fn_t    g_req_is_secure_fn = NULL;
+static oxphp_req_str_fn_t     g_req_content_type_fn = NULL;
+static oxphp_req_str_key_fn_t g_req_query_param_fn = NULL;
+static oxphp_req_pairs_fn_t   g_req_headers_all_fn = NULL;
+static oxphp_req_pairs_fn_t   g_req_cookies_all_fn = NULL;
+static oxphp_req_pairs_fn_t   g_req_query_params_all_fn = NULL;
+static oxphp_req_body_fn_t    g_req_body_fn = NULL;
+static oxphp_req_bool_fn_t    g_req_is_active_fn = NULL;
+
+void oxphp_bridge_set_request_accessors(
+    oxphp_req_str_fn_t      method_fn,
+    oxphp_req_str_fn_t      path_fn,
+    oxphp_req_str_fn_t      full_uri_fn,
+    oxphp_req_str_fn_t      scheme_fn,
+    oxphp_req_str_fn_t      host_fn,
+    oxphp_req_u16_fn_t      port_fn,
+    oxphp_req_str_fn_t      query_string_fn,
+    oxphp_req_str_key_fn_t  header_fn,
+    oxphp_req_str_key_fn_t  cookie_fn,
+    oxphp_req_str_fn_t      ip_fn,
+    oxphp_req_str_fn_t      protocol_version_fn,
+    oxphp_req_double_fn_t   start_time_fn,
+    oxphp_req_bool_fn_t     is_secure_fn,
+    oxphp_req_str_fn_t      content_type_fn,
+    oxphp_req_str_key_fn_t  query_param_fn,
+    oxphp_req_pairs_fn_t    headers_all_fn,
+    oxphp_req_pairs_fn_t    cookies_all_fn,
+    oxphp_req_pairs_fn_t    query_params_all_fn,
+    oxphp_req_body_fn_t     body_fn,
+    oxphp_req_bool_fn_t     is_active_fn
+) {
+    g_req_method_fn = method_fn;
+    g_req_path_fn = path_fn;
+    g_req_full_uri_fn = full_uri_fn;
+    g_req_scheme_fn = scheme_fn;
+    g_req_host_fn = host_fn;
+    g_req_port_fn = port_fn;
+    g_req_query_string_fn = query_string_fn;
+    g_req_header_fn = header_fn;
+    g_req_cookie_fn = cookie_fn;
+    g_req_ip_fn = ip_fn;
+    g_req_protocol_version_fn = protocol_version_fn;
+    g_req_start_time_fn = start_time_fn;
+    g_req_is_secure_fn = is_secure_fn;
+    g_req_content_type_fn = content_type_fn;
+    g_req_query_param_fn = query_param_fn;
+    g_req_headers_all_fn = headers_all_fn;
+    g_req_cookies_all_fn = cookies_all_fn;
+    g_req_query_params_all_fn = query_params_all_fn;
+    g_req_body_fn = body_fn;
+    g_req_is_active_fn = is_active_fn;
+}
+
+/* Convenience wrappers — call through registered function pointers */
+const char* oxphp_req_method(size_t *out_len) {
+    return g_req_method_fn ? g_req_method_fn(out_len) : NULL;
+}
+const char* oxphp_req_path(size_t *out_len) {
+    return g_req_path_fn ? g_req_path_fn(out_len) : NULL;
+}
+const char* oxphp_req_full_uri(size_t *out_len) {
+    return g_req_full_uri_fn ? g_req_full_uri_fn(out_len) : NULL;
+}
+const char* oxphp_req_scheme(size_t *out_len) {
+    return g_req_scheme_fn ? g_req_scheme_fn(out_len) : NULL;
+}
+const char* oxphp_req_host(size_t *out_len) {
+    return g_req_host_fn ? g_req_host_fn(out_len) : NULL;
+}
+uint16_t oxphp_req_port(void) {
+    return g_req_port_fn ? g_req_port_fn() : 0;
+}
+const char* oxphp_req_query_string(size_t *out_len) {
+    return g_req_query_string_fn ? g_req_query_string_fn(out_len) : NULL;
+}
+const char* oxphp_req_header(const char *name, size_t name_len, size_t *out_len) {
+    return g_req_header_fn ? g_req_header_fn(name, name_len, out_len) : NULL;
+}
+const char* oxphp_req_cookie(const char *name, size_t name_len, size_t *out_len) {
+    return g_req_cookie_fn ? g_req_cookie_fn(name, name_len, out_len) : NULL;
+}
+const char* oxphp_req_ip(size_t *out_len) {
+    return g_req_ip_fn ? g_req_ip_fn(out_len) : NULL;
+}
+const char* oxphp_req_protocol_version(size_t *out_len) {
+    return g_req_protocol_version_fn ? g_req_protocol_version_fn(out_len) : NULL;
+}
+double oxphp_req_start_time(void) {
+    return g_req_start_time_fn ? g_req_start_time_fn() : 0.0;
+}
+int oxphp_req_is_secure(void) {
+    return g_req_is_secure_fn ? g_req_is_secure_fn() : 0;
+}
+const char* oxphp_req_content_type(size_t *out_len) {
+    return g_req_content_type_fn ? g_req_content_type_fn(out_len) : NULL;
+}
+const char* oxphp_req_query_param(const char *key, size_t key_len, size_t *out_len) {
+    return g_req_query_param_fn ? g_req_query_param_fn(key, key_len, out_len) : NULL;
+}
+void oxphp_req_headers_all(oxphp_req_pairs_cb_t cb, void *user_data) {
+    if (g_req_headers_all_fn) g_req_headers_all_fn(cb, user_data);
+}
+void oxphp_req_cookies_all(oxphp_req_pairs_cb_t cb, void *user_data) {
+    if (g_req_cookies_all_fn) g_req_cookies_all_fn(cb, user_data);
+}
+void oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data) {
+    if (g_req_query_params_all_fn) g_req_query_params_all_fn(cb, user_data);
+}
+const uint8_t* oxphp_req_body(size_t *out_len) {
+    return g_req_body_fn ? g_req_body_fn(out_len) : NULL;
+}
+int oxphp_req_is_active(void) {
+    return g_req_is_active_fn ? g_req_is_active_fn() : 0;
+}
+
+/* ─── Worker Mode ─── */
 static oxphp_worker_wait_fn_t rust_worker_wait = NULL;
 static oxphp_worker_send_fn_t rust_worker_send = NULL;
 

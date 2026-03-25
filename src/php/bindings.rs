@@ -279,6 +279,52 @@ extern "C" {
         flush: Option<unsafe extern "C" fn(*mut c_void)>,
     );
 
+    // ─── Superglobals configuration ─────────────────────
+    pub fn oxphp_bridge_set_superglobals_enabled(enabled: bool);
+    pub fn oxphp_bridge_get_superglobals_enabled() -> bool;
+
+    // ─── HTTP Request data accessors ─────────────────────
+    #[allow(clippy::too_many_arguments)]
+    pub fn oxphp_bridge_set_request_accessors(
+        method_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        path_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        full_uri_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        scheme_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        host_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        port_fn: Option<unsafe extern "C" fn() -> u16>,
+        query_string_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        header_fn: Option<unsafe extern "C" fn(*const c_char, usize, *mut usize) -> *const c_char>,
+        cookie_fn: Option<unsafe extern "C" fn(*const c_char, usize, *mut usize) -> *const c_char>,
+        ip_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        protocol_version_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        start_time_fn: Option<unsafe extern "C" fn() -> f64>,
+        is_secure_fn: Option<unsafe extern "C" fn() -> c_int>,
+        content_type_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        query_param_fn: Option<
+            unsafe extern "C" fn(*const c_char, usize, *mut usize) -> *const c_char,
+        >,
+        headers_all_fn: Option<
+            unsafe extern "C" fn(
+                unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void),
+                *mut c_void,
+            ),
+        >,
+        cookies_all_fn: Option<
+            unsafe extern "C" fn(
+                unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void),
+                *mut c_void,
+            ),
+        >,
+        query_params_all_fn: Option<
+            unsafe extern "C" fn(
+                unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void),
+                *mut c_void,
+            ),
+        >,
+        body_fn: Option<unsafe extern "C" fn(*mut usize) -> *const u8>,
+        is_active_fn: Option<unsafe extern "C" fn() -> c_int>,
+    );
+
     // ─── Worker mode ────────────────────────────────────
 
     pub fn oxphp_bridge_set_worker_callbacks(

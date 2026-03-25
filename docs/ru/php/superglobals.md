@@ -219,8 +219,38 @@ $data = json_decode($body, true);
 
 ---
 
+## Отключение суперглобалов
+
+Установите `SUPERGLOBALS_ENABLED=false` чтобы отключить заполнение `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES` и `$_SERVER`. При отключении эти массивы будут пустыми. Используйте [HTTP Request API](request-api.md) (`oxphp_http_request()`) для доступа к данным запроса.
+
+```bash
+SUPERGLOBALS_ENABLED=false   # суперглобалы — пустые массивы
+```
+
+Следующее остаётся доступным независимо от этой настройки:
+
+| Что | Почему |
+|-----|--------|
+| `$_SESSION` | Управляется модулем сессий PHP, а не SAPI |
+| `php://input` | Поток, а не суперглобал |
+| `header()`, `headers_list()` и т.д. | SAPI-функции, не суперглобалы |
+| `session_start()` и другие `session_*()` | Нативные PHP-функции |
+| `oxphp_http_request()` | Доступен всегда — рекомендуемая альтернатива |
+
+Текущую настройку можно проверить во время выполнения:
+
+```php
+if (!oxphp_superglobals_enabled()) {
+    $request = oxphp_http_request();
+    $page = $request->query('page', 1);
+}
+```
+
+---
+
 ## См. также
 
+- [HTTP Request API](request-api.md) — типизированный объект запроса с ленивой загрузкой как альтернатива суперглобалам
 - [PHP-функции](functions.md) — `oxphp_request_id()`, `oxphp_worker_id()` и другие функции расширения
 - [Режим Worker](../features/worker-mode.md) — как суперглобальные переменные обновляются между запросами воркера
 - [Справочник по конфигурации](../operations/configuration.md) — `DOCUMENT_ROOT` и другие переменные конфигурации сервера

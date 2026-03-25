@@ -133,6 +133,14 @@ services:
       # Max memory (MB) before recycling a worker (0 = unlimited).
       # - WORKER_MAX_MEMORY_MIB=0
 
+      # ── HTTP Object API ─────────────────────────────────────────
+
+      # Whether PHP superglobals ($_GET, $_POST, $_COOKIE, $_FILES, $_SERVER)
+      # are populated. When false, only oxphp_http_request() provides request data.
+      # Default: true (full backward compatibility).
+      # - SUPERGLOBALS_ENABLED=true
+      - SUPERGLOBALS_ENABLED=false
+
       # ── Trace Context (W3C) ────────────────────────────────────
 
       # Enable W3C Trace Context propagation (traceparent/tracestate).

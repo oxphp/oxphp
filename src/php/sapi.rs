@@ -110,6 +110,32 @@ struct RequestData {
     body_offset: usize,
     /// Whether this slot has been populated for the current request.
     active: bool,
+
+    // ── Object API: lazily accessed via bridge callbacks ──
+    /// HTTP method string (e.g. "GET", "POST").
+    method_str: String,
+    /// URI path (e.g. "/users/42").
+    path_str: String,
+    /// Full URI (e.g. "https://example.com/users/42?page=2").
+    full_uri_str: String,
+    /// Scheme ("http" or "https").
+    scheme_str: String,
+    /// Host from Host header, or empty string.
+    host_str: String,
+    /// Port number (from Host header or scheme default).
+    port_val: u16,
+    /// Raw query string (without leading '?').
+    query_string_raw: String,
+    /// Remote address string (IP).
+    remote_addr_str: String,
+    /// HTTP protocol version (e.g. "1.1").
+    protocol_version_str: String,
+    /// Whether TLS is active.
+    is_secure: bool,
+    /// Raw headers as (lowercase_name, value) pairs.
+    headers_raw: Vec<(String, String)>,
+    /// Parsed cookies as (name, value) pairs.
+    cookies_parsed: Vec<(String, String)>,
 }
 
 impl RequestData {
@@ -123,6 +149,18 @@ impl RequestData {
             body: Bytes::new(),
             body_offset: 0,
             active: false,
+            method_str: String::new(),
+            path_str: String::new(),
+            full_uri_str: String::new(),
+            scheme_str: String::new(),
+            host_str: String::new(),
+            port_val: 0,
+            query_string_raw: String::new(),
+            remote_addr_str: String::new(),
+            protocol_version_str: String::new(),
+            is_secure: false,
+            headers_raw: Vec::with_capacity(16),
+            cookies_parsed: Vec::new(),
         }
     }
 }
@@ -362,129 +400,135 @@ pub fn set_request_data(req: &ScriptRequest) {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| CString::new(s).ok());
 
+        let sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };
+
         // Clear previous values but keep the Vec allocation
         data.server_vars.clear();
 
-        let vars = &mut data.server_vars;
-
-        // Import process environment variables first so CGI/HTTP vars can override them.
-        for (key, val) in env_snapshot() {
-            vars.push((key.clone(), val.clone()));
-        }
-
-        // CGI/1.1 standard variables
-        push_server_var(vars, "REQUEST_METHOD", req.method.as_str());
-        push_server_var(
-            vars,
-            "REQUEST_URI",
-            req.uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/"),
-        );
-        push_server_var(vars, "QUERY_STRING", &req.query_string);
-        let protocol = match req.version {
-            http::Version::HTTP_10 => "HTTP/1.0",
-            http::Version::HTTP_11 => "HTTP/1.1",
-            http::Version::HTTP_2 => "HTTP/2",
-            http::Version::HTTP_3 => "HTTP/3",
-            _ => "HTTP/1.1",
-        };
-        push_server_var(vars, "SERVER_PROTOCOL", protocol);
-
-        // SCRIPT_NAME: URI path without query string
-        let path = req.uri.path();
-        push_server_var(vars, "SCRIPT_NAME", path);
-        push_server_var(vars, "PHP_SELF", path);
-        push_server_var(vars, "DOCUMENT_URI", path);
-
-        // SCRIPT_FILENAME: absolute filesystem path to the script
-        push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());
-
-        // DOCUMENT_ROOT
-        push_server_var(vars, "DOCUMENT_ROOT", &req.document_root.to_string_lossy());
-
-        // Server identification
-        push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
-        push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
-
-        // Connection info
-        push_server_var(vars, "REMOTE_ADDR", &req.remote_addr.ip().to_string());
-        push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
-
-        // HTTPS indicator (CGI/1.1: "on" when TLS is active)
-        if req.is_tls {
-            push_server_var(vars, "HTTPS", "on");
-        }
-
-        // REQUEST_SCHEME: "http" or "https" (PHP-FPM / nginx convention)
-        push_server_var(
-            vars,
-            "REQUEST_SCHEME",
-            if req.is_tls { "https" } else { "http" },
-        );
-
-        // SERVER_NAME and SERVER_PORT from Host header
-        let default_port = if req.is_tls { "443" } else { "80" };
-        if let Some(host) = req.headers.get(header::HOST) {
-            if let Ok(host_str) = host.to_str() {
-                let (name, port) = parse_host(host_str, default_port);
-                push_server_var(vars, "SERVER_NAME", name);
-                push_server_var(vars, "SERVER_PORT", port);
-            }
+        if !sg_enabled {
+            // Skip server_vars population — object API fields below are always populated.
         } else {
-            push_server_var(vars, "SERVER_NAME", "localhost");
-            push_server_var(vars, "SERVER_PORT", default_port);
-        }
+            let vars = &mut data.server_vars;
 
-        // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
-        if let Some(ct) = req.headers.get(header::CONTENT_TYPE) {
-            if let Ok(ct_str) = ct.to_str() {
-                push_server_var(vars, "CONTENT_TYPE", ct_str);
+            // Import process environment variables first so CGI/HTTP vars can override them.
+            for (key, val) in env_snapshot() {
+                vars.push((key.clone(), val.clone()));
             }
-        }
-        if let Some(cl) = req.headers.get(header::CONTENT_LENGTH) {
-            if let Ok(cl_str) = cl.to_str() {
-                push_server_var(vars, "CONTENT_LENGTH", cl_str);
-            }
-        }
 
-        // All request headers as HTTP_{UPPER_SNAKE_CASE}
-        // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
-        let mut header_buf = String::with_capacity(64);
-        for (name, value) in req.headers.iter() {
-            if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
-                continue;
-            }
-            let Ok(val_str) = value.to_str() else {
-                continue;
+            // CGI/1.1 standard variables
+            push_server_var(vars, "REQUEST_METHOD", req.method.as_str());
+            push_server_var(
+                vars,
+                "REQUEST_URI",
+                req.uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str())
+                    .unwrap_or("/"),
+            );
+            push_server_var(vars, "QUERY_STRING", &req.query_string);
+            let protocol = match req.version {
+                http::Version::HTTP_10 => "HTTP/1.0",
+                http::Version::HTTP_11 => "HTTP/1.1",
+                http::Version::HTTP_2 => "HTTP/2",
+                http::Version::HTTP_3 => "HTTP/3",
+                _ => "HTTP/1.1",
             };
+            push_server_var(vars, "SERVER_PROTOCOL", protocol);
 
-            header_buf.clear();
-            header_buf.push_str("HTTP_");
-            for b in name.as_str().bytes() {
-                header_buf.push(if b == b'-' {
-                    '_'
-                } else {
-                    b.to_ascii_uppercase() as char
-                });
+            // SCRIPT_NAME: URI path without query string
+            let path = req.uri.path();
+            push_server_var(vars, "SCRIPT_NAME", path);
+            push_server_var(vars, "PHP_SELF", path);
+            push_server_var(vars, "DOCUMENT_URI", path);
+
+            // SCRIPT_FILENAME: absolute filesystem path to the script
+            push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());
+
+            // DOCUMENT_ROOT
+            push_server_var(vars, "DOCUMENT_ROOT", &req.document_root.to_string_lossy());
+
+            // Server identification
+            push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
+            push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
+
+            // Connection info
+            push_server_var(vars, "REMOTE_ADDR", &req.remote_addr.ip().to_string());
+            push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
+
+            // HTTPS indicator (CGI/1.1: "on" when TLS is active)
+            if req.is_tls {
+                push_server_var(vars, "HTTPS", "on");
             }
-            push_server_var(vars, &header_buf, val_str);
-        }
 
-        // REQUEST_TIME and REQUEST_TIME_FLOAT from bridge (set in setup_request_tls)
-        let rt = unsafe { bindings::oxphp_bridge_get_request_time() };
-        if rt > 0.0 {
-            push_server_var(vars, "REQUEST_TIME", &(rt as u64).to_string());
-            push_server_var(vars, "REQUEST_TIME_FLOAT", &format!("{rt:.6}"));
-        }
+            // REQUEST_SCHEME: "http" or "https" (PHP-FPM / nginx convention)
+            push_server_var(
+                vars,
+                "REQUEST_SCHEME",
+                if req.is_tls { "https" } else { "http" },
+            );
 
-        // Trace context variables (when tracing is enabled)
-        if !req.trace_id.is_empty() {
-            push_server_var(vars, "OXPHP_TRACE_ID", &req.trace_id);
-            push_server_var(vars, "OXPHP_SPAN_ID", &req.span_id);
-            push_server_var(vars, "OXPHP_PARENT_SPAN_ID", &req.parent_span_id);
-        }
+            // SERVER_NAME and SERVER_PORT from Host header
+            let default_port = if req.is_tls { "443" } else { "80" };
+            if let Some(host) = req.headers.get(header::HOST) {
+                if let Ok(host_str) = host.to_str() {
+                    let (name, port) = parse_host(host_str, default_port);
+                    push_server_var(vars, "SERVER_NAME", name);
+                    push_server_var(vars, "SERVER_PORT", port);
+                }
+            } else {
+                push_server_var(vars, "SERVER_NAME", "localhost");
+                push_server_var(vars, "SERVER_PORT", default_port);
+            }
+
+            // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
+            if let Some(ct) = req.headers.get(header::CONTENT_TYPE) {
+                if let Ok(ct_str) = ct.to_str() {
+                    push_server_var(vars, "CONTENT_TYPE", ct_str);
+                }
+            }
+            if let Some(cl) = req.headers.get(header::CONTENT_LENGTH) {
+                if let Ok(cl_str) = cl.to_str() {
+                    push_server_var(vars, "CONTENT_LENGTH", cl_str);
+                }
+            }
+
+            // All request headers as HTTP_{UPPER_SNAKE_CASE}
+            // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
+            let mut header_buf = String::with_capacity(64);
+            for (name, value) in req.headers.iter() {
+                if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
+                    continue;
+                }
+                let Ok(val_str) = value.to_str() else {
+                    continue;
+                };
+
+                header_buf.clear();
+                header_buf.push_str("HTTP_");
+                for b in name.as_str().bytes() {
+                    header_buf.push(if b == b'-' {
+                        '_'
+                    } else {
+                        b.to_ascii_uppercase() as char
+                    });
+                }
+                push_server_var(vars, &header_buf, val_str);
+            }
+
+            // REQUEST_TIME and REQUEST_TIME_FLOAT from bridge (set in setup_request_tls)
+            let rt = unsafe { bindings::oxphp_bridge_get_request_time() };
+            if rt > 0.0 {
+                push_server_var(vars, "REQUEST_TIME", &(rt as u64).to_string());
+                push_server_var(vars, "REQUEST_TIME_FLOAT", &format!("{rt:.6}"));
+            }
+
+            // Trace context variables (when tracing is enabled)
+            if !req.trace_id.is_empty() {
+                push_server_var(vars, "OXPHP_TRACE_ID", &req.trace_id);
+                push_server_var(vars, "OXPHP_SPAN_ID", &req.span_id);
+                push_server_var(vars, "OXPHP_PARENT_SPAN_ID", &req.parent_span_id);
+            }
+        } // end if sg_enabled
 
         // Strings for SG(request_info) — stored as CStrings so pointers
         // remain valid through php_request_shutdown().
@@ -502,6 +546,105 @@ pub fn set_request_data(req: &ScriptRequest) {
 
         data.body = req.body.clone();
         data.body_offset = 0;
+
+        // ── Object API fields ──
+        data.method_str.clear();
+        data.method_str.push_str(req.method.as_str());
+
+        data.path_str.clear();
+        data.path_str.push_str(req.uri.path());
+
+        data.is_secure = req.is_tls;
+        data.scheme_str.clear();
+        data.scheme_str
+            .push_str(if req.is_tls { "https" } else { "http" });
+
+        // Parse host and port from Host header
+        data.host_str.clear();
+        data.port_val = if req.is_tls { 443 } else { 80 }; // default for scheme
+        if let Some(host_hdr) = req.headers.get(header::HOST) {
+            if let Ok(host_val) = host_hdr.to_str() {
+                // Handle IPv6: [::1]:8080
+                if let Some(bracket_end) = host_val.find(']') {
+                    data.host_str.push_str(&host_val[..=bracket_end]);
+                    if let Some(port_str) = host_val.get(bracket_end + 2..) {
+                        if let Ok(p) = port_str.parse::<u16>() {
+                            data.port_val = p;
+                        }
+                    }
+                } else if let Some(colon) = host_val.rfind(':') {
+                    data.host_str.push_str(&host_val[..colon]);
+                    if let Ok(p) = host_val[colon + 1..].parse::<u16>() {
+                        data.port_val = p;
+                    }
+                } else {
+                    data.host_str.push_str(host_val);
+                }
+            }
+        }
+
+        data.query_string_raw.clear();
+        data.query_string_raw.push_str(&req.query_string);
+
+        data.remote_addr_str.clear();
+        data.remote_addr_str
+            .push_str(&req.remote_addr.ip().to_string());
+
+        data.protocol_version_str.clear();
+        data.protocol_version_str.push_str(match req.version {
+            http::Version::HTTP_09 => "0.9",
+            http::Version::HTTP_10 => "1.0",
+            http::Version::HTTP_11 => "1.1",
+            http::Version::HTTP_2 => "2",
+            http::Version::HTTP_3 => "3",
+            _ => "1.1",
+        });
+
+        // Build full URI: scheme://host[:port]/path[?query]
+        // Use format! to avoid borrow conflicts between struct fields.
+        {
+            let scheme = if req.is_tls { "https" } else { "http" };
+            let host = &data.host_str;
+            let port = data.port_val;
+            let path = req.uri.path();
+            let qs = &req.query_string;
+            let default_port: u16 = if req.is_tls { 443 } else { 80 };
+            let port_part = if port != default_port {
+                format!(":{port}")
+            } else {
+                String::new()
+            };
+            let qs_part = if qs.is_empty() {
+                String::new()
+            } else {
+                format!("?{qs}")
+            };
+            data.full_uri_str = format!("{scheme}://{host}{port_part}{path}{qs_part}");
+        }
+
+        // Store raw headers for object API iteration
+        data.headers_raw.clear();
+        for (name, value) in req.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                data.headers_raw
+                    .push((name.as_str().to_owned(), v.to_owned()));
+            }
+        }
+
+        // Parse cookies from Cookie header
+        data.cookies_parsed.clear();
+        if let Some(cookie_hdr) = req.headers.get(header::COOKIE) {
+            if let Ok(cookie_str) = cookie_hdr.to_str() {
+                for pair in cookie_str.split(';') {
+                    let pair = pair.trim();
+                    if let Some(eq) = pair.find('=') {
+                        data.cookies_parsed
+                            .push((pair[..eq].to_owned(), pair[eq + 1..].to_owned()));
+                    }
+                }
+            }
+        }
+
         data.active = true;
 
         // Set request ID in bridge TLS so oxphp_request_id() returns it.
@@ -513,18 +656,29 @@ pub fn set_request_data(req: &ScriptRequest) {
 
         // Set SG(request_info) so PHP parses $_GET, $_POST, $_FILES, $_COOKIE.
         // This MUST happen before php_request_startup().
-        let method_cstr = data
-            .server_vars
-            .iter()
-            .find(|(k, _)| k.as_bytes() == b"REQUEST_METHOD")
-            .map(|(_, v)| v.as_ptr())
-            .unwrap_or(std::ptr::null());
+        // When superglobals disabled, still set method/content-type for php://input.
+        let method_cstr_owned = CString::new(req.method.as_str()).ok();
+        let method_cstr = if sg_enabled {
+            data.server_vars
+                .iter()
+                .find(|(k, _)| k.as_bytes() == b"REQUEST_METHOD")
+                .map(|(_, v)| v.as_ptr())
+                .unwrap_or(std::ptr::null())
+        } else {
+            method_cstr_owned
+                .as_ref()
+                .map(|c| c.as_ptr())
+                .unwrap_or(std::ptr::null())
+        };
 
-        let qs_ptr = data
-            .query_string
-            .as_ref()
-            .map(|cs| cs.as_ptr())
-            .unwrap_or(std::ptr::null());
+        let qs_ptr = if sg_enabled {
+            data.query_string
+                .as_ref()
+                .map(|cs| cs.as_ptr())
+                .unwrap_or(std::ptr::null())
+        } else {
+            std::ptr::null()
+        };
 
         let ct_ptr = data
             .content_type_string
@@ -572,6 +726,20 @@ pub fn clear_request_data() {
         data.body = Bytes::new();
         data.body_offset = 0;
         data.active = false;
+
+        // Clear object API fields (retain Vec capacity for reuse)
+        data.method_str.clear();
+        data.path_str.clear();
+        data.full_uri_str.clear();
+        data.scheme_str.clear();
+        data.host_str.clear();
+        data.port_val = 0;
+        data.query_string_raw.clear();
+        data.remote_addr_str.clear();
+        data.protocol_version_str.clear();
+        data.is_secure = false;
+        data.headers_raw.clear();
+        data.cookies_parsed.clear();
     });
 
     // Clear SG(request_info) and bridge context so PHP doesn't hold stale references.
@@ -2258,6 +2426,269 @@ pub fn register_async_callbacks() {
         crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
             cleanup_outstanding_promises_callback,
         ));
+    }
+}
+
+// ─── HTTP Object API: Bridge callbacks for lazy request data access ───
+
+/// Helper macro for bridge callbacks that return a string field from RequestData.
+macro_rules! req_str_callback {
+    ($name:ident, $field:ident) => {
+        unsafe extern "C" fn $name(out_len: *mut usize) -> *const c_char {
+            REQUEST_DATA.with(|rd| {
+                let data = rd.borrow();
+                if !data.active {
+                    *out_len = 0;
+                    return std::ptr::null();
+                }
+                *out_len = data.$field.len();
+                data.$field.as_ptr() as *const c_char
+            })
+        }
+    };
+}
+
+req_str_callback!(req_method_cb, method_str);
+req_str_callback!(req_path_cb, path_str);
+req_str_callback!(req_full_uri_cb, full_uri_str);
+req_str_callback!(req_scheme_cb, scheme_str);
+req_str_callback!(req_host_cb, host_str);
+req_str_callback!(req_query_string_cb, query_string_raw);
+req_str_callback!(req_ip_cb, remote_addr_str);
+req_str_callback!(req_protocol_version_cb, protocol_version_str);
+
+unsafe extern "C" fn req_port_cb() -> u16 {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            return 0;
+        }
+        data.port_val
+    })
+}
+
+unsafe extern "C" fn req_start_time_cb() -> f64 {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            return 0.0;
+        }
+        unsafe { bindings::oxphp_bridge_get_request_time() }
+    })
+}
+
+unsafe extern "C" fn req_is_secure_cb() -> c_int {
+    REQUEST_DATA.with(|rd| if rd.borrow().is_secure { 1 } else { 0 })
+}
+
+unsafe extern "C" fn req_content_type_cb(out_len: *mut usize) -> *const c_char {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            *out_len = 0;
+            return std::ptr::null();
+        }
+        // Find content-type in headers_raw
+        for (k, v) in &data.headers_raw {
+            if k == "content-type" {
+                *out_len = v.len();
+                return v.as_ptr() as *const c_char;
+            }
+        }
+        *out_len = 0;
+        std::ptr::null()
+    })
+}
+
+unsafe extern "C" fn req_header_cb(
+    name: *const c_char,
+    name_len: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            *out_len = 0;
+            return std::ptr::null();
+        }
+        let key = std::slice::from_raw_parts(name as *const u8, name_len);
+        let key_str = std::str::from_utf8_unchecked(key);
+        for (k, v) in &data.headers_raw {
+            if k.eq_ignore_ascii_case(key_str) {
+                *out_len = v.len();
+                return v.as_ptr() as *const c_char;
+            }
+        }
+        *out_len = 0;
+        std::ptr::null()
+    })
+}
+
+unsafe extern "C" fn req_cookie_cb(
+    name: *const c_char,
+    name_len: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            *out_len = 0;
+            return std::ptr::null();
+        }
+        let key = std::slice::from_raw_parts(name as *const u8, name_len);
+        let key_str = std::str::from_utf8_unchecked(key);
+        for (k, v) in &data.cookies_parsed {
+            if k == key_str {
+                *out_len = v.len();
+                return v.as_ptr() as *const c_char;
+            }
+        }
+        *out_len = 0;
+        std::ptr::null()
+    })
+}
+
+unsafe extern "C" fn req_query_param_cb(
+    key: *const c_char,
+    key_len: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active || data.query_string_raw.is_empty() {
+            *out_len = 0;
+            return std::ptr::null();
+        }
+        let search = std::slice::from_raw_parts(key as *const u8, key_len);
+        let search_str = std::str::from_utf8_unchecked(search);
+        // Simple query string parsing for single-value lookup
+        for pair in data.query_string_raw.split('&') {
+            if let Some(eq) = pair.find('=') {
+                if &pair[..eq] == search_str {
+                    let val = &pair[eq + 1..];
+                    *out_len = val.len();
+                    return val.as_ptr() as *const c_char;
+                }
+            } else if pair == search_str {
+                *out_len = 0;
+                return b"\0".as_ptr() as *const c_char; // empty value, not null
+            }
+        }
+        *out_len = 0;
+        std::ptr::null()
+    })
+}
+
+type PairsCb = unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void);
+
+unsafe extern "C" fn req_headers_all_cb(cb: PairsCb, user_data: *mut c_void) {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            return;
+        }
+        for (k, v) in &data.headers_raw {
+            cb(
+                k.as_ptr() as *const c_char,
+                k.len(),
+                v.as_ptr() as *const c_char,
+                v.len(),
+                user_data,
+            );
+        }
+    });
+}
+
+unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active {
+            return;
+        }
+        for (k, v) in &data.cookies_parsed {
+            cb(
+                k.as_ptr() as *const c_char,
+                k.len(),
+                v.as_ptr() as *const c_char,
+                v.len(),
+                user_data,
+            );
+        }
+    });
+}
+
+unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void) {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active || data.query_string_raw.is_empty() {
+            return;
+        }
+        for pair in data.query_string_raw.split('&') {
+            if let Some(eq) = pair.find('=') {
+                let k = &pair[..eq];
+                let v = &pair[eq + 1..];
+                cb(
+                    k.as_ptr() as *const c_char,
+                    k.len(),
+                    v.as_ptr() as *const c_char,
+                    v.len(),
+                    user_data,
+                );
+            } else {
+                cb(
+                    pair.as_ptr() as *const c_char,
+                    pair.len(),
+                    b"\0".as_ptr() as *const c_char,
+                    0,
+                    user_data,
+                );
+            }
+        }
+    });
+}
+
+unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if !data.active || data.body.is_empty() {
+            *out_len = 0;
+            return std::ptr::null();
+        }
+        *out_len = data.body.len();
+        data.body.as_ptr()
+    })
+}
+
+unsafe extern "C" fn req_is_active_cb() -> c_int {
+    REQUEST_DATA.with(|rd| if rd.borrow().active { 1 } else { 0 })
+}
+
+/// Register all request accessor callbacks with the bridge.
+/// Must be called once at startup before any request processing.
+pub fn register_request_accessors() {
+    unsafe {
+        bindings::oxphp_bridge_set_request_accessors(
+            Some(req_method_cb),
+            Some(req_path_cb),
+            Some(req_full_uri_cb),
+            Some(req_scheme_cb),
+            Some(req_host_cb),
+            Some(req_port_cb),
+            Some(req_query_string_cb),
+            Some(req_header_cb),
+            Some(req_cookie_cb),
+            Some(req_ip_cb),
+            Some(req_protocol_version_cb),
+            Some(req_start_time_cb),
+            Some(req_is_secure_cb),
+            Some(req_content_type_cb),
+            Some(req_query_param_cb),
+            Some(req_headers_all_cb),
+            Some(req_cookies_all_cb),
+            Some(req_query_params_all_cb),
+            Some(req_body_cb),
+            Some(req_is_active_cb),
+        );
     }
 }
 
