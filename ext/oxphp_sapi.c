@@ -1077,7 +1077,27 @@ PHP_FUNCTION(oxphp_usleep)
  * Called between worker mode requests to prevent response bleed.
  */
 static void oxphp_soft_reset(void) {
-    /* 0. Clear stale engine state from previous bailout or exit/die.
+    /* 0. Session cleanup — MUST come before CG(unclean_shutdown) reset.
+     * Matches PHP-FPM behavior: always write session data, even on crash.
+     * This ensures the file lock is released and data is persisted.
+     * SYNC: php-src/ext/session/session.c php_rshutdown_session_globals() */
+    if (PS(session_status) == php_session_active) {
+        zend_try {
+            php_session_flush(1);
+        } zend_end_try();
+    }
+    if (!Z_ISUNDEF(PS(http_session_vars))) {
+        zval_ptr_dtor(&PS(http_session_vars));
+        ZVAL_UNDEF(&PS(http_session_vars));
+    }
+    if (PS(id)) { zend_string_release(PS(id)); PS(id) = NULL; }
+    if (PS(session_vars)) { zend_string_release(PS(session_vars)); PS(session_vars) = NULL; }
+    if (PS(mod_user_class_name)) {
+        zend_string_release(PS(mod_user_class_name));
+        PS(mod_user_class_name) = NULL;
+    }
+
+    /* 1. Clear stale engine state from previous bailout or exit/die.
      * Without this, a leftover UnwindExit exception or unclean_shutdown flag
      * would corrupt subsequent requests. */
     CG(unclean_shutdown) = 0;
