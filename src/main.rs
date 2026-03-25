@@ -42,6 +42,16 @@ fn main() -> Result<(), types::BoxError> {
 
     #[cfg(feature = "php")]
     {
+        // Set superglobals flag before PHP startup (read during MINIT and request handling)
+        unsafe {
+            oxphp::php::bindings::oxphp_bridge_set_superglobals_enabled(
+                config.superglobals_enabled,
+            );
+        }
+
+        // Register request accessor callbacks for the HTTP Object API
+        oxphp::php::sapi::register_request_accessors();
+
         let native_fns = plugin_manager.take_native_php_functions();
         if !native_fns.is_empty() {
             oxphp::php::sapi::register_native_plugin_functions(native_fns);

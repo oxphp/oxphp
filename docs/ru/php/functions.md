@@ -9,6 +9,8 @@ OxPHP регистрирует свои функции через расшире
 
 ## Содержание
 
+- [oxphp_http_request()](#oxphp_http_request)
+- [oxphp_superglobals_enabled()](#oxphp_superglobals_enabled)
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
@@ -25,6 +27,68 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+
+---
+
+## oxphp_http_request()
+
+```php
+oxphp_http_request(): \OxPHP\Http\RequestInterface
+```
+
+Возвращает объект запроса для текущего HTTP-запроса. Объект предоставляет типизированный доступ к методу HTTP, URI, параметрам строки запроса, разобранному телу, заголовкам, кукам, загруженным файлам, IP-адресу клиента и времени запроса.
+
+**Возвращает:** Экземпляр `\OxPHP\Http\RequestInterface`, подкреплённый данными запроса из текущего PHP-воркер-потока.
+
+**Выбрасывает:** Исключение из пространства имён `OxPHP\Http\Exception` при вызове вне активного запроса:
+
+| Исключение | Ситуация |
+|------------|----------|
+| `\OxPHP\Http\Exception\WorkerIdleException` | Режим worker, между запросами |
+| `\OxPHP\Http\Exception\AsyncContextException` | Внутри колбэка `oxphp_async()` |
+| `\OxPHP\Http\Exception\NoActiveRequestException` | Любой другой контекст без активного запроса |
+
+В обычном коде обработки запросов обработка исключений не требуется.
+
+**Пример:**
+
+```php
+<?php
+$request = oxphp_http_request();
+
+$method  = $request->method();             // "POST"
+$path    = $request->path();               // "/api/users"
+$email   = $request->payload('email');     // из JSON или тела формы
+$token   = $request->header('Authorization');
+$theme   = $request->cookie('theme', 'light');
+```
+
+Полный справочник по интерфейсу см. в документации [HTTP Object API](request-api.md).
+
+---
+
+## oxphp_superglobals_enabled()
+
+```php
+oxphp_superglobals_enabled(): bool
+```
+
+Возвращает, включено ли заполнение суперглобальных переменных для данного экземпляра сервера. Значение отражает переменную окружения `SUPERGLOBALS_ENABLED` и не изменяется в течение жизни сервера.
+
+При значении `false` переменные `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES` и `$_SERVER` являются пустыми массивами. HTTP Object API (`oxphp_http_request()`), `php://input` и функции сессий PHP при этом не затрагиваются.
+
+**Возвращает:** `true`, если `SUPERGLOBALS_ENABLED` равно `true` (по умолчанию), `false` в противном случае.
+
+**Пример:**
+
+```php
+<?php
+if (oxphp_superglobals_enabled()) {
+    $query = $_GET['page'] ?? 1;
+} else {
+    $query = oxphp_http_request()->query('page', 1);
+}
+```
 
 ---
 
@@ -543,22 +607,24 @@ $functions = get_extension_funcs('oxphp_sapi');
 print_r($functions);
 // Array
 // (
-//     [0]  => oxphp_request_id
-//     [1]  => oxphp_worker_id
-//     [2]  => oxphp_server_info
-//     [3]  => oxphp_request_heartbeat
-//     [4]  => oxphp_finish_request
-//     [5]  => oxphp_is_worker
-//     [6]  => oxphp_is_streaming
-//     [7]  => oxphp_stream_flush
-//     [8]  => oxphp_sleep
-//     [9]  => oxphp_usleep
-//     [10] => oxphp_worker
-//     [11] => oxphp_async
-//     [12] => oxphp_async_await
-//     [13] => oxphp_async_await_all
-//     [14] => oxphp_async_await_any
-//     [15] => oxphp_register_decorator
+//     [0]  => oxphp_http_request
+//     [1]  => oxphp_superglobals_enabled
+//     [2]  => oxphp_request_id
+//     [3]  => oxphp_worker_id
+//     [4]  => oxphp_server_info
+//     [5]  => oxphp_request_heartbeat
+//     [6]  => oxphp_finish_request
+//     [7]  => oxphp_is_worker
+//     [8]  => oxphp_is_streaming
+//     [9]  => oxphp_stream_flush
+//     [10] => oxphp_sleep
+//     [11] => oxphp_usleep
+//     [12] => oxphp_worker
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
 // )
 ```
 
@@ -589,6 +655,7 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 
 ## См. также
 
+- [HTTP Object API](request-api.md) — объектно-ориентированный доступ к данным запроса через `oxphp_http_request()`
 - [Режим Worker](../features/worker-mode.md) — постоянный цикл воркера и жизненный цикл запроса
 - [Server-Sent Events](../features/sse.md) — потоковая передача в реальном времени с `oxphp_stream_flush()`
 - [Ранний ответ](../features/early-response.md) — фоновая обработка с `oxphp_finish_request()`

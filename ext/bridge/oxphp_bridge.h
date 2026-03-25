@@ -401,6 +401,80 @@ size_t oxphp_bridge_ub_write(const char *str, size_t str_length);
 /** C wrapper for flush — checks deadline, then calls Rust impl. */
 void oxphp_bridge_flush(void *server_context);
 
+/* ─── Superglobals Configuration ──────────────────────────── */
+
+/** Set whether superglobals are enabled (called once at startup from Rust). */
+void oxphp_bridge_set_superglobals_enabled(bool enabled);
+
+/** Check if superglobals are enabled. */
+bool oxphp_bridge_get_superglobals_enabled(void);
+
+/* ─── HTTP Request Data Accessors (Rust callback pattern) ─── */
+
+/** Rust callback types for lazy request data access.
+ *  String accessors return pointer valid until next request or clear.
+ *  out_len receives the byte length. NULL means absent/no value. */
+typedef const char* (*oxphp_req_str_fn_t)(size_t *out_len);
+typedef const char* (*oxphp_req_str_key_fn_t)(const char *key, size_t key_len, size_t *out_len);
+typedef double (*oxphp_req_double_fn_t)(void);
+typedef int (*oxphp_req_bool_fn_t)(void);
+typedef uint16_t (*oxphp_req_u16_fn_t)(void);
+
+/** Visitor callback for iterating key-value pairs. */
+typedef void (*oxphp_req_pairs_cb_t)(const char *key, size_t klen,
+                                      const char *val, size_t vlen,
+                                      void *user_data);
+typedef void (*oxphp_req_pairs_fn_t)(oxphp_req_pairs_cb_t cb, void *user_data);
+
+/** Body accessor — returns pointer to raw body bytes. */
+typedef const uint8_t* (*oxphp_req_body_fn_t)(size_t *out_len);
+
+/** Register all request accessor callbacks (called once at startup from Rust). */
+void oxphp_bridge_set_request_accessors(
+    oxphp_req_str_fn_t      method_fn,
+    oxphp_req_str_fn_t      path_fn,
+    oxphp_req_str_fn_t      full_uri_fn,
+    oxphp_req_str_fn_t      scheme_fn,
+    oxphp_req_str_fn_t      host_fn,
+    oxphp_req_u16_fn_t      port_fn,
+    oxphp_req_str_fn_t      query_string_fn,
+    oxphp_req_str_key_fn_t  header_fn,
+    oxphp_req_str_key_fn_t  cookie_fn,
+    oxphp_req_str_fn_t      ip_fn,
+    oxphp_req_str_fn_t      protocol_version_fn,
+    oxphp_req_double_fn_t   start_time_fn,
+    oxphp_req_bool_fn_t     is_secure_fn,
+    oxphp_req_str_fn_t      content_type_fn,
+    oxphp_req_str_key_fn_t  query_param_fn,
+    oxphp_req_pairs_fn_t    headers_all_fn,
+    oxphp_req_pairs_fn_t    cookies_all_fn,
+    oxphp_req_pairs_fn_t    query_params_all_fn,
+    oxphp_req_body_fn_t     body_fn,
+    oxphp_req_bool_fn_t     is_active_fn
+);
+
+/** Convenience getters — call through registered function pointers. */
+const char* oxphp_req_method(size_t *out_len);
+const char* oxphp_req_path(size_t *out_len);
+const char* oxphp_req_full_uri(size_t *out_len);
+const char* oxphp_req_scheme(size_t *out_len);
+const char* oxphp_req_host(size_t *out_len);
+uint16_t    oxphp_req_port(void);
+const char* oxphp_req_query_string(size_t *out_len);
+const char* oxphp_req_header(const char *name, size_t name_len, size_t *out_len);
+const char* oxphp_req_cookie(const char *name, size_t name_len, size_t *out_len);
+const char* oxphp_req_ip(size_t *out_len);
+const char* oxphp_req_protocol_version(size_t *out_len);
+double      oxphp_req_start_time(void);
+int         oxphp_req_is_secure(void);
+const char* oxphp_req_content_type(size_t *out_len);
+const char* oxphp_req_query_param(const char *key, size_t key_len, size_t *out_len);
+void        oxphp_req_headers_all(oxphp_req_pairs_cb_t cb, void *user_data);
+void        oxphp_req_cookies_all(oxphp_req_pairs_cb_t cb, void *user_data);
+void        oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data);
+const uint8_t* oxphp_req_body(size_t *out_len);
+int         oxphp_req_is_active(void);
+
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
 /** Rust callback: blocks until next request arrives, returns 0 on success, -1 on shutdown. */

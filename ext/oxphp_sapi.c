@@ -11,14 +11,30 @@
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "ext/standard/basic_functions.h"
+#include "ext/json/php_json.h"
+#include "ext/spl/spl_exceptions.h"
+#include "ext/session/php_session.h"
 #include <stdlib.h>
 #include <time.h>
 
+/* HTTP Request class */
+static zend_class_entry *oxphp_http_request_ce = NULL;
+
 /* Async promise exception and proxy classes */
 static zend_class_entry *oxphp_async_exception_ce = NULL;
+
+/* HTTP Object API exception classes */
+static zend_class_entry *oxphp_no_active_request_ce = NULL;
+static zend_class_entry *oxphp_async_context_exc_ce = NULL;
+static zend_class_entry *oxphp_worker_idle_exc_ce = NULL;
 static zend_class_entry *oxphp_async_timeout_ce = NULL;
 static zend_class_entry *oxphp_async_borrow_ce = NULL;
 zend_class_entry *oxphp_borrowed_proxy_ce = NULL;
+
+/* HTTP Object API supporting classes */
+static zend_class_entry *oxphp_http_session_ce = NULL;
+static zend_class_entry *oxphp_http_attributes_ce = NULL;
+static zend_class_entry *oxphp_http_uploaded_file_ce = NULL;
 
 /* Decorator system class entries */
 static zend_class_entry *oxphp_decorator_interface_ce = NULL;
@@ -34,6 +50,818 @@ static __thread int decorator_instance_count = 0;
 static zend_observer_fcall_handlers oxphp_decorator_observer_init(zend_execute_data *execute_data);
 static void oxphp_decorator_begin(zend_execute_data *execute_data);
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval);
+
+/* ═══════════════════════════════════════════════════════════════
+ *  OxPHP\Http\Request — ZEND_METHOD implementations
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* ─── URI methods ─────────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::method(): string */
+ZEND_METHOD(OxPHP_Http_Request, method) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_method(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::path(): string */
+ZEND_METHOD(OxPHP_Http_Request, path) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_path(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_STRING("/");
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::fullUri(): string */
+ZEND_METHOD(OxPHP_Http_Request, fullUri) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_full_uri(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::scheme(): string */
+ZEND_METHOD(OxPHP_Http_Request, scheme) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_scheme(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_STRING("http");
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::host(): string */
+ZEND_METHOD(OxPHP_Http_Request, host) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_host(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::port(): int */
+ZEND_METHOD(OxPHP_Http_Request, port) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_req_port());
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::queryString(): ?string */
+ZEND_METHOD(OxPHP_Http_Request, queryString) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_query_string(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::isSecure(): bool */
+ZEND_METHOD(OxPHP_Http_Request, isSecure) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(oxphp_req_is_secure());
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::isMethod(string $method): bool */
+ZEND_METHOD(OxPHP_Http_Request, isMethod) {
+    zend_string *method;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(method)
+    ZEND_PARSE_PARAMETERS_END();
+
+    size_t len = 0;
+    const char *actual = oxphp_req_method(&len);
+    if (actual && len == ZSTR_LEN(method)) {
+        RETURN_BOOL(strncasecmp(actual, ZSTR_VAL(method), len) == 0);
+    }
+    RETURN_FALSE;
+}
+/* }}} */
+
+/* ─── Protocol methods ────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::httpProtocol(): string */
+ZEND_METHOD(OxPHP_Http_Request, httpProtocol) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *ver = oxphp_req_protocol_version(&len);
+    /* Build "HTTP/X.Y" */
+    char buf[16];
+    int n = snprintf(buf, sizeof(buf), "HTTP/%.*s", (int)len, ver ? ver : "1.1");
+    RETURN_STRINGL(buf, n);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::httpProtocolVersion(): string */
+ZEND_METHOD(OxPHP_Http_Request, httpProtocolVersion) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_protocol_version(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_STRING("1.1");
+}
+/* }}} */
+
+/* ─── Header methods ──────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::header(string $name, ?string $default = null): ?string */
+ZEND_METHOD(OxPHP_Http_Request, header) {
+    zend_string *name;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    size_t len = 0;
+    const char *val = oxphp_req_header(ZSTR_VAL(name), ZSTR_LEN(name), &len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    if (def) {
+        RETURN_COPY(def);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* Visitor callback for building PHP array from key-value pairs */
+static void headers_visitor(const char *key, size_t klen,
+                            const char *val, size_t vlen, void *user_data) {
+    zval *arr = (zval *)user_data;
+    add_assoc_stringl_ex(arr, key, klen, val, vlen);
+}
+
+/* {{{ OxPHP\Http\Request::headers(): array */
+ZEND_METHOD(OxPHP_Http_Request, headers) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    array_init(return_value);
+    oxphp_req_headers_all(headers_visitor, return_value);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::hasHeader(string $name): bool */
+ZEND_METHOD(OxPHP_Http_Request, hasHeader) {
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+
+    size_t len = 0;
+    const char *val = oxphp_req_header(ZSTR_VAL(name), ZSTR_LEN(name), &len);
+    RETURN_BOOL(val != NULL);
+}
+/* }}} */
+
+/* ─── Cookie methods ──────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::cookie(string $name, ?string $default = null): ?string */
+ZEND_METHOD(OxPHP_Http_Request, cookie) {
+    zend_string *name;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(name)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    size_t len = 0;
+    const char *val = oxphp_req_cookie(ZSTR_VAL(name), ZSTR_LEN(name), &len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    if (def) {
+        RETURN_COPY(def);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::cookies(): array */
+ZEND_METHOD(OxPHP_Http_Request, cookies) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    array_init(return_value);
+    oxphp_req_cookies_all(headers_visitor, return_value);  /* reuse visitor */
+}
+/* }}} */
+
+/* ─── Body methods ────────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::body(): string */
+ZEND_METHOD(OxPHP_Http_Request, body) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const uint8_t *data = oxphp_req_body(&len);
+    if (data && len > 0) {
+        RETURN_STRINGL((const char *)data, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::contentType(): ?string */
+ZEND_METHOD(OxPHP_Http_Request, contentType) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_content_type(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* ─── Client / timing methods ─────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::ip(): string */
+ZEND_METHOD(OxPHP_Http_Request, ip) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *val = oxphp_req_ip(&len);
+    if (val && len > 0) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_STRING("0.0.0.0");
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::startTime(bool $asFloat = false): int|float */
+ZEND_METHOD(OxPHP_Http_Request, startTime) {
+    bool as_float = false;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_BOOL(as_float)
+    ZEND_PARSE_PARAMETERS_END();
+
+    double t = oxphp_req_start_time();
+    if (as_float) {
+        RETURN_DOUBLE(t);
+    }
+    RETURN_LONG((zend_long)t);
+}
+/* }}} */
+
+/* ─── Query methods ───────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::query(?string $key = null, mixed $default = null): mixed
+ * When called with a key, does a single bridge lookup (fast path).
+ * When called without arguments, builds the full array via visitor.
+ * Bracket-notation is not yet supported in the initial version. */
+ZEND_METHOD(OxPHP_Http_Request, query) {
+    zend_string *key = NULL;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(0, 2)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(key)
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (key) {
+        /* Single key lookup — direct bridge call, no array build */
+        size_t len = 0;
+        const char *val = oxphp_req_query_param(ZSTR_VAL(key), ZSTR_LEN(key), &len);
+        if (val) {
+            RETURN_STRINGL(val, len);
+        }
+        if (def) {
+            RETURN_COPY(def);
+        }
+        RETURN_NULL();
+    }
+
+    /* No key — return full parsed query array.
+     * Check if we have a cached version in the object property. */
+    zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+        "_query_cache", sizeof("_query_cache")-1, 1, NULL);
+    if (cached && Z_TYPE_P(cached) == IS_ARRAY) {
+        RETURN_COPY(cached);
+    }
+
+    /* Build array from flat pairs via bridge visitor. */
+    array_init(return_value);
+    oxphp_req_query_params_all(headers_visitor, return_value);
+
+    /* Cache on the object for subsequent calls */
+    zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+        "_query_cache", sizeof("_query_cache")-1, return_value);
+}
+/* }}} */
+
+/* ─── Payload method ──────────────────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::payload(?string $key = null, mixed $default = null): mixed */
+ZEND_METHOD(OxPHP_Http_Request, payload) {
+    zend_string *key = NULL;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(0, 2)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(key)
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Check cached payload */
+    zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+        "_payload_cache", sizeof("_payload_cache")-1, 1, NULL);
+
+    if (!cached || Z_TYPE_P(cached) == IS_UNDEF || Z_TYPE_P(cached) == IS_NULL) {
+        /* Parse body based on Content-Type */
+        size_t ct_len = 0;
+        const char *ct = oxphp_req_content_type(&ct_len);
+        size_t body_len = 0;
+        const uint8_t *body_data = oxphp_req_body(&body_len);
+
+        zval parsed;
+        ZVAL_NULL(&parsed);
+
+        if (ct && body_data && body_len > 0) {
+            if (ct_len >= 16 && strncasecmp(ct, "application/json", 16) == 0) {
+                /* JSON decode */
+                zend_string *body_str = zend_string_init((const char *)body_data, body_len, 0);
+                php_json_decode(&parsed, ZSTR_VAL(body_str), ZSTR_LEN(body_str), 1, 512);
+                zend_string_release(body_str);
+            } else if (
+                (ct_len >= 33 && strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0) ||
+                (ct_len >= 19 && strncasecmp(ct, "multipart/form-data", 19) == 0)
+            ) {
+                /* Form data — use $_POST if superglobals are enabled */
+                if (oxphp_bridge_get_superglobals_enabled()) {
+                    zval *post = &PG(http_globals)[TRACK_VARS_POST];
+                    if (Z_TYPE_P(post) == IS_ARRAY) {
+                        ZVAL_COPY(&parsed, post);
+                    }
+                }
+            }
+        }
+
+        zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+            "_payload_cache", sizeof("_payload_cache")-1, &parsed);
+        zval_ptr_dtor(&parsed);
+
+        cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+            "_payload_cache", sizeof("_payload_cache")-1, 1, NULL);
+    }
+
+    if (key) {
+        if (Z_TYPE_P(cached) == IS_ARRAY) {
+            zval *found = zend_hash_find(Z_ARRVAL_P(cached), key);
+            if (found) {
+                RETURN_COPY(found);
+            }
+        }
+        if (def) {
+            RETURN_COPY(def);
+        }
+        RETURN_NULL();
+    }
+
+    if (Z_TYPE_P(cached) != IS_NULL) {
+        RETURN_COPY(cached);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* ─── Placeholder methods (depend on Task 5 supporting classes) */
+
+/* {{{ OxPHP\Http\Request::attributes(): AttributesInterface */
+ZEND_METHOD(OxPHP_Http_Request, attributes) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Return cached Attributes object, or create one on first call */
+    zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+        "_attributes", sizeof("_attributes")-1, 1, NULL);
+    if (cached && Z_TYPE_P(cached) == IS_OBJECT) {
+        RETURN_COPY(cached);
+    }
+    /* Create new Attributes object and cache it on this Request */
+    zval attr_obj;
+    object_init_ex(&attr_obj, oxphp_http_attributes_ce);
+    zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+        "_attributes", sizeof("_attributes")-1, &attr_obj);
+    RETURN_ZVAL(&attr_obj, 1, 1);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::session(): ?SessionInterface */
+ZEND_METHOD(OxPHP_Http_Request, session) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Return null if session_start() hasn't been called */
+    if (PS(session_status) != php_session_active) {
+        RETURN_NULL();
+    }
+    object_init_ex(return_value, oxphp_http_session_ce);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::file(string $name): null — placeholder */
+ZEND_METHOD(OxPHP_Http_Request, file) {
+    zend_string *name;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(name)
+    ZEND_PARSE_PARAMETERS_END();
+    /* File support implemented in Task 5 */
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::files(?string $name = null): array — placeholder */
+ZEND_METHOD(OxPHP_Http_Request, files) {
+    zend_string *name = NULL;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_STR_OR_NULL(name)
+    ZEND_PARSE_PARAMETERS_END();
+    /* File support implemented in Task 5 */
+    array_init(return_value);
+}
+/* }}} */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  End of OxPHP\Http\Request methods
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  OxPHP\Http\Attributes — ZEND_METHOD implementations
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* {{{ OxPHP\Http\Attributes::get(string $key, mixed $default = null): mixed */
+ZEND_METHOD(OxPHP_Http_Attributes, get) {
+    zend_string *key;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(key)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, 1, NULL);
+    if (store && Z_TYPE_P(store) == IS_ARRAY) {
+        zval *found = zend_hash_find(Z_ARRVAL_P(store), key);
+        if (found) {
+            RETURN_COPY(found);
+        }
+    }
+    if (def) {
+        RETURN_COPY(def);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Attributes::set(string $key, mixed $value): void */
+ZEND_METHOD(OxPHP_Http_Attributes, set) {
+    zend_string *key;
+    zval *value;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+        Z_PARAM_STR(key)
+        Z_PARAM_ZVAL(value)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval rv;
+    zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, 1, &rv);
+
+    zval new_arr;
+    if (store && Z_TYPE_P(store) == IS_ARRAY) {
+        /* Copy existing array */
+        ZVAL_DUP(&new_arr, store);
+    } else {
+        array_init(&new_arr);
+    }
+
+    Z_TRY_ADDREF_P(value);
+    zend_hash_update(Z_ARRVAL(new_arr), key, value);
+    zend_update_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, &new_arr);
+    zval_ptr_dtor(&new_arr);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Attributes::has(string $key): bool */
+ZEND_METHOD(OxPHP_Http_Attributes, has) {
+    zend_string *key;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(key)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, 1, NULL);
+    RETURN_BOOL(store && Z_TYPE_P(store) == IS_ARRAY &&
+        zend_hash_exists(Z_ARRVAL_P(store), key));
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Attributes::remove(string $key): void */
+ZEND_METHOD(OxPHP_Http_Attributes, remove) {
+    zend_string *key;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(key)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval rv;
+    zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, 1, &rv);
+    if (store && Z_TYPE_P(store) == IS_ARRAY) {
+        zval new_arr;
+        ZVAL_DUP(&new_arr, store);
+        zend_hash_del(Z_ARRVAL(new_arr), key);
+        zend_update_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+            "_store", sizeof("_store")-1, &new_arr);
+        zval_ptr_dtor(&new_arr);
+    }
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Attributes::all(): array */
+ZEND_METHOD(OxPHP_Http_Attributes, all) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
+        "_store", sizeof("_store")-1, 1, NULL);
+    if (store && Z_TYPE_P(store) == IS_ARRAY) {
+        RETURN_COPY(store);
+    }
+    RETURN_EMPTY_ARRAY();
+}
+/* }}} */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  OxPHP\Http\Session — ZEND_METHOD implementations
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* {{{ OxPHP\Http\Session::id(): string */
+ZEND_METHOD(OxPHP_Http_Session, id) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval func_name, retval;
+    ZVAL_STRING(&func_name, "session_id");
+    if (call_user_function(NULL, NULL, &func_name, &retval, 0, NULL) == SUCCESS) {
+        zval_ptr_dtor(&func_name);
+        RETURN_ZVAL(&retval, 0, 0);
+    }
+    zval_ptr_dtor(&func_name);
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Session::name(): string */
+ZEND_METHOD(OxPHP_Http_Session, name) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval func_name, retval;
+    ZVAL_STRING(&func_name, "session_name");
+    if (call_user_function(NULL, NULL, &func_name, &retval, 0, NULL) == SUCCESS) {
+        zval_ptr_dtor(&func_name);
+        RETURN_ZVAL(&retval, 0, 0);
+    }
+    zval_ptr_dtor(&func_name);
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Session::get(string $key, mixed $default = null): mixed */
+ZEND_METHOD(OxPHP_Http_Session, get) {
+    zend_string *key;
+    zval *def = NULL;
+    ZEND_PARSE_PARAMETERS_START(1, 2)
+        Z_PARAM_STR(key)
+        Z_PARAM_OPTIONAL
+        Z_PARAM_ZVAL_OR_NULL(def)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval *session = zend_hash_str_find(&EG(symbol_table), "_SESSION", sizeof("_SESSION")-1);
+    if (session) { ZVAL_DEREF(session); }
+    if (session && Z_TYPE_P(session) == IS_ARRAY) {
+        zval *found = zend_hash_find(Z_ARRVAL_P(session), key);
+        if (found) {
+            RETURN_COPY(found);
+        }
+    }
+    if (def) {
+        RETURN_COPY(def);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Session::has(string $key): bool */
+ZEND_METHOD(OxPHP_Http_Session, has) {
+    zend_string *key;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(key)
+    ZEND_PARSE_PARAMETERS_END();
+
+    zval *session = zend_hash_str_find(&EG(symbol_table), "_SESSION", sizeof("_SESSION")-1);
+    if (session) { ZVAL_DEREF(session); }
+    RETURN_BOOL(session && Z_TYPE_P(session) == IS_ARRAY &&
+        zend_hash_exists(Z_ARRVAL_P(session), key));
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Session::all(): array */
+ZEND_METHOD(OxPHP_Http_Session, all) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *session = zend_hash_str_find(&EG(symbol_table), "_SESSION", sizeof("_SESSION")-1);
+    if (session) { ZVAL_DEREF(session); }
+    if (session && Z_TYPE_P(session) == IS_ARRAY) {
+        RETURN_COPY(session);
+    }
+    RETURN_EMPTY_ARRAY();
+}
+/* }}} */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  OxPHP\Http\UploadedFile — ZEND_METHOD implementations
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* {{{ OxPHP\Http\UploadedFile::name(): string */
+ZEND_METHOD(OxPHP_Http_UploadedFile, name) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "name", sizeof("name")-1, 1, NULL);
+    RETURN_COPY(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::clientType(): string */
+ZEND_METHOD(OxPHP_Http_UploadedFile, clientType) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "clientType", sizeof("clientType")-1, 1, NULL);
+    RETURN_COPY(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::type(): string
+ * Detects real MIME type via mime_content_type(), caches in _type property. */
+ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Check cached _type first */
+    zval *cached = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "_type", sizeof("_type")-1, 1, NULL);
+    if (cached && Z_TYPE_P(cached) == IS_STRING) {
+        RETURN_COPY(cached);
+    }
+    /* Use mime_content_type() for magic-bytes detection */
+    zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "tmpPath", sizeof("tmpPath")-1, 1, NULL);
+    if (tmp_path && Z_TYPE_P(tmp_path) == IS_STRING) {
+        zval func_name, retval;
+        ZVAL_STRING(&func_name, "mime_content_type");
+        zval args[1];
+        ZVAL_COPY(&args[0], tmp_path);
+        if (call_user_function(NULL, NULL, &func_name, &retval, 1, args) == SUCCESS
+            && Z_TYPE(retval) == IS_STRING) {
+            zend_update_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+                "_type", sizeof("_type")-1, &retval);
+            zval_ptr_dtor(&func_name);
+            zval_ptr_dtor(&args[0]);
+            RETURN_ZVAL(&retval, 0, 0);
+        }
+        zval_ptr_dtor(&func_name);
+        zval_ptr_dtor(&args[0]);
+    }
+    zend_update_property_string(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "_type", sizeof("_type")-1, "application/octet-stream");
+    RETURN_STRING("application/octet-stream");
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::size(): int */
+ZEND_METHOD(OxPHP_Http_UploadedFile, size) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "size", sizeof("size")-1, 1, NULL);
+    RETURN_COPY(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::tmpPath(): string */
+ZEND_METHOD(OxPHP_Http_UploadedFile, tmpPath) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "tmpPath", sizeof("tmpPath")-1, 1, NULL);
+    RETURN_COPY(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::error(): int */
+ZEND_METHOD(OxPHP_Http_UploadedFile, error) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "error", sizeof("error")-1, 1, NULL);
+    RETURN_COPY(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::isValid(): bool */
+ZEND_METHOD(OxPHP_Http_UploadedFile, isValid) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *err = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "error", sizeof("error")-1, 1, NULL);
+    RETURN_BOOL(err && Z_TYPE_P(err) == IS_LONG && Z_LVAL_P(err) == 0 /* UPLOAD_ERR_OK */);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\UploadedFile::moveTo(string $destination): bool */
+ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
+    zend_string *destination;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_STR(destination)
+    ZEND_PARSE_PARAMETERS_END();
+
+    /* Call type() to cache MIME before moving */
+    zval tmp_retval;
+    zend_call_method_with_0_params(Z_OBJ_P(ZEND_THIS), oxphp_http_uploaded_file_ce,
+        NULL, "type", &tmp_retval);
+    zval_ptr_dtor(&tmp_retval);
+
+    /* Check isValid */
+    zval *err = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "error", sizeof("error")-1, 1, NULL);
+    if (!err || Z_TYPE_P(err) != IS_LONG || Z_LVAL_P(err) != 0) {
+        RETURN_FALSE;
+    }
+
+    /* Call move_uploaded_file() */
+    zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "tmpPath", sizeof("tmpPath")-1, 1, NULL);
+    zval func_name, retval;
+    ZVAL_STRING(&func_name, "move_uploaded_file");
+    zval args[2];
+    ZVAL_COPY(&args[0], tmp_path);
+    ZVAL_STR_COPY(&args[1], destination);
+    int rc = call_user_function(NULL, NULL, &func_name, &retval, 2, args);
+    zval_ptr_dtor(&func_name);
+    zval_ptr_dtor(&args[0]);
+    zval_ptr_dtor(&args[1]);
+    if (rc == SUCCESS && Z_TYPE(retval) == IS_TRUE) {
+        RETURN_TRUE;
+    }
+    RETURN_FALSE;
+}
+/* }}} */
+
+/* ═══════════════════════════════════════════════════════════════
+ *  End of supporting classes
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* {{{ oxphp_http_request(): OxPHP\Http\Request
+ * Returns the HTTP Request object for the current request context.
+ * Throws OxPHP\Http\Exception\* if no active request. */
+PHP_FUNCTION(oxphp_http_request)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    if (!oxphp_req_is_active()) {
+        if (oxphp_bridge_is_async_worker()) {
+            zend_throw_exception(oxphp_async_context_exc_ce,
+                "Cannot access HTTP request from async worker context", 0);
+            RETURN_THROWS();
+        }
+        if (oxphp_bridge_is_worker_mode()) {
+            zend_throw_exception(oxphp_worker_idle_exc_ce,
+                "Cannot access HTTP request: worker is idle (waiting for next request)", 0);
+            RETURN_THROWS();
+        }
+        zend_throw_exception(oxphp_no_active_request_ce,
+            "Cannot access HTTP request: no active request context", 0);
+        RETURN_THROWS();
+    }
+
+    object_init_ex(return_value, oxphp_http_request_ce);
+}
+/* }}} */
+
+/* {{{ oxphp_superglobals_enabled(): bool */
+PHP_FUNCTION(oxphp_superglobals_enabled)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(oxphp_bridge_get_superglobals_enabled());
+}
+/* }}} */
 
 /* {{{ oxphp_request_id(): string
  * Returns the hex request ID for the current request. */
@@ -1342,7 +2170,225 @@ PHP_FUNCTION(oxphp_async_await_any)
 }
 /* }}} */
 
+/* ─── Request arginfo ────────────────────────────────────── */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_method, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_path, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_fullUri, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_scheme, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_host, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_port, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_queryString, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_isSecure, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_isMethod, 0, 1, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_httpProtocol, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_httpProtocolVersion, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_query, 0, 0, IS_MIXED, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, key, IS_STRING, 1, "null")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_MIXED, 0, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_payload, 0, 0, IS_MIXED, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, key, IS_STRING, 1, "null")
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_MIXED, 0, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_header, 0, 1, IS_STRING, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_headers, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_hasHeader, 0, 1, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_cookie, 0, 1, IS_STRING, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_cookies, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_body, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_contentType, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_ip, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_startTime, 0, 0, IS_MIXED, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, asFloat, _IS_BOOL, 0, "false")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_attributes, 0, 0, IS_MIXED, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_session, 0, 0, IS_MIXED, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_file, 0, 1, IS_MIXED, 1)
+    ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_files, 0, 0, IS_ARRAY, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, name, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+/* ─── Request method entries ─────────────────────────────── */
+static const zend_function_entry oxphp_http_request_methods[] = {
+    ZEND_ME(OxPHP_Http_Request, method,              arginfo_req_method,              ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, path,                arginfo_req_path,                ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, fullUri,             arginfo_req_fullUri,             ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, scheme,              arginfo_req_scheme,              ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, host,                arginfo_req_host,                ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, port,                arginfo_req_port,                ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, queryString,         arginfo_req_queryString,         ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, isSecure,            arginfo_req_isSecure,            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, isMethod,            arginfo_req_isMethod,            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, httpProtocol,        arginfo_req_httpProtocol,        ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, httpProtocolVersion, arginfo_req_httpProtocolVersion, ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, query,               arginfo_req_query,               ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, payload,             arginfo_req_payload,             ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, header,              arginfo_req_header,              ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, headers,             arginfo_req_headers,             ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, hasHeader,           arginfo_req_hasHeader,           ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, cookie,              arginfo_req_cookie,              ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, cookies,             arginfo_req_cookies,             ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, body,                arginfo_req_body,                ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, contentType,         arginfo_req_contentType,         ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, ip,                  arginfo_req_ip,                  ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, startTime,           arginfo_req_startTime,           ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, attributes,          arginfo_req_attributes,          ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, session,             arginfo_req_session,             ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, file,                arginfo_req_file,                ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, files,               arginfo_req_files,               ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+/* ─── Attributes arginfo and method entries ────────────────── */
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_attr_get, 0, 1, IS_MIXED, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, default, IS_MIXED, 0, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_attr_set, 0, 2, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+    ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_attr_has, 0, 1, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_attr_remove, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, key, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_attr_all, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry oxphp_http_attributes_methods[] = {
+    ZEND_ME(OxPHP_Http_Attributes, get,    arginfo_attr_get,    ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Attributes, set,    arginfo_attr_set,    ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Attributes, has,    arginfo_attr_has,    ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Attributes, remove, arginfo_attr_remove, ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Attributes, all,    arginfo_attr_all,    ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+/* ─── Session arginfo and method entries ───────────────────── */
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_session_id, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_session_name, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry oxphp_http_session_methods[] = {
+    ZEND_ME(OxPHP_Http_Session, id,   arginfo_session_id,   ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Session, name, arginfo_session_name, ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Session, get,  arginfo_attr_get,     ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Session, has,  arginfo_attr_has,     ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Session, all,  arginfo_attr_all,     ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+/* ─── UploadedFile arginfo and method entries ──────────────── */
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_name, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_clientType, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_type, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_size, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_tmpPath, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_error, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_isValid, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_uf_moveTo, 0, 1, _IS_BOOL, 0)
+    ZEND_ARG_TYPE_INFO(0, destination, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry oxphp_http_uploaded_file_methods[] = {
+    ZEND_ME(OxPHP_Http_UploadedFile, name,       arginfo_uf_name,       ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, clientType, arginfo_uf_clientType, ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, type,       arginfo_uf_type,       ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, size,       arginfo_uf_size,       ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, tmpPath,    arginfo_uf_tmpPath,    ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, error,      arginfo_uf_error,      ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, isValid,    arginfo_uf_isValid,    ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_UploadedFile, moveTo,     arginfo_uf_moveTo,    ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
 /* {{{ arginfo */
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_http_request, 0, 0,
+    OxPHP\\Http\\Request, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_superglobals_enabled, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_request_id, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
@@ -1403,6 +2449,8 @@ ZEND_END_ARG_INFO()
 
 /* {{{ function entries */
 static const zend_function_entry oxphp_sapi_functions[] = {
+    PHP_FE(oxphp_http_request,      arginfo_oxphp_http_request)
+    PHP_FE(oxphp_superglobals_enabled, arginfo_oxphp_superglobals_enabled)
     PHP_FE(oxphp_request_id,        arginfo_oxphp_request_id)
     PHP_FE(oxphp_worker_id,         arginfo_oxphp_worker_id)
     PHP_FE(oxphp_server_info,       arginfo_oxphp_server_info)
@@ -1580,6 +2628,77 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
     INIT_NS_CLASS_ENTRY(ce, "OxPHP", "AsyncBorrowException", NULL);
     oxphp_async_borrow_ce = zend_register_internal_class_ex(&ce, zend_ce_exception);
+
+    /* OxPHP\Http\Exception\NoActiveRequestException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "NoActiveRequestException", NULL);
+    oxphp_no_active_request_ce = zend_register_internal_class_ex(&ce, spl_ce_RuntimeException);
+
+    /* OxPHP\Http\Exception\AsyncContextException extends NoActiveRequestException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "AsyncContextException", NULL);
+    oxphp_async_context_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
+
+    /* OxPHP\Http\Exception\WorkerIdleException extends NoActiveRequestException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
+    oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
+
+    /* OxPHP\Http\Request */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Request",
+            oxphp_http_request_methods);
+        oxphp_http_request_ce = zend_register_internal_class(&tmp_ce);
+        oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL;
+
+        /* Internal cache properties (hidden, used for lazy caching) */
+        zend_declare_property_null(oxphp_http_request_ce,
+            "_query_cache", sizeof("_query_cache")-1, ZEND_ACC_PROTECTED);
+        zend_declare_property_null(oxphp_http_request_ce,
+            "_payload_cache", sizeof("_payload_cache")-1, ZEND_ACC_PROTECTED);
+        zend_declare_property_null(oxphp_http_request_ce,
+            "_attributes", sizeof("_attributes")-1, ZEND_ACC_PROTECTED);
+    }
+
+    /* OxPHP\Http\Attributes */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Attributes",
+            oxphp_http_attributes_methods);
+        oxphp_http_attributes_ce = zend_register_internal_class(&tmp_ce);
+        oxphp_http_attributes_ce->ce_flags |= ZEND_ACC_FINAL;
+        zend_declare_property_null(oxphp_http_attributes_ce,
+            "_store", sizeof("_store")-1, ZEND_ACC_PROTECTED);
+    }
+
+    /* OxPHP\Http\Session */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Session",
+            oxphp_http_session_methods);
+        oxphp_http_session_ce = zend_register_internal_class(&tmp_ce);
+        oxphp_http_session_ce->ce_flags |= ZEND_ACC_FINAL;
+    }
+
+    /* OxPHP\Http\UploadedFile */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "UploadedFile",
+            oxphp_http_uploaded_file_methods);
+        oxphp_http_uploaded_file_ce = zend_register_internal_class(&tmp_ce);
+        oxphp_http_uploaded_file_ce->ce_flags |= ZEND_ACC_FINAL;
+
+        zend_declare_property_string(oxphp_http_uploaded_file_ce,
+            "name", sizeof("name")-1, "", ZEND_ACC_PROTECTED);
+        zend_declare_property_string(oxphp_http_uploaded_file_ce,
+            "clientType", sizeof("clientType")-1, "", ZEND_ACC_PROTECTED);
+        zend_declare_property_long(oxphp_http_uploaded_file_ce,
+            "size", sizeof("size")-1, 0, ZEND_ACC_PROTECTED);
+        zend_declare_property_string(oxphp_http_uploaded_file_ce,
+            "tmpPath", sizeof("tmpPath")-1, "", ZEND_ACC_PROTECTED);
+        zend_declare_property_long(oxphp_http_uploaded_file_ce,
+            "error", sizeof("error")-1, 4 /* UPLOAD_ERR_NO_FILE */, ZEND_ACC_PROTECTED);
+        zend_declare_property_null(oxphp_http_uploaded_file_ce,
+            "_type", sizeof("_type")-1, ZEND_ACC_PROTECTED);
+    }
 
     /* BorrowedProxy class */
     INIT_NS_CLASS_ENTRY(ce, "OxPHP", "BorrowedProxy", oxphp_borrowed_proxy_methods);

@@ -75,6 +75,7 @@ curl http://localhost:8080/
 
 ## PHP
 
+- [HTTP Object API](php/request-api.md) — объектно-ориентированный доступ к запросу через `oxphp_http_request()`: параметры строки запроса, разобранное тело, заголовки, куки, загруженные файлы и многое другое
 - [Функции](php/functions.md) — встроенные PHP-функции OxPHP (`oxphp_worker()`, `oxphp_request_id()`, `oxphp_server_info()` и другие)
 - [Суперглобальные переменные](php/superglobals.md) — как заполняются `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES` и `php://input`
 - [OPcache и JIT](php/opcache.md) — конфигурация OPcache и настройки JIT-компиляции

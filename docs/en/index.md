@@ -75,6 +75,7 @@ For a full walkthrough, see the [Quick Start](getting-started/quick-start.md) gu
 
 ## PHP
 
+- [HTTP Request API](php/request-api.md) — object-oriented request access via `oxphp_http_request()`: query params, parsed body, headers, cookies, file uploads, and more
 - [Functions](php/functions.md) — built-in PHP functions provided by OxPHP (`oxphp_worker()`, `oxphp_request_id()`, `oxphp_server_info()`, and more)
 - [Superglobals](php/superglobals.md) — how `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `php://input` are populated
 - [OPcache and JIT](php/opcache.md) — OPcache configuration and JIT compilation settings

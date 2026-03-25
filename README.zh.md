@@ -80,6 +80,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 ### PHP 运行时
 - **原生 PHP 执行** — 通过自定义 SAPI（`oxphp`）配合 ZTS 工作池运行
 - **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
+- **HTTP Object API** — `oxphp_http_request()` 返回类型化、惰性加载的请求对象，内置 JSON 请求体解析、基于文件内容的 MIME 类型检测以及用于中间件的可变属性容器；参见 [HTTP Request API 文档](docs/zh/php/request-api.md)
 - **原生 Rust↔PHP 桥接** — 通过 C 访问函数直接操作 `zval`，零序列化开销
 - **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
 - **基于属性的装饰器** — 通过 PHP 8+ 属性拦截函数/方法调用，对未装饰代码零开销；支持 `TARGET_FUNCTION`、`TARGET_METHOD`、`TARGET_CLASS`

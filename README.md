@@ -80,6 +80,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 ### PHP Runtime
 - **Native PHP execution** via custom SAPI (`oxphp`) with ZTS worker pool
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
+- **HTTP Object API** — `oxphp_http_request()` returns a typed, lazy-loading request object with built-in JSON body parsing, content-detected MIME types for uploads, and a mutable attributes container for middleware; see [HTTP Request API docs](docs/en/php/request-api.md)
 - **Native Rust↔PHP bridge** — zero-serialization via direct `zval` access through C accessor functions
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
 - **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS`

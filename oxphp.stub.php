@@ -3,7 +3,7 @@
  * OxPHP Extension Stub File
  *
  * Provides IDE autocompletion and static analysis support for
- * functions defined by the oxphp_sapi PHP extension.
+ * functions and classes defined by the oxphp_sapi PHP extension.
  *
  * This file is NOT loaded at runtime — it is only used by IDEs
  * (PhpStorm, VS Code + Intelephense) and static analyzers (PHPStan, Psalm).
@@ -12,6 +12,46 @@
  * @version 0.1.0
  * @link https://github.com/oxphp/oxphp
  */
+
+// ═══════════════════════════════════════════════════════════════
+//  Global Functions
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Returns the HTTP Request object for the current request context.
+ *
+ * The object is a lightweight proxy — data is fetched lazily from Rust
+ * thread-local storage via FFI only when a method is called. No allocation
+ * overhead for data you never access.
+ *
+ * @return \OxPHP\Http\RequestInterface Typed, read-only request object
+ *
+ * @throws \OxPHP\Http\Exception\NoActiveRequestException If no active request context
+ * @throws \OxPHP\Http\Exception\AsyncContextException If called from an oxphp_async() callback
+ * @throws \OxPHP\Http\Exception\WorkerIdleException If worker is between requests
+ *
+ * @example
+ * $request = oxphp_http_request();
+ * $page = $request->query('page', 1);
+ * $token = $request->header('Authorization');
+ */
+function oxphp_http_request(): \OxPHP\Http\RequestInterface {}
+
+/**
+ * Check if PHP superglobals ($_GET, $_POST, etc.) are populated.
+ *
+ * When SUPERGLOBALS_ENABLED=false, the object API via oxphp_http_request()
+ * is the only way to access request data.
+ *
+ * @return bool true if superglobals are enabled (default)
+ *
+ * @example
+ * if (!oxphp_superglobals_enabled()) {
+ *     // must use oxphp_http_request() for all request data
+ *     $request = oxphp_http_request();
+ * }
+ */
+function oxphp_superglobals_enabled(): bool {}
 
 /**
  * Returns the unique request ID for the current request.
@@ -332,6 +372,402 @@ function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): arra
  * function handle_request(): void { ... }
  */
 function oxphp_register_decorator(string $class): bool {}
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP\Http — Request Object API
+// ═══════════════════════════════════════════════════════════════
+
+namespace OxPHP\Http {
+
+    /**
+     * Read-only HTTP request interface.
+     *
+     * All HTTP data is fixed at the moment of receipt. The only mutable
+     * component is attributes() for middleware enrichment. Data is fetched
+     * lazily from Rust via FFI — only what you access crosses the bridge.
+     */
+    interface RequestInterface
+    {
+        // ── URI & Method ──
+
+        /** HTTP method (e.g. "GET", "POST"). */
+        public function method(): string;
+
+        /** URI path without query string (e.g. "/users/42"). */
+        public function path(): string;
+
+        /**
+         * Full URI including scheme, host, port (if non-default), path, and query.
+         * Port is omitted when it matches the scheme default (80/443).
+         *
+         * @example "https://example.com:8080/users/42?page=2"
+         */
+        public function fullUri(): string;
+
+        /** URI scheme: "http" or "https". */
+        public function scheme(): string;
+
+        /** Hostname from Host header, or empty string if absent. */
+        public function host(): string;
+
+        /** Port from Host header, or scheme default (80 for http, 443 for https). */
+        public function port(): int;
+
+        /** Raw query string without leading "?", or null if absent. */
+        public function queryString(): ?string;
+
+        /** Whether the request arrived over TLS. */
+        public function isSecure(): bool;
+
+        /** Case-insensitive HTTP method comparison. */
+        public function isMethod(string $method): bool;
+
+        // ── Protocol ──
+
+        /** Full protocol string (e.g. "HTTP/1.1"). */
+        public function httpProtocol(): string;
+
+        /** Protocol version only (e.g. "1.1", "2"). */
+        public function httpProtocolVersion(): string;
+
+        // ── Query Parameters ($_GET replacement) ──
+
+        /**
+         * Access query string parameters.
+         *
+         * Supports bracket notation: ?a[]=1&a[]=2 → ['a' => ['1', '2']].
+         * Bridge returns flat pairs; bracket parsing happens on PHP side.
+         *
+         * @param string|null $key Specific key, or null for all params
+         * @param mixed $default Returned when key is absent
+         * @return mixed Array of all params, or single value, or $default
+         */
+        public function query(?string $key = null, mixed $default = null): mixed;
+
+        // ── Parsed Body ($_POST + JSON replacement) ──
+
+        /**
+         * Access parsed request body based on Content-Type.
+         *
+         * - application/x-www-form-urlencoded → array
+         * - multipart/form-data → array
+         * - application/json → decoded array/object (null on invalid JSON)
+         * - other Content-Type → null
+         *
+         * Not tied to HTTP method — works with POST, PUT, PATCH, etc.
+         * Parsed result is cached per request. Parsing happens in Rust.
+         *
+         * @param string|null $key Specific key, or null for full body
+         * @param mixed $default Returned when key is absent
+         * @return mixed Parsed body or single value or $default
+         */
+        public function payload(?string $key = null, mixed $default = null): mixed;
+
+        // ── Headers ──
+
+        /**
+         * Get a header value by name (case-insensitive).
+         *
+         * Returns the raw value as-is. For multi-value headers (Accept,
+         * X-Forwarded-For), the full string is returned:
+         * "text/html,application/xhtml+xml,application/xml;q=0.9"
+         *
+         * @param string $name Header name
+         * @param string|null $default Returned when header is absent
+         * @return string|null Header value or $default
+         */
+        public function header(string $name, ?string $default = null): ?string;
+
+        /** All headers as name => value array. */
+        public function headers(): array;
+
+        /** Check if a header exists (case-insensitive). */
+        public function hasHeader(string $name): bool;
+
+        // ── Cookies ($_COOKIE replacement) ──
+
+        /**
+         * Get a cookie value by name.
+         *
+         * @param string $name Cookie name
+         * @param string|null $default Returned when cookie is absent
+         * @return string|null Cookie value or $default
+         */
+        public function cookie(string $name, ?string $default = null): ?string;
+
+        /** All cookies as name => value array. */
+        public function cookies(): array;
+
+        // ── Raw Body (php://input replacement) ──
+
+        /** Raw request body bytes. Not cached — FFI call each time. */
+        public function body(): string;
+
+        /** Content-Type header value, or null. */
+        public function contentType(): ?string;
+
+        // ── File Uploads ($_FILES replacement) ──
+
+        /**
+         * Get a single uploaded file by field name.
+         * For array fields (name="photos[]"), returns the first file.
+         *
+         * @return UploadedFileInterface|null The file or null if not found
+         */
+        public function file(string $name): ?UploadedFileInterface;
+
+        /**
+         * Get uploaded files.
+         *
+         * Without argument: all files as a flat UploadedFileInterface[] array.
+         * With name: all files for that field (supports name="photos[]").
+         *
+         * @param string|null $name Field name filter, or null for all
+         * @return UploadedFileInterface[]
+         */
+        public function files(?string $name = null): array;
+
+        // ── Client ──
+
+        /** Client IP address (REMOTE_ADDR). */
+        public function ip(): string;
+
+        // ── Timing ──
+
+        /**
+         * Request start timestamp.
+         *
+         * @param bool $asFloat true for float with sub-second precision
+         * @return int|float Unix timestamp
+         */
+        public function startTime(bool $asFloat = false): int|float;
+
+        // ── Attributes (mutable middleware container) ──
+
+        /**
+         * Mutable key-value container for middleware enrichment.
+         *
+         * Per-request, shared between Fibers on the same thread.
+         * The Attributes object is created on first call and cached.
+         */
+        public function attributes(): AttributesInterface;
+
+        // ── Session ──
+
+        /**
+         * Live read-only view on $_SESSION.
+         *
+         * Returns null if session_start() has not been called.
+         * Values reflect $_SESSION state at the time of each method call.
+         * Session management (start, save, destroy, set) via native session_*().
+         */
+        public function session(): ?SessionInterface;
+    }
+
+    /**
+     * Read-only view on $_SESSION.
+     *
+     * Session lifecycle (start, save, destroy, write) is managed through
+     * native PHP session_*() functions. This interface only reads.
+     */
+    interface SessionInterface
+    {
+        /** Current session ID (session_id()). */
+        public function id(): string;
+
+        /** Current session name (session_name()). */
+        public function name(): string;
+
+        /**
+         * Get a session value by key.
+         *
+         * @param string $key Session key
+         * @param mixed $default Returned when key is absent
+         * @return mixed Session value or $default
+         */
+        public function get(string $key, mixed $default = null): mixed;
+
+        /** Check if a key exists in the session. */
+        public function has(string $key): bool;
+
+        /** All session data as an array. */
+        public function all(): array;
+    }
+
+    /**
+     * Represents an uploaded file with server-side MIME type detection.
+     *
+     * type() detects MIME from file contents (magic bytes), not from the
+     * client-provided Content-Type which can be spoofed. The detected type
+     * is cached on first call. moveTo() automatically calls type() before
+     * moving to ensure the cache is populated.
+     */
+    interface UploadedFileInterface
+    {
+        /** Original filename from the client. */
+        public function name(): string;
+
+        /** MIME type reported by the client (unreliable, can be spoofed). */
+        public function clientType(): string;
+
+        /**
+         * MIME type detected from file contents (magic bytes).
+         *
+         * Cached on first call. Returns "application/octet-stream" if
+         * detection fails. moveTo() auto-calls type() before moving.
+         */
+        public function type(): string;
+
+        /** File size in bytes. */
+        public function size(): int;
+
+        /** Path to the temporary uploaded file. */
+        public function tmpPath(): string;
+
+        /** Upload error code (UPLOAD_ERR_* constant). */
+        public function error(): int;
+
+        /** Whether the upload succeeded (error === UPLOAD_ERR_OK). */
+        public function isValid(): bool;
+
+        /**
+         * Move the uploaded file to a destination path.
+         *
+         * Automatically calls type() before moving to cache MIME detection.
+         * Returns false if the file is not valid or the move fails.
+         *
+         * @param string $path Destination file path
+         * @return bool true on success
+         */
+        public function moveTo(string $path): bool;
+    }
+
+    /**
+     * Mutable key-value container for request attributes.
+     *
+     * Used by middleware to attach data to the request (auth user, locale,
+     * route parameters, etc.). Per-request, shared between Fibers.
+     */
+    interface AttributesInterface
+    {
+        /**
+         * @param string $key Attribute key
+         * @param mixed $default Returned when key is absent
+         * @return mixed Attribute value or $default
+         */
+        public function get(string $key, mixed $default = null): mixed;
+
+        /** Set an attribute value. */
+        public function set(string $key, mixed $value): void;
+
+        /** Check if an attribute exists. */
+        public function has(string $key): bool;
+
+        /** Remove an attribute. */
+        public function remove(string $key): void;
+
+        /** All attributes as an array. */
+        public function all(): array;
+    }
+
+    /** @internal Native implementation — use RequestInterface for type hints. */
+    final class Request implements RequestInterface
+    {
+        public function method(): string {}
+        public function path(): string {}
+        public function fullUri(): string {}
+        public function scheme(): string {}
+        public function host(): string {}
+        public function port(): int {}
+        public function queryString(): ?string {}
+        public function isSecure(): bool {}
+        public function isMethod(string $method): bool {}
+        public function httpProtocol(): string {}
+        public function httpProtocolVersion(): string {}
+        public function query(?string $key = null, mixed $default = null): mixed {}
+        public function payload(?string $key = null, mixed $default = null): mixed {}
+        public function header(string $name, ?string $default = null): ?string {}
+        public function headers(): array {}
+        public function hasHeader(string $name): bool {}
+        public function cookie(string $name, ?string $default = null): ?string {}
+        public function cookies(): array {}
+        public function body(): string {}
+        public function contentType(): ?string {}
+        public function file(string $name): ?UploadedFileInterface {}
+        public function files(?string $name = null): array {}
+        public function ip(): string {}
+        public function startTime(bool $asFloat = false): int|float {}
+        public function attributes(): AttributesInterface {}
+        public function session(): ?SessionInterface {}
+    }
+
+    /** @internal Native implementation — use SessionInterface for type hints. */
+    final class Session implements SessionInterface
+    {
+        public function id(): string {}
+        public function name(): string {}
+        public function get(string $key, mixed $default = null): mixed {}
+        public function has(string $key): bool {}
+        public function all(): array {}
+    }
+
+    /** @internal Native implementation — use UploadedFileInterface for type hints. */
+    final class UploadedFile implements UploadedFileInterface
+    {
+        public function name(): string {}
+        public function clientType(): string {}
+        public function type(): string {}
+        public function size(): int {}
+        public function tmpPath(): string {}
+        public function error(): int {}
+        public function isValid(): bool {}
+        public function moveTo(string $path): bool {}
+    }
+
+    /** @internal Native implementation — use AttributesInterface for type hints. */
+    final class Attributes implements AttributesInterface
+    {
+        public function get(string $key, mixed $default = null): mixed {}
+        public function set(string $key, mixed $value): void {}
+        public function has(string $key): bool {}
+        public function remove(string $key): void {}
+        public function all(): array {}
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP\Http\Exception — Context-aware request exceptions
+// ═══════════════════════════════════════════════════════════════
+
+namespace OxPHP\Http\Exception {
+
+    /**
+     * No active HTTP request in this context.
+     *
+     * Base class for all request-context exceptions.
+     * Thrown by oxphp_http_request() when called outside a request lifecycle.
+     */
+    class NoActiveRequestException extends \RuntimeException {}
+
+    /**
+     * Cannot access request from an oxphp_async() worker thread.
+     *
+     * Async workers run on separate OS threads without request context.
+     */
+    class AsyncContextException extends NoActiveRequestException {}
+
+    /**
+     * Worker is idle — waiting for the next request.
+     *
+     * Thrown when oxphp_http_request() is called in worker mode
+     * but outside the request handler callback.
+     */
+    class WorkerIdleException extends NoActiveRequestException {}
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP — Async & Decorator classes
+// ═══════════════════════════════════════════════════════════════
 
 namespace OxPHP {
     /**

@@ -219,8 +219,38 @@ $data = json_decode($body, true);
 
 ---
 
+## Disabling Superglobals
+
+Set `SUPERGLOBALS_ENABLED=false` to disable population of `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `$_SERVER`. When disabled, these arrays are empty. Use the [HTTP Request API](request-api.md) (`oxphp_http_request()`) to access request data instead.
+
+```bash
+SUPERGLOBALS_ENABLED=false   # superglobals are empty arrays
+```
+
+The following remain available regardless of this setting:
+
+| What | Why |
+|------|-----|
+| `$_SESSION` | Managed by PHP's session module, not by the SAPI |
+| `php://input` | A stream, not a superglobal |
+| `header()`, `headers_list()`, etc. | SAPI functions, not superglobals |
+| `session_start()` and other `session_*()` functions | Native PHP functions |
+| `oxphp_http_request()` | Always available — the recommended alternative |
+
+You can check the current setting at runtime:
+
+```php
+if (!oxphp_superglobals_enabled()) {
+    $request = oxphp_http_request();
+    $page = $request->query('page', 1);
+}
+```
+
+---
+
 ## See Also
 
+- [HTTP Request API](request-api.md) -- typed, lazy-loading request object as an alternative to superglobals
 - [PHP Functions](functions.md) -- `oxphp_request_id()`, `oxphp_worker_id()`, and other extension functions
 - [Worker Mode](../features/worker-mode.md) -- how superglobals are refreshed between worker requests
 - [Configuration Reference](../operations/configuration.md) -- `DOCUMENT_ROOT` and other server configuration variables
