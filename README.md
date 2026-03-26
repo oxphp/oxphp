@@ -214,6 +214,7 @@ All settings are via environment variables — no config files required.
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
 | `STATIC_CACHE_TTL` | `30d` | Static file cache TTL (`30s`, `5m`, `2h`, `30d`, `1y`, `off`) |
+| `STATIC_CACHE` | *(on)* | Set to `off` to enable mtime revalidation on the in-memory content cache |
 | `COMPRESSION_LEVEL` | `4` | Brotli quality (0 = off, 1–11) |
 | `ACCESS_LOG` | *(off)* | Per-request JSON log: `all`, `error`, or unset |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |

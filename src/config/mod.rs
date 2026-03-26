@@ -52,6 +52,11 @@ pub struct Config {
     pub worker_max_memory_mib: u64,
     /// Static file cache TTL in seconds. `None` = caching disabled.
     pub static_cache_ttl: Option<u64>,
+    /// Whether cached content is served without mtime revalidation.
+    /// When `true` (default), cached entries are returned immediately.
+    /// When `false` (`STATIC_CACHE=off`), each hit performs a `stat()` check
+    /// and evicts stale entries before serving.
+    pub static_cache_enabled: bool,
     /// Number of dedicated async worker threads. 0 = async pool disabled.
     pub async_workers: usize,
     /// Bounded channel capacity for pending async tasks. 0 = auto (async_workers * 64).
@@ -171,6 +176,10 @@ impl Config {
             Err(_) => Some(2_592_000), // 30 days
         };
 
+        let static_cache_enabled = std::env::var("STATIC_CACHE")
+            .map(|v| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+
         let async_workers: usize = std::env::var("ASYNC_WORKERS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -235,6 +244,7 @@ impl Config {
             worker_max_requests,
             worker_max_memory_mib,
             static_cache_ttl,
+            static_cache_enabled,
             async_workers,
             async_queue_capacity,
             trace_context,
@@ -274,6 +284,7 @@ impl Config {
             "worker_max_requests": self.worker_max_requests,
             "worker_max_memory_mib": self.worker_max_memory_mib,
             "static_cache_ttl": self.static_cache_ttl,
+            "static_cache_enabled": self.static_cache_enabled,
             "async_workers": self.async_workers,
             "async_queue_capacity": if self.async_queue_capacity > 0 {
                 self.async_queue_capacity
@@ -351,5 +362,38 @@ mod tests {
     fn test_parse_duration_whitespace() {
         assert_eq!(parse_duration("  30s  "), Some(30));
         assert_eq!(parse_duration(" off "), None);
+    }
+
+    #[test]
+    fn test_static_cache_parse_off() {
+        let enabled = Some("off")
+            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn test_static_cache_parse_off_uppercase() {
+        let enabled = Some("OFF")
+            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn test_static_cache_parse_default() {
+        let enabled: Option<&str> = None;
+        let result = enabled
+            .map(|v| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        assert!(result);
+    }
+
+    #[test]
+    fn test_static_cache_parse_on() {
+        let enabled = Some("on")
+            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        assert!(enabled);
     }
 }

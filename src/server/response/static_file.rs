@@ -70,11 +70,21 @@ struct FileCacheInner {
 /// Uses `RwLock<HashMap>` with counter-based LRU eviction.
 pub struct FileCache {
     inner: RwLock<FileCacheInner>,
+    /// When true, `get_content()` checks file mtime via `stat()` before returning.
+    /// Stale entries are evicted and `None` is returned.
+    validate_content: bool,
 }
 
 impl FileCache {
     /// Create a new file cache with the given metadata entry capacity.
     pub fn new(capacity: usize) -> Self {
+        Self::with_revalidation(capacity, false)
+    }
+
+    /// Create a file cache with explicit content revalidation setting.
+    /// When `validate` is true, `get_content()` performs a `stat()` check
+    /// on every hit and evicts entries whose mtime has changed.
+    pub fn with_revalidation(capacity: usize, validate: bool) -> Self {
         Self {
             inner: RwLock::new(FileCacheInner {
                 meta: HashMap::with_capacity(capacity),
@@ -84,6 +94,7 @@ impl FileCache {
                 canonical: HashMap::with_capacity(capacity),
                 counter: 0,
             }),
+            validate_content: validate,
         }
     }
 
@@ -156,11 +167,31 @@ impl FileCache {
 
     /// Check if cached content matches the request's conditional headers (304 fast path).
     /// Returns `Some(true)` if cached and not modified, `Some(false)` if cached but modified,
-    /// `None` on cache miss. Uses read lock — no cloning.
+    /// `None` on cache miss. When content revalidation is enabled, uses a write lock and
+    /// may evict a stale entry; otherwise uses a read lock.
     pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        let entry = guard.content.get(key)?;
-        Some(check_not_modified(headers, &entry.etag, &entry.modified))
+        if self.validate_content {
+            // Need write lock for potential eviction
+            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            let inner = &mut *guard;
+            let entry = inner.content.get(key)?;
+            let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
+            match current_mtime {
+                Some(mtime) if mtime == entry.modified => {
+                    Some(check_not_modified(headers, &entry.etag, &entry.modified))
+                }
+                _ => {
+                    if let Some(evicted) = inner.content.remove(key) {
+                        inner.content_total_bytes -= evicted.bytes.len();
+                    }
+                    None
+                }
+            }
+        } else {
+            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
+            let entry = guard.content.get(key)?;
+            Some(check_not_modified(headers, &entry.etag, &entry.modified))
+        }
     }
 
     /// Get cached file content and MIME type. Returns `None` on cache miss.
@@ -173,6 +204,20 @@ impl FileCache {
         let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
         let inner = &mut *guard;
         if let Some(entry) = inner.content.get_mut(key) {
+            // mtime revalidation: stat() the file and evict if changed
+            if self.validate_content {
+                let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
+                match current_mtime {
+                    Some(mtime) if mtime == entry.modified => {}
+                    _ => {
+                        // File changed or deleted — evict stale entry
+                        if let Some(evicted) = inner.content.remove(key) {
+                            inner.content_total_bytes -= evicted.bytes.len();
+                        }
+                        return None;
+                    }
+                }
+            }
             entry.last_used = inner.counter;
             inner.counter += 1;
             Some((
@@ -1136,5 +1181,106 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
         assert!(response.headers().get(header::ETAG).is_some());
         assert!(response.headers().get(header::CACHE_CONTROL).is_some());
+    }
+
+    #[test]
+    fn test_content_cache_revalidation_detects_mtime_change() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("revalidate.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        let cache = FileCache::with_revalidation(10, true);
+        let key = file_path.to_string_lossy().to_string();
+        let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
+
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"original"),
+            "text/plain".into(),
+            modified,
+            generate_etag(8, &modified).as_str().into(),
+            httpdate::fmt_http_date(modified).as_str().into(),
+        );
+
+        // Cache hit before modification
+        assert!(cache.get_content(&key).is_some());
+
+        // Modify file on disk (touch with new mtime)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&file_path, "updated").unwrap();
+
+        // Cache should detect mtime change and return None
+        assert!(
+            cache.get_content(&key).is_none(),
+            "Revalidation should detect mtime change and evict stale entry"
+        );
+    }
+
+    #[test]
+    fn test_content_cache_no_revalidation_when_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("no_revalidate.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        let cache = FileCache::new(10); // revalidation off (default)
+        let key = file_path.to_string_lossy().to_string();
+        let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
+
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"original"),
+            "text/plain".into(),
+            modified,
+            generate_etag(8, &modified).as_str().into(),
+            httpdate::fmt_http_date(modified).as_str().into(),
+        );
+
+        // Modify file on disk
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&file_path, "updated").unwrap();
+
+        // Cache should still return cached content (no revalidation)
+        assert!(
+            cache.get_content(&key).is_some(),
+            "Without revalidation, cache should return stale content"
+        );
+    }
+
+    #[test]
+    fn test_check_not_modified_revalidation_detects_change() {
+        use http::header;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("check_304.txt");
+        fs::write(&file_path, "hello").unwrap();
+
+        let cache = FileCache::with_revalidation(10, true);
+        let key = file_path.to_string_lossy().to_string();
+        let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
+        let etag: Arc<str> = generate_etag(5, &modified).as_str().into();
+
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"hello"),
+            "text/plain".into(),
+            modified,
+            etag.clone(),
+            httpdate::fmt_http_date(modified).as_str().into(),
+        );
+
+        // Before modification: should find cached entry
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        assert!(cache.check_not_modified(&key, &headers).is_some());
+
+        // Modify file
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&file_path, "changed").unwrap();
+
+        // After modification: should return None (cache miss)
+        assert!(
+            cache.check_not_modified(&key, &headers).is_none(),
+            "check_not_modified should detect mtime change and evict"
+        );
     }
 }

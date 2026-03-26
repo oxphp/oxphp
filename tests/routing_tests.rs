@@ -59,6 +59,7 @@ async fn start_server_with_options(
         512 * 1024,                                // max_query_body: 512 KB
         None,                                      // no worker mode
         Some("public, max-age=86400".to_string()), // static_cache_control
+        true,                                      // static_cache_enabled
     ));
 
     tokio::spawn(async move {

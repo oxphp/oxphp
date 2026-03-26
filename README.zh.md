@@ -214,6 +214,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
 | `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL（`30s`、`5m`、`2h`、`30d`、`1y`、`off`） |
+| `STATIC_CACHE` | *(开启)* | 设为 `off` 启用内存内容缓存的 mtime 重新验证 |
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0 = 关闭，1-11） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
