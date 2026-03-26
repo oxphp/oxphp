@@ -2766,7 +2766,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Request",
             oxphp_http_request_methods);
         oxphp_http_request_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_request_ce, 1, oxphp_http_request_iface_ce);
+        memcpy(&oxphp_http_request_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_request_handlers.clone_obj = NULL;
+        oxphp_http_request_ce->default_object_handlers = &oxphp_http_request_handlers;
 
         /* Internal cache properties (hidden, used for lazy caching) */
         zend_declare_property_null(oxphp_http_request_ce,
@@ -2783,7 +2787,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Attributes",
             oxphp_http_attributes_methods);
         oxphp_http_attributes_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_attributes_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_attributes_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_attributes_ce, 1, oxphp_http_attributes_iface_ce);
+        memcpy(&oxphp_http_attributes_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_attributes_handlers.clone_obj = NULL;
+        oxphp_http_attributes_ce->default_object_handlers = &oxphp_http_attributes_handlers;
         zend_declare_property_null(oxphp_http_attributes_ce,
             "_store", sizeof("_store")-1, ZEND_ACC_PROTECTED);
     }
@@ -2794,7 +2802,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Session",
             oxphp_http_session_methods);
         oxphp_http_session_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_session_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_session_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_session_ce, 1, oxphp_http_session_iface_ce);
+        memcpy(&oxphp_http_session_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_session_handlers.clone_obj = NULL;
+        oxphp_http_session_ce->default_object_handlers = &oxphp_http_session_handlers;
     }
 
     /* OxPHP\Http\UploadedFile */
@@ -2803,7 +2815,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "UploadedFile",
             oxphp_http_uploaded_file_methods);
         oxphp_http_uploaded_file_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_uploaded_file_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_uploaded_file_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_uploaded_file_ce, 1, oxphp_http_uploaded_file_iface_ce);
+        memcpy(&oxphp_http_uploaded_file_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_uploaded_file_handlers.clone_obj = NULL;
+        oxphp_http_uploaded_file_ce->default_object_handlers = &oxphp_http_uploaded_file_handlers;
 
         zend_declare_property_string(oxphp_http_uploaded_file_ce,
             "name", sizeof("name")-1, "", ZEND_ACC_PROTECTED);
@@ -2839,7 +2855,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Decorator", "Context",
             oxphp_decorator_context_methods);
         oxphp_decorator_context_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_decorator_context_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_decorator_context_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        memcpy(&oxphp_decorator_context_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_decorator_context_handlers.clone_obj = NULL;
+        oxphp_decorator_context_ce->default_object_handlers = &oxphp_decorator_context_handlers;
 
         /* Declare public properties with string defaults */
         zend_declare_property_string(oxphp_decorator_context_ce, "target", sizeof("target")-1, "", ZEND_ACC_PUBLIC);
