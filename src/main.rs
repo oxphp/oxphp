@@ -296,6 +296,10 @@ async fn async_main(
         tracing::info!("Brotli compression disabled");
     }
 
+    if !config.static_cache_enabled {
+        tracing::info!("Static file content cache: mtime revalidation (STATIC_CACHE=off)");
+    }
+
     let server = Arc::new(server::Server::new(
         &config.server,
         executor,
@@ -308,6 +312,7 @@ async fn async_main(
         config
             .static_cache_ttl
             .map(|ttl| format!("public, max-age={ttl}")),
+        config.static_cache_enabled,
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 

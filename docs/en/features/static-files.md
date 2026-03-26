@@ -22,6 +22,7 @@ When a request matches a static file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_CACHE_TTL` | `30d` | Cache-Control max-age for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely |
+| `STATIC_CACHE` | *(on)* | Set to `off` to enable mtime revalidation on the in-memory content cache |
 
 ## MIME Detection
 
@@ -44,7 +45,13 @@ OxPHP uses an in-memory cache to reduce disk I/O for frequently requested files:
 - Files **up to 1 MiB** (1,048,576 bytes) are read into memory and cached. The total cache budget is 64 MiB (67,108,864 bytes). When the budget is exceeded, the least recently used entries are evicted to make room.
 - Files **larger than 1 MiB** are always streamed directly from disk. The `Content-Length` header is set from file metadata so the client knows the total size upfront.
 
-The file cache is populated on the first request to each file and retained across subsequent requests. Cache entries are never manually invalidated — they persist until evicted by the LRU policy.
+The file cache is populated on the first request to each file and retained across subsequent requests. By default, cache entries persist until evicted by the LRU policy.
+
+### Content Revalidation
+
+Set `STATIC_CACHE=off` to enable mtime-based revalidation. In this mode, each cache hit performs a `stat()` syscall (~1–2 μs) to check the file's modification time. If the file has changed on disk, the stale entry is evicted and the file is re-read automatically. This is ideal for development — you see file changes immediately without restarting the server.
+
+In production, leave `STATIC_CACHE` unset (the default) for maximum throughput with zero per-request syscall overhead.
 
 ## HTTP Caching
 
@@ -78,13 +85,24 @@ OxPHP evaluates conditional request headers to avoid sending unchanged file cont
 
 ### Disabling Caching
 
-Set `STATIC_CACHE_TTL=off` to disable all HTTP caching headers. No `Cache-Control`, `ETag`, or `Last-Modified` headers are sent, and conditional requests are not evaluated. Use this during development to always see the latest file contents.
+There are two independent cache layers and a variable for each:
+
+| Variable | Controls | Effect of `off` |
+|----------|----------|-----------------|
+| `STATIC_CACHE_TTL=off` | **Browser cache** (HTTP headers) | No `Cache-Control`, `ETag`, or `Last-Modified` headers sent |
+| `STATIC_CACHE=off` | **Server in-memory cache** | Each hit validates file mtime; stale entries evicted automatically |
+
+For development, set `STATIC_CACHE=off` so the server always serves fresh content. Optionally also set `STATIC_CACHE_TTL=off` to prevent browser caching entirely.
 
 ## Troubleshooting
 
+### Server keeps serving stale files
+
+By default, the in-memory content cache does not check whether files have changed on disk. Set `STATIC_CACHE=off` to enable mtime revalidation — the server will detect file changes automatically with negligible overhead (~1–2 μs per request).
+
 ### Browser keeps serving stale files
 
-If you are not using `STATIC_CACHE_TTL=off` during development, browsers cache files aggressively. Either set `STATIC_CACHE_TTL=off` in development, or use your browser's hard reload (Shift+F5 or Cmd+Shift+R) to bypass the cache.
+If the server is returning fresh content but the browser still shows the old version, the browser's own cache is the culprit. Set `STATIC_CACHE_TTL=off` to stop sending caching headers, or use your browser's hard reload (Shift+F5 or Cmd+Shift+R).
 
 ### Files are served with `application/octet-stream`
 
@@ -96,7 +114,7 @@ Files larger than 1 MiB are streamed from disk on every request and are not cach
 
 ### 304 responses are returned when you expect 200
 
-A 304 means the client already has the current version. This is correct behavior. If you need to force a fresh response during development, set `STATIC_CACHE_TTL=off` so no `ETag` or `Last-Modified` headers are sent.
+A 304 means the client already has the current version. This is correct behavior. If you need to force a fresh response during development, set `STATIC_CACHE_TTL=off` to stop sending `ETag` and `Last-Modified` headers.
 
 ## Docker Example
 
@@ -117,7 +135,7 @@ services:
 ## Best Practices
 
 - **Use long TTLs with cache-busting filenames** in production (e.g. `app.a1b2c3.js`). Set `STATIC_CACHE_TTL=1y` for maximum browser and CDN caching.
-- **Set `STATIC_CACHE_TTL=off` during development** to ensure you always see the latest changes without clearing browser caches.
+- **Set `STATIC_CACHE=off` during development** so the server detects file changes automatically. Optionally also set `STATIC_CACHE_TTL=off` to bypass browser caching.
 - **Place a CDN in front of OxPHP** for high-traffic sites. The `ETag`, `Last-Modified`, and `Cache-Control` headers work with all major CDN providers.
 - **Let your build tool handle asset hashing.** Frameworks like Vite and Laravel Mix generate hashed filenames automatically, making long cache TTLs safe.
 

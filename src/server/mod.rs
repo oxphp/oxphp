@@ -67,12 +67,13 @@ impl Server {
         max_query_body: usize,
         worker_file: Option<PathBuf>,
         static_cache_control: Option<String>,
+        static_cache_enabled: bool,
     ) -> Self {
         let mut route_config = RouteConfig::new(config);
         if let Some(wf) = worker_file {
             route_config.set_worker_file(wf);
         }
-        let file_cache = Arc::new(FileCache::new(200));
+        let file_cache = Arc::new(FileCache::with_revalidation(200, !static_cache_enabled));
 
         // Pre-build the HTTP connection builder once — reused for every connection
         let mut http_builder = Builder::new(hyper_util::rt::TokioExecutor::new());

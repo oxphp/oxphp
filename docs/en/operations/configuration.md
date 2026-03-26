@@ -81,6 +81,7 @@ When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping boo
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_CACHE_TTL` | `30d` | Cache TTL for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable |
+| `STATIC_CACHE` | *(on)* | Set to `off` to enable mtime revalidation on the in-memory content cache. When off, each cache hit checks the file's modification time and evicts stale entries automatically |
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
 
 ## Logging
