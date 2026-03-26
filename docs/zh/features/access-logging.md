@@ -29,7 +29,7 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
 
 ```json
 {
-  "timestamp": "2026-02-11T12:34:56.789Z",
+  "timestamp": "2026-02-11T12:34:56.789012Z",
   "level": "INFO",
   "fields": {
     "request_id": "67890abc12341a2b0042",
@@ -47,7 +47,7 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
 
 ```json
 {
-  "timestamp": "2026-02-11T12:34:56.789Z",
+  "timestamp": "2026-02-11T12:34:56.789012Z",
   "level": "INFO",
   "fields": {
     "request_id": "67890abc12341a2b0042",
@@ -78,12 +78,14 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
 
 ## 精细化过滤
 
-OxPHP 使用 `access_log` 日志目标输出访问日志条目。使用 `RUST_LOG` 变量可独立于其他日志输出过滤访问日志：
+OxPHP 使用内部日志目标 `access_log` 输出访问日志条目。使用 `RUST_LOG` 变量可独立于其他日志输出过滤访问日志：
 
 ```bash
 # 抑制通用 info 消息，保留访问日志
 RUST_LOG=warn,access_log=info
 ```
+
+> **注意：** `access_log` 目标仅用于 `RUST_LOG` 过滤，不会出现在 JSON 输出中。要在下游系统中识别访问日志条目，请使用 `"message": "request completed"` 字段及特征字段集（`method`、`path`、`status`、`duration_us`）。
 
 ## 故障排除
 
@@ -104,7 +106,7 @@ ACCESS_LOG=all
 **检查：** 确认当前生效的设置：
 
 ```bash
-curl http://localhost:9090/config | grep access_log
+curl -s http://localhost:9090/config | jq '.access_log'
 ```
 
 ### 日志条目中没有 `trace_id` 和 `span_id`
@@ -126,12 +128,14 @@ services:
   app:
     image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
-      - "8080:8080"
+      - "80:80"
+      - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
     environment:
       ACCESS_LOG: "all"
       INDEX_FILE: "index.php"
+      INTERNAL_ADDR: "0.0.0.0:9090"
 ```
 
 ## 最佳实践

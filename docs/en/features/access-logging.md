@@ -29,7 +29,7 @@ Every access log entry is a single JSON line written to stdout:
 
 ```json
 {
-  "timestamp": "2026-02-11T12:34:56.789Z",
+  "timestamp": "2026-02-11T12:34:56.789012Z",
   "level": "INFO",
   "fields": {
     "request_id": "67890abc12341a2b0042",
@@ -47,7 +47,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 
 ```json
 {
-  "timestamp": "2026-02-11T12:34:56.789Z",
+  "timestamp": "2026-02-11T12:34:56.789012Z",
   "level": "INFO",
   "fields": {
     "request_id": "67890abc12341a2b0042",
@@ -78,12 +78,14 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 
 ## Fine-Grained Filtering
 
-OxPHP uses the `access_log` logging target for access log entries. Use the `RUST_LOG` variable to filter access logs independently from other log output:
+OxPHP uses the internal `access_log` logging target for access log entries. Use the `RUST_LOG` variable to filter access logs independently from other log output:
 
 ```bash
 # Suppress general info messages, keep access logs
 RUST_LOG=warn,access_log=info
 ```
+
+> **Note:** The `access_log` target is used for `RUST_LOG` filtering but is not included in the JSON output. To identify access log entries in downstream systems, use the `"message": "request completed"` field and the characteristic field set (`method`, `path`, `status`, `duration_us`).
 
 ## Troubleshooting
 
@@ -104,7 +106,7 @@ ACCESS_LOG=all
 **Check:** Confirm the active setting:
 
 ```bash
-curl http://localhost:9090/config | grep access_log
+curl -s http://localhost:9090/config | jq '.access_log'
 ```
 
 ### Log entries appear without `trace_id` and `span_id`
@@ -126,12 +128,14 @@ services:
   app:
     image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
-      - "8080:8080"
+      - "80:80"
+      - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
     environment:
       ACCESS_LOG: "all"
       INDEX_FILE: "index.php"
+      INTERNAL_ADDR: "0.0.0.0:9090"
 ```
 
 ## Best Practices
