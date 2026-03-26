@@ -2,6 +2,61 @@
 
 All notable changes to OxPHP are documented in this file.
 
+## [0.2.0] - 2026-03-27
+
+### Added
+
+#### Async & Concurrency
+
+- Fiber-based request multiplexing in worker mode — concurrent I/O within a single worker thread
+- Async promises (`oxphp_async()`) — parallel PHP execution via dedicated thread pool
+- Distributed tracing with W3C Trace Context propagation and OpenTelemetry export
+
+#### PHP API
+
+- HTTP Object API (`OxPHP\Http\Request`) with lazy bridge accessors
+- HTTP interfaces (`OxPHP\Http\RequestInterface`, `OxPHP\Http\SessionInterface`, `OxPHP\Http\AttributesInterface`) with clone/serialize blocking on request-scoped classes
+- Attribute-based decorator system (`oxphp_register_decorator()`, `OxPHP\Decorator\AttributeInterface`) with PHP observer integration
+
+#### Server Variables
+
+- `HTTPS` — set to `"on"` when TLS is active
+- `REQUEST_SCHEME` — `"https"` or `"http"` per PHP-FPM/nginx convention
+- `DOCUMENT_URI` — alias for `SCRIPT_NAME` for nginx/PHP-FPM compatibility
+- `REQUEST_TIME_FLOAT` — request start time with microsecond precision
+
+#### HTTP Compliance
+
+- `Date` header on all HTTP responses per RFC 9110 §6.6.1
+- `Content-Type` header on all error responses per RFC 9110
+
+#### Observability
+
+- Request duration histograms, byte counters, and subsystem metrics
+- `trace_context` field exposed in `/config` endpoint
+
+#### Static Files
+
+- `STATIC_CACHE=off` mode with mtime-based content cache revalidation via `stat()` checks
+
+### Changed
+
+- Default listen port changed from 8080 to 80 (TLS-aware: defaults to 443 when `TLS_CERT` is set)
+- Backpressure response changed from 503 to 529 (Site is overloaded)
+- `workers_idle` metric now calculated dynamically during scrape (was always 0 in static pool mode)
+- `workers_spawned_total` counter now includes initial worker spawn
+- `/config` endpoint now exposes `log_level` and other missing runtime settings
+
+### Fixed
+
+- `SERVER_PROTOCOL` now reflects actual HTTP version (was hardcoded to `HTTP/1.1`) per RFC 3875
+- `REQUEST_TIME` now returns request start time (was returning current time)
+- IPv6 Host header parsing for `SERVER_NAME` and `SERVER_PORT`
+- Request timeout now returns 408 instead of 504 per RFC 9110
+- Duplicate `oxphp_response_time_us_total` Prometheus metric removed
+- Session state cleanup added to worker soft reset to prevent state leaks between requests
+- Missing fiber source files added to alpine-release Dockerfile
+
 ## [0.1.0] - 2026-03-08
 
 First public release. OxPHP replaces nginx + PHP-FPM with a single async binary
@@ -121,4 +176,5 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.2.0]: https://github.com/oxphp/oxphp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/oxphp/oxphp/releases/tag/v0.1.0
