@@ -41,6 +41,19 @@ static zend_class_entry *oxphp_decorator_interface_ce = NULL;
 static zend_class_entry *oxphp_decorator_context_ce = NULL;
 static zend_class_entry *oxphp_decorator_rejected_ce = NULL;
 
+/* HTTP Interface class entries */
+static zend_class_entry *oxphp_http_request_iface_ce = NULL;
+static zend_class_entry *oxphp_http_session_iface_ce = NULL;
+static zend_class_entry *oxphp_http_uploaded_file_iface_ce = NULL;
+static zend_class_entry *oxphp_http_attributes_iface_ce = NULL;
+
+/* Custom object handlers to block cloning */
+static zend_object_handlers oxphp_http_request_handlers;
+static zend_object_handlers oxphp_http_session_handlers;
+static zend_object_handlers oxphp_http_uploaded_file_handlers;
+static zend_object_handlers oxphp_http_attributes_handlers;
+static zend_object_handlers oxphp_decorator_context_handlers;
+
 /* Decorator instance cache (TLS) */
 #define OXPHP_DEC_CACHE_MAX 256
 static __thread zval decorator_instance_cache[OXPHP_DEC_CACHE_MAX];
@@ -2268,13 +2281,16 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_startTime, 0, 0, IS_MIXED, 0
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, asFloat, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_attributes, 0, 0, IS_MIXED, 1)
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_req_attributes, 0, 0,
+    OxPHP\\Http\\AttributesInterface, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_session, 0, 0, IS_MIXED, 1)
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_req_session, 0, 0,
+    OxPHP\\Http\\SessionInterface, 1)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_file, 0, 1, IS_MIXED, 1)
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_req_file, 0, 1,
+    OxPHP\\Http\\UploadedFileInterface, 1)
     ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
@@ -2401,9 +2417,71 @@ static const zend_function_entry oxphp_http_uploaded_file_methods[] = {
     PHP_FE_END
 };
 
+/* ─── Interface method entries ──────────────────────────── */
+
+static const zend_function_entry oxphp_http_attributes_iface_methods[] = {
+    ZEND_ABSTRACT_ME(AttributesInterface, get,    arginfo_attr_get)
+    ZEND_ABSTRACT_ME(AttributesInterface, set,    arginfo_attr_set)
+    ZEND_ABSTRACT_ME(AttributesInterface, has,    arginfo_attr_has)
+    ZEND_ABSTRACT_ME(AttributesInterface, remove, arginfo_attr_remove)
+    ZEND_ABSTRACT_ME(AttributesInterface, all,    arginfo_attr_all)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_session_iface_methods[] = {
+    ZEND_ABSTRACT_ME(SessionInterface, id,   arginfo_session_id)
+    ZEND_ABSTRACT_ME(SessionInterface, name, arginfo_session_name)
+    ZEND_ABSTRACT_ME(SessionInterface, get,  arginfo_attr_get)
+    ZEND_ABSTRACT_ME(SessionInterface, has,  arginfo_attr_has)
+    ZEND_ABSTRACT_ME(SessionInterface, all,  arginfo_attr_all)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_uploaded_file_iface_methods[] = {
+    ZEND_ABSTRACT_ME(UploadedFileInterface, name,       arginfo_uf_name)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, clientType, arginfo_uf_clientType)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, type,       arginfo_uf_type)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, size,       arginfo_uf_size)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, tmpPath,    arginfo_uf_tmpPath)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, error,      arginfo_uf_error)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, isValid,    arginfo_uf_isValid)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, moveTo,     arginfo_uf_moveTo)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_request_iface_methods[] = {
+    ZEND_ABSTRACT_ME(RequestInterface, method,              arginfo_req_method)
+    ZEND_ABSTRACT_ME(RequestInterface, path,                arginfo_req_path)
+    ZEND_ABSTRACT_ME(RequestInterface, fullUri,             arginfo_req_fullUri)
+    ZEND_ABSTRACT_ME(RequestInterface, scheme,              arginfo_req_scheme)
+    ZEND_ABSTRACT_ME(RequestInterface, host,                arginfo_req_host)
+    ZEND_ABSTRACT_ME(RequestInterface, port,                arginfo_req_port)
+    ZEND_ABSTRACT_ME(RequestInterface, queryString,         arginfo_req_queryString)
+    ZEND_ABSTRACT_ME(RequestInterface, isSecure,            arginfo_req_isSecure)
+    ZEND_ABSTRACT_ME(RequestInterface, isMethod,            arginfo_req_isMethod)
+    ZEND_ABSTRACT_ME(RequestInterface, httpProtocol,        arginfo_req_httpProtocol)
+    ZEND_ABSTRACT_ME(RequestInterface, httpProtocolVersion, arginfo_req_httpProtocolVersion)
+    ZEND_ABSTRACT_ME(RequestInterface, query,               arginfo_req_query)
+    ZEND_ABSTRACT_ME(RequestInterface, payload,             arginfo_req_payload)
+    ZEND_ABSTRACT_ME(RequestInterface, header,              arginfo_req_header)
+    ZEND_ABSTRACT_ME(RequestInterface, headers,             arginfo_req_headers)
+    ZEND_ABSTRACT_ME(RequestInterface, hasHeader,           arginfo_req_hasHeader)
+    ZEND_ABSTRACT_ME(RequestInterface, cookie,              arginfo_req_cookie)
+    ZEND_ABSTRACT_ME(RequestInterface, cookies,             arginfo_req_cookies)
+    ZEND_ABSTRACT_ME(RequestInterface, body,                arginfo_req_body)
+    ZEND_ABSTRACT_ME(RequestInterface, contentType,         arginfo_req_contentType)
+    ZEND_ABSTRACT_ME(RequestInterface, ip,                  arginfo_req_ip)
+    ZEND_ABSTRACT_ME(RequestInterface, startTime,           arginfo_req_startTime)
+    ZEND_ABSTRACT_ME(RequestInterface, attributes,          arginfo_req_attributes)
+    ZEND_ABSTRACT_ME(RequestInterface, session,             arginfo_req_session)
+    ZEND_ABSTRACT_ME(RequestInterface, file,                arginfo_req_file)
+    ZEND_ABSTRACT_ME(RequestInterface, files,               arginfo_req_files)
+    PHP_FE_END
+};
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_http_request, 0, 0,
-    OxPHP\\Http\\Request, 0)
+    OxPHP\\Http\\RequestInterface, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_superglobals_enabled, 0, 0, _IS_BOOL, 0)
@@ -2661,13 +2739,38 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
     oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
 
+    /* ─── HTTP Interfaces (must register before classes) ───── */
+    {
+        zend_class_entry tmp_ce;
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "AttributesInterface",
+            oxphp_http_attributes_iface_methods);
+        oxphp_http_attributes_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "SessionInterface",
+            oxphp_http_session_iface_methods);
+        oxphp_http_session_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "UploadedFileInterface",
+            oxphp_http_uploaded_file_iface_methods);
+        oxphp_http_uploaded_file_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "RequestInterface",
+            oxphp_http_request_iface_methods);
+        oxphp_http_request_iface_ce = zend_register_internal_interface(&tmp_ce);
+    }
+
     /* OxPHP\Http\Request */
     {
         zend_class_entry tmp_ce;
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Request",
             oxphp_http_request_methods);
         oxphp_http_request_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_request_ce, 1, oxphp_http_request_iface_ce);
+        memcpy(&oxphp_http_request_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_request_handlers.clone_obj = NULL;
+        oxphp_http_request_ce->default_object_handlers = &oxphp_http_request_handlers;
 
         /* Internal cache properties (hidden, used for lazy caching) */
         zend_declare_property_null(oxphp_http_request_ce,
@@ -2684,7 +2787,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Attributes",
             oxphp_http_attributes_methods);
         oxphp_http_attributes_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_attributes_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_attributes_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_attributes_ce, 1, oxphp_http_attributes_iface_ce);
+        memcpy(&oxphp_http_attributes_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_attributes_handlers.clone_obj = NULL;
+        oxphp_http_attributes_ce->default_object_handlers = &oxphp_http_attributes_handlers;
         zend_declare_property_null(oxphp_http_attributes_ce,
             "_store", sizeof("_store")-1, ZEND_ACC_PROTECTED);
     }
@@ -2695,7 +2802,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "Session",
             oxphp_http_session_methods);
         oxphp_http_session_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_session_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_session_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_session_ce, 1, oxphp_http_session_iface_ce);
+        memcpy(&oxphp_http_session_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_session_handlers.clone_obj = NULL;
+        oxphp_http_session_ce->default_object_handlers = &oxphp_http_session_handlers;
     }
 
     /* OxPHP\Http\UploadedFile */
@@ -2704,7 +2815,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "UploadedFile",
             oxphp_http_uploaded_file_methods);
         oxphp_http_uploaded_file_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_http_uploaded_file_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_http_uploaded_file_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_uploaded_file_ce, 1, oxphp_http_uploaded_file_iface_ce);
+        memcpy(&oxphp_http_uploaded_file_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_uploaded_file_handlers.clone_obj = NULL;
+        oxphp_http_uploaded_file_ce->default_object_handlers = &oxphp_http_uploaded_file_handlers;
 
         zend_declare_property_string(oxphp_http_uploaded_file_ce,
             "name", sizeof("name")-1, "", ZEND_ACC_PROTECTED);
@@ -2740,7 +2855,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Decorator", "Context",
             oxphp_decorator_context_methods);
         oxphp_decorator_context_ce = zend_register_internal_class(&tmp_ce);
-        oxphp_decorator_context_ce->ce_flags |= ZEND_ACC_FINAL;
+        oxphp_decorator_context_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        memcpy(&oxphp_decorator_context_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_decorator_context_handlers.clone_obj = NULL;
+        oxphp_decorator_context_ce->default_object_handlers = &oxphp_decorator_context_handlers;
 
         /* Declare public properties with string defaults */
         zend_declare_property_string(oxphp_decorator_context_ce, "target", sizeof("target")-1, "", ZEND_ACC_PUBLIC);
