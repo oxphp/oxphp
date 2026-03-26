@@ -14,8 +14,8 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
-- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
+- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
 - [oxphp_is_streaming()](#oxphp_is_streaming)
@@ -27,18 +27,20 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+- [Классы и интерфейсы](#классы-и-интерфейсы)
+- [Исключения](#исключения)
 
 ---
 
 ## oxphp_http_request()
 
 ```php
-oxphp_http_request(): \OxPHP\Http\RequestInterface
+oxphp_http_request(): \OxPHP\Http\Request
 ```
 
 Возвращает объект запроса для текущего HTTP-запроса. Объект предоставляет типизированный доступ к методу HTTP, URI, параметрам строки запроса, разобранному телу, заголовкам, кукам, загруженным файлам, IP-адресу клиента и времени запроса.
 
-**Возвращает:** Экземпляр `\OxPHP\Http\RequestInterface`, подкреплённый данными запроса из текущего PHP-воркер-потока.
+**Возвращает:** Экземпляр `\OxPHP\Http\Request`, подкреплённый данными запроса из текущего PHP-воркер-потока.
 
 **Выбрасывает:** Исключение из пространства имён `OxPHP\Http\Exception` при вызове вне активного запроса:
 
@@ -216,7 +218,7 @@ oxphp_request_heartbeat(int $time = 10): bool
 
 **Возвращает:** `true` при успехе, `false` если `$time` равно нулю или отрицательно.
 
-> **Примечание:** Каждый вызов устанавливает новый дедлайн относительно текущего момента, а не начала запроса. Вызов `oxphp_request_heartbeat(30)` на 100-й секунде при тайм-ауте 120 секунд устанавливает дедлайн через 130 секунд от текущего момента.
+> **Примечание:** Каждый вызов устанавливает новый дедлайн относительно текущего момента, а не начала запроса. Вызов `oxphp_request_heartbeat(30)` на 100-й секунде запроса устанавливает дедлайн через 30 секунд от текущего момента (то есть на 130-й секунде от начала запроса).
 
 **Пример:**
 
@@ -344,7 +346,7 @@ for ($i = 0; $i < 10; $i++) {
     echo "id: $i\n";
     echo "data: " . json_encode(['counter' => $i]) . "\n\n";
     oxphp_stream_flush();
-    sleep(1);
+    oxphp_sleep(1.0); // используйте oxphp_sleep вместо sleep — не блокирует воркер в режиме fiber
 }
 ```
 
@@ -590,6 +592,50 @@ class LogDecorator implements AttributeInterface
 // Регистрируем один раз при инициализации (или при запуске воркера)
 oxphp_register_decorator(LogDecorator::class);
 ```
+
+---
+
+## Классы и интерфейсы
+
+Расширение `oxphp_sapi` регистрирует следующие классы:
+
+### HTTP
+
+| Класс | Описание |
+|-------|----------|
+| `OxPHP\Http\Request` | Объект запроса, возвращаемый `oxphp_http_request()`. `final` — нельзя наследовать. |
+| `OxPHP\Http\Attributes` | Мутабельный контейнер атрибутов запроса (для middleware). `final`. |
+| `OxPHP\Http\Session` | Объект сессии, доступный через `$request->session()`. `final`. |
+| `OxPHP\Http\UploadedFile` | Объект загруженного файла из `$request->files()`. `final`. |
+
+### Декораторы
+
+| Класс / Интерфейс | Описание |
+|--------------------|----------|
+| `OxPHP\Decorator\AttributeInterface` | Интерфейс для декораторов. Требует методы `before(Context $ctx)` и `after(Context $ctx)`. |
+| `OxPHP\Decorator\Context` | Объект контекста, передаваемый в хуки декоратора. `final`. Содержит `target`, `requestId`, аргументы и возвращаемое значение. |
+
+### Async
+
+| Класс | Описание |
+|-------|----------|
+| `OxPHP\BorrowedProxy` | Прокси-объект для заимствованных значений между потоками. |
+
+---
+
+## Исключения
+
+Все исключения, зарегистрированные расширением:
+
+| Исключение | Наследует | Когда выбрасывается |
+|------------|-----------|---------------------|
+| `OxPHP\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
+| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
+| `OxPHP\AsyncBorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
+| `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |
+| `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` внутри колбэка `oxphp_async()` |
+| `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` в режиме worker между запросами |
+| `OxPHP\Decorator\RejectedException` | `\Exception` | Декоратор отклонил вызов функции/метода |
 
 ---
 

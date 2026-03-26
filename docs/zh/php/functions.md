@@ -14,8 +14,8 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
-- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
+- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
 - [oxphp_is_streaming()](#oxphp_is_streaming)
@@ -27,18 +27,20 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+- [类与接口](#类与接口)
+- [异常](#异常)
 
 ---
 
 ## oxphp_http_request()
 
 ```php
-oxphp_http_request(): \OxPHP\Http\RequestInterface
+oxphp_http_request(): \OxPHP\Http\Request
 ```
 
 返回当前 HTTP 请求的请求对象。该对象提供对 HTTP 方法、URI、查询参数、解析后的请求体、请求头、Cookie、上传文件、客户端 IP 和请求时间的类型化访问。
 
-**返回值：** 一个 `\OxPHP\Http\RequestInterface` 实例，由当前 PHP Worker 线程中的请求数据支撑。
+**返回值：** 一个 `\OxPHP\Http\Request` 实例，由当前 PHP Worker 线程中的请求数据支撑。
 
 **抛出异常：** 在没有活跃请求的上下文中调用时，抛出 `OxPHP\Http\Exception` 命名空间下的异常：
 
@@ -216,7 +218,7 @@ oxphp_request_heartbeat(int $time = 10): bool
 
 **返回值：** 成功时返回 `true`，若 `$time` 为零或负数则返回 `false`。
 
-> **注意：** 每次调用都会相对于当前时间设置新的截止时间，而非相对于原始请求开始时间。在 120 秒超时的第 100 秒时调用 `oxphp_request_heartbeat(30)`，截止时间将延长至从此刻起的 130 秒后。
+> **注意：** 每次调用都会相对于当前时间设置新的截止时间，而非相对于原始请求开始时间。在请求的第 100 秒时调用 `oxphp_request_heartbeat(30)`，截止时间将设置为从当前时刻起 30 秒后（即从请求开始起第 130 秒）。
 
 **示例：**
 
@@ -344,7 +346,7 @@ for ($i = 0; $i < 10; $i++) {
     echo "id: $i\n";
     echo "data: " . json_encode(['counter' => $i]) . "\n\n";
     oxphp_stream_flush();
-    sleep(1);
+    oxphp_sleep(1.0); // 使用 oxphp_sleep 代替 sleep——在 fiber 模式下不会阻塞 Worker
 }
 ```
 
@@ -590,6 +592,50 @@ class LogDecorator implements AttributeInterface
 // 在引导阶段（或 Worker 启动时）注册一次
 oxphp_register_decorator(LogDecorator::class);
 ```
+
+---
+
+## 类与接口
+
+`oxphp_sapi` 扩展注册了以下类：
+
+### HTTP
+
+| 类 | 描述 |
+|----|------|
+| `OxPHP\Http\Request` | `oxphp_http_request()` 返回的请求对象。`final`——不可继承。 |
+| `OxPHP\Http\Attributes` | 可变的请求属性容器（用于中间件）。`final`。 |
+| `OxPHP\Http\Session` | 通过 `$request->session()` 访问的会话对象。`final`。 |
+| `OxPHP\Http\UploadedFile` | 来自 `$request->files()` 的上传文件对象。`final`。 |
+
+### 装饰器
+
+| 类 / 接口 | 描述 |
+|-----------|------|
+| `OxPHP\Decorator\AttributeInterface` | 装饰器接口。要求实现 `before(Context $ctx)` 和 `after(Context $ctx)` 方法。 |
+| `OxPHP\Decorator\Context` | 传递给装饰器钩子的上下文对象。`final`。包含 `target`、`requestId`、参数和返回值。 |
+
+### Async
+
+| 类 | 描述 |
+|----|------|
+| `OxPHP\BorrowedProxy` | 用于线程间借用值的代理对象。 |
+
+---
+
+## 异常
+
+扩展注册的所有异常：
+
+| 异常 | 继承自 | 触发时机 |
+|------|--------|----------|
+| `OxPHP\AsyncException` | `\Exception` | 异步任务中的错误（`oxphp_async_await()`）或 `oxphp_async()` 中的无效参数 |
+| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()` 中超时 |
+| `OxPHP\AsyncBorrowException` | `\Exception` | 线程间借用值时出错 |
+| `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | 在没有活跃请求时调用 `oxphp_http_request()` |
+| `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | 在 `oxphp_async()` 回调内部调用 `oxphp_http_request()` |
+| `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | 在 Worker 模式下两次请求之间调用 `oxphp_http_request()` |
+| `OxPHP\Decorator\RejectedException` | `\Exception` | 装饰器拒绝了函数/方法调用 |
 
 ---
 

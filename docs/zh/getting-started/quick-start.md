@@ -5,15 +5,35 @@ description: 5 分钟内启动 OxPHP。创建项目、编写 PHP 应用、启动
 
 # 快速开始
 
-使用 Docker Compose，5 分钟内即可启动 OxPHP。本指南带你从空目录开始，搭建一个包含健康检查和结构化日志的可运行 PHP 应用。
+## 一条命令
 
-## 1. 创建项目目录
+如果你已有一个包含 `public/` 目录的 PHP 项目：
+
+```bash
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.1.0
+```
+
+打开 `http://localhost/` —— 你的应用已在运行。
+
+如需启用内部服务器（健康检查、指标、配置）：
+
+```bash
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.1.0
+```
+
+---
+
+## 使用 Docker Compose 逐步搭建
+
+更详细的设置 —— 从空目录到包含健康检查和结构化日志的可运行 PHP 应用。
+
+### 1. 创建项目目录
 
 ```bash
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. 创建 Dockerfile
+### 2. 创建 Dockerfile
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -23,7 +43,7 @@ COPY --chown=www-data:www-data . /var/www/html
 
 官方镜像包含服务器二进制文件、PHP 8.4 ZTS、OxPHP PHP 扩展及所有运行时依赖。
 
-## 3. 添加 compose.yaml
+### 3. 添加 compose.yaml
 
 ```yaml
 services:
@@ -42,7 +62,7 @@ services:
 
 `80` 端口提供应用服务，`9090` 端口暴露内部服务器，用于健康检查、Prometheus 指标和当前配置快照。
 
-## 4. 创建 PHP 应用
+### 4. 创建 PHP 应用
 
 ```bash
 mkdir -p public
@@ -66,13 +86,13 @@ echo "<p>Time: " . date('c') . "</p>\n";
 
 `oxphp_request_id()` 返回每个请求的唯一 ID，`oxphp_server_info()` 返回运行中服务器的详细信息，包括 `sapi`、`version`、`worker_id` 和 `worker_mode`。
 
-## 5. 构建并启动
+### 5. 构建并启动
 
 ```bash
 docker compose up -d --build
 ```
 
-## 6. 测试应用
+### 6. 测试应用
 
 ```bash
 curl http://localhost/
@@ -91,7 +111,7 @@ curl http://localhost/
 
 每个请求都会获得一个唯一 ID，Worker ID 显示处理该请求的 PHP Worker 线程编号。
 
-## 7. 查看内部端点
+### 7. 查看内部端点
 
 ```bash
 # 健康检查 —— 健康时返回 200，降级时返回 503
@@ -104,7 +124,7 @@ curl http://localhost:9090/metrics
 curl http://localhost:9090/config
 ```
 
-## 8. 查看日志
+### 8. 查看日志
 
 ```bash
 docker compose logs -f oxphp

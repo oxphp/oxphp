@@ -5,15 +5,35 @@ description: Get OxPHP running in under 5 minutes. Create a project, write a PHP
 
 # Quick Start
 
-Get OxPHP running in under 5 minutes with Docker Compose. This guide takes you from an empty directory to a working PHP application with health checks and structured logging.
+## One Command
 
-## 1. Create a Project Directory
+If you already have a PHP project with a `public/` directory:
+
+```bash
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.1.0
+```
+
+Open `http://localhost/` — your application is running.
+
+To enable the internal server (health, metrics, config):
+
+```bash
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.1.0
+```
+
+---
+
+## Step-by-Step Setup with Docker Compose
+
+A more detailed setup — from an empty directory to a working PHP application with health checks and structured logging.
+
+### 1. Create a Project Directory
 
 ```bash
 mkdir my-oxphp-app && cd my-oxphp-app
 ```
 
-## 2. Create a Dockerfile
+### 2. Create a Dockerfile
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -23,7 +43,7 @@ COPY --chown=www-data:www-data . /var/www/html
 
 The official image includes the server binary, PHP 8.4 ZTS, the OxPHP PHP extension, and all runtime dependencies.
 
-## 3. Add a compose.yaml
+### 3. Add a compose.yaml
 
 ```yaml
 services:
@@ -42,7 +62,7 @@ services:
 
 Port `80` serves your application. Port `9090` exposes the internal server for health checks, Prometheus metrics, and the active configuration snapshot.
 
-## 4. Create a PHP Application
+### 4. Create a PHP Application
 
 ```bash
 mkdir -p public
@@ -66,13 +86,13 @@ echo "<p>Time: " . date('c') . "</p>\n";
 
 `oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `sapi`, `version`, `worker_id`, and `worker_mode`.
 
-## 5. Build and Start
+### 5. Build and Start
 
 ```bash
 docker compose up -d --build
 ```
 
-## 6. Test Your Application
+### 6. Test Your Application
 
 ```bash
 curl http://localhost/
@@ -91,7 +111,7 @@ Expected output:
 
 Each request gets a unique ID. The worker ID shows which PHP worker thread handled it.
 
-## 7. Check the Internal Endpoints
+### 7. Check the Internal Endpoints
 
 ```bash
 # Health check — 200 when healthy, 503 when degraded
@@ -104,7 +124,7 @@ curl http://localhost:9090/metrics
 curl http://localhost:9090/config
 ```
 
-## 8. View Logs
+### 8. View Logs
 
 ```bash
 docker compose logs -f oxphp

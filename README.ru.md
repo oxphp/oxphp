@@ -10,7 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="docs/ru/">Документация</a> · <a href="#быстрый-старт">Быстрый старт</a> · <a href="#почему-oxphp">Почему OxPHP</a> · <a href="#конфигурация">Конфигурация</a>
+  <a href="docs/ru/">Документация</a> · <a href="docs/en/">EN</a> · <a href="docs/zh/">中文</a> · <a href="README.md">README EN</a>
+  <br>
+  <a href="#быстрый-старт">Быстрый старт</a> · <a href="#почему-oxphp">Почему OxPHP</a> · <a href="#конфигурация">Конфигурация</a>
 </p>
 
 <p align="center">
@@ -49,9 +51,7 @@ curl http://localhost:8080/
 
 ## Почему OxPHP?
 
-Традиционный PHP-стек — это три компонента, склеенных вместе: веб-сервер, менеджер процессов и среда выполнения PHP. Каждый добавляет поверхность конфигурации, режимы отказа и операционные издержки.
-
-OxPHP объединяет все три в один бинарный файл на Rust со встроенным PHP.
+OxPHP заменяет связку nginx + PHP-FPM одним контейнером. Сервер работает из коробки — TLS, сжатие Brotli, rate limiting, метрики Prometheus, проверки состояния и структурированные JSON-логи настраиваются через переменные окружения. Режим воркеров, где фреймворк инициализируется один раз и обрабатывает тысячи запросов, включается одной переменной `INDEX_FILE=worker.php`.
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
@@ -66,6 +66,8 @@ OxPHP объединяет все три в один бинарный файл �
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
 | HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
 | Memory safety | ❌ | partial | partial | ✅ Rust |
+
+Подробнее о возможностях — в [документации](docs/ru/index.md).
 
 ---
 
@@ -158,6 +160,7 @@ OxPHP объединяет все три в один бинарный файл �
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+         ──────────────────┬──────────────────
                            │
                     ┌──────▼───────┐
                     │ Async pool   │  oxphp_async() / oxphp_async_await()
@@ -306,9 +309,8 @@ curl http://localhost:9090/metrics
 ## Документация
 
 - [English](docs/en/)
-- [中文](docs/zh/)
 - [Русский](docs/ru/)
-- [Беларуская](docs/be/)
+- [中文](docs/zh/)
 
 ## Лицензия
 

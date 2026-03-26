@@ -115,7 +115,7 @@ services:
 
       # Number of dedicated async worker threads for oxphp_async().
       # 0 = async pool disabled (default).
-      - ASYNC_WORKERS=4
+      # - ASYNC_WORKERS=0
 
       # Bounded channel capacity for pending async tasks.
       # Tasks are rejected when full. Default: ASYNC_WORKERS * 64.
@@ -139,7 +139,6 @@ services:
       # are populated. When false, only oxphp_http_request() provides request data.
       # Default: true (full backward compatibility).
       # - SUPERGLOBALS_ENABLED=true
-      - SUPERGLOBALS_ENABLED=false
 
       # ── Trace Context (W3C) ────────────────────────────────────
 

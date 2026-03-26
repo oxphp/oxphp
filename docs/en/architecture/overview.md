@@ -12,7 +12,8 @@ OxPHP is a single-binary HTTP server that replaces the traditional nginx + PHP-F
 OxPHP combines two runtime layers in a single process:
 
 1. **Async HTTP layer** — an event-driven network layer accepts TCP connections, performs TLS handshakes, parses HTTP requests, and sends responses. It handles thousands of concurrent connections using non-blocking I/O, so one slow client never blocks another.
-2. **PHP worker pool** — a pool of dedicated PHP workers executes your PHP scripts. Each worker runs one request at a time with full isolation from other workers.
+2. **PHP worker pool** — a pool of dedicated PHP workers executes your PHP scripts. In standard mode, each worker handles one request at a time. In [Worker mode](../features/worker-mode.md) with [fiber multiplexing](../features/fiber-multiplexing.md) enabled, a single worker can serve multiple concurrent requests — when a script calls `oxphp_sleep()` or `oxphp_async_await()`, the fiber yields the thread and the worker switches to the next request.
+3. **Async pool** — separate OS threads for tasks submitted via `oxphp_async()`. This pool is isolated from the worker pool so that heavy background computations do not block HTTP request handling.
 
 The two layers communicate through a bounded queue. When an HTTP request arrives that needs PHP execution, the async layer places it in the queue. An available PHP worker picks it up, executes the script, and returns the response to the async layer for delivery to the client.
 
@@ -45,7 +46,7 @@ When all current workers are busy, OxPHP spawns new workers up to the maximum. W
 
 Between the async HTTP layer and the worker pool sits a bounded queue. Its capacity defaults to the initial worker count multiplied by 128 and can be overridden with `QUEUE_CAPACITY`. For a static pool, the initial count is the configured worker count. For a dynamic pool (`MIN:MAX`), the initial count is the minimum.
 
-When the queue is full — meaning all workers are busy and the queue has reached capacity — OxPHP immediately returns a `503 Service Unavailable` response to the client. This backpressure mechanism prevents the server from accepting unbounded work that would exhaust memory or increase latency for all requests.
+When the queue is full — meaning all workers are busy and the queue has reached capacity — OxPHP immediately returns a `529 Site is Overloaded` response to the client with a `Retry-After` header. Status code 529 (non-standard, used by Cloudflare and others) clearly distinguishes overload from application errors (500) and maintenance (503), making it easier to configure alerts and load balancers.
 
 ## Request Flow
 
@@ -74,16 +75,21 @@ Route resolution
   │                         ▼
   │                    Response to client
   │
-  └── PHP request ──► Bounded queue
+  └── PHP request ──► Bounded queue (529 if full)
                          │
                          ▼
                     PHP worker executes script
                          │
-                         ▼
-                    Compression + Response headers
-                         │
-                         ▼
-                    Response to client
+                    ┌────┼─────────────────┐
+                    ▼    ▼                 ▼
+                 Normal  SSE streaming   Early response
+                 response (chunked)      (finish_request)
+                    │       │                │
+                    ▼       ▼                ▼
+                 Compression Chunks ──► client Response to client
+                    │                      + background work
+                    ▼
+                 Response to client
 ```
 
 1. **TLS termination** — if `TLS_CERT` and `TLS_KEY` are configured, OxPHP handles TLS directly. No separate reverse proxy is needed.
@@ -91,9 +97,11 @@ Route resolution
 3. **Rate limiting** — if `RATE_LIMIT` is set, the client's IP is checked against the per-IP request counter. Requests that exceed the limit receive a `429 Too Many Requests` response immediately.
 4. **Route resolution** — the URL is matched against the configured routing mode (traditional, framework, SPA, or worker). The result is either a static file, a PHP script, or a 404.
 5. **Static files** — served directly from an in-memory cache (for frequently accessed files) or streamed from disk. OxPHP adds `ETag`, `Last-Modified`, and `Cache-Control` headers automatically.
-6. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 503 immediately.
+6. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 529 immediately.
 7. **Compression** — text-based responses are compressed with Brotli before being sent when the client sends `Accept-Encoding: br` (configurable via `COMPRESSION_LEVEL`).
-8. **Response delivery** — the completed response is sent back over the connection, and access logging fires if enabled.
+8. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
+9. **Early response** — calling `oxphp_finish_request()` sends the HTTP response to the client immediately. The script continues executing in the background — for writing logs, updating caches, sending notifications — without holding the connection open.
+10. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written.
 
 ## Worker Mode vs Standard Mode
 
@@ -119,19 +127,38 @@ oxphp_worker(function () use ($app) {
 
 For a detailed guide, see [Worker Mode](../features/worker-mode.md).
 
+## Internal Server
+
+If the `INTERNAL_ADDR` variable is set, OxPHP starts a separate HTTP server on the specified port. It serves three endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health status in JSON (uptime, request counters, connections, worker state). Returns `200` during normal operation, `503` during degradation. |
+| `GET /metrics` | Prometheus-format metrics — request counters, response time, queue wait time, worker statistics, compression savings. |
+| `GET /config` | Snapshot of the active configuration in JSON. TLS file paths are redacted. |
+
+The internal server does not go through the PHP worker pool or the bounded queue — it responds directly from the async HTTP layer, so it remains accessible even when the PHP pool is fully loaded. This makes `/health` suitable for Kubernetes liveness/readiness probes.
+
+For details, see [Internal Server](../features/internal-server.md).
+
 ## Safety
 
 OxPHP provides several guarantees to keep your application running reliably in production:
 
 - **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally. The crashed worker is automatically replaced with a fresh one.
 - **Automatic worker respawn** — OxPHP monitors the health of all PHP workers. If a worker dies unexpectedly, a new worker is started in its place without manual intervention.
-- **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a clear 503 response rather than queueing indefinitely and causing cascading timeouts.
+- **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
 - **Graceful shutdown** — on SIGTERM, OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 
 - [Worker Mode](../features/worker-mode.md) — persistent PHP processes and the `oxphp_worker()` API
+- [Fiber Multiplexing](../features/fiber-multiplexing.md) — hundreds of concurrent requests on a single worker
+- [SSE Streaming](../features/sse.md) — streaming events from PHP
+- [Early Response](../features/early-response.md) — `oxphp_finish_request()` and background processing
+- [Async Promises](../features/async-promises.md) — `oxphp_async()` / `oxphp_async_await()`
+- [Internal Server](../features/internal-server.md) — health, metrics, config
 - [Routing](../features/routing.md) — four routing modes and how URLs are resolved
 - [Configuration Reference](../operations/configuration.md) — complete list of environment variables
 - [Metrics](../operations/metrics.md) — observing the worker pool and request pipeline

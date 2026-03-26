@@ -13,7 +13,7 @@ OxPHP 将自身注册为具名 SAPI，OPcache 将其与其他服务器 SAPI 同�
 
 - **跨 Worker 共享缓存**：所有 PHP Worker 线程使用同一份编译后的操作码缓存。一个 Worker 编译文件后，所有 Worker 均可受益。
 - **无逐请求编译**：每个脚本首次请求后，后续请求完全跳过解析和编译步骤。
-- `opcache.enable_cli` 与此无关——该设置仅适用于 `cli` 和 `phpdbg` SAPI。OxPHP 两者都不是。
+- `opcache.enable_cli` 不影响 OxPHP——该设置仅适用于名为 `cli` 和 `phpdbg` 的 SAPI。OxPHP 注册的 SAPI 名称为 `cli-server`，因此 OPcache 仅通过 `opcache.enable` 控制。如果你在同一容器中使用 PHP CLI（例如运行迁移或 Artisan 命令），`opcache.enable_cli` 参数会很有用。官方镜像 `ghcr.io/oxphp/oxphp` 不包含 PHP CLI，因此未设置此参数。
 
 要启用 OPcache，至少需要以下配置：
 
@@ -122,6 +122,8 @@ opcache_compile_file(__DIR__ . '/src/Service/UserService.php');
 
 > **注意：** 预加载的类和函数对所有请求永久可用。在重启服务器之前无法更改它们。
 
+> **Worker 模式与预加载：** 如果你使用 [Worker 模式](../features/worker-mode.md)，应用已经只初始化一次——自动加载器、配置和数据库连接在请求之间保持不变。OPcache 预加载对此形成补充，消除了操作码编译的开销，但不能替代应用初始化。两种机制独立工作，可以同时使用。
+
 ## 应用 PHP 配置
 
 OxPHP 从标准的 `conf.d` 目录读取 PHP 配置。使用 Docker 卷挂载或 `COPY` 指令提供自定义 INI 文件。
@@ -129,7 +131,7 @@ OxPHP 从标准的 `conf.d` 目录读取 PHP 配置。使用 Docker 卷挂载或
 **Docker run：**
 
 ```bash
-docker run -p 8080:8080 \
+docker run -p 80:80 \
   -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
   ghcr.io/oxphp/oxphp:0.1.0
 ```
@@ -150,7 +152,7 @@ services:
   app:
     image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
-      - "8080:8080"
+      - "80:80"
     volumes:
       - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
       - ./src:/var/www/html

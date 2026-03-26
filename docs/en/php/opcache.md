@@ -13,7 +13,7 @@ OxPHP registers itself as a named SAPI, and OPcache treats it identically to oth
 
 - **Shared cache across workers**: all PHP worker threads use the same compiled opcode cache. One worker compiles a file; all workers benefit.
 - **No per-request compilation**: after the first request for each script, subsequent requests skip the parse and compile step entirely.
-- `opcache.enable_cli` is irrelevant — that setting applies only to the `cli` and `phpdbg` SAPIs. OxPHP is neither.
+- `opcache.enable_cli` does not affect OxPHP — that setting applies only to SAPIs named `cli` and `phpdbg`. OxPHP registers with the SAPI name `cli-server`, so OPcache is controlled solely via `opcache.enable`. The `opcache.enable_cli` setting is useful if you run PHP CLI in the same container (e.g., for migrations or Artisan commands). The official image `ghcr.io/oxphp/oxphp` does not include PHP CLI, so this setting is not configured there.
 
 To enable OPcache, at minimum:
 
@@ -122,6 +122,8 @@ opcache_compile_file(__DIR__ . '/src/Service/UserService.php');
 
 > **Note:** Preloaded classes and functions are permanently available to all requests. They cannot be changed without restarting the server.
 
+> **Worker Mode and preloading:** If you use [Worker Mode](../features/worker-mode.md), your application is already initialized once — the autoloader, configuration, and database connections persist between requests. OPcache preloading complements this by eliminating opcode compilation overhead, but it does not replace application initialization. The two mechanisms work independently and can be used together.
+
 ## Applying the PHP Configuration
 
 OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker volume or a `COPY` instruction to supply your custom INI file.
@@ -129,7 +131,7 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 **Docker run:**
 
 ```bash
-docker run -p 8080:8080 \
+docker run -p 80:80 \
   -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
   ghcr.io/oxphp/oxphp:0.1.0
 ```
@@ -150,7 +152,7 @@ services:
   app:
     image: ghcr.io/oxphp/oxphp:0.1.0
     ports:
-      - "8080:8080"
+      - "80:80"
     volumes:
       - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
       - ./src:/var/www/html
