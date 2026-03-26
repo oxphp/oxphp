@@ -2414,6 +2414,68 @@ static const zend_function_entry oxphp_http_uploaded_file_methods[] = {
     PHP_FE_END
 };
 
+/* ─── Interface method entries ──────────────────────────── */
+
+static const zend_function_entry oxphp_http_attributes_iface_methods[] = {
+    ZEND_ABSTRACT_ME(AttributesInterface, get,    arginfo_attr_get)
+    ZEND_ABSTRACT_ME(AttributesInterface, set,    arginfo_attr_set)
+    ZEND_ABSTRACT_ME(AttributesInterface, has,    arginfo_attr_has)
+    ZEND_ABSTRACT_ME(AttributesInterface, remove, arginfo_attr_remove)
+    ZEND_ABSTRACT_ME(AttributesInterface, all,    arginfo_attr_all)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_session_iface_methods[] = {
+    ZEND_ABSTRACT_ME(SessionInterface, id,   arginfo_session_id)
+    ZEND_ABSTRACT_ME(SessionInterface, name, arginfo_session_name)
+    ZEND_ABSTRACT_ME(SessionInterface, get,  arginfo_attr_get)
+    ZEND_ABSTRACT_ME(SessionInterface, has,  arginfo_attr_has)
+    ZEND_ABSTRACT_ME(SessionInterface, all,  arginfo_attr_all)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_uploaded_file_iface_methods[] = {
+    ZEND_ABSTRACT_ME(UploadedFileInterface, name,       arginfo_uf_name)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, clientType, arginfo_uf_clientType)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, type,       arginfo_uf_type)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, size,       arginfo_uf_size)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, tmpPath,    arginfo_uf_tmpPath)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, error,      arginfo_uf_error)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, isValid,    arginfo_uf_isValid)
+    ZEND_ABSTRACT_ME(UploadedFileInterface, moveTo,     arginfo_uf_moveTo)
+    PHP_FE_END
+};
+
+static const zend_function_entry oxphp_http_request_iface_methods[] = {
+    ZEND_ABSTRACT_ME(RequestInterface, method,              arginfo_req_method)
+    ZEND_ABSTRACT_ME(RequestInterface, path,                arginfo_req_path)
+    ZEND_ABSTRACT_ME(RequestInterface, fullUri,             arginfo_req_fullUri)
+    ZEND_ABSTRACT_ME(RequestInterface, scheme,              arginfo_req_scheme)
+    ZEND_ABSTRACT_ME(RequestInterface, host,                arginfo_req_host)
+    ZEND_ABSTRACT_ME(RequestInterface, port,                arginfo_req_port)
+    ZEND_ABSTRACT_ME(RequestInterface, queryString,         arginfo_req_queryString)
+    ZEND_ABSTRACT_ME(RequestInterface, isSecure,            arginfo_req_isSecure)
+    ZEND_ABSTRACT_ME(RequestInterface, isMethod,            arginfo_req_isMethod)
+    ZEND_ABSTRACT_ME(RequestInterface, httpProtocol,        arginfo_req_httpProtocol)
+    ZEND_ABSTRACT_ME(RequestInterface, httpProtocolVersion, arginfo_req_httpProtocolVersion)
+    ZEND_ABSTRACT_ME(RequestInterface, query,               arginfo_req_query)
+    ZEND_ABSTRACT_ME(RequestInterface, payload,             arginfo_req_payload)
+    ZEND_ABSTRACT_ME(RequestInterface, header,              arginfo_req_header)
+    ZEND_ABSTRACT_ME(RequestInterface, headers,             arginfo_req_headers)
+    ZEND_ABSTRACT_ME(RequestInterface, hasHeader,           arginfo_req_hasHeader)
+    ZEND_ABSTRACT_ME(RequestInterface, cookie,              arginfo_req_cookie)
+    ZEND_ABSTRACT_ME(RequestInterface, cookies,             arginfo_req_cookies)
+    ZEND_ABSTRACT_ME(RequestInterface, body,                arginfo_req_body)
+    ZEND_ABSTRACT_ME(RequestInterface, contentType,         arginfo_req_contentType)
+    ZEND_ABSTRACT_ME(RequestInterface, ip,                  arginfo_req_ip)
+    ZEND_ABSTRACT_ME(RequestInterface, startTime,           arginfo_req_startTime)
+    ZEND_ABSTRACT_ME(RequestInterface, attributes,          arginfo_req_attributes)
+    ZEND_ABSTRACT_ME(RequestInterface, session,             arginfo_req_session)
+    ZEND_ABSTRACT_ME(RequestInterface, file,                arginfo_req_file)
+    ZEND_ABSTRACT_ME(RequestInterface, files,               arginfo_req_files)
+    PHP_FE_END
+};
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_http_request, 0, 0,
     OxPHP\\Http\\Request, 0)
