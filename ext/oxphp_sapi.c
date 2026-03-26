@@ -41,6 +41,19 @@ static zend_class_entry *oxphp_decorator_interface_ce = NULL;
 static zend_class_entry *oxphp_decorator_context_ce = NULL;
 static zend_class_entry *oxphp_decorator_rejected_ce = NULL;
 
+/* HTTP Interface class entries */
+static zend_class_entry *oxphp_http_request_iface_ce = NULL;
+static zend_class_entry *oxphp_http_session_iface_ce = NULL;
+static zend_class_entry *oxphp_http_uploaded_file_iface_ce = NULL;
+static zend_class_entry *oxphp_http_attributes_iface_ce = NULL;
+
+/* Custom object handlers to block cloning */
+static zend_object_handlers oxphp_http_request_handlers;
+static zend_object_handlers oxphp_http_session_handlers;
+static zend_object_handlers oxphp_http_uploaded_file_handlers;
+static zend_object_handlers oxphp_http_attributes_handlers;
+static zend_object_handlers oxphp_decorator_context_handlers;
+
 /* Decorator instance cache (TLS) */
 #define OXPHP_DEC_CACHE_MAX 256
 static __thread zval decorator_instance_cache[OXPHP_DEC_CACHE_MAX];
