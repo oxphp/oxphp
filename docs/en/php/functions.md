@@ -14,8 +14,8 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
-- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
+- [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
 - [oxphp_is_streaming()](#oxphp_is_streaming)
@@ -27,18 +27,20 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+- [Classes and Interfaces](#classes-and-interfaces)
+- [Exceptions](#exceptions)
 
 ---
 
 ## oxphp_http_request()
 
 ```php
-oxphp_http_request(): \OxPHP\Http\RequestInterface
+oxphp_http_request(): \OxPHP\Http\Request
 ```
 
 Returns the request object for the current HTTP request. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
 
-**Returns:** An `\OxPHP\Http\RequestInterface` instance backed by the request data in the current PHP worker thread.
+**Returns:** An `\OxPHP\Http\Request` instance backed by the request data in the current PHP worker thread.
 
 **Throws:** An exception from the `OxPHP\Http\Exception` namespace when called outside an active request:
 
@@ -216,7 +218,7 @@ Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the momen
 
 **Returns:** `true` on success, `false` if `$time` is zero or negative.
 
-> **Note:** Each call sets a new deadline relative to the current time, not the original request start. Calling `oxphp_request_heartbeat(30)` at the 100-second mark of a 120-second timeout extends the deadline to 130 seconds from now.
+> **Note:** Each call sets a new deadline relative to the current time, not the original request start. Calling `oxphp_request_heartbeat(30)` at the 100-second mark of a request sets the deadline 30 seconds from now (130 seconds from request start).
 
 **Example:**
 
@@ -344,7 +346,7 @@ for ($i = 0; $i < 10; $i++) {
     echo "id: $i\n";
     echo "data: " . json_encode(['counter' => $i]) . "\n\n";
     oxphp_stream_flush();
-    sleep(1);
+    oxphp_sleep(1.0); // use oxphp_sleep instead of sleep — does not block the worker in fiber mode
 }
 ```
 
@@ -590,6 +592,50 @@ class LogDecorator implements AttributeInterface
 // Register once at bootstrap (or worker startup)
 oxphp_register_decorator(LogDecorator::class);
 ```
+
+---
+
+## Classes and Interfaces
+
+The `oxphp_sapi` extension registers the following classes:
+
+### HTTP
+
+| Class | Description |
+|-------|-------------|
+| `OxPHP\Http\Request` | Request object returned by `oxphp_http_request()`. `final` — cannot be extended. |
+| `OxPHP\Http\Attributes` | Mutable request attributes container (for middleware). `final`. |
+| `OxPHP\Http\Session` | Session object accessible via `$request->session()`. `final`. |
+| `OxPHP\Http\UploadedFile` | Uploaded file object from `$request->files()`. `final`. |
+
+### Decorators
+
+| Class / Interface | Description |
+|-------------------|-------------|
+| `OxPHP\Decorator\AttributeInterface` | Interface for decorators. Requires `before(Context $ctx)` and `after(Context $ctx)` methods. |
+| `OxPHP\Decorator\Context` | Context object passed to decorator hooks. `final`. Contains `target`, `requestId`, arguments, and return value. |
+
+### Async
+
+| Class | Description |
+|-------|-------------|
+| `OxPHP\BorrowedProxy` | Proxy object for borrowed values between threads. |
+
+---
+
+## Exceptions
+
+All exceptions registered by the extension:
+
+| Exception | Extends | When thrown |
+|-----------|---------|------------|
+| `OxPHP\AsyncException` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
+| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
+| `OxPHP\AsyncBorrowException` | `\Exception` | Error borrowing a value between threads |
+| `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |
+| `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Calling `oxphp_http_request()` inside an `oxphp_async()` callback |
+| `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Calling `oxphp_http_request()` in worker mode between requests |
+| `OxPHP\Decorator\RejectedException` | `\Exception` | A decorator rejected a function/method call |
 
 ---
 

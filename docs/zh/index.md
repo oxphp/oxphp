@@ -9,43 +9,28 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 
 ## 为什么选择 OxPHP
 
-传统 PHP 部署需要多个组件协同工作：Web 服务器、进程管理器、TLS 代理，以及独立的指标采集和限速工具。OxPHP 将整个技术栈整合为一个二进制文件。
+典型的 PHP 生产环境应用需要多个容器：nginx、PHP-FPM，有时还需要单独的 TLS 代理和指标导出器。配置分散在各处，要让它们协同工作，就必须同步套接字设置、超时和路径。OxPHP 用[一个容器](getting-started/docker.md)取代了整个技术栈。内部是一个进程，负责接收 HTTP 连接、执行 PHP 并提供静态文件服务。
 
-- **单一二进制** —— 无需 nginx、无需 PHP-FPM、无需进程管理器。一个容器即可运行完整应用。
-- **内置 TLS** —— 无需反向代理，直接终止 TLS。只需两个环境变量即可完成配置。
-- **Brotli 压缩** —— 文本响应压缩开箱即用，支持可配置的质量级别。
-- **限速** —— 内置基于 IP 的限速功能，支持可配置的限制次数和时间窗口。
-- **健康检查** —— 在专用内部端口上提供 `/health`、`/metrics` 和 `/config` 端点，供 Kubernetes 探针和监控系统使用。
-- **Prometheus 指标** —— 在 `/metrics` 端点提供请求数量、响应时间、队列等待、Worker 池统计、压缩节省量等指标。
-- **静态文件服务** —— 内存缓存、自动 MIME 检测、ETag/Last-Modified 响应头，以及无需配置的可定制缓存 TTL。
-- **Worker 模式** —— 持久化 PHP 进程，启动一次即可处理数千个请求，消除 Laravel、Symfony 等框架的每次请求启动开销。
-- **SSE 流式传输** —— 从 PHP 向浏览器推送实时 Server-Sent Events，无需轮询。
-- **提前响应** —— 立即发送 HTTP 响应，同时在后台继续处理。
-- **四种路由模式** —— 传统文件映射、框架前置控制器（`index.php`）、SPA 回退（`index.html`）和 Worker 模式。
-- **异步 Promise** —— 在专用线程池上运行 PHP 闭包并等待结果，不阻塞 Worker。
-- **装饰器** —— 使用 PHP 8 属性拦截函数和方法调用，实现日志记录、计时、缓存和访问控制。
-- **W3C Trace Context** —— 通过 `$_SERVER` 将上游服务的分布式追踪头传递到 PHP。
-- **OpenTelemetry** —— 将请求 span 导出到 Jaeger、Grafana Tempo、Zipkin 或任何兼容 OTLP 的后端。
+服务器开箱即用，带有合理的默认值。微调通过[环境变量](operations/configuration.md)完成：[TLS](features/tls.md) 只需两个变量即可启用（`TLS_CERT`、`TLS_KEY`），[限速](features/rate-limiting.md)只需一个变量（`RATE_LIMIT`），[Brotli 压缩](features/compression.md)默认开启。无需编辑 nginx 配置或构建额外模块。
 
-## 快速开始
+在专用的[内部端口](features/internal-server.md)上，可以访问[健康检查](operations/health-checks.md)（`/health`）、[Prometheus 指标](operations/metrics.md)（`/metrics`）和配置快照（`/config`）。这足以满足 Kubernetes 存活/就绪探针和 Grafana 接入，无需额外的 sidecar 容器。
 
-使用 Docker 在 30 秒内启动 OxPHP：
+[日志](features/access-logging.md)是结构化 JSON：每一行都包含方法、路径、状态码、响应时间和[请求 ID](features/request-ids.md)。在 Loki、Elasticsearch 或任何其他工具中都可以轻松解析，无需额外的 grok 模式。
 
-```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.1.0
+如果想尝试 [Worker 模式](features/worker-mode.md)——即 PHP 进程不在每次请求时重建——只需一个环境变量 `INDEX_FILE=worker.php`。框架初始化一次，随后处理数千个请求而无需重新加载。要切换回经典模式，只需删除该变量。
 
-COPY --chown=www-data:www-data . /var/www/html
-```
+此外，OxPHP 还包含通常需要单独工具或第三方库才能实现的功能：
 
-```bash
-docker build -t my-app .
-docker run -p 8080:80 my-app
-curl http://localhost:8080/
-```
+- **[静态文件服务](features/static-files.md)** —— 内存缓存、ETag/Last-Modified、自动 MIME 类型
+- **[四种路由模式](features/routing.md)** —— 文件映射、框架、SPA 和 Worker
+- **[提前响应](features/early-response.md)** —— 立即发送响应并继续后台处理
+- **[Worker 模式](features/worker-mode.md)** —— 持久化 PHP 进程，支持 [Fiber 多路复用](features/fiber-multiplexing.md)
+- **[SSE 流式传输](features/sse.md)** —— 从 PHP 推送实时 Server-Sent Events
+- **[异步 Promise](features/async-promises.md)** —— 后台执行 PHP 闭包，不阻塞 Worker
+- **[装饰器](features/decorators.md)** —— 通过 PHP 8 属性拦截调用
+- **[分布式追踪](features/distributed-tracing.md)** —— W3C Trace Context 与 OpenTelemetry
 
-OxPHP 镜像包含服务器二进制文件、PHP 8.4、带 JIT 的 OPcache 及所有必要依赖。应用代码放置在 `/var/www/html`，默认文档根目录为 `/var/www/html/public`。
-
-完整的操作指南请参阅[快速开始](getting-started/quick-start.md)文档。
+---
 
 ## 入门
 

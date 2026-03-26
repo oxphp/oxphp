@@ -24,7 +24,101 @@ docker pull ghcr.io/oxphp/oxphp:0.1.0
 - **Alpine Linux** — минимальный базовый образ
 - Запускается от имени **www-data** (UID 82, GID 82) для выполнения контейнера без root-прав
 
-Чтобы контейнеризировать ваше приложение, расширьте официальный образ:
+### Структура образа
+
+Файловая структура runtime-образа:
+
+```
+/usr/local/
+├── bin/
+│   └── oxphp                                        # серверный бинарный файл
+├── lib/
+│   ├── libphp.so                                    # PHP 8.4 ZTS runtime
+│   ├── liboxphp_bridge.so                           # C-мост (TLS-слот между Rust и PHP)
+│   └── php/extensions/no-debug-zts-20240924/
+│       ├── oxphp_sapi.so                            # PHP-расширение OxPHP
+│       └── opcache.so                               # OPcache (из базового PHP)
+├── etc/php/
+│   └── conf.d/
+│       ├── oxphp.ini                                # настройки PHP для OxPHP
+│       └── extension.ini                            # extension=oxphp_sapi.so
+```
+
+Три компонента OxPHP и их назначение:
+
+| Компонент | Размер | Назначение |
+|-----------|--------|------------|
+| `oxphp` | ~8 МБ | HTTP-сервер, маршрутизация, плагины, метрики |
+| `liboxphp_bridge.so` | ~50 КБ | Разделяемый `__thread` TLS-контекст между Rust и PHP |
+| `oxphp_sapi.so` | ~200 КБ | PHP-функции (`oxphp_request_id()`, `OxPHP\Http\Request` и др.) |
+
+Цепочка зависимостей:
+
+```
+oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
+  │
+  └──► liboxphp_bridge.so ◄── oxphp_sapi.so
+```
+
+Бинарник `oxphp` динамически линкуется к `libphp.so` и `liboxphp_bridge.so`. PHP-расширение `oxphp_sapi.so` также линкуется к bridge-библиотеке — это единственный способ разделить per-request состояние между Rust и PHP через общий `__thread`-слот в одном `.so`.
+
+### Минимальный Dockerfile
+
+Базовый образ `php:8.4-zts-alpine3.23` уже содержит `libphp.so` и все его зависимости. Достаточно скопировать три артефакта OxPHP:
+
+```dockerfile
+FROM php:8.4-zts-alpine3.23
+
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
+
+COPY --chown=www-data:www-data . /var/www/html
+
+EXPOSE 80 443 9090
+
+CMD ["oxphp"]
+```
+
+Этот подход удобен для разработки — доступен PHP CLI, `composer`, `docker-php-ext-install`, `xdebug`. Подробнее — в [руководстве по Docker](docker.md).
+
+### Продакшен Dockerfile
+
+Официальный образ OxPHP минимален — в нём нет PHP CLI и инструментов сборки расширений. Если приложению нужны дополнительные расширения (pdo_mysql, intl и т.д.), соберите их в отдельном стейдже и скопируйте в финальный образ:
+
+```dockerfile
+# Стейдж сборки расширений
+FROM php:8.4-zts-alpine3.23 AS extensions
+
+RUN apk add --no-cache icu-dev postgresql-dev \
+    && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
+
+# Продакшен
+FROM ghcr.io/oxphp/oxphp:0.1.0
+
+# Runtime-зависимости расширений
+USER root
+RUN apk add --no-cache icu-libs libpq
+
+# Скопировать скомпилированные расширения
+COPY --from=extensions /usr/local/lib/php/extensions/no-debug-zts-20240924/*.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+# Подключить расширения
+RUN { \
+        echo "extension=pdo.so"; \
+        echo "extension=pdo_mysql.so"; \
+        echo "extension=pdo_pgsql.so"; \
+        echo "extension=intl.so"; \
+    } > /usr/local/etc/php/conf.d/app-extensions.ini
+
+USER www-data
+
+COPY --chown=www-data:www-data . /var/www/html
+```
+
+Если приложению не нужны дополнительные расширения, достаточно:
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -39,7 +133,7 @@ docker build -t my-app .
 docker run -p 80:80 my-app
 ```
 
-По умолчанию сервер слушает порт `80`. Корень документов — `/var/www/html/public`.
+По умолчанию сервер слушает порт `80`. Корень документов — `/var/www/html/public`. Проекты на Laravel и Symfony уже содержат директорию `public/`, поэтому достаточно скопировать проект в `/var/www/html/`. Если структура проекта отличается, переопределите корень документов через переменную окружения `DOCUMENT_ROOT`.
 
 ## Сборка из исходного кода (без PHP)
 

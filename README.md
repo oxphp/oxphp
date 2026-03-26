@@ -10,7 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="docs/en/">Docs</a> · <a href="#quick-start">Quick Start</a> · <a href="#why-oxphp">Why OxPHP</a> · <a href="#configuration">Configuration</a>
+  <a href="docs/en/">Docs</a> · <a href="docs/ru/">RU</a> · <a href="docs/zh/">中文</a> · <a href="README.ru.md">README RU</a> · <a href="README.zh.md">README 中文</a>
+  <br>
+  <a href="#quick-start">Quick Start</a> · <a href="#why-oxphp">Why OxPHP</a> · <a href="#configuration">Configuration</a>
 </p>
 
 <p align="center">
@@ -49,9 +51,7 @@ No nginx config. No PHP-FPM pool tuning. No process manager. Just your app.
 
 ## Why OxPHP?
 
-The traditional PHP stack is three moving parts glued together: a web server, a process manager, and a PHP runtime. Each adds config surface, failure modes, and operational overhead.
-
-OxPHP collapses all three into one Rust binary with PHP baked in.
+OxPHP replaces nginx + PHP-FPM with a single container. The server works out of the box — TLS, Brotli compression, rate limiting, Prometheus metrics, health checks, and structured JSON logs are configured via environment variables.
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
@@ -66,6 +66,8 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
 | HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
 | Memory safety | ❌ | partial | partial | ✅ Rust |
+
+See the full [documentation](docs/en/index.md) for details.
 
 ---
 
@@ -158,6 +160,7 @@ OxPHP collapses all three into one Rust binary with PHP baked in.
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+         ──────────────────┬──────────────────
                            │
                     ┌──────▼───────┐
                     │ Async pool   │  oxphp_async() / oxphp_async_await()
@@ -306,8 +309,8 @@ curl http://localhost:9090/metrics
 ## Documentation
 
 - [English](docs/en/)
-- [中文](docs/zh/)
 - [Русский](docs/ru/)
+- [中文](docs/zh/)
 
 ## License
 

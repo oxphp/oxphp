@@ -10,7 +10,9 @@
 </p>
 
 <p align="center">
-  <a href="docs/en/">Docs</a> · <a href="#快速开始">快速开始</a> · <a href="#为什么选择-oxphp">为什么选择 OxPHP</a> · <a href="#配置">配置</a>
+  <a href="docs/zh/">文档</a> · <a href="docs/en/">EN</a> · <a href="docs/ru/">RU</a> · <a href="README.md">README EN</a> · <a href="README.ru.md">README RU</a>
+  <br>
+  <a href="#快速开始">快速开始</a> · <a href="#为什么选择-oxphp">为什么选择 OxPHP</a> · <a href="#配置">配置</a>
 </p>
 
 <p align="center">
@@ -49,9 +51,7 @@ curl http://localhost:8080/
 
 ## 为什么选择 OxPHP？
 
-传统 PHP 技术栈由三个相互粘合的组件构成：Web 服务器、进程管理器和 PHP 运行时。每一层都增加了配置复杂度、故障模式和运维负担。
-
-OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
+OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS、Brotli 压缩、限流、Prometheus 指标、健康检查和结构化 JSON 日志均通过环境变量配置。
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
@@ -66,6 +66,8 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
 | HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
 | Memory safety | ❌ | partial | partial | ✅ Rust |
+
+详细功能介绍请参阅[文档](docs/zh/index.md)。
 
 ---
 
@@ -158,6 +160,7 @@ OxPHP 将这三者合并为一个内置 PHP 的 Rust 二进制文件。
               ▼            ▼            ▼
          PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
          (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
+         ──────────────────┬──────────────────
                            │
                     ┌──────▼───────┐
                     │ Async pool   │  oxphp_async() / oxphp_async_await()
@@ -306,9 +309,8 @@ curl http://localhost:9090/metrics
 ## 文档
 
 - [English](docs/en/)
-- [中文](docs/zh/)
 - [Русский](docs/ru/)
-- [Беларуская](docs/be/)
+- [中文](docs/zh/)
 
 ## 许可证
 

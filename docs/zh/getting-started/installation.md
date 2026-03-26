@@ -24,7 +24,101 @@ docker pull ghcr.io/oxphp/oxphp:0.1.0
 - **Alpine Linux** 基础镜像 —— 最小化运行时占用
 - 以 **www-data**（UID 82，GID 82）用户运行，实现非 root 容器执行
 
-在官方镜像基础上扩展，将应用容器化：
+### 镜像结构
+
+运行时镜像的文件布局：
+
+```
+/usr/local/
+├── bin/
+│   └── oxphp                                        # 服务器二进制文件
+├── lib/
+│   ├── libphp.so                                    # PHP 8.4 ZTS 运行时
+│   ├── liboxphp_bridge.so                           # C Bridge（Rust 与 PHP 之间的 TLS 槽）
+│   └── php/extensions/no-debug-zts-20240924/
+│       ├── oxphp_sapi.so                            # OxPHP PHP 扩展
+│       └── opcache.so                               # OPcache（来自基础 PHP）
+├── etc/php/
+│   └── conf.d/
+│       ├── oxphp.ini                                # OxPHP 的 PHP 配置
+│       └── extension.ini                            # extension=oxphp_sapi.so
+```
+
+OxPHP 的三个组件及其用途：
+
+| 组件 | 大小 | 用途 |
+|------|------|------|
+| `oxphp` | ~8 MB | HTTP 服务器、路由、插件、指标 |
+| `liboxphp_bridge.so` | ~50 KB | Rust 与 PHP 之间的共享 `__thread` TLS 上下文 |
+| `oxphp_sapi.so` | ~200 KB | PHP 函数（`oxphp_request_id()`、`OxPHP\Http\Request` 等） |
+
+依赖链：
+
+```
+oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
+  │
+  └──► liboxphp_bridge.so ◄── oxphp_sapi.so
+```
+
+`oxphp` 二进制文件动态链接到 `libphp.so` 和 `liboxphp_bridge.so`。PHP 扩展 `oxphp_sapi.so` 同样链接到 Bridge 库 —— 这是通过单个 `.so` 中的共享 `__thread` 槽在 Rust 和 PHP 之间共享 per-request 状态的唯一方式。
+
+### 最小化 Dockerfile
+
+基础镜像 `php:8.4-zts-alpine3.23` 已包含 `libphp.so` 及其所有依赖。只需复制三个 OxPHP 构件即可：
+
+```dockerfile
+FROM php:8.4-zts-alpine3.23
+
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
+
+COPY --chown=www-data:www-data . /var/www/html
+
+EXPOSE 80 443 9090
+
+CMD ["oxphp"]
+```
+
+此方式适合开发场景 —— 可使用 PHP CLI、`composer`、`docker-php-ext-install`、`xdebug`。详情参阅 [Docker 指南](docker.md)。
+
+### 生产环境 Dockerfile
+
+官方 OxPHP 镜像非常精简 —— 不包含 PHP CLI 和扩展构建工具。如果应用需要额外扩展（pdo_mysql、intl 等），请在单独的构建阶段编译，然后复制到最终镜像中：
+
+```dockerfile
+# 扩展构建阶段
+FROM php:8.4-zts-alpine3.23 AS extensions
+
+RUN apk add --no-cache icu-dev postgresql-dev \
+    && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
+
+# 生产环境
+FROM ghcr.io/oxphp/oxphp:0.1.0
+
+# 扩展的运行时依赖
+USER root
+RUN apk add --no-cache icu-libs libpq
+
+# 复制已编译的扩展
+COPY --from=extensions /usr/local/lib/php/extensions/no-debug-zts-20240924/*.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+
+# 启用扩展
+RUN { \
+        echo "extension=pdo.so"; \
+        echo "extension=pdo_mysql.so"; \
+        echo "extension=pdo_pgsql.so"; \
+        echo "extension=intl.so"; \
+    } > /usr/local/etc/php/conf.d/app-extensions.ini
+
+USER www-data
+
+COPY --chown=www-data:www-data . /var/www/html
+```
+
+如果应用不需要额外扩展，以下配置即可：
 
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.1.0
@@ -39,7 +133,7 @@ docker build -t my-app .
 docker run -p 80:80 my-app
 ```
 
-服务器默认监听 `80` 端口，文档根目录为 `/var/www/html/public`。
+服务器默认监听 `80` 端口，文档根目录为 `/var/www/html/public`。Laravel 和 Symfony 项目已包含 `public/` 目录，因此只需将项目复制到 `/var/www/html/` 即可。如果项目结构不同，请通过 `DOCUMENT_ROOT` 环境变量覆盖文档根目录。
 
 ## 源码构建（不含 PHP）
 

@@ -9,43 +9,28 @@ OxPHP is a high-performance PHP application server that replaces nginx + PHP-FPM
 
 ## Why OxPHP
 
-Traditional PHP deployments require multiple moving parts: a web server, a process manager, a TLS proxy, and separate tooling for metrics and rate limiting. OxPHP collapses this entire stack into one binary.
+A typical PHP application in production is several containers: nginx, PHP-FPM, sometimes a separate TLS proxy and a metrics exporter. Configuration is scattered across them, and to make everything work together you need to synchronize socket settings, timeouts, and paths. OxPHP replaces the entire stack with [a single container](getting-started/docker.md). Inside is one process that accepts HTTP connections, executes PHP, and serves static files.
 
-- **Single binary** — no nginx, no PHP-FPM, no process manager. One container runs your entire application.
-- **Built-in TLS** — terminate TLS directly without a reverse proxy. Configure it with two environment variables.
-- **Brotli compression** — text response compression is enabled out of the box with configurable quality levels.
-- **Rate limiting** — per-IP rate limiting with configurable limits and time windows, built in.
-- **Health checks** — `/health`, `/metrics`, and `/config` endpoints on a dedicated internal port for Kubernetes probes and monitoring systems.
-- **Prometheus metrics** — request counts, response times, queue wait, worker pool stats, compression savings, and more at `/metrics`.
-- **Static file serving** — in-memory caching, automatic MIME detection, ETag/Last-Modified headers, and configurable cache TTL with zero configuration.
-- **Worker mode** — persistent PHP processes that bootstrap once and handle thousands of requests, eliminating per-request startup overhead for frameworks like Laravel and Symfony.
-- **SSE streaming** — real-time Server-Sent Events pushed from PHP to the browser without polling.
-- **Early response** — send the HTTP response immediately and continue processing in the background.
-- **Four routing modes** — traditional file mapping, framework front-controller (`index.php`), SPA fallback (`index.html`), and worker mode.
-- **Async promises** — run PHP closures on a dedicated thread pool and await results without blocking the worker.
-- **Decorators** — intercept function and method calls with PHP 8 attributes for logging, timing, caching, and access control.
-- **W3C Trace Context** — propagate distributed tracing headers from upstream services into PHP via `$_SERVER`.
-- **OpenTelemetry** — export request spans to Jaeger, Grafana Tempo, Zipkin, or any OTLP-compatible backend.
+The server works out of the box with sensible defaults. Fine-tuning is done through [environment variables](operations/configuration.md): [TLS](features/tls.md) is enabled with two variables (`TLS_CERT`, `TLS_KEY`), [rate limiting](features/rate-limiting.md) with one (`RATE_LIMIT`), and [Brotli compression](features/compression.md) is on by default. No need to edit nginx configs or build separate modules.
 
-## Quick Start
+On a dedicated [internal port](features/internal-server.md), [health checks](operations/health-checks.md) (`/health`), [Prometheus metrics](operations/metrics.md) (`/metrics`), and a configuration snapshot (`/config`) are available. This is enough for Kubernetes liveness/readiness probes and connecting Grafana without additional sidecar containers.
 
-Get OxPHP running in 30 seconds with Docker:
+[Logs](features/access-logging.md) are structured JSON: method, path, status, response time, and [request ID](features/request-ids.md) in every line. They are easy to parse in Loki, Elasticsearch, or any other tool without additional grok patterns.
 
-```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.1.0
+If you want to try [worker mode](features/worker-mode.md), where the PHP process is not recreated on every request, a single environment variable `INDEX_FILE=worker.php` is all it takes. The framework initializes once and then handles thousands of requests without reloading. To switch back to classic mode, just remove the variable.
 
-COPY --chown=www-data:www-data . /var/www/html
-```
+OxPHP also includes capabilities that typically require separate tools or third-party libraries:
 
-```bash
-docker build -t my-app .
-docker run -p 8080:80 my-app
-curl http://localhost:8080/
-```
+- **[Static file serving](features/static-files.md)** — in-memory caching, ETag/Last-Modified, automatic MIME types
+- **[Four routing modes](features/routing.md)** — file-based, framework, SPA, and worker
+- **[Early response](features/early-response.md)** — send the response immediately and continue background processing
+- **[Worker mode](features/worker-mode.md)** — persistent PHP processes with [fiber multiplexing](features/fiber-multiplexing.md)
+- **[SSE streaming](features/sse.md)** — real-time Server-Sent Events from PHP
+- **[Async promises](features/async-promises.md)** — background execution of PHP closures without blocking the worker
+- **[Decorators](features/decorators.md)** — intercept calls via PHP 8 attributes
+- **[Distributed tracing](features/distributed-tracing.md)** — W3C Trace Context and OpenTelemetry
 
-The OxPHP image includes the server binary, PHP 8.4, OPcache with JIT, and all required dependencies. Your application code goes in `/var/www/html` and the default document root is `/var/www/html/public`.
-
-For a full walkthrough, see the [Quick Start](getting-started/quick-start.md) guide.
+---
 
 ## Getting Started
 
