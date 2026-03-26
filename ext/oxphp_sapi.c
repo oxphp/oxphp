@@ -2739,6 +2739,27 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
     oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
 
+    /* ─── HTTP Interfaces (must register before classes) ───── */
+    {
+        zend_class_entry tmp_ce;
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "AttributesInterface",
+            oxphp_http_attributes_iface_methods);
+        oxphp_http_attributes_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "SessionInterface",
+            oxphp_http_session_iface_methods);
+        oxphp_http_session_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "UploadedFileInterface",
+            oxphp_http_uploaded_file_iface_methods);
+        oxphp_http_uploaded_file_iface_ce = zend_register_internal_interface(&tmp_ce);
+
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "RequestInterface",
+            oxphp_http_request_iface_methods);
+        oxphp_http_request_iface_ce = zend_register_internal_interface(&tmp_ce);
+    }
+
     /* OxPHP\Http\Request */
     {
         zend_class_entry tmp_ce;
