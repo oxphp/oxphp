@@ -12,7 +12,7 @@ OxPHP распространяется в виде Docker-образа — эт�
 Загрузите официальный образ из GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.1.0
+docker pull ghcr.io/oxphp/oxphp:0.2.0
 ```
 
 В образ входит:
@@ -69,9 +69,9 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.1.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -96,7 +96,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Продакшен
-FROM ghcr.io/oxphp/oxphp:0.1.0
+FROM ghcr.io/oxphp/oxphp:0.2.0
 
 # Runtime-зависимости расширений
 USER root
@@ -121,7 +121,7 @@ COPY --chown=www-data:www-data . /var/www/html
 Если приложению не нужны дополнительные расширения, достаточно:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.1.0
+FROM ghcr.io/oxphp/oxphp:0.2.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

@@ -12,7 +12,7 @@ OxPHP 专为容器化运行而设计。本指南涵盖使用 Docker 构建、配
 将应用容器化最简单的方式：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.1.0
+FROM ghcr.io/oxphp/oxphp:0.2.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -51,7 +51,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.1.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.2.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension

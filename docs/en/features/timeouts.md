@@ -95,7 +95,7 @@ OPcache recompilation adds latency on the first request after a file change. Thi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "8080:8080"
     environment:

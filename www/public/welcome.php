@@ -363,7 +363,7 @@ $sapi       = PHP_SAPI;
             <div class="card-body">
                 <div class="code-block">
                     <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
-                    <pre><span class="kw">FROM</span> <span class="str">ghcr.io/oxphp/oxphp:0.1.0</span>
+                    <pre><span class="kw">FROM</span> <span class="str">ghcr.io/oxphp/oxphp:0..0</span>
 
 <span class="kw">COPY</span> --chown=www-data:www-data . /var/www/html</pre>
                 </div>
@@ -379,7 +379,7 @@ $sapi       = PHP_SAPI;
                 <div class="code-block">
                     <button class="copy-btn" onclick="copyBlock(this)">Copy</button>
                     <pre><span class="cmt"># Build your image</span>
-docker build -t my-app ghcr.io/oxphp/oxphp:0.1.0
+docker build -t my-app ghcr.io/oxphp/oxphp:0.2.0
 
 <span class="cmt"># Run with defaults (auto-scaled workers, port 8080)</span>
 docker run -p 8080:8080 my-app

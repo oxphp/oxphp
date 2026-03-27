@@ -133,13 +133,13 @@ OxPHP читает конфигурацию PHP из стандартной ди
 ```bash
 docker run -p 80:80 \
   -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
-  ghcr.io/oxphp/oxphp:0.1.0
+  ghcr.io/oxphp/oxphp:0.2.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.1.0
+FROM ghcr.io/oxphp/oxphp:0.2.0
 
 COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -150,7 +150,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     volumes:

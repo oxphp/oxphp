@@ -154,7 +154,7 @@ OTel 插件激活时，请求 ID 从 trace context 派生：trace ID 的前 16 �
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:
@@ -169,7 +169,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:
@@ -192,7 +192,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:

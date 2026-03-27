@@ -129,7 +129,7 @@ spec:
     spec:
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.1.0
+          image: ghcr.io/oxphp/oxphp:0.2.0
           env:
             - name: INTERNAL_ADDR
               value: "0.0.0.0:9090"
@@ -159,7 +159,7 @@ spec:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "8080:80"
     environment:

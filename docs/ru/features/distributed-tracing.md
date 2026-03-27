@@ -154,7 +154,7 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:
@@ -169,7 +169,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:
@@ -192,7 +192,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     ports:
       - "80:80"
     environment:

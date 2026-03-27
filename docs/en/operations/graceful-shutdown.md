@@ -63,7 +63,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.1.0
+          image: ghcr.io/oxphp/oxphp:0.2.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -97,7 +97,7 @@ Or set it in your Compose file:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.1.0
+    image: ghcr.io/oxphp/oxphp:0.2.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"
