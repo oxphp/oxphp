@@ -386,7 +386,12 @@ ZEND_METHOD(OxPHP_Http_Request, query) {
 
 /* ─── Payload method ──────────────────────────────────────── */
 
-/* {{{ OxPHP\Http\Request::payload(?string $key = null, mixed $default = null): mixed */
+/* {{{ OxPHP\Http\Request::payload(?string $key = null, mixed $default = null): mixed
+ *
+ * Cache sentinel: IS_FALSE means "already parsed, body was empty or unsupported
+ * content-type" — avoids re-parsing on every call.  IS_NULL means "not yet
+ * parsed".  IS_ARRAY is the successful decode result.
+ */
 ZEND_METHOD(OxPHP_Http_Request, payload) {
     zend_string *key = NULL;
     zval *def = NULL;
@@ -396,7 +401,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         Z_PARAM_ZVAL_OR_NULL(def)
     ZEND_PARSE_PARAMETERS_END();
 
-    /* Check cached payload */
+    /* Check cached payload (IS_NULL = not yet parsed) */
     zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
         "_payload_cache", sizeof("_payload_cache")-1, 1, NULL);
 
@@ -408,13 +413,42 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         const uint8_t *body_data = oxphp_req_body(&body_len);
 
         zval parsed;
-        ZVAL_NULL(&parsed);
+        ZVAL_FALSE(&parsed); /* sentinel: "parsed, nothing to return" */
 
         if (ct && body_data && body_len > 0) {
             if (ct_len >= 16 && strncasecmp(ct, "application/json", 16) == 0) {
-                /* JSON decode */
+                /* JSON decode — call php_json_decode_ex directly to avoid
+                 * any issues with the static-inline php_json_decode wrapper
+                 * across PHP ZTS builds. */
                 zend_string *body_str = zend_string_init((const char *)body_data, body_len, 0);
-                php_json_decode(&parsed, ZSTR_VAL(body_str), ZSTR_LEN(body_str), 1, 512);
+                zval json_result;
+                ZVAL_NULL(&json_result);
+                php_json_decode_ex(&json_result, ZSTR_VAL(body_str), ZSTR_LEN(body_str),
+                    PHP_JSON_OBJECT_AS_ARRAY, PHP_JSON_PARSER_DEFAULT_DEPTH);
+
+                if (Z_TYPE(json_result) == IS_ARRAY) {
+                    ZVAL_COPY_VALUE(&parsed, &json_result);
+                } else {
+                    /* Decode failed or returned scalar — try via call_user_function
+                     * as a fallback (matches the json_decode() PHP code path). */
+                    zval func_name, args[2];
+                    ZVAL_STRING(&func_name, "json_decode");
+                    ZVAL_STR_COPY(&args[0], body_str);
+                    ZVAL_TRUE(&args[1]);
+
+                    zval fallback;
+                    ZVAL_NULL(&fallback);
+                    if (call_user_function(EG(function_table), NULL, &func_name,
+                            &fallback, 2, args) == SUCCESS
+                        && Z_TYPE(fallback) == IS_ARRAY) {
+                        ZVAL_COPY_VALUE(&parsed, &fallback);
+                    } else {
+                        zval_ptr_dtor(&fallback);
+                    }
+                    zval_ptr_dtor(&args[0]);
+                    zval_ptr_dtor(&func_name);
+                    zval_ptr_dtor(&json_result);
+                }
                 zend_string_release(body_str);
             } else if (
                 (ct_len >= 33 && strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0) ||
@@ -438,6 +472,14 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
             "_payload_cache", sizeof("_payload_cache")-1, 1, NULL);
     }
 
+    /* IS_FALSE sentinel = parsed but empty/unsupported */
+    if (Z_TYPE_P(cached) == IS_FALSE) {
+        if (def) {
+            RETURN_COPY(def);
+        }
+        RETURN_NULL();
+    }
+
     if (key) {
         if (Z_TYPE_P(cached) == IS_ARRAY) {
             zval *found = zend_hash_find(Z_ARRVAL_P(cached), key);
@@ -451,7 +493,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         RETURN_NULL();
     }
 
-    if (Z_TYPE_P(cached) != IS_NULL) {
+    if (Z_TYPE_P(cached) == IS_ARRAY) {
         RETURN_COPY(cached);
     }
     RETURN_NULL();
