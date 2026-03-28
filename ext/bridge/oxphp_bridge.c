@@ -1,4 +1,5 @@
 #include "oxphp_bridge.h"
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
@@ -481,7 +482,7 @@ void oxphp_bridge_set_request_info(
     /* Set a non-NULL server_context — PHP checks this in sapi_activate()
      * to decide whether to read POST data and cookies. Without it,
      * $_POST/$_FILES/$_COOKIE are never populated. */
-    SG(server_context) = (void*)(method ? 1 : 0);
+    SG(server_context) = (void*)(intptr_t)(method ? 1 : 0);
     SG(request_info).request_method = method;
     SG(request_info).query_string = (char*)query_string;
     SG(request_info).content_type = content_type;
