@@ -64,6 +64,7 @@ mod tests {
             parent_span_id: String::new(),
             is_tls: false,
             version: http::Version::HTTP_11,
+            path_info: None,
         }
     }
 

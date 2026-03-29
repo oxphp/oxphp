@@ -71,7 +71,8 @@ Cookie: session=xyz          -> HTTP_COOKIE
 | 变量 | 行为 |
 |------|------|
 | `SERVER_ADDR` | 未设置。OxPHP 不填充本地服务器 IP 地址。 |
-| `PATH_INFO` / `PATH_TRANSLATED` | 未设置。OxPHP 不执行路径信息拆分。 |
+| `PATH_INFO` | 默认未设置。通过 `SPLIT_PATH_INFO_ENABLED=true` 启用——详见下方 [PATH_INFO 拆分](#path_info-拆分)。 |
+| `PATH_TRANSLATED` | 未设置。 |
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | 不从 `Authorization` 请求头中提取。请直接读取 `$_SERVER['HTTP_AUTHORIZATION']`。 |
 | `REDIRECT_STATUS` | 未设置。OxPHP 不使用内部重定向机制。 |
 
@@ -96,6 +97,29 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
     // 安全连接
 }
 ```
+
+### PATH_INFO 拆分
+
+默认情况下，OxPHP 不会将 URI 路径拆分为脚本和路径信息两部分。对 `/app.php/user/42` 的请求会被视为单一路径——除非有回退机制（框架模式或 Worker 模式）捕获，否则会返回 404。
+
+设置 `SPLIT_PATH_INFO_ENABLED=true` 以启用类似 nginx 的路径拆分，适用于依赖 `$_SERVER['PATH_INFO']` 的旧版应用：
+
+```bash
+SPLIT_PATH_INFO_ENABLED=true
+```
+
+启用后，OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.php` 段。其后的所有内容成为 `PATH_INFO`：
+
+| 请求 URI | 磁盘上的文件 | `SCRIPT_NAME` | `PATH_INFO` | `PHP_SELF` |
+|---|---|---|---|---|
+| `/app.php/user/42` | `app.php` 存在 | `/app.php` | `/user/42` | `/app.php/user/42` |
+| `/index.php/api/v2/users` | `index.php` 存在 | `/index.php` | `/api/v2/users` | `/index.php/api/v2/users` |
+| `/app.php` | `app.php` 存在 | `/app.php` | *（不存在）* | `/app.php` |
+| `/missing.php/foo` | 文件未找到 | — | — | 404 |
+
+禁用时（默认），`SCRIPT_NAME` 和 `PHP_SELF` 均包含完整的 URI 路径，且不设置 `PATH_INFO`。
+
+> **注意：** `PATH_TRANSLATED` 不会被填充。它在实践中很少使用，nginx 和 PHP-FPM 默认也不设置此变量。
 
 ---
 

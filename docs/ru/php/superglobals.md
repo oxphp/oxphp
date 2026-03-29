@@ -71,7 +71,8 @@ Cookie: session=xyz          -> HTTP_COOKIE
 | Переменная | Поведение |
 |-----------|---------|
 | `SERVER_ADDR` | Не устанавливается. OxPHP не заполняет локальный IP-адрес сервера. |
-| `PATH_INFO` / `PATH_TRANSLATED` | Не устанавливаются. OxPHP не выполняет разбиение path-info. |
+| `PATH_INFO` | Не устанавливается по умолчанию. Включается через `SPLIT_PATH_INFO_ENABLED=true` — см. [Разбиение PATH_INFO](#разбиение-path_info) ниже. |
+| `PATH_TRANSLATED` | Не устанавливается. |
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Не извлекаются из заголовка `Authorization`. Читайте `$_SERVER['HTTP_AUTHORIZATION']` напрямую. |
 | `REDIRECT_STATUS` | Не устанавливается. OxPHP не использует механизм внутреннего перенаправления. |
 
@@ -96,6 +97,29 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
     // Защищённое соединение
 }
 ```
+
+### Разбиение PATH_INFO
+
+По умо��чанию OxPHP не разделяет URI-пути на компонент скрипта и path-info. Запрос к `/app.php/user/42` обрабатывается как единый путь — что возвращает 404, если не сработает запасной вариант (режим фреймворка или режим воркера).
+
+Установите `SPLIT_PATH_INFO_ENABLED=true` для активации разбиения путей в стиле nginx для устаревших приложений, которые используют `$_SERVER['PATH_INFO']`:
+
+```bash
+SPLIT_PATH_INFO_ENABLED=true
+```
+
+При включении OxPHP сканирует URI слева направо в поисках первого сегмента `.php`, соответствующего реальному файлу на диске. Всё, что следует после него, становится `PATH_INFO`:
+
+| URI запроса | Файл на диске | `SCRIPT_NAME` | `PATH_INFO` | `PHP_SELF` |
+|---|---|---|---|---|
+| `/app.php/user/42` | `app.php` существует | `/app.php` | `/user/42` | `/app.php/user/42` |
+| `/index.php/api/v2/users` | `index.php` существует | `/index.php` | `/api/v2/users` | `/index.php/api/v2/users` |
+| `/app.php` | `app.php` существует | `/app.php` | *(отсутствует)* | `/app.php` |
+| `/missing.php/foo` | файл не найден | — | — | 404 |
+
+При отключении (по умолчанию) `SCRIPT_NAME` и `PHP_SELF` содержат полный URI-путь, а `PATH_INFO` не устанавливается.
+
+> **Примечание:** `PATH_TRANSLATED` не заполняется. На практике используется крайне редко и не устанавливается ни nginx, ни PHP-FPM по умолчанию.
 
 ---
 

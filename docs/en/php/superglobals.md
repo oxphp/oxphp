@@ -71,7 +71,8 @@ The following variables behave differently compared to a standard PHP-FPM setup:
 | Variable | Behavior |
 |----------|----------|
 | `SERVER_ADDR` | Not set. OxPHP does not populate the local server IP address. |
-| `PATH_INFO` / `PATH_TRANSLATED` | Not set. OxPHP does not perform path-info splitting. |
+| `PATH_INFO` | Not set by default. Enable with `SPLIT_PATH_INFO_ENABLED=true` — see [PATH_INFO Splitting](#path_info-splitting) below. |
+| `PATH_TRANSLATED` | Not set. |
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Not extracted from the `Authorization` header. Read `$_SERVER['HTTP_AUTHORIZATION']` directly. |
 | `REDIRECT_STATUS` | Not set. OxPHP does not use an internal redirect mechanism. |
 
@@ -96,6 +97,29 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
     // Secure connection
 }
 ```
+
+### PATH_INFO Splitting
+
+By default, OxPHP does not split URI paths into script and path-info components. A request to `/app.php/user/42` is treated as a single path — which returns 404 unless a fallback (framework mode or worker mode) catches it.
+
+Enable `SPLIT_PATH_INFO_ENABLED=true` to activate nginx-style path splitting for legacy applications that rely on `$_SERVER['PATH_INFO']`:
+
+```bash
+SPLIT_PATH_INFO_ENABLED=true
+```
+
+When enabled, OxPHP scans the URI left-to-right for the first `.php` segment that corresponds to an actual file on disk. Everything after it becomes `PATH_INFO`:
+
+| Request URI | File on disk | `SCRIPT_NAME` | `PATH_INFO` | `PHP_SELF` |
+|---|---|---|---|---|
+| `/app.php/user/42` | `app.php` exists | `/app.php` | `/user/42` | `/app.php/user/42` |
+| `/index.php/api/v2/users` | `index.php` exists | `/index.php` | `/api/v2/users` | `/index.php/api/v2/users` |
+| `/app.php` | `app.php` exists | `/app.php` | *(absent)* | `/app.php` |
+| `/missing.php/foo` | file not found | — | — | 404 |
+
+When disabled (the default), `SCRIPT_NAME` and `PHP_SELF` both contain the full URI path, and `PATH_INFO` is not set.
+
+> **Note:** `PATH_TRANSLATED` is not populated. It is rarely used in practice and is not set by nginx or PHP-FPM by default.
 
 ---
 

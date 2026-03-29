@@ -300,6 +300,10 @@ async fn async_main(
         tracing::info!("Static file content cache: mtime revalidation (STATIC_CACHE=off)");
     }
 
+    if config.server.split_path_info {
+        tracing::info!("PATH_INFO splitting enabled (SPLIT_PATH_INFO_ENABLED=true)");
+    }
+
     let server = Arc::new(server::Server::new(
         &config.server,
         executor,

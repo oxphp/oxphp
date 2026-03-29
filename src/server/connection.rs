@@ -252,7 +252,7 @@ async fn dispatch_request(
 
             response
         }
-        RouteResult::Execute(script_path) => {
+        RouteResult::Execute(script_path, path_info) => {
             let is_query = is_query_method(&parts.method);
 
             // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2
@@ -338,6 +338,7 @@ async fn dispatch_request(
                 parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),
                 is_tls: server.is_tls(),
                 version: parts.version,
+                path_info,
             };
 
             let queue_start = Instant::now();

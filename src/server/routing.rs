@@ -14,8 +14,9 @@ const ROUTE_CACHE_CAPACITY: usize = 10_000;
 /// Result of route resolution.
 #[derive(Debug, Clone)]
 pub enum RouteResult {
-    /// Execute a PHP script (Phase 2+).
-    Execute(PathBuf),
+    /// Execute a PHP script. Optional `path_info` carries the extra path
+    /// after the `.php` segment (e.g. `/user/42` for `/app.php/user/42`).
+    Execute(PathBuf, Option<String>),
     /// Serve a static file.
     Serve(PathBuf),
     /// File not found.
@@ -38,6 +39,9 @@ pub struct RouteConfig {
     /// Pre-computed string keys for cache lookups (avoids `to_string_lossy()` per request).
     root_index_php_key: String,
     root_index_html_key: String,
+    /// When true, URIs like `/script.php/extra/path` are split into
+    /// script_path + PATH_INFO instead of being treated as a single path.
+    split_path_info: bool,
     /// Cache of resolved routes keyed by URI path.
     /// Mutex is fine here: hold time is O(1) for both get and put.
     route_cache: Mutex<LruCache<String, RouteResult>>,
@@ -85,6 +89,7 @@ impl RouteConfig {
             root_index_html,
             root_index_php_key,
             root_index_html_key,
+            split_path_info: config.split_path_info,
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
@@ -110,7 +115,7 @@ impl RouteConfig {
     /// When set, all unmatched requests route to this PHP file instead of 404.
     /// Pre-computes the RouteResult to avoid PathBuf::clone() on every cache miss.
     pub fn set_worker_file(&mut self, path: PathBuf) {
-        self.worker_route = Some(RouteResult::Execute(path));
+        self.worker_route = Some(RouteResult::Execute(path, None));
     }
 
     /// Resolve a URI path to a route result using the file cache.
@@ -137,11 +142,11 @@ impl RouteConfig {
         // In worker mode, the worker file is an admin-configured trusted path
         // that may live outside the document root — skip validation for it.
         let result = match &result {
-            RouteResult::Serve(path) | RouteResult::Execute(path) => {
+            RouteResult::Serve(path) | RouteResult::Execute(path, _) => {
                 let is_worker = self
                     .worker_route
                     .as_ref()
-                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf) if wf == path));
+                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf, _) if wf == path));
                 if !is_worker && !self.validate_path(path, file_cache).await {
                     tracing::warn!(
                         path = %path.display(),
@@ -234,10 +239,17 @@ impl RouteConfig {
         let path_str = file_path.to_string_lossy();
         if file_cache.is_file(&path_str).await {
             return if file_path.extension().and_then(|s| s.to_str()) == Some("php") {
-                RouteResult::Execute(file_path)
+                RouteResult::Execute(file_path, None)
             } else {
                 RouteResult::Serve(file_path)
             };
+        }
+
+        // 8b. SPLIT_PATH_INFO: walk path segments to find a .php file prefix
+        if self.split_path_info {
+            if let Some(result) = self.try_split_path_info(&sanitized, file_cache).await {
+                return result;
+            }
         }
 
         // 9. Worker mode → all unmatched requests go to the worker
@@ -248,7 +260,7 @@ impl RouteConfig {
         // 10. File not found + INDEX_FILE set → fallback
         if let Some(ref index_path) = self.index_file_path {
             if self.index_file_is_php {
-                return RouteResult::Execute(index_path.clone());
+                return RouteResult::Execute(index_path.clone(), None);
             } else {
                 return RouteResult::Serve(index_path.clone());
             }
@@ -263,7 +275,7 @@ impl RouteConfig {
         // Framework/SPA mode: root goes to INDEX_FILE
         if let Some(ref index_path) = self.index_file_path {
             if self.index_file_is_php {
-                return RouteResult::Execute(index_path.clone());
+                return RouteResult::Execute(index_path.clone(), None);
             } else {
                 return RouteResult::Serve(index_path.clone());
             }
@@ -271,7 +283,7 @@ impl RouteConfig {
 
         // Traditional mode: check index.php, then index.html
         if file_cache.is_file(&self.root_index_php_key).await {
-            return RouteResult::Execute(self.root_index_php.clone());
+            return RouteResult::Execute(self.root_index_php.clone(), None);
         }
 
         if file_cache.is_file(&self.root_index_html_key).await {
@@ -290,7 +302,7 @@ impl RouteConfig {
     async fn resolve_index(&self, dir: &Path, file_cache: &Arc<FileCache>) -> RouteResult {
         let php_index = dir.join("index.php");
         if file_cache.is_file(&php_index.to_string_lossy()).await {
-            return RouteResult::Execute(php_index);
+            return RouteResult::Execute(php_index, None);
         }
 
         let html_index = dir.join("index.html");
@@ -306,13 +318,57 @@ impl RouteConfig {
         // Framework/SPA mode: fallback to INDEX_FILE
         if let Some(ref index_path) = self.index_file_path {
             if self.index_file_is_php {
-                return RouteResult::Execute(index_path.clone());
+                return RouteResult::Execute(index_path.clone(), None);
             } else {
                 return RouteResult::Serve(index_path.clone());
             }
         }
 
         RouteResult::NotFound
+    }
+
+    /// Try to split a URI path into a PHP script and PATH_INFO.
+    /// Iterates segments left-to-right looking for a `.php` file on disk.
+    /// Returns `Some(Execute(script, path_info))` on match, `None` otherwise.
+    async fn try_split_path_info(
+        &self,
+        sanitized: &str,
+        file_cache: &Arc<FileCache>,
+    ) -> Option<RouteResult> {
+        // Look for `.php` within the path — quick bail if none
+        if !sanitized.contains(".php") {
+            return None;
+        }
+
+        // Find each `.php` boundary and check if it's a real file
+        let mut search_from = 0;
+        while let Some(pos) = sanitized[search_from..].find(".php") {
+            let end = search_from + pos + 4; // past ".php"
+
+            // The `.php` must be at end-of-string or followed by `/`
+            if end < sanitized.len() && sanitized.as_bytes()[end] != b'/' {
+                search_from = end;
+                continue;
+            }
+
+            let script_part = &sanitized[..end];
+            let candidate = self.document_root.join(script_part);
+            let candidate_str = candidate.to_string_lossy();
+
+            if file_cache.is_file(&candidate_str).await {
+                let path_info = if end < sanitized.len() {
+                    // Everything after the .php segment (starts with `/`)
+                    Some(sanitized[end..].to_string())
+                } else {
+                    None
+                };
+                return Some(RouteResult::Execute(candidate, path_info));
+            }
+
+            search_from = end;
+        }
+
+        None
     }
 }
 
@@ -390,7 +446,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/index.php", &cache).await;
-        assert!(matches!(result, RouteResult::Execute(_)));
+        assert!(matches!(result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -410,7 +466,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/", &cache).await;
         // index.php exists and is checked first
-        assert!(matches!(result, RouteResult::Execute(_)));
+        assert!(matches!(result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -430,7 +486,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/unknown/path", &cache).await;
-        assert!(matches!(result, RouteResult::Execute(_)));
+        assert!(matches!(result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -560,7 +616,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/", &cache).await;
         match result {
-            RouteResult::Execute(path) => {
+            RouteResult::Execute(path, _) => {
                 assert!(
                     path.ends_with("index.php"),
                     "Root should route to index.php, got {:?}",
@@ -581,7 +637,7 @@ mod tests {
         // /_profiler/ has trailing slash, no _profiler/index.php exists
         let result = rc.resolve_request("/_profiler/", &cache).await;
         match result {
-            RouteResult::Execute(path) => {
+            RouteResult::Execute(path, _) => {
                 assert!(
                     path.ends_with("index.php"),
                     "Should fallback to index.php, got {:?}",
@@ -649,5 +705,88 @@ mod tests {
             lru_cache.len() <= ROUTE_CACHE_CAPACITY,
             "Cache should not exceed capacity"
         );
+    }
+
+    // --- SPLIT_PATH_INFO tests ---
+
+    fn make_config_with_split(dir: &Path, index_file: Option<&str>) -> RouteConfig {
+        let mut config = ServerConfig::new(
+            "0.0.0.0:8080".to_string(),
+            dir.to_path_buf(),
+            index_file.map(|s| s.to_string()),
+        );
+        config.split_path_info = true;
+        RouteConfig::new(&config)
+    }
+
+    #[tokio::test]
+    async fn test_split_path_info_basic() {
+        let dir = setup_test_dir();
+        let rc = make_config_with_split(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        // /about.php/user/42 → script=about.php, path_info=/user/42
+        let result = rc.resolve_request("/about.php/user/42", &cache).await;
+        match result {
+            RouteResult::Execute(path, Some(pi)) => {
+                assert!(path.ends_with("about.php"), "got {:?}", path);
+                assert_eq!(pi, "/user/42");
+            }
+            other => panic!("Expected Execute with path_info, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_path_info_no_extra_path() {
+        let dir = setup_test_dir();
+        let rc = make_config_with_split(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        // /about.php → normal execute, no path_info
+        let result = rc.resolve_request("/about.php", &cache).await;
+        match result {
+            RouteResult::Execute(path, None) => {
+                assert!(path.ends_with("about.php"), "got {:?}", path);
+            }
+            other => panic!("Expected Execute without path_info, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_path_info_disabled_returns_not_found() {
+        let dir = setup_test_dir();
+        let rc = make_config(dir.path(), None); // split_path_info = false
+        let cache = Arc::new(FileCache::new(200));
+        // Without splitting, /about.php/user/42 is a single path → not found
+        let result = rc.resolve_request("/about.php/user/42", &cache).await;
+        assert!(
+            matches!(result, RouteResult::NotFound),
+            "Without split, path with extra segments should 404"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_split_path_info_nonexistent_script() {
+        let dir = setup_test_dir();
+        let rc = make_config_with_split(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        // /missing.php/foo → script doesn't exist → not found
+        let result = rc.resolve_request("/missing.php/foo", &cache).await;
+        assert!(matches!(result, RouteResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_split_path_info_deep_path() {
+        let dir = setup_test_dir();
+        let rc = make_config_with_split(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/index.php/api/v2/users/42/profile", &cache)
+            .await;
+        match result {
+            RouteResult::Execute(path, Some(pi)) => {
+                assert!(path.ends_with("index.php"), "got {:?}", path);
+                assert_eq!(pi, "/api/v2/users/42/profile");
+            }
+            other => panic!("Expected Execute with deep path_info, got {:?}", other),
+        }
     }
 }
