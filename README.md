@@ -120,6 +120,9 @@ See the full [documentation](docs/en/index.md) for details.
 ### Observability
 - **W3C Trace Context** — automatic `traceparent`/`tracestate` propagation, `$_SERVER['OXPHP_TRACE_ID']` for PHP log correlation
 - **OpenTelemetry** — OTLP span export (gRPC/HTTP) with semantic conventions, configurable sampling, batch processing
+- **APM auto-instrumentation** — 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) hooked at the engine level; every call becomes a span with zero code changes
+- **`#[OxPHP\Tracing\Trace]` decorator** — annotate any function or method with a PHP 8 attribute to create spans automatically
+- **PHP tracing SDK** — 10 `oxphp_trace_*()` functions for manual span creation, attributes, events, error recording, and trace context propagation
 - **Prometheus metrics** at `/metrics` — per-worker, zero dependencies
 - **Health check** at `/health` — ready for K8s readiness probes
 - **Structured error logging** — PHP errors routed through `tracing` with `php_error_type`, `php_file`, `php_line`
@@ -241,6 +244,14 @@ All settings are via environment variables — no config files required.
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) |
 
+### APM (`plugin-apm` feature)
+
+| Variable | Default | Description |
+|---|---|---|
+| `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP tracing SDK. Requires `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold (ms). Queries above this get `oxphp.db.slow=true` |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in `db.params` span attribute |
+
 ---
 
 ## Build
@@ -294,6 +305,7 @@ curl http://localhost:9090/metrics
 | **PHP 8.5** | Support for PHP 8.5 |
 | ~~**Trace Context (W3C)**~~ | ✅ Implemented — automatic propagation of `traceparent` / `tracestate` headers (W3C spec), enabled via `TRACE_CONTEXT=true` |
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
+| ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O), `#[OxPHP\Tracing\Trace]` decorator, 10 `oxphp_trace_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
 | **Built-in PHP Profiler** | Low-overhead profiling via attribute decorators (`#[Timer]`, `#[Span]`), integrated with server metrics and tracing |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |

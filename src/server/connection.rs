@@ -345,7 +345,7 @@ async fn dispatch_request(
             server.metrics.request_queued();
             let execute_result = server.executor.execute(script_request);
 
-            let script_response = match execute_result {
+            let mut script_response = match execute_result {
                 ExecuteResult::Immediate(resp) => {
                     server.metrics.request_dequeued();
                     let queue_wait_us = queue_start.elapsed().as_micros();
@@ -382,6 +382,33 @@ async fn dispatch_request(
                     }
                 },
             };
+
+            // Move APM spans JSON into metadata for completion handler (no clone)
+            if let Some(spans_json) = script_response.apm_spans_json.take() {
+                metadata.push(("oxphp.apm_spans_json".into(), spans_json));
+            }
+
+            // Push PHP errors into metadata for APM plugin
+            if !script_response.errors.is_empty() {
+                metadata.push((
+                    "oxphp.php_error_count".into(),
+                    script_response.errors.len().to_string(),
+                ));
+                // Serialize each error as a metadata entry for the completion handler
+                for (i, err) in script_response.errors.iter().enumerate() {
+                    metadata.push((format!("oxphp.php_error.{i}.level"), err.level.to_string()));
+                    metadata.push((
+                        format!("oxphp.php_error.{i}.type"),
+                        err.error_type.to_string(),
+                    ));
+                    metadata.push((format!("oxphp.php_error.{i}.message"), err.message.clone()));
+                    metadata.push((format!("oxphp.php_error.{i}.file"), err.file.clone()));
+                    metadata.push((format!("oxphp.php_error.{i}.line"), err.line.to_string()));
+                    if let Some(ref trace) = err.stacktrace {
+                        metadata.push((format!("oxphp.php_error.{i}.stacktrace"), trace.clone()));
+                    }
+                }
+            }
 
             let mut builder = Response::builder().status(script_response.status);
             for (name, value) in &script_response.headers {

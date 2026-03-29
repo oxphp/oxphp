@@ -251,6 +251,41 @@ class RequestTimer implements AttributeInterface
 }
 ```
 
+## 内置装饰器
+
+### #[OxPHP\Tracing\Trace]
+
+当 APM 插件启用时（`OTEL_APM_ENABLED=true`），OxPHP 会为 `#[OxPHP\Tracing\Trace]` 属性注册一个内置装饰器。它在函数进入时自动创建 Span，在函数退出时自动关闭——无需手动调用 `oxphp_trace_start()` / `oxphp_trace_end()`。
+
+```php
+<?php
+use OxPHP\Tracing\Trace;
+
+#[Trace]
+function processOrder(int $orderId): void
+{
+    // 名为 "processOrder" 的 Span 会自动创建。
+    // 如果此函数抛出异常，Span 会被标记为错误
+    // 并记录一个包含类名的 "exception" 事件。
+}
+
+class PaymentService
+{
+    #[Trace]
+    public function charge(float $amount): bool
+    {
+        // Span 名称为 "PaymentService::charge"
+        return true;
+    }
+}
+```
+
+`#[Trace]` 属性同时支持函数和方法。它适用于用户定义的 PHP 代码（不适用于内部 C 函数——那些由 APM 自动埋点钩子处理）。
+
+无需调用 `oxphp_register_decorator()`——APM 插件在服务器初始化期间会自动注册此装饰器。该装饰器在标准模式和 Worker 模式下均可使用。
+
+关于 APM 追踪的更多信息，请参阅[分布式追踪与 APM](distributed-tracing.md)。
+
 ## 限制
 
 - **仅限用户定义函数** — PHP 内置函数无法被装饰。只有 PHP 代码中定义的函数和方法可被拦截

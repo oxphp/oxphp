@@ -120,6 +120,9 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ### 可观测性
 - **W3C Trace Context** — 自动传播 `traceparent`/`tracestate`，`$_SERVER['OXPHP_TRACE_ID']` 用于 PHP 日志关联
 - **OpenTelemetry** — 通过 `plugin-otel` 特性进行 OTLP Span 导出（gRPC/HTTP），支持语义化约定、可配置采样和批处理
+- **APM 自动埋点** — 在引擎层面 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）；每次调用自动成为 Span，无需修改代码
+- **`#[OxPHP\Tracing\Trace]` 装饰器** — 通过 PHP 8 属性注解任意函数或方法，自动创建 Span
+- **PHP 追踪 SDK** — 10 个 `oxphp_trace_*()` 函数，支持手动创建 Span、设置属性、记录事件、错误记录和追踪上下文传播
 - **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖
 - **健康检查**端点 `/health` — 支持 K8s 就绪探针
 - **结构化错误日志** — PHP 错误通过 `tracing` 输出，包含 `php_error_type`、`php_file`、`php_line` 字段
@@ -241,6 +244,14 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样器：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 采样比率（0.0-1.0） |
 
+### APM（`plugin-apm` 特性）
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获、PHP 追踪 SDK。需要 `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的查询将标记 `oxphp.db.slow=true` |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中 |
+
 ---
 
 ## 构建
@@ -294,6 +305,7 @@ curl http://localhost:9090/metrics
 | **PHP 8.5** | 支持 PHP 8.5 |
 | ~~**Trace Context (W3C)**~~ | ✅ 已实现 — 自动传播 `traceparent` / `tracestate` 头（W3C 规范），通过 `TRACE_CONTEXT=true` 启用 |
 | ~~**OpenTelemetry**~~ | ✅ 已实现 — 通过 `plugin-otel` 特性进行 OTLP 追踪导出，W3C context 传播，每请求 Span 支持标准语义化约定 |
+| ~~**APM & Auto-Instrumentation**~~ | ✅ 已实现 — `plugin-apm` 特性：自动追踪 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O），`#[OxPHP\Tracing\Trace]` 装饰器，10 个 `oxphp_trace_*()` SDK 函数，PHP 错误捕获 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
 | **Built-in PHP Profiler** | 通过属性装饰器（`#[Timer]`、`#[Span]`）实现低开销性能分析，与服务器指标和追踪直接集成 |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |

@@ -103,6 +103,31 @@ PHP_WORKERS=4:0    # 最少 4 个，最多自动检测（CPU × 2）
 | `MAX_QUERY_BODY` | `524288` | 内部查询端点的最大请求体大小（字节，512 KiB） |
 | `TRACE_CONTEXT` | `false` | 启用 W3C Trace Context 传播（`true` 或 `1`）。读取 `traceparent`/`tracestate` 头部并通过 `$_SERVER` 转发给 PHP |
 
+## OpenTelemetry
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry Span 导出。自动设置 `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc` 或 `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317`（gRPC）或 `http://localhost:4318`（HTTP） | OTLP 收集器端点 |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(未设置)* | 认证头：`key=value,key2=value2` |
+| `OTEL_SERVICE_NAME` | `oxphp` | 导出 Span 中的服务名称 |
+| `OTEL_SERVICE_VERSION` | *(未设置)* | 服务版本属性 |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(未设置)* | 额外资源属性：`env=prod,region=us-east-1` |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样策略：`always_on`、`always_off`、`traceidratio`、`parentbased_always_on`、`parentbased_always_off`、`parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 基于比率的采样器的采样比率（0.0–1.0） |
+
+## APM
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获和 PHP 追踪 SDK。需要 `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的数据库查询将添加 `oxphp.db.slow=true` Span 属性 |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中。如果参数可能包含敏感数据，请在生产环境中禁用 |
+
+当 APM 启用时，OxPHP 自动 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）来创建子 Span。无论 APM 是否启用，`oxphp_trace_*()` PHP 函数都会注册——禁用时它们是安全的空操作。
+
 ## 异步工作进程
 
 | 变量 | 默认值 | 描述 |
@@ -203,9 +228,21 @@ curl -s http://localhost:9090/config | jq .
   "static_cache_ttl": 2592000,
   "async_workers": 0,
   "async_queue_capacity": 0,
-  "trace_context": false,
+  "trace_context": true,
   "split_path_info": false,
-  "plugins": {}
+  "plugins": {
+    "otel": {
+      "enabled": true,
+      "protocol": "grpc",
+      "service_name": "oxphp"
+    },
+    "apm": {
+      "enabled": true,
+      "slow_query_ms": 100,
+      "db_capture_params": false,
+      "hooks_registered": 33
+    }
+  }
 }
 ```
 
@@ -222,3 +259,4 @@ curl -s http://localhost:9090/config | jq .
 - [工作进程模式](../features/worker-mode.md) — 持久化 PHP 工作进程架构
 - [压缩](../features/compression.md) — Brotli 压缩详情
 - [静态文件](../features/static-files.md) — 缓存与文件服务
+- [分布式追踪与 APM](../features/distributed-tracing.md) — OTel 导出、自动埋点和 PHP 追踪 SDK

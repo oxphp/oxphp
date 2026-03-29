@@ -1,11 +1,17 @@
 ---
-title: Distributed Tracing
-description: W3C Trace Context propagation, OpenTelemetry integration, and end-to-end observability with OxPHP.
+title: Distributed Tracing & APM
+description: W3C Trace Context propagation, OpenTelemetry integration, automatic instrumentation, PHP tracing SDK, and end-to-end observability with OxPHP.
 ---
 
-# Distributed Tracing
+# Distributed Tracing & APM
 
-OxPHP supports W3C Trace Context propagation and OpenTelemetry (OTel) export. Incoming `traceparent` headers are parsed and continued, trace IDs are available in PHP via `$_SERVER`, access logs include trace fields, and spans can be exported to Jaeger, Grafana Tempo, Zipkin, or any OTLP-compatible backend.
+OxPHP supports W3C Trace Context propagation, OpenTelemetry (OTel) export, and built-in Application Performance Monitoring (APM). Incoming `traceparent` headers are parsed and continued, trace IDs are available in PHP via `$_SERVER`, access logs include trace fields, and spans can be exported to Jaeger, Grafana Tempo, Zipkin, or any OTLP-compatible backend.
+
+The APM plugin adds three layers of tracing on top of the OTel foundation:
+
+- **Automatic instrumentation** — internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) are hooked at the engine level; every call becomes a span with zero code changes
+- **Attribute-based tracing** — annotate any PHP function or method with `#[OxPHP\Tracing\Trace]` to create spans automatically
+- **PHP SDK** — 10 `oxphp_trace_*()` functions for manual span creation, attributes, events, and error recording
 
 ## How It Works
 
@@ -42,6 +48,16 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 | `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Additional resource attributes: `env=prod,region=us-east-1` |
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) for ratio-based samplers |
+
+### APM Plugin
+
+The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel plugin. It adds automatic instrumentation, the `#[OxPHP\Tracing\Trace]` decorator, and the PHP tracing SDK.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Queries above this get `oxphp.db.slow=true` on their spans |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute |
 
 ## Trace Context in PHP
 
@@ -145,6 +161,155 @@ Exported spans include standard HTTP semantic convention attributes:
 
 When the OTel plugin is active, request IDs are derived from the trace context: the first 16 characters of the trace ID and first 8 characters of the span ID, separated by a dash. This appears in logs, the `X-Request-ID` response header, and `oxphp_request_id()` in PHP.
 
+## APM: Automatic Instrumentation
+
+When the APM plugin is enabled, OxPHP automatically hooks 33 internal PHP functions at the engine level. Every call to a hooked function creates a child span under the current request's root span — with zero code changes required.
+
+### Hooked Functions
+
+| Category | Functions |
+|----------|-----------|
+| **PDO** | `PDO::__construct`, `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute` |
+| **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::execute` |
+| **cURL** | `curl_init`, `curl_setopt`, `curl_exec`, `curl_multi_exec` |
+| **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hget`, `Redis::hset`, `Redis::lpush`, `Redis::rpush` |
+| **Memcached** | `Memcached::get`, `Memcached::set`, `Memcached::delete`, `Memcached::getMulti`, `Memcached::setMulti` |
+| **File I/O** | `fopen`, `fread`, `fwrite`, `file_get_contents`, `file_put_contents` |
+
+Hooks are only installed for extensions that are actually loaded. If your build does not include the Redis extension, the Redis hooks are silently skipped.
+
+### How It Works
+
+Hook installation uses a two-phase design for thread safety under PHP ZTS:
+
+1. **Phase 1 (MINIT)** — during module initialization, OxPHP validates each target function against the loaded extensions and captures original handler pointers into a read-only approved list
+2. **Phase 2 (RINIT)** — on the first request per worker thread, the approved hooks are installed into that thread's function tables
+
+This ensures each ZTS worker thread has consistent function table modifications and thread-local state.
+
+## APM: Attribute-Based Tracing
+
+The `#[OxPHP\Tracing\Trace]` attribute creates spans automatically around decorated functions and methods. Unlike the auto-instrumentation hooks (which target internal C functions), this works on user-defined PHP code.
+
+```php
+<?php
+use OxPHP\Tracing\Trace;
+
+#[Trace]
+function processOrder(int $orderId): void
+{
+    // A span named "processOrder" is created on entry and closed on exit.
+    // If an exception is thrown, the span is marked as error with the
+    // exception class recorded as a span event.
+}
+
+class PaymentService
+{
+    #[Trace]
+    public function charge(float $amount): bool
+    {
+        // Span named "PaymentService::charge"
+        return true;
+    }
+}
+```
+
+The `#[Trace]` attribute targets both functions and methods. No registration call is needed — the APM plugin registers the decorator automatically during initialization.
+
+If the decorated function throws an exception, the span's status is set to error and an `exception` event is recorded with the exception class name.
+
+## APM: PHP Tracing SDK
+
+The APM plugin registers 10 `oxphp_trace_*()` functions for manual span management. All functions are safe no-ops when APM is disabled, so your code works without modification in any environment.
+
+### Creating Spans
+
+```php
+<?php
+// Start a span and get its local ID
+$spanId = oxphp_trace_start('cache.warm', ['cache.size' => '1024']);
+
+// ... do work ...
+
+// Close the span
+oxphp_trace_end($spanId);
+```
+
+### Adding Attributes and Events
+
+```php
+<?php
+$spanId = oxphp_trace_start('order.process');
+
+// Add attributes to the current span (or a specific one)
+oxphp_trace_attribute('order.id', $orderId);
+oxphp_trace_attribute('order.total', $total, $spanId);
+
+// Record an event on the span
+oxphp_trace_event('payment.authorized', [
+    'provider' => 'stripe',
+    'amount' => (string) $amount,
+]);
+
+oxphp_trace_end($spanId);
+```
+
+### Error Recording
+
+```php
+<?php
+$spanId = oxphp_trace_start('external.api');
+
+try {
+    $result = callExternalApi();
+} catch (\Throwable $e) {
+    // Mark the span as error
+    oxphp_trace_error($e, $spanId);
+    throw $e;
+} finally {
+    oxphp_trace_end($spanId);
+}
+```
+
+### Propagating Trace Context
+
+```php
+<?php
+// Get the current trace ID and span ID
+$traceId = oxphp_trace_id();
+$currentSpanId = oxphp_trace_span_id();
+
+// Or get a ready-to-use traceparent header value
+$traceparent = oxphp_trace_header();
+// "00-{trace_id}-{span_id}-01"
+
+// Propagate to downstream services
+$response = file_get_contents('https://api.example.com/data', false,
+    stream_context_create([
+        'http' => [
+            'header' => "traceparent: {$traceparent}\r\n",
+        ],
+    ])
+);
+```
+
+### Function Reference
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `oxphp_trace(name, callback, ?attributes)` | `void` | Execute a callback inside a span (reserved for future use) |
+| `oxphp_trace_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
+| `oxphp_trace_end(span_id)` | `void` | Close the span with the given local ID |
+| `oxphp_trace_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
+| `oxphp_trace_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
+| `oxphp_trace_error(exception, ?span_id)` | `void` | Mark the current or specified span as error |
+| `oxphp_trace_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
+| `oxphp_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
+| `oxphp_trace_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
+| `oxphp_trace_header()` | `string` | W3C `traceparent` header value for the current span context |
+
+For the complete function signature reference, see [PHP Functions](../php/functions.md#oxphp_trace_start).
+
 ## Docker Example
 
 ### Trace Context Only
@@ -211,6 +376,35 @@ services:
       - "3000:3000"
 ```
 
+### With Jaeger and APM
+
+Full observability with automatic instrumentation of database queries, HTTP calls, cache operations, and file I/O:
+
+```yaml
+services:
+  app:
+    image: ghcr.io/oxphp/oxphp:0.2.0
+    ports:
+      - "80:80"
+    environment:
+      - OTEL_ENABLED=true
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=my-app
+      - OTEL_APM_ENABLED=true
+      - OTEL_APM_SLOW_QUERY_MS=50
+      - INTERNAL_ADDR=0.0.0.0:9090
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+```
+
+> **Note:** The `plugin-apm` Cargo feature must be enabled at build time. The official OxPHP image includes it by default.
+
 ## The Observability Stack
 
 OxPHP provides three observability pillars that work together:
@@ -273,6 +467,8 @@ Parent-based sampling means that if an incoming request carries a sampled trace,
 
 ## See Also
 
+- [PHP Functions](../php/functions.md#oxphp_trace_start) -- `oxphp_trace_*()` function reference
+- [Decorators](decorators.md) -- attribute-based function interception including `#[Trace]`
 - [Access Logging](access-logging.md) -- structured JSON logs with trace fields
 - [Request IDs](request-ids.md) -- how request IDs interact with trace context
 - [Metrics](../operations/metrics.md) -- Prometheus metrics reference

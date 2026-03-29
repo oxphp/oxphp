@@ -120,6 +120,9 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 ### Наблюдаемость
 - **W3C Trace Context** — автоматический пропуск `traceparent`/`tracestate`, `$_SERVER['OXPHP_TRACE_ID']` для корреляции PHP-логов
 - **OpenTelemetry** — экспорт спанов OTLP (gRPC/HTTP) с семантическими конвенциями, настраиваемым семплированием, пакетной обработкой
+- **Автоинструментирование APM** — 33 внутренние PHP-функции (PDO, mysqli, cURL, Redis, Memcached, файловый I/O) перехвачены на уровне движка; каждый вызов становится спаном без изменений кода
+- **Декоратор `#[OxPHP\Tracing\Trace]`** — пометьте любую функцию или метод атрибутом PHP 8 для автоматического создания спанов
+- **PHP tracing SDK** — 10 функций `oxphp_trace_*()` для ручного создания спанов, атрибутов, событий, записи ошибок и передачи контекста трассировки
 - **Метрики Prometheus** на `/metrics` — по каждому воркеру, без зависимостей
 - **Проверка работоспособности** на `/health` — готова для проб готовности K8s
 - **Структурированное логирование ошибок** — ошибки PHP направляются через `tracing` с полями `php_error_type`, `php_file`, `php_line`
@@ -241,6 +244,14 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Семплер: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Коэффициент семплирования (0.0–1.0) |
 
+### APM (feature `plugin-apm`)
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментирование, захват ошибок, PHP tracing SDK. Требуется `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленных запросов (мс). Запросы выше порога получают `oxphp.db.slow=true` |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params` |
+
 ---
 
 ## Сборка
@@ -294,6 +305,7 @@ curl http://localhost:9090/metrics
 | **PHP 8.5** | Поддержка PHP 8.5 |
 | ~~**Trace Context (W3C)**~~ | ✅ Реализовано — автоматическая передача заголовков `traceparent` / `tracestate` (спецификация W3C), включается через `TRACE_CONTEXT=true` |
 | ~~**OpenTelemetry**~~ | ✅ Реализовано — экспорт трейсов OTLP через feature `plugin-otel`, пропуск контекста W3C, спаны для каждого запроса со стандартными семантическими конвенциями |
+| ~~**APM & Auto-Instrumentation**~~ | ✅ Реализовано — feature `plugin-apm`: автоматическая трассировка 33 внутренних PHP-функций (PDO, mysqli, cURL, Redis, Memcached, файловый I/O), декоратор `#[OxPHP\Tracing\Trace]`, 10 SDK-функций `oxphp_trace_*()`, захват ошибок PHP |
 | **Custom Metrics** | PHP API для регистрации пользовательских метрик Prometheus из кода приложения |
 | **Built-in PHP Profiler** | Низконакладное профилирование через атрибуты декораторов (`#[Timer]`, `#[Span]`), интегрированное с метриками сервера и трассировкой |
 | **Dockerfile.bookworm** | Официальный образ на базе Debian Bookworm как альтернатива Alpine |

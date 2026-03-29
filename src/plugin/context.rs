@@ -149,6 +149,24 @@ impl<'a> PluginContext<'a> {
         });
     }
 
+    /// Register a native PHP function with an exact name (no auto-prefix).
+    /// Use for functions that should appear as top-level `oxphp_*` builtins.
+    pub fn register_function_as(
+        &mut self,
+        full_name: &str,
+        params: Vec<PhpParam>,
+        return_type: PhpType,
+        handler: impl PluginNativeFunction + 'static,
+    ) {
+        self.native_php_functions.push(PluginNativeFunctionDef {
+            name: full_name.to_string(),
+            plugin_name: self.plugin_name.clone(),
+            params,
+            return_type,
+            handler: Box::new(handler),
+        });
+    }
+
     /// Register a Rust-native decorator.
     /// The decorator's `attribute_name()` is the fully qualified PHP attribute class name.
     pub fn register_decorator(&mut self, decorator: impl Decorator + 'static) {
@@ -415,5 +433,40 @@ mod tests {
 
         assert_eq!(decorators.len(), 1);
         assert_eq!(decorators[0].decorator.attribute_name(), "App\\TestDec");
+    }
+
+    #[test]
+    fn test_register_function_as() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+        );
+
+        ctx.register_function_as(
+            "oxphp_trace_start",
+            vec![PhpParam::required("name", PhpType::String)],
+            PhpType::Int,
+            |_call: &mut crate::bridge::call::NativeCall| Ok(()),
+        );
+
+        drop(ctx);
+
+        assert_eq!(native_php_functions.len(), 1);
+        // register_function_as uses exact name — no prefix added
+        assert_eq!(native_php_functions[0].name, "oxphp_trace_start");
+        assert_eq!(native_php_functions[0].plugin_name, "test_plugin");
     }
 }

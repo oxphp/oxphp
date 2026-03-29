@@ -103,6 +103,31 @@ When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping boo
 | `MAX_QUERY_BODY` | `524288` | Maximum request body size in bytes for internal query endpoints (512 KiB) |
 | `TRACE_CONTEXT` | `false` | Enable W3C Trace Context propagation (`true` or `1`). Reads `traceparent`/`tracestate` headers and forwards them to PHP via `$_SERVER` |
 
+## OpenTelemetry
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `false` | Enable OpenTelemetry span export. Automatically sets `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Authentication headers: `key=value,key2=value2` |
+| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported spans |
+| `OTEL_SERVICE_VERSION` | *(unset)* | Service version attribute |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Additional resource attributes: `env=prod,region=us-east-1` |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) for ratio-based samplers |
+
+## APM
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_APM_ENABLED` | `false` | Enable APM: automatic instrumentation, error capture, and the PHP tracing SDK. Requires `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Database queries exceeding this get an `oxphp.db.slow=true` span attribute |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Disable in production if parameters may contain sensitive data |
+
+When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_trace_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, they are safe no-ops.
+
 ## Async Workers
 
 | Variable | Default | Description |
@@ -203,9 +228,21 @@ curl -s http://localhost:9090/config | jq .
   "static_cache_ttl": 2592000,
   "async_workers": 0,
   "async_queue_capacity": 0,
-  "trace_context": false,
+  "trace_context": true,
   "split_path_info": false,
-  "plugins": {}
+  "plugins": {
+    "otel": {
+      "enabled": true,
+      "protocol": "grpc",
+      "service_name": "oxphp"
+    },
+    "apm": {
+      "enabled": true,
+      "slow_query_ms": 100,
+      "db_capture_params": false,
+      "hooks_registered": 33
+    }
+  }
 }
 ```
 
@@ -222,3 +259,4 @@ curl -s http://localhost:9090/config | jq .
 - [Worker Mode](../features/worker-mode.md) — persistent PHP worker architecture
 - [Compression](../features/compression.md) — Brotli compression details
 - [Static Files](../features/static-files.md) — caching and file serving
+- [Distributed Tracing & APM](../features/distributed-tracing.md) — OTel export, auto-instrumentation, and PHP tracing SDK

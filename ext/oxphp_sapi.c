@@ -2748,7 +2748,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 entries[i].fname = oxphp_bridge_get_plugin_fn_name(i);
                 entries[i].handler = ZEND_FN(oxphp_native_dispatch);
                 entries[i].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
-                entries[i].num_args = (uint32_t)oxphp_bridge_get_plugin_fn_total(i);
+                /* num_args MUST match arginfo entry count. arginfo_oxphp_native_dispatch
+                   is variadic with 0 required args, so num_args must be 0. Setting it to
+                   the actual param count causes out-of-bounds read in arginfo → SIGSEGV. */
+                entries[i].num_args = 0;
                 entries[i].flags = 0;
             }
             /* Sentinel: last entry is all-zeroes (from calloc). */
@@ -2926,6 +2929,18 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register decorator observer */
     zend_observer_fcall_register(oxphp_decorator_observer_init);
 
+    /* APM hook approval — validates targets against loaded extensions.
+       No handler replacement here; that happens per-thread in RINIT. */
+    oxphp_apm_approve_registered_hooks();
+
+    return SUCCESS;
+}
+/* }}} */
+
+/* {{{ RINIT — per-thread APM hook installation */
+PHP_RINIT_FUNCTION(oxphp_sapi)
+{
+    oxphp_apm_install_on_thread();  /* no-op after first call per thread */
     return SUCCESS;
 }
 /* }}} */
@@ -2954,7 +2969,7 @@ zend_module_entry oxphp_sapi_module_entry = {
     oxphp_sapi_functions,
     PHP_MINIT(oxphp_sapi),
     NULL,   /* MSHUTDOWN */
-    NULL,   /* RINIT */
+    PHP_RINIT(oxphp_sapi),   /* RINIT */
     PHP_RSHUTDOWN(oxphp_sapi),   /* RSHUTDOWN */
     PHP_MINFO(oxphp_sapi),
     PHP_OXPHP_SAPI_VERSION,

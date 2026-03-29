@@ -103,6 +103,31 @@ PHP_WORKERS=4:0    # 4 минимум, авто-определение макс�
 | `MAX_QUERY_BODY` | `524288` | Максимальный размер тела запроса в байтах для внутренних конечных точек (512 КиБ) |
 | `TRACE_CONTEXT` | `false` | Включить распространение W3C Trace Context (`true` или `1`). Читает заголовки `traceparent`/`tracestate` и передаёт их в PHP через `$_SERVER` |
 
+## OpenTelemetry
+
+| Переменная | По умолчанию | Описание |
+|-----------|-------------|---------|
+| `OTEL_ENABLED` | `false` | Включить экспорт спанов OpenTelemetry. Автоматически устанавливает `TRACE_CONTEXT=true` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Протокол экспорта: `grpc` или `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) или `http://localhost:4318` (HTTP) | Эндпоинт OTLP-коллектора |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Таймаут экспорта в миллисекундах |
+| `OTEL_EXPORTER_OTLP_HEADERS` | *(не задано)* | Заголовки аутентификации: `key=value,key2=value2` |
+| `OTEL_SERVICE_NAME` | `oxphp` | Имя сервиса в экспортируемых спанах |
+| `OTEL_SERVICE_VERSION` | *(не задано)* | Атрибут версии сервиса |
+| `OTEL_RESOURCE_ATTRIBUTES` | *(не задано)* | Дополнительные атрибуты ресурса: `env=prod,region=us-east-1` |
+| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Стратегия семплирования: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Коэффициент семплирования (0.0–1.0) для семплеров на основе коэффициента |
+
+## APM
+
+| Переменная | По умолчанию | Описание |
+|-----------|-------------|---------|
+| `OTEL_APM_ENABLED` | `false` | Включить APM: автоматическое инструментирование, захват ошибок и PHP tracing SDK. Требуется `OTEL_ENABLED=true` |
+| `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленных запросов в миллисекундах. Запросы к БД, превышающие этот порог, получают атрибут спана `oxphp.db.slow=true` |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params`. Отключите в продакшене, если параметры могут содержать конфиденциальные данные |
+
+При включённом APM OxPHP автоматически перехватывает 33 внутренние PHP-функции (PDO, mysqli, cURL, Redis, Memcached, файловый I/O) для создания дочерних спанов. PHP-функции `oxphp_trace_*()` регистрируются независимо от того, включён ли APM — при отключённом APM они являются безопасными no-op.
+
 ## Асинхронные воркеры
 
 | Переменная | По умолчанию | Описание |
@@ -203,9 +228,21 @@ curl -s http://localhost:9090/config | jq .
   "static_cache_ttl": 2592000,
   "async_workers": 0,
   "async_queue_capacity": 0,
-  "trace_context": false,
+  "trace_context": true,
   "split_path_info": false,
-  "plugins": {}
+  "plugins": {
+    "otel": {
+      "enabled": true,
+      "protocol": "grpc",
+      "service_name": "oxphp"
+    },
+    "apm": {
+      "enabled": true,
+      "slow_query_ms": 100,
+      "db_capture_params": false,
+      "hooks_registered": 33
+    }
+  }
 }
 ```
 
@@ -222,3 +259,4 @@ curl -s http://localhost:9090/config | jq .
 - [Режим Worker](../features/worker-mode.md) — архитектура постоянных PHP-воркеров
 - [Сжатие](../features/compression.md) — подробности Brotli-сжатия
 - [Статические файлы](../features/static-files.md) — кэширование и обслуживание файлов
+- [Распределённая трассировка и APM](../features/distributed-tracing.md) — экспорт OTel, автоинструментирование и PHP tracing SDK

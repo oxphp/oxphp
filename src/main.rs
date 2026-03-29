@@ -25,7 +25,7 @@ use oxphp::server;
 use oxphp::types;
 
 fn main() -> Result<(), types::BoxError> {
-    let config = Arc::new(config::Config::from_env()?);
+    let mut config = Arc::new(config::Config::from_env()?);
 
     // Create metrics early — needed by executor for worker metrics
     let metrics = Arc::new(Metrics::new());
@@ -38,7 +38,23 @@ fn main() -> Result<(), types::BoxError> {
     plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
     #[cfg(feature = "plugin-otel")]
     plugin_manager.add(Box::new(oxphp::plugins::otel::OtelPlugin::new()));
+    #[cfg(feature = "plugin-apm")]
+    plugin_manager.add(Box::new(oxphp::plugins::apm::ApmPlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
+
+    // Re-read trace_context after plugin init — the OTel plugin sets
+    // TRACE_CONTEXT=true via env::set_var during its init(), but Config
+    // was already parsed before plugins ran. Safe to get_mut here because
+    // no clones of the Arc exist yet.
+    if !config.trace_context
+        && std::env::var("TRACE_CONTEXT")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    {
+        Arc::get_mut(&mut config)
+            .expect("config Arc not yet shared")
+            .trace_context = true;
+    }
 
     #[cfg(feature = "php")]
     {

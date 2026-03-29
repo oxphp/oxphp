@@ -27,6 +27,16 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+- [oxphp_trace()](#oxphp_trace)
+- [oxphp_trace_start()](#oxphp_trace_start)
+- [oxphp_trace_end()](#oxphp_trace_end)
+- [oxphp_trace_attribute()](#oxphp_trace_attribute)
+- [oxphp_trace_event()](#oxphp_trace_event)
+- [oxphp_trace_error()](#oxphp_trace_error)
+- [oxphp_trace_status()](#oxphp_trace_status)
+- [oxphp_trace_id()](#oxphp_trace_id)
+- [oxphp_trace_span_id()](#oxphp_trace_span_id)
+- [oxphp_trace_header()](#oxphp_trace_header)
 - [类与接口](#类与接口)
 - [异常](#异常)
 
@@ -595,6 +605,257 @@ oxphp_register_decorator(LogDecorator::class);
 
 ---
 
+## oxphp_trace()
+
+```php
+oxphp_trace(string $name, callable $callback, ?array $attributes = null): void
+```
+
+在一个命名 Span 内执行回调。Span 在回调运行前打开，在回调返回后关闭。为未来增强的回调集成而预留。
+
+**参数：**
+- `$name` — Span 名称
+- `$callback` — 在 Span 内执行的可调用对象
+- `$attributes` — 可选的字符串键值属性关联数组
+
+**返回值：** `void`
+
+---
+
+## oxphp_trace_start()
+
+```php
+oxphp_trace_start(string $name, ?array $attributes = null): int
+```
+
+打开一个新的 Span 并返回一个本地 ID 以供后续引用。该 Span 将成为当前活跃 Span 的子 Span（如果没有活跃 Span，则成为请求根 Span 的子 Span）。使用 `oxphp_trace_end()` 关闭它。
+
+**参数：**
+- `$name` — Span 名称（例如 `"cache.warm"`、`"payment.process"`）
+- `$attributes` — 可选的字符串键值属性关联数组，在创建时设置到 Span 上
+
+**返回值：** 整数类型的本地 Span ID。将其传递给 `oxphp_trace_end()`、`oxphp_trace_attribute()` 或其他接受 `$span_id` 的函数。APM 禁用时返回 `0`。
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('order.validate', [
+    'order.type' => 'subscription',
+]);
+
+validateOrder($order);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_end()
+
+```php
+oxphp_trace_end(int $span_id): void
+```
+
+关闭由 `oxphp_trace_start()` 打开的 Span。记录 Span 的结束时间，并将其从活跃栈移至已完成列表，准备导出。
+
+**参数：**
+- `$span_id` — `oxphp_trace_start()` 返回的本地 Span ID
+
+**返回值：** `void`
+
+> **注意：** 始终按反向顺序关闭 Span。如果你先打开 Span A 再打开 Span B，则应先关闭 B 再关闭 A。未关闭的 Span 会在请求结束时自动关闭，并标记 `oxphp.span.leaked=true`。
+
+---
+
+## oxphp_trace_attribute()
+
+```php
+oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void
+```
+
+在 Span 上设置键值属性。值会被转换为字符串。如果未提供 `$span_id`，属性将添加到当前活跃的 Span 上。
+
+**参数：**
+- `$key` — 属性键（例如 `"user.id"`、`"cache.hit"`）
+- `$value` — 属性值（string、int、float、bool 或 null——转换为字符串）
+- `$span_id` — 可选的本地 Span ID。省略时指向当前 Span
+
+**返回值：** `void`
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('db.query');
+
+oxphp_trace_attribute('db.system', 'mysql');
+oxphp_trace_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
+oxphp_trace_attribute('db.row_count', $rowCount, $spanId);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_event()
+
+```php
+oxphp_trace_event(string $name, ?array $attributes = null, ?int $span_id = null): void
+```
+
+在 Span 上记录一个带时间戳的事件。事件用于记录 Span 生命周期内的离散事件（例如缓存未命中、重试尝试、鉴权检查）。
+
+**参数：**
+- `$name` — 事件名称（例如 `"cache.miss"`、`"retry"`）
+- `$attributes` — 可选的字符串键值事件属性关联数组
+- `$span_id` — 可选的本地 Span ID。省略时指向当前 Span
+
+**返回值：** `void`
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('payment.process');
+
+oxphp_trace_event('payment.authorized', [
+    'provider' => 'stripe',
+    'amount' => '49.99',
+]);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_error()
+
+```php
+oxphp_trace_error(mixed $exception, ?int $span_id = null): void
+```
+
+将 Span 的状态标记为错误（状态码 2）。用于标记发生异常或故障的 Span。
+
+**参数：**
+- `$exception` — 异常或错误（用于上下文信息；状态设置与类型无关）
+- `$span_id` — 可选的本地 Span ID。省略时指向当前 Span
+
+**返回值：** `void`
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('external.api');
+
+try {
+    $result = callExternalApi();
+} catch (\Throwable $e) {
+    oxphp_trace_error($e, $spanId);
+    throw $e;
+} finally {
+    oxphp_trace_end($spanId);
+}
+```
+
+---
+
+## oxphp_trace_status()
+
+```php
+oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null): void
+```
+
+设置 Span 的状态码和可选描述。
+
+**参数：**
+- `$code` — 状态码：`0` = 未设置，`1` = 正常，`2` = 错误
+- `$description` — 可选的可读状态描述
+- `$span_id` — 可选的本地 Span ID。省略时指向当前 Span
+
+**返回值：** `void`
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('validation');
+
+if ($valid) {
+    oxphp_trace_status(1, 'Validation passed', $spanId);
+} else {
+    oxphp_trace_status(2, 'Invalid input: missing email', $spanId);
+}
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_id()
+
+```php
+oxphp_trace_id(): string
+```
+
+返回当前请求追踪上下文的 W3C trace ID（32 位十六进制字符）。该值与 `$_SERVER['OXPHP_TRACE_ID']` 相同，无需超全局变量即可获取。
+
+**返回值：** 32 位十六进制字符的 trace ID 字符串。APM 禁用或没有活跃追踪上下文时返回空字符串。
+
+**示例：**
+
+```php
+<?php
+$traceId = oxphp_trace_id();
+error_log("Processing request in trace {$traceId}");
+```
+
+---
+
+## oxphp_trace_span_id()
+
+```php
+oxphp_trace_span_id(): string
+```
+
+返回当前活跃 Span 的 Span ID（16 位十六进制字符）。如果存在嵌套 Span，返回最内层打开的 Span 的 ID。
+
+**返回值：** 16 位十六进制字符的 Span ID 字符串。没有活跃 Span 时返回空字符串。
+
+---
+
+## oxphp_trace_header()
+
+```php
+oxphp_trace_header(): string
+```
+
+返回当前 Span 上下文的 W3C `traceparent` 请求头值。用于将追踪上下文传播到下游 HTTP 调用。
+
+**返回值：** 格式为 `00-{trace_id}-{span_id}-01` 的字符串。没有活跃追踪上下文时返回空字符串。
+
+**示例：**
+
+```php
+<?php
+$spanId = oxphp_trace_start('http.call');
+
+$traceparent = oxphp_trace_header();
+
+$response = file_get_contents('https://api.example.com/data', false,
+    stream_context_create([
+        'http' => [
+            'header' => "traceparent: {$traceparent}\r\n",
+        ],
+    ])
+);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
 ## 类与接口
 
 `oxphp_sapi` 扩展注册了以下类：
@@ -614,6 +875,12 @@ oxphp_register_decorator(LogDecorator::class);
 |-----------|------|
 | `OxPHP\Decorator\AttributeInterface` | 装饰器接口。要求实现 `before(Context $ctx)` 和 `after(Context $ctx)` 方法。 |
 | `OxPHP\Decorator\Context` | 传递给装饰器钩子的上下文对象。`final`。包含 `target`、`requestId`、参数和返回值。 |
+
+### 追踪
+
+| 类 | 描述 |
+|----|------|
+| `OxPHP\Tracing\Trace` | 用于自动创建 Span 的内置属性。应用于函数或方法。 |
 
 ### Async
 
@@ -671,6 +938,16 @@ print_r($functions);
 //     [15] => oxphp_async_await_all
 //     [16] => oxphp_async_await_any
 //     [17] => oxphp_register_decorator
+//     [18] => oxphp_trace
+//     [19] => oxphp_trace_start
+//     [20] => oxphp_trace_end
+//     [21] => oxphp_trace_attribute
+//     [22] => oxphp_trace_event
+//     [23] => oxphp_trace_error
+//     [24] => oxphp_trace_status
+//     [25] => oxphp_trace_id
+//     [26] => oxphp_trace_span_id
+//     [27] => oxphp_trace_header
 // )
 ```
 
@@ -706,4 +983,5 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Server-Sent Events](../features/sse.md) -- 使用 `oxphp_stream_flush()` 实现实时流式传输
 - [提前响应](../features/early-response.md) -- 使用 `oxphp_finish_request()` 进行后台处理
 - [超全局变量](superglobals.md) -- OxPHP 如何填充 `$_SERVER`、`$_GET`、`$_POST` 及其他超全局变量
+- [分布式追踪与 APM](../features/distributed-tracing.md) -- W3C Trace Context、OTel 导出和 `oxphp_trace_*()` SDK
 - [配置参考](../operations/configuration.md) -- `WORKER_FILE`、`PHP_WORKERS`、`REQUEST_TIMEOUT_SECONDS` 及其他环境变量

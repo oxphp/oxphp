@@ -28,7 +28,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - **[SSE 流式传输](features/sse.md)** —— 从 PHP 推送实时 Server-Sent Events
 - **[异步 Promise](features/async-promises.md)** —— 后台执行 PHP 闭包，不阻塞 Worker
 - **[装饰器](features/decorators.md)** —— 通过 PHP 8 属性拦截调用
-- **[分布式追踪](features/distributed-tracing.md)** —— W3C Trace Context 与 OpenTelemetry
+- **[分布式追踪与 APM](features/distributed-tracing.md)** —— W3C Trace Context、OpenTelemetry、数据库/HTTP/缓存/文件调用的自动埋点，以及 PHP 追踪 SDK
 
 ---
 
@@ -55,7 +55,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [提前响应](features/early-response.md) —— 立即发送响应并继续后台处理
 - [异步 Promise](features/async-promises.md) —— 在后台线程运行 PHP 闭包并等待结果
 - [装饰器](features/decorators.md) —— 使用 PHP 8 属性拦截函数和方法调用
-- [分布式追踪](features/distributed-tracing.md) —— W3C Trace Context、OpenTelemetry 集成和日志关联
+- [分布式追踪与 APM](features/distributed-tracing.md) —— W3C Trace Context、OpenTelemetry、自动埋点和 PHP 追踪 SDK
 - [内部服务器](features/internal-server.md) —— 用于健康检查、Prometheus 指标和实时配置的专用端口
 
 ## PHP
