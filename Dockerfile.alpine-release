@@ -69,7 +69,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
-    cargo build --release --features plugin-otel && \
+    cargo build --release --features plugin-apm && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 # Copy real source and build script
@@ -79,7 +79,7 @@ COPY build.rs ./
 # Patch version from build arg
 RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
 
-RUN cargo build --release --features plugin-otel
+RUN cargo build --release --features plugin-apm
 
 # ══════════════════════════════════════════════════════════════
 # Stage 4: Runtime

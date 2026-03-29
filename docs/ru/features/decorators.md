@@ -251,6 +251,41 @@ class RequestTimer implements AttributeInterface
 }
 ```
 
+## Встроенные декораторы
+
+### #[OxPHP\Tracing\Trace]
+
+При включённом APM-плагине (`OTEL_APM_ENABLED=true`) OxPHP регистрирует встроенный декоратор для атрибута `#[OxPHP\Tracing\Trace]`. Он автоматически создаёт спан при входе в функцию и закрывает его при выходе — ручные вызовы `oxphp_trace_start()` / `oxphp_trace_end()` не требуются.
+
+```php
+<?php
+use OxPHP\Tracing\Trace;
+
+#[Trace]
+function processOrder(int $orderId): void
+{
+    // A span named "processOrder" is created automatically.
+    // If this function throws, the span is marked as error
+    // and an "exception" event is recorded with the class name.
+}
+
+class PaymentService
+{
+    #[Trace]
+    public function charge(float $amount): bool
+    {
+        // Span named "PaymentService::charge"
+        return true;
+    }
+}
+```
+
+Атрибут `#[Trace]` применяется как к функциям, так и к методам. Он работает с пользовательским PHP-кодом (не с внутренними C-функциями — те обрабатываются хуками автоинструментирования APM).
+
+Вызов `oxphp_register_decorator()` не требуется — APM-плагин регистрирует этот декоратор автоматически при инициализации сервера. Декоратор доступен как в стандартном, так и в режиме worker.
+
+Подробнее о трассировке APM см. в разделе [Распределённая трассировка и APM](distributed-tracing.md).
+
 ## Ограничения
 
 - **Только пользовательские функции** — встроенные функции PHP не могут быть декорированы. Перехватить можно только функции и методы, определённые в PHP-коде

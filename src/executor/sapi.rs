@@ -961,6 +961,16 @@ fn execute_request(
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 
+    // Reset APM span stack on the PHP worker thread with trace context from the request.
+    // This MUST happen on the worker thread (not Tokio) because SPAN_STACK is thread-local.
+    #[cfg(feature = "plugin-apm")]
+    crate::plugins::apm::spans::SPAN_STACK.with(|s| {
+        s.borrow_mut()
+            .reset(request.trace_id.clone(), request.span_id.clone());
+    });
+    #[cfg(feature = "plugin-apm")]
+    crate::plugins::apm::connection_meta::clear();
+
     // Streaming channel is created lazily in send_streaming_headers() — no alloc
     // for the vast majority of non-streaming requests.
 
@@ -1038,12 +1048,19 @@ fn execute_request(
     // so the single-threaded Tokio runtime doesn't pay the parsing cost.
     let headers = sapi::parse_raw_headers(raw_headers);
 
+    #[cfg(feature = "plugin-apm")]
+    let apm_spans_json = crate::plugins::apm::spans::drain_and_serialize();
+    #[cfg(not(feature = "plugin-apm"))]
+    let apm_spans_json: Option<String> = None;
+
     Some(ScriptResponse {
         status,
         headers,
         body,
         execution_time_us: start.elapsed().as_micros() as u64,
         stream_rx: None,
+        errors: sapi::take_request_errors(),
+        apm_spans_json,
     })
 }
 

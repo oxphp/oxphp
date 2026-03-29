@@ -71,6 +71,20 @@ pub struct ScriptRequest {
     pub path_info: Option<String>,
 }
 
+/// A PHP error captured during script execution.
+#[derive(Debug, Clone)]
+pub struct PhpError {
+    /// Severity: "error", "warn", "info" (matches tracing level from error_type_str).
+    pub level: &'static str,
+    /// PHP error constant name: "E_ERROR", "E_WARNING", etc.
+    pub error_type: &'static str,
+    pub message: String,
+    pub file: String,
+    pub line: u32,
+    /// Stack trace for exceptions and fatal errors.
+    pub stacktrace: Option<String>,
+}
+
 /// Response sent from PHP worker thread back to Tokio task.
 pub struct ScriptResponse {
     pub status: u16,
@@ -80,6 +94,11 @@ pub struct ScriptResponse {
     /// If Some, response is streaming: `body` is the first chunk (may be empty),
     /// subsequent chunks arrive via this channel. Channel close = stream end.
     pub stream_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
+    /// PHP errors captured during script execution.
+    pub errors: Vec<PhpError>,
+    /// Serialized APM child spans (JSON). Populated by SpanStack drain on PHP worker thread.
+    /// None when APM is disabled or no spans were created.
+    pub apm_spans_json: Option<String>,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -90,6 +109,8 @@ impl std::fmt::Debug for ScriptResponse {
             .field("body_len", &self.body.len())
             .field("execution_time_us", &self.execution_time_us)
             .field("streaming", &self.stream_rx.is_some())
+            .field("errors_count", &self.errors.len())
+            .field("has_apm_spans", &self.apm_spans_json.is_some())
             .finish()
     }
 }
@@ -102,6 +123,8 @@ impl Default for ScriptResponse {
             body: Bytes::new(),
             execution_time_us: 0,
             stream_rx: None,
+            errors: Vec::new(),
+            apm_spans_json: None,
         }
     }
 }
@@ -118,6 +141,7 @@ mod tests {
         assert!(resp.body.is_empty());
         assert_eq!(resp.execution_time_us, 0);
         assert!(resp.stream_rx.is_none());
+        assert!(resp.errors.is_empty());
     }
 
     #[tokio::test]

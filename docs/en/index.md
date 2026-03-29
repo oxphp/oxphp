@@ -28,7 +28,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - **[SSE streaming](features/sse.md)** — real-time Server-Sent Events from PHP
 - **[Async promises](features/async-promises.md)** — background execution of PHP closures without blocking the worker
 - **[Decorators](features/decorators.md)** — intercept calls via PHP 8 attributes
-- **[Distributed tracing](features/distributed-tracing.md)** — W3C Trace Context and OpenTelemetry
+- **[Distributed tracing & APM](features/distributed-tracing.md)** — W3C Trace Context, OpenTelemetry, automatic instrumentation of database/HTTP/cache/file calls, and a PHP tracing SDK
 
 ---
 
@@ -55,7 +55,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Early Response](features/early-response.md) — send the response immediately and continue background processing
 - [Async Promises](features/async-promises.md) — run PHP closures on background threads and await results
 - [Decorators](features/decorators.md) — intercept function and method calls with PHP 8 attributes
-- [Distributed Tracing](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry integration, and log correlation
+- [Distributed Tracing & APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, auto-instrumentation, and PHP tracing SDK
 - [Internal Server](features/internal-server.md) — dedicated port for health checks, Prometheus metrics, and live configuration
 
 ## PHP

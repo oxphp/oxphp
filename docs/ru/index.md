@@ -28,7 +28,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - **[SSE-стриминг](features/sse.md)** — Server-Sent Events в реальном времени из PHP
 - **[Асинхронные промисы](features/async-promises.md)** — фоновое выполнение PHP-замыканий без блокировки воркера
 - **[Декораторы](features/decorators.md)** — перехват вызовов через атрибуты PHP 8
-- **[Распределённая трассировка](features/distributed-tracing.md)** — W3C Trace Context и OpenTelemetry
+- **[Распределённая трассировка и APM](features/distributed-tracing.md)** — W3C Trace Context, OpenTelemetry, автоматическое инструментирование вызовов базы данных/HTTP/кэша/файлов и PHP tracing SDK
 
 ---
 
@@ -55,7 +55,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [Ранний ответ](features/early-response.md) — немедленная отправка ответа с продолжением фоновой обработки
 - [Асинхронные промисы](features/async-promises.md) — выполнение PHP-замыканий в фоновых потоках с ожиданием результатов
 - [Декораторы](features/decorators.md) — перехват вызовов функций и методов с помощью атрибутов PHP 8
-- [Распределённая трассировка](features/distributed-tracing.md) — W3C Trace Context, интеграция с OpenTelemetry и корреляция логов
+- [Распределённая трассировка и APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, автоинструментирование и PHP tracing SDK
 - [Внутренний сервер](features/internal-server.md) — выделенный порт для проверок состояния, метрик Prometheus и просмотра конфигурации
 
 ## PHP

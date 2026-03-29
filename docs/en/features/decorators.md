@@ -251,6 +251,41 @@ class RequestTimer implements AttributeInterface
 }
 ```
 
+## Built-in Decorators
+
+### #[OxPHP\Tracing\Trace]
+
+When the APM plugin is enabled (`OTEL_APM_ENABLED=true`), OxPHP registers a built-in decorator for the `#[OxPHP\Tracing\Trace]` attribute. It automatically creates a span on function entry and closes it on exit — no manual `oxphp_trace_start()` / `oxphp_trace_end()` calls needed.
+
+```php
+<?php
+use OxPHP\Tracing\Trace;
+
+#[Trace]
+function processOrder(int $orderId): void
+{
+    // A span named "processOrder" is created automatically.
+    // If this function throws, the span is marked as error
+    // and an "exception" event is recorded with the class name.
+}
+
+class PaymentService
+{
+    #[Trace]
+    public function charge(float $amount): bool
+    {
+        // Span named "PaymentService::charge"
+        return true;
+    }
+}
+```
+
+The `#[Trace]` attribute targets both functions and methods. It works on user-defined PHP code (not internal C functions — those are handled by the APM auto-instrumentation hooks).
+
+No `oxphp_register_decorator()` call is needed — the APM plugin registers this decorator automatically during server initialization. The decorator is available in both standard and worker modes.
+
+For more on APM tracing, see [Distributed Tracing & APM](distributed-tracing.md).
+
 ## Limitations
 
 - **User functions only** — built-in PHP functions cannot be decorated. Only functions and methods defined in PHP code are interceptable

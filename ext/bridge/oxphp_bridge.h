@@ -733,6 +733,63 @@ int oxphp_execute_async_task(
 
 #endif /* PHP_H */
 
+/* ═══════════════════════════════════════════════════════════
+ *  APM Hook Infrastructure
+ *  Replace internal PHP function handlers with wrappers that
+ *  call Rust before/after callbacks for automatic tracing.
+ * ═══════════════════════════════════════════════════════════ */
+
+/** Maximum number of internal functions that can be hooked simultaneously. */
+#define OXPHP_APM_MAX_HOOKS 128
+
+/**
+ * Callback types: Rust sets these, C calls them around the original handler.
+ * class_name is "" for global functions.
+ */
+typedef void (*oxphp_apm_before_fn_t)(const char *class_name, const char *func_name,
+                                       uint32_t argc, void *args);
+typedef void (*oxphp_apm_after_fn_t)(const char *class_name, const char *func_name,
+                                      uint32_t argc, void *args, void *return_value);
+
+/** Set the before-hook callback (called by Rust during init). */
+void oxphp_apm_set_before(oxphp_apm_before_fn_t fn);
+
+/** Set the after-hook callback (called by Rust during init). */
+void oxphp_apm_set_after(oxphp_apm_after_fn_t fn);
+
+/**
+ * Register a function for hooking. Called by Rust before PHP startup.
+ * class_name may be NULL or "" for global functions.
+ */
+void oxphp_apm_register_hook(const char *class_name, const char *func_name);
+
+/**
+ * Approve registered hooks against loaded extensions. Called from MINIT.
+ * Validates each pending hook target exists in CG tables.
+ * Returns the number of approved hooks (available for installation).
+ */
+int oxphp_apm_approve_registered_hooks(void);
+
+/**
+ * Returns the number of approved hooks (global, available after MINIT).
+ */
+int oxphp_apm_hook_count_approved(void);
+
+/**
+ * Install approved hooks into this thread's function tables.
+ * Called from RINIT. Idempotent — no-op after first call per thread.
+ */
+void oxphp_apm_install_on_thread(void);
+
+/**
+ * Restore all hooked functions to their original handlers on this thread.
+ * Safe to call even if no hooks were installed.
+ */
+void oxphp_apm_unhook_all(void);
+
+/** Get number of hooks currently installed on this thread (diagnostics). */
+int oxphp_apm_hook_count_installed(void);
+
 #ifdef __cplusplus
 }
 #endif

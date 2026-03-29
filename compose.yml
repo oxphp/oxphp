@@ -4,7 +4,7 @@ services:
       context: .
       args:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-         CARGO_FEATURES: "plugin-otel"
+         CARGO_FEATURES: "plugin-otel plugin-apm"
     ports:
       - "80:80"
       - "443:443"
@@ -151,10 +151,10 @@ services:
       # ── OpenTelemetry (requires CARGO_FEATURES: "plugin-otel") ──
 
       # Enable OpenTelemetry span export. Implies TRACE_CONTEXT=true.
-      # - OTEL_ENABLED=false
+      - OTEL_ENABLED=true
 
       # OTLP collector endpoint.
-      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
 
       # Export protocol: "grpc" (default, port 4317) or "http/protobuf" (port 4318).
       # - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
@@ -167,7 +167,7 @@ services:
       # - OTEL_EXPORTER_OTLP_HEADERS=
 
       # Service identity in traces.
-      # - OTEL_SERVICE_NAME=oxphp
+      - OTEL_SERVICE_NAME=oxphp
       # - OTEL_SERVICE_VERSION=
 
       # Additional resource attributes (key=value,key2=value2).
@@ -187,4 +187,25 @@ services:
 
       # HTTP Basic auth credentials for example plugin internal routes (user:pass).
       # - EXAMPLE_INTERNAL_AUTH=admin:secret
+
+      # ── APM (requires CARGO_FEATURES: "plugin-apm") ─────────────
+
+      # Enable APM: error capture, auto-instrumentation, PHP SDK.
+      # Requires OTEL_ENABLED=true.
+      - OTEL_APM_ENABLED=true
+
+      # Slow query threshold in milliseconds. Queries above this get oxphp.db.slow=true.
+      # - OTEL_APM_SLOW_QUERY_MS=100
+
+      # Record bind parameters in db.params span attribute.
+      # - OTEL_APM_DB_CAPTURE_PARAMS_ENABLED=false
     restart: unless-stopped
+
+  # ── Jaeger — tracing backend (UI at http://localhost:16686) ──
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OTLP gRPC receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true

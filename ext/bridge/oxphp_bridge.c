@@ -1800,3 +1800,226 @@ void oxphp_bridge_timer_remove(uint64_t timer_id) {
         rust_timer_remove(timer_id);
     }
 }
+
+/* ═══════════════════════════════════════════════════════════
+ *  APM Hook Infrastructure — Two-Phase Design
+ *
+ *  Phase 1 — Registration + Approval (global, during init):
+ *    1) Rust calls oxphp_apm_register_hook() before PHP startup
+ *       to record which functions should be hooked (pending list).
+ *    2) oxphp_apm_approve_registered_hooks() runs during MINIT —
+ *       validates each pending hook against CG(class_table)/CG(function_table)
+ *       and copies approved entries to a global read-only list.
+ *
+ *  Phase 2 — Installation (per-thread, during first RINIT):
+ *    3) oxphp_apm_install_on_thread() reads the global approved list
+ *       and installs hooks into THIS thread's function tables.
+ *       Idempotent — no-op after first call per thread.
+ *
+ *  Thread safety: pending + approved lists are global, written once
+ *  before workers start, read-only after. Installed hooks (apm_hooks,
+ *  apm_hook_count) are __thread — each ZTS worker has its own copy.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* ── Types ── */
+
+typedef struct {
+    char class_name[128];
+    char func_name[128];
+} oxphp_apm_pending_hook_t;
+
+typedef struct {
+    char class_name[128];
+    char func_name[128];
+    zif_handler original_handler; /* captured during MINIT before any replacement */
+} oxphp_apm_approved_hook_t;
+
+typedef struct {
+    char class_name[128];
+    char func_name[128];
+    zif_handler original_handler;
+} oxphp_apm_hook_t;
+
+/* ── Global state (written once during init, read-only after) ── */
+
+static oxphp_apm_pending_hook_t apm_pending_hooks[OXPHP_APM_MAX_HOOKS];
+static int apm_pending_count = 0;
+
+static oxphp_apm_approved_hook_t approved_hooks[OXPHP_APM_MAX_HOOKS];
+static int approved_hook_count = 0;
+
+static oxphp_apm_before_fn_t apm_before_fn = NULL;
+static oxphp_apm_after_fn_t  apm_after_fn  = NULL;
+
+/* ── Per-thread state ── */
+
+static __thread oxphp_apm_hook_t apm_hooks[OXPHP_APM_MAX_HOOKS];
+static __thread int apm_hook_count = 0;
+static __thread int apm_hooks_installed = 0;
+
+/* ── Callbacks (set by Rust before PHP startup) ── */
+
+void oxphp_apm_set_before(oxphp_apm_before_fn_t fn) { apm_before_fn = fn; }
+void oxphp_apm_set_after(oxphp_apm_after_fn_t fn)   { apm_after_fn = fn; }
+
+/* ── Registration (called by Rust before PHP startup) ── */
+
+void oxphp_apm_register_hook(const char *class_name, const char *func_name) {
+    if (!func_name || apm_pending_count >= OXPHP_APM_MAX_HOOKS) return;
+
+    oxphp_apm_pending_hook_t *entry = &apm_pending_hooks[apm_pending_count];
+    strncpy(entry->class_name, class_name ? class_name : "", sizeof(entry->class_name) - 1);
+    entry->class_name[sizeof(entry->class_name) - 1] = '\0';
+    strncpy(entry->func_name, func_name, sizeof(entry->func_name) - 1);
+    entry->func_name[sizeof(entry->func_name) - 1] = '\0';
+
+    apm_pending_count++;
+}
+
+/* ── Hook wrapper (per-thread, replaces original handler) ── */
+
+static void oxphp_apm_hook_wrapper(zend_execute_data *execute_data, zval *return_value) {
+    const char *fname = (execute_data->func->common.function_name)
+        ? ZSTR_VAL(execute_data->func->common.function_name) : "";
+    const char *cname = (execute_data->func->common.scope)
+        ? ZSTR_VAL(execute_data->func->common.scope->name) : "";
+
+    /* Find the hook entry to get the original handler */
+    zif_handler orig = NULL;
+    for (int i = 0; i < apm_hook_count; i++) {
+        if (strcmp(apm_hooks[i].func_name, fname) == 0 &&
+            strcmp(apm_hooks[i].class_name, cname) == 0) {
+            orig = apm_hooks[i].original_handler;
+            break;
+        }
+    }
+
+    if (__builtin_expect(orig == NULL, 0)) {
+        /* Safety fallback — shouldn't happen. */
+        return;
+    }
+
+    uint32_t argc = ZEND_CALL_NUM_ARGS(execute_data);
+    zval *args = ZEND_CALL_ARG(execute_data, 1);
+
+    if (apm_before_fn) {
+        apm_before_fn(cname, fname, argc, (void *)args);
+    }
+
+    /* Call original handler */
+    orig(execute_data, return_value);
+
+    if (apm_after_fn) {
+        apm_after_fn(cname, fname, argc, (void *)args, (void *)return_value);
+    }
+}
+
+/* ── Helper: look up a zend_function by class+func name ── */
+
+static zend_function *oxphp_apm_lookup(const char *class_name, const char *func_name) {
+    if (!func_name || func_name[0] == '\0') return NULL;
+
+    zend_function *func = NULL;
+
+    if (class_name && class_name[0] != '\0') {
+        zend_string *cls_lower = zend_string_init(class_name, strlen(class_name), 0);
+        zend_str_tolower(ZSTR_VAL(cls_lower), ZSTR_LEN(cls_lower));
+        zend_class_entry *ce = zend_hash_find_ptr(CG(class_table), cls_lower);
+        zend_string_release(cls_lower);
+        if (!ce) return NULL;
+
+        zend_string *fn_lower = zend_string_init(func_name, strlen(func_name), 0);
+        zend_str_tolower(ZSTR_VAL(fn_lower), ZSTR_LEN(fn_lower));
+        func = zend_hash_find_ptr(&ce->function_table, fn_lower);
+        zend_string_release(fn_lower);
+    } else {
+        zend_string *fn_lower = zend_string_init(func_name, strlen(func_name), 0);
+        zend_str_tolower(ZSTR_VAL(fn_lower), ZSTR_LEN(fn_lower));
+        func = zend_hash_find_ptr(CG(function_table), fn_lower);
+        zend_string_release(fn_lower);
+    }
+
+    return func;
+}
+
+/* ── Phase 1: Approve hooks (MINIT, global) ── */
+
+int oxphp_apm_approve_registered_hooks(void) {
+    approved_hook_count = 0;
+
+    for (int i = 0; i < apm_pending_count; i++) {
+        zend_function *func = oxphp_apm_lookup(
+            apm_pending_hooks[i].class_name,
+            apm_pending_hooks[i].func_name
+        );
+
+        if (!func || func->type != ZEND_INTERNAL_FUNCTION) continue;
+
+        oxphp_apm_approved_hook_t *entry = &approved_hooks[approved_hook_count];
+        memcpy(entry->class_name, apm_pending_hooks[i].class_name, sizeof(entry->class_name));
+        memcpy(entry->func_name, apm_pending_hooks[i].func_name, sizeof(entry->func_name));
+        entry->original_handler = func->internal_function.handler;
+        approved_hook_count++;
+    }
+
+    return approved_hook_count;
+}
+
+int oxphp_apm_hook_count_approved(void) {
+    return approved_hook_count;
+}
+
+/* ── Phase 2: Install hooks (first RINIT, per-thread) ── */
+
+void oxphp_apm_install_on_thread(void) {
+    if (apm_hooks_installed) return;
+    apm_hooks_installed = 1;
+
+    apm_hook_count = 0;
+
+    for (int i = 0; i < approved_hook_count; i++) {
+        if (apm_hook_count >= OXPHP_APM_MAX_HOOKS) break;
+
+        zend_function *func = oxphp_apm_lookup(
+            approved_hooks[i].class_name,
+            approved_hooks[i].func_name
+        );
+
+        if (!func || func->type != ZEND_INTERNAL_FUNCTION) continue;
+
+        oxphp_apm_hook_t *entry = &apm_hooks[apm_hook_count];
+        strncpy(entry->class_name, approved_hooks[i].class_name, sizeof(entry->class_name) - 1);
+        entry->class_name[sizeof(entry->class_name) - 1] = '\0';
+        strncpy(entry->func_name, approved_hooks[i].func_name, sizeof(entry->func_name) - 1);
+        entry->func_name[sizeof(entry->func_name) - 1] = '\0';
+        /* Use the original handler captured during MINIT (before any replacement),
+           not the current handler which may already be our wrapper from another thread. */
+        entry->original_handler = approved_hooks[i].original_handler;
+
+        func->internal_function.handler = oxphp_apm_hook_wrapper;
+        apm_hook_count++;
+    }
+}
+
+/* ── Unhook (per-thread) ── */
+
+void oxphp_apm_unhook_all(void) {
+    for (int i = 0; i < apm_hook_count; i++) {
+        zend_function *func = oxphp_apm_lookup(
+            apm_hooks[i].class_name,
+            apm_hooks[i].func_name
+        );
+
+        if (func && func->type == ZEND_INTERNAL_FUNCTION) {
+            func->internal_function.handler = apm_hooks[i].original_handler;
+        }
+    }
+    apm_hook_count = 0;
+    apm_hooks_installed = 0;
+}
+
+/* ── Diagnostics ── */
+
+int oxphp_apm_hook_count_installed(void) {
+    return apm_hook_count;
+}

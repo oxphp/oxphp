@@ -27,6 +27,16 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
+- [oxphp_trace()](#oxphp_trace)
+- [oxphp_trace_start()](#oxphp_trace_start)
+- [oxphp_trace_end()](#oxphp_trace_end)
+- [oxphp_trace_attribute()](#oxphp_trace_attribute)
+- [oxphp_trace_event()](#oxphp_trace_event)
+- [oxphp_trace_error()](#oxphp_trace_error)
+- [oxphp_trace_status()](#oxphp_trace_status)
+- [oxphp_trace_id()](#oxphp_trace_id)
+- [oxphp_trace_span_id()](#oxphp_trace_span_id)
+- [oxphp_trace_header()](#oxphp_trace_header)
 - [Classes and Interfaces](#classes-and-interfaces)
 - [Exceptions](#exceptions)
 
@@ -595,6 +605,257 @@ oxphp_register_decorator(LogDecorator::class);
 
 ---
 
+## oxphp_trace()
+
+```php
+oxphp_trace(string $name, callable $callback, ?array $attributes = null): void
+```
+
+Executes a callback inside a named span. The span is opened before the callback runs and closed after it returns. Reserved for future enhanced callback integration.
+
+**Parameters:**
+- `$name` — Span name
+- `$callback` — Callable to execute inside the span
+- `$attributes` — Optional associative array of string key-value attributes
+
+**Returns:** `void`
+
+---
+
+## oxphp_trace_start()
+
+```php
+oxphp_trace_start(string $name, ?array $attributes = null): int
+```
+
+Opens a new span and returns a local ID for later reference. The span becomes a child of the currently active span (or the request root span if no span is active). Use `oxphp_trace_end()` to close it.
+
+**Parameters:**
+- `$name` — Span name (e.g. `"cache.warm"`, `"payment.process"`)
+- `$attributes` — Optional associative array of string key-value attributes to set on the span at creation
+
+**Returns:** An integer local span ID. Pass this to `oxphp_trace_end()`, `oxphp_trace_attribute()`, or other functions that accept a `$span_id`. Returns `0` when APM is disabled.
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('order.validate', [
+    'order.type' => 'subscription',
+]);
+
+validateOrder($order);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_end()
+
+```php
+oxphp_trace_end(int $span_id): void
+```
+
+Closes the span opened by `oxphp_trace_start()`. The span's end time is recorded and it moves from the active stack to the finished list, ready for export.
+
+**Parameters:**
+- `$span_id` — The local span ID returned by `oxphp_trace_start()`
+
+**Returns:** `void`
+
+> **Note:** Always close spans in reverse order. If you open span A then span B, close B before A. Unclosed spans are automatically closed at request end and marked with `oxphp.span.leaked=true`.
+
+---
+
+## oxphp_trace_attribute()
+
+```php
+oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void
+```
+
+Sets a key-value attribute on a span. Values are converted to strings. If no `$span_id` is provided, the attribute is added to the currently active span.
+
+**Parameters:**
+- `$key` — Attribute key (e.g. `"user.id"`, `"cache.hit"`)
+- `$value` — Attribute value (string, int, float, bool, or null -- converted to string)
+- `$span_id` — Optional local span ID. When omitted, targets the current span
+
+**Returns:** `void`
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('db.query');
+
+oxphp_trace_attribute('db.system', 'mysql');
+oxphp_trace_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
+oxphp_trace_attribute('db.row_count', $rowCount, $spanId);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_event()
+
+```php
+oxphp_trace_event(string $name, ?array $attributes = null, ?int $span_id = null): void
+```
+
+Records a timestamped event on a span. Events are useful for logging discrete occurrences within a span's lifetime (e.g. cache miss, retry attempt, authorization check).
+
+**Parameters:**
+- `$name` — Event name (e.g. `"cache.miss"`, `"retry"`)
+- `$attributes` — Optional associative array of string key-value event attributes
+- `$span_id` — Optional local span ID. When omitted, targets the current span
+
+**Returns:** `void`
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('payment.process');
+
+oxphp_trace_event('payment.authorized', [
+    'provider' => 'stripe',
+    'amount' => '49.99',
+]);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_error()
+
+```php
+oxphp_trace_error(mixed $exception, ?int $span_id = null): void
+```
+
+Marks a span's status as error (status code 2). Use this to flag spans where an exception or failure occurred.
+
+**Parameters:**
+- `$exception` — The exception or error (used for context; status is set regardless of type)
+- `$span_id` — Optional local span ID. When omitted, targets the current span
+
+**Returns:** `void`
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('external.api');
+
+try {
+    $result = callExternalApi();
+} catch (\Throwable $e) {
+    oxphp_trace_error($e, $spanId);
+    throw $e;
+} finally {
+    oxphp_trace_end($spanId);
+}
+```
+
+---
+
+## oxphp_trace_status()
+
+```php
+oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null): void
+```
+
+Sets the status code and optional description on a span.
+
+**Parameters:**
+- `$code` — Status code: `0` = Unset, `1` = Ok, `2` = Error
+- `$description` — Optional human-readable status description
+- `$span_id` — Optional local span ID. When omitted, targets the current span
+
+**Returns:** `void`
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('validation');
+
+if ($valid) {
+    oxphp_trace_status(1, 'Validation passed', $spanId);
+} else {
+    oxphp_trace_status(2, 'Invalid input: missing email', $spanId);
+}
+
+oxphp_trace_end($spanId);
+```
+
+---
+
+## oxphp_trace_id()
+
+```php
+oxphp_trace_id(): string
+```
+
+Returns the W3C trace ID (32 hex characters) for the current request's trace context. This is the same value as `$_SERVER['OXPHP_TRACE_ID']`, available without superglobals.
+
+**Returns:** A 32-character hexadecimal trace ID string. Returns an empty string when APM is disabled or no trace context is active.
+
+**Example:**
+
+```php
+<?php
+$traceId = oxphp_trace_id();
+error_log("Processing request in trace {$traceId}");
+```
+
+---
+
+## oxphp_trace_span_id()
+
+```php
+oxphp_trace_span_id(): string
+```
+
+Returns the span ID (16 hex characters) of the currently active span. If there are nested spans, this returns the innermost open span's ID.
+
+**Returns:** A 16-character hexadecimal span ID string. Returns an empty string when no span is active.
+
+---
+
+## oxphp_trace_header()
+
+```php
+oxphp_trace_header(): string
+```
+
+Returns a W3C `traceparent` header value for the current span context. Use this to propagate trace context to downstream HTTP calls.
+
+**Returns:** A string in the format `00-{trace_id}-{span_id}-01`. Returns an empty string when no trace context is active.
+
+**Example:**
+
+```php
+<?php
+$spanId = oxphp_trace_start('http.call');
+
+$traceparent = oxphp_trace_header();
+
+$response = file_get_contents('https://api.example.com/data', false,
+    stream_context_create([
+        'http' => [
+            'header' => "traceparent: {$traceparent}\r\n",
+        ],
+    ])
+);
+
+oxphp_trace_end($spanId);
+```
+
+---
+
 ## Classes and Interfaces
 
 The `oxphp_sapi` extension registers the following classes:
@@ -614,6 +875,12 @@ The `oxphp_sapi` extension registers the following classes:
 |-------------------|-------------|
 | `OxPHP\Decorator\AttributeInterface` | Interface for decorators. Requires `before(Context $ctx)` and `after(Context $ctx)` methods. |
 | `OxPHP\Decorator\Context` | Context object passed to decorator hooks. `final`. Contains `target`, `requestId`, arguments, and return value. |
+
+### Tracing
+
+| Class | Description |
+|-------|-------------|
+| `OxPHP\Tracing\Trace` | Built-in attribute for automatic span creation. Apply to functions or methods. |
 
 ### Async
 
@@ -671,6 +938,16 @@ print_r($functions);
 //     [15] => oxphp_async_await_all
 //     [16] => oxphp_async_await_any
 //     [17] => oxphp_register_decorator
+//     [18] => oxphp_trace
+//     [19] => oxphp_trace_start
+//     [20] => oxphp_trace_end
+//     [21] => oxphp_trace_attribute
+//     [22] => oxphp_trace_event
+//     [23] => oxphp_trace_error
+//     [24] => oxphp_trace_status
+//     [25] => oxphp_trace_id
+//     [26] => oxphp_trace_span_id
+//     [27] => oxphp_trace_header
 // )
 ```
 
@@ -706,4 +983,5 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Server-Sent Events](../features/sse.md) -- real-time streaming with `oxphp_stream_flush()`
 - [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`
 - [Superglobals](superglobals.md) -- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
+- [Distributed Tracing & APM](../features/distributed-tracing.md) -- W3C Trace Context, OTel export, and the `oxphp_trace_*()` SDK
 - [Configuration Reference](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars

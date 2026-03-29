@@ -877,3 +877,221 @@ namespace OxPHP\Decorator {
      */
     class RejectedException extends \Exception {}
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP Tracing — APM Functions & Attribute
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Execute a callback inside a child span. The span is automatically
+ * closed when the callback returns or throws. On exception, the span
+ * is marked as error with an exception event, then the exception
+ * is re-thrown.
+ *
+ * When APM is disabled (OTEL_APM_ENABLED != true): calls $callback
+ * directly with no overhead. $span_id passed to callback is 0.
+ *
+ * @param string   $name       Span name ("db.query", "payment.charge")
+ * @param callable $callback   Receives (int $span_id) as argument
+ * @param array    $attributes Initial span attributes ['key' => 'value']
+ * @return mixed   Return value of $callback
+ *
+ * @example
+ * $user = oxphp_trace('user.fetch', function(int $span) use ($id) {
+ *     oxphp_trace_attribute('user.id', $id);
+ *     return User::find($id);
+ * });
+ */
+function oxphp_trace(string $name, callable $callback, array $attributes = []): mixed {}
+
+/**
+ * Start a new child span manually. Returns a span ID that MUST be
+ * passed to oxphp_trace_end(). For most cases, prefer oxphp_trace()
+ * which handles closing automatically.
+ *
+ * When APM is disabled: returns 0. All functions accept 0 as no-op.
+ *
+ * @param string $name       Span name
+ * @param array  $attributes Initial span attributes
+ * @return int   Span ID (local to this request, not the OTel span ID)
+ *
+ * @example
+ * $span = oxphp_trace_start('payment.charge', ['provider' => 'stripe']);
+ * try {
+ *     $result = $stripe->charge($amount);
+ * } finally {
+ *     oxphp_trace_end($span);
+ * }
+ */
+function oxphp_trace_start(string $name, array $attributes = []): int {}
+
+/**
+ * Close a span opened by oxphp_trace_start().
+ *
+ * Repeat calls with the same ID are no-op. Unclosed spans are
+ * force-closed at request end with an E_NOTICE and oxphp.span.leaked
+ * attribute.
+ *
+ * @param int $span_id Span ID from oxphp_trace_start()
+ */
+function oxphp_trace_end(int $span_id): void {}
+
+/**
+ * Add an attribute to a span.
+ *
+ * Without $span_id: applies to the current (innermost) active span.
+ * With $span_id: applies to that specific span.
+ *
+ * Supported value types: string, int, float, bool, string[].
+ * No active span = silent no-op.
+ *
+ * @param string   $key      Attribute name (e.g. "db.system", "payment.amount")
+ * @param mixed    $value    Attribute value
+ * @param int|null $span_id  Target span, or null for current span
+ *
+ * @example
+ * oxphp_trace_attribute('order.total', 99.99);
+ * oxphp_trace_attribute('cache.hit', true, $outer_span);
+ */
+function oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void {}
+
+/**
+ * Add a named event (timestamp marker) to a span.
+ *
+ * Events are visible in tracing UIs as markers on the span timeline.
+ * Use for noteworthy moments: cache misses, retries, validations.
+ *
+ * @param string   $name       Event name ("cache.miss", "retry.attempt")
+ * @param array    $attributes Event attributes ['attempt' => 3]
+ * @param int|null $span_id    Target span, or null for current span
+ *
+ * @example
+ * oxphp_trace_event('cache.miss', ['key' => 'user:session:abc']);
+ */
+function oxphp_trace_event(string $name, array $attributes = [], ?int $span_id = null): void {}
+
+/**
+ * Record an exception on a span. Adds an "exception" event with
+ * exception.type, exception.message, exception.stacktrace attributes
+ * and sets span status to Error.
+ *
+ * The span is NOT closed -- use in catch blocks to record the error
+ * while continuing execution. Inside oxphp_trace() callbacks,
+ * exceptions are recorded automatically.
+ *
+ * @param \Throwable $exception The caught exception
+ * @param int|null   $span_id   Target span, or null for current span
+ *
+ * @example
+ * try {
+ *     riskyOperation();
+ * } catch (\Throwable $e) {
+ *     oxphp_trace_error($e);
+ * }
+ */
+function oxphp_trace_error(\Throwable $exception, ?int $span_id = null): void {}
+
+/**
+ * Set span status explicitly.
+ *
+ * OXPHP_TRACE_OK (0): operation succeeded.
+ * OXPHP_TRACE_ERROR (1): operation failed.
+ *
+ * Default status is "Unset" -- OTel infers from context.
+ * Use Error without oxphp_trace_error() for business logic failures
+ * that aren't exceptions.
+ *
+ * @param int         $code        OXPHP_TRACE_OK or OXPHP_TRACE_ERROR
+ * @param string|null $description Optional status description
+ * @param int|null    $span_id     Target span, or null for current span
+ */
+function oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null): void {}
+
+/**
+ * Get the current trace ID (32 hex chars).
+ *
+ * Same value as $_SERVER['OXPHP_TRACE_ID'], but convenient in
+ * tracing context without accessing superglobals.
+ *
+ * @return string Trace ID, or "" if tracing is disabled
+ */
+function oxphp_trace_id(): string {}
+
+/**
+ * Get the span ID of the current active span (16 hex chars).
+ *
+ * Use for building traceparent headers in manual HTTP calls.
+ *
+ * @return string Span ID, or "" if no active span
+ */
+function oxphp_trace_span_id(): string {}
+
+/**
+ * Build a W3C traceparent header value for the current trace context.
+ *
+ * Format: "00-{trace_id}-{span_id}-01"
+ * Uses the current active span's ID for propagation.
+ *
+ * @return string Formatted traceparent, or "" if tracing is disabled
+ *
+ * @example
+ * $response = file_get_contents('https://api.example.com', false,
+ *     stream_context_create(['http' => [
+ *         'header' => 'traceparent: ' . oxphp_trace_header(),
+ *     ]])
+ * );
+ */
+function oxphp_trace_header(): string {}
+
+/** Span status: operation succeeded. */
+define('OXPHP_TRACE_OK', 0);
+
+/** Span status: operation failed. */
+define('OXPHP_TRACE_ERROR', 1);
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP\Tracing — Trace Attribute
+// ═══════════════════════════════════════════════════════════════
+
+namespace OxPHP\Tracing {
+
+    /**
+     * Attribute-based decorator for automatic span creation.
+     *
+     * Wraps the decorated function/method in a span. On exception,
+     * the span is marked as error with an exception event, then the
+     * exception is re-thrown.
+     *
+     * When APM is disabled: attribute is ignored (no consumer = no-op
+     * per PHP specification).
+     *
+     * Auto-registered when OTEL_APM_ENABLED=true. No manual
+     * oxphp_register_decorator() call needed.
+     *
+     * @example
+     * class PaymentService {
+     *     #[Trace('payment.charge')]
+     *     public function charge(int $amount): Receipt {
+     *         return $this->gateway->process($amount);
+     *     }
+     *
+     *     #[Trace]  // span name: "PaymentService::validate"
+     *     public function validate(Order $order): bool {
+     *         return $order->total > 0;
+     *     }
+     * }
+     */
+    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
+    final class Trace implements \OxPHP\Decorator\AttributeInterface
+    {
+        /**
+         * @param string|null $name Span name. null = "{Class}::{method}" or "{function}"
+         */
+        public function __construct(
+            public readonly ?string $name = null,
+        ) {}
+
+        public function before(\OxPHP\Decorator\Context $ctx): void {}
+        public function after(\OxPHP\Decorator\Context $ctx): void {}
+    }
+}

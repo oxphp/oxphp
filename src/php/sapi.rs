@@ -91,6 +91,17 @@ thread_local! {
         = RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// PHP errors captured during the current request's script execution.
+    /// Drained into ScriptResponse at request completion; cleared at request boundaries.
+    pub(crate) static REQUEST_ERRORS: RefCell<Vec<crate::types::PhpError>> = RefCell::new(Vec::new());
+}
+
+/// Take all captured PHP errors for the current request, leaving the Vec empty.
+pub fn take_request_errors() -> Vec<crate::types::PhpError> {
+    REQUEST_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
+}
+
 /// Per-request data stored in thread-local for SAPI callbacks to access.
 /// Reused across requests — `server_vars` Vec capacity is retained.
 struct RequestData {
@@ -309,6 +320,8 @@ pub fn try_early_send() -> bool {
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
+                errors: take_request_errors(),
+                apm_spans_json: None, // early response — spans not finished yet
             });
             true
         } else {
@@ -352,6 +365,8 @@ pub fn send_streaming_headers() -> bool {
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: Some(chunk_rx),
+                errors: Vec::new(), // Streaming: errors accumulate during stream, not captured here.
+                apm_spans_json: None, // streaming — spans not finished yet
             });
             true
         } else {
@@ -1190,6 +1205,18 @@ unsafe extern "C" fn oxphp_error_cb(
         }
     }
 
+    // Capture error into REQUEST_ERRORS for inclusion in ScriptResponse.
+    REQUEST_ERRORS.with(|errors| {
+        errors.borrow_mut().push(crate::types::PhpError {
+            level,
+            error_type: type_name,
+            message: msg.to_string(),
+            file: file.to_string(),
+            line: error_lineno,
+            stacktrace: None, // Stack trace capture will be added later
+        });
+    });
+
     // Delegate to original callback for PHP's standard error handling
     // (display_errors output, user error handlers, fatal abort, etc.)
     if let Some(&original) = ORIGINAL_ERROR_CB.get() {
@@ -1252,6 +1279,8 @@ pub fn clear_buffers() {
     STREAM_TX.with(|slot| {
         slot.borrow_mut().take();
     });
+    // Clear captured PHP errors from previous request.
+    REQUEST_ERRORS.with(|errors| errors.borrow_mut().clear());
 }
 
 /// Set HTTP 500 status if the current status is still the default 200.
@@ -1440,6 +1469,12 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     let body = Bytes::from(raw_output);
     let headers = parse_raw_headers(raw_headers);
 
+    // Drain APM spans from PHP worker thread before sending response
+    #[cfg(feature = "plugin-apm")]
+    let apm_spans_json = crate::plugins::apm::spans::drain_and_serialize();
+    #[cfg(not(feature = "plugin-apm"))]
+    let apm_spans_json: Option<String> = None;
+
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
             let _ = tx.send(ScriptResponse {
@@ -1448,6 +1483,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
+                errors: take_request_errors(),
+                apm_spans_json,
             });
         }
     });

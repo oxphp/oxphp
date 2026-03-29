@@ -1,9 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use dashmap::DashMap;
 use opentelemetry::trace::{
     SpanBuilder, SpanId, SpanKind, Status, TraceFlags, TraceId, TracerProvider as _,
 };
@@ -20,17 +19,6 @@ use crate::plugin::handler::{
 };
 use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth};
 
-/// Pending span data stored between request and completion handlers.
-struct PendingSpan {
-    start: Instant,
-    method: String,
-    path: String,
-    remote_addr: String,
-}
-
-/// Shared map of in-flight spans, keyed by `{trace_id}:{span_id}`.
-type PendingMap = Arc<DashMap<String, PendingSpan>>;
-
 /// OpenTelemetry plugin — exports HTTP server spans via OTLP.
 ///
 /// Feature-gated behind `plugin-otel`. Reads standard `OTEL_*` env vars
@@ -38,8 +26,7 @@ type PendingMap = Arc<DashMap<String, PendingSpan>>;
 /// built-in trace context handler generates trace/span IDs.
 pub struct OtelPlugin {
     enabled: bool,
-    provider: OnceLock<TracerProvider>,
-    pending: PendingMap,
+    provider: Arc<OnceLock<TracerProvider>>,
     server_address: String,
 }
 
@@ -53,8 +40,7 @@ impl OtelPlugin {
     pub fn new() -> Self {
         Self {
             enabled: false,
-            provider: OnceLock::new(),
-            pending: Arc::new(DashMap::new()),
+            provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
         }
     }
@@ -241,11 +227,10 @@ impl Plugin for OtelPlugin {
             std::env::set_var("TRACE_CONTEXT", "true");
         }
 
-        // Initialize provider
-        let provider = self.init_provider()?;
-        self.provider
-            .set(provider)
-            .map_err(|_| PluginError::Config("TracerProvider already initialized".into()))?;
+        // TracerProvider initialization is deferred to on_ready() because
+        // BatchSpanProcessor requires an active Tokio runtime, and init()
+        // runs before the runtime starts. The OnceLock<TracerProvider> is
+        // filled in on_ready(); handlers check provider.get() and no-op if None.
 
         let protocol =
             std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".into());
@@ -260,7 +245,7 @@ impl Plugin for OtelPlugin {
             endpoint = %std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .unwrap_or_else(|_| default_endpoint.into()),
             protocol = %protocol,
-            "OTel plugin initialized"
+            "OTel plugin initialized (provider deferred to on_ready)"
         );
 
         ctx.expose_config("enabled", true);
@@ -274,17 +259,39 @@ impl Plugin for OtelPlugin {
             std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "oxphp".into()),
         );
 
+        // Share TracerProvider with other plugins (e.g. APM)
+        ctx.register_service("otel.provider", Box::new(self.provider.clone()));
+
         // Register handlers
-        ctx.on_request(OtelRequestHandler {
-            pending: self.pending.clone(),
-        });
+        ctx.on_request(OtelRequestHandler);
         ctx.on_complete(OtelCompleteHandler {
-            pending: self.pending.clone(),
             provider: self.provider.clone(),
             server_address: self.server_address.clone(),
         });
 
         Ok(())
+    }
+
+    fn on_ready(&self) {
+        if !self.enabled {
+            return;
+        }
+        // Now inside Tokio runtime — safe to create BatchSpanProcessor
+        match self.init_provider() {
+            Ok(provider) => {
+                if self.provider.set(provider).is_err() {
+                    tracing::warn!(plugin = "otel", "TracerProvider already initialized");
+                } else {
+                    tracing::info!(
+                        plugin = "otel",
+                        "TracerProvider started (OTLP export active)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(plugin = "otel", error = %e, "Failed to initialize TracerProvider");
+            }
+        }
     }
 
     fn shutdown(&self) {
@@ -302,10 +309,6 @@ impl Plugin for OtelPlugin {
                 tracing::warn!(error = %e, "OTel provider shutdown error");
             }
         }
-        let remaining = self.pending.len();
-        if remaining > 0 {
-            tracing::debug!(remaining, "OTel plugin shutdown with pending spans");
-        }
         tracing::info!(plugin = "otel", "OTel plugin shutdown complete");
     }
 
@@ -322,9 +325,7 @@ impl Plugin for OtelPlugin {
 
 // ─── Request handler ────────────────────────────────────────
 
-struct OtelRequestHandler {
-    pending: PendingMap,
-}
+struct OtelRequestHandler;
 
 impl PluginRequestHandler for OtelRequestHandler {
     fn handle(&self, view: &PluginRequestView, actions: &mut PluginRequestActions) {
@@ -337,17 +338,12 @@ impl PluginRequestHandler for OtelRequestHandler {
             _ => return,
         };
 
-        let key = format!("{trace_id}:{span_id}");
-
-        self.pending.insert(
-            key,
-            PendingSpan {
-                start: Instant::now(),
-                method: view.method.to_string(),
-                path: view.uri.path().to_string(),
-                remote_addr: view.remote_addr.ip().to_string(),
-            },
-        );
+        // Store absolute start time in metadata — no DashMap, no lock contention
+        let start_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+        actions.set_metadata("otel.start_us", start_us.to_string());
 
         // Derive request ID from trace context: first 16 chars of trace_id + first 8 of span_id
         let tid_prefix = &trace_id[..trace_id.len().min(16)];
@@ -363,13 +359,13 @@ impl PluginRequestHandler for OtelRequestHandler {
 // ─── Complete handler ───────────────────────────────────────
 
 struct OtelCompleteHandler {
-    pending: PendingMap,
-    provider: OnceLock<TracerProvider>,
+    provider: Arc<OnceLock<TracerProvider>>,
     server_address: String,
 }
 
 impl PluginCompleteHandler for OtelCompleteHandler {
     fn handle(&self, view: &PluginCompleteView) {
+        // Quick guard checks before collecting owned data
         let trace_id_str = match view.metadata("trace_id") {
             Some(v) if !v.is_empty() => v,
             _ => return,
@@ -378,128 +374,123 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             Some(v) if !v.is_empty() => v,
             _ => return,
         };
-
-        let key = format!("{trace_id_str}:{span_id_str}");
-        let pending = match self.pending.remove(&key) {
-            Some((_, p)) => p,
+        let start_us: u64 = match view.metadata("otel.start_us").and_then(|v| v.parse().ok()) {
+            Some(v) => v,
             None => return,
         };
+        if self.provider.get().is_none() {
+            return;
+        }
 
-        let provider = match self.provider.get() {
-            Some(p) => p,
-            None => return,
-        };
-
-        // Parse trace_id and span_id from hex strings
-        let trace_id = match TraceId::from_hex(trace_id_str) {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let span_id = match SpanId::from_hex(span_id_str) {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-
-        // Parse parent span ID if present
-        let parent_span_id = view
+        // Collect owned data for background export — nothing below blocks the response
+        let provider = self.provider.clone();
+        let trace_id_owned = trace_id_str.to_string();
+        let span_id_owned = span_id_str.to_string();
+        let parent_span_id_owned = view
             .metadata("parent_span_id")
-            .and_then(|s| if s.is_empty() { None } else { Some(s) })
-            .and_then(|s| SpanId::from_hex(s).ok());
-
-        // Parse trace flags
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         let trace_flags = view
             .metadata("trace_flags")
             .and_then(|s| u8::from_str_radix(s, 16).ok())
             .map(TraceFlags::new)
             .unwrap_or(TraceFlags::SAMPLED);
+        let method = view.method.to_string();
+        let path = view.path.to_string();
+        let status_code = view.status;
+        let remote_addr = view.remote_addr.ip().to_string();
+        let request_id = view.request_id.to_string();
+        let server_address = self.server_address.clone();
+        let request_body_size = view.request_body_size;
+        let response_size = view.response_size;
+        let queue_wait_us = view
+            .metadata("oxphp.queue_wait_us")
+            .and_then(|v| v.parse::<i64>().ok());
+        let php_exec_us = view
+            .metadata("oxphp.php_exec_us")
+            .and_then(|v| v.parse::<i64>().ok());
 
-        let elapsed = pending.start.elapsed();
-        let start_time = std::time::SystemTime::now() - elapsed;
-        let end_time = std::time::SystemTime::now();
+        // Span building + OTel export happens off the hot path
+        tokio::spawn(async move {
+            let provider = provider.get().unwrap(); // safe: checked above
+            let tracer = provider.tracer("oxphp");
 
-        // Build span attributes using OTel semantic conventions
-        let mut attributes = vec![
-            KeyValue::new(semconv::HTTP_REQUEST_METHOD, pending.method.clone()),
-            KeyValue::new(semconv::URL_PATH, pending.path.clone()),
-            KeyValue::new(semconv::HTTP_RESPONSE_STATUS_CODE, i64::from(view.status)),
-            KeyValue::new(semconv::CLIENT_ADDRESS, pending.remote_addr.clone()),
-            KeyValue::new("oxphp.request_id", view.request_id.to_string()),
-            KeyValue::new(semconv::SERVER_ADDRESS, self.server_address.clone()),
-        ];
+            let trace_id = match TraceId::from_hex(&trace_id_owned) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let span_id = match SpanId::from_hex(&span_id_owned) {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let parent_span_id = parent_span_id_owned
+                .as_deref()
+                .and_then(|s| SpanId::from_hex(s).ok());
 
-        // Body sizes (semconv_experimental attrs — use string keys)
-        if view.request_body_size > 0 {
-            attributes.push(KeyValue::new(
-                "http.request.body.size",
-                view.request_body_size as i64,
-            ));
-        }
-        if view.response_size > 0 {
-            attributes.push(KeyValue::new(
-                "http.response.body.size",
-                view.response_size as i64,
-            ));
-        }
+            let start_time = std::time::UNIX_EPOCH + std::time::Duration::from_micros(start_us);
+            let end_time = std::time::SystemTime::now();
 
-        // OxPHP-specific timing from metadata
-        if let Some(queue_wait) = view.metadata("queue_wait_us") {
-            if let Ok(us) = queue_wait.parse::<i64>() {
+            let mut attributes = vec![
+                KeyValue::new(semconv::HTTP_REQUEST_METHOD, method.clone()),
+                KeyValue::new(semconv::URL_PATH, path.clone()),
+                KeyValue::new(semconv::HTTP_RESPONSE_STATUS_CODE, i64::from(status_code)),
+                KeyValue::new(semconv::CLIENT_ADDRESS, remote_addr),
+                KeyValue::new("oxphp.request_id", request_id),
+                KeyValue::new(semconv::SERVER_ADDRESS, server_address),
+            ];
+            if request_body_size > 0 {
+                attributes.push(KeyValue::new(
+                    "http.request.body.size",
+                    request_body_size as i64,
+                ));
+            }
+            if response_size > 0 {
+                attributes.push(KeyValue::new(
+                    "http.response.body.size",
+                    response_size as i64,
+                ));
+            }
+            if let Some(us) = queue_wait_us {
                 attributes.push(KeyValue::new("oxphp.queue_wait_us", us));
             }
-        }
-        if let Some(php_exec) = view.metadata("php_exec_us") {
-            if let Ok(us) = php_exec.parse::<i64>() {
+            if let Some(us) = php_exec_us {
                 attributes.push(KeyValue::new("oxphp.php_exec_us", us));
             }
-        }
 
-        // Determine span status from HTTP status code
-        let status = if view.status >= 500 {
-            Status::error(format!("HTTP {}", view.status))
-        } else {
-            Status::Ok
-        };
+            let status = if status_code >= 500 {
+                Status::error(format!("HTTP {status_code}"))
+            } else {
+                Status::Ok
+            };
 
-        // Build and export the span
-        let tracer = provider.tracer("oxphp");
-        let span_name = format!("{} {}", pending.method, pending.path);
+            let span_name = format!("{method} {path}");
+            let mut builder = SpanBuilder::from_name(span_name)
+                .with_trace_id(trace_id)
+                .with_span_id(span_id)
+                .with_kind(SpanKind::Server)
+                .with_start_time(start_time)
+                .with_end_time(end_time)
+                .with_attributes(attributes)
+                .with_status(status);
 
-        let mut builder = SpanBuilder::from_name(span_name)
-            .with_trace_id(trace_id)
-            .with_span_id(span_id)
-            .with_kind(SpanKind::Server)
-            .with_start_time(start_time)
-            .with_end_time(end_time)
-            .with_attributes(attributes)
-            .with_status(status);
-
-        // Set parent context if we have a parent span ID
-        if let Some(parent_sid) = parent_span_id {
-            use opentelemetry::trace::{SpanContext, TraceContextExt};
-            let parent_ctx = SpanContext::new(
-                trace_id,
-                parent_sid,
-                trace_flags,
-                true, // is_remote
-                Default::default(),
-            );
-            let parent_otel_ctx =
-                opentelemetry::Context::new().with_remote_span_context(parent_ctx);
-            let span = builder.start_with_context(&tracer, &parent_otel_ctx);
-            // Span is already ended (end_time set), drop triggers export
-            drop(span);
-        } else {
-            // Set sampling result to honour trace_flags without a parent
-            if trace_flags.is_sampled() {
-                builder.sampling_result = Some(opentelemetry::trace::SamplingResult {
-                    decision: opentelemetry::trace::SamplingDecision::RecordAndSample,
-                    attributes: Vec::new(),
-                    trace_state: Default::default(),
-                });
+            if let Some(parent_sid) = parent_span_id {
+                use opentelemetry::trace::{SpanContext, TraceContextExt};
+                let parent_ctx =
+                    SpanContext::new(trace_id, parent_sid, trace_flags, true, Default::default());
+                let parent_otel_ctx =
+                    opentelemetry::Context::new().with_remote_span_context(parent_ctx);
+                drop(builder.start_with_context(&tracer, &parent_otel_ctx));
+            } else {
+                if trace_flags.is_sampled() {
+                    builder.sampling_result = Some(opentelemetry::trace::SamplingResult {
+                        decision: opentelemetry::trace::SamplingDecision::RecordAndSample,
+                        attributes: Vec::new(),
+                        trace_state: Default::default(),
+                    });
+                }
+                drop(builder.start(&tracer));
             }
-            let span = builder.start(&tracer);
-            drop(span);
-        }
+        });
     }
 
     fn priority(&self) -> Priority {
@@ -511,6 +502,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 mod tests {
     use super::*;
     use crate::events::EventDispatcher;
+    use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
 
@@ -524,6 +516,7 @@ mod tests {
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
 
         let mut ctx = PluginContext::new(
             "otel".into(),
@@ -534,6 +527,7 @@ mod tests {
             &mut metrics_collectors,
             &mut internal_routes,
             &mut native_php_functions,
+            &mut decorators,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
@@ -563,9 +557,7 @@ mod tests {
 
     #[test]
     fn test_otel_request_handler_no_metadata() {
-        let handler = OtelRequestHandler {
-            pending: Arc::new(DashMap::new()),
-        };
+        let handler = OtelRequestHandler;
         let method = http::Method::GET;
         let uri: http::Uri = "/test".parse().unwrap();
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
@@ -576,16 +568,14 @@ mod tests {
         let mut actions = PluginRequestActions::new();
         handler.handle(&view, &mut actions);
 
-        // No trace metadata => nothing stored, no request_id override
-        assert!(handler.pending.is_empty());
+        // No trace metadata => no start_us metadata, no request_id override
+        assert!(actions.metadata.is_empty());
         assert!(actions.request_id_override.is_none());
     }
 
     #[test]
     fn test_otel_request_handler_with_trace_metadata() {
-        let handler = OtelRequestHandler {
-            pending: Arc::new(DashMap::new()),
-        };
+        let handler = OtelRequestHandler;
         let method = http::Method::GET;
         let uri: http::Uri = "/api/users".parse().unwrap();
         let addr: std::net::SocketAddr = "10.0.0.1:9999".parse().unwrap();
@@ -604,11 +594,10 @@ mod tests {
         let mut actions = PluginRequestActions::new();
         handler.handle(&view, &mut actions);
 
-        // Should have stored a pending span
-        assert_eq!(handler.pending.len(), 1);
-        assert!(handler
-            .pending
-            .contains_key("4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7"));
+        // Should have stored start_us in metadata
+        let start_meta = actions.metadata.iter().find(|(k, _)| k == "otel.start_us");
+        assert!(start_meta.is_some());
+        assert!(start_meta.unwrap().1.parse::<u64>().is_ok());
 
         // Should have overridden request_id
         assert_eq!(
@@ -619,17 +608,14 @@ mod tests {
 
     #[test]
     fn test_otel_request_handler_priority() {
-        let handler = OtelRequestHandler {
-            pending: Arc::new(DashMap::new()),
-        };
+        let handler = OtelRequestHandler;
         assert_eq!(handler.priority(), -80);
     }
 
     #[test]
     fn test_otel_complete_handler_priority() {
         let handler = OtelCompleteHandler {
-            pending: Arc::new(DashMap::new()),
-            provider: OnceLock::new(),
+            provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
         };
         assert_eq!(handler.priority(), -80);
@@ -638,8 +624,7 @@ mod tests {
     #[test]
     fn test_otel_complete_handler_no_metadata() {
         let handler = OtelCompleteHandler {
-            pending: Arc::new(DashMap::new()),
-            provider: OnceLock::new(),
+            provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
         };
         let view = PluginCompleteView::new(
@@ -657,10 +642,9 @@ mod tests {
     }
 
     #[test]
-    fn test_otel_complete_handler_no_pending_span() {
+    fn test_otel_complete_handler_no_start_us() {
         let handler = OtelCompleteHandler {
-            pending: Arc::new(DashMap::new()),
-            provider: OnceLock::new(),
+            provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
         };
         let metadata = vec![
@@ -681,7 +665,7 @@ mod tests {
             1024,
             &metadata,
         );
-        handler.handle(&view); // no pending span, no provider => should not panic
+        handler.handle(&view); // no start_us, no provider => should not panic
     }
 
     #[test]
@@ -867,8 +851,7 @@ mod tests {
     #[test]
     fn test_complete_handler_has_server_address() {
         let handler = OtelCompleteHandler {
-            pending: Arc::new(DashMap::new()),
-            provider: OnceLock::new(),
+            provider: Arc::new(OnceLock::new()),
             server_address: "0.0.0.0:8080".to_string(),
         };
         assert_eq!(handler.server_address, "0.0.0.0:8080");
