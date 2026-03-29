@@ -15,6 +15,7 @@ OxPHP 完全通过环境变量进行配置。无需管理任何配置文件—�
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件和 PHP 脚本的根目录 |
 | `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数 |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | 对 `/script.php/extra/path` 形式的 URI 启用 PATH_INFO 拆分。详见[路由 — PATH_INFO 拆分](../features/routing.md#path_info-拆分) |
 | `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N` = 固定线程数，`0` = 自动检测 |
 
 ## PHP 工作进程
@@ -203,6 +204,7 @@ curl -s http://localhost:9090/config | jq .
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": false,
+  "split_path_info": false,
   "plugins": {}
 }
 ```

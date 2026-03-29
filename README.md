@@ -223,6 +223,7 @@ All settings are via environment variables — no config files required.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | PATH_INFO splitting for `/script.php/extra/path` URIs (legacy CGI compat) |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 
 ### OpenTelemetry (`plugin-otel` feature)

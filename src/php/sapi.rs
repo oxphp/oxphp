@@ -435,11 +435,20 @@ pub fn set_request_data(req: &ScriptRequest) {
             };
             push_server_var(vars, "SERVER_PROTOCOL", protocol);
 
-            // SCRIPT_NAME: URI path without query string
-            let path = req.uri.path();
-            push_server_var(vars, "SCRIPT_NAME", path);
-            push_server_var(vars, "PHP_SELF", path);
-            push_server_var(vars, "DOCUMENT_URI", path);
+            // SCRIPT_NAME, PHP_SELF, PATH_INFO
+            let uri_path = req.uri.path();
+            if let Some(ref path_info) = req.path_info {
+                // With PATH_INFO splitting: SCRIPT_NAME = URI minus PATH_INFO suffix
+                let script_name = &uri_path[..uri_path.len() - path_info.len()];
+                push_server_var(vars, "SCRIPT_NAME", script_name);
+                push_server_var(vars, "PHP_SELF", uri_path);
+                push_server_var(vars, "DOCUMENT_URI", script_name);
+                push_server_var(vars, "PATH_INFO", path_info);
+            } else {
+                push_server_var(vars, "SCRIPT_NAME", uri_path);
+                push_server_var(vars, "PHP_SELF", uri_path);
+                push_server_var(vars, "DOCUMENT_URI", uri_path);
+            }
 
             // SCRIPT_FILENAME: absolute filesystem path to the script
             push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());

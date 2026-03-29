@@ -15,6 +15,7 @@ OxPHP настраивается исключительно через пере�
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневая директория для обслуживания файлов и PHP-скриптов |
 | `INDEX_FILE` | *(не задано)* | Режим маршрутизации: не задано = традиционный, `index.php` = Framework, `index.html` = SPA |
 | `MAX_CONNECTIONS` | `10000` | Максимальное количество одновременных TCP-соединений |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | Разбиение PATH_INFO для URI вида `/script.php/extra/path`. См. [Маршрутизация — PATH_INFO](../features/routing.md#разбиение-path_info) |
 | `TOKIO_WORKERS` | CPU / 2 (мин. 1) | Потоки асинхронного ввода-вывода. `1` = однопоточный, `N` = фиксированное число потоков, `0` = авто |
 
 ## PHP-воркеры
@@ -203,6 +204,7 @@ curl -s http://localhost:9090/config | jq .
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": false,
+  "split_path_info": false,
   "plugins": {}
 }
 ```

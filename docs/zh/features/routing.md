@@ -22,6 +22,7 @@ OxPHP 使用四种模式之一处理传入的 HTTP 请求，通过单个环境�
 |------|--------|------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 用于提供文件和 PHP 脚本的根目录 |
 | `INDEX_FILE` | *(未设置)* | 决定路由模式。未设置 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | 将 `/script.php/path` 形式的 URI 拆分为脚本 + `PATH_INFO` |
 
 ## 传统模式
 
@@ -66,6 +67,37 @@ OxPHP 使用四种模式之一处理传入的 HTTP 请求，通过单个环境�
 Worker 模式与 `INDEX_FILE` 兼容。同时设置 `WORKER_FILE` 和 `INDEX_FILE=index.php` 可将 Worker 模式路由与框架模式静态文件处理相结合——静态文件直接提供，其他所有内容都发送到 Worker。
 
 详细配置请参见 [Worker 模式](worker-mode.md)。
+
+## PATH_INFO 拆分
+
+一些旧版 PHP 应用使用 `PATH_INFO` 进行路由——在 `.php` 脚本名称后附加额外的路径段（例如 `/api.php/users/42`）。默认情况下，OxPHP 将整个 URI 视为单一文件系统路径，因此这些请求会返回 404。
+
+设置 `SPLIT_PATH_INFO_ENABLED=true` 以启用路径拆分：
+
+```bash
+SPLIT_PATH_INFO_ENABLED=true
+```
+
+启用后，OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.php` 段。其后的所有内容成为 `PATH_INFO`：
+
+```
+/app.php/user/42
+├── 脚本: DOCUMENT_ROOT/app.php
+└── PATH_INFO: /user/42
+```
+
+这会正确填充 `$_SERVER` 以支持 CGI 风格的路由：
+
+| 变量 | 值 |
+|---|---|
+| `SCRIPT_NAME` | `/app.php` |
+| `SCRIPT_FILENAME` | `/var/www/html/public/app.php` |
+| `PATH_INFO` | `/user/42` |
+| `PHP_SELF` | `/app.php/user/42` |
+
+如果在路径中未找到 `.php` 文件，路由将继续按正常解析链处理（Worker 回退、`INDEX_FILE` 回退或 404）。
+
+> **适用场景：** Drupal、MediaWiki、基于 `$_SERVER['PATH_INFO']` 构建的旧版 REST API，或任何此前通过 nginx `fastcgi_split_path_info` 配置的应用。
 
 ## 路径安全
 

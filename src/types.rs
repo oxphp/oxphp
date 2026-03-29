@@ -66,6 +66,9 @@ pub struct ScriptRequest {
     pub is_tls: bool,
     /// HTTP version of the request (e.g., HTTP/1.0, HTTP/1.1, HTTP/2).
     pub version: Version,
+    /// Extra path after the `.php` script (e.g. `/user/42` for `/app.php/user/42`).
+    /// Set when `SPLIT_PATH_INFO_ENABLED=true` and the URI contains a `.php` prefix.
+    pub path_info: Option<String>,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.

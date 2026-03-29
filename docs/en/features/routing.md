@@ -22,6 +22,7 @@ When a request arrives, OxPHP processes the URL path through a security pipeline
 |----------|---------|-------------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `INDEX_FILE` | *(unset)* | Determines routing mode. Unset = traditional, `index.php` = framework, `index.html` = SPA |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | Split URIs like `/script.php/path` into script + `PATH_INFO` |
 
 ## Traditional Mode
 
@@ -66,6 +67,37 @@ Worker mode routing activates automatically when `WORKER_FILE` is set. All incom
 Worker mode is compatible with `INDEX_FILE`. Setting both `WORKER_FILE` and `INDEX_FILE=index.php` combines worker mode routing with framework mode static file handling — static files are served directly, and everything else goes to the worker.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
+
+## PATH_INFO Splitting
+
+Some legacy PHP applications use `PATH_INFO` for routing — placing extra path segments after a `.php` script name (e.g., `/api.php/users/42`). By default, OxPHP treats the entire URI as a single filesystem path, so these requests return 404.
+
+Enable `SPLIT_PATH_INFO_ENABLED=true` to activate path splitting:
+
+```bash
+SPLIT_PATH_INFO_ENABLED=true
+```
+
+When enabled, OxPHP scans the URI left-to-right for the first `.php` segment that maps to an existing file on disk. Everything after it becomes `PATH_INFO`:
+
+```
+/app.php/user/42
+├── Script: DOCUMENT_ROOT/app.php
+└── PATH_INFO: /user/42
+```
+
+This populates `$_SERVER` correctly for CGI-style routing:
+
+| Variable | Value |
+|---|---|
+| `SCRIPT_NAME` | `/app.php` |
+| `SCRIPT_FILENAME` | `/var/www/html/public/app.php` |
+| `PATH_INFO` | `/user/42` |
+| `PHP_SELF` | `/app.php/user/42` |
+
+If no `.php` file is found along the path, routing falls through to the normal resolution chain (worker fallback, `INDEX_FILE` fallback, or 404).
+
+> **When to use:** Drupal, MediaWiki, legacy REST APIs built with `$_SERVER['PATH_INFO']`, or any application that was previously configured with nginx `fastcgi_split_path_info`.
 
 ## Path Security
 

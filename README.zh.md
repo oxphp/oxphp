@@ -223,6 +223,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | 对 `/script.php/extra/path` 形式的 URI 启用 PATH_INFO 拆分（旧版 CGI 兼容） |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
 
 ### OpenTelemetry（`plugin-otel` 特性）

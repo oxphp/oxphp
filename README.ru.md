@@ -223,6 +223,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 | `WORKER_MAX_MEMORY_MIB` | `0` (без ограничений) | Макс. память (МиБ) на воркер до рециклизации |
 | `ASYNC_WORKERS` | `0` (отключено) | Выделенные потоки асинхронных воркеров для `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Ограниченная очередь для асинхронных задач; отклоняются при заполнении |
+| `SPLIT_PATH_INFO_ENABLED` | `false` | Разбиение PATH_INFO для URI вида `/script.php/extra/path` (совместимость с legacy CGI) |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 
 ### OpenTelemetry (feature `plugin-otel`)
