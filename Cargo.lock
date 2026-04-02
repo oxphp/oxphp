@@ -1130,6 +1130,7 @@ name = "oxphp"
 version = "0.2.0"
 dependencies = [
  "base64",
+ "bitflags",
  "brotli",
  "bytes",
  "crossbeam-channel",

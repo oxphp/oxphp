@@ -4,6 +4,7 @@ pub mod handler;
 pub mod macros;
 pub mod manager;
 pub mod php;
+pub mod types;
 pub mod wrappers;
 
 pub use context::{PluginContext, PluginDecoratorDef};
@@ -15,6 +16,7 @@ pub use handler::{
 };
 pub use manager::PluginManager;
 pub use php::{PhpError, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
+pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
 use std::any::Any;
 

@@ -63,6 +63,9 @@ libc = "0.2"
 # Fast allocator
 mimalloc = "0.1"
 
+# Bitfield flags
+bitflags = "2"
+
 # Cryptographic random bytes (trace ID / span ID generation)
 getrandom = "0.2"
 
