@@ -2922,11 +2922,9 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 }
             }
 
-            zend_class_entry tmp_ce;
-            INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
             /* backing: 0=unit, 4=IS_LONG, 6=IS_STRING */
             zend_class_entry *enum_ce = zend_register_internal_enum(
-                &tmp_ce, backing == 0 ? IS_UNDEF : (zend_uchar)backing, NULL);
+                fqn, backing == 0 ? IS_UNDEF : (zend_uchar)backing, methods);
 
             /* Implement interfaces */
             int icount = oxphp_bridge_get_enum_interface_count(i);
