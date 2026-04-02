@@ -211,6 +211,10 @@ pub unsafe fn oxphp_zval_size() -> usize {
     16
 }
 
+pub unsafe fn oxphp_op_array_size() -> usize {
+    256 // approximate; only used in non-php builds for compilation
+}
+
 // ── Async dispatch function pointer registration ──
 
 pub unsafe fn oxphp_bridge_set_async_dispatch(

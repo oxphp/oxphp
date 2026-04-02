@@ -11,13 +11,19 @@ use std::sync::Arc;
 /// A task dispatched from a PHP worker thread to the async worker pool.
 ///
 /// Contains all the data needed to execute a PHP closure on a different thread:
-/// the OPcache-resident op_array pointer, frozen static variables, an optional
-/// borrowed `$this` reference, and portable-serialized argument data.
+/// a thread-local copy of the zend_op_array struct, portable-serialized static
+/// variables, an optional borrowed `$this` reference, and portable-serialized
+/// argument data.
 pub struct AsyncTask {
     /// Unique identifier for the promise this task belongs to.
     pub promise_id: u64,
-    /// Pointer to `zend_op_array` in OPcache shared memory (read-only, safe to share).
-    pub op_array: *const c_void,
+    /// System-malloc'd copy of the `zend_op_array` struct bytes.
+    /// Copied on the dispatching thread to avoid cross-thread reads.
+    /// The internal pointers (opcodes, literals) reference OPcache SHM or
+    /// stable compiled-script memory — safe to dereference from any thread.
+    pub op_array_buf: *mut u8,
+    /// Size of the op_array_buf (sizeof(zend_op_array)).
+    pub op_array_buf_len: usize,
     /// Portable-serialized static variables buffer (system malloc'd, thread-safe).
     /// Null if the closure has no use-vars.
     pub serialized_static_vars: *mut u8,
@@ -38,10 +44,11 @@ pub struct AsyncTask {
     pub result_tx: tokio::sync::oneshot::Sender<AsyncResult>,
 }
 
-// SAFETY: All raw pointers in AsyncTask either point to OPcache shared memory
-// (immutable, process-wide), or to a system-malloc'd serialization buffer
-// exclusively owned by this task. The Arc<AtomicBool> is inherently thread-safe.
-// The oneshot::Sender is Send. No pointer is aliased across threads.
+// SAFETY: op_array_buf is a system-malloc'd buffer exclusively owned by this task,
+// containing a snapshot of the zend_op_array struct. Its internal pointers reference
+// OPcache SHM or stable compiled-script memory (safe from any thread).
+// Serialization buffers are system-malloc'd and exclusively owned.
+// The Arc<AtomicBool> is inherently thread-safe. The oneshot::Sender is Send.
 unsafe impl Send for AsyncTask {}
 
 /// The result of executing an async task, sent back to the originating PHP worker.
@@ -161,7 +168,8 @@ mod tests {
 
         let task = AsyncTask {
             promise_id: 42,
-            op_array: ptr::null(),
+            op_array_buf: ptr::null_mut(),
+            op_array_buf_len: 0,
             serialized_static_vars: ptr::null_mut(),
             serialized_static_vars_len: 0,
             this_ptr: ptr::null_mut(),
@@ -173,7 +181,7 @@ mod tests {
         };
 
         assert_eq!(task.promise_id, 42);
-        assert!(task.op_array.is_null());
+        assert!(task.op_array_buf.is_null());
         assert!(task.serialized_static_vars.is_null());
         assert!(task.this_ptr.is_null());
         assert_eq!(task.argc, 3);

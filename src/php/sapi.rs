@@ -1970,10 +1970,21 @@ pub unsafe extern "C" fn async_dispatch_callback(
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // 7. Build and send task
+    // 7. Copy op_array struct bytes into a system-malloc'd buffer.
+    //    This eliminates cross-thread reads — the async worker uses this local copy
+    //    instead of dereferencing the closure object on the PHP worker's emalloc heap.
+    let op_array_size = ffi::oxphp_op_array_size();
+    let op_array_buf = libc::malloc(op_array_size) as *mut u8;
+    if op_array_buf.is_null() {
+        return -1;
+    }
+    std::ptr::copy_nonoverlapping(op_array as *const u8, op_array_buf, op_array_size);
+
+    // 8. Build and send task
     let task = AsyncTask {
         promise_id,
-        op_array,
+        op_array_buf,
+        op_array_buf_len: op_array_size,
         serialized_static_vars: sv_buf,
         serialized_static_vars_len: sv_len,
         this_ptr,
@@ -1993,8 +2004,12 @@ pub unsafe extern "C" fn async_dispatch_callback(
             }
             promise_id as i64
         }
-        Err(crossbeam_channel::TrySendError::Full(_))
-        | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+        Err(crossbeam_channel::TrySendError::Full(task))
+        | Err(crossbeam_channel::TrySendError::Disconnected(task)) => {
+            // Free the op_array copy (system malloc'd)
+            if !task.op_array_buf.is_null() {
+                libc::free(task.op_array_buf as *mut c_void);
+            }
             // Rollback: cleanup borrowed (restore original zval bytes)
             for borrowed in &cleanup.borrowed {
                 let zval_size = ffi::oxphp_zval_size();
@@ -2423,6 +2438,10 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
                     borrowed.proxy_zval_ptr as *mut u8,
                     copy_len,
                 );
+            }
+            // Release the closure object reference (prevents leak)
+            if !cleanup.closure_zval.is_null() {
+                ffi::oxphp_closure_release(cleanup.closure_zval);
             }
         }
     }

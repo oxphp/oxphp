@@ -379,6 +379,9 @@ void oxphp_closure_release(void *obj_ptr);
 /** Return sizeof(zval) for the running PHP build. */
 size_t oxphp_zval_size(void);
 
+/** Return sizeof(zend_op_array) for the running PHP build. */
+size_t oxphp_op_array_size(void);
+
 /** Trigger zend_bailout() — safely abort PHP execution from SAPI callbacks. */
 void oxphp_bridge_bailout(void);
 
