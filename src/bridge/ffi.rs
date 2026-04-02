@@ -277,4 +277,48 @@ extern "C" {
         exc_message: *mut *mut c_char,
         exc_trace: *mut *mut c_char,
     ) -> c_int;
+
+    // ─── Plugin Class Registry ──────────────────────────────────
+    pub fn oxphp_bridge_register_class(fqn: *const c_char, parent_fqn: *const c_char, flags: u32) -> c_int;
+    pub fn oxphp_bridge_class_implements(class_handle: c_int, interface_fqn: *const c_char);
+    pub fn oxphp_bridge_class_add_property(class_handle: c_int, name: *const c_char, visibility: u32, modifiers: u32, type_info: c_int, default_value: *const c_char);
+    pub fn oxphp_bridge_class_add_constant(class_handle: c_int, name: *const c_char, visibility: u32, value: *const c_char);
+    pub fn oxphp_bridge_class_add_method(class_handle: c_int, name: *const c_char, visibility: u32, flags: u32, required_params: c_int, total_params: c_int, is_variadic: c_int);
+    pub fn oxphp_bridge_class_set_magic(class_handle: c_int, magic_type: c_int, has_handler: c_int);
+    pub fn oxphp_bridge_class_enable_custom_object(class_handle: c_int);
+
+    // ─── Plugin Interface Registry ──────────────────────────────
+    pub fn oxphp_bridge_register_interface(fqn: *const c_char, parent_fqn: *const c_char) -> c_int;
+    pub fn oxphp_bridge_interface_add_method(iface_handle: c_int, name: *const c_char, flags: u32, required_params: c_int, total_params: c_int, is_variadic: c_int);
+    pub fn oxphp_bridge_interface_add_constant(iface_handle: c_int, name: *const c_char, visibility: u32, value: *const c_char);
+
+    // ─── Plugin Enum Registry ───────────────────────────────────
+    pub fn oxphp_bridge_register_enum(fqn: *const c_char, backing_type: c_int) -> c_int;
+    pub fn oxphp_bridge_enum_implements(enum_handle: c_int, interface_fqn: *const c_char);
+    pub fn oxphp_bridge_enum_add_case(enum_handle: c_int, name: *const c_char, value: *const c_char);
+    pub fn oxphp_bridge_enum_add_method(enum_handle: c_int, name: *const c_char, flags: u32, required_params: c_int, total_params: c_int, is_variadic: c_int);
+
+    // ─── Plugin Attribute Registry ──────────────────────────────
+    pub fn oxphp_bridge_register_attribute(fqn: *const c_char, targets: u32, is_repeatable: c_int) -> c_int;
+    pub fn oxphp_bridge_attribute_add_param(attr_handle: c_int, name: *const c_char, type_info: c_int, is_required: c_int, default_value: *const c_char);
+    pub fn oxphp_bridge_attribute_add_property(attr_handle: c_int, name: *const c_char, type_info: c_int, visibility: u32);
+
+    // ─── Plugin Function Registry (new builder-based) ───────────
+    pub fn oxphp_bridge_register_plugin_function(fqn: *const c_char, required_params: c_int, total_params: c_int, is_variadic: c_int) -> c_int;
+
+    // ─── Method Dispatch ────────────────────────────────────────
+    pub fn oxphp_bridge_set_method_dispatch(dispatch: Option<unsafe extern "C" fn(class_index: u32, method_name: *const c_char, args: *mut c_void, argc: u32, retval: *mut c_void, rust_data: *mut c_void) -> c_int>);
+
+    // ─── Storage Callbacks ──────────────────────────────────────
+    pub fn oxphp_bridge_set_storage_callbacks(
+        create_fn: Option<unsafe extern "C" fn(class_index: u32) -> *mut c_void>,
+        drop_fn: Option<unsafe extern "C" fn(class_index: u32, rust_data: *mut c_void)>,
+        clone_fn: Option<unsafe extern "C" fn(class_index: u32, rust_data: *mut c_void) -> *mut c_void>,
+    );
+
+    // ─── Exception Bridge ───────────────────────────────────────
+    pub fn oxphp_throw_exception(class_fqn: *const c_char, message: *const c_char, code: i64);
+    pub fn oxphp_exception_pending() -> c_int;
+    pub fn oxphp_exception_get(class_out: *mut *const c_char, message_out: *mut *const c_char, code_out: *mut i64);
+    pub fn oxphp_exception_clear();
 }

@@ -5,6 +5,7 @@ pub mod ffi;
 pub mod mock;
 
 pub mod call;
+pub mod storage;
 pub mod types;
 
 // Re-export the FFI module as `ffi` regardless of feature flag.
