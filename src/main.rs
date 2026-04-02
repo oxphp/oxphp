@@ -72,6 +72,17 @@ fn main() -> Result<(), types::BoxError> {
         if !native_fns.is_empty() {
             oxphp::php::sapi::register_native_plugin_functions(native_fns);
         }
+
+        // Register plugin PHP definitions (classes, interfaces, enums, attributes, functions)
+        let php_defs = plugin_manager.take_php_definitions();
+        if !php_defs.classes.is_empty()
+            || !php_defs.interfaces.is_empty()
+            || !php_defs.enums.is_empty()
+            || !php_defs.attributes.is_empty()
+            || !php_defs.functions.is_empty()
+        {
+            oxphp::php::sapi::register_php_definitions(php_defs);
+        }
     }
 
     #[cfg(feature = "php")]
