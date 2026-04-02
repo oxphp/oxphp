@@ -1359,7 +1359,7 @@ unsafe extern "C" fn native_dispatch_callback(
 
     // Catch panics — unwinding through extern "C" is an abort on Rust 2021.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut call = crate::bridge::call::NativeCall::new(args, argc, retval, None);
+        let mut call = crate::bridge::call::NativeCall::new(args, argc, retval, None, None);
         handler.handle(&mut call)
     }));
 

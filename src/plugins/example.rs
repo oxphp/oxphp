@@ -750,6 +750,7 @@ mod tests {
                 1,
                 retval.as_mut_ptr() as *mut std::os::raw::c_void,
                 None,
+                None,
             )
         };
 

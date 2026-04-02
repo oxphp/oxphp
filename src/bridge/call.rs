@@ -20,6 +20,7 @@ pub struct NativeCall<'a> {
     argc: u32,
     retval: *mut c_void,
     object_id: Option<u64>,
+    rust_data: Option<*mut c_void>,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -28,18 +29,22 @@ impl<'a> NativeCall<'a> {
     ///
     /// # Safety
     /// `args` and `retval` must be valid zval pointers for the duration of `'a`.
+    /// `rust_data`, if `Some`, must point to a valid object of the expected type
+    /// for the duration of `'a`.
     #[allow(dead_code)]
     pub(crate) unsafe fn new(
         args: *mut c_void,
         argc: u32,
         retval: *mut c_void,
         object_id: Option<u64>,
+        rust_data: Option<*mut c_void>,
     ) -> Self {
         Self {
             args,
             argc,
             retval,
             object_id,
+            rust_data,
             _marker: PhantomData,
         }
     }
@@ -54,6 +59,32 @@ impl<'a> NativeCall<'a> {
     /// Object ID (for class methods). None for free functions.
     pub fn object_id(&self) -> Option<u64> {
         self.object_id
+    }
+
+    /// Get typed immutable reference to Rust storage for current object.
+    pub fn storage<T: std::any::Any + Send + Sync>(&self) -> Result<&T, PhpError> {
+        let ptr = self.rust_data.ok_or_else(|| {
+            PhpError::Custom(
+                "storage() called outside method context or no storage".into(),
+            )
+        })?;
+        if ptr.is_null() {
+            return Err(PhpError::Custom("object storage not initialized".into()));
+        }
+        Ok(unsafe { &*(ptr as *const T) })
+    }
+
+    /// Get typed mutable reference to Rust storage for current object.
+    pub fn storage_mut<T: std::any::Any + Send + Sync>(&mut self) -> Result<&mut T, PhpError> {
+        let ptr = self.rust_data.ok_or_else(|| {
+            PhpError::Custom(
+                "storage_mut() called outside method context or no storage".into(),
+            )
+        })?;
+        if ptr.is_null() {
+            return Err(PhpError::Custom("object storage not initialized".into()));
+        }
+        Ok(unsafe { &mut *(ptr as *mut T) })
     }
 
     // ── Argument reading ──
@@ -584,6 +615,7 @@ mod tests {
                 2,
                 &mut retval as *mut ZvalSlot as *mut c_void,
                 None,
+                None,
             )
         };
         assert!(call.check_idx(0).is_ok());
@@ -602,6 +634,7 @@ mod tests {
                 0,
                 &mut retval as *mut ZvalSlot as *mut c_void,
                 Some(42),
+                None,
             )
         };
         assert_eq!(call.object_id(), Some(42));
@@ -621,5 +654,42 @@ mod tests {
         // Verify val() works — ptr is computed from field address, not cached
         let _v = result.val();
         drop(result); // Should call zval_dtor (no-op in mock)
+    }
+
+    #[test]
+    fn test_storage_returns_error_for_free_function() {
+        let call = unsafe {
+            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), None, None)
+        };
+        let result = call.storage::<u32>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_storage_with_rust_data() {
+        let value: u32 = 42;
+        let ptr = Box::into_raw(Box::new(value)) as *mut std::ffi::c_void;
+        let call = unsafe {
+            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), Some(1), Some(ptr))
+        };
+        let result = call.storage::<u32>();
+        assert!(result.is_ok());
+        assert_eq!(*result.unwrap(), 42);
+        unsafe { drop(Box::from_raw(ptr as *mut u32)); }
+    }
+
+    #[test]
+    fn test_storage_mut_with_rust_data() {
+        let value: u32 = 42;
+        let ptr = Box::into_raw(Box::new(value)) as *mut std::ffi::c_void;
+        let mut call = unsafe {
+            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), Some(1), Some(ptr))
+        };
+        {
+            let s = call.storage_mut::<u32>().unwrap();
+            *s = 100;
+        }
+        assert_eq!(*call.storage::<u32>().unwrap(), 100);
+        unsafe { drop(Box::from_raw(ptr as *mut u32)); }
     }
 }
