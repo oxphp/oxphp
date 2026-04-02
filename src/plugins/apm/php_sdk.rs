@@ -1,45 +1,38 @@
-//! PHP SDK functions for manual tracing (`oxphp_trace*`).
+//! PHP SDK functions for APM tracing (`oxphp_apm_*`).
 //!
 //! All 10 functions are registered regardless of whether APM is enabled.
 //! When disabled, they are safe no-ops so PHP code never errors.
 
 use crate::bridge::call::NativeCall;
-use crate::plugin::php::{PhpParam, PhpType};
+use crate::plugin::types::{PhpType, PhpValue};
 use crate::plugin::PluginContext;
 
 use super::spans::{now_us, SpanEvent, SPAN_STACK};
 
-/// Register all `oxphp_trace*` PHP functions.
+/// Register all `oxphp_apm_*` PHP functions.
 ///
 /// The `enabled` flag controls runtime behavior: when `false`, functions
 /// return sentinel values (0 for IDs, "" for strings) without touching
 /// the span stack.
-pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
-    // 1. oxphp_trace(name, callback, ?attributes)
-    ctx.register_function_as(
-        "oxphp_trace",
-        vec![
-            PhpParam::required("name", PhpType::String),
-            PhpParam::required("callback", PhpType::Mixed),
-            PhpParam::optional("attributes", PhpType::Array, "null"),
-        ],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+pub fn register_functions(ctx: &mut PluginContext, enabled: bool) -> Result<(), crate::plugin::PluginError> {
+    // 1. oxphp_apm_trace(name, callback, ?attributes)
+    ctx.function("oxphp_apm_trace")
+        .param("name", PhpType::String)
+        .param("callback", PhpType::Mixed)
+        .optional_param("attributes", PhpType::Array, PhpValue::Null)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             // Callback invocation will be wired later; for now no-op.
             let _ = (call, enabled);
             Ok(())
-        },
-    );
+        })?;
 
-    // 2. oxphp_trace_start(name, ?attributes)
-    ctx.register_function_as(
-        "oxphp_trace_start",
-        vec![
-            PhpParam::required("name", PhpType::String),
-            PhpParam::optional("attributes", PhpType::Array, "null"),
-        ],
-        PhpType::Int,
-        move |call: &mut NativeCall| {
+    // 2. oxphp_apm_start(name, ?attributes)
+    ctx.function("oxphp_apm_start")
+        .param("name", PhpType::String)
+        .optional_param("attributes", PhpType::Array, PhpValue::Null)
+        .returns(PhpType::Int)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 call.ret_long(0);
                 return Ok(());
@@ -71,15 +64,13 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
             let local_id = SPAN_STACK.with(|stack| stack.borrow_mut().push(name, attrs));
             call.ret_long(local_id as i64);
             Ok(())
-        },
-    );
+        })?;
 
-    // 3. oxphp_trace_end(span_id)
-    ctx.register_function_as(
-        "oxphp_trace_end",
-        vec![PhpParam::required("span_id", PhpType::Int)],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+    // 3. oxphp_apm_end(span_id)
+    ctx.function("oxphp_apm_end")
+        .param("span_id", PhpType::Int)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 return Ok(());
             }
@@ -93,19 +84,15 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 stack.borrow_mut().pop(span_id);
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 4. oxphp_trace_attribute(key, value, ?span_id)
-    ctx.register_function_as(
-        "oxphp_trace_attribute",
-        vec![
-            PhpParam::required("key", PhpType::String),
-            PhpParam::required("value", PhpType::Mixed),
-            PhpParam::optional("span_id", PhpType::Int, "null"),
-        ],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+    // 4. oxphp_apm_attribute(key, value, ?span_id)
+    ctx.function("oxphp_apm_attribute")
+        .param("key", PhpType::String)
+        .param("value", PhpType::Mixed)
+        .optional_param("span_id", PhpType::Int, PhpValue::Null)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 return Ok(());
             }
@@ -145,19 +132,15 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 }
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 5. oxphp_trace_event(name, ?attributes, ?span_id)
-    ctx.register_function_as(
-        "oxphp_trace_event",
-        vec![
-            PhpParam::required("name", PhpType::String),
-            PhpParam::optional("attributes", PhpType::Array, "null"),
-            PhpParam::optional("span_id", PhpType::Int, "null"),
-        ],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+    // 5. oxphp_apm_event(name, ?attributes, ?span_id)
+    ctx.function("oxphp_apm_event")
+        .param("name", PhpType::String)
+        .optional_param("attributes", PhpType::Array, PhpValue::Null)
+        .optional_param("span_id", PhpType::Int, PhpValue::Null)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 return Ok(());
             }
@@ -214,18 +197,14 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 }
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 6. oxphp_trace_error(exception, ?span_id)
-    ctx.register_function_as(
-        "oxphp_trace_error",
-        vec![
-            PhpParam::required("exception", PhpType::Mixed),
-            PhpParam::optional("span_id", PhpType::Int, "null"),
-        ],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+    // 6. oxphp_apm_error(exception, ?span_id)
+    ctx.function("oxphp_apm_error")
+        .param("exception", PhpType::Mixed)
+        .optional_param("span_id", PhpType::Int, PhpValue::Null)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 return Ok(());
             }
@@ -256,19 +235,15 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 }
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 7. oxphp_trace_status(code, ?description, ?span_id)
-    ctx.register_function_as(
-        "oxphp_trace_status",
-        vec![
-            PhpParam::required("code", PhpType::Int),
-            PhpParam::optional("description", PhpType::String, "null"),
-            PhpParam::optional("span_id", PhpType::Int, "null"),
-        ],
-        PhpType::Void,
-        move |call: &mut NativeCall| {
+    // 7. oxphp_apm_status(code, ?description, ?span_id)
+    ctx.function("oxphp_apm_status")
+        .param("code", PhpType::Int)
+        .optional_param("description", PhpType::String, PhpValue::Null)
+        .optional_param("span_id", PhpType::Int, PhpValue::Null)
+        .returns(PhpType::Void)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 return Ok(());
             }
@@ -315,15 +290,12 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 }
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 8. oxphp_trace_id() — no params
-    ctx.register_function_as(
-        "oxphp_trace_id",
-        vec![],
-        PhpType::String,
-        move |call: &mut NativeCall| {
+    // 8. oxphp_apm_trace_id() — no params
+    ctx.function("oxphp_apm_trace_id")
+        .returns(PhpType::String)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 call.ret_str("");
                 return Ok(());
@@ -339,15 +311,12 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 }
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 9. oxphp_trace_span_id() — no params
-    ctx.register_function_as(
-        "oxphp_trace_span_id",
-        vec![],
-        PhpType::String,
-        move |call: &mut NativeCall| {
+    // 9. oxphp_apm_span_id() — no params
+    ctx.function("oxphp_apm_span_id")
+        .returns(PhpType::String)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 call.ret_str("");
                 return Ok(());
@@ -359,15 +328,12 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 call.ret_str(span_id);
             });
             Ok(())
-        },
-    );
+        })?;
 
-    // 10. oxphp_trace_header() — no params
-    ctx.register_function_as(
-        "oxphp_trace_header",
-        vec![],
-        PhpType::String,
-        move |call: &mut NativeCall| {
+    // 10. oxphp_apm_header() — no params
+    ctx.function("oxphp_apm_header")
+        .returns(PhpType::String)
+        .handler(move |call: &mut NativeCall| {
             if !enabled {
                 call.ret_str("");
                 return Ok(());
@@ -389,8 +355,9 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) {
                 call.ret_str(&header);
             });
             Ok(())
-        },
-    );
+        })?;
+
+    Ok(())
 }
 
 /// Read a mixed-type argument as a string representation.
@@ -425,12 +392,13 @@ fn read_mixed_as_string(call: &NativeCall, idx: u32) -> String {
 mod tests {
     use super::*;
     use crate::events::EventDispatcher;
+    use crate::plugin::builders::definitions::PhpFunctionDef;
     use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
 
-    fn make_context_and_functions(enabled: bool) -> Vec<PluginNativeFunctionDef> {
+    fn make_context_and_functions(enabled: bool) -> Vec<PhpFunctionDef> {
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -438,6 +406,11 @@ mod tests {
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions: Vec<PhpFunctionDef> = Vec::new();
 
         let mut ctx = PluginContext::new(
             "apm".into(),
@@ -449,10 +422,15 @@ mod tests {
             &mut internal_routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
-        register_functions(&mut ctx, enabled);
+        register_functions(&mut ctx, enabled).unwrap();
         drop(ctx);
-        native_php_functions
+        php_functions
     }
 
     #[test]
@@ -464,30 +442,17 @@ mod tests {
     #[test]
     fn test_function_names_are_exact() {
         let funcs = make_context_and_functions(true);
-        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
-        assert!(names.contains(&"oxphp_trace"));
-        assert!(names.contains(&"oxphp_trace_start"));
-        assert!(names.contains(&"oxphp_trace_end"));
-        assert!(names.contains(&"oxphp_trace_attribute"));
-        assert!(names.contains(&"oxphp_trace_event"));
-        assert!(names.contains(&"oxphp_trace_error"));
-        assert!(names.contains(&"oxphp_trace_status"));
-        assert!(names.contains(&"oxphp_trace_id"));
-        assert!(names.contains(&"oxphp_trace_span_id"));
-        assert!(names.contains(&"oxphp_trace_header"));
-    }
-
-    #[test]
-    fn test_no_auto_prefix_applied() {
-        let funcs = make_context_and_functions(true);
-        // None should have the "oxphp_apm_" prefix
-        for func in &funcs {
-            assert!(
-                !func.name.starts_with("oxphp_apm_"),
-                "Function {} should not have apm prefix",
-                func.name
-            );
-        }
+        let names: Vec<&str> = funcs.iter().map(|f| f.fqn.as_str()).collect();
+        assert!(names.contains(&"oxphp_apm_trace"));
+        assert!(names.contains(&"oxphp_apm_start"));
+        assert!(names.contains(&"oxphp_apm_end"));
+        assert!(names.contains(&"oxphp_apm_attribute"));
+        assert!(names.contains(&"oxphp_apm_event"));
+        assert!(names.contains(&"oxphp_apm_error"));
+        assert!(names.contains(&"oxphp_apm_status"));
+        assert!(names.contains(&"oxphp_apm_trace_id"));
+        assert!(names.contains(&"oxphp_apm_span_id"));
+        assert!(names.contains(&"oxphp_apm_header"));
     }
 
     #[test]
@@ -510,7 +475,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_start")
+            .find(|f| f.fqn == "oxphp_apm_start")
             .unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "name");
@@ -522,7 +487,7 @@ mod tests {
     #[test]
     fn test_trace_end_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.name == "oxphp_trace_end").unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_end").unwrap();
         assert_eq!(f.params.len(), 1);
         assert_eq!(f.params[0].name, "span_id");
         assert!(f.params[0].required);
@@ -533,7 +498,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_attribute")
+            .find(|f| f.fqn == "oxphp_apm_attribute")
             .unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "key");
@@ -547,7 +512,7 @@ mod tests {
     #[test]
     fn test_trace_id_no_params() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.name == "oxphp_trace_id").unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_trace_id").unwrap();
         assert!(f.params.is_empty());
     }
 
@@ -556,7 +521,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_span_id")
+            .find(|f| f.fqn == "oxphp_apm_span_id")
             .unwrap();
         assert!(f.params.is_empty());
     }
@@ -566,7 +531,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_header")
+            .find(|f| f.fqn == "oxphp_apm_header")
             .unwrap();
         assert!(f.params.is_empty());
     }
@@ -576,7 +541,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_event")
+            .find(|f| f.fqn == "oxphp_apm_event")
             .unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "name");
@@ -592,7 +557,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_error")
+            .find(|f| f.fqn == "oxphp_apm_error")
             .unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "exception");
@@ -606,7 +571,7 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let f = funcs
             .iter()
-            .find(|f| f.name == "oxphp_trace_status")
+            .find(|f| f.fqn == "oxphp_apm_status")
             .unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "code");
@@ -620,7 +585,7 @@ mod tests {
     #[test]
     fn test_trace_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.name == "oxphp_trace").unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_trace").unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "name");
         assert!(f.params[0].required);
@@ -633,17 +598,30 @@ mod tests {
     #[test]
     fn test_return_types() {
         let funcs = make_context_and_functions(true);
-        let find = |name: &str| funcs.iter().find(|f| f.name == name).unwrap();
+        let find = |name: &str| funcs.iter().find(|f| f.fqn == name).unwrap();
 
-        assert_eq!(find("oxphp_trace").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_start").return_type, PhpType::Int);
-        assert_eq!(find("oxphp_trace_end").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_attribute").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_event").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_error").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_status").return_type, PhpType::Void);
-        assert_eq!(find("oxphp_trace_id").return_type, PhpType::String);
-        assert_eq!(find("oxphp_trace_span_id").return_type, PhpType::String);
-        assert_eq!(find("oxphp_trace_header").return_type, PhpType::String);
+        assert_eq!(find("oxphp_apm_trace").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_start").return_type, Some(PhpType::Int));
+        assert_eq!(find("oxphp_apm_end").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_attribute").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_event").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_error").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_status").return_type, Some(PhpType::Void));
+        assert_eq!(find("oxphp_apm_trace_id").return_type, Some(PhpType::String));
+        assert_eq!(find("oxphp_apm_span_id").return_type, Some(PhpType::String));
+        assert_eq!(find("oxphp_apm_header").return_type, Some(PhpType::String));
+    }
+
+    #[test]
+    fn test_param_types() {
+        let funcs = make_context_and_functions(true);
+        let find = |name: &str| funcs.iter().find(|f| f.fqn == name).unwrap();
+
+        let start = find("oxphp_apm_start");
+        assert_eq!(start.params[0].php_type, PhpType::String);
+        assert_eq!(start.params[1].php_type, PhpType::Array);
+
+        let end = find("oxphp_apm_end");
+        assert_eq!(end.params[0].php_type, PhpType::Int);
     }
 }

@@ -37,7 +37,7 @@ thread_local! {
     static DECORATOR_SPAN_IDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Built-in decorator for the `#[OxPHP\Tracing\Trace]` PHP attribute.
+/// Built-in decorator for the `#[OxPHP\Apm\Trace]` PHP attribute.
 ///
 /// When a PHP developer annotates a function or method with this attribute,
 /// the decorator automatically creates a span on entry and closes it on exit,
@@ -46,7 +46,7 @@ struct TraceDecorator;
 
 impl crate::decorator::Decorator for TraceDecorator {
     fn attribute_name(&self) -> &str {
-        "OxPHP\\Tracing\\Trace"
+        "OxPHP\\Apm\\Trace"
     }
 
     fn targets(&self) -> AttributeTargets {
@@ -345,7 +345,7 @@ impl Plugin for ApmPlugin {
             ctx.expose_config("enabled", false);
 
             // Register no-op PHP SDK functions even when disabled
-            php_sdk::register_functions(ctx, false);
+            php_sdk::register_functions(ctx, false)?;
 
             return Ok(());
         }
@@ -366,7 +366,7 @@ impl Plugin for ApmPlugin {
         ctx.expose_config("slow_query_ms", self.config.slow_query_ms);
         ctx.expose_config("db_capture_params", self.config.db_capture_params);
 
-        php_sdk::register_functions(ctx, true);
+        php_sdk::register_functions(ctx, true)?;
 
         let provider: Arc<OnceLock<TracerProvider>> = ctx
             .service::<Arc<OnceLock<TracerProvider>>>("otel.provider")
@@ -430,6 +430,11 @@ mod tests {
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = PluginContext::new(
             "apm".into(),
@@ -441,6 +446,11 @@ mod tests {
             &mut internal_routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
@@ -649,7 +659,7 @@ mod tests {
     #[test]
     fn test_trace_decorator_attribute_name() {
         let decorator = TraceDecorator;
-        assert_eq!(decorator.attribute_name(), "OxPHP\\Tracing\\Trace");
+        assert_eq!(decorator.attribute_name(), "OxPHP\\Apm\\Trace");
     }
 
     #[test]
