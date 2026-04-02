@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 
 /// Metadata for a plugin-registered PHP class with Rust storage.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub struct ClassMeta {
     pub fqn: String,
     pub factory: Box<dyn Fn() -> *mut c_void + Send + Sync>,
@@ -10,9 +11,11 @@ pub struct ClassMeta {
 }
 
 /// Global class metadata table. Set once before MINIT, read during runtime.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub static CLASS_META: OnceLock<Vec<ClassMeta>> = OnceLock::new();
 
 /// FFI callback: create storage for a new object instance.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub unsafe extern "C" fn storage_create_callback(class_index: u32) -> *mut c_void {
     let meta = CLASS_META.get().expect("CLASS_META not initialized");
     if let Some(m) = meta.get(class_index as usize) {
@@ -23,6 +26,7 @@ pub unsafe extern "C" fn storage_create_callback(class_index: u32) -> *mut c_voi
 }
 
 /// FFI callback: drop storage when object is freed.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub unsafe extern "C" fn storage_drop_callback(class_index: u32, rust_data: *mut c_void) {
     if rust_data.is_null() {
         return;
@@ -34,6 +38,7 @@ pub unsafe extern "C" fn storage_drop_callback(class_index: u32, rust_data: *mut
 }
 
 /// FFI callback: clone storage when object is cloned.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub unsafe extern "C" fn storage_clone_callback(class_index: u32, rust_data: *mut c_void) -> *mut c_void {
     let meta = CLASS_META.get().expect("CLASS_META not initialized");
     if let Some(m) = meta.get(class_index as usize) {

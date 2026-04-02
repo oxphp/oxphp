@@ -198,27 +198,27 @@ impl<'a> PluginContext<'a> {
 
     /// Register a PHP class definition.
     pub fn register_class(&mut self, fqn: &str) -> ClassBuilder<'_> {
-        ClassBuilder::new(fqn, &self.plugin_name, &mut self.php_classes)
+        ClassBuilder::new(fqn, &self.plugin_name, self.php_classes)
     }
 
     /// Register a PHP interface definition.
     pub fn register_interface(&mut self, fqn: &str) -> InterfaceBuilder<'_> {
-        InterfaceBuilder::new(fqn, &self.plugin_name, &mut self.php_interfaces)
+        InterfaceBuilder::new(fqn, &self.plugin_name, self.php_interfaces)
     }
 
     /// Register a PHP enum definition.
     pub fn register_enum(&mut self, fqn: &str) -> EnumBuilder<'_> {
-        EnumBuilder::new(fqn, &self.plugin_name, &mut self.php_enums)
+        EnumBuilder::new(fqn, &self.plugin_name, self.php_enums)
     }
 
     /// Register a PHP attribute definition.
     pub fn register_attribute(&mut self, fqn: &str) -> AttributeBuilder<'_> {
-        AttributeBuilder::new(fqn, &self.plugin_name, &mut self.php_attributes)
+        AttributeBuilder::new(fqn, &self.plugin_name, self.php_attributes)
     }
 
     /// Register a free PHP function definition.
     pub fn function(&mut self, fqn: &str) -> FunctionBuilder<'_> {
-        FunctionBuilder::new(fqn, &self.plugin_name, &mut self.php_functions)
+        FunctionBuilder::new(fqn, &self.plugin_name, self.php_functions)
     }
 
     /// Plugin name.

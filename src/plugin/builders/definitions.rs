@@ -286,6 +286,7 @@ impl PhpFunctionDef {
 // ─── PhpDefinitions ──────────────────────────────────────────────────────────
 
 /// Aggregate of all PHP definitions contributed by a plugin.
+#[derive(Default)]
 pub struct PhpDefinitions {
     pub classes: Vec<PhpClassDef>,
     pub interfaces: Vec<PhpInterfaceDef>,
@@ -294,17 +295,6 @@ pub struct PhpDefinitions {
     pub functions: Vec<PhpFunctionDef>,
 }
 
-impl Default for PhpDefinitions {
-    fn default() -> Self {
-        Self {
-            classes: Vec::new(),
-            interfaces: Vec::new(),
-            enums: Vec::new(),
-            attributes: Vec::new(),
-            functions: Vec::new(),
-        }
-    }
-}
 
 // ─── Topological Sort ────────────────────────────────────────────────────────
 
