@@ -1065,7 +1065,13 @@ int oxphp_execute_async_task(
 /**
  * Custom object structure for plugin-defined classes with Rust storage.
  * The `std` field MUST be last — PHP uses container_of arithmetic to find it.
+ *
+ * Wrapped in OXPHP_CUSTOM_OBJECT_DEFINED so it can also be defined in
+ * oxphp_bridge.c (which includes php.h after this header, meaning PHP_H is
+ * not yet defined when this block is first seen).
  */
+#ifndef OXPHP_CUSTOM_OBJECT_DEFINED
+#define OXPHP_CUSTOM_OBJECT_DEFINED
 typedef struct {
     void       *rust_data;      /**< Opaque pointer to Rust-allocated data. */
     uint32_t    class_index;    /**< Index into the class registry. */
@@ -1077,6 +1083,7 @@ typedef struct {
  */
 #define OXPHP_OBJ(zobj) \
     ((oxphp_custom_object *)((char *)(zobj) - XtOffsetOf(oxphp_custom_object, std)))
+#endif /* OXPHP_CUSTOM_OBJECT_DEFINED */
 
 /**
  * Allocate and initialize the custom object handler infrastructure.

@@ -972,6 +972,23 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
 
+/* Custom object struct — defined here because it depends on zend_object from php.h.
+ * oxphp_bridge.h declares this inside #ifdef PHP_H, but the header is included
+ * before php.h, so PHP_H is not defined at that point.  Define it locally with
+ * an include-guard so the two definitions don't conflict on compilers that allow
+ * duplicate identical typedefs (C11 §6.7p3). */
+#ifndef OXPHP_CUSTOM_OBJECT_DEFINED
+#define OXPHP_CUSTOM_OBJECT_DEFINED
+typedef struct {
+    void       *rust_data;
+    uint32_t    class_index;
+    zend_object std;   /* MUST be last */
+} oxphp_custom_object;
+
+#define OXPHP_OBJ(zobj) \
+    ((oxphp_custom_object *)((char *)(zobj) - XtOffsetOf(oxphp_custom_object, std)))
+#endif /* OXPHP_CUSTOM_OBJECT_DEFINED */
+
 /* Define thread-local TSRM cache for this compilation unit.
  * SG()/CG()/EG() macros expand to use TSRMLS_CACHE (_tsrm_ls_cache).
  * Each .so gets its own copy of this TLS variable.
@@ -1607,7 +1624,13 @@ void oxphp_throw_exception(const char *class_fqn, const char *message, int64_t c
         zend_string_release(name);
     }
     if (!ce) {
-        ce = zend_ce_runtime_exception;
+        /* zend_ce_runtime_exception does not exist in PHP 8.x — look up by name. */
+        zend_string *rt = zend_string_init("RuntimeException", sizeof("RuntimeException") - 1, 0);
+        ce = zend_lookup_class(rt);
+        zend_string_release(rt);
+    }
+    if (!ce) {
+        ce = zend_ce_exception; /* last resort */
     }
     zend_throw_exception(ce, message, (zend_long)code);
 }
