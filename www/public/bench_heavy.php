@@ -115,7 +115,7 @@ $router->add('GET', '#^/api/users$#', function(Request $req): Response {
     return (new Response(200, json_encode(array_values($users))))->withHeader('Content-Type', 'application/json');
 });
 
-$request = new Request('GET', '/api/users/100', ['host' => 'localhost'], ['role' => 'admin']);
+$request = new Request('GET', '/api/users/' . random_int(0,49), ['host' => 'localhost'], ['role' => 'admin']);
 $response = $router->dispatch($request);
 
 header('Content-Type: application/json');

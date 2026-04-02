@@ -170,6 +170,7 @@ fn async_worker_thread(
         // Check if the task was cancelled before we even start
         if task.cancelled.load(Ordering::Relaxed) {
             free_task_args(&task);
+            free_op_array_buf(&task);
             let _ = task.result_tx.send(AsyncResult {
                 success: false,
                 serialized_value: std::ptr::null_mut(),
@@ -294,7 +295,7 @@ fn async_worker_thread(
 
         let rc = unsafe {
             ffi::oxphp_execute_async_task(
-                task.op_array,
+                task.op_array_buf as *const c_void,
                 local_static_vars as *const c_void,
                 task.this_ptr,
                 task.argc,
@@ -369,6 +370,9 @@ fn async_worker_thread(
             unsafe { ffi::oxphp_portable_free_ht(local_static_vars) };
         }
 
+        // Free the op_array copy (system malloc'd, thread-safe)
+        free_op_array_buf(&task);
+
         // Track metrics
         if let Some(ref m) = metrics {
             if result.success {
@@ -392,6 +396,14 @@ fn async_worker_thread(
         tasks_executed,
         "Async worker thread exiting"
     );
+}
+
+/// Free the system-malloc'd op_array copy owned by an AsyncTask.
+#[cfg(feature = "php")]
+fn free_op_array_buf(task: &AsyncTask) {
+    if !task.op_array_buf.is_null() {
+        unsafe { libc::free(task.op_array_buf as *mut std::ffi::c_void) };
+    }
 }
 
 /// Free the portable-serialized buffers owned by an AsyncTask.

@@ -1359,6 +1359,10 @@ size_t oxphp_zval_size(void) {
     return sizeof(zval);
 }
 
+size_t oxphp_op_array_size(void) {
+    return sizeof(zend_op_array);
+}
+
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
 /*
@@ -2598,6 +2602,44 @@ void oxphp_async_reset(void) {
     zend_set_timeout(0, 0);
 }
 
+/* === Async Promise: Fixup run_time_cache for cross-thread execution === */
+
+/**
+ * Ensure the current thread's MAP_PTR table is large enough and allocate a
+ * fresh run_time_cache for the given op_array.
+ *
+ * In PHP ZTS, run_time_cache uses ZEND_MAP_PTR which is an offset into the
+ * per-thread CG(map_ptr_base) table. When an op_array is transferred from
+ * one thread (PHP worker) to another (async worker), the async worker's
+ * MAP_PTR table may be smaller than the offset, causing SIGBUS when the VM
+ * tries to access the run_time_cache.
+ *
+ * This function grows the table if needed, then allocates a fresh cache.
+ */
+/**
+ * In PHP ZTS, run_time_cache uses ZEND_MAP_PTR — a byte offset into the
+ * per-thread CG(map_ptr_base) table. When an op_array is transferred across
+ * threads, the destination thread's table may be too small for the offset,
+ * causing SIGBUS when the VM accesses run_time_cache.
+ *
+ * Fix: allocate a fresh run_time_cache via emalloc on this thread's heap
+ * and store it as a DIRECT POINTER (bypassing MAP_PTR offset indirection).
+ * ZEND_MAP_PTR_GET detects direct pointers (low bit clear) vs offsets
+ * (low bit set) and handles both correctly.
+ *
+ * Set ZEND_ACC_HEAP_RT_CACHE so zend_closure_free_storage() will efree()
+ * the cache when the closure is destroyed.
+ */
+static void oxphp_fixup_run_time_cache(zend_op_array *op) {
+    if (op->cache_size == 0) {
+        return;
+    }
+
+    void **cache = ecalloc(op->cache_size / sizeof(void *), sizeof(void *));
+    ZEND_MAP_PTR_INIT(op->run_time_cache, cache);
+    op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
+}
+
 /* === Async Promise: Execute Async Task === */
 
 int oxphp_execute_async_task(
@@ -2622,6 +2664,10 @@ int oxphp_execute_async_task(
     /* Reconstruct closure from op_array + static_vars */
     memcpy(&func, op_array, sizeof(zend_op_array));
     func.op_array.static_variables = static_vars;
+
+    /* Fix up run_time_cache for this thread — the MAP_PTR offset from the
+     * source thread's op_array may be invalid on the async worker's thread. */
+    oxphp_fixup_run_time_cache(&func.op_array);
 
     zend_create_closure(&closure, &func,
         NULL, /* scope */

@@ -106,6 +106,10 @@ fn main() -> Result<(), types::BoxError> {
     let executor: Arc<dyn executor::ScriptExecutor> =
         Arc::from(executor::create_executor(Arc::clone(&metrics)));
 
+    // Install crash signal handlers AFTER php_module_startup() to override
+    // PHP's zend_signal handlers. Writes diagnostic to stderr + /tmp/oxphp-crash.log.
+    install_crash_handlers();
+
     let async_pool = oxphp::executor::async_pool::AsyncWorkerPool::new(
         config.async_workers,
         config.async_queue_capacity,
@@ -472,3 +476,140 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
+
+/// Install signal handlers for SIGSEGV, SIGBUS, SIGABRT that write a minimal
+/// diagnostic to stderr before re-raising. Fully signal-safe: only uses write(2),
+/// no allocations, no std library calls that could deadlock.
+///
+/// Must be called AFTER php_module_startup() to override PHP's zend_signal handlers.
+#[cfg(unix)]
+fn install_crash_handlers() {
+    use libc::{c_int, sigaction, SA_RESETHAND, SA_SIGINFO, SIGABRT, SIGBUS, SIGSEGV};
+    use std::mem::MaybeUninit;
+
+    extern "C" fn crash_handler(sig: c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+        // STRICTLY signal-safe: only write(2) to stderr, then re-raise.
+        // No allocations, no locks, no std::thread::current().
+        unsafe {
+            let stderr = 2;
+
+            // Helper: write a u64 as hex to a fixed buffer, return slice
+            fn u64_to_hex(val: u64, buf: &mut [u8; 18]) -> usize {
+                buf[0] = b'0';
+                buf[1] = b'x';
+                let hex = b"0123456789abcdef";
+                let mut v = val;
+                let mut i = 18;
+                if v == 0 {
+                    buf[2] = b'0';
+                    return 3;
+                }
+                while v > 0 && i > 2 {
+                    i -= 1;
+                    buf[i] = hex[(v & 0xf) as usize];
+                    v >>= 4;
+                }
+                // Shift to start
+                let len = 18 - i;
+                for j in 0..len {
+                    buf[2 + j] = buf[i + j];
+                }
+                2 + len
+            }
+
+            // Signal name
+            let sig_name: &[u8] = match sig {
+                libc::SIGSEGV => b"SIGSEGV",
+                libc::SIGBUS => b"SIGBUS",
+                libc::SIGABRT => b"SIGABRT",
+                _ => b"SIG?",
+            };
+
+            libc::write(stderr, b"[CRASH] " as *const _ as _, 8);
+            libc::write(stderr, sig_name.as_ptr() as _, sig_name.len());
+
+            // Fault address from siginfo_t
+            if !info.is_null() {
+                let addr = (*info).si_addr() as u64;
+                let code = (*info).si_code;
+                let mut hex_buf = [0u8; 18];
+                let hex_len = u64_to_hex(addr, &mut hex_buf);
+                libc::write(stderr, b" addr=" as *const _ as _, 6);
+                libc::write(stderr, hex_buf.as_ptr() as _, hex_len);
+                let mut code_buf = [0u8; 4];
+                let mut cn = if code < 0 {
+                    (-code) as u32
+                } else {
+                    code as u32
+                };
+                let mut ci = code_buf.len();
+                if cn == 0 {
+                    ci -= 1;
+                    code_buf[ci] = b'0';
+                } else {
+                    while cn > 0 && ci > 0 {
+                        ci -= 1;
+                        code_buf[ci] = b'0' + (cn % 10) as u8;
+                        cn /= 10;
+                    }
+                }
+                libc::write(stderr, b" code=" as *const _ as _, 6);
+                if code < 0 {
+                    libc::write(stderr, b"-" as *const _ as _, 1);
+                }
+                libc::write(stderr, code_buf[ci..].as_ptr() as _, (4 - ci) as _);
+            }
+            // Write thread ID (gettid syscall — signal safe, Linux only)
+            #[cfg(target_os = "linux")]
+            {
+                let tid = libc::syscall(libc::SYS_gettid) as u64;
+                let mut tid_buf = [0u8; 18];
+                let tid_len = u64_to_hex(tid, &mut tid_buf);
+                libc::write(stderr, b" tid=" as *const _ as _, 5);
+                libc::write(stderr, tid_buf.as_ptr() as _, tid_len);
+            }
+            libc::write(stderr, b"\n" as *const _ as _, 1);
+
+            // Persist to file
+            let fd = libc::open(
+                b"/tmp/oxphp-crash.log\0" as *const _ as _,
+                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                0o644,
+            );
+            if fd >= 0 {
+                libc::write(fd, sig_name.as_ptr() as _, sig_name.len());
+                if !info.is_null() {
+                    let addr = (*info).si_addr() as u64;
+                    let mut hex_buf = [0u8; 18];
+                    let hex_len = u64_to_hex(addr, &mut hex_buf);
+                    libc::write(fd, b" addr=" as *const _ as _, 6);
+                    libc::write(fd, hex_buf.as_ptr() as _, hex_len);
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let tid = libc::syscall(libc::SYS_gettid) as u64;
+                    let mut tid_buf = [0u8; 18];
+                    let tid_len = u64_to_hex(tid, &mut tid_buf);
+                    libc::write(fd, b" tid=" as *const _ as _, 5);
+                    libc::write(fd, tid_buf.as_ptr() as _, tid_len);
+                }
+                libc::write(fd, b"\n" as *const _ as _, 1);
+                libc::close(fd);
+            }
+            libc::raise(sig);
+        }
+    }
+
+    for sig in [SIGSEGV, SIGBUS, SIGABRT] {
+        unsafe {
+            let mut sa = MaybeUninit::<sigaction>::zeroed().assume_init();
+            sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+            sa.sa_sigaction = crash_handler as *const () as usize;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn install_crash_handlers() {}
