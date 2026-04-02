@@ -8,6 +8,12 @@ pub mod php;
 pub mod types;
 pub mod wrappers;
 
+pub use builders::attribute::AttributeBuilder;
+pub use builders::class::ClassBuilder;
+pub use builders::definitions::PhpDefinitions;
+pub use builders::enum_::EnumBuilder;
+pub use builders::function::FunctionBuilder;
+pub use builders::interface::InterfaceBuilder;
 pub use context::{PluginContext, PluginDecoratorDef};
 pub use cookies::{CookieOptions, PluginCookies, PluginSetCookie, SameSite};
 pub use handler::{

@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use crate::decorator::Decorator;
 use crate::events::EventDispatcher;
 
+use super::builders::attribute::AttributeBuilder;
+use super::builders::class::ClassBuilder;
+use super::builders::definitions::*;
+use super::builders::enum_::EnumBuilder;
+use super::builders::function::FunctionBuilder;
+use super::builders::interface::InterfaceBuilder;
 use super::handler::{
     PluginCompleteHandler, PluginInternalHandler, PluginMetricsCollector, PluginRequestHandler,
     PluginResponseHandler,
@@ -28,6 +34,11 @@ pub struct PluginContext<'a> {
     internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
     native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
     decorators: &'a mut Vec<PluginDecoratorDef>,
+    php_classes: &'a mut Vec<PhpClassDef>,
+    php_interfaces: &'a mut Vec<PhpInterfaceDef>,
+    php_enums: &'a mut Vec<PhpEnumDef>,
+    php_attributes: &'a mut Vec<PhpAttributeDef>,
+    php_functions: &'a mut Vec<PhpFunctionDef>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -42,6 +53,11 @@ impl<'a> PluginContext<'a> {
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
         native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
         decorators: &'a mut Vec<PluginDecoratorDef>,
+        php_classes: &'a mut Vec<PhpClassDef>,
+        php_interfaces: &'a mut Vec<PhpInterfaceDef>,
+        php_enums: &'a mut Vec<PhpEnumDef>,
+        php_attributes: &'a mut Vec<PhpAttributeDef>,
+        php_functions: &'a mut Vec<PhpFunctionDef>,
     ) -> Self {
         Self {
             plugin_name,
@@ -53,6 +69,11 @@ impl<'a> PluginContext<'a> {
             internal_routes,
             native_php_functions,
             decorators,
+            php_classes,
+            php_interfaces,
+            php_enums,
+            php_attributes,
+            php_functions,
         }
     }
 
@@ -175,6 +196,31 @@ impl<'a> PluginContext<'a> {
         });
     }
 
+    /// Register a PHP class definition.
+    pub fn register_class(&mut self, fqn: &str) -> ClassBuilder<'_> {
+        ClassBuilder::new(fqn, &self.plugin_name, &mut self.php_classes)
+    }
+
+    /// Register a PHP interface definition.
+    pub fn register_interface(&mut self, fqn: &str) -> InterfaceBuilder<'_> {
+        InterfaceBuilder::new(fqn, &self.plugin_name, &mut self.php_interfaces)
+    }
+
+    /// Register a PHP enum definition.
+    pub fn register_enum(&mut self, fqn: &str) -> EnumBuilder<'_> {
+        EnumBuilder::new(fqn, &self.plugin_name, &mut self.php_enums)
+    }
+
+    /// Register a PHP attribute definition.
+    pub fn register_attribute(&mut self, fqn: &str) -> AttributeBuilder<'_> {
+        AttributeBuilder::new(fqn, &self.plugin_name, &mut self.php_attributes)
+    }
+
+    /// Register a free PHP function definition.
+    pub fn function(&mut self, fqn: &str) -> FunctionBuilder<'_> {
+        FunctionBuilder::new(fqn, &self.plugin_name, &mut self.php_functions)
+    }
+
     /// Plugin name.
     pub fn plugin_name(&self) -> &str {
         &self.plugin_name
@@ -198,6 +244,11 @@ mod tests {
         internal_routes: &'a mut HashMap<String, Box<dyn PluginInternalHandler>>,
         native_php_functions: &'a mut Vec<PluginNativeFunctionDef>,
         decorators: &'a mut Vec<PluginDecoratorDef>,
+        php_classes: &'a mut Vec<PhpClassDef>,
+        php_interfaces: &'a mut Vec<PhpInterfaceDef>,
+        php_enums: &'a mut Vec<PhpEnumDef>,
+        php_attributes: &'a mut Vec<PhpAttributeDef>,
+        php_functions: &'a mut Vec<PhpFunctionDef>,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "test_plugin".into(),
@@ -209,6 +260,11 @@ mod tests {
             internal_routes,
             native_php_functions,
             decorators,
+            php_classes,
+            php_interfaces,
+            php_enums,
+            php_attributes,
+            php_functions,
         )
     }
 
@@ -224,6 +280,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -233,6 +294,11 @@ mod tests {
             &mut routes,
             &mut native_php,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
@@ -255,6 +321,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -264,6 +335,11 @@ mod tests {
             &mut routes,
             &mut native_php,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         assert_eq!(ctx.plugin_name(), "test_plugin");
@@ -278,6 +354,11 @@ mod tests {
         let mut routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         {
             let mut ctx = make_context(
@@ -288,6 +369,11 @@ mod tests {
                 &mut routes,
                 &mut native_php,
                 &mut decorators,
+                &mut php_classes,
+                &mut php_interfaces,
+                &mut php_enums,
+                &mut php_attributes,
+                &mut php_functions,
             );
 
             // Valid path
@@ -320,6 +406,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -329,6 +420,11 @@ mod tests {
             &mut routes,
             &mut native_php,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         ctx.register_service("my_pool", Box::new(42u32));
@@ -346,6 +442,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -355,6 +456,11 @@ mod tests {
             &mut routes,
             &mut native_php,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         ctx.expose_config("verbose", serde_json::json!(true));
@@ -370,6 +476,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php_functions = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -379,6 +490,11 @@ mod tests {
             &mut routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         ctx.register_function(
@@ -417,6 +533,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php_functions = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -426,6 +547,11 @@ mod tests {
             &mut routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         ctx.register_decorator(TestDecorator);
@@ -444,6 +570,11 @@ mod tests {
         let mut routes = HashMap::new();
         let mut native_php_functions = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -453,6 +584,11 @@ mod tests {
             &mut routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
 
         ctx.register_function_as(
@@ -468,5 +604,197 @@ mod tests {
         // register_function_as uses exact name — no prefix added
         assert_eq!(native_php_functions[0].name, "oxphp_trace_start");
         assert_eq!(native_php_functions[0].plugin_name, "test_plugin");
+    }
+
+    #[test]
+    fn test_register_class() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+        );
+
+        let _ = ctx.register_class("App\\MyClass").build();
+        drop(ctx);
+
+        assert_eq!(php_classes.len(), 1);
+        assert_eq!(php_classes[0].fqn, "App\\MyClass");
+        assert_eq!(php_classes[0].plugin_name, "test_plugin");
+    }
+
+    #[test]
+    fn test_register_interface() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+        );
+
+        let _ = ctx.register_interface("App\\Countable").build();
+        drop(ctx);
+
+        assert_eq!(php_interfaces.len(), 1);
+        assert_eq!(php_interfaces[0].fqn, "App\\Countable");
+        assert_eq!(php_interfaces[0].plugin_name, "test_plugin");
+    }
+
+    #[test]
+    fn test_register_enum() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+        );
+
+        let _ = ctx.register_enum("App\\Status").build();
+        drop(ctx);
+
+        assert_eq!(php_enums.len(), 1);
+        assert_eq!(php_enums[0].fqn, "App\\Status");
+        assert_eq!(php_enums[0].plugin_name, "test_plugin");
+    }
+
+    #[test]
+    fn test_register_attribute() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+        );
+
+        let _ = ctx.register_attribute("App\\Route").build();
+        drop(ctx);
+
+        assert_eq!(php_attributes.len(), 1);
+        assert_eq!(php_attributes[0].fqn, "App\\Route");
+        assert_eq!(php_attributes[0].plugin_name, "test_plugin");
+    }
+
+    #[test]
+    fn test_function_builder() {
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut native_php_functions = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+
+        let mut ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics,
+            &mut routes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+        );
+
+        let _ = ctx
+            .function("oxphp_test_plugin_hello")
+            .handler(|_call| Ok(()));
+        drop(ctx);
+
+        assert_eq!(php_functions.len(), 1);
+        assert_eq!(php_functions[0].fqn, "oxphp_test_plugin_hello");
+        assert_eq!(php_functions[0].plugin_name, "test_plugin");
     }
 }
