@@ -1467,7 +1467,10 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     for iface in &interfaces {
         let fqn = CString::new(iface.fqn.as_str()).unwrap();
         let parent = iface.parent.as_deref().map(|s| CString::new(s).unwrap());
-        let parent_ptr = parent.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let parent_ptr = parent
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
         unsafe {
             let handle =
                 crate::bridge::ffi::oxphp_bridge_register_interface(fqn.as_ptr(), parent_ptr);
@@ -1530,13 +1533,12 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         let fqn = CString::new(enum_def.fqn.as_str()).unwrap();
         let backing = match &enum_def.backing_type {
             None => 0,
-            Some(crate::plugin::types::PhpType::Int) => 4,    // IS_LONG
+            Some(crate::plugin::types::PhpType::Int) => 4, // IS_LONG
             Some(crate::plugin::types::PhpType::String) => 6, // IS_STRING
             _ => 0,
         };
         unsafe {
-            let handle =
-                crate::bridge::ffi::oxphp_bridge_register_enum(fqn.as_ptr(), backing);
+            let handle = crate::bridge::ffi::oxphp_bridge_register_enum(fqn.as_ptr(), backing);
             for iface_fqn in &enum_def.interfaces {
                 let ifqn = CString::new(iface_fqn.as_str()).unwrap();
                 crate::bridge::ffi::oxphp_bridge_enum_implements(handle, ifqn.as_ptr());
@@ -1551,11 +1553,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     .as_ref()
                     .map(|c| c.as_ptr())
                     .unwrap_or(std::ptr::null());
-                crate::bridge::ffi::oxphp_bridge_enum_add_case(
-                    handle,
-                    cname.as_ptr(),
-                    cval_ptr,
-                );
+                crate::bridge::ffi::oxphp_bridge_enum_add_case(handle, cname.as_ptr(), cval_ptr);
             }
             for method in &enum_def.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
@@ -1580,22 +1578,21 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     let mut class_metas: Vec<ClassMeta> = Vec::new();
 
     // Consume classes in topological order using Option-wrapped Vec.
-    let mut classes_vec: Vec<Option<PhpClassDef>> =
-        classes.into_iter().map(Some).collect();
+    let mut classes_vec: Vec<Option<PhpClassDef>> = classes.into_iter().map(Some).collect();
 
     for &idx in &class_order {
         let class = classes_vec[idx].take().unwrap();
         let fqn = CString::new(class.fqn.as_str()).unwrap();
         let parent = class.parent.as_deref().map(|s| CString::new(s).unwrap());
-        let parent_ptr = parent.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let parent_ptr = parent
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
         let flags = class.modifiers.bits() as u32;
 
         unsafe {
-            let handle = crate::bridge::ffi::oxphp_bridge_register_class(
-                fqn.as_ptr(),
-                parent_ptr,
-                flags,
-            );
+            let handle =
+                crate::bridge::ffi::oxphp_bridge_register_class(fqn.as_ptr(), parent_ptr, flags);
 
             // Interfaces
             for iface_fqn in &class.interfaces {
@@ -1679,7 +1676,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         if class.has_custom_storage {
             class_metas.push(ClassMeta {
                 fqn: class.fqn,
-                factory: class.storage_factory.unwrap_or_else(|| Box::new(|| std::ptr::null_mut())),
+                factory: class
+                    .storage_factory
+                    .unwrap_or_else(|| Box::new(|| std::ptr::null_mut())),
                 drop_fn: class.storage_drop.unwrap_or_else(|| Box::new(|_| {})),
                 clone_fn: class.storage_clone,
             });
@@ -1722,8 +1721,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     MAGIC_DISPATCH_MAP.set(magic_dispatch).ok();
     CLASS_META.set(class_metas).ok();
 
-    let total = interfaces.len() + attributes.len() + enums.len()
-        + class_order.len() + functions.len();
+    let total =
+        interfaces.len() + attributes.len() + enums.len() + class_order.len() + functions.len();
     tracing::info!(
         interfaces = interfaces.len(),
         attributes = attributes.len(),

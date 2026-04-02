@@ -27,7 +27,9 @@ impl<'a> FunctionBuilder<'a> {
 
     /// Add an optional parameter with a default value.
     pub fn optional_param(mut self, name: &str, php_type: PhpType, default: PhpValue) -> Self {
-        self.def.params.push(PhpParamDef::optional(name, php_type, default));
+        self.def
+            .params
+            .push(PhpParamDef::optional(name, php_type, default));
         self
     }
 
@@ -77,7 +79,9 @@ impl<'a> FunctionBuilder<'a> {
 mod tests {
     use super::*;
 
-    fn collect_function(f: impl FnOnce(FunctionBuilder<'_>) -> Result<(), PluginError>) -> PhpFunctionDef {
+    fn collect_function(
+        f: impl FnOnce(FunctionBuilder<'_>) -> Result<(), PluginError>,
+    ) -> PhpFunctionDef {
         let mut functions = Vec::new();
         let builder = FunctionBuilder::new("oxphp_test_hello", "test_plugin", &mut functions);
         f(builder).unwrap();
@@ -137,9 +141,7 @@ mod tests {
     #[test]
     fn test_global_namespace_function() {
         // Functions without a namespace prefix are valid.
-        let f = collect_function(|b| {
-            b.returns(PhpType::String).handler(|_call| Ok(()))
-        });
+        let f = collect_function(|b| b.returns(PhpType::String).handler(|_call| Ok(())));
         assert_eq!(f.fqn, "oxphp_test_hello");
         assert!(f.params.is_empty());
         assert_eq!(f.return_type, Some(PhpType::String));

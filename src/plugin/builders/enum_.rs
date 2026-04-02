@@ -127,20 +127,26 @@ pub struct EnumMethodBuilder<'a> {
 impl<'a> EnumMethodBuilder<'a> {
     /// Add a required parameter.
     pub fn param(mut self, name: &str, php_type: PhpType) -> Self {
-        self.method_def.params.push(PhpParamDef::required(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::required(name, php_type));
         self
     }
 
     /// Add an optional parameter with a default value.
     pub fn optional_param(mut self, name: &str, php_type: PhpType, default: PhpValue) -> Self {
-        self.method_def.params.push(PhpParamDef::optional(name, php_type, default));
+        self.method_def
+            .params
+            .push(PhpParamDef::optional(name, php_type, default));
         self
     }
 
     /// Add a variadic parameter. Also marks the method as variadic.
     pub fn variadic_param(mut self, name: &str, php_type: PhpType) -> Self {
         self.method_def.is_variadic = true;
-        self.method_def.params.push(PhpParamDef::variadic(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::variadic(name, php_type));
         self
     }
 
@@ -178,7 +184,11 @@ mod tests {
     #[test]
     fn test_unit_enum() {
         let e = collect_enum(|b| {
-            b.case("Active").case("Inactive").case("Pending").build().unwrap();
+            b.case("Active")
+                .case("Inactive")
+                .case("Pending")
+                .build()
+                .unwrap();
         });
         assert_eq!(e.fqn, "Test\\Status");
         assert_eq!(e.plugin_name, "test_plugin");
@@ -261,7 +271,10 @@ mod tests {
     #[test]
     fn test_enum_implements() {
         let e = collect_enum(|b| {
-            b.implements("Stringable").implements("JsonSerializable").build().unwrap();
+            b.implements("Stringable")
+                .implements("JsonSerializable")
+                .build()
+                .unwrap();
         });
         assert_eq!(e.interfaces.len(), 2);
         assert!(e.interfaces.contains(&"Stringable".to_string()));
@@ -290,9 +303,13 @@ mod tests {
     #[test]
     fn test_enum_constant() {
         let e = collect_enum(|b| {
-            b.constant("DEFAULT_CASE", PhpValue::String("active".to_string()), Visibility::Public)
-                .build()
-                .unwrap();
+            b.constant(
+                "DEFAULT_CASE",
+                PhpValue::String("active".to_string()),
+                Visibility::Public,
+            )
+            .build()
+            .unwrap();
         });
         assert_eq!(e.constants.len(), 1);
         let c = &e.constants[0];

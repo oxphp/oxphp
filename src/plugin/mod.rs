@@ -22,7 +22,9 @@ pub use handler::{
     PluginResponseActions, PluginResponseHandler, PluginResponseView,
 };
 pub use manager::PluginManager;
-pub use php::{PhpError, PhpException, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
+pub use php::{
+    PhpError, PhpException, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef,
+};
 pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
 use std::any::Any;

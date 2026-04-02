@@ -295,7 +295,6 @@ pub struct PhpDefinitions {
     pub functions: Vec<PhpFunctionDef>,
 }
 
-
 // ─── Topological Sort ────────────────────────────────────────────────────────
 
 /// Sort class definitions topologically by parent dependency.
@@ -329,9 +328,8 @@ pub fn topological_sort_classes(classes: &[PhpClassDef]) -> Result<Vec<usize>, P
     }
 
     // Kahn's BFS: start with all nodes that have no internal parent dependency.
-    let mut queue: std::collections::VecDeque<usize> = (0..n)
-        .filter(|&i| in_degree[i] == 0)
-        .collect();
+    let mut queue: std::collections::VecDeque<usize> =
+        (0..n).filter(|&i| in_degree[i] == 0).collect();
 
     let mut result = Vec::with_capacity(n);
     while let Some(idx) = queue.pop_front() {
@@ -468,9 +466,15 @@ mod tests {
     #[test]
     fn test_php_method_def_param_counts() {
         let mut m = PhpMethodDef::new("greet");
-        m.params.push(PhpParamDef::required("name", PhpType::String));
-        m.params.push(PhpParamDef::optional("title", PhpType::String, PhpValue::Null));
-        m.params.push(PhpParamDef::variadic("extras", PhpType::Mixed));
+        m.params
+            .push(PhpParamDef::required("name", PhpType::String));
+        m.params.push(PhpParamDef::optional(
+            "title",
+            PhpType::String,
+            PhpValue::Null,
+        ));
+        m.params
+            .push(PhpParamDef::variadic("extras", PhpType::Mixed));
         assert_eq!(m.required_params(), 1);
         assert_eq!(m.total_params(), 3);
     }
@@ -618,10 +622,7 @@ mod tests {
     #[test]
     fn test_topo_sort_cycle_error() {
         // A extends B, B extends A — cycle.
-        let classes = vec![
-            make_class("A", Some("B")),
-            make_class("B", Some("A")),
-        ];
+        let classes = vec![make_class("A", Some("B")), make_class("B", Some("A"))];
         let result = topological_sort_classes(&classes);
         assert!(result.is_err(), "Expected cycle error");
         let err = result.unwrap_err();

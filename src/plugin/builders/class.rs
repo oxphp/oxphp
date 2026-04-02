@@ -122,7 +122,10 @@ impl<'a> ClassBuilder<'a> {
 
     /// Start building a magic method handler. Transfers ownership to `MagicBuilder`.
     pub fn magic(self, magic: MagicMethod) -> MagicBuilder<'a> {
-        MagicBuilder { parent: self, magic }
+        MagicBuilder {
+            parent: self,
+            magic,
+        }
     }
 
     /// Validate and push the class definition to the target collection.
@@ -205,20 +208,26 @@ impl<'a> MethodBuilder<'a> {
 
     /// Add a required parameter.
     pub fn param(mut self, name: &str, php_type: PhpType) -> Self {
-        self.method_def.params.push(PhpParamDef::required(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::required(name, php_type));
         self
     }
 
     /// Add an optional parameter with a default value.
     pub fn optional_param(mut self, name: &str, php_type: PhpType, default: PhpValue) -> Self {
-        self.method_def.params.push(PhpParamDef::optional(name, php_type, default));
+        self.method_def
+            .params
+            .push(PhpParamDef::optional(name, php_type, default));
         self
     }
 
     /// Add a variadic parameter. Also marks the method as variadic.
     pub fn variadic_param(mut self, name: &str, php_type: PhpType) -> Self {
         self.method_def.is_variadic = true;
-        self.method_def.params.push(PhpParamDef::variadic(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::variadic(name, php_type));
         self
     }
 
@@ -355,9 +364,13 @@ mod tests {
     #[test]
     fn test_class_constant() {
         let cls = collect_class(|b| {
-            b.constant("VERSION", PhpValue::String("1.0.0".to_string()), Visibility::Public)
-                .build()
-                .unwrap();
+            b.constant(
+                "VERSION",
+                PhpValue::String("1.0.0".to_string()),
+                Visibility::Public,
+            )
+            .build()
+            .unwrap();
         });
         assert_eq!(cls.constants.len(), 1);
         let c = &cls.constants[0];
@@ -419,11 +432,7 @@ mod tests {
     fn test_abstract_method_in_non_abstract_class_fails() {
         let mut classes = Vec::new();
         let builder = ClassBuilder::new("Test\\MyClass", "test_plugin", &mut classes);
-        let result = builder
-            .method("doIt")
-            .abstract_()
-            .no_body()
-            .build();
+        let result = builder.method("doIt").abstract_().no_body().build();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("abstract"));

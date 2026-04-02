@@ -64,9 +64,7 @@ impl<'a> NativeCall<'a> {
     /// Get typed immutable reference to Rust storage for current object.
     pub fn storage<T: std::any::Any + Send + Sync>(&self) -> Result<&T, PhpError> {
         let ptr = self.rust_data.ok_or_else(|| {
-            PhpError::Custom(
-                "storage() called outside method context or no storage".into(),
-            )
+            PhpError::Custom("storage() called outside method context or no storage".into())
         })?;
         if ptr.is_null() {
             return Err(PhpError::Custom("object storage not initialized".into()));
@@ -77,9 +75,7 @@ impl<'a> NativeCall<'a> {
     /// Get typed mutable reference to Rust storage for current object.
     pub fn storage_mut<T: std::any::Any + Send + Sync>(&mut self) -> Result<&mut T, PhpError> {
         let ptr = self.rust_data.ok_or_else(|| {
-            PhpError::Custom(
-                "storage_mut() called outside method context or no storage".into(),
-            )
+            PhpError::Custom("storage_mut() called outside method context or no storage".into())
         })?;
         if ptr.is_null() {
             return Err(PhpError::Custom("object storage not initialized".into()));
@@ -658,9 +654,8 @@ mod tests {
 
     #[test]
     fn test_storage_returns_error_for_free_function() {
-        let call = unsafe {
-            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), None, None)
-        };
+        let call =
+            unsafe { NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), None, None) };
         let result = call.storage::<u32>();
         assert!(result.is_err());
     }
@@ -670,12 +665,20 @@ mod tests {
         let value: u32 = 42;
         let ptr = Box::into_raw(Box::new(value)) as *mut std::ffi::c_void;
         let call = unsafe {
-            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), Some(1), Some(ptr))
+            NativeCall::new(
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                Some(1),
+                Some(ptr),
+            )
         };
         let result = call.storage::<u32>();
         assert!(result.is_ok());
         assert_eq!(*result.unwrap(), 42);
-        unsafe { drop(Box::from_raw(ptr as *mut u32)); }
+        unsafe {
+            drop(Box::from_raw(ptr as *mut u32));
+        }
     }
 
     #[test]
@@ -683,13 +686,21 @@ mod tests {
         let value: u32 = 42;
         let ptr = Box::into_raw(Box::new(value)) as *mut std::ffi::c_void;
         let mut call = unsafe {
-            NativeCall::new(std::ptr::null_mut(), 0, std::ptr::null_mut(), Some(1), Some(ptr))
+            NativeCall::new(
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                Some(1),
+                Some(ptr),
+            )
         };
         {
             let s = call.storage_mut::<u32>().unwrap();
             *s = 100;
         }
         assert_eq!(*call.storage::<u32>().unwrap(), 100);
-        unsafe { drop(Box::from_raw(ptr as *mut u32)); }
+        unsafe {
+            drop(Box::from_raw(ptr as *mut u32));
+        }
     }
 }

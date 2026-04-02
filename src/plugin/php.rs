@@ -157,7 +157,10 @@ mod tests {
             message: "bad input".into(),
             code: 42,
         };
-        assert_eq!(e.to_string(), "PHP Exception [InvalidArgumentException]: bad input (code: 42)");
+        assert_eq!(
+            e.to_string(),
+            "PHP Exception [InvalidArgumentException]: bad input (code: 42)"
+        );
     }
 
     #[test]
@@ -169,7 +172,11 @@ mod tests {
         };
         let err: PhpError = exc.into();
         match err {
-            PhpError::Exception { class, message, code } => {
+            PhpError::Exception {
+                class,
+                message,
+                code,
+            } => {
                 assert_eq!(class, "RuntimeException");
                 assert_eq!(message, "fail");
                 assert_eq!(code, 1);

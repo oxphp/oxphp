@@ -39,7 +39,10 @@ pub unsafe extern "C" fn storage_drop_callback(class_index: u32, rust_data: *mut
 
 /// FFI callback: clone storage when object is cloned.
 #[cfg_attr(not(feature = "php"), allow(dead_code))]
-pub unsafe extern "C" fn storage_clone_callback(class_index: u32, rust_data: *mut c_void) -> *mut c_void {
+pub unsafe extern "C" fn storage_clone_callback(
+    class_index: u32,
+    rust_data: *mut c_void,
+) -> *mut c_void {
     let meta = CLASS_META.get().expect("CLASS_META not initialized");
     if let Some(m) = meta.get(class_index as usize) {
         match &m.clone_fn {
@@ -82,7 +85,9 @@ mod tests {
             })),
         };
         let ptr = (meta.factory)();
-        unsafe { *(ptr as *mut u32) = 99; }
+        unsafe {
+            *(ptr as *mut u32) = 99;
+        }
         let clone_ptr = (meta.clone_fn.as_ref().unwrap())(ptr);
         assert_eq!(unsafe { *(clone_ptr as *const u32) }, 99);
         (meta.drop_fn)(ptr);

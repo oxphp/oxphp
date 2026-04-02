@@ -21,11 +21,7 @@ pub struct AttributeBuilder<'a> {
 }
 
 impl<'a> AttributeBuilder<'a> {
-    pub(crate) fn new(
-        fqn: &str,
-        plugin_name: &str,
-        target: &'a mut Vec<PhpAttributeDef>,
-    ) -> Self {
+    pub(crate) fn new(fqn: &str, plugin_name: &str, target: &'a mut Vec<PhpAttributeDef>) -> Self {
         let mut def = PhpAttributeDef::new(fqn);
         def.plugin_name = plugin_name.to_string();
         Self { def, target }
@@ -51,7 +47,9 @@ impl<'a> AttributeBuilder<'a> {
 
     /// Add an optional constructor parameter with a default value.
     pub fn optional_param(mut self, name: &str, php_type: PhpType, default: PhpValue) -> Self {
-        self.def.params.push(PhpParamDef::optional(name, php_type, default));
+        self.def
+            .params
+            .push(PhpParamDef::optional(name, php_type, default));
         self
     }
 
@@ -104,7 +102,9 @@ mod tests {
     #[test]
     fn test_attribute_targets() {
         let attr = collect_attribute(|b| {
-            b.target(ATTR_TARGET_CLASS | ATTR_TARGET_METHOD).build().unwrap();
+            b.target(ATTR_TARGET_CLASS | ATTR_TARGET_METHOD)
+                .build()
+                .unwrap();
         });
         assert_eq!(attr.targets, ATTR_TARGET_CLASS | ATTR_TARGET_METHOD);
         assert_ne!(attr.targets, ATTR_TARGET_ALL);

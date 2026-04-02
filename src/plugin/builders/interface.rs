@@ -11,11 +11,7 @@ pub struct InterfaceBuilder<'a> {
 }
 
 impl<'a> InterfaceBuilder<'a> {
-    pub(crate) fn new(
-        fqn: &str,
-        plugin_name: &str,
-        target: &'a mut Vec<PhpInterfaceDef>,
-    ) -> Self {
+    pub(crate) fn new(fqn: &str, plugin_name: &str, target: &'a mut Vec<PhpInterfaceDef>) -> Self {
         let mut def = PhpInterfaceDef::new(fqn);
         def.plugin_name = plugin_name.to_string();
         Self { def, target }
@@ -62,20 +58,26 @@ pub struct InterfaceMethodBuilder<'a> {
 impl<'a> InterfaceMethodBuilder<'a> {
     /// Add a required parameter.
     pub fn param(mut self, name: &str, php_type: PhpType) -> Self {
-        self.method_def.params.push(PhpParamDef::required(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::required(name, php_type));
         self
     }
 
     /// Add an optional parameter with a default value.
     pub fn optional_param(mut self, name: &str, php_type: PhpType, default: PhpValue) -> Self {
-        self.method_def.params.push(PhpParamDef::optional(name, php_type, default));
+        self.method_def
+            .params
+            .push(PhpParamDef::optional(name, php_type, default));
         self
     }
 
     /// Add a variadic parameter. Also marks the method as variadic.
     pub fn variadic_param(mut self, name: &str, php_type: PhpType) -> Self {
         self.method_def.is_variadic = true;
-        self.method_def.params.push(PhpParamDef::variadic(name, php_type));
+        self.method_def
+            .params
+            .push(PhpParamDef::variadic(name, php_type));
         self
     }
 
@@ -165,9 +167,13 @@ mod tests {
     #[test]
     fn test_interface_constant() {
         let iface = collect_interface(|b| {
-            b.constant("VERSION", PhpValue::String("1.0.0".to_string()), Visibility::Public)
-                .build()
-                .unwrap();
+            b.constant(
+                "VERSION",
+                PhpValue::String("1.0.0".to_string()),
+                Visibility::Public,
+            )
+            .build()
+            .unwrap();
         });
         assert_eq!(iface.constants.len(), 1);
         let c = &iface.constants[0];

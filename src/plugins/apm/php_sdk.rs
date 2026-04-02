@@ -14,7 +14,10 @@ use super::spans::{now_us, SpanEvent, SPAN_STACK};
 /// The `enabled` flag controls runtime behavior: when `false`, functions
 /// return sentinel values (0 for IDs, "" for strings) without touching
 /// the span stack.
-pub fn register_functions(ctx: &mut PluginContext, enabled: bool) -> Result<(), crate::plugin::PluginError> {
+pub fn register_functions(
+    ctx: &mut PluginContext,
+    enabled: bool,
+) -> Result<(), crate::plugin::PluginError> {
     // 1. oxphp_apm_trace(name, callback, ?attributes)
     ctx.function("oxphp_apm_trace")
         .param("name", PhpType::String)
@@ -473,10 +476,7 @@ mod tests {
     #[test]
     fn test_trace_start_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_start")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_start").unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "name");
         assert!(f.params[0].required);
@@ -512,37 +512,31 @@ mod tests {
     #[test]
     fn test_trace_id_no_params() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_trace_id").unwrap();
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_apm_trace_id")
+            .unwrap();
         assert!(f.params.is_empty());
     }
 
     #[test]
     fn test_trace_span_id_no_params() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_span_id")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_span_id").unwrap();
         assert!(f.params.is_empty());
     }
 
     #[test]
     fn test_trace_header_no_params() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_header")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_header").unwrap();
         assert!(f.params.is_empty());
     }
 
     #[test]
     fn test_trace_event_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_event")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_event").unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "name");
         assert!(f.params[0].required);
@@ -555,10 +549,7 @@ mod tests {
     #[test]
     fn test_trace_error_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_error")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_error").unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "exception");
         assert!(f.params[0].required);
@@ -569,10 +560,7 @@ mod tests {
     #[test]
     fn test_trace_status_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs
-            .iter()
-            .find(|f| f.fqn == "oxphp_apm_status")
-            .unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_apm_status").unwrap();
         assert_eq!(f.params.len(), 3);
         assert_eq!(f.params[0].name, "code");
         assert!(f.params[0].required);
@@ -607,7 +595,10 @@ mod tests {
         assert_eq!(find("oxphp_apm_event").return_type, Some(PhpType::Void));
         assert_eq!(find("oxphp_apm_error").return_type, Some(PhpType::Void));
         assert_eq!(find("oxphp_apm_status").return_type, Some(PhpType::Void));
-        assert_eq!(find("oxphp_apm_trace_id").return_type, Some(PhpType::String));
+        assert_eq!(
+            find("oxphp_apm_trace_id").return_type,
+            Some(PhpType::String)
+        );
         assert_eq!(find("oxphp_apm_span_id").return_type, Some(PhpType::String));
         assert_eq!(find("oxphp_apm_header").return_type, Some(PhpType::String));
     }
