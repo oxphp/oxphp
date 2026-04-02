@@ -347,6 +347,19 @@ impl Plugin for ApmPlugin {
             // Register no-op PHP SDK functions even when disabled
             php_sdk::register_functions(ctx, false)?;
 
+            // Register attribute class so #[Trace] doesn't fatal even when APM is off
+            use crate::plugin::builders::attribute::{ATTR_TARGET_FUNCTION, ATTR_TARGET_METHOD};
+            ctx.register_attribute("OxPHP\\Apm\\Trace")
+                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD)
+                .optional_param(
+                    "name",
+                    crate::plugin::types::PhpType::Nullable(Box::new(
+                        crate::plugin::types::PhpType::String,
+                    )),
+                    crate::plugin::types::PhpValue::Null,
+                )
+                .build()?;
+
             return Ok(());
         }
 
@@ -367,6 +380,21 @@ impl Plugin for ApmPlugin {
         ctx.expose_config("db_capture_params", self.config.db_capture_params);
 
         php_sdk::register_functions(ctx, true)?;
+
+        // Register the #[OxPHP\Apm\Trace] PHP attribute class
+        {
+            use crate::plugin::builders::attribute::{ATTR_TARGET_FUNCTION, ATTR_TARGET_METHOD};
+            ctx.register_attribute("OxPHP\\Apm\\Trace")
+                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD)
+                .optional_param(
+                    "name",
+                    crate::plugin::types::PhpType::Nullable(Box::new(
+                        crate::plugin::types::PhpType::String,
+                    )),
+                    crate::plugin::types::PhpValue::Null,
+                )
+                .build()?;
+        }
 
         let provider: Arc<OnceLock<TracerProvider>> = ctx
             .service::<Arc<OnceLock<TracerProvider>>>("otel.provider")
