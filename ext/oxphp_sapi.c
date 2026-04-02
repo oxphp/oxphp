@@ -8,6 +8,7 @@
 #include "Zend/zend_observer.h"
 #include "Zend/zend_attributes.h"
 #include "Zend/zend_interfaces.h"
+#include "Zend/zend_enum.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "ext/standard/basic_functions.h"
@@ -1404,6 +1405,61 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_oxphp_native_dispatch, 0, 0, 0)
 ZEND_END_ARG_INFO()
 /* }}} */
 
+/* ─── Plugin class method dispatch ────────────────────────── */
+
+/* {{{ arginfo for method dispatch (variadic mixed, same as native dispatch) */
+ZEND_BEGIN_ARG_INFO_EX(arginfo_oxphp_method_dispatch, 0, 0, 0)
+    ZEND_ARG_VARIADIC_INFO(0, args)
+ZEND_END_ARG_INFO()
+/* }}} */
+
+/* {{{ oxphp_method_dispatch — single handler for all plugin class methods.
+ * Routes calls through the Rust method dispatch callback using class_index
+ * and method name to identify the target. */
+ZEND_FUNCTION(oxphp_method_dispatch)
+{
+    const char *method_name = ZSTR_VAL(execute_data->func->common.function_name);
+    uint32_t argc = ZEND_NUM_ARGS();
+    zval *args = (argc > 0) ? ZEND_CALL_ARG(execute_data, 1) : NULL;
+
+    void *rust_data = NULL;
+    uint32_t class_index = 0;
+
+    /* For instance methods, extract rust_data from the custom object */
+    if (Z_TYPE(execute_data->This) == IS_OBJECT) {
+        oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
+        rust_data = intern->rust_data;
+        class_index = intern->class_index;
+    } else if (execute_data->func->common.scope) {
+        /* Static method — find class_index from the scope CE.
+         * Walk the plugin class CE array to find the match. */
+        zend_class_entry *scope = execute_data->func->common.scope;
+        int cls_count = oxphp_bridge_get_plugin_class_count();
+        for (int i = 0; i < cls_count; i++) {
+            const char *fqn = oxphp_bridge_get_class_fqn(i);
+            if (fqn && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
+                class_index = (uint32_t)i;
+                break;
+            }
+        }
+    }
+
+    oxphp_method_dispatch_fn_t dispatch = oxphp_bridge_get_method_dispatch();
+    if (!dispatch) {
+        zend_throw_error(NULL, "OxPHP method dispatch not initialized");
+        return;
+    }
+
+    int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data);
+    if (rc != 0 && !EG(exception)) {
+        zend_throw_error(NULL, "Plugin method %s::%s failed",
+            execute_data->func->common.scope
+                ? ZSTR_VAL(execute_data->func->common.scope->name) : "?",
+            method_name);
+    }
+}
+/* }}} */
+
 /* ─── Decorator System ────────────────────────────────────── */
 
 /* {{{ AttributeInterface — method arginfo and entries */
@@ -2757,6 +2813,345 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             /* Sentinel: last entry is all-zeroes (from calloc). */
             zend_register_functions(NULL, entries, NULL, MODULE_PERSISTENT);
             free(entries);
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * Register builder-based plugin functions (new API)
+     * ═══════════════════════════════════════════════════════════ */
+    {
+        int fn_count = oxphp_bridge_get_plugin_function_count();
+        if (fn_count > 0) {
+            zend_function_entry *fn_entries = calloc(fn_count + 1, sizeof(zend_function_entry));
+            if (fn_entries) {
+                for (int i = 0; i < fn_count; i++) {
+                    fn_entries[i].fname = oxphp_bridge_get_plugin_function_fqn(i);
+                    fn_entries[i].handler = ZEND_FN(oxphp_native_dispatch);
+                    fn_entries[i].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
+                    fn_entries[i].num_args = 0;
+                    fn_entries[i].flags = 0;
+                }
+                zend_register_functions(NULL, fn_entries, NULL, MODULE_PERSISTENT);
+                free(fn_entries);
+            }
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * Register plugin interfaces
+     * ═══════════════════════════════════════════════════════════ */
+    {
+        int iface_count = oxphp_bridge_get_plugin_interface_count();
+        for (int i = 0; i < iface_count; i++) {
+            const char *fqn = oxphp_bridge_get_interface_fqn(i);
+            const char *parent = oxphp_bridge_get_interface_parent(i);
+            if (!fqn) continue;
+
+            /* Build method entries for the interface */
+            int mcount = oxphp_bridge_get_interface_method_count(i);
+            zend_function_entry *methods = calloc(mcount + 1, sizeof(zend_function_entry));
+            if (methods) {
+                for (int m = 0; m < mcount; m++) {
+                    methods[m].fname = oxphp_bridge_get_interface_method_name(i, m);
+                    methods[m].handler = NULL; /* interface methods have no handler */
+                    methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                    methods[m].num_args = 0;
+                    methods[m].flags = oxphp_bridge_get_interface_method_flags(i, m)
+                                     | ZEND_ACC_ABSTRACT | ZEND_ACC_PUBLIC;
+                }
+            }
+
+            zend_class_entry tmp_ce;
+            INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
+
+            zend_class_entry *iface_ce;
+            if (parent) {
+                zend_string *parent_str = zend_string_init(parent, strlen(parent), 0);
+                zend_class_entry *parent_ce = zend_lookup_class(parent_str);
+                zend_string_release(parent_str);
+                iface_ce = zend_register_internal_interface(&tmp_ce);
+                if (parent_ce) {
+                    zend_class_implements(iface_ce, 1, parent_ce);
+                }
+            } else {
+                iface_ce = zend_register_internal_interface(&tmp_ce);
+            }
+
+            /* Register interface constants */
+            int kcount = oxphp_bridge_get_interface_constant_count(i);
+            for (int k = 0; k < kcount; k++) {
+                const char *kname = oxphp_bridge_get_interface_constant_name(i, k);
+                const char *kval = oxphp_bridge_get_interface_constant_value(i, k);
+                if (kname && kval) {
+                    zval zv;
+                    char *endptr;
+                    long lval = strtol(kval, &endptr, 10);
+                    if (*endptr == '\0' && kval[0] != '\0') {
+                        ZVAL_LONG(&zv, lval);
+                    } else {
+                        ZVAL_STRING(&zv, kval);
+                    }
+                    zend_declare_class_constant(iface_ce, kname, strlen(kname), &zv);
+                }
+            }
+
+            free(methods);
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * Register plugin enums
+     * ═══════════════════════════════════════════════════════════ */
+    {
+        int enum_count = oxphp_bridge_get_plugin_enum_count();
+        for (int i = 0; i < enum_count; i++) {
+            const char *fqn = oxphp_bridge_get_enum_fqn(i);
+            int backing = oxphp_bridge_get_enum_backing_type(i);
+            if (!fqn) continue;
+
+            /* Build method entries */
+            int mcount = oxphp_bridge_get_enum_method_count(i);
+            zend_function_entry *methods = calloc(mcount + 1, sizeof(zend_function_entry));
+            if (methods) {
+                for (int m = 0; m < mcount; m++) {
+                    methods[m].fname = oxphp_bridge_get_enum_method_name(i, m);
+                    methods[m].handler = ZEND_FN(oxphp_method_dispatch);
+                    methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                    methods[m].num_args = 0;
+                    methods[m].flags = oxphp_bridge_get_enum_method_flags(i, m);
+                }
+            }
+
+            zend_class_entry tmp_ce;
+            INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
+            /* backing: 0=unit, 4=IS_LONG, 6=IS_STRING */
+            zend_class_entry *enum_ce = zend_register_internal_enum(
+                &tmp_ce, backing == 0 ? IS_UNDEF : (zend_uchar)backing, NULL);
+
+            /* Implement interfaces */
+            int icount = oxphp_bridge_get_enum_interface_count(i);
+            for (int j = 0; j < icount; j++) {
+                const char *ifqn = oxphp_bridge_get_enum_interface_fqn(i, j);
+                if (ifqn) {
+                    zend_string *iname = zend_string_init(ifqn, strlen(ifqn), 0);
+                    zend_class_entry *iface_ce = zend_lookup_class(iname);
+                    zend_string_release(iname);
+                    if (iface_ce) {
+                        zend_class_implements(enum_ce, 1, iface_ce);
+                    }
+                }
+            }
+
+            /* Add cases */
+            int ccount = oxphp_bridge_get_enum_case_count(i);
+            for (int c = 0; c < ccount; c++) {
+                const char *cname = oxphp_bridge_get_enum_case_name(i, c);
+                const char *cval = oxphp_bridge_get_enum_case_value(i, c);
+                if (!cname) continue;
+
+                if (backing == 0) {
+                    /* Unit enum */
+                    zend_enum_add_case_cstr(enum_ce, cname, NULL);
+                } else if (backing == 4) {
+                    /* Int-backed */
+                    zval zv;
+                    ZVAL_LONG(&zv, cval ? strtol(cval, NULL, 10) : 0);
+                    zend_enum_add_case_cstr(enum_ce, cname, &zv);
+                } else if (backing == 6) {
+                    /* String-backed */
+                    zval zv;
+                    ZVAL_STRING(&zv, cval ? cval : "");
+                    zend_enum_add_case_cstr(enum_ce, cname, &zv);
+                    zval_ptr_dtor(&zv);
+                }
+            }
+
+            free(methods);
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * Register plugin classes
+     * ═══════════════════════════════════════════════════════════ */
+    {
+        int cls_count = oxphp_bridge_get_plugin_class_count();
+        if (cls_count > 0) {
+            /* Initialize custom object infrastructure in the bridge */
+            oxphp_plugin_init_custom_objects(cls_count);
+
+            for (int i = 0; i < cls_count; i++) {
+                const char *fqn = oxphp_bridge_get_class_fqn(i);
+                const char *parent_fqn = oxphp_bridge_get_class_parent(i);
+                uint32_t cls_flags = oxphp_bridge_get_class_flags(i);
+                int has_custom = oxphp_bridge_get_class_has_custom_object(i);
+                if (!fqn) continue;
+
+                /* Build method entries */
+                int mcount = oxphp_bridge_get_class_method_count(i);
+                zend_function_entry *methods = calloc(mcount + 1, sizeof(zend_function_entry));
+                if (methods) {
+                    for (int m = 0; m < mcount; m++) {
+                        methods[m].fname = oxphp_bridge_get_class_method_name(i, m);
+                        methods[m].handler = ZEND_FN(oxphp_method_dispatch);
+                        methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                        methods[m].num_args = 0;
+                        methods[m].flags = oxphp_bridge_get_class_method_visibility(i, m)
+                                         | oxphp_bridge_get_class_method_flags(i, m);
+                    }
+                }
+
+                zend_class_entry tmp_ce;
+
+                /* Look up parent class entry if specified */
+                zend_class_entry *parent_ce = NULL;
+                if (parent_fqn) {
+                    zend_string *parent_str = zend_string_init(parent_fqn, strlen(parent_fqn), 0);
+                    parent_ce = zend_lookup_class(parent_str);
+                    zend_string_release(parent_str);
+                }
+
+                INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
+                zend_class_entry *cls_ce = zend_register_internal_class_ex(&tmp_ce, parent_ce);
+
+                /* Apply class flags */
+                cls_ce->ce_flags |= cls_flags;
+
+                /* Store CE in our lookup array */
+                oxphp_plugin_set_class_ce(i, cls_ce);
+
+                /* Set up object handlers */
+                zend_object_handlers *handlers = oxphp_plugin_get_handlers(i);
+                if (has_custom) {
+                    cls_ce->create_object = oxphp_plugin_create_object;
+                    handlers->free_obj = oxphp_plugin_free_object;
+                    handlers->clone_obj = oxphp_plugin_clone_object;
+                    cls_ce->default_object_handlers = handlers;
+                } else {
+                    /* Even without custom storage, set the handlers for consistency */
+                    cls_ce->default_object_handlers = handlers;
+                }
+
+                /* Implement interfaces */
+                int icount = oxphp_bridge_get_class_interface_count(i);
+                for (int j = 0; j < icount; j++) {
+                    const char *ifqn = oxphp_bridge_get_class_interface_fqn(i, j);
+                    if (ifqn) {
+                        zend_string *iname = zend_string_init(ifqn, strlen(ifqn), 0);
+                        zend_class_entry *iface_ce = zend_lookup_class(iname);
+                        zend_string_release(iname);
+                        if (iface_ce) {
+                            zend_class_implements(cls_ce, 1, iface_ce);
+                        }
+                    }
+                }
+
+                /* Declare properties */
+                int pcount = oxphp_bridge_get_class_property_count(i);
+                for (int p = 0; p < pcount; p++) {
+                    const char *pname = oxphp_bridge_get_class_property_name(i, p);
+                    uint32_t pvis = oxphp_bridge_get_class_property_visibility(i, p);
+                    uint32_t pmods = oxphp_bridge_get_class_property_modifiers(i, p);
+                    const char *pdefault = oxphp_bridge_get_class_property_default(i, p);
+                    if (!pname) continue;
+
+                    uint32_t access = pvis | pmods;
+                    if (pdefault) {
+                        /* Try to parse as int, float, bool, null, or fall back to string */
+                        char *endptr;
+                        long lval = strtol(pdefault, &endptr, 10);
+                        if (*endptr == '\0' && pdefault[0] != '\0') {
+                            zend_declare_property_long(cls_ce, pname, strlen(pname), lval, access);
+                        } else if (strcmp(pdefault, "true") == 0) {
+                            zend_declare_property_bool(cls_ce, pname, strlen(pname), 1, access);
+                        } else if (strcmp(pdefault, "false") == 0) {
+                            zend_declare_property_bool(cls_ce, pname, strlen(pname), 0, access);
+                        } else if (strcmp(pdefault, "null") == 0) {
+                            zend_declare_property_null(cls_ce, pname, strlen(pname), access);
+                        } else {
+                            double dval = strtod(pdefault, &endptr);
+                            if (*endptr == '\0' && pdefault[0] != '\0') {
+                                zend_declare_property_double(cls_ce, pname, strlen(pname), dval, access);
+                            } else {
+                                zend_declare_property_string(cls_ce, pname, strlen(pname), pdefault, access);
+                            }
+                        }
+                    } else {
+                        zend_declare_property_null(cls_ce, pname, strlen(pname), access);
+                    }
+                }
+
+                /* Declare class constants */
+                int kcount = oxphp_bridge_get_class_constant_count(i);
+                for (int k = 0; k < kcount; k++) {
+                    const char *kname = oxphp_bridge_get_class_constant_name(i, k);
+                    const char *kval = oxphp_bridge_get_class_constant_value(i, k);
+                    if (!kname || !kval) continue;
+
+                    zval zv;
+                    char *endptr;
+                    long lval = strtol(kval, &endptr, 10);
+                    if (*endptr == '\0' && kval[0] != '\0') {
+                        ZVAL_LONG(&zv, lval);
+                    } else if (strcmp(kval, "true") == 0) {
+                        ZVAL_TRUE(&zv);
+                    } else if (strcmp(kval, "false") == 0) {
+                        ZVAL_FALSE(&zv);
+                    } else if (strcmp(kval, "null") == 0) {
+                        ZVAL_NULL(&zv);
+                    } else {
+                        ZVAL_STRING(&zv, kval);
+                    }
+                    zend_declare_class_constant(cls_ce, kname, strlen(kname), &zv);
+                }
+
+                free(methods);
+            }
+        }
+    }
+
+    /* ═══════════════════════════════════════════════════════════
+     * Register plugin attributes
+     * ═══════════════════════════════════════════════════════════ */
+    {
+        int attr_count = oxphp_bridge_get_plugin_attribute_count();
+        for (int i = 0; i < attr_count; i++) {
+            const char *fqn = oxphp_bridge_get_attribute_fqn(i);
+            uint32_t targets = oxphp_bridge_get_attribute_targets(i);
+            int is_repeatable = oxphp_bridge_get_attribute_is_repeatable(i);
+            if (!fqn) continue;
+
+            /* Attributes are registered as internal classes first,
+             * then marked as attributes via zend_mark_internal_attribute(). */
+
+            /* Build param entries as constructor arginfo — for now just use variadic */
+            zend_function_entry *attr_methods = calloc(1, sizeof(zend_function_entry));
+            /* sentinel only — no methods needed for simple attributes */
+
+            zend_class_entry tmp_ce;
+            INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), attr_methods);
+            zend_class_entry *attr_ce = zend_register_internal_class(&tmp_ce);
+
+            /* Mark as attribute with targets */
+            attr_ce->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
+            zend_internal_attribute *attr = zend_mark_internal_attribute(attr_ce);
+            if (attr) {
+                attr->flags = targets;
+                if (is_repeatable) {
+                    attr->flags |= ZEND_ATTRIBUTE_IS_REPEATABLE;
+                }
+            }
+
+            /* Declare attribute properties */
+            int pcount = oxphp_bridge_get_attribute_property_count(i);
+            for (int p = 0; p < pcount; p++) {
+                const char *pname = oxphp_bridge_get_attribute_property_name(i, p);
+                uint32_t pvis = oxphp_bridge_get_attribute_property_visibility(i, p);
+                if (pname) {
+                    zend_declare_property_null(attr_ce, pname, strlen(pname), pvis);
+                }
+            }
+
+            free(attr_methods);
         }
     }
 

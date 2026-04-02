@@ -29,6 +29,7 @@ PHP_FUNCTION(oxphp_usleep);
 PHP_FUNCTION(oxphp_worker);
 
 ZEND_FUNCTION(oxphp_plugin_dispatch);
+ZEND_FUNCTION(oxphp_method_dispatch);
 
 PHP_FUNCTION(oxphp_async);
 PHP_FUNCTION(oxphp_async_await);

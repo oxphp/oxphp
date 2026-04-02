@@ -148,6 +148,820 @@ int oxphp_bridge_get_plugin_fn_total(int index) {
 }
 
 /* ═══════════════════════════════════════════════════════════
+ *  Plugin Class Registry (global, NOT __thread)
+ *
+ *  Same thread-safety model as the function registry: written once
+ *  from the main thread during startup, read during MINIT on the
+ *  same thread. No concurrent access.
+ * ═══════════════════════════════════════════════════════════ */
+
+#define MAGIC_METHOD_COUNT 17
+
+/* Sub-entries for class properties, constants, and methods. */
+
+typedef struct {
+    char *name;
+    uint32_t visibility;
+    uint32_t modifiers;
+    int type_info;
+    char *default_value;    /* NULL = no default */
+} oxphp_class_property_t;
+
+typedef struct {
+    char *name;
+    uint32_t visibility;
+    char *value;
+} oxphp_class_constant_t;
+
+typedef struct {
+    char *name;
+    uint32_t visibility;
+    uint32_t flags;
+    int required_params;
+    int total_params;
+    int is_variadic;
+} oxphp_class_method_t;
+
+typedef struct {
+    char *fqn;
+    char *parent_fqn;           /* NULL if no parent */
+    uint32_t flags;             /* ZEND_ACC_FINAL, ZEND_ACC_ABSTRACT, etc. */
+    int has_custom_object;
+
+    /* Interfaces */
+    char **interface_fqns;
+    int interface_count;
+    int interface_capacity;
+
+    /* Properties */
+    oxphp_class_property_t *properties;
+    int property_count;
+    int property_capacity;
+
+    /* Constants */
+    oxphp_class_constant_t *constants;
+    int constant_count;
+    int constant_capacity;
+
+    /* Methods */
+    oxphp_class_method_t *methods;
+    int method_count;
+    int method_capacity;
+
+    /* Magic method flags (1 = has handler, indexed by MagicMethod enum) */
+    int magic_handlers[MAGIC_METHOD_COUNT];
+} oxphp_plugin_class_entry_t;
+
+static oxphp_plugin_class_entry_t *plugin_classes = NULL;
+static int plugin_class_count = 0;
+static int plugin_class_capacity = 0;
+
+int oxphp_bridge_register_class(const char *fqn, const char *parent_fqn, uint32_t flags) {
+    if (!fqn) return -1;
+    if (plugin_class_count >= plugin_class_capacity) {
+        int new_cap = plugin_class_capacity == 0 ? 8 : plugin_class_capacity * 2;
+        oxphp_plugin_class_entry_t *new_arr = realloc(plugin_classes, new_cap * sizeof(*plugin_classes));
+        if (!new_arr) return -1;
+        plugin_classes = new_arr;
+        plugin_class_capacity = new_cap;
+    }
+    int idx = plugin_class_count++;
+    oxphp_plugin_class_entry_t *e = &plugin_classes[idx];
+    memset(e, 0, sizeof(*e));
+    e->fqn = strdup(fqn);
+    e->parent_fqn = parent_fqn ? strdup(parent_fqn) : NULL;
+    e->flags = flags;
+    return idx;
+}
+
+void oxphp_bridge_class_implements(int h, const char *interface_fqn) {
+    if (h < 0 || h >= plugin_class_count || !interface_fqn) return;
+    oxphp_plugin_class_entry_t *e = &plugin_classes[h];
+    if (e->interface_count >= e->interface_capacity) {
+        int new_cap = e->interface_capacity == 0 ? 4 : e->interface_capacity * 2;
+        char **new_arr = realloc(e->interface_fqns, new_cap * sizeof(char*));
+        if (!new_arr) return;
+        e->interface_fqns = new_arr;
+        e->interface_capacity = new_cap;
+    }
+    e->interface_fqns[e->interface_count++] = strdup(interface_fqn);
+}
+
+void oxphp_bridge_class_add_property(int h, const char *name,
+    uint32_t visibility, uint32_t modifiers, int type_info, const char *default_value)
+{
+    if (h < 0 || h >= plugin_class_count || !name) return;
+    oxphp_plugin_class_entry_t *e = &plugin_classes[h];
+    if (e->property_count >= e->property_capacity) {
+        int new_cap = e->property_capacity == 0 ? 4 : e->property_capacity * 2;
+        oxphp_class_property_t *new_arr = realloc(e->properties, new_cap * sizeof(*e->properties));
+        if (!new_arr) return;
+        e->properties = new_arr;
+        e->property_capacity = new_cap;
+    }
+    oxphp_class_property_t *p = &e->properties[e->property_count++];
+    p->name = strdup(name);
+    p->visibility = visibility;
+    p->modifiers = modifiers;
+    p->type_info = type_info;
+    p->default_value = default_value ? strdup(default_value) : NULL;
+}
+
+void oxphp_bridge_class_add_constant(int h, const char *name,
+    uint32_t visibility, const char *value)
+{
+    if (h < 0 || h >= plugin_class_count || !name || !value) return;
+    oxphp_plugin_class_entry_t *e = &plugin_classes[h];
+    if (e->constant_count >= e->constant_capacity) {
+        int new_cap = e->constant_capacity == 0 ? 4 : e->constant_capacity * 2;
+        oxphp_class_constant_t *new_arr = realloc(e->constants, new_cap * sizeof(*e->constants));
+        if (!new_arr) return;
+        e->constants = new_arr;
+        e->constant_capacity = new_cap;
+    }
+    oxphp_class_constant_t *c = &e->constants[e->constant_count++];
+    c->name = strdup(name);
+    c->visibility = visibility;
+    c->value = strdup(value);
+}
+
+void oxphp_bridge_class_add_method(int h, const char *name,
+    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic)
+{
+    if (h < 0 || h >= plugin_class_count || !name) return;
+    oxphp_plugin_class_entry_t *e = &plugin_classes[h];
+    if (e->method_count >= e->method_capacity) {
+        int new_cap = e->method_capacity == 0 ? 8 : e->method_capacity * 2;
+        oxphp_class_method_t *new_arr = realloc(e->methods, new_cap * sizeof(*e->methods));
+        if (!new_arr) return;
+        e->methods = new_arr;
+        e->method_capacity = new_cap;
+    }
+    oxphp_class_method_t *m = &e->methods[e->method_count++];
+    m->name = strdup(name);
+    m->visibility = visibility;
+    m->flags = flags;
+    m->required_params = required_params;
+    m->total_params = total_params;
+    m->is_variadic = is_variadic;
+}
+
+void oxphp_bridge_class_set_magic(int h, int magic_type, int has_handler) {
+    if (h < 0 || h >= plugin_class_count) return;
+    if (magic_type < 0 || magic_type >= MAGIC_METHOD_COUNT) return;
+    plugin_classes[h].magic_handlers[magic_type] = has_handler;
+}
+
+void oxphp_bridge_class_enable_custom_object(int h) {
+    if (h < 0 || h >= plugin_class_count) return;
+    plugin_classes[h].has_custom_object = 1;
+}
+
+int oxphp_bridge_get_plugin_class_count(void) { return plugin_class_count; }
+
+const char *oxphp_bridge_get_class_fqn(int i) {
+    if (i < 0 || i >= plugin_class_count) return NULL;
+    return plugin_classes[i].fqn;
+}
+const char *oxphp_bridge_get_class_parent(int i) {
+    if (i < 0 || i >= plugin_class_count) return NULL;
+    return plugin_classes[i].parent_fqn;
+}
+uint32_t oxphp_bridge_get_class_flags(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].flags;
+}
+int oxphp_bridge_get_class_has_custom_object(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].has_custom_object;
+}
+int oxphp_bridge_get_class_interface_count(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].interface_count;
+}
+const char *oxphp_bridge_get_class_interface_fqn(int ci, int ii) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (ii < 0 || ii >= plugin_classes[ci].interface_count) return NULL;
+    return plugin_classes[ci].interface_fqns[ii];
+}
+int oxphp_bridge_get_class_property_count(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].property_count;
+}
+const char *oxphp_bridge_get_class_property_name(int ci, int pi) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (pi < 0 || pi >= plugin_classes[ci].property_count) return NULL;
+    return plugin_classes[ci].properties[pi].name;
+}
+uint32_t oxphp_bridge_get_class_property_visibility(int ci, int pi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (pi < 0 || pi >= plugin_classes[ci].property_count) return 0;
+    return plugin_classes[ci].properties[pi].visibility;
+}
+uint32_t oxphp_bridge_get_class_property_modifiers(int ci, int pi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (pi < 0 || pi >= plugin_classes[ci].property_count) return 0;
+    return plugin_classes[ci].properties[pi].modifiers;
+}
+const char *oxphp_bridge_get_class_property_default(int ci, int pi) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (pi < 0 || pi >= plugin_classes[ci].property_count) return NULL;
+    return plugin_classes[ci].properties[pi].default_value;
+}
+int oxphp_bridge_get_class_constant_count(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].constant_count;
+}
+const char *oxphp_bridge_get_class_constant_name(int ci, int ki) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (ki < 0 || ki >= plugin_classes[ci].constant_count) return NULL;
+    return plugin_classes[ci].constants[ki].name;
+}
+uint32_t oxphp_bridge_get_class_constant_visibility(int ci, int ki) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (ki < 0 || ki >= plugin_classes[ci].constant_count) return 0;
+    return plugin_classes[ci].constants[ki].visibility;
+}
+const char *oxphp_bridge_get_class_constant_value(int ci, int ki) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (ki < 0 || ki >= plugin_classes[ci].constant_count) return NULL;
+    return plugin_classes[ci].constants[ki].value;
+}
+int oxphp_bridge_get_class_method_count(int i) {
+    if (i < 0 || i >= plugin_class_count) return 0;
+    return plugin_classes[i].method_count;
+}
+const char *oxphp_bridge_get_class_method_name(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return NULL;
+    return plugin_classes[ci].methods[mi].name;
+}
+uint32_t oxphp_bridge_get_class_method_visibility(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].visibility;
+}
+uint32_t oxphp_bridge_get_class_method_flags(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].flags;
+}
+int oxphp_bridge_get_class_method_required(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].required_params;
+}
+int oxphp_bridge_get_class_method_total(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].total_params;
+}
+int oxphp_bridge_get_class_method_is_variadic(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].is_variadic;
+}
+int oxphp_bridge_get_class_magic(int ci, int mt) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mt < 0 || mt >= MAGIC_METHOD_COUNT) return 0;
+    return plugin_classes[ci].magic_handlers[mt];
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Plugin Interface Registry
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char *name;
+    uint32_t flags;
+    int required_params;
+    int total_params;
+    int is_variadic;
+} oxphp_iface_method_t;
+
+typedef struct {
+    char *name;
+    uint32_t visibility;
+    char *value;
+} oxphp_iface_constant_t;
+
+typedef struct {
+    char *fqn;
+    char *parent_fqn;   /* NULL if no parent */
+
+    oxphp_iface_method_t *methods;
+    int method_count;
+    int method_capacity;
+
+    oxphp_iface_constant_t *constants;
+    int constant_count;
+    int constant_capacity;
+} oxphp_plugin_iface_entry_t;
+
+static oxphp_plugin_iface_entry_t *plugin_interfaces = NULL;
+static int plugin_interface_count = 0;
+static int plugin_interface_capacity = 0;
+
+int oxphp_bridge_register_interface(const char *fqn, const char *parent_fqn) {
+    if (!fqn) return -1;
+    if (plugin_interface_count >= plugin_interface_capacity) {
+        int new_cap = plugin_interface_capacity == 0 ? 8 : plugin_interface_capacity * 2;
+        oxphp_plugin_iface_entry_t *new_arr = realloc(plugin_interfaces, new_cap * sizeof(*plugin_interfaces));
+        if (!new_arr) return -1;
+        plugin_interfaces = new_arr;
+        plugin_interface_capacity = new_cap;
+    }
+    int idx = plugin_interface_count++;
+    oxphp_plugin_iface_entry_t *e = &plugin_interfaces[idx];
+    memset(e, 0, sizeof(*e));
+    e->fqn = strdup(fqn);
+    e->parent_fqn = parent_fqn ? strdup(parent_fqn) : NULL;
+    return idx;
+}
+
+void oxphp_bridge_interface_add_method(int h, const char *name,
+    uint32_t flags, int required_params, int total_params, int is_variadic)
+{
+    if (h < 0 || h >= plugin_interface_count || !name) return;
+    oxphp_plugin_iface_entry_t *e = &plugin_interfaces[h];
+    if (e->method_count >= e->method_capacity) {
+        int new_cap = e->method_capacity == 0 ? 4 : e->method_capacity * 2;
+        oxphp_iface_method_t *new_arr = realloc(e->methods, new_cap * sizeof(*e->methods));
+        if (!new_arr) return;
+        e->methods = new_arr;
+        e->method_capacity = new_cap;
+    }
+    oxphp_iface_method_t *m = &e->methods[e->method_count++];
+    m->name = strdup(name);
+    m->flags = flags;
+    m->required_params = required_params;
+    m->total_params = total_params;
+    m->is_variadic = is_variadic;
+}
+
+void oxphp_bridge_interface_add_constant(int h, const char *name,
+    uint32_t visibility, const char *value)
+{
+    if (h < 0 || h >= plugin_interface_count || !name || !value) return;
+    oxphp_plugin_iface_entry_t *e = &plugin_interfaces[h];
+    if (e->constant_count >= e->constant_capacity) {
+        int new_cap = e->constant_capacity == 0 ? 4 : e->constant_capacity * 2;
+        oxphp_iface_constant_t *new_arr = realloc(e->constants, new_cap * sizeof(*e->constants));
+        if (!new_arr) return;
+        e->constants = new_arr;
+        e->constant_capacity = new_cap;
+    }
+    oxphp_iface_constant_t *c = &e->constants[e->constant_count++];
+    c->name = strdup(name);
+    c->visibility = visibility;
+    c->value = strdup(value);
+}
+
+int oxphp_bridge_get_plugin_interface_count(void) { return plugin_interface_count; }
+
+const char *oxphp_bridge_get_interface_fqn(int i) {
+    if (i < 0 || i >= plugin_interface_count) return NULL;
+    return plugin_interfaces[i].fqn;
+}
+const char *oxphp_bridge_get_interface_parent(int i) {
+    if (i < 0 || i >= plugin_interface_count) return NULL;
+    return plugin_interfaces[i].parent_fqn;
+}
+int oxphp_bridge_get_interface_method_count(int i) {
+    if (i < 0 || i >= plugin_interface_count) return 0;
+    return plugin_interfaces[i].method_count;
+}
+const char *oxphp_bridge_get_interface_method_name(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return NULL;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return NULL;
+    return plugin_interfaces[ii].methods[mi].name;
+}
+uint32_t oxphp_bridge_get_interface_method_flags(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].flags;
+}
+int oxphp_bridge_get_interface_method_required(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].required_params;
+}
+int oxphp_bridge_get_interface_method_total(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].total_params;
+}
+int oxphp_bridge_get_interface_method_is_variadic(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].is_variadic;
+}
+int oxphp_bridge_get_interface_constant_count(int i) {
+    if (i < 0 || i >= plugin_interface_count) return 0;
+    return plugin_interfaces[i].constant_count;
+}
+const char *oxphp_bridge_get_interface_constant_name(int ii, int ki) {
+    if (ii < 0 || ii >= plugin_interface_count) return NULL;
+    if (ki < 0 || ki >= plugin_interfaces[ii].constant_count) return NULL;
+    return plugin_interfaces[ii].constants[ki].name;
+}
+uint32_t oxphp_bridge_get_interface_constant_visibility(int ii, int ki) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (ki < 0 || ki >= plugin_interfaces[ii].constant_count) return 0;
+    return plugin_interfaces[ii].constants[ki].visibility;
+}
+const char *oxphp_bridge_get_interface_constant_value(int ii, int ki) {
+    if (ii < 0 || ii >= plugin_interface_count) return NULL;
+    if (ki < 0 || ki >= plugin_interfaces[ii].constant_count) return NULL;
+    return plugin_interfaces[ii].constants[ki].value;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Plugin Enum Registry
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char *name;
+    char *value;    /* NULL for unit enums */
+} oxphp_enum_case_t;
+
+typedef struct {
+    char *name;
+    uint32_t flags;
+    int required_params;
+    int total_params;
+    int is_variadic;
+} oxphp_enum_method_t;
+
+typedef struct {
+    char *fqn;
+    int backing_type;   /* 0=unit, 4=IS_LONG, 6=IS_STRING */
+
+    char **interface_fqns;
+    int interface_count;
+    int interface_capacity;
+
+    oxphp_enum_case_t *cases;
+    int case_count;
+    int case_capacity;
+
+    oxphp_enum_method_t *methods;
+    int method_count;
+    int method_capacity;
+} oxphp_plugin_enum_entry_t;
+
+static oxphp_plugin_enum_entry_t *plugin_enums = NULL;
+static int plugin_enum_count = 0;
+static int plugin_enum_capacity = 0;
+
+int oxphp_bridge_register_enum(const char *fqn, int backing_type) {
+    if (!fqn) return -1;
+    if (plugin_enum_count >= plugin_enum_capacity) {
+        int new_cap = plugin_enum_capacity == 0 ? 4 : plugin_enum_capacity * 2;
+        oxphp_plugin_enum_entry_t *new_arr = realloc(plugin_enums, new_cap * sizeof(*plugin_enums));
+        if (!new_arr) return -1;
+        plugin_enums = new_arr;
+        plugin_enum_capacity = new_cap;
+    }
+    int idx = plugin_enum_count++;
+    oxphp_plugin_enum_entry_t *e = &plugin_enums[idx];
+    memset(e, 0, sizeof(*e));
+    e->fqn = strdup(fqn);
+    e->backing_type = backing_type;
+    return idx;
+}
+
+void oxphp_bridge_enum_implements(int h, const char *interface_fqn) {
+    if (h < 0 || h >= plugin_enum_count || !interface_fqn) return;
+    oxphp_plugin_enum_entry_t *e = &plugin_enums[h];
+    if (e->interface_count >= e->interface_capacity) {
+        int new_cap = e->interface_capacity == 0 ? 4 : e->interface_capacity * 2;
+        char **new_arr = realloc(e->interface_fqns, new_cap * sizeof(char*));
+        if (!new_arr) return;
+        e->interface_fqns = new_arr;
+        e->interface_capacity = new_cap;
+    }
+    e->interface_fqns[e->interface_count++] = strdup(interface_fqn);
+}
+
+void oxphp_bridge_enum_add_case(int h, const char *name, const char *value) {
+    if (h < 0 || h >= plugin_enum_count || !name) return;
+    oxphp_plugin_enum_entry_t *e = &plugin_enums[h];
+    if (e->case_count >= e->case_capacity) {
+        int new_cap = e->case_capacity == 0 ? 8 : e->case_capacity * 2;
+        oxphp_enum_case_t *new_arr = realloc(e->cases, new_cap * sizeof(*e->cases));
+        if (!new_arr) return;
+        e->cases = new_arr;
+        e->case_capacity = new_cap;
+    }
+    oxphp_enum_case_t *c = &e->cases[e->case_count++];
+    c->name = strdup(name);
+    c->value = value ? strdup(value) : NULL;
+}
+
+void oxphp_bridge_enum_add_method(int h, const char *name,
+    uint32_t flags, int required_params, int total_params, int is_variadic)
+{
+    if (h < 0 || h >= plugin_enum_count || !name) return;
+    oxphp_plugin_enum_entry_t *e = &plugin_enums[h];
+    if (e->method_count >= e->method_capacity) {
+        int new_cap = e->method_capacity == 0 ? 4 : e->method_capacity * 2;
+        oxphp_enum_method_t *new_arr = realloc(e->methods, new_cap * sizeof(*e->methods));
+        if (!new_arr) return;
+        e->methods = new_arr;
+        e->method_capacity = new_cap;
+    }
+    oxphp_enum_method_t *m = &e->methods[e->method_count++];
+    m->name = strdup(name);
+    m->flags = flags;
+    m->required_params = required_params;
+    m->total_params = total_params;
+    m->is_variadic = is_variadic;
+}
+
+int oxphp_bridge_get_plugin_enum_count(void) { return plugin_enum_count; }
+
+const char *oxphp_bridge_get_enum_fqn(int i) {
+    if (i < 0 || i >= plugin_enum_count) return NULL;
+    return plugin_enums[i].fqn;
+}
+int oxphp_bridge_get_enum_backing_type(int i) {
+    if (i < 0 || i >= plugin_enum_count) return 0;
+    return plugin_enums[i].backing_type;
+}
+int oxphp_bridge_get_enum_interface_count(int i) {
+    if (i < 0 || i >= plugin_enum_count) return 0;
+    return plugin_enums[i].interface_count;
+}
+const char *oxphp_bridge_get_enum_interface_fqn(int ei, int ii) {
+    if (ei < 0 || ei >= plugin_enum_count) return NULL;
+    if (ii < 0 || ii >= plugin_enums[ei].interface_count) return NULL;
+    return plugin_enums[ei].interface_fqns[ii];
+}
+int oxphp_bridge_get_enum_case_count(int i) {
+    if (i < 0 || i >= plugin_enum_count) return 0;
+    return plugin_enums[i].case_count;
+}
+const char *oxphp_bridge_get_enum_case_name(int ei, int ci) {
+    if (ei < 0 || ei >= plugin_enum_count) return NULL;
+    if (ci < 0 || ci >= plugin_enums[ei].case_count) return NULL;
+    return plugin_enums[ei].cases[ci].name;
+}
+const char *oxphp_bridge_get_enum_case_value(int ei, int ci) {
+    if (ei < 0 || ei >= plugin_enum_count) return NULL;
+    if (ci < 0 || ci >= plugin_enums[ei].case_count) return NULL;
+    return plugin_enums[ei].cases[ci].value;
+}
+int oxphp_bridge_get_enum_method_count(int i) {
+    if (i < 0 || i >= plugin_enum_count) return 0;
+    return plugin_enums[i].method_count;
+}
+const char *oxphp_bridge_get_enum_method_name(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return NULL;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return NULL;
+    return plugin_enums[ei].methods[mi].name;
+}
+uint32_t oxphp_bridge_get_enum_method_flags(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].flags;
+}
+int oxphp_bridge_get_enum_method_required(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].required_params;
+}
+int oxphp_bridge_get_enum_method_total(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].total_params;
+}
+int oxphp_bridge_get_enum_method_is_variadic(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].is_variadic;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Plugin Attribute Registry
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char *name;
+    int type_info;
+    int is_required;
+    char *default_value;    /* NULL if none */
+} oxphp_attr_param_t;
+
+typedef struct {
+    char *name;
+    int type_info;
+    uint32_t visibility;
+} oxphp_attr_property_t;
+
+typedef struct {
+    char *fqn;
+    uint32_t targets;
+    int is_repeatable;
+
+    oxphp_attr_param_t *params;
+    int param_count;
+    int param_capacity;
+
+    oxphp_attr_property_t *properties;
+    int property_count;
+    int property_capacity;
+} oxphp_plugin_attr_entry_t;
+
+static oxphp_plugin_attr_entry_t *plugin_attributes = NULL;
+static int plugin_attribute_count = 0;
+static int plugin_attribute_capacity = 0;
+
+int oxphp_bridge_register_attribute(const char *fqn, uint32_t targets, int is_repeatable) {
+    if (!fqn) return -1;
+    if (plugin_attribute_count >= plugin_attribute_capacity) {
+        int new_cap = plugin_attribute_capacity == 0 ? 4 : plugin_attribute_capacity * 2;
+        oxphp_plugin_attr_entry_t *new_arr = realloc(plugin_attributes, new_cap * sizeof(*plugin_attributes));
+        if (!new_arr) return -1;
+        plugin_attributes = new_arr;
+        plugin_attribute_capacity = new_cap;
+    }
+    int idx = plugin_attribute_count++;
+    oxphp_plugin_attr_entry_t *e = &plugin_attributes[idx];
+    memset(e, 0, sizeof(*e));
+    e->fqn = strdup(fqn);
+    e->targets = targets;
+    e->is_repeatable = is_repeatable;
+    return idx;
+}
+
+void oxphp_bridge_attribute_add_param(int h, const char *name,
+    int type_info, int is_required, const char *default_value)
+{
+    if (h < 0 || h >= plugin_attribute_count || !name) return;
+    oxphp_plugin_attr_entry_t *e = &plugin_attributes[h];
+    if (e->param_count >= e->param_capacity) {
+        int new_cap = e->param_capacity == 0 ? 4 : e->param_capacity * 2;
+        oxphp_attr_param_t *new_arr = realloc(e->params, new_cap * sizeof(*e->params));
+        if (!new_arr) return;
+        e->params = new_arr;
+        e->param_capacity = new_cap;
+    }
+    oxphp_attr_param_t *p = &e->params[e->param_count++];
+    p->name = strdup(name);
+    p->type_info = type_info;
+    p->is_required = is_required;
+    p->default_value = default_value ? strdup(default_value) : NULL;
+}
+
+void oxphp_bridge_attribute_add_property(int h, const char *name,
+    int type_info, uint32_t visibility)
+{
+    if (h < 0 || h >= plugin_attribute_count || !name) return;
+    oxphp_plugin_attr_entry_t *e = &plugin_attributes[h];
+    if (e->property_count >= e->property_capacity) {
+        int new_cap = e->property_capacity == 0 ? 4 : e->property_capacity * 2;
+        oxphp_attr_property_t *new_arr = realloc(e->properties, new_cap * sizeof(*e->properties));
+        if (!new_arr) return;
+        e->properties = new_arr;
+        e->property_capacity = new_cap;
+    }
+    oxphp_attr_property_t *p = &e->properties[e->property_count++];
+    p->name = strdup(name);
+    p->type_info = type_info;
+    p->visibility = visibility;
+}
+
+int oxphp_bridge_get_plugin_attribute_count(void) { return plugin_attribute_count; }
+
+const char *oxphp_bridge_get_attribute_fqn(int i) {
+    if (i < 0 || i >= plugin_attribute_count) return NULL;
+    return plugin_attributes[i].fqn;
+}
+uint32_t oxphp_bridge_get_attribute_targets(int i) {
+    if (i < 0 || i >= plugin_attribute_count) return 0;
+    return plugin_attributes[i].targets;
+}
+int oxphp_bridge_get_attribute_is_repeatable(int i) {
+    if (i < 0 || i >= plugin_attribute_count) return 0;
+    return plugin_attributes[i].is_repeatable;
+}
+int oxphp_bridge_get_attribute_param_count(int i) {
+    if (i < 0 || i >= plugin_attribute_count) return 0;
+    return plugin_attributes[i].param_count;
+}
+const char *oxphp_bridge_get_attribute_param_name(int ai, int pi) {
+    if (ai < 0 || ai >= plugin_attribute_count) return NULL;
+    if (pi < 0 || pi >= plugin_attributes[ai].param_count) return NULL;
+    return plugin_attributes[ai].params[pi].name;
+}
+int oxphp_bridge_get_attribute_param_is_required(int ai, int pi) {
+    if (ai < 0 || ai >= plugin_attribute_count) return 0;
+    if (pi < 0 || pi >= plugin_attributes[ai].param_count) return 0;
+    return plugin_attributes[ai].params[pi].is_required;
+}
+const char *oxphp_bridge_get_attribute_param_default(int ai, int pi) {
+    if (ai < 0 || ai >= plugin_attribute_count) return NULL;
+    if (pi < 0 || pi >= plugin_attributes[ai].param_count) return NULL;
+    return plugin_attributes[ai].params[pi].default_value;
+}
+int oxphp_bridge_get_attribute_property_count(int i) {
+    if (i < 0 || i >= plugin_attribute_count) return 0;
+    return plugin_attributes[i].property_count;
+}
+const char *oxphp_bridge_get_attribute_property_name(int ai, int pi) {
+    if (ai < 0 || ai >= plugin_attribute_count) return NULL;
+    if (pi < 0 || pi >= plugin_attributes[ai].property_count) return NULL;
+    return plugin_attributes[ai].properties[pi].name;
+}
+uint32_t oxphp_bridge_get_attribute_property_visibility(int ai, int pi) {
+    if (ai < 0 || ai >= plugin_attribute_count) return 0;
+    if (pi < 0 || pi >= plugin_attributes[ai].property_count) return 0;
+    return plugin_attributes[ai].properties[pi].visibility;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Plugin Function Registry (new builder-based)
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    char *fqn;
+    int required_params;
+    int total_params;
+    int is_variadic;
+} oxphp_plugin_func_entry_t;
+
+static oxphp_plugin_func_entry_t *plugin_builder_functions = NULL;
+static int plugin_builder_function_count = 0;
+static int plugin_builder_function_capacity = 0;
+
+int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
+    int total_params, int is_variadic)
+{
+    if (!fqn) return -1;
+    if (plugin_builder_function_count >= plugin_builder_function_capacity) {
+        int new_cap = plugin_builder_function_capacity == 0 ? 16 : plugin_builder_function_capacity * 2;
+        oxphp_plugin_func_entry_t *new_arr = realloc(plugin_builder_functions, new_cap * sizeof(*plugin_builder_functions));
+        if (!new_arr) return -1;
+        plugin_builder_functions = new_arr;
+        plugin_builder_function_capacity = new_cap;
+    }
+    int idx = plugin_builder_function_count++;
+    oxphp_plugin_func_entry_t *e = &plugin_builder_functions[idx];
+    e->fqn = strdup(fqn);
+    e->required_params = required_params;
+    e->total_params = total_params;
+    e->is_variadic = is_variadic;
+    return idx;
+}
+
+int oxphp_bridge_get_plugin_function_count(void) { return plugin_builder_function_count; }
+
+const char *oxphp_bridge_get_plugin_function_fqn(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return NULL;
+    return plugin_builder_functions[i].fqn;
+}
+int oxphp_bridge_get_plugin_function_required(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return 0;
+    return plugin_builder_functions[i].required_params;
+}
+int oxphp_bridge_get_plugin_function_total(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return 0;
+    return plugin_builder_functions[i].total_params;
+}
+int oxphp_bridge_get_plugin_function_is_variadic(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return 0;
+    return plugin_builder_functions[i].is_variadic;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Method Dispatch + Storage Callbacks
+ * ═══════════════════════════════════════════════════════════ */
+
+static oxphp_method_dispatch_fn_t method_dispatch_fn = NULL;
+
+void oxphp_bridge_set_method_dispatch(oxphp_method_dispatch_fn_t fn) { method_dispatch_fn = fn; }
+oxphp_method_dispatch_fn_t oxphp_bridge_get_method_dispatch(void)    { return method_dispatch_fn; }
+
+static oxphp_storage_create_fn_t storage_create_fn = NULL;
+static oxphp_storage_drop_fn_t   storage_drop_fn   = NULL;
+static oxphp_storage_clone_fn_t  storage_clone_fn  = NULL;
+
+void oxphp_bridge_set_storage_callbacks(
+    oxphp_storage_create_fn_t create_fn,
+    oxphp_storage_drop_fn_t drop_fn,
+    oxphp_storage_clone_fn_t clone_fn)
+{
+    storage_create_fn = create_fn;
+    storage_drop_fn   = drop_fn;
+    storage_clone_fn  = clone_fn;
+}
+
+oxphp_storage_create_fn_t oxphp_bridge_get_storage_create(void) { return storage_create_fn; }
+oxphp_storage_drop_fn_t   oxphp_bridge_get_storage_drop(void)   { return storage_drop_fn; }
+oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage_clone_fn; }
+
+/* ═══════════════════════════════════════════════════════════
  *  Native Bridge API — Zero-Serialization Value Access
  * ═══════════════════════════════════════════════════════════ */
 
@@ -779,6 +1593,174 @@ bool oxphp_bridge_get_handler_failed(void) {
 
 void oxphp_bridge_bailout(void) {
     zend_bailout();
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Exception Bridge (PHP-dependent)
+ * ═══════════════════════════════════════════════════════════ */
+
+void oxphp_throw_exception(const char *class_fqn, const char *message, int64_t code) {
+    zend_class_entry *ce = NULL;
+    if (class_fqn && class_fqn[0] != '\0') {
+        zend_string *name = zend_string_init(class_fqn, strlen(class_fqn), 0);
+        ce = zend_lookup_class(name);
+        zend_string_release(name);
+    }
+    if (!ce) {
+        ce = zend_ce_runtime_exception;
+    }
+    zend_throw_exception(ce, message, (zend_long)code);
+}
+
+int oxphp_exception_pending(void) {
+    return EG(exception) != NULL ? 1 : 0;
+}
+
+/* Thread-local buffers for exception class name (avoids allocation) */
+static __thread char exc_class_buf[256];
+static __thread char exc_message_buf[4096];
+
+void oxphp_exception_get(const char **class_out, const char **message_out, int64_t *code_out) {
+    if (!EG(exception)) {
+        if (class_out) *class_out = NULL;
+        if (message_out) *message_out = NULL;
+        if (code_out) *code_out = 0;
+        return;
+    }
+
+    zend_object *exc = EG(exception);
+
+    /* Class name */
+    if (class_out) {
+        const char *name = ZSTR_VAL(exc->ce->name);
+        size_t len = ZSTR_LEN(exc->ce->name);
+        if (len >= sizeof(exc_class_buf)) len = sizeof(exc_class_buf) - 1;
+        memcpy(exc_class_buf, name, len);
+        exc_class_buf[len] = '\0';
+        *class_out = exc_class_buf;
+    }
+
+    /* Message — read the 'message' property directly */
+    if (message_out) {
+        zval rv;
+        zval *msg_prop = zend_read_property(
+            zend_ce_exception, exc, "message", sizeof("message") - 1, 1, &rv);
+        if (msg_prop && Z_TYPE_P(msg_prop) == IS_STRING) {
+            size_t len = Z_STRLEN_P(msg_prop);
+            if (len >= sizeof(exc_message_buf)) len = sizeof(exc_message_buf) - 1;
+            memcpy(exc_message_buf, Z_STRVAL_P(msg_prop), len);
+            exc_message_buf[len] = '\0';
+            *message_out = exc_message_buf;
+        } else {
+            exc_message_buf[0] = '\0';
+            *message_out = exc_message_buf;
+        }
+    }
+
+    /* Code */
+    if (code_out) {
+        zval rv;
+        zval *code_prop = zend_read_property(
+            zend_ce_exception, exc, "code", sizeof("code") - 1, 1, &rv);
+        if (code_prop && Z_TYPE_P(code_prop) == IS_LONG) {
+            *code_out = (int64_t)Z_LVAL_P(code_prop);
+        } else {
+            *code_out = 0;
+        }
+    }
+}
+
+void oxphp_exception_clear(void) {
+    if (EG(exception)) {
+        zend_clear_exception();
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Custom Object Handlers (PHP-dependent)
+ *  One set of handlers per class with custom storage.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* Per-class handlers array (allocated during MINIT). */
+static zend_object_handlers *oxphp_custom_handlers_arr = NULL;
+static int oxphp_custom_handler_capacity = 0;
+
+/* Per-class zend_class_entry* array to map class_index -> ce.
+ * Populated during MINIT to enable create_object reverse lookup. */
+static zend_class_entry **oxphp_plugin_class_ces = NULL;
+static int oxphp_plugin_class_ce_count = 0;
+
+void oxphp_plugin_init_custom_objects(int class_count) {
+    if (class_count <= 0) return;
+    oxphp_custom_handlers_arr = calloc(class_count, sizeof(zend_object_handlers));
+    oxphp_custom_handler_capacity = class_count;
+    oxphp_plugin_class_ces = calloc(class_count, sizeof(zend_class_entry *));
+    oxphp_plugin_class_ce_count = class_count;
+
+    /* Initialize all handler sets from std_object_handlers */
+    for (int i = 0; i < class_count; i++) {
+        memcpy(&oxphp_custom_handlers_arr[i], &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_custom_handlers_arr[i].offset = XtOffsetOf(oxphp_custom_object, std);
+    }
+}
+
+void oxphp_plugin_set_class_ce(int index, zend_class_entry *ce) {
+    if (index < 0 || index >= oxphp_plugin_class_ce_count) return;
+    oxphp_plugin_class_ces[index] = ce;
+}
+
+zend_object_handlers *oxphp_plugin_get_handlers(int index) {
+    if (index < 0 || index >= oxphp_custom_handler_capacity) return NULL;
+    return &oxphp_custom_handlers_arr[index];
+}
+
+zend_object *oxphp_plugin_create_object(zend_class_entry *ce) {
+    oxphp_custom_object *intern = zend_object_alloc(sizeof(oxphp_custom_object), ce);
+
+    /* Find class_index by matching ce against the registered class_entry array */
+    intern->class_index = 0;
+    for (int i = 0; i < oxphp_plugin_class_ce_count; i++) {
+        if (oxphp_plugin_class_ces[i] == ce) {
+            intern->class_index = (uint32_t)i;
+            break;
+        }
+    }
+
+    /* Allocate Rust storage immediately so __construct can use it */
+    if (storage_create_fn) {
+        intern->rust_data = storage_create_fn(intern->class_index);
+    } else {
+        intern->rust_data = NULL;
+    }
+
+    zend_object_std_init(&intern->std, ce);
+    object_properties_init(&intern->std, ce);
+    intern->std.handlers = &oxphp_custom_handlers_arr[intern->class_index];
+    return &intern->std;
+}
+
+void oxphp_plugin_free_object(zend_object *obj) {
+    oxphp_custom_object *intern = OXPHP_OBJ(obj);
+    if (intern->rust_data && storage_drop_fn) {
+        storage_drop_fn(intern->class_index, intern->rust_data);
+        intern->rust_data = NULL;
+    }
+    zend_object_std_dtor(&intern->std);
+}
+
+zend_object *oxphp_plugin_clone_object(zend_object *obj) {
+    oxphp_custom_object *old = OXPHP_OBJ(obj);
+    zend_object *new_obj = oxphp_plugin_create_object(obj->ce);
+    oxphp_custom_object *new_intern = OXPHP_OBJ(new_obj);
+    zend_objects_clone_members(&new_intern->std, &old->std);
+    if (old->rust_data && storage_clone_fn) {
+        /* Drop the default-created storage and replace with clone */
+        if (new_intern->rust_data && storage_drop_fn) {
+            storage_drop_fn(new_intern->class_index, new_intern->rust_data);
+        }
+        new_intern->rust_data = storage_clone_fn(old->class_index, old->rust_data);
+    }
+    return new_obj;
 }
 
 /* ── SAPI callback wrappers with cooperative deadline check ── */
