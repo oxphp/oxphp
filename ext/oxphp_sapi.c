@@ -2425,9 +2425,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
             zend_class_entry *iface_ce;
             if (parent) {
-                zend_string *parent_str = zend_string_init(parent, strlen(parent), 0);
-                zend_class_entry *parent_ce = zend_lookup_class(parent_str);
-                zend_string_release(parent_str);
+                size_t plen = strlen(parent);
+                char *lc = emalloc(plen + 1);
+                zend_str_tolower_copy(lc, parent, plen);
+                zend_class_entry *parent_ce = zend_hash_str_find_ptr(CG(class_table), lc, plen);
+                efree(lc);
                 iface_ce = zend_register_internal_interface(&tmp_ce);
                 if (parent_ce) {
                     zend_class_implements(iface_ce, 1, parent_ce);
@@ -2490,9 +2492,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             for (int j = 0; j < icount; j++) {
                 const char *ifqn = oxphp_bridge_get_enum_interface_fqn(i, j);
                 if (ifqn) {
-                    zend_string *iname = zend_string_init(ifqn, strlen(ifqn), 0);
-                    zend_class_entry *iface_ce = zend_lookup_class(iname);
-                    zend_string_release(iname);
+                    size_t ilen = strlen(ifqn);
+                    char *lc = emalloc(ilen + 1);
+                    zend_str_tolower_copy(lc, ifqn, ilen);
+                    zend_class_entry *iface_ce = zend_hash_str_find_ptr(CG(class_table), lc, ilen);
+                    efree(lc);
                     if (iface_ce) {
                         zend_class_implements(enum_ce, 1, iface_ce);
                     }
@@ -2559,12 +2563,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
                 zend_class_entry tmp_ce;
 
-                /* Look up parent class entry if specified */
+                /* Look up parent class entry if specified.
+                 * During MINIT, zend_lookup_class() is unsafe (triggers autoload/executor init).
+                 * Use direct class_table lookup instead. Names must be lowercased for the
+                 * hash lookup (PHP class names are case-insensitive). */
                 zend_class_entry *parent_ce = NULL;
                 if (parent_fqn) {
-                    zend_string *parent_str = zend_string_init(parent_fqn, strlen(parent_fqn), 0);
-                    parent_ce = zend_lookup_class(parent_str);
-                    zend_string_release(parent_str);
+                    size_t parent_len = strlen(parent_fqn);
+                    char *lc_parent = emalloc(parent_len + 1);
+                    zend_str_tolower_copy(lc_parent, parent_fqn, parent_len);
+                    parent_ce = zend_hash_str_find_ptr(CG(class_table), lc_parent, parent_len);
+                    efree(lc_parent);
                 }
 
                 INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
@@ -2598,9 +2607,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 for (int j = 0; j < icount; j++) {
                     const char *ifqn = oxphp_bridge_get_class_interface_fqn(i, j);
                     if (ifqn) {
-                        zend_string *iname = zend_string_init(ifqn, strlen(ifqn), 0);
-                        zend_class_entry *iface_ce = zend_lookup_class(iname);
-                        zend_string_release(iname);
+                        size_t ilen = strlen(ifqn);
+                        char *lc = emalloc(ilen + 1);
+                        zend_str_tolower_copy(lc, ifqn, ilen);
+                        zend_class_entry *iface_ce = zend_hash_str_find_ptr(CG(class_table), lc, ilen);
+                        efree(lc);
                         if (iface_ce) {
                             zend_class_implements(cls_ce, 1, iface_ce);
                         }
@@ -2695,13 +2706,15 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
             /* Mark as attribute with targets */
             attr_ce->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
-            zend_internal_attribute *attr = zend_mark_internal_attribute(attr_ce);
-            if (attr) {
-                attr->flags = targets;
-                if (is_repeatable) {
-                    attr->flags |= ZEND_ATTRIBUTE_IS_REPEATABLE;
-                }
+
+            /* Build the target flags for registration */
+            uint32_t attr_flags = targets;
+            if (is_repeatable) {
+                attr_flags |= ZEND_ATTRIBUTE_IS_REPEATABLE;
             }
+
+            zend_internal_attribute *attr = zend_internal_attribute_register(attr_ce, attr_flags);
+            (void)attr;
 
             /* Declare attribute properties */
             int pcount = oxphp_bridge_get_attribute_property_count(i);
