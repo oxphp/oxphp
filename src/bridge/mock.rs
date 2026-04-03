@@ -350,6 +350,51 @@ pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
     0
 }
 
+// ── Async plugin helpers ──
+
+pub unsafe fn oxphp_ht_has_objects_or_resources(_ht: *mut c_void) -> c_int {
+    0
+}
+pub unsafe fn oxphp_fiber_suspend_for_await(
+    _promise_id: i64,
+    _timeout: f64,
+    _retval: *mut c_void,
+) -> c_int {
+    1 // not in fiber — blocking path
+}
+pub unsafe fn oxphp_bridge_set_borrow_proxy_ce(_ce: *mut c_void) {}
+pub unsafe fn oxphp_arr_add_zval(_arr: *mut c_void, _key: *const c_char, _val: *mut c_void) {}
+pub unsafe fn oxphp_arr_add_index_zval(_arr: *mut c_void, _idx: u64, _val: *mut c_void) {}
+
+// ── Async direct dispatch ──
+
+pub unsafe fn oxphp_bridge_async_dispatch(
+    _op_array: *const c_void,
+    _static_vars: *mut c_void,
+    _this_ptr: *mut c_void,
+    _argc: u32,
+    _args: *mut c_void,
+    _closure_zval: *mut c_void,
+) -> i64 {
+    -1
+}
+pub unsafe fn oxphp_bridge_await_dispatch(
+    _promise_id: i64,
+    _timeout: f64,
+    _retval: *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_bridge_await_any_dispatch(
+    _promise_ids: *const i64,
+    _count: u32,
+    _timeout: f64,
+    _out_winner_id: *mut i64,
+    _retval: *mut c_void,
+) -> c_int {
+    -1
+}
+
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
 pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {

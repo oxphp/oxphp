@@ -241,6 +241,36 @@ extern "C" {
     pub fn oxphp_bridge_set_async_worker(is_async: c_int);
     pub fn oxphp_bridge_is_async_worker() -> c_int;
 
+    // ── Async plugin helpers ──
+    pub fn oxphp_ht_has_objects_or_resources(ht: *mut c_void) -> c_int;
+    pub fn oxphp_fiber_suspend_for_await(
+        promise_id: i64,
+        timeout: f64,
+        retval: *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_bridge_set_borrow_proxy_ce(ce: *mut c_void);
+    pub fn oxphp_arr_add_zval(arr: *mut c_void, key: *const c_char, val: *mut c_void);
+    pub fn oxphp_arr_add_index_zval(arr: *mut c_void, idx: u64, val: *mut c_void);
+
+    // ── Async direct dispatch ──
+    pub fn oxphp_bridge_async_dispatch(
+        op_array: *const c_void,
+        static_vars: *mut c_void,
+        this_ptr: *mut c_void,
+        argc: u32,
+        args: *mut c_void,
+        closure_zval: *mut c_void,
+    ) -> i64;
+    pub fn oxphp_bridge_await_dispatch(promise_id: i64, timeout: f64, retval: *mut c_void)
+        -> c_int;
+    pub fn oxphp_bridge_await_any_dispatch(
+        promise_ids: *const i64,
+        count: u32,
+        timeout: f64,
+        out_winner_id: *mut i64,
+        retval: *mut c_void,
+    ) -> c_int;
+
     // Async fatal error capture
     pub fn oxphp_bridge_capture_fatal(msg: *const c_char, len: usize);
     pub fn oxphp_bridge_pop_fatal() -> *mut c_char;
