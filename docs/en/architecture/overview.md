@@ -13,7 +13,7 @@ OxPHP combines two runtime layers in a single process:
 
 1. **Async HTTP layer** — an event-driven network layer accepts TCP connections, performs TLS handshakes, parses HTTP requests, and sends responses. It handles thousands of concurrent connections using non-blocking I/O, so one slow client never blocks another.
 2. **PHP worker pool** — a pool of dedicated PHP workers executes your PHP scripts. In standard mode, each worker handles one request at a time. In [Worker mode](../features/worker-mode.md) with [fiber multiplexing](../features/fiber-multiplexing.md) enabled, a single worker can serve multiple concurrent requests — when a script calls `oxphp_sleep()` or `oxphp_async_await()`, the fiber yields the thread and the worker switches to the next request.
-3. **Async pool** — separate OS threads for tasks submitted via `oxphp_async()`. This pool is isolated from the worker pool so that heavy background computations do not block HTTP request handling.
+3. **Async pool** (optional) — separate OS threads for tasks submitted via `oxphp_async()`. Enabled by setting `ASYNC_WORKERS > 0`. Isolated from the worker pool so background tasks do not block HTTP request handling.
 
 The two layers communicate through a bounded queue. When an HTTP request arrives that needs PHP execution, the async layer places it in the queue. An available PHP worker picks it up, executes the script, and returns the response to the async layer for delivery to the client.
 

@@ -431,7 +431,11 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 
 **Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()`.
 
-**Throws:** `OxPHP\Async\Exception` if the closure is not user-defined, if the async pool is full, or if arguments contain objects or resources.
+**Throws:** `OxPHP\Async\Exception` in the following cases:
+- The async pool is disabled (`ASYNC_WORKERS=0`) — message: "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
+- The closure is not user-defined
+- The async pool is full (all queue slots occupied)
+- Arguments or `use`-variables contain objects or resources
 
 > **Note:** Use-vars captured via `use` in the closure follow the same restrictions — objects and resources are rejected.
 
@@ -470,7 +474,7 @@ Blocks until the specified async promise completes and returns its result. Insid
 **Returns:** The return value of the async closure.
 
 **Throws:**
-- `OxPHP\Async\Exception` if the async task threw an exception
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the async task threw an exception
 - `OxPHP\Async\TimeoutException` if `$timeout` is exceeded
 
 **Example:**
@@ -509,7 +513,7 @@ Awaits all promises in the array and returns an associative array mapping each p
 **Returns:** An associative array where each key is a promise ID (integer) and each value is the result of that promise.
 
 **Throws:**
-- `OxPHP\Async\Exception` if any promise fails
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if any promise fails
 - `OxPHP\Async\TimeoutException` if any promise exceeds `$timeout`
 
 **Example:**
@@ -548,7 +552,7 @@ Races multiple promises and returns the first one to complete. The other promise
 - `value` (`mixed`) — The return value of the winning promise
 
 **Throws:**
-- `OxPHP\Async\Exception` if the winning promise failed
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the winning promise failed
 - `OxPHP\Async\TimeoutException` if no promise completes within `$timeout`
 
 **Example:**
@@ -975,6 +979,8 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
     // PHP-FPM or OxPHP traditional mode
 }
 ```
+
+> **Note:** The `oxphp_async()` family of functions is always registered in OxPHP, so `function_exists('oxphp_async')` returns `true` even when `ASYNC_WORKERS=0`. When the pool is disabled, calling any async function throws `OxPHP\Async\Exception`. If your code must handle both configurations, catch the exception rather than checking `function_exists()`.
 
 ## See Also
 

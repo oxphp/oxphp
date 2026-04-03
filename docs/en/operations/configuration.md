@@ -132,7 +132,7 @@ When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, m
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads for background task processing. `0` disables the async pool |
+| `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. When `0`, the async functions (`oxphp_async`, etc.) are registered but throw `OxPHP\Async\Exception` on call. Set to a positive value to enable background task execution |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | Maximum pending tasks in the async queue. `0` = auto (workers × 64) |
 
 The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.

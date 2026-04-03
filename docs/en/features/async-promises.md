@@ -21,7 +21,7 @@ OxPHP provides an async execution system that runs PHP closures on a dedicated t
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. Set to `0` to disable the async pool entirely |
 | `ASYNC_QUEUE_CAPACITY` | `0` (auto) | Maximum pending async tasks. When `0`, defaults to `ASYNC_WORKERS × 64` |
 
-> **Note:** The async pool is disabled by default. You must set `ASYNC_WORKERS` to a value greater than `0` to use `oxphp_async()`.
+> **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\Exception` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
 
 ## Dispatching Tasks
 
@@ -187,23 +187,27 @@ services:
 
 ## Troubleshooting
 
-### "Failed to dispatch async task (pool full or not configured)"
+### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-The async pool is either disabled or at capacity.
+The async pool is not configured. When `ASYNC_WORKERS=0` (the default), the async functions are registered but throw `OxPHP\Async\Exception` on every call.
 
-**Check:** Verify `ASYNC_WORKERS` is set to a value greater than `0`:
-
-```bash
-curl -s http://localhost:9090/config | jq '.async_workers'
-```
-
-**Fix:** Set `ASYNC_WORKERS` to the desired number of background threads:
+**Fix:** Set `ASYNC_WORKERS` to a positive value:
 
 ```bash
 ASYNC_WORKERS=4
 ```
 
-If the pool is configured but the error persists, increase `ASYNC_QUEUE_CAPACITY`.
+### "Failed to dispatch async task (pool full)"
+
+The async pool is running but all queue slots are occupied.
+
+**Check:** Verify the pool is accepting tasks:
+
+```bash
+curl -s http://localhost:9090/config | jq '.async_workers'
+```
+
+**Fix:** Increase `ASYNC_WORKERS` or `ASYNC_QUEUE_CAPACITY`:
 
 ### "Cannot pass object values in use-vars to async closure"
 
