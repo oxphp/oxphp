@@ -431,7 +431,7 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 
 **Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()`.
 
-**Throws:** `OxPHP\AsyncException` if the closure is not user-defined, if the async pool is full, or if arguments contain objects or resources.
+**Throws:** `OxPHP\Async\Exception` if the closure is not user-defined, if the async pool is full, or if arguments contain objects or resources.
 
 > **Note:** Use-vars captured via `use` in the closure follow the same restrictions — objects and resources are rejected.
 
@@ -470,8 +470,8 @@ Blocks until the specified async promise completes and returns its result. Insid
 **Returns:** The return value of the async closure.
 
 **Throws:**
-- `OxPHP\AsyncException` if the async task threw an exception
-- `OxPHP\AsyncTimeoutException` if `$timeout` is exceeded
+- `OxPHP\Async\Exception` if the async task threw an exception
+- `OxPHP\Async\TimeoutException` if `$timeout` is exceeded
 
 **Example:**
 
@@ -487,7 +487,7 @@ echo $result; // 500000500000
 // With timeout
 try {
     $result = oxphp_async_await($promise, 5.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo "Task took too long";
 }
 ```
@@ -509,8 +509,8 @@ Awaits all promises in the array and returns an associative array mapping each p
 **Returns:** An associative array where each key is a promise ID (integer) and each value is the result of that promise.
 
 **Throws:**
-- `OxPHP\AsyncException` if any promise fails
-- `OxPHP\AsyncTimeoutException` if any promise exceeds `$timeout`
+- `OxPHP\Async\Exception` if any promise fails
+- `OxPHP\Async\TimeoutException` if any promise exceeds `$timeout`
 
 **Example:**
 
@@ -548,8 +548,8 @@ Races multiple promises and returns the first one to complete. The other promise
 - `value` (`mixed`) — The return value of the winning promise
 
 **Throws:**
-- `OxPHP\AsyncException` if the winning promise failed
-- `OxPHP\AsyncTimeoutException` if no promise completes within `$timeout`
+- `OxPHP\Async\Exception` if the winning promise failed
+- `OxPHP\Async\TimeoutException` if no promise completes within `$timeout`
 
 **Example:**
 
@@ -886,7 +886,7 @@ The `oxphp_sapi` extension registers the following classes:
 
 | Class | Description |
 |-------|-------------|
-| `OxPHP\BorrowedProxy` | Proxy object for borrowed values between threads. |
+| `OxPHP\Async\BorrowedProxy` | Proxy object for borrowed values between threads. |
 
 ---
 
@@ -896,9 +896,9 @@ All exceptions registered by the extension:
 
 | Exception | Extends | When thrown |
 |-----------|---------|------------|
-| `OxPHP\AsyncException` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
-| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
-| `OxPHP\AsyncBorrowException` | `\Exception` | Error borrowing a value between threads |
+| `OxPHP\Async\Exception` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
+| `OxPHP\Async\BorrowException` | `\Exception` | Error borrowing a value between threads |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Calling `oxphp_http_request()` inside an `oxphp_async()` callback |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Calling `oxphp_http_request()` in worker mode between requests |

@@ -431,7 +431,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **返回值：** 整数类型的 Promise ID。将其传递给 `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()`。
 
-**抛出异常：** 若闭包不是用户定义的、异步池已满或参数包含对象或资源，则抛出 `OxPHP\AsyncException`。
+**抛出异常：** 若闭包不是用户定义的、异步池已满或参数包含对象或资源，则抛出 `OxPHP\Async\Exception`。
 
 > **注意：** 通过 `use` 捕获的变量遵循相同限制——对象和资源会被拒绝。
 
@@ -470,8 +470,8 @@ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 **返回值：** 异步闭包的返回值。
 
 **抛出异常：**
-- 若异步任务抛出异常，则抛出 `OxPHP\AsyncException`
-- 若超过 `$timeout`，则抛出 `OxPHP\AsyncTimeoutException`
+- 若异步任务抛出异常，则抛出 `OxPHP\Async\Exception`
+- 若超过 `$timeout`，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
 
@@ -487,7 +487,7 @@ echo $result; // 500000500000
 // 带超时
 try {
     $result = oxphp_async_await($promise, 5.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo "Task took too long";
 }
 ```
@@ -509,8 +509,8 @@ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 **返回值：** 关联数组，每个键为 Promise ID（整数），每个值为该 Promise 的结果。
 
 **抛出异常：**
-- 若任意 Promise 失败，则抛出 `OxPHP\AsyncException`
-- 若任意 Promise 超过 `$timeout`，则抛出 `OxPHP\AsyncTimeoutException`
+- 若任意 Promise 失败，则抛出 `OxPHP\Async\Exception`
+- 若任意 Promise 超过 `$timeout`，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
 
@@ -548,8 +548,8 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value`（`mixed`）— 获胜 Promise 的返回值
 
 **抛出异常：**
-- 若获胜 Promise 失败，则抛出 `OxPHP\AsyncException`
-- 若在 `$timeout` 内没有 Promise 完成，则抛出 `OxPHP\AsyncTimeoutException`
+- 若获胜 Promise 失败，则抛出 `OxPHP\Async\Exception`
+- 若在 `$timeout` 内没有 Promise 完成，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
 
@@ -886,7 +886,7 @@ oxphp_trace_end($spanId);
 
 | 类 | 描述 |
 |----|------|
-| `OxPHP\BorrowedProxy` | 用于线程间借用值的代理对象。 |
+| `OxPHP\Async\BorrowedProxy` | 用于线程间借用值的代理对象。 |
 
 ---
 
@@ -896,9 +896,9 @@ oxphp_trace_end($spanId);
 
 | 异常 | 继承自 | 触发时机 |
 |------|--------|----------|
-| `OxPHP\AsyncException` | `\Exception` | 异步任务中的错误（`oxphp_async_await()`）或 `oxphp_async()` 中的无效参数 |
-| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()` 中超时 |
-| `OxPHP\AsyncBorrowException` | `\Exception` | 线程间借用值时出错 |
+| `OxPHP\Async\Exception` | `\Exception` | 异步任务中的错误（`oxphp_async_await()`）或 `oxphp_async()` 中的无效参数 |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()` 中超时 |
+| `OxPHP\Async\BorrowException` | `\Exception` | 线程间借用值时出错 |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | 在没有活跃请求时调用 `oxphp_http_request()` |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | 在 `oxphp_async()` 回调内部调用 `oxphp_http_request()` |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | 在 Worker 模式下两次请求之间调用 `oxphp_http_request()` |

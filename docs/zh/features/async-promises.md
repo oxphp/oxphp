@@ -65,7 +65,7 @@ $result = oxphp_async_await($promise);           // 无限等待
 $result = oxphp_async_await($promise, 5.0);      // 最多等待 5 秒
 ```
 
-超时值为 `0.0`（默认值）时无限等待。超时时抛出 `OxPHP\AsyncTimeoutException`。
+超时值为 `0.0`（默认值）时无限等待。超时时抛出 `OxPHP\Async\TimeoutException`。
 
 ### 所有 Promise
 
@@ -103,7 +103,7 @@ echo "Promise {$winner['id']} 赢得竞争：{$winner['value']}";
 
 ## 错误处理
 
-异步闭包内抛出的异常会被捕获，并在等待时重新以 `OxPHP\AsyncException` 抛出：
+异步闭包内抛出的异常会被捕获，并在等待时重新以 `OxPHP\Async\Exception` 抛出：
 
 ```php
 <?php
@@ -113,20 +113,20 @@ $promise = oxphp_async(function () {
 
 try {
     $result = oxphp_async_await($promise);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     // "Async task failed: [RuntimeException] Something failed"
     echo $e->getMessage();
 }
 ```
 
-异步闭包内的 `exit()` 和 `die()` 也会被捕获并转换为 `OxPHP\AsyncException`。异步 Worker 可以继续存活并处理新任务。
+异步闭包内的 `exit()` 和 `die()` 也会被捕获并转换为 `OxPHP\Async\Exception`。异步 Worker 可以继续存活并处理新任务。
 
 ### 异常层级
 
 ```text
 \Exception
-  └── OxPHP\AsyncException              # 所有异步错误
-        └── OxPHP\AsyncTimeoutException  # 超时专用
+  └── OxPHP\Async\Exception              # 所有异步错误
+        └── OxPHP\Async\TimeoutException  # 超时专用
 ```
 
 ## Fiber 集成
@@ -165,7 +165,7 @@ oxphp_worker(function () {
 
 其他限制：
 
-- **不支持嵌套异步** — 在异步闭包内调用 `oxphp_async()` 会抛出 `AsyncException`
+- **不支持嵌套异步** — 在异步闭包内调用 `oxphp_async()` 会抛出 `OxPHP\Async\Exception`
 - **仅限用户定义函数** — 闭包必须是用户定义的，不能是对内置函数的包装
 - **序列化开销** — 参数和返回值在线程边界间序列化。大数组或字符串会增加延迟
 - **无共享状态** — 每个异步 Worker 有独立的 PHP 环境，分发线程和异步线程之间没有共享变量
@@ -230,7 +230,7 @@ $promise = oxphp_async(function () use ($userId, $userName) { ... });
 
 ### 异步超时不会终止正在运行的任务
 
-`OxPHP\AsyncTimeoutException` 在等待方抛出——闭包继续在异步池上运行，直到完成或请求结束。任务会在请求结束清理期间被取消。
+`OxPHP\Async\TimeoutException` 在等待方抛出——闭包继续在异步池上运行，直到完成或请求结束。任务会在请求结束清理期间被取消。
 
 ## 最佳实践
 

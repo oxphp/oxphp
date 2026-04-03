@@ -431,7 +431,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()`.
 
-**Выбрасывает:** `OxPHP\AsyncException` если замыкание не является пользовательским, если пул асинхронных воркеров переполнен или если аргументы содержат объекты или ресурсы.
+**Выбрасывает:** `OxPHP\Async\Exception` если замыкание не является пользовательским, если пул асинхронных воркеров переполнен или если аргументы содержат объекты или ресурсы.
 
 > **Примечание:** Переменные, захваченные через `use` в замыкании, подпадают под те же ограничения — объекты и ресурсы отклоняются.
 
@@ -470,8 +470,8 @@ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 **Возвращает:** Возвращаемое значение асинхронного замыкания.
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если асинхронная задача выбросила исключение
-- `OxPHP\AsyncTimeoutException` если превышен `$timeout`
+- `OxPHP\Async\Exception` если асинхронная задача выбросила исключение
+- `OxPHP\Async\TimeoutException` если превышен `$timeout`
 
 **Пример:**
 
@@ -487,7 +487,7 @@ echo $result; // 500000500000
 // С тайм-аутом
 try {
     $result = oxphp_async_await($promise, 5.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo "Task took too long";
 }
 ```
@@ -509,8 +509,8 @@ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 **Возвращает:** Ассоциативный массив, где каждый ключ — идентификатор промиса (целое число), а значение — результат этого промиса.
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если какой-либо промис завершился с ошибкой
-- `OxPHP\AsyncTimeoutException` если какой-либо промис превысил `$timeout`
+- `OxPHP\Async\Exception` если какой-либо промис завершился с ошибкой
+- `OxPHP\Async\TimeoutException` если какой-либо промис превысил `$timeout`
 
 **Пример:**
 
@@ -548,8 +548,8 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value` (`mixed`) — Возвращаемое значение промиса-победителя
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если промис-победитель завершился с ошибкой
-- `OxPHP\AsyncTimeoutException` если ни один промис не завершился в течение `$timeout`
+- `OxPHP\Async\Exception` если промис-победитель завершился с ошибкой
+- `OxPHP\Async\TimeoutException` если ни один промис не завершился в течение `$timeout`
 
 **Пример:**
 
@@ -886,7 +886,7 @@ oxphp_trace_end($spanId);
 
 | Класс | Описание |
 |-------|----------|
-| `OxPHP\BorrowedProxy` | Прокси-объект для заимствованных значений между потоками. |
+| `OxPHP\Async\BorrowedProxy` | Прокси-объект для заимствованных значений между потоками. |
 
 ---
 
@@ -896,9 +896,9 @@ oxphp_trace_end($spanId);
 
 | Исключение | Наследует | Когда выбрасывается |
 |------------|-----------|---------------------|
-| `OxPHP\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
-| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
-| `OxPHP\AsyncBorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
+| `OxPHP\Async\Exception` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
+| `OxPHP\Async\BorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` внутри колбэка `oxphp_async()` |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` в режиме worker между запросами |

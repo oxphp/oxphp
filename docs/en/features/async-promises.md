@@ -65,7 +65,7 @@ $result = oxphp_async_await($promise);           // Wait indefinitely
 $result = oxphp_async_await($promise, 5.0);      // Wait up to 5 seconds
 ```
 
-A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\AsyncTimeoutException` is thrown.
+A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\Async\TimeoutException` is thrown.
 
 ### All Promises
 
@@ -103,7 +103,7 @@ Non-winning promises remain awaitable individually after `oxphp_async_await_any(
 
 ## Error Handling
 
-Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\AsyncException`:
+Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\Async\Exception`:
 
 ```php
 <?php
@@ -113,20 +113,20 @@ $promise = oxphp_async(function () {
 
 try {
     $result = oxphp_async_await($promise);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     // "Async task failed: [RuntimeException] Something failed"
     echo $e->getMessage();
 }
 ```
 
-`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\AsyncException`. The async worker survives and continues processing new tasks.
+`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\Async\Exception`. The async worker survives and continues processing new tasks.
 
 ### Exception Hierarchy
 
 ```text
 \Exception
-  └── OxPHP\AsyncException              # All async errors
-        └── OxPHP\AsyncTimeoutException  # Timeout-specific
+  └── OxPHP\Async\Exception              # All async errors
+        └── OxPHP\Async\TimeoutException  # Timeout-specific
 ```
 
 ## Fiber Integration
@@ -165,7 +165,7 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 Additional constraints:
 
-- **No nested async** — calling `oxphp_async()` from inside an async closure throws `AsyncException`
+- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\Exception`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state** — each async worker has its own PHP environment. There are no shared variables between the dispatching thread and the async thread
@@ -230,7 +230,7 @@ In traditional mode (no `WORKER_FILE`), `oxphp_async_await()` blocks the worker 
 
 ### Async timeout does not kill the running task
 
-`OxPHP\AsyncTimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
+`OxPHP\Async\TimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
 
 ## Best Practices
 
