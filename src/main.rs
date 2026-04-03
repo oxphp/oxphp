@@ -40,6 +40,10 @@ fn main() -> Result<(), types::BoxError> {
     plugin_manager.add(Box::new(oxphp::plugins::otel::OtelPlugin::new()));
     #[cfg(feature = "plugin-apm")]
     plugin_manager.add(Box::new(oxphp::plugins::apm::ApmPlugin::new()));
+    #[cfg(feature = "plugin-async")]
+    plugin_manager.add(Box::new(
+        oxphp::plugins::async_plugin::AsyncPlugin::new(),
+    ));
     plugin_manager.init_all(&mut dispatcher)?;
 
     // Re-read trace_context after plugin init — the OTel plugin sets

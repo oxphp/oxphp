@@ -90,6 +90,7 @@ php = []
 plugin-example = ["base64"]
 plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 plugin-apm = ["plugin-otel"]
+plugin-async = []
 
 [profile.release]
 lto = "thin"
