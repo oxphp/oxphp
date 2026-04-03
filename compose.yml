@@ -4,7 +4,8 @@ services:
       context: .
       args:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-         CARGO_FEATURES: "plugin-otel plugin-apm"
+        # All plugins are included by default via the "php" feature.
+         CARGO_FEATURES: ""
     ports:
       - "80:80"
       - "443:443"
