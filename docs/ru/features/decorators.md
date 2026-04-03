@@ -253,13 +253,13 @@ class RequestTimer implements AttributeInterface
 
 ## Встроенные декораторы
 
-### #[OxPHP\Tracing\Trace]
+### #[OxPHP\Apm\Trace]
 
-При включённом APM-плагине (`OTEL_APM_ENABLED=true`) OxPHP регистрирует встроенный декоратор для атрибута `#[OxPHP\Tracing\Trace]`. Он автоматически создаёт спан при входе в функцию и закрывает его при выходе — ручные вызовы `oxphp_trace_start()` / `oxphp_trace_end()` не требуются.
+При включённом APM-плагине (`OTEL_APM_ENABLED=true`) OxPHP регистрирует встроенный декоратор для атрибута `#[OxPHP\Apm\Trace]`. Он автоматически создаёт спан при входе в функцию и закрывает его при выходе — ручные вызовы `oxphp_apm_start()` / `oxphp_apm_end()` не требуются.
 
 ```php
 <?php
-use OxPHP\Tracing\Trace;
+use OxPHP\Apm\Trace;
 
 #[Trace]
 function processOrder(int $orderId): void

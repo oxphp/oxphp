@@ -10,8 +10,8 @@ OxPHP поддерживает распространение W3C Trace Context,
 Плагин APM добавляет три уровня трассировки поверх основы OTel:
 
 - **Автоматическая инструментация** — внутренние функции PHP (PDO, mysqli, cURL, Redis, Memcached, файловый ввод-вывод) перехватываются на уровне движка; каждый вызов становится спаном без изменения кода
-- **Трассировка через атрибуты** — аннотируйте любую PHP-функцию или метод атрибутом `#[OxPHP\Tracing\Trace]` для автоматического создания спанов
-- **PHP SDK** — 10 функций `oxphp_trace_*()` для ручного создания спанов, атрибутов, событий и записи ошибок
+- **Трассировка через атрибуты** — аннотируйте любую PHP-функцию или метод атрибутом `#[OxPHP\Apm\Trace]` для автоматического создания спанов
+- **PHP SDK** — 10 функций `oxphp_apm_*()` для ручного создания спанов, атрибутов, событий и записи ошибок
 
 ## Как это работает
 
@@ -51,7 +51,7 @@ OxPHP поддерживает распространение W3C Trace Context,
 
 ### Плагин APM
 
-Плагин APM является функцией времени компиляции (`plugin-apm`), зависящей от плагина OTel. Он добавляет автоматическую инструментацию, декоратор `#[OxPHP\Tracing\Trace]` и PHP SDK трассировки.
+Плагин APM является функцией времени компиляции (`plugin-apm`), зависящей от плагина OTel. Он добавляет автоматическую инструментацию, декоратор `#[OxPHP\Apm\Trace]` и PHP SDK трассировки.
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
@@ -189,11 +189,11 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 ## APM: трассировка через атрибуты
 
-Атрибут `#[OxPHP\Tracing\Trace]` автоматически создаёт спаны вокруг декорированных функций и методов. В отличие от хуков автоинструментации (которые нацелены на внутренние C-функции), это работает с пользовательским PHP-кодом.
+Атрибут `#[OxPHP\Apm\Trace]` автоматически создаёт спаны вокруг декорированных функций и методов. В отличие от хуков автоинструментации (которые нацелены на внутренние C-функции), это работает с пользовательским PHP-кодом.
 
 ```php
 <?php
-use OxPHP\Tracing\Trace;
+use OxPHP\Apm\Trace;
 
 #[Trace]
 function processOrder(int $orderId): void
@@ -220,54 +220,54 @@ class PaymentService
 
 ## APM: PHP SDK трассировки
 
-Плагин APM регистрирует 10 функций `oxphp_trace_*()` для ручного управления спанами. Все функции являются безопасными no-op, когда APM отключён, поэтому ваш код работает без изменений в любом окружении.
+Плагин APM регистрирует 10 функций `oxphp_apm_*()` для ручного управления спанами. Все функции являются безопасными no-op, когда APM отключён, поэтому ваш код работает без изменений в любом окружении.
 
 ### Создание спанов
 
 ```php
 <?php
 // Start a span and get its local ID
-$spanId = oxphp_trace_start('cache.warm', ['cache.size' => '1024']);
+$spanId = oxphp_apm_start('cache.warm', ['cache.size' => '1024']);
 
 // ... do work ...
 
 // Close the span
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### Добавление атрибутов и событий
 
 ```php
 <?php
-$spanId = oxphp_trace_start('order.process');
+$spanId = oxphp_apm_start('order.process');
 
 // Add attributes to the current span (or a specific one)
-oxphp_trace_attribute('order.id', $orderId);
-oxphp_trace_attribute('order.total', $total, $spanId);
+oxphp_apm_attribute('order.id', $orderId);
+oxphp_apm_attribute('order.total', $total, $spanId);
 
 // Record an event on the span
-oxphp_trace_event('payment.authorized', [
+oxphp_apm_event('payment.authorized', [
     'provider' => 'stripe',
     'amount' => (string) $amount,
 ]);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### Запись ошибок
 
 ```php
 <?php
-$spanId = oxphp_trace_start('external.api');
+$spanId = oxphp_apm_start('external.api');
 
 try {
     $result = callExternalApi();
 } catch (\Throwable $e) {
     // Mark the span as error
-    oxphp_trace_error($e, $spanId);
+    oxphp_apm_error($e, $spanId);
     throw $e;
 } finally {
-    oxphp_trace_end($spanId);
+    oxphp_apm_end($spanId);
 }
 ```
 
@@ -276,11 +276,11 @@ try {
 ```php
 <?php
 // Get the current trace ID and span ID
-$traceId = oxphp_trace_id();
-$currentSpanId = oxphp_trace_span_id();
+$traceId = oxphp_apm_trace_id();
+$currentSpanId = oxphp_apm_span_id();
 
 // Or get a ready-to-use traceparent header value
-$traceparent = oxphp_trace_header();
+$traceparent = oxphp_apm_header();
 // "00-{trace_id}-{span_id}-01"
 
 // Propagate to downstream services
@@ -297,18 +297,18 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 | Функция | Возвращает | Описание |
 |---------|------------|----------|
-| `oxphp_trace(name, callback, ?attributes)` | `void` | Выполнить callback внутри спана (зарезервировано для будущего использования) |
-| `oxphp_trace_start(name, ?attributes)` | `int` | Открыть спан и вернуть его локальный ID. `0`, когда APM отключён |
-| `oxphp_trace_end(span_id)` | `void` | Закрыть спан с указанным локальным ID |
-| `oxphp_trace_attribute(key, value, ?span_id)` | `void` | Установить атрибут на текущем или указанном спане |
-| `oxphp_trace_event(name, ?attributes, ?span_id)` | `void` | Записать событие с меткой времени на текущем или указанном спане |
-| `oxphp_trace_error(exception, ?span_id)` | `void` | Отметить текущий или указанный спан как ошибочный |
-| `oxphp_trace_status(code, ?description, ?span_id)` | `void` | Установить статус спана: `0` = Не задан, `1` = Ok, `2` = Ошибка |
-| `oxphp_trace_id()` | `string` | Текущий идентификатор трассы (32 шестнадцатеричных символа). Пустой, когда APM отключён |
-| `oxphp_trace_span_id()` | `string` | Текущий идентификатор спана (16 шестнадцатеричных символов). Пустой, когда нет активного спана |
-| `oxphp_trace_header()` | `string` | Значение W3C-заголовка `traceparent` для текущего контекста спана |
+| `oxphp_apm_trace(name, callback, ?attributes)` | `void` | Выполнить callback внутри спана (зарезервировано для будущего использования) |
+| `oxphp_apm_start(name, ?attributes)` | `int` | Открыть спан и вернуть его локальный ID. `0`, когда APM отключён |
+| `oxphp_apm_end(span_id)` | `void` | Закрыть спан с указанным локальным ID |
+| `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Установить атрибут на текущем или указанном спане |
+| `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Записать событие с меткой времени на текущем или указанном спане |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | Отметить текущий или указанный спан как ошибочный |
+| `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Установить статус спана: `0` = Не задан, `1` = Ok, `2` = Ошибка |
+| `oxphp_apm_trace_id()` | `string` | Текущий идентификатор трассы (32 шестнадцатеричных символа). Пустой, когда APM отключён |
+| `oxphp_apm_span_id()` | `string` | Текущий идентификатор спана (16 шестнадцатеричных символов). Пустой, когда нет активного спана |
+| `oxphp_apm_header()` | `string` | Значение W3C-заголовка `traceparent` для текущего контекста спана |
 
-Полный справочник сигнатур функций см. в разделе [PHP Functions](../php/functions.md#oxphp_trace_start).
+Полный справочник сигнатур функций см. в разделе [PHP Functions](../php/functions.md#oxphp_apm_start).
 
 ## Пример Docker
 
@@ -467,7 +467,7 @@ OTEL_TRACES_SAMPLER_ARG=0.1   # Выбирать 10% трасс
 
 ## См. также
 
-- [PHP Functions](../php/functions.md#oxphp_trace_start) — справочник по функциям `oxphp_trace_*()`
+- [PHP Functions](../php/functions.md#oxphp_apm_start) — справочник по функциям `oxphp_apm_*()`
 - [Decorators](decorators.md) — перехват функций через атрибуты, включая `#[Trace]`
 - [Access Logging](access-logging.md) — структурированные JSON-логи с полями трассировки
 - [Request IDs](request-ids.md) — взаимодействие идентификаторов запросов с контекстом трассировки
