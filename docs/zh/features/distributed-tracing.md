@@ -10,8 +10,8 @@ OxPHP 支持 W3C Trace Context 传播、OpenTelemetry（OTel）导出，以及�
 APM 插件在 OTel 基础之上增加了三层追踪能力：
 
 - **自动插桩** — 在引擎层面 hook PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）；每次调用自动生成 span，无需修改任何代码
-- **基于属性的追踪** — 使用 `#[OxPHP\Tracing\Trace]` 注解任意 PHP 函数或方法，自动创建 span
-- **PHP SDK** — 10 个 `oxphp_trace_*()` 函数，用于手动创建 span、设置属性、记录事件和错误
+- **基于属性的追踪** — 使用 `#[OxPHP\Apm\Trace]` 注解任意 PHP 函数或方法，自动创建 span
+- **PHP SDK** — 10 个 `oxphp_apm_*()` 函数，用于手动创建 span、设置属性、记录事件和错误
 
 ## 工作原理
 
@@ -51,7 +51,7 @@ OTel 插件是编译时特性（`plugin-otel`）。启用时会自动设置 `TRA
 
 ### APM 插件
 
-APM 插件是编译时特性（`plugin-apm`），依赖于 OTel 插件。它增加了自动插桩、`#[OxPHP\Tracing\Trace]` 装饰器和 PHP 追踪 SDK。
+APM 插件是编译时特性（`plugin-apm`），依赖于 OTel 插件。它增加了自动插桩、`#[OxPHP\Apm\Trace]` 装饰器和 PHP 追踪 SDK。
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
@@ -189,11 +189,11 @@ Hook 安装采用两阶段设计，以确保 PHP ZTS 下的线程安全：
 
 ## APM：基于属性的追踪
 
-`#[OxPHP\Tracing\Trace]` 属性可以自动在被装饰的函数和方法周围创建 span。与自动插桩 hook（针对内部 C 函数）不同，此功能作用于用户定义的 PHP 代码。
+`#[OxPHP\Apm\Trace]` 属性可以自动在被装饰的函数和方法周围创建 span。与自动插桩 hook（针对内部 C 函数）不同，此功能作用于用户定义的 PHP 代码。
 
 ```php
 <?php
-use OxPHP\Tracing\Trace;
+use OxPHP\Apm\Trace;
 
 #[Trace]
 function processOrder(int $orderId): void
@@ -220,54 +220,54 @@ class PaymentService
 
 ## APM：PHP 追踪 SDK
 
-APM 插件注册了 10 个 `oxphp_trace_*()` 函数，用于手动管理 span。所有函数在 APM 禁用时均为安全的空操作，因此您的代码无需修改即可在任何环境中运行。
+APM 插件注册了 10 个 `oxphp_apm_*()` 函数，用于手动管理 span。所有函数在 APM 禁用时均为安全的空操作，因此您的代码无需修改即可在任何环境中运行。
 
 ### 创建 Span
 
 ```php
 <?php
 // Start a span and get its local ID
-$spanId = oxphp_trace_start('cache.warm', ['cache.size' => '1024']);
+$spanId = oxphp_apm_start('cache.warm', ['cache.size' => '1024']);
 
 // ... do work ...
 
 // Close the span
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### 添加属性和事件
 
 ```php
 <?php
-$spanId = oxphp_trace_start('order.process');
+$spanId = oxphp_apm_start('order.process');
 
 // Add attributes to the current span (or a specific one)
-oxphp_trace_attribute('order.id', $orderId);
-oxphp_trace_attribute('order.total', $total, $spanId);
+oxphp_apm_attribute('order.id', $orderId);
+oxphp_apm_attribute('order.total', $total, $spanId);
 
 // Record an event on the span
-oxphp_trace_event('payment.authorized', [
+oxphp_apm_event('payment.authorized', [
     'provider' => 'stripe',
     'amount' => (string) $amount,
 ]);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### 错误记录
 
 ```php
 <?php
-$spanId = oxphp_trace_start('external.api');
+$spanId = oxphp_apm_start('external.api');
 
 try {
     $result = callExternalApi();
 } catch (\Throwable $e) {
     // Mark the span as error
-    oxphp_trace_error($e, $spanId);
+    oxphp_apm_error($e, $spanId);
     throw $e;
 } finally {
-    oxphp_trace_end($spanId);
+    oxphp_apm_end($spanId);
 }
 ```
 
@@ -276,11 +276,11 @@ try {
 ```php
 <?php
 // Get the current trace ID and span ID
-$traceId = oxphp_trace_id();
-$currentSpanId = oxphp_trace_span_id();
+$traceId = oxphp_apm_trace_id();
+$currentSpanId = oxphp_apm_span_id();
 
 // Or get a ready-to-use traceparent header value
-$traceparent = oxphp_trace_header();
+$traceparent = oxphp_apm_header();
 // "00-{trace_id}-{span_id}-01"
 
 // Propagate to downstream services
@@ -297,18 +297,18 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 | 函数 | 返回值 | 说明 |
 |----------|---------|-------------|
-| `oxphp_trace(name, callback, ?attributes)` | `void` | 在 span 内执行回调（保留供将来使用） |
-| `oxphp_trace_start(name, ?attributes)` | `int` | 打开一个 span 并返回其本地 ID。APM 禁用时返回 `0` |
-| `oxphp_trace_end(span_id)` | `void` | 关闭指定本地 ID 的 span |
-| `oxphp_trace_attribute(key, value, ?span_id)` | `void` | 在当前或指定的 span 上设置属性 |
-| `oxphp_trace_event(name, ?attributes, ?span_id)` | `void` | 在当前或指定的 span 上记录带时间戳的事件 |
-| `oxphp_trace_error(exception, ?span_id)` | `void` | 将当前或指定的 span 标记为错误 |
-| `oxphp_trace_status(code, ?description, ?span_id)` | `void` | 设置 span 状态：`0` = 未设置，`1` = 正常，`2` = 错误 |
-| `oxphp_trace_id()` | `string` | 当前 trace ID（32 个十六进制字符）。APM 禁用时为空 |
-| `oxphp_trace_span_id()` | `string` | 当前 span ID（16 个十六进制字符）。无活跃 span 时为空 |
-| `oxphp_trace_header()` | `string` | 当前 span 上下文的 W3C `traceparent` 请求头值 |
+| `oxphp_apm_trace(name, callback, ?attributes)` | `void` | 在 span 内执行回调（保留供将来使用） |
+| `oxphp_apm_start(name, ?attributes)` | `int` | 打开一个 span 并返回其本地 ID。APM 禁用时返回 `0` |
+| `oxphp_apm_end(span_id)` | `void` | 关闭指定本地 ID 的 span |
+| `oxphp_apm_attribute(key, value, ?span_id)` | `void` | 在当前或指定的 span 上设置属性 |
+| `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | 在当前或指定的 span 上记录带时间戳的事件 |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | 将当前或指定的 span 标记为错误 |
+| `oxphp_apm_status(code, ?description, ?span_id)` | `void` | 设置 span 状态：`0` = 未设置，`1` = 正常，`2` = 错误 |
+| `oxphp_apm_trace_id()` | `string` | 当前 trace ID（32 个十六进制字符）。APM 禁用时为空 |
+| `oxphp_apm_span_id()` | `string` | 当前 span ID（16 个十六进制字符）。无活跃 span 时为空 |
+| `oxphp_apm_header()` | `string` | 当前 span 上下文的 W3C `traceparent` 请求头值 |
 
-完整的函数签名参考请参阅 [PHP 函数](../php/functions.md#oxphp_trace_start)。
+完整的函数签名参考请参阅 [PHP 函数](../php/functions.md#oxphp_apm_start)。
 
 ## Docker 示例
 
@@ -467,7 +467,7 @@ OTEL_TRACES_SAMPLER_ARG=0.1   # 采样 10% 的追踪
 
 ## 参见
 
-- [PHP 函数](../php/functions.md#oxphp_trace_start) -- `oxphp_trace_*()` 函数参考
+- [PHP 函数](../php/functions.md#oxphp_apm_start) -- `oxphp_apm_*()` 函数参考
 - [装饰器](decorators.md) -- 基于属性的函数拦截，包括 `#[Trace]`
 - [访问日志](access-logging.md) -- 包含 trace 字段的结构化 JSON 日志
 - [请求 ID](request-ids.md) -- 请求 ID 与 trace context 的交互方式
