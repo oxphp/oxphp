@@ -2570,6 +2570,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 INIT_CLASS_ENTRY_EX(tmp_ce, fqn, strlen(fqn), methods);
                 zend_class_entry *cls_ce = zend_register_internal_class_ex(&tmp_ce, parent_ce);
 
+                /* Wire BorrowedProxy CE for async borrow mechanism */
+                if (strcmp(fqn, "OxPHP\\Async\\BorrowedProxy") == 0) {
+                    oxphp_bridge_set_borrow_proxy_ce(cls_ce);
+                }
+
                 /* Apply class flags */
                 cls_ce->ce_flags |= cls_flags;
 
