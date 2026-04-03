@@ -121,11 +121,7 @@ impl Plugin for AsyncPlugin {
         ctx.expose_config("enabled", self.enabled);
         if self.enabled {
             ctx.expose_config("workers", workers);
-            tracing::info!(
-                plugin = "async",
-                workers,
-                "Async plugin initialized"
-            );
+            tracing::info!(plugin = "async", workers, "Async plugin initialized");
         } else {
             tracing::info!(
                 plugin = "async",
