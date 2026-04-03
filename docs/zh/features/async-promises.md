@@ -21,7 +21,7 @@ OxPHP 提供异步执行系统，在专用线程池（与 HTTP Worker 池相互�
 | `ASYNC_WORKERS` | `0`（禁用） | 专用异步 Worker 线程数。设为 `0` 可完全禁用异步池 |
 | `ASYNC_QUEUE_CAPACITY` | `0`（自动） | 最大待处理异步任务数。为 `0` 时默认为 `ASYNC_WORKERS × 64` |
 
-> **注意：** 异步池默认禁用。必须将 `ASYNC_WORKERS` 设置为大于 `0` 的值才能使用 `oxphp_async()`。
+> **注意：** 异步池默认禁用（`ASYNC_WORKERS=0`）。池被禁用时，四个异步函数均已注册，但调用时会抛出 `OxPHP\Async\Exception`。将 `ASYNC_WORKERS` 设置为大于 `0` 的值即可启用后台执行。
 
 ## 分发任务
 
@@ -187,23 +187,27 @@ services:
 
 ## 故障排除
 
-### "Failed to dispatch async task (pool full or not configured)"
+### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-异步池已禁用或容量已满。
+异步池未配置。当 `ASYNC_WORKERS=0`（默认值）时，异步函数已注册，但每次调用都会抛出 `OxPHP\Async\Exception`。
 
-**检查：** 验证 `ASYNC_WORKERS` 是否设置为大于 `0` 的值：
-
-```bash
-curl -s http://localhost:9090/config | jq '.async_workers'
-```
-
-**修复：** 将 `ASYNC_WORKERS` 设置为所需的后台线程数：
+**修复：** 将 `ASYNC_WORKERS` 设置为正整数：
 
 ```bash
 ASYNC_WORKERS=4
 ```
 
-如果池已配置但错误仍然出现，请增大 `ASYNC_QUEUE_CAPACITY`。
+### "Failed to dispatch async task (pool full)"
+
+异步池正在运行，但所有队列槽位均已占满。
+
+**检查：** 验证池是否正在接受任务：
+
+```bash
+curl -s http://localhost:9090/config | jq '.async_workers'
+```
+
+**修复：** 增大 `ASYNC_WORKERS` 或 `ASYNC_QUEUE_CAPACITY`：
 
 ### "Cannot pass object values in use-vars to async closure"
 

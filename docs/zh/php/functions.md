@@ -431,7 +431,11 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **返回值：** 整数类型的 Promise ID。将其传递给 `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()`。
 
-**抛出异常：** 若闭包不是用户定义的、异步池已满或参数包含对象或资源，则抛出 `OxPHP\Async\Exception`。
+**抛出异常：** 在以下情况下抛出 `OxPHP\Async\Exception`：
+- 异步池已禁用（`ASYNC_WORKERS=0`）
+- 闭包不是用户定义的
+- 异步池已满（所有队列槽位被占用）
+- 参数或 `use` 变量包含对象或资源
 
 > **注意：** 通过 `use` 捕获的变量遵循相同限制——对象和资源会被拒绝。
 
@@ -470,7 +474,7 @@ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 **返回值：** 异步闭包的返回值。
 
 **抛出异常：**
-- 若异步任务抛出异常，则抛出 `OxPHP\Async\Exception`
+- 若异步池已禁用（`ASYNC_WORKERS=0`）或异步任务抛出异常，则抛出 `OxPHP\Async\Exception`
 - 若超过 `$timeout`，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
@@ -509,7 +513,7 @@ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 **返回值：** 关联数组，每个键为 Promise ID（整数），每个值为该 Promise 的结果。
 
 **抛出异常：**
-- 若任意 Promise 失败，则抛出 `OxPHP\Async\Exception`
+- 若异步池已禁用（`ASYNC_WORKERS=0`）或任意 Promise 失败，则抛出 `OxPHP\Async\Exception`
 - 若任意 Promise 超过 `$timeout`，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
@@ -548,7 +552,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value`（`mixed`）— 获胜 Promise 的返回值
 
 **抛出异常：**
-- 若获胜 Promise 失败，则抛出 `OxPHP\Async\Exception`
+- 若异步池已禁用（`ASYNC_WORKERS=0`）或获胜 Promise 失败，则抛出 `OxPHP\Async\Exception`
 - 若在 `$timeout` 内没有 Promise 完成，则抛出 `OxPHP\Async\TimeoutException`
 
 **示例：**
@@ -975,6 +979,8 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
     // PHP-FPM 或 OxPHP 传统模式
 }
 ```
+
+> **注意：** `oxphp_async()` 系列函数在 OxPHP 中始终会被注册，因此即使 `ASYNC_WORKERS=0`，`function_exists('oxphp_async')` 也会返回 `true`。池被禁用时，调用任意异步函数均会抛出 `OxPHP\Async\Exception`。如果你的代码需要同时兼容两种配置，请捕获异常，而非依赖 `function_exists()` 进行检测。
 
 ## 参见
 
