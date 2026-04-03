@@ -1,6 +1,6 @@
 <?php
 // die() / exit() внутри async-замыкания: не убивает сервер,
-// а пробрасывается как AsyncException при await
+// а пробрасывается как OxPHP\Async\Exception при await
 header('Content-Type: application/json');
 
 $p = oxphp_async(function(): void {
@@ -10,7 +10,7 @@ $p = oxphp_async(function(): void {
 try {
     oxphp_async_await($p);
     echo json_encode(['test' => 'die_in_closure', 'pass' => false, 'error' => 'no exception']);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     echo json_encode([
         'test'    => 'die_in_closure',
         'class'   => get_class($e),

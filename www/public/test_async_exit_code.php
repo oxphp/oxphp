@@ -9,7 +9,7 @@ $p = oxphp_async(function(): never {
 try {
     oxphp_async_await($p);
     echo json_encode(['test' => 'exit_code_in_closure', 'pass' => false]);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     echo json_encode([
         'test'    => 'exit_code_in_closure',
         'class'   => get_class($e),

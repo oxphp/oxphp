@@ -12,8 +12,8 @@ try {
         'pool'   => 'configured',
         'pass'   => true,
     ]);
-} catch (\OxPHP\AsyncException $e) {
-    // Если пул не настроен — AsyncException
+} catch (\OxPHP\Async\Exception $e) {
+    // Если пул не настроен — OxPHP\Async\Exception
     echo json_encode([
         'test'    => 'pool_check',
         'class'   => get_class($e),

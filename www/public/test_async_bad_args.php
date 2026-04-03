@@ -4,23 +4,23 @@ header('Content-Type: application/json');
 
 $tests = [];
 
-// 1. Ресурс как аргумент — должен бросить AsyncException
+// 1. Ресурс как аргумент — должен бросить OxPHP\Async\Exception
 try {
     $fp = fopen('php://memory', 'r');
     oxphp_async(function($r) { return 1; }, $fp);
     fclose($fp);
     $tests[] = ['name' => 'resource_arg', 'pass' => false, 'error' => 'no exception'];
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     if (isset($fp) && is_resource($fp)) fclose($fp);
     $tests[] = ['name' => 'resource_arg', 'pass' => true, 'message' => $e->getMessage()];
 }
 
-// 2. Объект как аргумент — должен бросить AsyncException
+// 2. Объект как аргумент — должен бросить OxPHP\Async\Exception
 try {
     $obj = new \stdClass();
     oxphp_async(function($o) { return 1; }, $obj);
     $tests[] = ['name' => 'object_arg', 'pass' => false, 'error' => 'no exception'];
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     $tests[] = ['name' => 'object_arg', 'pass' => true, 'message' => $e->getMessage()];
 }
 

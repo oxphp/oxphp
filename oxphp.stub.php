@@ -289,8 +289,8 @@ function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
  * @param float|null $timeout Maximum seconds to wait, null = wait indefinitely
  * @return mixed The return value of the closure
  *
- * @throws \OxPHP\AsyncException If the closure threw an exception or called die()/exit()
- * @throws \OxPHP\AsyncTimeoutException If the timeout expired before completion
+ * @throws \OxPHP\Async\Exception If the closure threw an exception or called die()/exit()
+ * @throws \OxPHP\Async\TimeoutException If the timeout expired before completion
  *
  * @example
  * $p = oxphp_async(function(): string { return 'hello'; });
@@ -299,7 +299,7 @@ function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
  * // With timeout:
  * try {
  *     $result = oxphp_async_await($p, 2.0);
- * } catch (\OxPHP\AsyncTimeoutException $e) {
+ * } catch (\OxPHP\Async\TimeoutException $e) {
  *     // task took longer than 2 seconds
  * }
  */
@@ -315,8 +315,8 @@ function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
  * @param float|null $timeout Per-promise timeout in seconds, null = no limit
  * @return array<int, mixed> Map of promise ID => result value
  *
- * @throws \OxPHP\AsyncException If any promise fails
- * @throws \OxPHP\AsyncTimeoutException If any promise times out
+ * @throws \OxPHP\Async\Exception If any promise fails
+ * @throws \OxPHP\Async\TimeoutException If any promise times out
  *
  * @example
  * $p1 = oxphp_async(fn() => 1);
@@ -340,8 +340,8 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * @param float|null $timeout Overall timeout in seconds, null = no limit
  * @return array{id: int, value: mixed} The winning promise ID and its result
  *
- * @throws \OxPHP\AsyncException If the winning promise threw an exception
- * @throws \OxPHP\AsyncTimeoutException If no promise completes within timeout
+ * @throws \OxPHP\Async\Exception If the winning promise threw an exception
+ * @throws \OxPHP\Async\TimeoutException If no promise completes within timeout
  *
  * @example
  * $p1 = oxphp_async(fn() => slow_api_a());
@@ -769,7 +769,7 @@ namespace OxPHP\Http\Exception {
 //  OxPHP — Async & Decorator classes
 // ═══════════════════════════════════════════════════════════════
 
-namespace OxPHP {
+namespace OxPHP\Async {
     /**
      * Thrown when an async task fails — the closure threw an exception,
      * or called die()/exit().
@@ -777,18 +777,18 @@ namespace OxPHP {
      * The message contains the original exception class and message:
      * "Async task failed: [DomainException] invalid value"
      */
-    class AsyncException extends \Exception {}
+    class Exception extends \Exception {}
 
     /**
      * Thrown when oxphp_async_await() times out before the task completes.
      */
-    class AsyncTimeoutException extends AsyncException {}
+    class TimeoutException extends Exception {}
 
     /**
      * Reserved for future use. Previously planned for frozen variable
      * write protection; currently not thrown by the runtime.
      */
-    class AsyncBorrowException extends \Exception {}
+    class BorrowException extends \Exception {}
 }
 
 namespace OxPHP\Decorator {

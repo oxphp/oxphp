@@ -1,5 +1,5 @@
 <?php
-// Цепочка исключений: DomainException → AsyncException
+// Цепочка исключений: DomainException → OxPHP\Async\Exception
 header('Content-Type: application/json');
 
 $p = oxphp_async(function(): never {
@@ -9,7 +9,7 @@ $p = oxphp_async(function(): never {
 try {
     oxphp_async_await($p);
     echo json_encode(['test' => 'nested_exception', 'pass' => false]);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     echo json_encode([
         'test'       => 'nested_exception',
         'class'      => get_class($e),

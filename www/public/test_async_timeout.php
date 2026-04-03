@@ -10,19 +10,19 @@ $p = oxphp_async(function(): string {
 try {
     oxphp_async_await($p, 0.1); // 100ms таймаут
     echo json_encode(['test' => 'timeout', 'pass' => false, 'error' => 'no timeout']);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo json_encode([
         'test'    => 'timeout',
         'class'   => get_class($e),
         'message' => $e->getMessage(),
         'pass'    => true,
     ]);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     echo json_encode([
         'test'    => 'timeout',
         'class'   => get_class($e),
         'message' => $e->getMessage(),
         'pass'    => false,
-        'note'    => 'expected AsyncTimeoutException, got AsyncException',
+        'note'    => 'expected OxPHP\\Async\\TimeoutException, got OxPHP\\Async\\Exception',
     ]);
 }
