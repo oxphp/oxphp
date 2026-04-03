@@ -34,14 +34,12 @@ fn main() -> Result<(), types::BoxError> {
     // functions with Zend (OPcache needs them at compile time).
     let mut dispatcher = EventDispatcher::new();
     let mut plugin_manager = PluginManager::new();
-    #[cfg(feature = "plugin-example")]
-    plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
     #[cfg(feature = "plugin-otel")]
-    plugin_manager.add(Box::new(oxphp::plugins::otel::OtelPlugin::new()));
+    plugin_manager.add(Box::new(oxphp::plugins::ox_otel::OtelPlugin::new()));
     #[cfg(feature = "plugin-apm")]
-    plugin_manager.add(Box::new(oxphp::plugins::apm::ApmPlugin::new()));
+    plugin_manager.add(Box::new(oxphp::plugins::ox_apm::ApmPlugin::new()));
     #[cfg(feature = "plugin-async")]
-    plugin_manager.add(Box::new(oxphp::plugins::async_plugin::AsyncPlugin::new()));
+    plugin_manager.add(Box::new(oxphp::plugins::ox_async::AsyncPlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
 
     // Re-read trace_context after plugin init — the OTel plugin sets

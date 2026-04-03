@@ -180,14 +180,6 @@ services:
       # Sampling ratio for ratio-based samplers (0.0–1.0).
       # - OTEL_TRACES_SAMPLER_ARG=1.0
 
-      # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
-
-      # Enable verbose logging in the example plugin.
-      # - EXAMPLE_VERBOSE=false
-
-      # HTTP Basic auth credentials for example plugin internal routes (user:pass).
-      # - EXAMPLE_INTERNAL_AUTH=admin:secret
-
       # ── APM (requires CARGO_FEATURES: "plugin-apm") ─────────────
 
       # Enable APM: error capture, auto-instrumentation, PHP SDK.

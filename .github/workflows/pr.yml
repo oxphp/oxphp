@@ -31,7 +31,7 @@ jobs:
             target
           key: clippy-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: clippy-${{ steps.rust.outputs.hash }}-
-      - run: cargo clippy --no-default-features --features plugin-example -- -D warnings
+      - run: cargo clippy --no-default-features -- -D warnings
 
   test:
     name: Test
@@ -49,4 +49,4 @@ jobs:
             target
           key: test-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: test-${{ steps.rust.outputs.hash }}-
-      - run: cargo test --no-default-features --features plugin-example
+      - run: cargo test --no-default-features

@@ -74,9 +74,6 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2"
 
-# Base64 encoding (optional — used by example plugin)
-base64 = { version = "0.22", optional = true }
-
 # OpenTelemetry (optional — used by otel plugin)
 opentelemetry = { version = "0.27", optional = true }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
@@ -87,7 +84,6 @@ tonic = { version = "0.12", optional = true }
 [features]
 default = ["php"]
 php = []
-plugin-example = ["base64"]
 plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 plugin-apm = ["plugin-otel"]
 plugin-async = []

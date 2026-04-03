@@ -1837,7 +1837,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Drain APM spans from PHP worker thread before sending response
     #[cfg(feature = "plugin-apm")]
-    let apm_spans_json = crate::plugins::apm::spans::drain_and_serialize();
+    let apm_spans_json = crate::plugins::ox_apm::spans::drain_and_serialize();
     #[cfg(not(feature = "plugin-apm"))]
     let apm_spans_json: Option<String> = None;
 
