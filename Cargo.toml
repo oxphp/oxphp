@@ -83,7 +83,7 @@ tonic = { version = "0.12", optional = true }
 
 [features]
 default = ["php"]
-php = []
+php = ["plugin-apm", "plugin-async"]
 plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 plugin-apm = ["plugin-otel"]
 plugin-async = []
