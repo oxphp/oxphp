@@ -2718,6 +2718,35 @@ void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce) {
     borrow_proxy_ce = ce;
 }
 
+int oxphp_ht_has_objects_or_resources(HashTable *ht) {
+    if (!ht) return 0;
+    zval *val;
+    ZEND_HASH_FOREACH_VAL(ht, val) {
+        zval *check = val;
+        if (Z_TYPE_P(check) == IS_REFERENCE) {
+            check = Z_REFVAL_P(check);
+        }
+        if (Z_TYPE_P(check) == IS_OBJECT || Z_TYPE_P(check) == IS_RESOURCE) {
+            return 1;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return 0;
+}
+
+void oxphp_arr_add_zval(zval *arr, const char *key, zval *val) {
+    if (!arr || Z_TYPE_P(arr) != IS_ARRAY || !key || !val) return;
+    zval copy;
+    ZVAL_COPY(&copy, val);
+    zend_hash_str_add_new(Z_ARRVAL_P(arr), key, strlen(key), &copy);
+}
+
+void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val) {
+    if (!arr || Z_TYPE_P(arr) != IS_ARRAY || !val) return;
+    zval copy;
+    ZVAL_COPY(&copy, val);
+    zend_hash_index_add_new(Z_ARRVAL_P(arr), idx, &copy);
+}
+
 void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
     if (!borrow_proxy_ce) {
         ZVAL_NULL(dst);

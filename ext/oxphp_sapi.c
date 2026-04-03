@@ -2072,6 +2072,31 @@ PHP_FUNCTION(oxphp_async)
 }
 /* }}} */
 
+/* Fiber-aware await helper. Called from Rust handler via FFI.
+ * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
+ *         -1 = error (exception details in bridge TLS), -2 = timeout */
+int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, zval *retval) {
+    if (oxphp_current_fiber == NULL) {
+        return 1; /* Not in fiber — caller should do blocking await */
+    }
+
+    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_AWAIT;
+    oxphp_current_fiber->suspend_data.promise_id = promise_id;
+
+    zend_fiber_transfer transfer = {
+        .context = oxphp_current_fiber->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    /* --- RESUMED by scheduler when promise result is ready --- */
+
+    int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, retval);
+    return rc; /* 0 = success, -1 = error, -2 = timeout */
+}
+
 /* {{{ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
  * Block until an async promise completes and return its result.
  * Timeout of 0.0 means wait indefinitely.

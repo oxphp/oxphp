@@ -38,4 +38,6 @@ PHP_FUNCTION(oxphp_async_await_any);
 
 PHP_FUNCTION(oxphp_register_decorator);
 
+int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, zval *retval);
+
 #endif /* PHP_OXPHP_SAPI_H */

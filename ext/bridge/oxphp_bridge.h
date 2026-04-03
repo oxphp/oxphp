@@ -1045,6 +1045,16 @@ zval *oxphp_closure_get_this(zval *closure);
 void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
 void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id);
 
+/* Check if a HashTable contains any IS_OBJECT or IS_RESOURCE values.
+ * Returns 1 if found, 0 if clean. Dereferences IS_REFERENCE wrappers. */
+int oxphp_ht_has_objects_or_resources(HashTable *ht);
+
+/* Copy a zval into an array at a string key (ZVAL_COPY semantics). */
+void oxphp_arr_add_zval(zval *arr, const char *key, zval *val);
+
+/* Copy a zval into an array at an integer index (ZVAL_COPY semantics). */
+void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
+
 /* Execute an async task on an async worker thread.
  * Returns 0 on success, -1 on exception.
  * On exception: exc_class, exc_message, exc_trace are malloc'd strings (caller frees). */
