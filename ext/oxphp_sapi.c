@@ -1973,7 +1973,7 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
 /* Fiber-aware await helper. Called from Rust handler via FFI.
  * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
  *         -1 = error (exception details in bridge TLS), -2 = timeout */
-int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, zval *retval) {
+int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval) {
     if (oxphp_current_fiber == NULL) {
         return 1; /* Not in fiber — caller should do blocking await */
     }
@@ -1991,7 +1991,7 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, zval *retv
     zend_fiber_switch_context(&transfer);
     /* --- RESUMED by scheduler when promise result is ready --- */
 
-    int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, retval);
+    int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, (zval *)retval);
     return rc; /* 0 = success, -1 = error, -2 = timeout */
 }
 
@@ -2873,6 +2873,9 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* APM hook approval — validates targets against loaded extensions.
        No handler replacement here; that happens per-thread in RINIT. */
     oxphp_apm_approve_registered_hooks();
+
+    /* Register fiber-await callback so Rust can call it via the bridge. */
+    oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
 
     return SUCCESS;
 }

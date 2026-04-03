@@ -243,11 +243,7 @@ extern "C" {
 
     // ── Async plugin helpers ──
     pub fn oxphp_ht_has_objects_or_resources(ht: *mut c_void) -> c_int;
-    pub fn oxphp_fiber_suspend_for_await(
-        promise_id: i64,
-        timeout: f64,
-        retval: *mut c_void,
-    ) -> c_int;
+    pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_set_borrow_proxy_ce(ce: *mut c_void);
     pub fn oxphp_arr_add_zval(arr: *mut c_void, key: *const c_char, val: *mut c_void);
     pub fn oxphp_arr_add_index_zval(arr: *mut c_void, idx: u64, val: *mut c_void);

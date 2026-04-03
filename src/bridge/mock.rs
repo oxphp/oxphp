@@ -355,7 +355,7 @@ pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
 pub unsafe fn oxphp_ht_has_objects_or_resources(_ht: *mut c_void) -> c_int {
     0
 }
-pub unsafe fn oxphp_fiber_suspend_for_await(
+pub unsafe fn oxphp_bridge_fiber_await(
     _promise_id: i64,
     _timeout: f64,
     _retval: *mut c_void,

@@ -33,6 +33,6 @@ ZEND_FUNCTION(oxphp_method_dispatch);
 
 PHP_FUNCTION(oxphp_register_decorator);
 
-int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, zval *retval);
+int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval);
 
 #endif /* PHP_OXPHP_SAPI_H */

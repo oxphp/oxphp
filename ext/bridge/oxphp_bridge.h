@@ -944,10 +944,14 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
     int64_t *out_winner_id, void *retval
 );
 
+typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
+
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
+void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
+int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
 int64_t oxphp_bridge_async_dispatch(

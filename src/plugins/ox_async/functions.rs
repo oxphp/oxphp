@@ -231,7 +231,7 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
     let retval = call.retval_ptr();
 
     // Try fiber path first: suspends the current fiber while waiting
-    let fiber_rc = unsafe { ffi::oxphp_fiber_suspend_for_await(promise_id, timeout, retval) };
+    let fiber_rc = unsafe { ffi::oxphp_bridge_fiber_await(promise_id, timeout, retval) };
 
     match fiber_rc {
         // 0 = done via fiber, retval already written

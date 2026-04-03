@@ -1893,6 +1893,19 @@ void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn) {
     rust_await_any_dispatch = fn;
 }
 
+static oxphp_fiber_await_fn_t sapi_fiber_await = NULL;
+
+void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn) {
+    sapi_fiber_await = fn;
+}
+
+int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
+    if (sapi_fiber_await != NULL) {
+        return sapi_fiber_await(promise_id, timeout, retval);
+    }
+    return 1; /* not in fiber — caller should do blocking await */
+}
+
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
     uint32_t argc, void *args, void *closure_zval
