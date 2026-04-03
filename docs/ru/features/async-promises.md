@@ -21,7 +21,7 @@ OxPHP предоставляет систему асинхронного вып�
 | `ASYNC_WORKERS` | `0` (отключено) | Количество выделенных потоков асинхронных воркеров. Установите `0` для полного отключения асинхронного пула |
 | `ASYNC_QUEUE_CAPACITY` | `0` (авто) | Максимальное количество ожидающих асинхронных задач. При `0` по умолчанию равно `ASYNC_WORKERS × 64` |
 
-> **Примечание:** Асинхронный пул отключён по умолчанию. Необходимо установить `ASYNC_WORKERS` в значение больше `0` для использования `oxphp_async()`.
+> **Примечание:** Асинхронный пул отключён по умолчанию (`ASYNC_WORKERS=0`). При отключённом пуле все четыре async-функции зарегистрированы, но при вызове выбрасывают `OxPHP\Async\Exception`. Установите `ASYNC_WORKERS` в значение больше `0` для включения фонового выполнения.
 
 ## Отправка задач
 
@@ -187,15 +187,9 @@ services:
 
 ## Устранение неполадок
 
-### "Failed to dispatch async task (pool full or not configured)"
+### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-Асинхронный пул либо отключён, либо заполнен.
-
-**Проверьте:** Убедитесь, что `ASYNC_WORKERS` установлен в значение больше `0`:
-
-```bash
-curl -s http://localhost:9090/config | jq '.async_workers'
-```
+Асинхронный пул отключён (`ASYNC_WORKERS=0`). Функции `oxphp_async()` и связанные с ней функции зарегистрированы, но немедленно выбрасывают `OxPHP\Async\Exception`.
 
 **Исправление:** Установите `ASYNC_WORKERS` в нужное количество фоновых потоков:
 
@@ -203,7 +197,22 @@ curl -s http://localhost:9090/config | jq '.async_workers'
 ASYNC_WORKERS=4
 ```
 
-Если пул настроен, но ошибка сохраняется, увеличьте `ASYNC_QUEUE_CAPACITY`.
+### "Failed to dispatch async task (pool full)"
+
+Асинхронный пул настроен, но очередь задач заполнена.
+
+**Проверьте:** Убедитесь, что `ASYNC_WORKERS` установлен в значение больше `0`:
+
+```bash
+curl -s http://localhost:9090/config | jq '.async_workers'
+```
+
+**Исправление:** Увеличьте `ASYNC_QUEUE_CAPACITY` или добавьте больше воркеров:
+
+```bash
+ASYNC_WORKERS=8
+ASYNC_QUEUE_CAPACITY=512
+```
 
 ### "Cannot pass object values in use-vars to async closure"
 
