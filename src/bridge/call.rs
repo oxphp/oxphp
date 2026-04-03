@@ -49,6 +49,26 @@ impl<'a> NativeCall<'a> {
         }
     }
 
+    // ── Raw pointer access (for FFI-heavy handlers) ──
+
+    /// Get a raw pointer to the zval at argument index `idx`.
+    ///
+    /// # Safety
+    /// The returned pointer is valid only for the duration of the NativeCall.
+    /// Caller must ensure `idx < self.argc`.
+    pub unsafe fn raw_arg_ptr(&self, idx: u32) -> *mut c_void {
+        let zval_size = super::ffi::oxphp_zval_size();
+        (self.args as *mut u8).add(idx as usize * zval_size) as *mut c_void
+    }
+
+    /// Get a raw pointer to the return value zval.
+    ///
+    /// Used by handlers that need to pass retval to FFI functions
+    /// which write directly into it (e.g., `oxphp_bridge_await_dispatch`).
+    pub fn retval_ptr(&self) -> *mut c_void {
+        self.retval
+    }
+
     // ── Metadata ──
 
     /// Number of arguments passed.
@@ -702,5 +722,38 @@ mod tests {
         unsafe {
             drop(Box::from_raw(ptr as *mut u32));
         }
+    }
+
+    #[test]
+    fn test_raw_arg_ptr() {
+        let mut args = [0u8; 64];
+        let mut retval = [0u8; 16];
+        let call = unsafe {
+            NativeCall::new(
+                args.as_mut_ptr() as *mut c_void,
+                2,
+                retval.as_mut_ptr() as *mut c_void,
+                None,
+                None,
+            )
+        };
+        let ptr = unsafe { call.raw_arg_ptr(0) };
+        assert_eq!(ptr, args.as_ptr() as *mut c_void);
+    }
+
+    #[test]
+    fn test_retval_ptr() {
+        let mut args = [0u8; 64];
+        let mut retval = [0u8; 16];
+        let call = unsafe {
+            NativeCall::new(
+                args.as_mut_ptr() as *mut c_void,
+                1,
+                retval.as_mut_ptr() as *mut c_void,
+                None,
+                None,
+            )
+        };
+        assert_eq!(call.retval_ptr(), retval.as_ptr() as *mut c_void);
     }
 }
