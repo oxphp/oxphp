@@ -4,6 +4,18 @@ static $previousHeaders = [];
 
 oxphp_worker(function () use (&$requestCount, &$previousHeaders) {
     $requestCount++;
+
+    // If the request targets a test PHP file, include it directly inside
+    // the worker callback so tests run in real worker context.
+    $uri = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+    if (preg_match('#^/tests/.+\.php$#', $uri)) {
+        $testFile = $_SERVER['DOCUMENT_ROOT'] . $uri;
+        if (file_exists($testFile)) {
+            include $testFile;
+            return;
+        }
+    }
+
     header('Content-Type: application/json');
 
     $action = $_GET['action'] ?? 'default';
