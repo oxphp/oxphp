@@ -1304,6 +1304,12 @@ use std::collections::HashMap;
 static NATIVE_DISPATCH_MAP: OnceLock<HashMap<String, Box<dyn PluginNativeFunction>>> =
     OnceLock::new();
 
+/// Builder-API function handlers (registered via ctx.function().handler()).
+/// Separate from NATIVE_DISPATCH_MAP because builder functions are registered
+/// after legacy functions, and OnceLock can only be set once.
+static BUILDER_FN_DISPATCH_MAP: OnceLock<HashMap<String, Box<dyn PluginNativeFunction>>> =
+    OnceLock::new();
+
 /// Register native plugin functions on the bridge and store handlers for dispatch.
 /// Called from main.rs after plugin_manager.init_all().
 pub fn register_native_plugin_functions(fns: Vec<PluginNativeFunctionDef>) {
@@ -1347,12 +1353,15 @@ unsafe extern "C" fn native_dispatch_callback(
     // during startup — UTF-8 validation is unnecessary overhead on the hot path.
     let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(name).to_bytes());
 
-    let map = match NATIVE_DISPATCH_MAP.get() {
-        Some(m) => m,
-        None => return -1,
-    };
+    // Look up handler in legacy map first, then builder map
+    let legacy_map = NATIVE_DISPATCH_MAP.get();
+    let builder_map = BUILDER_FN_DISPATCH_MAP.get();
 
-    let handler = match map.get(name_str) {
+    let handler = legacy_map
+        .and_then(|m| m.get(name_str))
+        .or_else(|| builder_map.and_then(|m| m.get(name_str)));
+
+    let handler = match handler {
         Some(h) => h,
         None => return -1,
     };
@@ -1693,8 +1702,10 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         }
     }
 
-    // 5. Register functions
-    for func in &functions {
+    // 5. Register functions (bridge + dispatch map)
+    let fn_count = functions.len();
+    let mut fn_dispatch: HashMap<String, Box<dyn PluginNativeFunction>> = HashMap::new();
+    for func in functions {
         let fqn = CString::new(func.fqn.as_str()).unwrap();
         unsafe {
             crate::bridge::ffi::oxphp_bridge_register_plugin_function(
@@ -1704,6 +1715,16 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 func.is_variadic as c_int,
             );
         }
+        if let Some(handler) = func.handler {
+            fn_dispatch.insert(func.fqn, handler);
+        }
+    }
+    if !fn_dispatch.is_empty() {
+        // Ensure native dispatch callback is set (may already be set by legacy path)
+        unsafe {
+            crate::bridge::ffi::oxphp_bridge_set_native_dispatch(Some(native_dispatch_callback));
+        }
+        BUILDER_FN_DISPATCH_MAP.set(fn_dispatch).ok();
     }
 
     // 6. Set dispatch callbacks
@@ -1721,14 +1742,13 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     MAGIC_DISPATCH_MAP.set(magic_dispatch).ok();
     CLASS_META.set(class_metas).ok();
 
-    let total =
-        interfaces.len() + attributes.len() + enums.len() + class_order.len() + functions.len();
+    let total = interfaces.len() + attributes.len() + enums.len() + class_order.len() + fn_count;
     tracing::info!(
         interfaces = interfaces.len(),
         attributes = attributes.len(),
         enums = enums.len(),
         classes = class_order.len(),
-        functions = functions.len(),
+        functions = fn_count,
         total,
         "PHP definitions registered on bridge"
     );

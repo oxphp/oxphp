@@ -1,9 +1,9 @@
 //! Handler implementations for the 4 async PHP functions:
 //!
 //! - `oxphp_async(Closure $fn, mixed ...$args): int`
-//! - `oxphp_await(int $promise_id, float $timeout = 0.0): mixed`
-//! - `oxphp_await_all(array $promise_ids, float $timeout = 0.0): array`
-//! - `oxphp_await_any(array $promise_ids, float $timeout = 0.0): array`
+//! - `oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed`
+//! - `oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array`
+//! - `oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array`
 
 use std::ffi::CStr;
 use std::os::raw::c_void;
@@ -95,22 +95,22 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) -> Result<(), 
         .returns(PhpType::Int)
         .handler(move |call: &mut NativeCall| handler_async(call, enabled))?;
 
-    // 2. oxphp_await(int $promise_id, float $timeout = 0.0): mixed
-    ctx.function("oxphp_await")
+    // 2. oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
+    ctx.function("oxphp_async_await")
         .param("promise_id", PhpType::Int)
         .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
         .returns(PhpType::Mixed)
         .handler(move |call: &mut NativeCall| handler_await(call, enabled))?;
 
-    // 3. oxphp_await_all(array $promise_ids, float $timeout = 0.0): array
-    ctx.function("oxphp_await_all")
+    // 3. oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
+    ctx.function("oxphp_async_await_all")
         .param("promise_ids", PhpType::Array)
         .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
         .returns(PhpType::Array)
         .handler(move |call: &mut NativeCall| handler_await_all(call, enabled))?;
 
-    // 4. oxphp_await_any(array $promise_ids, float $timeout = 0.0): array
-    ctx.function("oxphp_await_any")
+    // 4. oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+    ctx.function("oxphp_async_await_any")
         .param("promise_ids", PhpType::Array)
         .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
         .returns(PhpType::Array)
@@ -208,7 +208,7 @@ fn handler_async(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
 
 // ─── handler_await ───────────────────────────────────────────────────────────
 
-/// `oxphp_await(int $promise_id, float $timeout = 0.0): mixed`
+/// `oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed`
 ///
 /// Awaits a single promise. Tries fiber-based suspend first (non-blocking),
 /// falls back to blocking await if not inside a fiber.
@@ -242,14 +242,14 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
             match rc {
                 0 => Ok(()),
                 -2 => Err(timeout_err(format!(
-                    "oxphp_await(): promise {promise_id} timed out"
+                    "oxphp_async_await(): promise {promise_id} timed out"
                 ))),
                 _ => Err(read_bridge_exception()),
             }
         }
         // -2 = timeout on fiber path
         -2 => Err(timeout_err(format!(
-            "oxphp_await(): promise {promise_id} timed out"
+            "oxphp_async_await(): promise {promise_id} timed out"
         ))),
         // -1 or other = error
         _ => Err(read_bridge_exception()),
@@ -258,7 +258,7 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
 
 // ─── handler_await_all ───────────────────────────────────────────────────────
 
-/// `oxphp_await_all(array $promise_ids, float $timeout = 0.0): array`
+/// `oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array`
 ///
 /// Awaits all promises in the array. Returns an associative array keyed by
 /// promise ID with each promise's result value.
@@ -315,7 +315,7 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
             }
             -2 => {
                 return Err(timeout_err(format!(
-                    "oxphp_await_all(): promise {pid} timed out"
+                    "oxphp_async_await_all(): promise {pid} timed out"
                 )));
             }
             _ => {
@@ -329,7 +329,7 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
 // ─── handler_await_any ───────────────────────────────────────────────────────
 
-/// `oxphp_await_any(array $promise_ids, float $timeout = 0.0): array`
+/// `oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array`
 ///
 /// Races all promises. Returns `['id' => int, 'value' => mixed]` for the
 /// first promise that completes.
@@ -348,7 +348,7 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
     if ids.is_empty() {
         return Err(async_err(
-            "oxphp_await_any(): promise_ids array must not be empty",
+            "oxphp_async_await_any(): promise_ids array must not be empty",
         ));
     }
 
@@ -397,7 +397,9 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
             Ok(())
         }
-        -2 => Err(timeout_err("oxphp_await_any(): all promises timed out")),
+        -2 => Err(timeout_err(
+            "oxphp_async_await_any(): all promises timed out",
+        )),
         _ => Err(read_bridge_exception()),
     }
 }
@@ -460,9 +462,9 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let names: Vec<&str> = funcs.iter().map(|f| f.fqn.as_str()).collect();
         assert!(names.contains(&"oxphp_async"));
-        assert!(names.contains(&"oxphp_await"));
-        assert!(names.contains(&"oxphp_await_all"));
-        assert!(names.contains(&"oxphp_await_any"));
+        assert!(names.contains(&"oxphp_async_await"));
+        assert!(names.contains(&"oxphp_async_await_all"));
+        assert!(names.contains(&"oxphp_async_await_any"));
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod tests {
     #[test]
     fn test_oxphp_await_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await").unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_async_await").unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "promise_id");
         assert!(f.params[0].required);
@@ -506,9 +508,12 @@ mod tests {
     }
 
     #[test]
-    fn test_oxphp_await_all_param_signature() {
+    fn test_oxphp_async_await_all_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await_all").unwrap();
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_all")
+            .unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "promise_ids");
         assert!(f.params[0].required);
@@ -519,9 +524,12 @@ mod tests {
     }
 
     #[test]
-    fn test_oxphp_await_any_param_signature() {
+    fn test_oxphp_async_await_any_param_signature() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await_any").unwrap();
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_any")
+            .unwrap();
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].name, "promise_ids");
         assert!(f.params[0].required);
@@ -537,9 +545,15 @@ mod tests {
         let find = |name: &str| funcs.iter().find(|f| f.fqn == name).unwrap();
 
         assert_eq!(find("oxphp_async").return_type, Some(PhpType::Int));
-        assert_eq!(find("oxphp_await").return_type, Some(PhpType::Mixed));
-        assert_eq!(find("oxphp_await_all").return_type, Some(PhpType::Array));
-        assert_eq!(find("oxphp_await_any").return_type, Some(PhpType::Array));
+        assert_eq!(find("oxphp_async_await").return_type, Some(PhpType::Mixed));
+        assert_eq!(
+            find("oxphp_async_await_all").return_type,
+            Some(PhpType::Array)
+        );
+        assert_eq!(
+            find("oxphp_async_await_any").return_type,
+            Some(PhpType::Array)
+        );
     }
 
     #[test]
@@ -643,21 +657,27 @@ mod tests {
     #[test]
     fn test_oxphp_await_not_variadic() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await").unwrap();
+        let f = funcs.iter().find(|f| f.fqn == "oxphp_async_await").unwrap();
         assert!(!f.is_variadic);
     }
 
     #[test]
-    fn test_oxphp_await_all_not_variadic() {
+    fn test_oxphp_async_await_all_not_variadic() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await_all").unwrap();
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_all")
+            .unwrap();
         assert!(!f.is_variadic);
     }
 
     #[test]
-    fn test_oxphp_await_any_not_variadic() {
+    fn test_oxphp_async_await_any_not_variadic() {
         let funcs = make_context_and_functions(true);
-        let f = funcs.iter().find(|f| f.fqn == "oxphp_await_any").unwrap();
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_any")
+            .unwrap();
         assert!(!f.is_variadic);
     }
 }
