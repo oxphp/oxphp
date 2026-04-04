@@ -22,7 +22,7 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      RATE_LIMIT: 3
+      RATE_LIMIT: 1
       RATE_WINDOW_SECONDS: 60
     volumes:
       - ../www:/var/www/html
