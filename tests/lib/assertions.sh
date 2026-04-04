@@ -55,13 +55,22 @@ run_runner_test() {
     # Default empty expected_status to 200
     [ -z "$expected_status" ] && expected_status=200
 
+    # Parse optional URL override: "group/test >> /custom/path"
+    local url_override=""
+    if [[ "$test_path" == *" >> "* ]]; then
+        url_override="${test_path#* >> }"
+        test_path="${test_path%% >> *}"
+    fi
+
     local test_name group
     test_name=$(basename "$test_path")
     group=$(dirname "$test_path")
 
     # Determine URL — static file tests don't have .php
     local url
-    if [[ "$test_path" == static_files/* ]]; then
+    if [ -n "$url_override" ]; then
+        url="${base_url}${url_override}"
+    elif [[ "$test_path" == static_files/* ]]; then
         # Map static file tests to fixture paths
         case "$test_name" in
             test_css_content_type)  url="${base_url}/test_static/style.css" ;;

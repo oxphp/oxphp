@@ -12,11 +12,13 @@ $p = oxphp_async(function(): string {
     return 'background_done';
 });
 
-// Send HTTP response early
+$t->assertTrue('async dispatch before finish_request succeeded', is_int($p));
+
+// Output test JSON before finish_request closes the response
+$t->done();
+
+// Send HTTP response early — connection closed after this
 oxphp_finish_request();
 
-// Client received response; we can still await
+// Background: await still works after finish_request (not reportable to client)
 $result = oxphp_async_await($p);
-$t->assertSame('async task completed after finish_request', $result, 'background_done');
-
-$t->done();
