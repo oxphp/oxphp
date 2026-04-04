@@ -1375,11 +1375,24 @@ unsafe extern "C" fn native_dispatch_callback(
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
-            tracing::warn!(func = name_str, error = %e, "Plugin function error");
+            // Throw a PHP exception for PhpError::Exception, or a RuntimeException for others
+            let (class, message, code) = match &e {
+                crate::plugin::php::PhpError::Exception {
+                    class,
+                    message,
+                    code,
+                } => (class.as_str(), message.as_str(), *code),
+                other => ("RuntimeException", &*other.to_string(), 0),
+            };
+            let cls_c = CString::new(class).unwrap_or_default();
+            let msg_c = CString::new(message).unwrap_or_default();
+            crate::bridge::ffi::oxphp_throw_exception(cls_c.as_ptr(), msg_c.as_ptr(), code);
             -1
         }
         Err(_) => {
             tracing::error!(func = name_str, "Plugin function panicked");
+            let msg = CString::new("Internal error: plugin function panicked").unwrap();
+            crate::bridge::ffi::oxphp_throw_exception(std::ptr::null(), msg.as_ptr(), 0);
             -1
         }
     }

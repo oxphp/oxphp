@@ -1385,8 +1385,17 @@ ZEND_FUNCTION(oxphp_native_dispatch)
 
     int rc = dispatch(func_name, args, argc, return_value);
     if (rc != 0) {
+        int has_exc = (EG(exception) != NULL) ? 1 : 0;
+        /* If Rust already threw a PHP exception via oxphp_throw_exception(),
+         * EG(exception) is set — just return and let Zend propagate it.
+         * Otherwise fall back to a generic warning. */
+        if (EG(exception)) {
+            /* return_value may have been partially written — reset to null */
+            zval_ptr_dtor(return_value);
+            ZVAL_NULL(return_value);
+            return;
+        }
         php_error_docref(NULL, E_WARNING, "oxphp: dispatch failed for %s", func_name);
-        /* return_value may have been partially written — reset to null on error */
         zval_ptr_dtor(return_value);
         ZVAL_NULL(return_value);
     }
