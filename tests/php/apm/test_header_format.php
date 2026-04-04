@@ -6,7 +6,10 @@ require __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('header_format', 'apm');
 
+// Must have an active span for header to include span_id
+$sid = oxphp_apm_start('test_span');
 $header = oxphp_apm_header();
+oxphp_apm_end($sid);
 $t->assertMatch(
     'traceparent header matches W3C format',
     $header,
