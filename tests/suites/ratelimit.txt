@@ -2,6 +2,6 @@
 # description: Rate limiting (429 Too Many Requests)
 
 ratelimit/test_under_limit_ok
-ratelimit/test_over_limit_429
-ratelimit/test_retry_after_header
-ratelimit/test_body_not_php
+ratelimit/test_over_limit_429     | GET | | 429 |
+ratelimit/test_retry_after_header | GET | | 429 | retry-after:exists
+ratelimit/test_body_not_php       | GET | | 429 |

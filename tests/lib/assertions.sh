@@ -101,16 +101,16 @@ run_runner_test() {
     # Status check
     if [ "$status" = "$expected_status" ]; then
         assertions_list=$(python3 -c "
-import json
-a = $assertions_list
+import json, sys
+a = json.loads(sys.argv[1])
 a.append({'name': 'HTTP status is $expected_status', 'pass': True})
-print(json.dumps(a))")
+print(json.dumps(a))" "$assertions_list")
     else
         assertions_list=$(python3 -c "
-import json
-a = $assertions_list
+import json, sys
+a = json.loads(sys.argv[1])
 a.append({'name': 'HTTP status is $expected_status', 'pass': False, 'expected': '$expected_status', 'actual': '$status'})
-print(json.dumps(a))")
+print(json.dumps(a))" "$assertions_list")
         pass=false
     fi
 
@@ -132,28 +132,28 @@ print(h.get('$hdr_name',''))" 2>/dev/null)
             if [ "$hdr_expect" = "exists" ]; then
                 if [ -n "$hdr_value" ]; then
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name exists','pass':True}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name exists','pass':True}); print(json.dumps(a))" "$assertions_list")
                 else
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name exists','pass':False,'expected':'exists','actual':'missing'}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name exists','pass':False,'expected':'exists','actual':'missing'}); print(json.dumps(a))" "$assertions_list")
                     pass=false
                 fi
             elif [ "$hdr_expect" = "missing" ]; then
                 if [ -z "$hdr_value" ]; then
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name missing','pass':True}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name missing','pass':True}); print(json.dumps(a))" "$assertions_list")
                 else
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name missing','pass':False,'expected':'missing','actual':'$hdr_value'}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name missing','pass':False,'expected':'missing','actual':'$hdr_value'}); print(json.dumps(a))" "$assertions_list")
                     pass=false
                 fi
             else
                 if [ "$hdr_value" = "$hdr_expect" ]; then
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name = $hdr_expect','pass':True}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name = $hdr_expect','pass':True}); print(json.dumps(a))" "$assertions_list")
                 else
                     assertions_list=$(python3 -c "
-import json; a=$assertions_list; a.append({'name':'header $hdr_name = $hdr_expect','pass':False,'expected':'$hdr_expect','actual':'$hdr_value'}); print(json.dumps(a))")
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name = $hdr_expect','pass':False,'expected':'$hdr_expect','actual':'$hdr_value'}); print(json.dumps(a))" "$assertions_list")
                     pass=false
                 fi
             fi
@@ -170,11 +170,11 @@ import json; a=$assertions_list; a.append({'name':'header $hdr_name = $hdr_expec
             php_pass=$(printf '%s' "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('pass',False))" 2>/dev/null)
             php_assertions=$(printf '%s' "$body" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('assertions',[])))" 2>/dev/null)
             assertions_list=$(python3 -c "
-import json
-a = json.loads('$assertions_list')
-b = json.loads('$php_assertions')
+import json, sys
+a = json.loads(sys.argv[1])
+b = json.loads(sys.argv[2])
 a.extend(b)
-print(json.dumps(a))")
+print(json.dumps(a))" "$assertions_list" "$php_assertions")
             if [ "$php_pass" = "False" ]; then
                 pass=false
             fi
