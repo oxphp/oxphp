@@ -1,0 +1,28 @@
+# Request timeout mode: REQUEST_TIMEOUT_SECONDS=2.
+# Requests that take longer than 2 seconds receive 504 Gateway Timeout.
+# Used to test timeout enforcement and error handling for slow PHP scripts.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.timeout.yml up
+services:
+  oxphp-timeout:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      REQUEST_TIMEOUT_SECONDS: 2
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

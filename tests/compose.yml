@@ -1,0 +1,19 @@
+# Base compose for PHP test suite.
+# Usage: docker compose -f compose.yml -f compose.<profile>.yml up
+networks:
+  test-net:
+    name: oxphp-test-net
+
+# Reference template (YAML anchors don't cross files — each override is self-contained)
+x-oxphp-base: &oxphp-base
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  networks: [test-net]
+  restart: "no"
+  healthcheck:
+    test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+    interval: 2s
+    timeout: 3s
+    retries: 15
+    start_period: 5s

@@ -1,0 +1,6 @@
+# profile: errors
+# description: Error handling and custom error pages
+
+errors/test_fatal_returns_500 | GET | | 500 |
+errors/test_custom_error_page | GET | | 404 |
+errors/test_exception_returns_500 | GET | | 500 |

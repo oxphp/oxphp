@@ -1,0 +1,29 @@
+# Custom error pages mode: ERROR_PAGES_DIR points to a fixture directory.
+# HTML files named {status}.html (e.g. 404.html, 500.html) override the default
+# error responses. Used to test that custom error pages are served correctly.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.errors.yml up
+services:
+  oxphp-errors:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ERROR_PAGES_DIR: /var/www/errors
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/error_pages:/var/www/errors

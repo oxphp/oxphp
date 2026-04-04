@@ -1,0 +1,29 @@
+# SPA routing mode: INDEX_FILE=index.html.
+# Missing files fall back to index.html for client-side routing.
+# PHP scripts still execute normally. The SPA fixture replaces the public root.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.spa.yml up
+services:
+  oxphp-spa:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      INDEX_FILE: index.html
+    volumes:
+      - ./fixtures/spa:/var/www/html/public
+      - ./fixtures/static:/var/www/html/public/assets
+      - ./php:/var/www/html/public/tests

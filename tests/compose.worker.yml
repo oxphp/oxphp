@@ -1,0 +1,31 @@
+# Worker mode: persistent PHP workers with a fixed entry file.
+# WORKER_FILE boots the application once; workers persist across requests
+# without php_request_shutdown between them. WORKER_MAX_REQUESTS=50 recycles
+# each worker after 50 requests to prevent memory leaks.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.worker.yml up
+services:
+  oxphp-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      WORKER_MAX_REQUESTS: 50
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker

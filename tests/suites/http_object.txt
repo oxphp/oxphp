@@ -1,0 +1,29 @@
+# profile: default
+# description: OxPHP HTTP Request object API
+
+http_object/test_request_object_exists
+http_object/test_method
+http_object/test_is_method
+http_object/test_path
+http_object/test_full_uri
+http_object/test_scheme
+http_object/test_host
+http_object/test_port
+http_object/test_query_string
+http_object/test_query_parsed
+http_object/test_is_secure
+http_object/test_http_protocol
+http_object/test_http_protocol_version
+http_object/test_header_single
+http_object/test_header_default
+http_object/test_headers_all
+http_object/test_has_header
+http_object/test_cookie_method | GET | -b "name=testvalue" | |
+http_object/test_cookies_all | GET | -b "a=1; b=2" | |
+http_object/test_body | POST | -H "Content-Type: text/plain" -d "request body content" | |
+http_object/test_content_type_method | POST | -H "Content-Type: application/json" -d '{}' | |
+http_object/test_payload_json | POST | -H "Content-Type: application/json" -d '{"key":"value","num":42}' | |
+http_object/test_payload_form | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "key=value&num=42" | |
+http_object/test_ip
+http_object/test_start_time
+http_object/test_attributes

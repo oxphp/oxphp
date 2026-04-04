@@ -1,0 +1,10 @@
+# profile: default
+# description: Decorator system
+
+decorators/test_classes_exist
+decorators/test_register_function_exists
+decorators/test_register_decorator
+decorators/test_before_after_called
+decorators/test_dispatch_order
+decorators/test_context_properties
+decorators/test_rejected_exception
