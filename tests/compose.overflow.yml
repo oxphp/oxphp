@@ -13,7 +13,7 @@ services:
     networks: [test-net]
     restart: "no"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -24,5 +24,5 @@ services:
       PHP_WORKERS: 1
       QUEUE_CAPACITY: 1
     volumes:
-      - ../www:/var/www/html:ro
-      - ./php:/var/www/html/tests:ro
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests:ro

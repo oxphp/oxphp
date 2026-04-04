@@ -1,6 +1,6 @@
 # TLS mode: TLS_CERT and TLS_KEY point to PEM files mounted from fixtures/certs.
 # The main listener serves HTTPS while the internal server (INTERNAL_ADDR) remains
-# plain HTTP, so the healthcheck still uses http://localhost:9090/health.
+# plain HTTP, so the healthcheck still uses http://127.0.0.1:9090/health.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.tls.yml up
@@ -12,7 +12,7 @@ services:
     networks: [test-net]
     restart: "no"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -23,6 +23,6 @@ services:
       TLS_CERT: /etc/ssl/oxphp/cert.pem
       TLS_KEY: /etc/ssl/oxphp/key.pem
     volumes:
-      - ../www:/var/www/html:ro
-      - ./php:/var/www/html/tests:ro
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests:ro
       - ./fixtures/certs:/etc/ssl/oxphp:ro

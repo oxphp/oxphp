@@ -12,7 +12,7 @@ services:
     networks: [test-net]
     restart: "no"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
       interval: 2s
       timeout: 3s
       retries: 15
@@ -24,4 +24,4 @@ services:
     volumes:
       - ./fixtures/spa:/var/www/html/public:ro
       - ./fixtures/static:/var/www/html/public/assets:ro
-      - ./php:/var/www/html/tests:ro
+      - ./php:/var/www/html/public/tests:ro
