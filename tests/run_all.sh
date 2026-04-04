@@ -109,10 +109,18 @@ for profile in "${profiles[@]}"; do
         continue
     fi
 
-    local_base_url="http://oxphp-${profile}"
-    if [ "$profile" = "tls" ]; then
-        local_base_url="https://oxphp-${profile}"
+    mapped_port=$(get_mapped_port "$profile")
+    if [ -z "$mapped_port" ]; then
+        log_error "Could not get mapped port for $profile, skipping"
+        stop_profile "$profile"
+        continue
     fi
+
+    local_base_url="http://127.0.0.1:${mapped_port}"
+    if [ "$profile" = "tls" ]; then
+        local_base_url="https://127.0.0.1:${mapped_port}"
+    fi
+    log_info "Base URL: $local_base_url"
 
     "${SCRIPT_DIR}/run_profile.sh" "$profile" "$local_base_url" "$VERBOSE" >> "$JSONL_FILE" 2>/dev/null || true
 

@@ -10,6 +10,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
+    ports:
+      - "80"
     networks: [test-net]
     restart: "no"
     healthcheck:

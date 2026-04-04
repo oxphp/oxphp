@@ -97,7 +97,8 @@ generate_certs() {
 # ── HTTP helpers ─────────────────────────────────────────────
 
 # http_request <url> [curl_args...]
-# Returns JSON: {"status": N, "headers": "raw_headers", "body": "response_body"}
+# Uses curl from the host. BASE_URL must point to the mapped port.
+# Returns JSON: {"status": N, "headers": {...}, "body": "..."}
 http_request() {
     local url="$1"
     shift
@@ -106,17 +107,15 @@ http_request() {
     local tmp_body
     tmp_body=$(mktemp)
 
-    local status
-    status=$(curl -s -o "$tmp_body" -D "$tmp_headers" -w '%{http_code}' "$@" "$url" 2>/dev/null || echo "000")
+    local http_code
+    http_code=$(curl -s -o "$tmp_body" -D "$tmp_headers" -w '%{http_code}' \
+        --max-time 15 "$@" "$url" 2>/dev/null) || http_code="000"
 
-    local body
-    body=$(cat "$tmp_body")
-    local headers_raw
-    headers_raw=$(cat "$tmp_headers")
-
+    local body headers_raw
+    body=$(cat "$tmp_body" 2>/dev/null || echo "")
+    headers_raw=$(cat "$tmp_headers" 2>/dev/null || echo "")
     rm -f "$tmp_headers" "$tmp_body"
 
-    # Use python3 to safely construct JSON
     python3 -c "
 import json, sys
 status = int(sys.argv[1])
@@ -127,9 +126,17 @@ for line in headers_raw.split('\n'):
     line = line.strip()
     if ': ' in line:
         key, _, value = line.partition(': ')
-        headers[key.lower()] = value
+        headers[key.lower().strip()] = value.strip()
 print(json.dumps({'status': status, 'headers': headers, 'body': body}, ensure_ascii=False))
-" "$status" "$body" "$headers_raw"
+" "$http_code" "$body" "$headers_raw"
+}
+
+# get_mapped_port <profile>
+# Returns the host port mapped to container port 80.
+get_mapped_port() {
+    local profile="$1"
+    local service="oxphp-${profile}"
+    eval "$(compose_cmd "$profile") port $service 80" 2>/dev/null | cut -d: -f2
 }
 
 # ── Suite parsing ────────────────────────────────────────────
