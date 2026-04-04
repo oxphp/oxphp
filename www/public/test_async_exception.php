@@ -9,7 +9,7 @@ $p = oxphp_async(function(): void {
 try {
     oxphp_async_await($p);
     echo json_encode(['test' => 'exception_propagation', 'pass' => false, 'error' => 'no exception']);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     echo json_encode([
         'test'    => 'exception_propagation',
         'class'   => get_class($e),

@@ -4,7 +4,8 @@ services:
       context: .
       args:
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-         CARGO_FEATURES: "plugin-otel plugin-apm"
+        # All plugins are included by default via the "php" feature.
+         CARGO_FEATURES: ""
     ports:
       - "80:80"
       - "443:443"
@@ -179,14 +180,6 @@ services:
 
       # Sampling ratio for ratio-based samplers (0.0–1.0).
       # - OTEL_TRACES_SAMPLER_ARG=1.0
-
-      # ── Example Plugin (requires CARGO_FEATURES: "plugin-example") ──
-
-      # Enable verbose logging in the example plugin.
-      # - EXAMPLE_VERBOSE=false
-
-      # HTTP Basic auth credentials for example plugin internal routes (user:pass).
-      # - EXAMPLE_INTERNAL_AUTH=admin:secret
 
       # ── APM (requires CARGO_FEATURES: "plugin-apm") ─────────────
 

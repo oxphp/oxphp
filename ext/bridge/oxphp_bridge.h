@@ -165,6 +165,335 @@ int oxphp_bridge_get_plugin_fn_required(int index);
 /** Get plugin function total param count by index. */
 int oxphp_bridge_get_plugin_fn_total(int index);
 
+/* ─── Plugin Class Registry (global, NOT __thread) ──────────── */
+
+/** Register a class definition. Returns handle (index) for subsequent calls. */
+int oxphp_bridge_register_class(const char *fqn, const char *parent_fqn, uint32_t flags);
+
+/** Add an interface implementation to a class. */
+void oxphp_bridge_class_implements(int class_handle, const char *interface_fqn);
+
+/** Add a property to a class. default_value may be NULL. */
+void oxphp_bridge_class_add_property(int class_handle, const char *name,
+    uint32_t visibility, uint32_t modifiers, int type_info, const char *default_value);
+
+/** Add a constant to a class. */
+void oxphp_bridge_class_add_constant(int class_handle, const char *name,
+    uint32_t visibility, const char *value);
+
+/** Add a method to a class. */
+void oxphp_bridge_class_add_method(int class_handle, const char *name,
+    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic);
+
+/** Set a magic method handler flag. magic_type is the MagicMethod enum ordinal (0-16). */
+void oxphp_bridge_class_set_magic(int class_handle, int magic_type, int has_handler);
+
+/** Enable custom object storage for a class. */
+void oxphp_bridge_class_enable_custom_object(int class_handle);
+
+/** Get number of registered plugin classes. */
+int oxphp_bridge_get_plugin_class_count(void);
+
+/** Get class FQN by index. */
+const char *oxphp_bridge_get_class_fqn(int index);
+
+/** Get class parent FQN (NULL if none). */
+const char *oxphp_bridge_get_class_parent(int index);
+
+/** Get class flags. */
+uint32_t oxphp_bridge_get_class_flags(int index);
+
+/** Get whether class has custom object storage. */
+int oxphp_bridge_get_class_has_custom_object(int index);
+
+/** Interface count for a class. */
+int oxphp_bridge_get_class_interface_count(int index);
+
+/** Get interface FQN by class + interface index. */
+const char *oxphp_bridge_get_class_interface_fqn(int class_index, int iface_index);
+
+/** Property count for a class. */
+int oxphp_bridge_get_class_property_count(int index);
+
+/** Get property name by class + property index. */
+const char *oxphp_bridge_get_class_property_name(int class_index, int prop_index);
+
+/** Get property visibility. */
+uint32_t oxphp_bridge_get_class_property_visibility(int class_index, int prop_index);
+
+/** Get property modifiers. */
+uint32_t oxphp_bridge_get_class_property_modifiers(int class_index, int prop_index);
+
+/** Get property default value (NULL if none). */
+const char *oxphp_bridge_get_class_property_default(int class_index, int prop_index);
+
+/** Constant count for a class. */
+int oxphp_bridge_get_class_constant_count(int index);
+
+/** Get constant name. */
+const char *oxphp_bridge_get_class_constant_name(int class_index, int const_index);
+
+/** Get constant visibility. */
+uint32_t oxphp_bridge_get_class_constant_visibility(int class_index, int const_index);
+
+/** Get constant value string. */
+const char *oxphp_bridge_get_class_constant_value(int class_index, int const_index);
+
+/** Method count for a class. */
+int oxphp_bridge_get_class_method_count(int index);
+
+/** Get method name. */
+const char *oxphp_bridge_get_class_method_name(int class_index, int method_index);
+
+/** Get method visibility. */
+uint32_t oxphp_bridge_get_class_method_visibility(int class_index, int method_index);
+
+/** Get method flags. */
+uint32_t oxphp_bridge_get_class_method_flags(int class_index, int method_index);
+
+/** Get method required param count. */
+int oxphp_bridge_get_class_method_required(int class_index, int method_index);
+
+/** Get method total param count. */
+int oxphp_bridge_get_class_method_total(int class_index, int method_index);
+
+/** Get whether method is variadic. */
+int oxphp_bridge_get_class_method_is_variadic(int class_index, int method_index);
+
+/** Get magic method handler flag. magic_type is MagicMethod enum ordinal. */
+int oxphp_bridge_get_class_magic(int class_index, int magic_type);
+
+/* ─── Plugin Interface Registry (global, NOT __thread) ──────── */
+
+/** Register an interface. Returns handle (index). parent_fqn may be NULL. */
+int oxphp_bridge_register_interface(const char *fqn, const char *parent_fqn);
+
+/** Add a method to an interface. */
+void oxphp_bridge_interface_add_method(int iface_handle, const char *name,
+    uint32_t flags, int required_params, int total_params, int is_variadic);
+
+/** Add a constant to an interface. */
+void oxphp_bridge_interface_add_constant(int iface_handle, const char *name,
+    uint32_t visibility, const char *value);
+
+/** Get interface count. */
+int oxphp_bridge_get_plugin_interface_count(void);
+
+/** Get interface FQN. */
+const char *oxphp_bridge_get_interface_fqn(int index);
+
+/** Get interface parent FQN (NULL if none). */
+const char *oxphp_bridge_get_interface_parent(int index);
+
+/** Method count for an interface. */
+int oxphp_bridge_get_interface_method_count(int index);
+
+/** Get interface method name. */
+const char *oxphp_bridge_get_interface_method_name(int iface_index, int method_index);
+
+/** Get interface method flags. */
+uint32_t oxphp_bridge_get_interface_method_flags(int iface_index, int method_index);
+
+/** Get interface method required params. */
+int oxphp_bridge_get_interface_method_required(int iface_index, int method_index);
+
+/** Get interface method total params. */
+int oxphp_bridge_get_interface_method_total(int iface_index, int method_index);
+
+/** Get interface method is_variadic. */
+int oxphp_bridge_get_interface_method_is_variadic(int iface_index, int method_index);
+
+/** Constant count for an interface. */
+int oxphp_bridge_get_interface_constant_count(int index);
+
+/** Get interface constant name. */
+const char *oxphp_bridge_get_interface_constant_name(int iface_index, int const_index);
+
+/** Get interface constant visibility. */
+uint32_t oxphp_bridge_get_interface_constant_visibility(int iface_index, int const_index);
+
+/** Get interface constant value. */
+const char *oxphp_bridge_get_interface_constant_value(int iface_index, int const_index);
+
+/* ─── Plugin Enum Registry (global, NOT __thread) ───────────── */
+
+/** Register an enum. backing_type: 0=unit, 4=IS_LONG, 6=IS_STRING. Returns handle. */
+int oxphp_bridge_register_enum(const char *fqn, int backing_type);
+
+/** Add an interface implementation to an enum. */
+void oxphp_bridge_enum_implements(int enum_handle, const char *interface_fqn);
+
+/** Add a case to an enum. value may be NULL for unit enums. */
+void oxphp_bridge_enum_add_case(int enum_handle, const char *name, const char *value);
+
+/** Add a method to an enum. */
+void oxphp_bridge_enum_add_method(int enum_handle, const char *name,
+    uint32_t flags, int required_params, int total_params, int is_variadic);
+
+/** Get enum count. */
+int oxphp_bridge_get_plugin_enum_count(void);
+
+/** Get enum FQN. */
+const char *oxphp_bridge_get_enum_fqn(int index);
+
+/** Get enum backing type. */
+int oxphp_bridge_get_enum_backing_type(int index);
+
+/** Interface count for an enum. */
+int oxphp_bridge_get_enum_interface_count(int index);
+
+/** Get enum interface FQN. */
+const char *oxphp_bridge_get_enum_interface_fqn(int enum_index, int iface_index);
+
+/** Case count for an enum. */
+int oxphp_bridge_get_enum_case_count(int index);
+
+/** Get enum case name. */
+const char *oxphp_bridge_get_enum_case_name(int enum_index, int case_index);
+
+/** Get enum case value (NULL for unit enums). */
+const char *oxphp_bridge_get_enum_case_value(int enum_index, int case_index);
+
+/** Method count for an enum. */
+int oxphp_bridge_get_enum_method_count(int index);
+
+/** Get enum method name. */
+const char *oxphp_bridge_get_enum_method_name(int enum_index, int method_index);
+
+/** Get enum method flags. */
+uint32_t oxphp_bridge_get_enum_method_flags(int enum_index, int method_index);
+
+/** Get enum method required params. */
+int oxphp_bridge_get_enum_method_required(int enum_index, int method_index);
+
+/** Get enum method total params. */
+int oxphp_bridge_get_enum_method_total(int enum_index, int method_index);
+
+/** Get enum method is_variadic. */
+int oxphp_bridge_get_enum_method_is_variadic(int enum_index, int method_index);
+
+/* ─── Plugin Attribute Registry (global, NOT __thread) ──────── */
+
+/** Register an attribute. targets is bitmask of Attribute::TARGET_*. Returns handle. */
+int oxphp_bridge_register_attribute(const char *fqn, uint32_t targets, int is_repeatable);
+
+/** Add a parameter to an attribute. */
+void oxphp_bridge_attribute_add_param(int attr_handle, const char *name,
+    int type_info, int is_required, const char *default_value);
+
+/** Add a property to an attribute (for attributes that are also classes). */
+void oxphp_bridge_attribute_add_property(int attr_handle, const char *name,
+    int type_info, uint32_t visibility);
+
+/** Get attribute count. */
+int oxphp_bridge_get_plugin_attribute_count(void);
+
+/** Get attribute FQN. */
+const char *oxphp_bridge_get_attribute_fqn(int index);
+
+/** Get attribute targets bitmask. */
+uint32_t oxphp_bridge_get_attribute_targets(int index);
+
+/** Get whether attribute is repeatable. */
+int oxphp_bridge_get_attribute_is_repeatable(int index);
+
+/** Param count for an attribute. */
+int oxphp_bridge_get_attribute_param_count(int index);
+
+/** Get attribute param name. */
+const char *oxphp_bridge_get_attribute_param_name(int attr_index, int param_index);
+
+/** Get attribute param is_required. */
+int oxphp_bridge_get_attribute_param_is_required(int attr_index, int param_index);
+
+/** Get attribute param default value (NULL if none). */
+const char *oxphp_bridge_get_attribute_param_default(int attr_index, int param_index);
+
+/** Property count for an attribute. */
+int oxphp_bridge_get_attribute_property_count(int index);
+
+/** Get attribute property name. */
+const char *oxphp_bridge_get_attribute_property_name(int attr_index, int prop_index);
+
+/** Get attribute property visibility. */
+uint32_t oxphp_bridge_get_attribute_property_visibility(int attr_index, int prop_index);
+
+/* ─── Plugin Function Registry (new builder-based) ──────────── */
+
+/** Register a plugin function via builder. Returns handle (index). */
+int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
+    int total_params, int is_variadic);
+
+/** Get number of registered builder-based functions. */
+int oxphp_bridge_get_plugin_function_count(void);
+
+/** Get builder-based function FQN. */
+const char *oxphp_bridge_get_plugin_function_fqn(int index);
+
+/** Get builder-based function required params. */
+int oxphp_bridge_get_plugin_function_required(int index);
+
+/** Get builder-based function total params. */
+int oxphp_bridge_get_plugin_function_total(int index);
+
+/** Get builder-based function is_variadic. */
+int oxphp_bridge_get_plugin_function_is_variadic(int index);
+
+/* ─── Method Dispatch Callback ──────────────────────────────── */
+
+/** Callback type for dispatching class method calls to Rust. */
+typedef int (*oxphp_method_dispatch_fn_t)(
+    uint32_t class_index, const char *method_name,
+    void *args, uint32_t argc, void *retval, void *rust_data
+);
+
+/** Set the method dispatch callback (called once at startup). */
+void oxphp_bridge_set_method_dispatch(oxphp_method_dispatch_fn_t fn);
+
+/** Get the method dispatch callback. */
+oxphp_method_dispatch_fn_t oxphp_bridge_get_method_dispatch(void);
+
+/* ─── Storage Callbacks ─────────────────────────────────────── */
+
+/** Callback: create rust_data for a class instance. */
+typedef void *(*oxphp_storage_create_fn_t)(uint32_t class_index);
+
+/** Callback: drop rust_data. */
+typedef void (*oxphp_storage_drop_fn_t)(uint32_t class_index, void *rust_data);
+
+/** Callback: clone rust_data. */
+typedef void *(*oxphp_storage_clone_fn_t)(uint32_t class_index, void *rust_data);
+
+/** Set storage lifecycle callbacks (called once at startup). */
+void oxphp_bridge_set_storage_callbacks(
+    oxphp_storage_create_fn_t create_fn,
+    oxphp_storage_drop_fn_t drop_fn,
+    oxphp_storage_clone_fn_t clone_fn
+);
+
+/** Get storage create callback. */
+oxphp_storage_create_fn_t oxphp_bridge_get_storage_create(void);
+
+/** Get storage drop callback. */
+oxphp_storage_drop_fn_t oxphp_bridge_get_storage_drop(void);
+
+/** Get storage clone callback. */
+oxphp_storage_clone_fn_t oxphp_bridge_get_storage_clone(void);
+
+/* ─── Exception Bridge ──────────────────────────────────────── */
+
+/** Throw a PHP exception from Rust. class_fqn may be NULL for RuntimeException. */
+void oxphp_throw_exception(const char *class_fqn, const char *message, int64_t code);
+
+/** Check if a PHP exception is pending. Returns 1 if pending, 0 otherwise. */
+int oxphp_exception_pending(void);
+
+/** Get the current pending exception details. Strings are temporary. */
+void oxphp_exception_get(const char **class_out, const char **message_out, int64_t *code_out);
+
+/** Clear the current pending exception. */
+void oxphp_exception_clear(void);
+
 /* ═══════════════════════════════════════════════════════════
  *  Native Bridge API — Zero-Serialization Value Access
  *  Rust reads/writes PHP zvals directly through these C helpers.
@@ -615,10 +944,14 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
     int64_t *out_winner_id, void *retval
 );
 
+typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
+
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
+void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
+int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
 int64_t oxphp_bridge_async_dispatch(
@@ -716,6 +1049,16 @@ zval *oxphp_closure_get_this(zval *closure);
 void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
 void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id);
 
+/* Check if a HashTable contains any IS_OBJECT or IS_RESOURCE values.
+ * Returns 1 if found, 0 if clean. Dereferences IS_REFERENCE wrappers. */
+int oxphp_ht_has_objects_or_resources(HashTable *ht);
+
+/* Copy a zval into an array at a string key (ZVAL_COPY semantics). */
+void oxphp_arr_add_zval(zval *arr, const char *key, zval *val);
+
+/* Copy a zval into an array at an integer index (ZVAL_COPY semantics). */
+void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
+
 /* Execute an async task on an async worker thread.
  * Returns 0 on success, -1 on exception.
  * On exception: exc_class, exc_message, exc_trace are malloc'd strings (caller frees). */
@@ -730,6 +1073,65 @@ int oxphp_execute_async_task(
     char **exc_message,
     char **exc_trace
 );
+
+/* ─── Custom Object for Plugin Classes ──────────────────────── */
+
+/**
+ * Custom object structure for plugin-defined classes with Rust storage.
+ * The `std` field MUST be last — PHP uses container_of arithmetic to find it.
+ *
+ * Wrapped in OXPHP_CUSTOM_OBJECT_DEFINED so it can also be defined in
+ * oxphp_bridge.c (which includes php.h after this header, meaning PHP_H is
+ * not yet defined when this block is first seen).
+ */
+#ifndef OXPHP_CUSTOM_OBJECT_DEFINED
+#define OXPHP_CUSTOM_OBJECT_DEFINED
+typedef struct {
+    void       *rust_data;      /**< Opaque pointer to Rust-allocated data. */
+    uint32_t    class_index;    /**< Index into the class registry. */
+    zend_object std;            /**< Standard zend_object — MUST be last. */
+} oxphp_custom_object;
+
+/**
+ * Convert from zend_object* to oxphp_custom_object* using offsetof arithmetic.
+ */
+#define OXPHP_OBJ(zobj) \
+    ((oxphp_custom_object *)((char *)(zobj) - XtOffsetOf(oxphp_custom_object, std)))
+#endif /* OXPHP_CUSTOM_OBJECT_DEFINED */
+
+/**
+ * Allocate and initialize the custom object handler infrastructure.
+ * Called from MINIT before registering plugin classes.
+ * class_count: number of plugin classes (determines array sizes).
+ */
+void oxphp_plugin_init_custom_objects(int class_count);
+
+/**
+ * Store a class entry in the plugin class CE array.
+ * Called during MINIT when registering each class.
+ */
+void oxphp_plugin_set_class_ce(int index, zend_class_entry *ce);
+
+/**
+ * Get the custom object handlers for a given class index.
+ * Returns pointer to the zend_object_handlers for that class.
+ */
+zend_object_handlers *oxphp_plugin_get_handlers(int index);
+
+/**
+ * The create_object handler for plugin classes with custom storage.
+ */
+zend_object *oxphp_plugin_create_object(zend_class_entry *ce);
+
+/**
+ * The free_obj handler for plugin classes with custom storage.
+ */
+void oxphp_plugin_free_object(zend_object *obj);
+
+/**
+ * The clone_obj handler for plugin classes with custom storage.
+ */
+zend_object *oxphp_plugin_clone_object(zend_object *obj);
 
 #endif /* PHP_H */
 

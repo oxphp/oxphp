@@ -253,13 +253,13 @@ class RequestTimer implements AttributeInterface
 
 ## 内置装饰器
 
-### #[OxPHP\Tracing\Trace]
+### #[OxPHP\Apm\Trace]
 
-当 APM 插件启用时（`OTEL_APM_ENABLED=true`），OxPHP 会为 `#[OxPHP\Tracing\Trace]` 属性注册一个内置装饰器。它在函数进入时自动创建 Span，在函数退出时自动关闭——无需手动调用 `oxphp_trace_start()` / `oxphp_trace_end()`。
+当 APM 插件启用时（`OTEL_APM_ENABLED=true`），OxPHP 会为 `#[OxPHP\Apm\Trace]` 属性注册一个内置装饰器。它在函数进入时自动创建 Span，在函数退出时自动关闭——无需手动调用 `oxphp_apm_start()` / `oxphp_apm_end()`。
 
 ```php
 <?php
-use OxPHP\Tracing\Trace;
+use OxPHP\Apm\Trace;
 
 #[Trace]
 function processOrder(int $orderId): void

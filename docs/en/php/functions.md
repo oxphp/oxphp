@@ -27,16 +27,16 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
-- [oxphp_trace()](#oxphp_trace)
-- [oxphp_trace_start()](#oxphp_trace_start)
-- [oxphp_trace_end()](#oxphp_trace_end)
-- [oxphp_trace_attribute()](#oxphp_trace_attribute)
-- [oxphp_trace_event()](#oxphp_trace_event)
-- [oxphp_trace_error()](#oxphp_trace_error)
-- [oxphp_trace_status()](#oxphp_trace_status)
-- [oxphp_trace_id()](#oxphp_trace_id)
-- [oxphp_trace_span_id()](#oxphp_trace_span_id)
-- [oxphp_trace_header()](#oxphp_trace_header)
+- [oxphp_apm_trace()](#oxphp_apm_trace)
+- [oxphp_apm_start()](#oxphp_apm_start)
+- [oxphp_apm_end()](#oxphp_apm_end)
+- [oxphp_apm_attribute()](#oxphp_apm_attribute)
+- [oxphp_apm_event()](#oxphp_apm_event)
+- [oxphp_apm_error()](#oxphp_apm_error)
+- [oxphp_apm_status()](#oxphp_apm_status)
+- [oxphp_apm_trace_id()](#oxphp_apm_trace_id)
+- [oxphp_apm_span_id()](#oxphp_apm_span_id)
+- [oxphp_apm_header()](#oxphp_apm_header)
 - [Classes and Interfaces](#classes-and-interfaces)
 - [Exceptions](#exceptions)
 
@@ -431,7 +431,11 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 
 **Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()`.
 
-**Throws:** `OxPHP\AsyncException` if the closure is not user-defined, if the async pool is full, or if arguments contain objects or resources.
+**Throws:** `OxPHP\Async\Exception` in the following cases:
+- The async pool is disabled (`ASYNC_WORKERS=0`) — message: "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
+- The closure is not user-defined
+- The async pool is full (all queue slots occupied)
+- Arguments or `use`-variables contain objects or resources
 
 > **Note:** Use-vars captured via `use` in the closure follow the same restrictions — objects and resources are rejected.
 
@@ -470,8 +474,8 @@ Blocks until the specified async promise completes and returns its result. Insid
 **Returns:** The return value of the async closure.
 
 **Throws:**
-- `OxPHP\AsyncException` if the async task threw an exception
-- `OxPHP\AsyncTimeoutException` if `$timeout` is exceeded
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the async task threw an exception
+- `OxPHP\Async\TimeoutException` if `$timeout` is exceeded
 
 **Example:**
 
@@ -487,7 +491,7 @@ echo $result; // 500000500000
 // With timeout
 try {
     $result = oxphp_async_await($promise, 5.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo "Task took too long";
 }
 ```
@@ -509,8 +513,8 @@ Awaits all promises in the array and returns an associative array mapping each p
 **Returns:** An associative array where each key is a promise ID (integer) and each value is the result of that promise.
 
 **Throws:**
-- `OxPHP\AsyncException` if any promise fails
-- `OxPHP\AsyncTimeoutException` if any promise exceeds `$timeout`
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if any promise fails
+- `OxPHP\Async\TimeoutException` if any promise exceeds `$timeout`
 
 **Example:**
 
@@ -548,8 +552,8 @@ Races multiple promises and returns the first one to complete. The other promise
 - `value` (`mixed`) — The return value of the winning promise
 
 **Throws:**
-- `OxPHP\AsyncException` if the winning promise failed
-- `OxPHP\AsyncTimeoutException` if no promise completes within `$timeout`
+- `OxPHP\Async\Exception` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the winning promise failed
+- `OxPHP\Async\TimeoutException` if no promise completes within `$timeout`
 
 **Example:**
 
@@ -605,10 +609,10 @@ oxphp_register_decorator(LogDecorator::class);
 
 ---
 
-## oxphp_trace()
+## oxphp_apm_trace()
 
 ```php
-oxphp_trace(string $name, callable $callback, ?array $attributes = null): void
+oxphp_apm_trace(string $name, callable $callback, ?array $attributes = null): void
 ```
 
 Executes a callback inside a named span. The span is opened before the callback runs and closed after it returns. Reserved for future enhanced callback integration.
@@ -622,45 +626,45 @@ Executes a callback inside a named span. The span is opened before the callback 
 
 ---
 
-## oxphp_trace_start()
+## oxphp_apm_start()
 
 ```php
-oxphp_trace_start(string $name, ?array $attributes = null): int
+oxphp_apm_start(string $name, ?array $attributes = null): int
 ```
 
-Opens a new span and returns a local ID for later reference. The span becomes a child of the currently active span (or the request root span if no span is active). Use `oxphp_trace_end()` to close it.
+Opens a new span and returns a local ID for later reference. The span becomes a child of the currently active span (or the request root span if no span is active). Use `oxphp_apm_end()` to close it.
 
 **Parameters:**
 - `$name` — Span name (e.g. `"cache.warm"`, `"payment.process"`)
 - `$attributes` — Optional associative array of string key-value attributes to set on the span at creation
 
-**Returns:** An integer local span ID. Pass this to `oxphp_trace_end()`, `oxphp_trace_attribute()`, or other functions that accept a `$span_id`. Returns `0` when APM is disabled.
+**Returns:** An integer local span ID. Pass this to `oxphp_apm_end()`, `oxphp_apm_attribute()`, or other functions that accept a `$span_id`. Returns `0` when APM is disabled.
 
 **Example:**
 
 ```php
 <?php
-$spanId = oxphp_trace_start('order.validate', [
+$spanId = oxphp_apm_start('order.validate', [
     'order.type' => 'subscription',
 ]);
 
 validateOrder($order);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_end()
+## oxphp_apm_end()
 
 ```php
-oxphp_trace_end(int $span_id): void
+oxphp_apm_end(int $span_id): void
 ```
 
-Closes the span opened by `oxphp_trace_start()`. The span's end time is recorded and it moves from the active stack to the finished list, ready for export.
+Closes the span opened by `oxphp_apm_start()`. The span's end time is recorded and it moves from the active stack to the finished list, ready for export.
 
 **Parameters:**
-- `$span_id` — The local span ID returned by `oxphp_trace_start()`
+- `$span_id` — The local span ID returned by `oxphp_apm_start()`
 
 **Returns:** `void`
 
@@ -668,10 +672,10 @@ Closes the span opened by `oxphp_trace_start()`. The span's end time is recorded
 
 ---
 
-## oxphp_trace_attribute()
+## oxphp_apm_attribute()
 
 ```php
-oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void
+oxphp_apm_attribute(string $key, mixed $value, ?int $span_id = null): void
 ```
 
 Sets a key-value attribute on a span. Values are converted to strings. If no `$span_id` is provided, the attribute is added to the currently active span.
@@ -687,21 +691,21 @@ Sets a key-value attribute on a span. Values are converted to strings. If no `$s
 
 ```php
 <?php
-$spanId = oxphp_trace_start('db.query');
+$spanId = oxphp_apm_start('db.query');
 
-oxphp_trace_attribute('db.system', 'mysql');
-oxphp_trace_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
-oxphp_trace_attribute('db.row_count', $rowCount, $spanId);
+oxphp_apm_attribute('db.system', 'mysql');
+oxphp_apm_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
+oxphp_apm_attribute('db.row_count', $rowCount, $spanId);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_event()
+## oxphp_apm_event()
 
 ```php
-oxphp_trace_event(string $name, ?array $attributes = null, ?int $span_id = null): void
+oxphp_apm_event(string $name, ?array $attributes = null, ?int $span_id = null): void
 ```
 
 Records a timestamped event on a span. Events are useful for logging discrete occurrences within a span's lifetime (e.g. cache miss, retry attempt, authorization check).
@@ -717,22 +721,22 @@ Records a timestamped event on a span. Events are useful for logging discrete oc
 
 ```php
 <?php
-$spanId = oxphp_trace_start('payment.process');
+$spanId = oxphp_apm_start('payment.process');
 
-oxphp_trace_event('payment.authorized', [
+oxphp_apm_event('payment.authorized', [
     'provider' => 'stripe',
     'amount' => '49.99',
 ]);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_error()
+## oxphp_apm_error()
 
 ```php
-oxphp_trace_error(mixed $exception, ?int $span_id = null): void
+oxphp_apm_error(mixed $exception, ?int $span_id = null): void
 ```
 
 Marks a span's status as error (status code 2). Use this to flag spans where an exception or failure occurred.
@@ -747,24 +751,24 @@ Marks a span's status as error (status code 2). Use this to flag spans where an 
 
 ```php
 <?php
-$spanId = oxphp_trace_start('external.api');
+$spanId = oxphp_apm_start('external.api');
 
 try {
     $result = callExternalApi();
 } catch (\Throwable $e) {
-    oxphp_trace_error($e, $spanId);
+    oxphp_apm_error($e, $spanId);
     throw $e;
 } finally {
-    oxphp_trace_end($spanId);
+    oxphp_apm_end($spanId);
 }
 ```
 
 ---
 
-## oxphp_trace_status()
+## oxphp_apm_status()
 
 ```php
-oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null): void
+oxphp_apm_status(int $code, ?string $description = null, ?int $span_id = null): void
 ```
 
 Sets the status code and optional description on a span.
@@ -780,23 +784,23 @@ Sets the status code and optional description on a span.
 
 ```php
 <?php
-$spanId = oxphp_trace_start('validation');
+$spanId = oxphp_apm_start('validation');
 
 if ($valid) {
-    oxphp_trace_status(1, 'Validation passed', $spanId);
+    oxphp_apm_status(1, 'Validation passed', $spanId);
 } else {
-    oxphp_trace_status(2, 'Invalid input: missing email', $spanId);
+    oxphp_apm_status(2, 'Invalid input: missing email', $spanId);
 }
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_id()
+## oxphp_apm_trace_id()
 
 ```php
-oxphp_trace_id(): string
+oxphp_apm_trace_id(): string
 ```
 
 Returns the W3C trace ID (32 hex characters) for the current request's trace context. This is the same value as `$_SERVER['OXPHP_TRACE_ID']`, available without superglobals.
@@ -807,16 +811,16 @@ Returns the W3C trace ID (32 hex characters) for the current request's trace con
 
 ```php
 <?php
-$traceId = oxphp_trace_id();
+$traceId = oxphp_apm_trace_id();
 error_log("Processing request in trace {$traceId}");
 ```
 
 ---
 
-## oxphp_trace_span_id()
+## oxphp_apm_span_id()
 
 ```php
-oxphp_trace_span_id(): string
+oxphp_apm_span_id(): string
 ```
 
 Returns the span ID (16 hex characters) of the currently active span. If there are nested spans, this returns the innermost open span's ID.
@@ -825,10 +829,10 @@ Returns the span ID (16 hex characters) of the currently active span. If there a
 
 ---
 
-## oxphp_trace_header()
+## oxphp_apm_header()
 
 ```php
-oxphp_trace_header(): string
+oxphp_apm_header(): string
 ```
 
 Returns a W3C `traceparent` header value for the current span context. Use this to propagate trace context to downstream HTTP calls.
@@ -839,9 +843,9 @@ Returns a W3C `traceparent` header value for the current span context. Use this 
 
 ```php
 <?php
-$spanId = oxphp_trace_start('http.call');
+$spanId = oxphp_apm_start('http.call');
 
-$traceparent = oxphp_trace_header();
+$traceparent = oxphp_apm_header();
 
 $response = file_get_contents('https://api.example.com/data', false,
     stream_context_create([
@@ -851,7 +855,7 @@ $response = file_get_contents('https://api.example.com/data', false,
     ])
 );
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
@@ -880,13 +884,13 @@ The `oxphp_sapi` extension registers the following classes:
 
 | Class | Description |
 |-------|-------------|
-| `OxPHP\Tracing\Trace` | Built-in attribute for automatic span creation. Apply to functions or methods. |
+| `OxPHP\Apm\Trace` | Built-in attribute for automatic span creation. Apply to functions or methods. |
 
 ### Async
 
 | Class | Description |
 |-------|-------------|
-| `OxPHP\BorrowedProxy` | Proxy object for borrowed values between threads. |
+| `OxPHP\Async\BorrowedProxy` | Proxy object for borrowed values between threads. |
 
 ---
 
@@ -896,9 +900,9 @@ All exceptions registered by the extension:
 
 | Exception | Extends | When thrown |
 |-----------|---------|------------|
-| `OxPHP\AsyncException` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
-| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
-| `OxPHP\AsyncBorrowException` | `\Exception` | Error borrowing a value between threads |
+| `OxPHP\Async\Exception` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
+| `OxPHP\Async\BorrowException` | `\Exception` | Error borrowing a value between threads |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Calling `oxphp_http_request()` inside an `oxphp_async()` callback |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Calling `oxphp_http_request()` in worker mode between requests |
@@ -938,16 +942,16 @@ print_r($functions);
 //     [15] => oxphp_async_await_all
 //     [16] => oxphp_async_await_any
 //     [17] => oxphp_register_decorator
-//     [18] => oxphp_trace
-//     [19] => oxphp_trace_start
-//     [20] => oxphp_trace_end
-//     [21] => oxphp_trace_attribute
-//     [22] => oxphp_trace_event
-//     [23] => oxphp_trace_error
-//     [24] => oxphp_trace_status
-//     [25] => oxphp_trace_id
-//     [26] => oxphp_trace_span_id
-//     [27] => oxphp_trace_header
+//     [18] => oxphp_apm_trace
+//     [19] => oxphp_apm_start
+//     [20] => oxphp_apm_end
+//     [21] => oxphp_apm_attribute
+//     [22] => oxphp_apm_event
+//     [23] => oxphp_apm_error
+//     [24] => oxphp_apm_status
+//     [25] => oxphp_apm_trace_id
+//     [26] => oxphp_apm_span_id
+//     [27] => oxphp_apm_header
 // )
 ```
 
@@ -976,6 +980,8 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 }
 ```
 
+> **Note:** The `oxphp_async()` family of functions is always registered in OxPHP, so `function_exists('oxphp_async')` returns `true` even when `ASYNC_WORKERS=0`. When the pool is disabled, calling any async function throws `OxPHP\Async\Exception`. If your code must handle both configurations, catch the exception rather than checking `function_exists()`.
+
 ## See Also
 
 - [HTTP Request API](request-api.md) -- object-oriented access to request data via `oxphp_http_request()`
@@ -983,5 +989,5 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Server-Sent Events](../features/sse.md) -- real-time streaming with `oxphp_stream_flush()`
 - [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`
 - [Superglobals](superglobals.md) -- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
-- [Distributed Tracing & APM](../features/distributed-tracing.md) -- W3C Trace Context, OTel export, and the `oxphp_trace_*()` SDK
+- [Distributed Tracing & APM](../features/distributed-tracing.md) -- W3C Trace Context, OTel export, and the `oxphp_apm_*()` SDK
 - [Configuration Reference](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars

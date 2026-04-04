@@ -126,13 +126,13 @@ When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping boo
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Database queries exceeding this get an `oxphp.db.slow=true` span attribute |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Disable in production if parameters may contain sensitive data |
 
-When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_trace_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, they are safe no-ops.
+When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_apm_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, they are safe no-ops.
 
 ## Async Workers
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads for background task processing. `0` disables the async pool |
+| `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. When `0`, the async functions (`oxphp_async`, etc.) are registered but throw `OxPHP\Async\Exception` on call. Set to a positive value to enable background task execution |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | Maximum pending tasks in the async queue. `0` = auto (workers × 64) |
 
 The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.

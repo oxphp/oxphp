@@ -209,14 +209,14 @@ $result = oxphp_async_await($p); // 30',
             ['name' => '$timeout', 'type' => '?float', 'default' => 'null', 'desc' => 'Timeout in seconds. <code>null</code> waits indefinitely.'],
         ],
         'return'  => 'mixed — The return value of the closure.',
-        'desc'    => 'Blocks the current thread until the async task completes and returns its result. The return value is deserialized from the async worker thread. Each promise can only be awaited once. Throws <code>OxPHP\AsyncException</code> on failure or <code>OxPHP\AsyncTimeoutException</code> on timeout.',
+        'desc'    => 'Blocks the current thread until the async task completes and returns its result. The return value is deserialized from the async worker thread. Each promise can only be awaited once. Throws <code>OxPHP\Async\Exception</code> on failure or <code>OxPHP\Async\TimeoutException</code> on timeout.',
         'example' => '$p = oxphp_async(fn(): string => "hello");
 $result = oxphp_async_await($p); // "hello"
 
 // With timeout:
 try {
     $result = oxphp_async_await($p, 2.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     // task took longer than 2 seconds
 }',
     ],

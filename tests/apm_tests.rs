@@ -1,8 +1,8 @@
 #[cfg(feature = "plugin-apm")]
 mod apm {
-    use oxphp::plugins::apm::connection_meta;
-    use oxphp::plugins::apm::spans::{SpanEvent, SpanStack};
-    use oxphp::plugins::apm::sql;
+    use oxphp::plugins::ox_apm::connection_meta;
+    use oxphp::plugins::ox_apm::spans::{SpanEvent, SpanStack};
+    use oxphp::plugins::ox_apm::sql;
 
     #[test]
     fn test_full_request_lifecycle() {
@@ -163,7 +163,7 @@ mod apm {
                         "SQLSTATE[HY000] [2002] Connection refused".into(),
                     ),
                 ],
-                timestamp_us: oxphp::plugins::apm::spans::now_us(),
+                timestamp_us: oxphp::plugins::ox_apm::spans::now_us(),
             });
         }
 

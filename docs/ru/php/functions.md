@@ -27,16 +27,16 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_async_await_all()](#oxphp_async_await_all)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
-- [oxphp_trace()](#oxphp_trace)
-- [oxphp_trace_start()](#oxphp_trace_start)
-- [oxphp_trace_end()](#oxphp_trace_end)
-- [oxphp_trace_attribute()](#oxphp_trace_attribute)
-- [oxphp_trace_event()](#oxphp_trace_event)
-- [oxphp_trace_error()](#oxphp_trace_error)
-- [oxphp_trace_status()](#oxphp_trace_status)
-- [oxphp_trace_id()](#oxphp_trace_id)
-- [oxphp_trace_span_id()](#oxphp_trace_span_id)
-- [oxphp_trace_header()](#oxphp_trace_header)
+- [oxphp_apm_trace()](#oxphp_apm_trace)
+- [oxphp_apm_start()](#oxphp_apm_start)
+- [oxphp_apm_end()](#oxphp_apm_end)
+- [oxphp_apm_attribute()](#oxphp_apm_attribute)
+- [oxphp_apm_event()](#oxphp_apm_event)
+- [oxphp_apm_error()](#oxphp_apm_error)
+- [oxphp_apm_status()](#oxphp_apm_status)
+- [oxphp_apm_trace_id()](#oxphp_apm_trace_id)
+- [oxphp_apm_span_id()](#oxphp_apm_span_id)
+- [oxphp_apm_header()](#oxphp_apm_header)
 - [Классы и интерфейсы](#классы-и-интерфейсы)
 - [Исключения](#исключения)
 
@@ -431,7 +431,11 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()`.
 
-**Выбрасывает:** `OxPHP\AsyncException` если замыкание не является пользовательским, если пул асинхронных воркеров переполнен или если аргументы содержат объекты или ресурсы.
+**Выбрасывает:** `OxPHP\Async\Exception` в следующих случаях:
+- Асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- Замыкание не является пользовательским (не определено пользователем)
+- Пул асинхронных воркеров переполнен
+- Аргументы содержат объекты или ресурсы
 
 > **Примечание:** Переменные, захваченные через `use` в замыкании, подпадают под те же ограничения — объекты и ресурсы отклоняются.
 
@@ -470,8 +474,9 @@ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 **Возвращает:** Возвращаемое значение асинхронного замыкания.
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если асинхронная задача выбросила исключение
-- `OxPHP\AsyncTimeoutException` если превышен `$timeout`
+- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\Exception` если асинхронная задача выбросила исключение
+- `OxPHP\Async\TimeoutException` если превышен `$timeout`
 
 **Пример:**
 
@@ -487,7 +492,7 @@ echo $result; // 500000500000
 // С тайм-аутом
 try {
     $result = oxphp_async_await($promise, 5.0);
-} catch (\OxPHP\AsyncTimeoutException $e) {
+} catch (\OxPHP\Async\TimeoutException $e) {
     echo "Task took too long";
 }
 ```
@@ -509,8 +514,9 @@ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 **Возвращает:** Ассоциативный массив, где каждый ключ — идентификатор промиса (целое число), а значение — результат этого промиса.
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если какой-либо промис завершился с ошибкой
-- `OxPHP\AsyncTimeoutException` если какой-либо промис превысил `$timeout`
+- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\Exception` если какой-либо промис завершился с ошибкой
+- `OxPHP\Async\TimeoutException` если какой-либо промис превысил `$timeout`
 
 **Пример:**
 
@@ -548,8 +554,9 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value` (`mixed`) — Возвращаемое значение промиса-победителя
 
 **Выбрасывает:**
-- `OxPHP\AsyncException` если промис-победитель завершился с ошибкой
-- `OxPHP\AsyncTimeoutException` если ни один промис не завершился в течение `$timeout`
+- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\Exception` если промис-победитель завершился с ошибкой
+- `OxPHP\Async\TimeoutException` если ни один промис не завершился в течение `$timeout`
 
 **Пример:**
 
@@ -605,10 +612,10 @@ oxphp_register_decorator(LogDecorator::class);
 
 ---
 
-## oxphp_trace()
+## oxphp_apm_trace()
 
 ```php
-oxphp_trace(string $name, callable $callback, ?array $attributes = null): void
+oxphp_apm_trace(string $name, callable $callback, ?array $attributes = null): void
 ```
 
 Выполняет колбэк внутри именованного спана. Спан открывается перед запуском колбэка и закрывается после его возврата. Зарезервирована для будущей расширенной интеграции с колбэками.
@@ -622,45 +629,45 @@ oxphp_trace(string $name, callable $callback, ?array $attributes = null): void
 
 ---
 
-## oxphp_trace_start()
+## oxphp_apm_start()
 
 ```php
-oxphp_trace_start(string $name, ?array $attributes = null): int
+oxphp_apm_start(string $name, ?array $attributes = null): int
 ```
 
-Открывает новый спан и возвращает локальный идентификатор для последующего обращения. Спан становится дочерним по отношению к текущему активному спану (или корневому спану запроса, если нет активного спана). Используйте `oxphp_trace_end()` для его закрытия.
+Открывает новый спан и возвращает локальный идентификатор для последующего обращения. Спан становится дочерним по отношению к текущему активному спану (или корневому спану запроса, если нет активного спана). Используйте `oxphp_apm_end()` для его закрытия.
 
 **Параметры:**
 - `$name` — Имя спана (например, `"cache.warm"`, `"payment.process"`)
 - `$attributes` — Необязательный ассоциативный массив строковых пар ключ-значение атрибутов для установки на спане при создании
 
-**Возвращает:** Целочисленный локальный идентификатор спана. Передайте его в `oxphp_trace_end()`, `oxphp_trace_attribute()` или другие функции, принимающие `$span_id`. Возвращает `0`, когда APM отключён.
+**Возвращает:** Целочисленный локальный идентификатор спана. Передайте его в `oxphp_apm_end()`, `oxphp_apm_attribute()` или другие функции, принимающие `$span_id`. Возвращает `0`, когда APM отключён.
 
 **Пример:**
 
 ```php
 <?php
-$spanId = oxphp_trace_start('order.validate', [
+$spanId = oxphp_apm_start('order.validate', [
     'order.type' => 'subscription',
 ]);
 
 validateOrder($order);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_end()
+## oxphp_apm_end()
 
 ```php
-oxphp_trace_end(int $span_id): void
+oxphp_apm_end(int $span_id): void
 ```
 
-Закрывает спан, открытый `oxphp_trace_start()`. Записывается время окончания спана, и он перемещается из активного стека в список завершённых, готовый к экспорту.
+Закрывает спан, открытый `oxphp_apm_start()`. Записывается время окончания спана, и он перемещается из активного стека в список завершённых, готовый к экспорту.
 
 **Параметры:**
-- `$span_id` — Локальный идентификатор спана, возвращённый `oxphp_trace_start()`
+- `$span_id` — Локальный идентификатор спана, возвращённый `oxphp_apm_start()`
 
 **Возвращает:** `void`
 
@@ -668,10 +675,10 @@ oxphp_trace_end(int $span_id): void
 
 ---
 
-## oxphp_trace_attribute()
+## oxphp_apm_attribute()
 
 ```php
-oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void
+oxphp_apm_attribute(string $key, mixed $value, ?int $span_id = null): void
 ```
 
 Устанавливает атрибут «ключ-значение» на спане. Значения преобразуются в строки. Если `$span_id` не указан, атрибут добавляется к текущему активному спану.
@@ -687,21 +694,21 @@ oxphp_trace_attribute(string $key, mixed $value, ?int $span_id = null): void
 
 ```php
 <?php
-$spanId = oxphp_trace_start('db.query');
+$spanId = oxphp_apm_start('db.query');
 
-oxphp_trace_attribute('db.system', 'mysql');
-oxphp_trace_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
-oxphp_trace_attribute('db.row_count', $rowCount, $spanId);
+oxphp_apm_attribute('db.system', 'mysql');
+oxphp_apm_attribute('db.statement', 'SELECT * FROM users WHERE id = ?');
+oxphp_apm_attribute('db.row_count', $rowCount, $spanId);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_event()
+## oxphp_apm_event()
 
 ```php
-oxphp_trace_event(string $name, ?array $attributes = null, ?int $span_id = null): void
+oxphp_apm_event(string $name, ?array $attributes = null, ?int $span_id = null): void
 ```
 
 Записывает событие с временной меткой на спане. События полезны для логирования дискретных происшествий в пределах жизни спана (например, промах кэша, повторная попытка, проверка авторизации).
@@ -717,22 +724,22 @@ oxphp_trace_event(string $name, ?array $attributes = null, ?int $span_id = null)
 
 ```php
 <?php
-$spanId = oxphp_trace_start('payment.process');
+$spanId = oxphp_apm_start('payment.process');
 
-oxphp_trace_event('payment.authorized', [
+oxphp_apm_event('payment.authorized', [
     'provider' => 'stripe',
     'amount' => '49.99',
 ]);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_error()
+## oxphp_apm_error()
 
 ```php
-oxphp_trace_error(mixed $exception, ?int $span_id = null): void
+oxphp_apm_error(mixed $exception, ?int $span_id = null): void
 ```
 
 Помечает статус спана как ошибку (код статуса 2). Используйте эту функцию для пометки спанов, в которых произошло исключение или сбой.
@@ -747,24 +754,24 @@ oxphp_trace_error(mixed $exception, ?int $span_id = null): void
 
 ```php
 <?php
-$spanId = oxphp_trace_start('external.api');
+$spanId = oxphp_apm_start('external.api');
 
 try {
     $result = callExternalApi();
 } catch (\Throwable $e) {
-    oxphp_trace_error($e, $spanId);
+    oxphp_apm_error($e, $spanId);
     throw $e;
 } finally {
-    oxphp_trace_end($spanId);
+    oxphp_apm_end($spanId);
 }
 ```
 
 ---
 
-## oxphp_trace_status()
+## oxphp_apm_status()
 
 ```php
-oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null): void
+oxphp_apm_status(int $code, ?string $description = null, ?int $span_id = null): void
 ```
 
 Устанавливает код статуса и необязательное описание на спане.
@@ -780,23 +787,23 @@ oxphp_trace_status(int $code, ?string $description = null, ?int $span_id = null)
 
 ```php
 <?php
-$spanId = oxphp_trace_start('validation');
+$spanId = oxphp_apm_start('validation');
 
 if ($valid) {
-    oxphp_trace_status(1, 'Validation passed', $spanId);
+    oxphp_apm_status(1, 'Validation passed', $spanId);
 } else {
-    oxphp_trace_status(2, 'Invalid input: missing email', $spanId);
+    oxphp_apm_status(2, 'Invalid input: missing email', $spanId);
 }
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
 
-## oxphp_trace_id()
+## oxphp_apm_trace_id()
 
 ```php
-oxphp_trace_id(): string
+oxphp_apm_trace_id(): string
 ```
 
 Возвращает W3C trace ID (32 шестнадцатеричных символа) для контекста трассировки текущего запроса. Это то же значение, что и `$_SERVER['OXPHP_TRACE_ID']`, доступное без суперглобальных переменных.
@@ -807,16 +814,16 @@ oxphp_trace_id(): string
 
 ```php
 <?php
-$traceId = oxphp_trace_id();
+$traceId = oxphp_apm_trace_id();
 error_log("Processing request in trace {$traceId}");
 ```
 
 ---
 
-## oxphp_trace_span_id()
+## oxphp_apm_span_id()
 
 ```php
-oxphp_trace_span_id(): string
+oxphp_apm_span_id(): string
 ```
 
 Возвращает span ID (16 шестнадцатеричных символов) текущего активного спана. При наличии вложенных спанов возвращает идентификатор самого внутреннего открытого спана.
@@ -825,10 +832,10 @@ oxphp_trace_span_id(): string
 
 ---
 
-## oxphp_trace_header()
+## oxphp_apm_header()
 
 ```php
-oxphp_trace_header(): string
+oxphp_apm_header(): string
 ```
 
 Возвращает значение заголовка W3C `traceparent` для текущего контекста спана. Используйте для передачи контекста трассировки в нисходящие HTTP-вызовы.
@@ -839,9 +846,9 @@ oxphp_trace_header(): string
 
 ```php
 <?php
-$spanId = oxphp_trace_start('http.call');
+$spanId = oxphp_apm_start('http.call');
 
-$traceparent = oxphp_trace_header();
+$traceparent = oxphp_apm_header();
 
 $response = file_get_contents('https://api.example.com/data', false,
     stream_context_create([
@@ -851,7 +858,7 @@ $response = file_get_contents('https://api.example.com/data', false,
     ])
 );
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ---
@@ -880,13 +887,13 @@ oxphp_trace_end($spanId);
 
 | Класс | Описание |
 |-------|----------|
-| `OxPHP\Tracing\Trace` | Встроенный атрибут для автоматического создания спанов. Применяется к функциям или методам. |
+| `OxPHP\Apm\Trace` | Встроенный атрибут для автоматического создания спанов. Применяется к функциям или методам. |
 
 ### Async
 
 | Класс | Описание |
 |-------|----------|
-| `OxPHP\BorrowedProxy` | Прокси-объект для заимствованных значений между потоками. |
+| `OxPHP\Async\BorrowedProxy` | Прокси-объект для заимствованных значений между потоками. |
 
 ---
 
@@ -896,9 +903,9 @@ oxphp_trace_end($spanId);
 
 | Исключение | Наследует | Когда выбрасывается |
 |------------|-----------|---------------------|
-| `OxPHP\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
-| `OxPHP\AsyncTimeoutException` | `OxPHP\AsyncException` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
-| `OxPHP\AsyncBorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
+| `OxPHP\Async\Exception` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
+| `OxPHP\Async\BorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` внутри колбэка `oxphp_async()` |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` в режиме worker между запросами |
@@ -938,20 +945,22 @@ print_r($functions);
 //     [15] => oxphp_async_await_all
 //     [16] => oxphp_async_await_any
 //     [17] => oxphp_register_decorator
-//     [18] => oxphp_trace
-//     [19] => oxphp_trace_start
-//     [20] => oxphp_trace_end
-//     [21] => oxphp_trace_attribute
-//     [22] => oxphp_trace_event
-//     [23] => oxphp_trace_error
-//     [24] => oxphp_trace_status
-//     [25] => oxphp_trace_id
-//     [26] => oxphp_trace_span_id
-//     [27] => oxphp_trace_header
+//     [18] => oxphp_apm_trace
+//     [19] => oxphp_apm_start
+//     [20] => oxphp_apm_end
+//     [21] => oxphp_apm_attribute
+//     [22] => oxphp_apm_event
+//     [23] => oxphp_apm_error
+//     [24] => oxphp_apm_status
+//     [25] => oxphp_apm_trace_id
+//     [26] => oxphp_apm_span_id
+//     [27] => oxphp_apm_header
 // )
 ```
 
 ## Совместимость с PHP-FPM
+
+> **Примечание:** `function_exists('oxphp_async')` возвращает `true` даже при отключённом асинхронном пуле (`ASYNC_WORKERS=0`). Функция зарегистрирована всегда — она лишь выбрасывает `OxPHP\Async\Exception` при вызове. Для проверки доступности фонового выполнения используйте `oxphp_server_info()['async_workers'] > 0`, а не `function_exists()`.
 
 Если ваш код должен работать как в OxPHP, так и в PHP-FPM, используйте обёртки с откатом:
 
@@ -983,5 +992,5 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Server-Sent Events](../features/sse.md) — потоковая передача в реальном времени с `oxphp_stream_flush()`
 - [Ранний ответ](../features/early-response.md) — фоновая обработка с `oxphp_finish_request()`
 - [Суперглобальные переменные](superglobals.md) — как OxPHP заполняет `$_SERVER`, `$_GET`, `$_POST` и другие суперглобальные переменные
-- [Распределённая трассировка и APM](../features/distributed-tracing.md) — W3C Trace Context, экспорт OTel и SDK `oxphp_trace_*()`
+- [Распределённая трассировка и APM](../features/distributed-tracing.md) — W3C Trace Context, экспорт OTel и SDK `oxphp_apm_*()`
 - [Справочник по конфигурации](../operations/configuration.md) — `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS` и другие переменные окружения

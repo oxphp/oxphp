@@ -5,7 +5,7 @@ description: 使用协作式多任务处理，在单个 PHP Worker 线程上处�
 
 # Fiber 多路复用
 
-OxPHP 使用 PHP Fiber 在单个 Worker 线程上并发处理多个 HTTP 请求。当某个请求调用 `oxphp_sleep()` 或 `oxphp_async_await()` 时，它会挂起，Worker 线程立即处理下一个请求。这使得一个 Worker 无需额外线程就能管理数百个正在处理中的请求。
+OxPHP 使用 PHP Fiber 在单个 Worker 线程上并发处理多个 HTTP 请求。当某个请求调用 `oxphp_sleep()` 或 `oxphp_async_await()`（当异步池启用时）时，它会挂起，Worker 线程立即处理下一个请求。这使得一个 Worker 无需额外线程就能管理数百个正在处理中的请求。
 
 ## 工作原理
 
@@ -165,6 +165,8 @@ $users = oxphp_async_await($promise);
 
 > **注意：** 数据库连接不能传递给 `oxphp_async()`，因为对象无法跨线程序列化。请在异步闭包内部创建连接，或者如果查询足够快速以至于阻塞是可以接受的，则直接在 fiber 中使用查询。
 
+> **重要：** `oxphp_async()` 需要 `ASYNC_WORKERS > 0`。当异步池被禁用时（默认），调用 `oxphp_async()` 会抛出 `OxPHP\Async\Exception`。
+
 ## Fiber 的回收方式
 
 Fiber 的 C 栈只分配一次，并跨请求复用。当 fiber 完成一次请求处理后，它不会被销毁——而是挂起回调度器并被添加到空闲列表中。下一个请求复用现有的 C 栈，避免了昂贵的内存分配。
@@ -202,11 +204,21 @@ $promise = oxphp_async(fn() => file_get_contents($url));
 $result = oxphp_async_await($promise);
 ```
 
+### 使用 oxphp_async() 时出现"Async pool is disabled"
+
+异步池未配置。当 `ASYNC_WORKERS=0`（默认值）时，所有异步函数均会抛出 `OxPHP\Async\Exception`。
+
+**修复：** 将 `ASYNC_WORKERS` 设置为正整数：
+
+```bash
+ASYNC_WORKERS=8
+```
+
 ### 使用 oxphp_async() 时出现"Failed to dispatch async task"
 
-异步池已满或被禁用。
+异步池正在运行，但容量已满。
 
-**修复：** 将 `ASYNC_WORKERS` 设置为大于 0 的值，并在需要时增大 `ASYNC_QUEUE_CAPACITY`：
+**修复：** 增大 `ASYNC_WORKERS` 或 `ASYNC_QUEUE_CAPACITY`：
 
 ```bash
 ASYNC_WORKERS=8

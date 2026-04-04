@@ -34,12 +34,12 @@ fn main() -> Result<(), types::BoxError> {
     // functions with Zend (OPcache needs them at compile time).
     let mut dispatcher = EventDispatcher::new();
     let mut plugin_manager = PluginManager::new();
-    #[cfg(feature = "plugin-example")]
-    plugin_manager.add(Box::new(oxphp::plugins::example::ExamplePlugin::new()));
     #[cfg(feature = "plugin-otel")]
-    plugin_manager.add(Box::new(oxphp::plugins::otel::OtelPlugin::new()));
+    plugin_manager.add(Box::new(oxphp::plugins::ox_otel::OtelPlugin::new()));
     #[cfg(feature = "plugin-apm")]
-    plugin_manager.add(Box::new(oxphp::plugins::apm::ApmPlugin::new()));
+    plugin_manager.add(Box::new(oxphp::plugins::ox_apm::ApmPlugin::new()));
+    #[cfg(feature = "plugin-async")]
+    plugin_manager.add(Box::new(oxphp::plugins::ox_async::AsyncPlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
 
     // Re-read trace_context after plugin init — the OTel plugin sets
@@ -71,6 +71,17 @@ fn main() -> Result<(), types::BoxError> {
         let native_fns = plugin_manager.take_native_php_functions();
         if !native_fns.is_empty() {
             oxphp::php::sapi::register_native_plugin_functions(native_fns);
+        }
+
+        // Register plugin PHP definitions (classes, interfaces, enums, attributes, functions)
+        let php_defs = plugin_manager.take_php_definitions();
+        if !php_defs.classes.is_empty()
+            || !php_defs.interfaces.is_empty()
+            || !php_defs.enums.is_empty()
+            || !php_defs.attributes.is_empty()
+            || !php_defs.functions.is_empty()
+        {
+            oxphp::php::sapi::register_php_definitions(php_defs);
         }
     }
 

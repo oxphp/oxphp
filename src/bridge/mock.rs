@@ -350,6 +350,51 @@ pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
     0
 }
 
+// ── Async plugin helpers ──
+
+pub unsafe fn oxphp_ht_has_objects_or_resources(_ht: *mut c_void) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_fiber_await(
+    _promise_id: i64,
+    _timeout: f64,
+    _retval: *mut c_void,
+) -> c_int {
+    1 // not in fiber — blocking path
+}
+pub unsafe fn oxphp_bridge_set_borrow_proxy_ce(_ce: *mut c_void) {}
+pub unsafe fn oxphp_arr_add_zval(_arr: *mut c_void, _key: *const c_char, _val: *mut c_void) {}
+pub unsafe fn oxphp_arr_add_index_zval(_arr: *mut c_void, _idx: u64, _val: *mut c_void) {}
+
+// ── Async direct dispatch ──
+
+pub unsafe fn oxphp_bridge_async_dispatch(
+    _op_array: *const c_void,
+    _static_vars: *mut c_void,
+    _this_ptr: *mut c_void,
+    _argc: u32,
+    _args: *mut c_void,
+    _closure_zval: *mut c_void,
+) -> i64 {
+    -1
+}
+pub unsafe fn oxphp_bridge_await_dispatch(
+    _promise_id: i64,
+    _timeout: f64,
+    _retval: *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_bridge_await_any_dispatch(
+    _promise_ids: *const i64,
+    _count: u32,
+    _timeout: f64,
+    _out_winner_id: *mut i64,
+    _retval: *mut c_void,
+) -> c_int {
+    -1
+}
+
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
 pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {
@@ -394,3 +439,176 @@ pub unsafe fn oxphp_execute_async_task(
 ) -> c_int {
     0
 }
+
+// ─── Plugin Class Registry ──────────────────────────────────
+
+pub unsafe fn oxphp_bridge_register_class(
+    _fqn: *const c_char,
+    _parent_fqn: *const c_char,
+    _flags: u32,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_class_implements(_class_handle: c_int, _interface_fqn: *const c_char) {}
+pub unsafe fn oxphp_bridge_class_add_property(
+    _class_handle: c_int,
+    _name: *const c_char,
+    _visibility: u32,
+    _modifiers: u32,
+    _type_info: c_int,
+    _default_value: *const c_char,
+) {
+}
+pub unsafe fn oxphp_bridge_class_add_constant(
+    _class_handle: c_int,
+    _name: *const c_char,
+    _visibility: u32,
+    _value: *const c_char,
+) {
+}
+pub unsafe fn oxphp_bridge_class_add_method(
+    _class_handle: c_int,
+    _name: *const c_char,
+    _visibility: u32,
+    _flags: u32,
+    _required_params: c_int,
+    _total_params: c_int,
+    _is_variadic: c_int,
+) {
+}
+pub unsafe fn oxphp_bridge_class_set_magic(
+    _class_handle: c_int,
+    _magic_type: c_int,
+    _has_handler: c_int,
+) {
+}
+pub unsafe fn oxphp_bridge_class_enable_custom_object(_class_handle: c_int) {}
+
+// ─── Plugin Interface Registry ──────────────────────────────
+
+pub unsafe fn oxphp_bridge_register_interface(
+    _fqn: *const c_char,
+    _parent_fqn: *const c_char,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_interface_add_method(
+    _iface_handle: c_int,
+    _name: *const c_char,
+    _flags: u32,
+    _required_params: c_int,
+    _total_params: c_int,
+    _is_variadic: c_int,
+) {
+}
+pub unsafe fn oxphp_bridge_interface_add_constant(
+    _iface_handle: c_int,
+    _name: *const c_char,
+    _visibility: u32,
+    _value: *const c_char,
+) {
+}
+
+// ─── Plugin Enum Registry ───────────────────────────────────
+
+pub unsafe fn oxphp_bridge_register_enum(_fqn: *const c_char, _backing_type: c_int) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_enum_implements(_enum_handle: c_int, _interface_fqn: *const c_char) {}
+pub unsafe fn oxphp_bridge_enum_add_case(
+    _enum_handle: c_int,
+    _name: *const c_char,
+    _value: *const c_char,
+) {
+}
+pub unsafe fn oxphp_bridge_enum_add_method(
+    _enum_handle: c_int,
+    _name: *const c_char,
+    _flags: u32,
+    _required_params: c_int,
+    _total_params: c_int,
+    _is_variadic: c_int,
+) {
+}
+
+// ─── Plugin Attribute Registry ──────────────────────────────
+
+pub unsafe fn oxphp_bridge_register_attribute(
+    _fqn: *const c_char,
+    _targets: u32,
+    _is_repeatable: c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_attribute_add_param(
+    _attr_handle: c_int,
+    _name: *const c_char,
+    _type_info: c_int,
+    _is_required: c_int,
+    _default_value: *const c_char,
+) {
+}
+pub unsafe fn oxphp_bridge_attribute_add_property(
+    _attr_handle: c_int,
+    _name: *const c_char,
+    _type_info: c_int,
+    _visibility: u32,
+) {
+}
+
+// ─── Plugin Function Registry (new builder-based) ───────────
+
+pub unsafe fn oxphp_bridge_register_plugin_function(
+    _fqn: *const c_char,
+    _required_params: c_int,
+    _total_params: c_int,
+    _is_variadic: c_int,
+) -> c_int {
+    0
+}
+
+// ─── Method Dispatch ────────────────────────────────────────
+
+pub unsafe fn oxphp_bridge_set_method_dispatch(
+    _dispatch: Option<
+        unsafe extern "C" fn(
+            class_index: u32,
+            method_name: *const c_char,
+            args: *mut c_void,
+            argc: u32,
+            retval: *mut c_void,
+            rust_data: *mut c_void,
+        ) -> c_int,
+    >,
+) {
+}
+
+// ─── Storage Callbacks ──────────────────────────────────────
+
+pub unsafe fn oxphp_bridge_set_storage_callbacks(
+    _create_fn: Option<unsafe extern "C" fn(class_index: u32) -> *mut c_void>,
+    _drop_fn: Option<unsafe extern "C" fn(class_index: u32, rust_data: *mut c_void)>,
+    _clone_fn: Option<
+        unsafe extern "C" fn(class_index: u32, rust_data: *mut c_void) -> *mut c_void,
+    >,
+) {
+}
+
+// ─── Exception Bridge ───────────────────────────────────────
+
+pub unsafe fn oxphp_throw_exception(
+    _class_fqn: *const c_char,
+    _message: *const c_char,
+    _code: i64,
+) {
+}
+pub unsafe fn oxphp_exception_pending() -> c_int {
+    0
+}
+pub unsafe fn oxphp_exception_get(
+    _class_out: *mut *const c_char,
+    _message_out: *mut *const c_char,
+    _code_out: *mut i64,
+) {
+}
+pub unsafe fn oxphp_exception_clear() {}

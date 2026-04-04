@@ -126,13 +126,13 @@ PHP_WORKERS=4:0    # 最少 4 个，最多自动检测（CPU × 2）
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的数据库查询将添加 `oxphp.db.slow=true` Span 属性 |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中。如果参数可能包含敏感数据，请在生产环境中禁用 |
 
-当 APM 启用时，OxPHP 自动 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）来创建子 Span。无论 APM 是否启用，`oxphp_trace_*()` PHP 函数都会注册——禁用时它们是安全的空操作。
+当 APM 启用时，OxPHP 自动 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）来创建子 Span。无论 APM 是否启用，`oxphp_apm_*()` PHP 函数都会注册——禁用时它们是安全的空操作。
 
 ## 异步工作进程
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `ASYNC_WORKERS` | `0`（禁用） | 用于后台任务处理的专用异步工作线程数。`0` 禁用异步进程池 |
+| `ASYNC_WORKERS` | `0`（禁用） | 专用异步工作线程数。为 `0` 时，异步函数（`oxphp_async` 等）已注册但调用时抛出 `OxPHP\Async\Exception`。设为正整数可启用后台任务执行 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | 异步队列中的最大待处理任务数。`0` = 自动（工作进程数 × 64） |
 
 异步工作进程池处理从 PHP 分发的即发即忘后台任务。它独立于 PHP 工作进程池，标准请求处理不需要它。

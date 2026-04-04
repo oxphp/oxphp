@@ -11,7 +11,7 @@ $p = oxphp_async(function(): never { die('round1'); });
 try {
     oxphp_async_await($p);
     $tests[] = ['round' => 1, 'pass' => false];
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     $tests[] = ['round' => 1, 'pass' => true, 'msg' => $e->getMessage()];
 }
 
@@ -29,7 +29,7 @@ $p = oxphp_async(function(): never { exit(1); });
 try {
     oxphp_async_await($p);
     $tests[] = ['round' => 3, 'pass' => false];
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     $tests[] = ['round' => 3, 'pass' => true, 'msg' => $e->getMessage()];
 }
 

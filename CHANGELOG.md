@@ -2,6 +2,17 @@
 
 All notable changes to OxPHP are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Async namespace migration**: All async-related PHP classes moved under `OxPHP\Async\` namespace:
+  - `OxPHP\AsyncException` → `OxPHP\Async\Exception`
+  - `OxPHP\AsyncTimeoutException` → `OxPHP\Async\TimeoutException`
+  - `OxPHP\AsyncBorrowException` → `OxPHP\Async\BorrowException`
+  - `OxPHP\BorrowedProxy` → `OxPHP\Async\BorrowedProxy`
+- Async functions (`oxphp_async`, `oxphp_async_await`, etc.) are now provided by `plugin-async` feature flag. Without it, functions are not available. Function names are unchanged.
+
 ## [0.2.0] - 2026-03-27
 
 ### Added

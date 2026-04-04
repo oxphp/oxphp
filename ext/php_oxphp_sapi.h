@@ -29,12 +29,10 @@ PHP_FUNCTION(oxphp_usleep);
 PHP_FUNCTION(oxphp_worker);
 
 ZEND_FUNCTION(oxphp_plugin_dispatch);
-
-PHP_FUNCTION(oxphp_async);
-PHP_FUNCTION(oxphp_async_await);
-PHP_FUNCTION(oxphp_async_await_all);
-PHP_FUNCTION(oxphp_async_await_any);
+ZEND_FUNCTION(oxphp_method_dispatch);
 
 PHP_FUNCTION(oxphp_register_decorator);
+
+int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval);
 
 #endif /* PHP_OXPHP_SAPI_H */

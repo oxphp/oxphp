@@ -99,6 +99,31 @@ pub enum PhpError {
 
     #[error("{0}")]
     Custom(String),
+
+    #[error("PHP Exception [{class}]: {message} (code: {code})")]
+    Exception {
+        class: String,
+        message: String,
+        code: i64,
+    },
+}
+
+/// Represents a PHP exception caught from `call_php()`.
+#[derive(Debug, Clone)]
+pub struct PhpException {
+    pub class: String,
+    pub message: String,
+    pub code: i64,
+}
+
+impl From<PhpException> for PhpError {
+    fn from(e: PhpException) -> Self {
+        PhpError::Exception {
+            class: e.class,
+            message: e.message,
+            code: e.code,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +149,41 @@ mod tests {
     }
 
     // ── PhpError display tests ──
+
+    #[test]
+    fn test_php_error_exception_display() {
+        let e = PhpError::Exception {
+            class: "InvalidArgumentException".into(),
+            message: "bad input".into(),
+            code: 42,
+        };
+        assert_eq!(
+            e.to_string(),
+            "PHP Exception [InvalidArgumentException]: bad input (code: 42)"
+        );
+    }
+
+    #[test]
+    fn test_php_exception_into_php_error() {
+        let exc = PhpException {
+            class: "RuntimeException".into(),
+            message: "fail".into(),
+            code: 1,
+        };
+        let err: PhpError = exc.into();
+        match err {
+            PhpError::Exception {
+                class,
+                message,
+                code,
+            } => {
+                assert_eq!(class, "RuntimeException");
+                assert_eq!(message, "fail");
+                assert_eq!(code, 1);
+            }
+            _ => panic!("Expected Exception variant"),
+        }
+    }
 
     #[test]
     fn test_php_error_display() {

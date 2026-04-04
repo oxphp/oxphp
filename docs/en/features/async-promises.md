@@ -21,7 +21,7 @@ OxPHP provides an async execution system that runs PHP closures on a dedicated t
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. Set to `0` to disable the async pool entirely |
 | `ASYNC_QUEUE_CAPACITY` | `0` (auto) | Maximum pending async tasks. When `0`, defaults to `ASYNC_WORKERS × 64` |
 
-> **Note:** The async pool is disabled by default. You must set `ASYNC_WORKERS` to a value greater than `0` to use `oxphp_async()`.
+> **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\Exception` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
 
 ## Dispatching Tasks
 
@@ -65,7 +65,7 @@ $result = oxphp_async_await($promise);           // Wait indefinitely
 $result = oxphp_async_await($promise, 5.0);      // Wait up to 5 seconds
 ```
 
-A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\AsyncTimeoutException` is thrown.
+A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\Async\TimeoutException` is thrown.
 
 ### All Promises
 
@@ -103,7 +103,7 @@ Non-winning promises remain awaitable individually after `oxphp_async_await_any(
 
 ## Error Handling
 
-Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\AsyncException`:
+Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\Async\Exception`:
 
 ```php
 <?php
@@ -113,20 +113,20 @@ $promise = oxphp_async(function () {
 
 try {
     $result = oxphp_async_await($promise);
-} catch (\OxPHP\AsyncException $e) {
+} catch (\OxPHP\Async\Exception $e) {
     // "Async task failed: [RuntimeException] Something failed"
     echo $e->getMessage();
 }
 ```
 
-`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\AsyncException`. The async worker survives and continues processing new tasks.
+`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\Async\Exception`. The async worker survives and continues processing new tasks.
 
 ### Exception Hierarchy
 
 ```text
 \Exception
-  └── OxPHP\AsyncException              # All async errors
-        └── OxPHP\AsyncTimeoutException  # Timeout-specific
+  └── OxPHP\Async\Exception              # All async errors
+        └── OxPHP\Async\TimeoutException  # Timeout-specific
 ```
 
 ## Fiber Integration
@@ -165,7 +165,7 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 Additional constraints:
 
-- **No nested async** — calling `oxphp_async()` from inside an async closure throws `AsyncException`
+- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\Exception`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state** — each async worker has its own PHP environment. There are no shared variables between the dispatching thread and the async thread
@@ -187,23 +187,27 @@ services:
 
 ## Troubleshooting
 
-### "Failed to dispatch async task (pool full or not configured)"
+### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-The async pool is either disabled or at capacity.
+The async pool is not configured. When `ASYNC_WORKERS=0` (the default), the async functions are registered but throw `OxPHP\Async\Exception` on every call.
 
-**Check:** Verify `ASYNC_WORKERS` is set to a value greater than `0`:
-
-```bash
-curl -s http://localhost:9090/config | jq '.async_workers'
-```
-
-**Fix:** Set `ASYNC_WORKERS` to the desired number of background threads:
+**Fix:** Set `ASYNC_WORKERS` to a positive value:
 
 ```bash
 ASYNC_WORKERS=4
 ```
 
-If the pool is configured but the error persists, increase `ASYNC_QUEUE_CAPACITY`.
+### "Failed to dispatch async task (pool full)"
+
+The async pool is running but all queue slots are occupied.
+
+**Check:** Verify the pool is accepting tasks:
+
+```bash
+curl -s http://localhost:9090/config | jq '.async_workers'
+```
+
+**Fix:** Increase `ASYNC_WORKERS` or `ASYNC_QUEUE_CAPACITY`:
 
 ### "Cannot pass object values in use-vars to async closure"
 
@@ -230,7 +234,7 @@ In traditional mode (no `WORKER_FILE`), `oxphp_async_await()` blocks the worker 
 
 ### Async timeout does not kill the running task
 
-`OxPHP\AsyncTimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
+`OxPHP\Async\TimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
 
 ## Best Practices
 

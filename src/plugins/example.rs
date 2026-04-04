@@ -430,6 +430,11 @@ mod tests {
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
         let mut native_php_functions = Vec::new();
         let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
 
         let mut ctx = PluginContext::new(
             "example".into(),
@@ -441,6 +446,11 @@ mod tests {
             &mut internal_routes,
             &mut native_php_functions,
             &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
@@ -749,6 +759,7 @@ mod tests {
                 std::ptr::null_mut(),
                 1,
                 retval.as_mut_ptr() as *mut std::os::raw::c_void,
+                None,
                 None,
             )
         };

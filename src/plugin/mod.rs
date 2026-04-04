@@ -1,11 +1,19 @@
+pub mod builders;
 pub mod context;
 pub mod cookies;
 pub mod handler;
 pub mod macros;
 pub mod manager;
 pub mod php;
+pub mod types;
 pub mod wrappers;
 
+pub use builders::attribute::AttributeBuilder;
+pub use builders::class::ClassBuilder;
+pub use builders::definitions::PhpDefinitions;
+pub use builders::enum_::EnumBuilder;
+pub use builders::function::FunctionBuilder;
+pub use builders::interface::InterfaceBuilder;
 pub use context::{PluginContext, PluginDecoratorDef};
 pub use cookies::{CookieOptions, PluginCookies, PluginSetCookie, SameSite};
 pub use handler::{
@@ -14,7 +22,10 @@ pub use handler::{
     PluginResponseActions, PluginResponseHandler, PluginResponseView,
 };
 pub use manager::PluginManager;
-pub use php::{PhpError, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
+pub use php::{
+    PhpError, PhpException, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef,
+};
+pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
 use std::any::Any;
 

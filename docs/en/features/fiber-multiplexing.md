@@ -5,7 +5,7 @@ description: Handle hundreds of concurrent requests on a single PHP worker threa
 
 # Fiber Multiplexing
 
-OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single worker thread. When a request calls `oxphp_sleep()` or `oxphp_async_await()`, it suspends and the worker thread immediately picks up the next request. This allows one worker to manage hundreds of in-flight requests without additional threads.
+OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single worker thread. When a request calls `oxphp_sleep()` or `oxphp_async_await()` (when the async pool is enabled), it suspends and the worker thread immediately picks up the next request. This allows one worker to manage hundreds of in-flight requests without additional threads.
 
 ## How It Works
 
@@ -165,6 +165,8 @@ $users = oxphp_async_await($promise);
 
 > **Note:** Database connections cannot be passed to `oxphp_async()` because objects are not serializable across threads. Create the connection inside the async closure, or use the direct query in the fiber if the query is fast enough that blocking is acceptable.
 
+> **Important:** `oxphp_async()` requires `ASYNC_WORKERS > 0`. When the async pool is disabled (the default), calling `oxphp_async()` throws `OxPHP\Async\Exception`.
+
 ## How Fibers Are Recycled
 
 Fiber C stacks are allocated once and reused across requests. When a fiber finishes handling a request, it is not destroyed — it suspends back to the scheduler and is added to a free list. The next request reuses the existing C stack, avoiding expensive memory allocation.
@@ -202,11 +204,21 @@ $promise = oxphp_async(fn() => file_get_contents($url));
 $result = oxphp_async_await($promise);
 ```
 
+### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
+
+The async pool is not configured. When `ASYNC_WORKERS=0` (the default), all async functions throw `OxPHP\Async\Exception`.
+
+**Fix:** Set `ASYNC_WORKERS` to a positive value:
+
+```bash
+ASYNC_WORKERS=8
+```
+
 ### "Failed to dispatch async task" when using oxphp_async()
 
-The async pool is full or disabled.
+The async pool is running but at capacity.
 
-**Fix:** Set `ASYNC_WORKERS` to a value greater than 0, and increase `ASYNC_QUEUE_CAPACITY` if needed:
+**Fix:** Increase `ASYNC_WORKERS` or `ASYNC_QUEUE_CAPACITY`:
 
 ```bash
 ASYNC_WORKERS=8

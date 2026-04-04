@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::events::EventDispatcher;
 
+use super::builders::definitions::*;
 use super::context::{PluginContext, PluginDecoratorDef};
 use super::handler::{PluginInternalHandler, PluginInternalRequest, PluginMetricsCollector};
 use super::php::PluginNativeFunctionDef;
@@ -18,6 +19,11 @@ pub struct PluginManager {
     internal_routes: HashMap<String, Box<dyn PluginInternalHandler>>,
     native_php_functions: Vec<PluginNativeFunctionDef>,
     decorators: Vec<PluginDecoratorDef>,
+    php_classes: Vec<PhpClassDef>,
+    php_interfaces: Vec<PhpInterfaceDef>,
+    php_enums: Vec<PhpEnumDef>,
+    php_attributes: Vec<PhpAttributeDef>,
+    php_functions: Vec<PhpFunctionDef>,
 }
 
 impl PluginManager {
@@ -30,6 +36,11 @@ impl PluginManager {
             internal_routes: HashMap::new(),
             native_php_functions: Vec::new(),
             decorators: Vec::new(),
+            php_classes: Vec::new(),
+            php_interfaces: Vec::new(),
+            php_enums: Vec::new(),
+            php_attributes: Vec::new(),
+            php_functions: Vec::new(),
         }
     }
 
@@ -65,6 +76,11 @@ impl PluginManager {
                 &mut self.internal_routes,
                 &mut self.native_php_functions,
                 &mut self.decorators,
+                &mut self.php_classes,
+                &mut self.php_interfaces,
+                &mut self.php_enums,
+                &mut self.php_attributes,
+                &mut self.php_functions,
             );
 
             plugin.init(&mut ctx)?;
@@ -146,6 +162,18 @@ impl PluginManager {
     /// Call after init_all(), before wrapping manager in Arc.
     pub fn take_decorators(&mut self) -> Vec<PluginDecoratorDef> {
         std::mem::take(&mut self.decorators)
+    }
+
+    /// Take all PHP type/function definitions contributed by plugins.
+    /// Call after init_all(), before wrapping manager in Arc.
+    pub fn take_php_definitions(&mut self) -> PhpDefinitions {
+        PhpDefinitions {
+            classes: std::mem::take(&mut self.php_classes),
+            interfaces: std::mem::take(&mut self.php_interfaces),
+            enums: std::mem::take(&mut self.php_enums),
+            attributes: std::mem::take(&mut self.php_attributes),
+            functions: std::mem::take(&mut self.php_functions),
+        }
     }
 
     /// Validate dependencies and return topological init order (Kahn's algorithm).

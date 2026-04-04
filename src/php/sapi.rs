@@ -1304,6 +1304,12 @@ use std::collections::HashMap;
 static NATIVE_DISPATCH_MAP: OnceLock<HashMap<String, Box<dyn PluginNativeFunction>>> =
     OnceLock::new();
 
+/// Builder-API function handlers (registered via ctx.function().handler()).
+/// Separate from NATIVE_DISPATCH_MAP because builder functions are registered
+/// after legacy functions, and OnceLock can only be set once.
+static BUILDER_FN_DISPATCH_MAP: OnceLock<HashMap<String, Box<dyn PluginNativeFunction>>> =
+    OnceLock::new();
+
 /// Register native plugin functions on the bridge and store handlers for dispatch.
 /// Called from main.rs after plugin_manager.init_all().
 pub fn register_native_plugin_functions(fns: Vec<PluginNativeFunctionDef>) {
@@ -1347,32 +1353,425 @@ unsafe extern "C" fn native_dispatch_callback(
     // during startup — UTF-8 validation is unnecessary overhead on the hot path.
     let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(name).to_bytes());
 
-    let map = match NATIVE_DISPATCH_MAP.get() {
-        Some(m) => m,
-        None => return -1,
-    };
+    // Look up handler in legacy map first, then builder map
+    let legacy_map = NATIVE_DISPATCH_MAP.get();
+    let builder_map = BUILDER_FN_DISPATCH_MAP.get();
 
-    let handler = match map.get(name_str) {
+    let handler = legacy_map
+        .and_then(|m| m.get(name_str))
+        .or_else(|| builder_map.and_then(|m| m.get(name_str)));
+
+    let handler = match handler {
         Some(h) => h,
         None => return -1,
     };
 
     // Catch panics — unwinding through extern "C" is an abort on Rust 2021.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut call = crate::bridge::call::NativeCall::new(args, argc, retval, None);
+        let mut call = crate::bridge::call::NativeCall::new(args, argc, retval, None, None);
         handler.handle(&mut call)
     }));
 
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
-            tracing::warn!(func = name_str, error = %e, "Plugin function error");
+            // Throw a PHP exception for PhpError::Exception, or a RuntimeException for others
+            let (class, message, code) = match &e {
+                crate::plugin::php::PhpError::Exception {
+                    class,
+                    message,
+                    code,
+                } => (class.as_str(), message.as_str(), *code),
+                other => ("RuntimeException", &*other.to_string(), 0),
+            };
+            let cls_c = CString::new(class).unwrap_or_default();
+            let msg_c = CString::new(message).unwrap_or_default();
+            crate::bridge::ffi::oxphp_throw_exception(cls_c.as_ptr(), msg_c.as_ptr(), code);
             -1
         }
         Err(_) => {
             tracing::error!(func = name_str, "Plugin function panicked");
+            let msg = CString::new("Internal error: plugin function panicked").unwrap();
+            crate::bridge::ffi::oxphp_throw_exception(std::ptr::null(), msg.as_ptr(), 0);
             -1
         }
+    }
+}
+
+// ─── PHP Definitions Registration ──────────────────────────
+
+use crate::bridge::storage::{self, ClassMeta, CLASS_META};
+use crate::plugin::builders::definitions::*;
+use crate::plugin::types::{MagicMethod, Visibility};
+
+/// Method dispatch: class_index → method_name → handler.
+static METHOD_DISPATCH_MAP: OnceLock<Vec<HashMap<String, Box<dyn PluginNativeFunction>>>> =
+    OnceLock::new();
+
+/// Magic dispatch: class_index → array of optional handlers.
+type MagicFn = Box<
+    dyn Fn(&mut crate::bridge::call::NativeCall) -> Result<(), crate::plugin::php::PhpError>
+        + Send
+        + Sync,
+>;
+static MAGIC_DISPATCH_MAP: OnceLock<Vec<[Option<MagicFn>; MagicMethod::COUNT]>> = OnceLock::new();
+
+/// Dispatch callback for class method calls from C.
+/// Routes to the correct Rust handler based on class_index + method_name.
+///
+/// # Safety
+/// Called from C code.
+unsafe extern "C" fn method_dispatch_callback(
+    class_index: u32,
+    method_name: *const c_char,
+    args: *mut c_void,
+    argc: u32,
+    retval: *mut c_void,
+    rust_data: *mut c_void,
+) -> c_int {
+    // Safety: method names are ASCII identifiers — UTF-8 validation is unnecessary overhead.
+    let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(method_name).to_bytes());
+
+    let dispatch = match METHOD_DISPATCH_MAP.get() {
+        Some(d) => d,
+        None => return -1,
+    };
+    let class_methods = match dispatch.get(class_index as usize) {
+        Some(m) => m,
+        None => return -1,
+    };
+    let handler = match class_methods.get(name_str) {
+        Some(h) => h,
+        None => return -1,
+    };
+
+    let rust_data_opt = if rust_data.is_null() {
+        None
+    } else {
+        Some(rust_data)
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut call = crate::bridge::call::NativeCall::new(
+            args,
+            argc,
+            retval,
+            Some(class_index as u64),
+            rust_data_opt,
+        );
+        handler.handle(&mut call)
+    }));
+
+    match result {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => {
+            tracing::warn!(class_index, method = name_str, error = %e, "Plugin method error");
+            -1
+        }
+        Err(_) => {
+            tracing::error!(class_index, method = name_str, "Plugin method panicked");
+            -1
+        }
+    }
+}
+
+/// Register all PHP entity definitions from plugins on the C bridge.
+/// Called from main.rs after plugin_manager.init_all(), before executor creation.
+pub fn register_php_definitions(defs: PhpDefinitions) {
+    let PhpDefinitions {
+        classes,
+        interfaces,
+        enums,
+        attributes,
+        functions,
+    } = defs;
+
+    // 1. Register interfaces (classes may implement them)
+    for iface in &interfaces {
+        let fqn = CString::new(iface.fqn.as_str()).unwrap();
+        let parent = iface.parent.as_deref().map(|s| CString::new(s).unwrap());
+        let parent_ptr = parent
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
+        unsafe {
+            let handle =
+                crate::bridge::ffi::oxphp_bridge_register_interface(fqn.as_ptr(), parent_ptr);
+            for method in &iface.methods {
+                let mname = CString::new(method.name.as_str()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_interface_add_method(
+                    handle,
+                    mname.as_ptr(),
+                    method.modifiers.bits() as u32,
+                    method.required_params() as c_int,
+                    method.total_params() as c_int,
+                    method.is_variadic as c_int,
+                );
+            }
+            for constant in &iface.constants {
+                let cname = CString::new(constant.name.as_str()).unwrap();
+                let cval = CString::new(constant.value.to_string()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_interface_add_constant(
+                    handle,
+                    cname.as_ptr(),
+                    visibility_to_zend(constant.visibility),
+                    cval.as_ptr(),
+                );
+            }
+        }
+    }
+
+    // 2. Register attributes
+    for attr in &attributes {
+        let fqn = CString::new(attr.fqn.as_str()).unwrap();
+        unsafe {
+            let handle = crate::bridge::ffi::oxphp_bridge_register_attribute(
+                fqn.as_ptr(),
+                attr.targets,
+                attr.repeatable as c_int,
+            );
+            for param in &attr.params {
+                let pname = CString::new(param.name.as_str()).unwrap();
+                let default = param
+                    .default
+                    .as_ref()
+                    .map(|d| CString::new(d.to_string()).unwrap());
+                let default_ptr = default
+                    .as_ref()
+                    .map(|c| c.as_ptr())
+                    .unwrap_or(std::ptr::null());
+                crate::bridge::ffi::oxphp_bridge_attribute_add_param(
+                    handle,
+                    pname.as_ptr(),
+                    -1,
+                    param.required as c_int,
+                    default_ptr,
+                );
+            }
+        }
+    }
+
+    // 3. Register enums
+    for enum_def in &enums {
+        let fqn = CString::new(enum_def.fqn.as_str()).unwrap();
+        let backing = match &enum_def.backing_type {
+            None => 0,
+            Some(crate::plugin::types::PhpType::Int) => 4, // IS_LONG
+            Some(crate::plugin::types::PhpType::String) => 6, // IS_STRING
+            _ => 0,
+        };
+        unsafe {
+            let handle = crate::bridge::ffi::oxphp_bridge_register_enum(fqn.as_ptr(), backing);
+            for iface_fqn in &enum_def.interfaces {
+                let ifqn = CString::new(iface_fqn.as_str()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_enum_implements(handle, ifqn.as_ptr());
+            }
+            for case in &enum_def.cases {
+                let cname = CString::new(case.name.as_str()).unwrap();
+                let cval = case
+                    .value
+                    .as_ref()
+                    .map(|v| CString::new(v.to_string()).unwrap());
+                let cval_ptr = cval
+                    .as_ref()
+                    .map(|c| c.as_ptr())
+                    .unwrap_or(std::ptr::null());
+                crate::bridge::ffi::oxphp_bridge_enum_add_case(handle, cname.as_ptr(), cval_ptr);
+            }
+            for method in &enum_def.methods {
+                let mname = CString::new(method.name.as_str()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_enum_add_method(
+                    handle,
+                    mname.as_ptr(),
+                    method.modifiers.bits() as u32,
+                    method.required_params() as c_int,
+                    method.total_params() as c_int,
+                    method.is_variadic as c_int,
+                );
+            }
+        }
+    }
+
+    // 4. Register classes (topologically sorted)
+    let class_order = topological_sort_classes(&classes)
+        .expect("Circular class inheritance in plugin definitions");
+
+    let mut method_dispatch: Vec<HashMap<String, Box<dyn PluginNativeFunction>>> = Vec::new();
+    let mut magic_dispatch: Vec<[Option<MagicFn>; MagicMethod::COUNT]> = Vec::new();
+    let mut class_metas: Vec<ClassMeta> = Vec::new();
+
+    // Consume classes in topological order using Option-wrapped Vec.
+    let mut classes_vec: Vec<Option<PhpClassDef>> = classes.into_iter().map(Some).collect();
+
+    for &idx in &class_order {
+        let class = classes_vec[idx].take().unwrap();
+        let fqn = CString::new(class.fqn.as_str()).unwrap();
+        let parent = class.parent.as_deref().map(|s| CString::new(s).unwrap());
+        let parent_ptr = parent
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
+        let flags = class.modifiers.bits() as u32;
+
+        unsafe {
+            let handle =
+                crate::bridge::ffi::oxphp_bridge_register_class(fqn.as_ptr(), parent_ptr, flags);
+
+            // Interfaces
+            for iface_fqn in &class.interfaces {
+                let ifqn = CString::new(iface_fqn.as_str()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_class_implements(handle, ifqn.as_ptr());
+            }
+
+            // Properties
+            for prop in &class.properties {
+                let pname = CString::new(prop.name.as_str()).unwrap();
+                let default = prop
+                    .default
+                    .as_ref()
+                    .map(|d| CString::new(d.to_string()).unwrap());
+                let default_ptr = default
+                    .as_ref()
+                    .map(|c| c.as_ptr())
+                    .unwrap_or(std::ptr::null());
+                crate::bridge::ffi::oxphp_bridge_class_add_property(
+                    handle,
+                    pname.as_ptr(),
+                    visibility_to_zend(prop.visibility),
+                    prop.modifiers.bits() as u32,
+                    -1, // type_info (complex types handled separately)
+                    default_ptr,
+                );
+            }
+
+            // Constants
+            for constant in &class.constants {
+                let cname = CString::new(constant.name.as_str()).unwrap();
+                let cval = CString::new(constant.value.to_string()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_class_add_constant(
+                    handle,
+                    cname.as_ptr(),
+                    visibility_to_zend(constant.visibility),
+                    cval.as_ptr(),
+                );
+            }
+
+            // Methods
+            for method in &class.methods {
+                let mname = CString::new(method.name.as_str()).unwrap();
+                crate::bridge::ffi::oxphp_bridge_class_add_method(
+                    handle,
+                    mname.as_ptr(),
+                    visibility_to_zend(method.visibility),
+                    method.modifiers.bits() as u32,
+                    method.required_params() as c_int,
+                    method.total_params() as c_int,
+                    method.is_variadic as c_int,
+                );
+            }
+
+            // Magic methods
+            for i in 0..MagicMethod::COUNT {
+                if class.magic_handlers[i].is_some() {
+                    crate::bridge::ffi::oxphp_bridge_class_set_magic(handle, i as c_int, 1);
+                }
+            }
+
+            // Custom object storage
+            if class.has_custom_storage {
+                crate::bridge::ffi::oxphp_bridge_class_enable_custom_object(handle);
+            }
+        }
+
+        // Build method dispatch map for this class.
+        let mut methods_map: HashMap<String, Box<dyn PluginNativeFunction>> = HashMap::new();
+        for method in class.methods {
+            if let Some(handler) = method.handler {
+                methods_map.insert(method.name, handler);
+            }
+        }
+        method_dispatch.push(methods_map);
+
+        // Build magic dispatch for this class.
+        magic_dispatch.push(class.magic_handlers);
+
+        // Build class meta for storage.
+        if class.has_custom_storage {
+            class_metas.push(ClassMeta {
+                fqn: class.fqn,
+                factory: class
+                    .storage_factory
+                    .unwrap_or_else(|| Box::new(|| std::ptr::null_mut())),
+                drop_fn: class.storage_drop.unwrap_or_else(|| Box::new(|_| {})),
+                clone_fn: class.storage_clone,
+            });
+        } else {
+            // Even classes without storage need an entry to keep indices aligned.
+            class_metas.push(ClassMeta {
+                fqn: class.fqn,
+                factory: Box::new(|| std::ptr::null_mut()),
+                drop_fn: Box::new(|_| {}),
+                clone_fn: None,
+            });
+        }
+    }
+
+    // 5. Register functions (bridge + dispatch map)
+    let fn_count = functions.len();
+    let mut fn_dispatch: HashMap<String, Box<dyn PluginNativeFunction>> = HashMap::new();
+    for func in functions {
+        let fqn = CString::new(func.fqn.as_str()).unwrap();
+        unsafe {
+            crate::bridge::ffi::oxphp_bridge_register_plugin_function(
+                fqn.as_ptr(),
+                func.required_params() as c_int,
+                func.total_params() as c_int,
+                func.is_variadic as c_int,
+            );
+        }
+        if let Some(handler) = func.handler {
+            fn_dispatch.insert(func.fqn, handler);
+        }
+    }
+    if !fn_dispatch.is_empty() {
+        // Ensure native dispatch callback is set (may already be set by legacy path)
+        unsafe {
+            crate::bridge::ffi::oxphp_bridge_set_native_dispatch(Some(native_dispatch_callback));
+        }
+        BUILDER_FN_DISPATCH_MAP.set(fn_dispatch).ok();
+    }
+
+    // 6. Set dispatch callbacks
+    unsafe {
+        crate::bridge::ffi::oxphp_bridge_set_method_dispatch(Some(method_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_storage_callbacks(
+            Some(storage::storage_create_callback),
+            Some(storage::storage_drop_callback),
+            Some(storage::storage_clone_callback),
+        );
+    }
+
+    // 7. Populate static dispatch maps
+    METHOD_DISPATCH_MAP.set(method_dispatch).ok();
+    MAGIC_DISPATCH_MAP.set(magic_dispatch).ok();
+    CLASS_META.set(class_metas).ok();
+
+    let total = interfaces.len() + attributes.len() + enums.len() + class_order.len() + fn_count;
+    tracing::info!(
+        interfaces = interfaces.len(),
+        attributes = attributes.len(),
+        enums = enums.len(),
+        classes = class_order.len(),
+        functions = fn_count,
+        total,
+        "PHP definitions registered on bridge"
+    );
+}
+
+fn visibility_to_zend(v: Visibility) -> u32 {
+    match v {
+        Visibility::Public => 0x01,    // ZEND_ACC_PUBLIC
+        Visibility::Protected => 0x02, // ZEND_ACC_PROTECTED
+        Visibility::Private => 0x04,   // ZEND_ACC_PRIVATE
     }
 }
 
@@ -1471,7 +1870,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Drain APM spans from PHP worker thread before sending response
     #[cfg(feature = "plugin-apm")]
-    let apm_spans_json = crate::plugins::apm::spans::drain_and_serialize();
+    let apm_spans_json = crate::plugins::ox_apm::spans::drain_and_serialize();
     #[cfg(not(feature = "plugin-apm"))]
     let apm_spans_json: Option<String> = None;
 

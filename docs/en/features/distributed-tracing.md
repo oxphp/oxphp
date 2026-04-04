@@ -10,8 +10,8 @@ OxPHP supports W3C Trace Context propagation, OpenTelemetry (OTel) export, and b
 The APM plugin adds three layers of tracing on top of the OTel foundation:
 
 - **Automatic instrumentation** — internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) are hooked at the engine level; every call becomes a span with zero code changes
-- **Attribute-based tracing** — annotate any PHP function or method with `#[OxPHP\Tracing\Trace]` to create spans automatically
-- **PHP SDK** — 10 `oxphp_trace_*()` functions for manual span creation, attributes, events, and error recording
+- **Attribute-based tracing** — annotate any PHP function or method with `#[OxPHP\Apm\Trace]` to create spans automatically
+- **PHP SDK** — 10 `oxphp_apm_*()` functions for manual span creation, attributes, events, and error recording
 
 ## How It Works
 
@@ -51,7 +51,7 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 
 ### APM Plugin
 
-The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel plugin. It adds automatic instrumentation, the `#[OxPHP\Tracing\Trace]` decorator, and the PHP tracing SDK.
+The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel plugin. It adds automatic instrumentation, the `#[OxPHP\Apm\Trace]` decorator, and the PHP tracing SDK.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -189,11 +189,11 @@ This ensures each ZTS worker thread has consistent function table modifications 
 
 ## APM: Attribute-Based Tracing
 
-The `#[OxPHP\Tracing\Trace]` attribute creates spans automatically around decorated functions and methods. Unlike the auto-instrumentation hooks (which target internal C functions), this works on user-defined PHP code.
+The `#[OxPHP\Apm\Trace]` attribute creates spans automatically around decorated functions and methods. Unlike the auto-instrumentation hooks (which target internal C functions), this works on user-defined PHP code.
 
 ```php
 <?php
-use OxPHP\Tracing\Trace;
+use OxPHP\Apm\Trace;
 
 #[Trace]
 function processOrder(int $orderId): void
@@ -220,54 +220,54 @@ If the decorated function throws an exception, the span's status is set to error
 
 ## APM: PHP Tracing SDK
 
-The APM plugin registers 10 `oxphp_trace_*()` functions for manual span management. All functions are safe no-ops when APM is disabled, so your code works without modification in any environment.
+The APM plugin registers 10 `oxphp_apm_*()` functions for manual span management. All functions are safe no-ops when APM is disabled, so your code works without modification in any environment.
 
 ### Creating Spans
 
 ```php
 <?php
 // Start a span and get its local ID
-$spanId = oxphp_trace_start('cache.warm', ['cache.size' => '1024']);
+$spanId = oxphp_apm_start('cache.warm', ['cache.size' => '1024']);
 
 // ... do work ...
 
 // Close the span
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### Adding Attributes and Events
 
 ```php
 <?php
-$spanId = oxphp_trace_start('order.process');
+$spanId = oxphp_apm_start('order.process');
 
 // Add attributes to the current span (or a specific one)
-oxphp_trace_attribute('order.id', $orderId);
-oxphp_trace_attribute('order.total', $total, $spanId);
+oxphp_apm_attribute('order.id', $orderId);
+oxphp_apm_attribute('order.total', $total, $spanId);
 
 // Record an event on the span
-oxphp_trace_event('payment.authorized', [
+oxphp_apm_event('payment.authorized', [
     'provider' => 'stripe',
     'amount' => (string) $amount,
 ]);
 
-oxphp_trace_end($spanId);
+oxphp_apm_end($spanId);
 ```
 
 ### Error Recording
 
 ```php
 <?php
-$spanId = oxphp_trace_start('external.api');
+$spanId = oxphp_apm_start('external.api');
 
 try {
     $result = callExternalApi();
 } catch (\Throwable $e) {
     // Mark the span as error
-    oxphp_trace_error($e, $spanId);
+    oxphp_apm_error($e, $spanId);
     throw $e;
 } finally {
-    oxphp_trace_end($spanId);
+    oxphp_apm_end($spanId);
 }
 ```
 
@@ -276,11 +276,11 @@ try {
 ```php
 <?php
 // Get the current trace ID and span ID
-$traceId = oxphp_trace_id();
-$currentSpanId = oxphp_trace_span_id();
+$traceId = oxphp_apm_trace_id();
+$currentSpanId = oxphp_apm_span_id();
 
 // Or get a ready-to-use traceparent header value
-$traceparent = oxphp_trace_header();
+$traceparent = oxphp_apm_header();
 // "00-{trace_id}-{span_id}-01"
 
 // Propagate to downstream services
@@ -297,18 +297,18 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `oxphp_trace(name, callback, ?attributes)` | `void` | Execute a callback inside a span (reserved for future use) |
-| `oxphp_trace_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
-| `oxphp_trace_end(span_id)` | `void` | Close the span with the given local ID |
-| `oxphp_trace_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
-| `oxphp_trace_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
-| `oxphp_trace_error(exception, ?span_id)` | `void` | Mark the current or specified span as error |
-| `oxphp_trace_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
-| `oxphp_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
-| `oxphp_trace_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
-| `oxphp_trace_header()` | `string` | W3C `traceparent` header value for the current span context |
+| `oxphp_apm_trace(name, callback, ?attributes)` | `void` | Execute a callback inside a span (reserved for future use) |
+| `oxphp_apm_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
+| `oxphp_apm_end(span_id)` | `void` | Close the span with the given local ID |
+| `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
+| `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | Mark the current or specified span as error |
+| `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
+| `oxphp_apm_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
+| `oxphp_apm_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
+| `oxphp_apm_header()` | `string` | W3C `traceparent` header value for the current span context |
 
-For the complete function signature reference, see [PHP Functions](../php/functions.md#oxphp_trace_start).
+For the complete function signature reference, see [PHP Functions](../php/functions.md#oxphp_apm_start).
 
 ## Docker Example
 
@@ -467,7 +467,7 @@ Parent-based sampling means that if an incoming request carries a sampled trace,
 
 ## See Also
 
-- [PHP Functions](../php/functions.md#oxphp_trace_start) -- `oxphp_trace_*()` function reference
+- [PHP Functions](../php/functions.md#oxphp_apm_start) -- `oxphp_apm_*()` function reference
 - [Decorators](decorators.md) -- attribute-based function interception including `#[Trace]`
 - [Access Logging](access-logging.md) -- structured JSON logs with trace fields
 - [Request IDs](request-ids.md) -- how request IDs interact with trace context
