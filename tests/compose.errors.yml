@@ -25,5 +25,5 @@ services:
       ERROR_PAGES_DIR: /var/www/errors
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
-      - ./fixtures/error_pages:/var/www/errors:ro
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/error_pages:/var/www/errors

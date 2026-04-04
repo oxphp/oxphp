@@ -27,4 +27,4 @@ services:
       QUEUE_CAPACITY: 1
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
+      - ./php:/var/www/html/public/tests

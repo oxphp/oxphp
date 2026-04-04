@@ -24,6 +24,6 @@ services:
       INTERNAL_ADDR: 0.0.0.0:9090
       INDEX_FILE: index.html
     volumes:
-      - ./fixtures/spa:/var/www/html/public:ro
-      - ./fixtures/static:/var/www/html/public/assets:ro
-      - ./php:/var/www/html/public/tests:ro
+      - ./fixtures/spa:/var/www/html/public
+      - ./fixtures/static:/var/www/html/public/assets
+      - ./php:/var/www/html/public/tests

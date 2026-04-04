@@ -26,5 +26,5 @@ services:
       TLS_KEY: /etc/ssl/oxphp/key.pem
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
-      - ./fixtures/certs:/etc/ssl/oxphp:ro
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/certs:/etc/ssl/oxphp

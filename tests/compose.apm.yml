@@ -28,4 +28,4 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
+      - ./php:/var/www/html/public/tests

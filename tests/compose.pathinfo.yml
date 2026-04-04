@@ -25,4 +25,4 @@ services:
       SPLIT_PATH_INFO_ENABLED: "true"
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
+      - ./php:/var/www/html/public/tests

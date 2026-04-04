@@ -27,5 +27,5 @@ services:
       WORKER_MAX_REQUESTS: 50
     volumes:
       - ../www:/var/www/html
-      - ./php:/var/www/html/public/tests:ro
-      - ./fixtures/worker:/var/www/html/worker:ro
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
