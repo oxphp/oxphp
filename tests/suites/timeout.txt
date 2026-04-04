@@ -2,5 +2,5 @@
 # description: Request timeout and heartbeat
 
 timeout/test_fast_request_ok
-timeout/test_slow_request_504
+timeout/test_slow_request_timeout | GET | | 408
 timeout/test_heartbeat_extends
