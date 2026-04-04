@@ -1,0 +1,29 @@
+# APM mode: OpenTelemetry tracing and APM error capture enabled.
+# OTEL_ENABLED activates W3C trace context and span export.
+# OTEL_APM_ENABLED activates auto-instrumentation and PHP error capture.
+# The OTLP endpoint points to localhost:4317 (bring your own collector).
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.apm.yml up
+services:
+  oxphp-apm:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      OTEL_ENABLED: "true"
+      OTEL_APM_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
+    volumes:
+      - ../www:/var/www/html:ro
+      - ./php:/var/www/html/tests:ro

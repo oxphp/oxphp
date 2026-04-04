@@ -1,0 +1,28 @@
+# Queue overflow mode: PHP_WORKERS=1, QUEUE_CAPACITY=1.
+# A single PHP worker with a queue capacity of 1 causes rapid queue saturation.
+# Requests that cannot be queued receive 529 Too Many Requests.
+# Used to test backpressure enforcement and overflow error handling.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.overflow.yml up
+services:
+  oxphp-overflow:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PHP_WORKERS: 1
+      QUEUE_CAPACITY: 1
+    volumes:
+      - ../www:/var/www/html:ro
+      - ./php:/var/www/html/tests:ro

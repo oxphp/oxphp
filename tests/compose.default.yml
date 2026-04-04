@@ -1,0 +1,27 @@
+# Traditional routing mode: no INDEX_FILE set.
+# Direct file mapping — / resolves to index.php or index.html.
+# Static test fixtures and upload fixtures are mounted alongside the web root.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.default.yml up
+services:
+  oxphp-default:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+    volumes:
+      - ../www:/var/www/html:ro
+      - ./php:/var/www/html/tests:ro
+      - ./fixtures/static:/var/www/html/public/test_static:ro
+      - ./fixtures/uploads:/var/www/html/fixtures/uploads:ro

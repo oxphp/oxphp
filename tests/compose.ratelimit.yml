@@ -1,0 +1,27 @@
+# Rate limiting mode: 3 requests per IP per 60-second window.
+# Requests beyond the limit receive 429 Too Many Requests.
+# Used to test rate limiting enforcement and response headers.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.ratelimit.yml up
+services:
+  oxphp-ratelimit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      RATE_LIMIT: 3
+      RATE_WINDOW_SECONDS: 60
+    volumes:
+      - ../www:/var/www/html:ro
+      - ./php:/var/www/html/tests:ro
