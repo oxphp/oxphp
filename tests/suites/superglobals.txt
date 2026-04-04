@@ -1,0 +1,34 @@
+# profile: default
+# description: $_SERVER superglobal population
+
+superglobals/test_request_method_get
+superglobals/test_request_method_post | POST | -d "" | |
+superglobals/test_request_method_put | PUT | -d "" | |
+superglobals/test_request_method_delete | DELETE | | |
+superglobals/test_request_method_patch | PATCH | -d "" | |
+superglobals/test_request_method_head | HEAD | | |
+superglobals/test_request_method_options | OPTIONS | | |
+superglobals/test_request_uri
+superglobals/test_query_string
+superglobals/test_query_string_empty
+superglobals/test_server_protocol_11
+superglobals/test_server_name
+superglobals/test_server_name_default
+superglobals/test_server_port
+superglobals/test_remote_addr
+superglobals/test_remote_port
+superglobals/test_server_software
+superglobals/test_request_time
+superglobals/test_request_time_float
+superglobals/test_gateway_interface
+superglobals/test_document_root
+superglobals/test_script_filename
+superglobals/test_script_name
+superglobals/test_php_self
+superglobals/test_request_scheme_http
+superglobals/test_https_absent
+superglobals/test_content_type | POST | -H "Content-Type: application/json" -d '{"test":true}' | |
+superglobals/test_content_length | POST | -d "hello" | |
+superglobals/test_http_headers | GET | -H "X-Custom-Test: hello_world" | |
+superglobals/test_http_multiple_headers | GET | -H "X-First: aaa" -H "X-Second: bbb" | |
+superglobals/test_env_vars_in_server

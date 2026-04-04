@@ -1,0 +1,8 @@
+# profile: default
+# description: php://input handling
+
+input/test_php_input_raw | POST | -H "Content-Type: application/json" -d '{"hello":"world"}' | |
+input/test_php_input_rewindable | POST | -H "Content-Type: application/json" -d '{"rewind":"test"}' | |
+input/test_php_input_empty_get
+input/test_php_input_multipart_empty | POST | -F "field=value" | |
+input/test_php_input_binary | POST | -H "Content-Type: application/octet-stream" -d "binary_data_here" | |

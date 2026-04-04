@@ -1,0 +1,9 @@
+# profile: worker
+# description: Worker mode (persistent PHP)
+
+worker/test_worker_mode_active
+worker/test_state_persists
+worker/test_superglobals_reset
+worker/test_output_buffer_reset
+worker/test_headers_reset
+worker/test_server_info_worker_mode

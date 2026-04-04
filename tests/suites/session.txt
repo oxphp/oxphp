@@ -1,0 +1,6 @@
+# profile: default
+# description: PHP session handling
+
+session/test_session_start
+session/test_session_write_read
+session/test_session_destroy

@@ -1,0 +1,7 @@
+# profile: ratelimit
+# description: Rate limiting (429 Too Many Requests)
+
+ratelimit/test_under_limit_ok
+ratelimit/test_over_limit_429
+ratelimit/test_retry_after_header
+ratelimit/test_body_not_php

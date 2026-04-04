@@ -1,0 +1,20 @@
+# profile: async
+# description: Async promise system
+
+async/test_basic_dispatch
+async/test_with_args
+async/test_return_types
+async/test_await_all
+async/test_await_any
+async/test_parallel_wall_time
+async/test_exception_propagation
+async/test_nested_exception
+async/test_timeout
+async/test_die_in_closure
+async/test_die_recovery
+async/test_bad_args_object
+async/test_bad_args_resource
+async/test_not_awaited_cleanup
+async/test_finish_request_with_async
+async/test_strings_frozen
+async/test_arrays_frozen

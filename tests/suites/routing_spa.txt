@@ -1,0 +1,6 @@
+# profile: spa
+# description: SPA routing mode (INDEX_FILE=index.html)
+
+routing/test_missing_to_html
+routing/test_php_still_executes
+routing/test_static_served | GET | | 200 |

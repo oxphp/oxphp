@@ -1,0 +1,7 @@
+# profile: default
+# description: $_COOKIE parsing
+
+cookies/test_cookie_single | GET | -b "foo=bar" | |
+cookies/test_cookie_multiple | GET | -b "a=1; b=2" | |
+cookies/test_cookie_special_chars | GET | -b "encoded=hello%20world" | |
+cookies/test_cookie_empty_value | GET | -b "key=" | |

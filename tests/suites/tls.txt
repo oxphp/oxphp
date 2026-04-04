@@ -1,0 +1,9 @@
+# profile: tls
+# description: TLS/HTTPS
+
+tls/test_https_on
+tls/test_scheme_https
+tls/test_port_443
+tls/test_is_secure
+tls/test_full_uri_https
+tls/test_scheme_method
