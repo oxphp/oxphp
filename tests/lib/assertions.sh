@@ -8,7 +8,15 @@ run_php_test() {
     local base_url="$1"
     local test_path="$2"
     shift 2
-    local url="${base_url}/tests/${test_path}.php"
+
+    # Parse optional URL suffix: "group/test >> /suffix"
+    local url_suffix=""
+    if [[ "$test_path" == *" >> "* ]]; then
+        url_suffix="${test_path#* >> }"
+        test_path="${test_path%% >> *}"
+    fi
+
+    local url="${base_url}/tests/${test_path}.php${url_suffix}"
 
     local response
     response=$(http_request "$url" "$@" 2>/dev/null) || response='{"status":0,"headers":{},"body":""}'

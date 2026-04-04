@@ -1,6 +1,6 @@
 # profile: pathinfo
 # description: PATH_INFO splitting
 
-pathinfo/test_path_info_split
-pathinfo/test_php_self_full
+pathinfo/test_path_info_split >> /extra/path
+pathinfo/test_php_self_full >> /extra/path
 pathinfo/test_no_path_info
