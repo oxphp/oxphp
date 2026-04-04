@@ -49,35 +49,32 @@ fn timeout_err(message: impl Into<String>) -> PhpError {
 }
 
 /// Read the async exception stored in bridge TLS (set by worker thread on failure).
-/// Returns a `PhpError::Exception` with the original exception class/message, or
-/// a generic error if the bridge has no exception details.
+/// Returns a `PhpError::Exception` wrapping the original exception details inside
+/// an `OxPHP\Async\Exception` — matching the old C behavior:
+/// `"Async task failed: [OriginalClass] original message"`.
 fn read_bridge_exception() -> PhpError {
     unsafe {
         let cls_ptr = ffi::oxphp_bridge_get_async_exc_class();
         let msg_ptr = ffi::oxphp_bridge_get_async_exc_message();
 
-        let class = if cls_ptr.is_null() {
-            EXCEPTION_CLASS.to_string()
+        let orig_class = if cls_ptr.is_null() {
+            "Unknown"
         } else {
-            CStr::from_ptr(cls_ptr)
-                .to_str()
-                .unwrap_or(EXCEPTION_CLASS)
-                .to_string()
+            CStr::from_ptr(cls_ptr).to_str().unwrap_or("Unknown")
         };
 
-        let message = if msg_ptr.is_null() {
-            "Async task failed".to_string()
+        let orig_msg = if msg_ptr.is_null() {
+            "unknown error"
         } else {
-            CStr::from_ptr(msg_ptr)
-                .to_str()
-                .unwrap_or("Async task failed")
-                .to_string()
+            CStr::from_ptr(msg_ptr).to_str().unwrap_or("unknown error")
         };
+
+        let message = format!("Async task failed: [{orig_class}] {orig_msg}");
 
         ffi::oxphp_bridge_clear_async_exception();
 
         PhpError::Exception {
-            class,
+            class: EXCEPTION_CLASS.to_string(),
             message,
             code: 0,
         }
