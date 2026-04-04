@@ -65,7 +65,8 @@ elif [ -n "$FILTER_TEST" ]; then
         exit 1
     fi
 else
-    mapfile -t profiles < <(list_profiles)
+    profiles=()
+    while IFS= read -r p; do profiles+=("$p"); done < <(list_profiles)
 fi
 
 # ── Generate TLS certs if needed ─────────────────────────────
