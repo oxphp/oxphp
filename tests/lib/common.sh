@@ -81,17 +81,20 @@ wait_healthy() {
 
 generate_certs() {
     local certs_dir="${TESTS_DIR}/fixtures/certs"
-    if [ -f "$certs_dir/cert.pem" ] && [ -f "$certs_dir/key.pem" ]; then
-        return 0
-    fi
     log_info "Generating self-signed TLS certificates"
+    rm -rf "$certs_dir"
     mkdir -p "$certs_dir"
     openssl req -x509 -newkey rsa:2048 -nodes \
         -keyout "$certs_dir/key.pem" \
         -out "$certs_dir/cert.pem" \
         -days 1 \
         -subj "/CN=oxphp-test" \
+        -addext "subjectAltName=DNS:oxphp-test,DNS:localhost,IP:127.0.0.1" \
         2>/dev/null
+}
+
+cleanup_certs() {
+    rm -rf "${TESTS_DIR}/fixtures/certs"
 }
 
 # ── HTTP helpers ─────────────────────────────────────────────
@@ -107,9 +110,13 @@ http_request() {
     local tmp_body
     tmp_body=$(mktemp)
 
+    # Accept self-signed certs for HTTPS URLs
+    local -a curl_flags=()
+    [[ "$url" == https://* ]] && curl_flags+=(-k)
+
     local http_code
     http_code=$(curl -s -o "$tmp_body" -D "$tmp_headers" -w '%{http_code}' \
-        --max-time 15 "$@" "$url" 2>/dev/null) || http_code="000"
+        --max-time 15 ${curl_flags[@]+"${curl_flags[@]}"} "$@" "$url" 2>/dev/null) || http_code="000"
 
     local body headers_raw
     body=$(cat "$tmp_body" 2>/dev/null || echo "")

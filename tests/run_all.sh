@@ -97,6 +97,7 @@ cleanup() {
         stop_profile "$p" 2>/dev/null || true
     done
     rm -f "$JSONL_FILE"
+    cleanup_certs 2>/dev/null || true
 }
 trap cleanup EXIT
 
