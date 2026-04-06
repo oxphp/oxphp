@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 /// Metadata for a plugin-registered PHP class with Rust storage.
 #[cfg_attr(not(feature = "php"), allow(dead_code))]
 pub struct ClassMeta {
+    #[allow(dead_code)] // stored for debugging; read by Display/Debug impls only
     pub fqn: String,
     pub factory: Box<dyn Fn() -> *mut c_void + Send + Sync>,
     pub drop_fn: Box<dyn Fn(*mut c_void) + Send + Sync>,

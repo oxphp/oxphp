@@ -37,6 +37,71 @@ pub enum PhpType {
     True,
 }
 
+// ─── Bridge Return Type Tags ─────────────────────────────────────────────────
+//
+// These constants mirror `OXPHP_RT_*` in `ext/bridge/oxphp_bridge.h`.
+// They are the wire format between Rust and the C bridge for method/function
+// return type declarations. The C SAPI maps them to Zend type codes at
+// registration time.
+
+/// No return type declared.
+pub const BRIDGE_RT_NONE: i32 = 0;
+pub const BRIDGE_RT_NULL: i32 = 1;
+pub const BRIDGE_RT_BOOL: i32 = 2;
+pub const BRIDGE_RT_INT: i32 = 3;
+pub const BRIDGE_RT_FLOAT: i32 = 4;
+pub const BRIDGE_RT_STRING: i32 = 5;
+pub const BRIDGE_RT_ARRAY: i32 = 6;
+pub const BRIDGE_RT_OBJECT: i32 = 7;
+pub const BRIDGE_RT_MIXED: i32 = 8;
+pub const BRIDGE_RT_VOID: i32 = 9;
+pub const BRIDGE_RT_CALLABLE: i32 = 10;
+pub const BRIDGE_RT_ITERABLE: i32 = 11;
+pub const BRIDGE_RT_NEVER: i32 = 12;
+pub const BRIDGE_RT_FALSE: i32 = 13;
+pub const BRIDGE_RT_TRUE: i32 = 14;
+pub const BRIDGE_RT_SELF: i32 = 15;
+pub const BRIDGE_RT_STATIC: i32 = 16;
+pub const BRIDGE_RT_PARENT: i32 = 17;
+
+impl PhpType {
+    /// Convert to bridge return type tag `(BRIDGE_RT_*, is_nullable)`.
+    ///
+    /// Returns `(BRIDGE_RT_NONE, false)` for types that the bridge doesn't
+    /// support yet (Class, Interface, Enum, Union, Intersection).
+    pub fn to_bridge_tag(&self) -> (i32, bool) {
+        match self {
+            PhpType::Null => (BRIDGE_RT_NULL, false),
+            PhpType::Bool => (BRIDGE_RT_BOOL, false),
+            PhpType::Int => (BRIDGE_RT_INT, false),
+            PhpType::Float => (BRIDGE_RT_FLOAT, false),
+            PhpType::String => (BRIDGE_RT_STRING, false),
+            PhpType::Array => (BRIDGE_RT_ARRAY, false),
+            PhpType::Object => (BRIDGE_RT_OBJECT, false),
+            PhpType::Mixed => (BRIDGE_RT_MIXED, false),
+            PhpType::Void => (BRIDGE_RT_VOID, false),
+            PhpType::Callable => (BRIDGE_RT_CALLABLE, false),
+            PhpType::Iterable => (BRIDGE_RT_ITERABLE, false),
+            PhpType::Never => (BRIDGE_RT_NEVER, false),
+            PhpType::False => (BRIDGE_RT_FALSE, false),
+            PhpType::True => (BRIDGE_RT_TRUE, false),
+            PhpType::Self_ => (BRIDGE_RT_SELF, false),
+            PhpType::Static_ => (BRIDGE_RT_STATIC, false),
+            PhpType::Parent_ => (BRIDGE_RT_PARENT, false),
+            PhpType::Nullable(inner) => {
+                let (tag, _) = inner.to_bridge_tag();
+                (tag, true)
+            }
+            // Complex types not yet supported by the bridge
+            PhpType::Class(_)
+            | PhpType::Interface(_)
+            | PhpType::Enum(_)
+            | PhpType::Union(_)
+            | PhpType::Intersection(_) => (BRIDGE_RT_NONE, false),
+        }
+    }
+}
+
 // ─── Visibility ───────────────────────────────────────────────────────────────
 
 /// PHP visibility modifier.
@@ -331,5 +396,108 @@ mod tests {
     #[test]
     fn test_magic_method_count() {
         assert_eq!(MagicMethod::COUNT, 17);
+    }
+
+    // ── Bridge return type tag tests ──
+
+    #[test]
+    fn test_bridge_tag_simple_types() {
+        assert_eq!(PhpType::Null.to_bridge_tag(), (BRIDGE_RT_NULL, false));
+        assert_eq!(PhpType::Bool.to_bridge_tag(), (BRIDGE_RT_BOOL, false));
+        assert_eq!(PhpType::Int.to_bridge_tag(), (BRIDGE_RT_INT, false));
+        assert_eq!(PhpType::Float.to_bridge_tag(), (BRIDGE_RT_FLOAT, false));
+        assert_eq!(PhpType::String.to_bridge_tag(), (BRIDGE_RT_STRING, false));
+        assert_eq!(PhpType::Array.to_bridge_tag(), (BRIDGE_RT_ARRAY, false));
+        assert_eq!(PhpType::Object.to_bridge_tag(), (BRIDGE_RT_OBJECT, false));
+        assert_eq!(PhpType::Mixed.to_bridge_tag(), (BRIDGE_RT_MIXED, false));
+        assert_eq!(PhpType::Void.to_bridge_tag(), (BRIDGE_RT_VOID, false));
+        assert_eq!(
+            PhpType::Callable.to_bridge_tag(),
+            (BRIDGE_RT_CALLABLE, false)
+        );
+        assert_eq!(
+            PhpType::Iterable.to_bridge_tag(),
+            (BRIDGE_RT_ITERABLE, false)
+        );
+        assert_eq!(PhpType::Never.to_bridge_tag(), (BRIDGE_RT_NEVER, false));
+        assert_eq!(PhpType::False.to_bridge_tag(), (BRIDGE_RT_FALSE, false));
+        assert_eq!(PhpType::True.to_bridge_tag(), (BRIDGE_RT_TRUE, false));
+        assert_eq!(PhpType::Self_.to_bridge_tag(), (BRIDGE_RT_SELF, false));
+        assert_eq!(PhpType::Static_.to_bridge_tag(), (BRIDGE_RT_STATIC, false));
+        assert_eq!(PhpType::Parent_.to_bridge_tag(), (BRIDGE_RT_PARENT, false));
+    }
+
+    #[test]
+    fn test_bridge_tag_nullable() {
+        // ?string → (STRING, true)
+        let t = PhpType::Nullable(Box::new(PhpType::String));
+        assert_eq!(t.to_bridge_tag(), (BRIDGE_RT_STRING, true));
+
+        // ?int → (INT, true)
+        let t = PhpType::Nullable(Box::new(PhpType::Int));
+        assert_eq!(t.to_bridge_tag(), (BRIDGE_RT_INT, true));
+
+        // ?array → (ARRAY, true)
+        let t = PhpType::Nullable(Box::new(PhpType::Array));
+        assert_eq!(t.to_bridge_tag(), (BRIDGE_RT_ARRAY, true));
+    }
+
+    #[test]
+    fn test_bridge_tag_unsupported_types_return_none() {
+        // Class names, union, intersection → BRIDGE_RT_NONE (not yet supported)
+        assert_eq!(
+            PhpType::Class("Foo".into()).to_bridge_tag(),
+            (BRIDGE_RT_NONE, false)
+        );
+        assert_eq!(
+            PhpType::Interface("Bar".into()).to_bridge_tag(),
+            (BRIDGE_RT_NONE, false)
+        );
+        assert_eq!(
+            PhpType::Enum("Baz".into()).to_bridge_tag(),
+            (BRIDGE_RT_NONE, false)
+        );
+        assert_eq!(
+            PhpType::Union(vec![PhpType::Int, PhpType::String]).to_bridge_tag(),
+            (BRIDGE_RT_NONE, false)
+        );
+        assert_eq!(
+            PhpType::Intersection(vec![
+                PhpType::Interface("A".into()),
+                PhpType::Interface("B".into())
+            ])
+            .to_bridge_tag(),
+            (BRIDGE_RT_NONE, false)
+        );
+    }
+
+    #[test]
+    fn test_bridge_tag_nullable_unsupported_inner() {
+        // ?SomeClass → inner is unsupported, returns (NONE, true)
+        let t = PhpType::Nullable(Box::new(PhpType::Class("Foo".into())));
+        assert_eq!(t.to_bridge_tag(), (BRIDGE_RT_NONE, true));
+    }
+
+    #[test]
+    fn test_bridge_tag_constants_match_c_header() {
+        // Verify our Rust constants match the C OXPHP_RT_* values in oxphp_bridge.h
+        assert_eq!(BRIDGE_RT_NONE, 0);
+        assert_eq!(BRIDGE_RT_NULL, 1);
+        assert_eq!(BRIDGE_RT_BOOL, 2);
+        assert_eq!(BRIDGE_RT_INT, 3);
+        assert_eq!(BRIDGE_RT_FLOAT, 4);
+        assert_eq!(BRIDGE_RT_STRING, 5);
+        assert_eq!(BRIDGE_RT_ARRAY, 6);
+        assert_eq!(BRIDGE_RT_OBJECT, 7);
+        assert_eq!(BRIDGE_RT_MIXED, 8);
+        assert_eq!(BRIDGE_RT_VOID, 9);
+        assert_eq!(BRIDGE_RT_CALLABLE, 10);
+        assert_eq!(BRIDGE_RT_ITERABLE, 11);
+        assert_eq!(BRIDGE_RT_NEVER, 12);
+        assert_eq!(BRIDGE_RT_FALSE, 13);
+        assert_eq!(BRIDGE_RT_TRUE, 14);
+        assert_eq!(BRIDGE_RT_SELF, 15);
+        assert_eq!(BRIDGE_RT_STATIC, 16);
+        assert_eq!(BRIDGE_RT_PARENT, 17);
     }
 }

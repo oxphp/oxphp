@@ -1402,7 +1402,7 @@ unsafe extern "C" fn native_dispatch_callback(
 
 use crate::bridge::storage::{self, ClassMeta, CLASS_META};
 use crate::plugin::builders::definitions::*;
-use crate::plugin::types::{MagicMethod, Visibility};
+use crate::plugin::types::{MagicMethod, PhpType, Visibility};
 
 /// Method dispatch: class_index → method_name → handler.
 static METHOD_DISPATCH_MAP: OnceLock<Vec<HashMap<String, Box<dyn PluginNativeFunction>>>> =
@@ -1498,6 +1498,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 crate::bridge::ffi::oxphp_bridge_register_interface(fqn.as_ptr(), parent_ptr);
             for method in &iface.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
+                let (rt, rn) = php_type_to_bridge(&method.return_type);
                 crate::bridge::ffi::oxphp_bridge_interface_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1505,6 +1506,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
+                    rt,
+                    rn,
                 );
             }
             for constant in &iface.constants {
@@ -1579,6 +1582,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             }
             for method in &enum_def.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
+                let (rt, rn) = php_type_to_bridge(&method.return_type);
                 crate::bridge::ffi::oxphp_bridge_enum_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1586,6 +1590,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
+                    rt,
+                    rn,
                 );
             }
         }
@@ -1658,6 +1664,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             // Methods
             for method in &class.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
+                let (rt, rn) = php_type_to_bridge(&method.return_type);
                 crate::bridge::ffi::oxphp_bridge_class_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1666,6 +1673,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
+                    rt,
+                    rn,
                 );
             }
 
@@ -1720,12 +1729,15 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     let mut fn_dispatch: HashMap<String, Box<dyn PluginNativeFunction>> = HashMap::new();
     for func in functions {
         let fqn = CString::new(func.fqn.as_str()).unwrap();
+        let (rt, rn) = php_type_to_bridge(&func.return_type);
         unsafe {
             crate::bridge::ffi::oxphp_bridge_register_plugin_function(
                 fqn.as_ptr(),
                 func.required_params() as c_int,
                 func.total_params() as c_int,
                 func.is_variadic as c_int,
+                rt,
+                rn,
             );
         }
         if let Some(handler) = func.handler {
@@ -1772,6 +1784,18 @@ fn visibility_to_zend(v: Visibility) -> u32 {
         Visibility::Public => 0x01,    // ZEND_ACC_PUBLIC
         Visibility::Protected => 0x02, // ZEND_ACC_PROTECTED
         Visibility::Private => 0x04,   // ZEND_ACC_PRIVATE
+    }
+}
+
+/// Map `Option<PhpType>` to bridge return type constants `(OXPHP_RT_*, is_nullable)`.
+/// Returns `(0, 0)` for `None` (no return type declared).
+fn php_type_to_bridge(t: &Option<PhpType>) -> (c_int, c_int) {
+    match t {
+        None => (0, 0),
+        Some(inner) => {
+            let (tag, nullable) = inner.to_bridge_tag();
+            (tag as c_int, nullable as c_int)
+        }
     }
 }
 
