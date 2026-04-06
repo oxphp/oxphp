@@ -2357,6 +2357,63 @@ PHP_MINFO_FUNCTION(oxphp_sapi)
 }
 /* }}} */
 
+/* ─── Dynamic arginfo builder for return types ──────────────
+ * Maps OXPHP_RT_* bridge constants to PHP's Zend type codes and
+ * allocates a one-element zend_internal_arg_info array encoding
+ * the return type. Returns NULL for OXPHP_RT_NONE (no type). */
+static int oxphp_rt_to_zend(int rt) {
+    switch (rt) {
+        case OXPHP_RT_NULL:     return IS_NULL;
+        case OXPHP_RT_BOOL:     return _IS_BOOL;
+        case OXPHP_RT_INT:      return IS_LONG;
+        case OXPHP_RT_FLOAT:    return IS_DOUBLE;
+        case OXPHP_RT_STRING:   return IS_STRING;
+        case OXPHP_RT_ARRAY:    return IS_ARRAY;
+        case OXPHP_RT_OBJECT:   return IS_OBJECT;
+        case OXPHP_RT_MIXED:    return IS_MIXED;
+        case OXPHP_RT_VOID:     return IS_VOID;
+        case OXPHP_RT_CALLABLE: return IS_CALLABLE;
+        case OXPHP_RT_ITERABLE: return IS_ITERABLE;
+        case OXPHP_RT_NEVER:    return IS_NEVER;
+        case OXPHP_RT_FALSE:    return IS_FALSE;
+        case OXPHP_RT_TRUE:     return IS_TRUE;
+        case OXPHP_RT_SELF:     return IS_STATIC; /* self/static → IS_STATIC for internals */
+        case OXPHP_RT_STATIC:   return IS_STATIC;
+        case OXPHP_RT_PARENT:   return IS_STATIC;
+        default:                return -1;
+    }
+}
+
+static const zend_internal_arg_info *oxphp_build_return_arginfo(int rt, int nullable) {
+    if (rt == OXPHP_RT_NONE) return NULL;
+
+    int zend_type = oxphp_rt_to_zend(rt);
+    if (zend_type < 0) return NULL;
+
+    /* Compute type_mask the same way ZEND_TYPE_INIT_CODE does */
+    uint32_t mask;
+    if (zend_type == _IS_BOOL) {
+        mask = MAY_BE_FALSE | MAY_BE_TRUE;
+    } else {
+        mask = (1u << zend_type);
+    }
+    if (nullable) {
+        mask |= MAY_BE_NULL;
+    }
+
+    /* Allocate one entry: the return type info (element [0] of arginfo array).
+     * Uses calloc (module-level allocation, not request-level). */
+    zend_internal_arg_info *info = calloc(1, sizeof(zend_internal_arg_info));
+    if (!info) return NULL;
+
+    info[0].name = (const char *)(zend_uintptr_t)(0); /* required_num_args = 0 */
+    info[0].type.type_mask = mask;
+    /* ptr and ce_cache are zeroed by calloc */
+
+    return info;
+}
+/* }}} */
+
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
  * compile-time optimization of function_exists('literal') can see them. */
@@ -2395,7 +2452,12 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 for (int i = 0; i < fn_count; i++) {
                     fn_entries[i].fname = oxphp_bridge_get_plugin_function_fqn(i);
                     fn_entries[i].handler = ZEND_FN(oxphp_native_dispatch);
-                    fn_entries[i].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
+                    int rt = oxphp_bridge_get_plugin_function_return_type(i);
+                    int rn = oxphp_bridge_get_plugin_function_return_nullable(i);
+                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
+                    fn_entries[i].arg_info = rt_info
+                        ? rt_info
+                        : (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
                     fn_entries[i].num_args = 0;
                     fn_entries[i].flags = 0;
                 }
@@ -2422,7 +2484,12 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 for (int m = 0; m < mcount; m++) {
                     methods[m].fname = oxphp_bridge_get_interface_method_name(i, m);
                     methods[m].handler = NULL; /* interface methods have no handler */
-                    methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                    int rt = oxphp_bridge_get_interface_method_return_type(i, m);
+                    int rn = oxphp_bridge_get_interface_method_return_nullable(i, m);
+                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
+                    methods[m].arg_info = rt_info
+                        ? rt_info
+                        : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
                     methods[m].num_args = 0;
                     methods[m].flags = oxphp_bridge_get_interface_method_flags(i, m)
                                      | ZEND_ACC_ABSTRACT | ZEND_ACC_PUBLIC;
@@ -2486,7 +2553,12 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 for (int m = 0; m < mcount; m++) {
                     methods[m].fname = oxphp_bridge_get_enum_method_name(i, m);
                     methods[m].handler = ZEND_FN(oxphp_method_dispatch);
-                    methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                    int rt = oxphp_bridge_get_enum_method_return_type(i, m);
+                    int rn = oxphp_bridge_get_enum_method_return_nullable(i, m);
+                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
+                    methods[m].arg_info = rt_info
+                        ? rt_info
+                        : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
                     methods[m].num_args = 0;
                     methods[m].flags = oxphp_bridge_get_enum_method_flags(i, m);
                 }
@@ -2563,7 +2635,12 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     for (int m = 0; m < mcount; m++) {
                         methods[m].fname = oxphp_bridge_get_class_method_name(i, m);
                         methods[m].handler = ZEND_FN(oxphp_method_dispatch);
-                        methods[m].arg_info = (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
+                        int rt = oxphp_bridge_get_class_method_return_type(i, m);
+                        int rn = oxphp_bridge_get_class_method_return_nullable(i, m);
+                        const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
+                        methods[m].arg_info = rt_info
+                            ? rt_info
+                            : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
                         methods[m].num_args = 0;
                         methods[m].flags = oxphp_bridge_get_class_method_visibility(i, m)
                                          | oxphp_bridge_get_class_method_flags(i, m);

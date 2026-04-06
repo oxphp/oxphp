@@ -1,7 +1,12 @@
 //! Mock FFI implementations for host testing without PHP.
 //! Mirrors the signatures from `ffi.rs` so `call.rs` compiles on all platforms.
 
-#![allow(unused_variables, dead_code, clippy::missing_safety_doc)]
+#![allow(
+    unused_variables,
+    dead_code,
+    clippy::missing_safety_doc,
+    clippy::too_many_arguments
+)]
 
 use std::os::raw::{c_char, c_int, c_void};
 
@@ -478,6 +483,8 @@ pub unsafe fn oxphp_bridge_class_add_method(
     _required_params: c_int,
     _total_params: c_int,
     _is_variadic: c_int,
+    _return_type: c_int,
+    _return_nullable: c_int,
 ) {
 }
 pub unsafe fn oxphp_bridge_class_set_magic(
@@ -503,6 +510,8 @@ pub unsafe fn oxphp_bridge_interface_add_method(
     _required_params: c_int,
     _total_params: c_int,
     _is_variadic: c_int,
+    _return_type: c_int,
+    _return_nullable: c_int,
 ) {
 }
 pub unsafe fn oxphp_bridge_interface_add_constant(
@@ -532,6 +541,8 @@ pub unsafe fn oxphp_bridge_enum_add_method(
     _required_params: c_int,
     _total_params: c_int,
     _is_variadic: c_int,
+    _return_type: c_int,
+    _return_nullable: c_int,
 ) {
 }
 
@@ -567,6 +578,8 @@ pub unsafe fn oxphp_bridge_register_plugin_function(
     _required_params: c_int,
     _total_params: c_int,
     _is_variadic: c_int,
+    _return_type: c_int,
+    _return_nullable: c_int,
 ) -> c_int {
     0
 }

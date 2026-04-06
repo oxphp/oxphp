@@ -334,6 +334,8 @@ extern "C" {
         required_params: c_int,
         total_params: c_int,
         is_variadic: c_int,
+        return_type: c_int,
+        return_nullable: c_int,
     );
     pub fn oxphp_bridge_class_set_magic(class_handle: c_int, magic_type: c_int, has_handler: c_int);
     pub fn oxphp_bridge_class_enable_custom_object(class_handle: c_int);
@@ -347,6 +349,8 @@ extern "C" {
         required_params: c_int,
         total_params: c_int,
         is_variadic: c_int,
+        return_type: c_int,
+        return_nullable: c_int,
     );
     pub fn oxphp_bridge_interface_add_constant(
         iface_handle: c_int,
@@ -370,6 +374,8 @@ extern "C" {
         required_params: c_int,
         total_params: c_int,
         is_variadic: c_int,
+        return_type: c_int,
+        return_nullable: c_int,
     );
 
     // ─── Plugin Attribute Registry ──────────────────────────────
@@ -398,6 +404,8 @@ extern "C" {
         required_params: c_int,
         total_params: c_int,
         is_variadic: c_int,
+        return_type: c_int,
+        return_nullable: c_int,
     ) -> c_int;
 
     // ─── Method Dispatch ────────────────────────────────────────

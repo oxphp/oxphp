@@ -180,6 +180,8 @@ typedef struct {
     int required_params;
     int total_params;
     int is_variadic;
+    int return_type;
+    int return_nullable;
 } oxphp_class_method_t;
 
 typedef struct {
@@ -286,7 +288,8 @@ void oxphp_bridge_class_add_constant(int h, const char *name,
 }
 
 void oxphp_bridge_class_add_method(int h, const char *name,
-    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic)
+    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable)
 {
     if (h < 0 || h >= plugin_class_count || !name) return;
     oxphp_plugin_class_entry_t *e = &plugin_classes[h];
@@ -304,6 +307,8 @@ void oxphp_bridge_class_add_method(int h, const char *name,
     m->required_params = required_params;
     m->total_params = total_params;
     m->is_variadic = is_variadic;
+    m->return_type = return_type;
+    m->return_nullable = return_nullable;
 }
 
 void oxphp_bridge_class_set_magic(int h, int magic_type, int has_handler) {
@@ -421,6 +426,16 @@ int oxphp_bridge_get_class_method_is_variadic(int ci, int mi) {
     if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
     return plugin_classes[ci].methods[mi].is_variadic;
 }
+int oxphp_bridge_get_class_method_return_type(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].return_type;
+}
+int oxphp_bridge_get_class_method_return_nullable(int ci, int mi) {
+    if (ci < 0 || ci >= plugin_class_count) return 0;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return 0;
+    return plugin_classes[ci].methods[mi].return_nullable;
+}
 int oxphp_bridge_get_class_magic(int ci, int mt) {
     if (ci < 0 || ci >= plugin_class_count) return 0;
     if (mt < 0 || mt >= MAGIC_METHOD_COUNT) return 0;
@@ -437,6 +452,8 @@ typedef struct {
     int required_params;
     int total_params;
     int is_variadic;
+    int return_type;
+    int return_nullable;
 } oxphp_iface_method_t;
 
 typedef struct {
@@ -480,7 +497,8 @@ int oxphp_bridge_register_interface(const char *fqn, const char *parent_fqn) {
 }
 
 void oxphp_bridge_interface_add_method(int h, const char *name,
-    uint32_t flags, int required_params, int total_params, int is_variadic)
+    uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable)
 {
     if (h < 0 || h >= plugin_interface_count || !name) return;
     oxphp_plugin_iface_entry_t *e = &plugin_interfaces[h];
@@ -497,6 +515,8 @@ void oxphp_bridge_interface_add_method(int h, const char *name,
     m->required_params = required_params;
     m->total_params = total_params;
     m->is_variadic = is_variadic;
+    m->return_type = return_type;
+    m->return_nullable = return_nullable;
 }
 
 void oxphp_bridge_interface_add_constant(int h, const char *name,
@@ -556,6 +576,16 @@ int oxphp_bridge_get_interface_method_is_variadic(int ii, int mi) {
     if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
     return plugin_interfaces[ii].methods[mi].is_variadic;
 }
+int oxphp_bridge_get_interface_method_return_type(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].return_type;
+}
+int oxphp_bridge_get_interface_method_return_nullable(int ii, int mi) {
+    if (ii < 0 || ii >= plugin_interface_count) return 0;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return 0;
+    return plugin_interfaces[ii].methods[mi].return_nullable;
+}
 int oxphp_bridge_get_interface_constant_count(int i) {
     if (i < 0 || i >= plugin_interface_count) return 0;
     return plugin_interfaces[i].constant_count;
@@ -591,6 +621,8 @@ typedef struct {
     int required_params;
     int total_params;
     int is_variadic;
+    int return_type;
+    int return_nullable;
 } oxphp_enum_method_t;
 
 typedef struct {
@@ -660,7 +692,8 @@ void oxphp_bridge_enum_add_case(int h, const char *name, const char *value) {
 }
 
 void oxphp_bridge_enum_add_method(int h, const char *name,
-    uint32_t flags, int required_params, int total_params, int is_variadic)
+    uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable)
 {
     if (h < 0 || h >= plugin_enum_count || !name) return;
     oxphp_plugin_enum_entry_t *e = &plugin_enums[h];
@@ -677,6 +710,8 @@ void oxphp_bridge_enum_add_method(int h, const char *name,
     m->required_params = required_params;
     m->total_params = total_params;
     m->is_variadic = is_variadic;
+    m->return_type = return_type;
+    m->return_nullable = return_nullable;
 }
 
 int oxphp_bridge_get_plugin_enum_count(void) { return plugin_enum_count; }
@@ -740,6 +775,16 @@ int oxphp_bridge_get_enum_method_is_variadic(int ei, int mi) {
     if (ei < 0 || ei >= plugin_enum_count) return 0;
     if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
     return plugin_enums[ei].methods[mi].is_variadic;
+}
+int oxphp_bridge_get_enum_method_return_type(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].return_type;
+}
+int oxphp_bridge_get_enum_method_return_nullable(int ei, int mi) {
+    if (ei < 0 || ei >= plugin_enum_count) return 0;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return 0;
+    return plugin_enums[ei].methods[mi].return_nullable;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -889,6 +934,8 @@ typedef struct {
     int required_params;
     int total_params;
     int is_variadic;
+    int return_type;
+    int return_nullable;
 } oxphp_plugin_func_entry_t;
 
 static oxphp_plugin_func_entry_t *plugin_builder_functions = NULL;
@@ -896,7 +943,7 @@ static int plugin_builder_function_count = 0;
 static int plugin_builder_function_capacity = 0;
 
 int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
-    int total_params, int is_variadic)
+    int total_params, int is_variadic, int return_type, int return_nullable)
 {
     if (!fqn) return -1;
     if (plugin_builder_function_count >= plugin_builder_function_capacity) {
@@ -912,6 +959,8 @@ int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
     e->required_params = required_params;
     e->total_params = total_params;
     e->is_variadic = is_variadic;
+    e->return_type = return_type;
+    e->return_nullable = return_nullable;
     return idx;
 }
 
@@ -932,6 +981,14 @@ int oxphp_bridge_get_plugin_function_total(int i) {
 int oxphp_bridge_get_plugin_function_is_variadic(int i) {
     if (i < 0 || i >= plugin_builder_function_count) return 0;
     return plugin_builder_functions[i].is_variadic;
+}
+int oxphp_bridge_get_plugin_function_return_type(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return 0;
+    return plugin_builder_functions[i].return_type;
+}
+int oxphp_bridge_get_plugin_function_return_nullable(int i) {
+    if (i < 0 || i >= plugin_builder_function_count) return 0;
+    return plugin_builder_functions[i].return_nullable;
 }
 
 /* ═══════════════════════════════════════════════════════════

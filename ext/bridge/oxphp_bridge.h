@@ -9,6 +9,30 @@
 extern "C" {
 #endif
 
+/* ─── Return Type Constants ─────────────────────────────────────
+ * Bridge-level type tags for method/function return types.
+ * These are OxPHP constants, NOT PHP's IS_* — the C SAPI maps them
+ * to the correct Zend type codes at registration time.
+ * 0 means "no return type declared". */
+#define OXPHP_RT_NONE     0
+#define OXPHP_RT_NULL     1
+#define OXPHP_RT_BOOL     2
+#define OXPHP_RT_INT      3
+#define OXPHP_RT_FLOAT    4
+#define OXPHP_RT_STRING   5
+#define OXPHP_RT_ARRAY    6
+#define OXPHP_RT_OBJECT   7
+#define OXPHP_RT_MIXED    8
+#define OXPHP_RT_VOID     9
+#define OXPHP_RT_CALLABLE 10
+#define OXPHP_RT_ITERABLE 11
+#define OXPHP_RT_NEVER    12
+#define OXPHP_RT_FALSE    13
+#define OXPHP_RT_TRUE     14
+#define OXPHP_RT_SELF     15
+#define OXPHP_RT_STATIC   16
+#define OXPHP_RT_PARENT   17
+
 /**
  * OxPHP Bridge Library
  *
@@ -181,9 +205,10 @@ void oxphp_bridge_class_add_property(int class_handle, const char *name,
 void oxphp_bridge_class_add_constant(int class_handle, const char *name,
     uint32_t visibility, const char *value);
 
-/** Add a method to a class. */
+/** Add a method to a class. return_type: OXPHP_RT_* constant (0 = no type info). */
 void oxphp_bridge_class_add_method(int class_handle, const char *name,
-    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic);
+    uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable);
 
 /** Set a magic method handler flag. magic_type is the MagicMethod enum ordinal (0-16). */
 void oxphp_bridge_class_set_magic(int class_handle, int magic_type, int has_handler);
@@ -260,6 +285,12 @@ int oxphp_bridge_get_class_method_total(int class_index, int method_index);
 /** Get whether method is variadic. */
 int oxphp_bridge_get_class_method_is_variadic(int class_index, int method_index);
 
+/** Get method return type (OXPHP_RT_* constant, 0 = no type). */
+int oxphp_bridge_get_class_method_return_type(int class_index, int method_index);
+
+/** Get method return nullable flag. */
+int oxphp_bridge_get_class_method_return_nullable(int class_index, int method_index);
+
 /** Get magic method handler flag. magic_type is MagicMethod enum ordinal. */
 int oxphp_bridge_get_class_magic(int class_index, int magic_type);
 
@@ -268,9 +299,10 @@ int oxphp_bridge_get_class_magic(int class_index, int magic_type);
 /** Register an interface. Returns handle (index). parent_fqn may be NULL. */
 int oxphp_bridge_register_interface(const char *fqn, const char *parent_fqn);
 
-/** Add a method to an interface. */
+/** Add a method to an interface. return_type: OXPHP_RT_* constant (0 = no type info). */
 void oxphp_bridge_interface_add_method(int iface_handle, const char *name,
-    uint32_t flags, int required_params, int total_params, int is_variadic);
+    uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable);
 
 /** Add a constant to an interface. */
 void oxphp_bridge_interface_add_constant(int iface_handle, const char *name,
@@ -303,6 +335,12 @@ int oxphp_bridge_get_interface_method_total(int iface_index, int method_index);
 /** Get interface method is_variadic. */
 int oxphp_bridge_get_interface_method_is_variadic(int iface_index, int method_index);
 
+/** Get interface method return type (OXPHP_RT_* constant, 0 = no type). */
+int oxphp_bridge_get_interface_method_return_type(int iface_index, int method_index);
+
+/** Get interface method return nullable flag. */
+int oxphp_bridge_get_interface_method_return_nullable(int iface_index, int method_index);
+
 /** Constant count for an interface. */
 int oxphp_bridge_get_interface_constant_count(int index);
 
@@ -326,9 +364,10 @@ void oxphp_bridge_enum_implements(int enum_handle, const char *interface_fqn);
 /** Add a case to an enum. value may be NULL for unit enums. */
 void oxphp_bridge_enum_add_case(int enum_handle, const char *name, const char *value);
 
-/** Add a method to an enum. */
+/** Add a method to an enum. return_type: OXPHP_RT_* constant (0 = no type info). */
 void oxphp_bridge_enum_add_method(int enum_handle, const char *name,
-    uint32_t flags, int required_params, int total_params, int is_variadic);
+    uint32_t flags, int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable);
 
 /** Get enum count. */
 int oxphp_bridge_get_plugin_enum_count(void);
@@ -371,6 +410,12 @@ int oxphp_bridge_get_enum_method_total(int enum_index, int method_index);
 
 /** Get enum method is_variadic. */
 int oxphp_bridge_get_enum_method_is_variadic(int enum_index, int method_index);
+
+/** Get enum method return type (OXPHP_RT_* constant, 0 = no type). */
+int oxphp_bridge_get_enum_method_return_type(int enum_index, int method_index);
+
+/** Get enum method return nullable flag. */
+int oxphp_bridge_get_enum_method_return_nullable(int enum_index, int method_index);
 
 /* ─── Plugin Attribute Registry (global, NOT __thread) ──────── */
 
@@ -422,7 +467,7 @@ uint32_t oxphp_bridge_get_attribute_property_visibility(int attr_index, int prop
 
 /** Register a plugin function via builder. Returns handle (index). */
 int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
-    int total_params, int is_variadic);
+    int total_params, int is_variadic, int return_type, int return_nullable);
 
 /** Get number of registered builder-based functions. */
 int oxphp_bridge_get_plugin_function_count(void);
@@ -438,6 +483,12 @@ int oxphp_bridge_get_plugin_function_total(int index);
 
 /** Get builder-based function is_variadic. */
 int oxphp_bridge_get_plugin_function_is_variadic(int index);
+
+/** Get builder-based function return type (OXPHP_RT_* constant, 0 = no type). */
+int oxphp_bridge_get_plugin_function_return_type(int index);
+
+/** Get builder-based function return nullable flag. */
+int oxphp_bridge_get_plugin_function_return_nullable(int index);
 
 /* ─── Method Dispatch Callback ──────────────────────────────── */
 
