@@ -117,7 +117,14 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
         run: |
           BASE="php:${PHP_MINOR}-zts-alpine${ALPINE_VER}"
-          DIGEST=$(docker buildx imagetools inspect "$BASE" --format '{{.Manifest.Digest}}')
+          # Parse default human-readable output — the `{{.Manifest.Digest}}`
+          # template is silently ignored in newer docker buildx builds and
+          # would cause multi-line $GITHUB_OUTPUT content that GitHub rejects.
+          DIGEST=$(docker buildx imagetools inspect "$BASE" 2>/dev/null | awk '/^Digest:/{print $2; exit}')
+          if [[ -z "$DIGEST" ]]; then
+            echo "error: could not resolve digest for $BASE" >&2
+            exit 1
+          fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Resolve PHP patch version from base image

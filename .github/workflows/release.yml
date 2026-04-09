@@ -59,8 +59,15 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
         run: |
           BASE="php:${PHP_MINOR}-zts-alpine${ALPINE_VER}"
-          docker buildx imagetools inspect "$BASE" >/dev/null
-          DIGEST=$(docker buildx imagetools inspect "$BASE" --format '{{.Manifest.Digest}}')
+          # `--format '{{.Manifest.Digest}}'` is silently ignored in newer
+          # docker buildx builds and returns the full human-readable
+          # output instead, which would produce multi-line $GITHUB_OUTPUT
+          # and fail the workflow step with "Invalid format 'MediaType:
+          # application/vnd.oci.image.index.v1+json'". Parse the default
+          # output with awk instead — the Digest: line at the top of the
+          # output is the manifest-list (OCI index) digest, which is
+          # what we want for the cache-key input.
+          DIGEST=$(docker buildx imagetools inspect "$BASE" 2>/dev/null | awk '/^Digest:/{print $2; exit}')
           if [[ -z "$DIGEST" ]]; then
             echo "error: could not resolve digest for $BASE" >&2
             exit 1
