@@ -49,10 +49,40 @@ static zend_object_handlers oxphp_http_uploaded_file_handlers;
 static zend_object_handlers oxphp_http_attributes_handlers;
 static zend_object_handlers oxphp_decorator_context_handlers;
 
-/* Decorator instance cache (TLS) */
-#define OXPHP_DEC_CACHE_MAX 256
-static __thread zval decorator_instance_cache[OXPHP_DEC_CACHE_MAX];
-static __thread int decorator_instance_count = 0;
+/* Decorator instance cache (TLS).
+ * HashTable keyed by a composite (fn_id, attr_index) key so that decorator
+ * instances never collide across functions. Cleared in RSHUTDOWN. */
+static __thread HashTable decorator_instance_cache_ht;
+static __thread int decorator_instance_cache_initialized = 0;
+
+static inline zend_ulong oxphp_dec_cache_key(const void *fn_id, uint32_t attr_index) {
+    /* Pack fn pointer with attr index into a single hash key.
+     * Shift pointer by 8 (functions are 8-byte aligned, discard low zeros)
+     * and store attr_index in the low bits (cap 255 decorators per function). */
+    return ((zend_ulong)(uintptr_t)fn_id << 8) | (attr_index & 0xFFu);
+}
+
+static inline void oxphp_dec_cache_ensure_init(void) {
+    if (!decorator_instance_cache_initialized) {
+        zend_hash_init(&decorator_instance_cache_ht, 16, NULL, ZVAL_PTR_DTOR, 0);
+        decorator_instance_cache_initialized = 1;
+    }
+}
+
+/* Force the VM to dispatch the exception handler on the NEXT opcode of the
+ * currently-active frame instead of executing its body. zend_throw_exception()
+ * only patches the frame that was active when it was called — when we throw
+ * from inside an observer's before() dispatch, that frame is the before()
+ * call, NOT the frame we're about to enter. Replicate the opline swap here
+ * for the correct frame so RejectedException actually aborts dispatch. */
+static inline void oxphp_force_exception_on_current_frame(void) {
+    if (EG(current_execute_data) &&
+        EG(current_execute_data)->opline &&
+        EG(current_execute_data)->opline != EG(exception_op)) {
+        EG(opline_before_exception) = EG(current_execute_data)->opline;
+        EG(current_execute_data)->opline = EG(exception_op);
+    }
+}
 
 /* Forward declarations for observer functions */
 static zend_observer_fcall_handlers oxphp_decorator_observer_init(zend_execute_data *execute_data);
@@ -1654,17 +1684,26 @@ static void oxphp_create_decorator_context(zval *ctx_zval, oxphp_decorator_ctx_t
 }
 
 /* Get or create a cached PHP decorator instance.
- * cache_key is used as the index into decorator_instance_cache.
+ * The cache is keyed by (decorated_func, attr_index) — globally unique
+ * within a request, so decorators never collide across functions.
  * Returns a pointer to the cached zval (valid for the request lifetime). */
-static zval *oxphp_get_cached_decorator(const char *class_name, uint64_t cache_key,
+static zval *oxphp_get_cached_decorator(const char *class_name,
                                          zend_function *decorated_func, uint32_t attr_index)
 {
-    /* Use cache_key as index — it's unique per (fn_id, decorator_index) */
-    int idx = (int)(cache_key % OXPHP_DEC_CACHE_MAX);
+    oxphp_dec_cache_ensure_init();
+    zend_ulong key = oxphp_dec_cache_key(decorated_func, attr_index);
 
-    /* Check if already cached */
-    if (Z_TYPE(decorator_instance_cache[idx]) == IS_OBJECT) {
-        return &decorator_instance_cache[idx];
+    /* Check if already cached — must match the expected class to defend
+     * against any hypothetical key collision. */
+    zval *existing = zend_hash_index_find(&decorator_instance_cache_ht, key);
+    if (existing && Z_TYPE_P(existing) == IS_OBJECT) {
+        zend_class_entry *existing_ce = Z_OBJCE_P(existing);
+        if (existing_ce && ZSTR_LEN(existing_ce->name) == strlen(class_name) &&
+            memcmp(ZSTR_VAL(existing_ce->name), class_name, strlen(class_name)) == 0) {
+            return existing;
+        }
+        /* Class mismatch — discard and recreate. */
+        zend_hash_index_del(&decorator_instance_cache_ht, key);
     }
 
     /* Look up the decorator class */
@@ -1673,8 +1712,10 @@ static zval *oxphp_get_cached_decorator(const char *class_name, uint64_t cache_k
     zend_string_release(cls);
     if (!ce) return NULL;
 
-    /* Create instance */
-    zval *cached = &decorator_instance_cache[idx];
+    /* Create instance in a scratch zval, then insert into the HT. */
+    zval scratch;
+    ZVAL_UNDEF(&scratch);
+    zval *cached = &scratch;
     object_init_ex(cached, ce);
 
     /* Find the matching attribute to get constructor args */
@@ -1757,12 +1798,9 @@ static zval *oxphp_get_cached_decorator(const char *class_name, uint64_t cache_k
         }
     }
 
-    Z_TRY_ADDREF_P(cached);
-    if (idx >= decorator_instance_count) {
-        decorator_instance_count = idx + 1;
-    }
-
-    return cached;
+    /* Insert into HT — HT takes ownership of the refcount bumped by
+     * object_init_ex(). Return a stable pointer via the HT lookup. */
+    return zend_hash_index_update(&decorator_instance_cache_ht, key, cached);
 }
 
 static zend_observer_fcall_handlers oxphp_decorator_observer_init(
@@ -1844,6 +1882,7 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
             zend_throw_exception(oxphp_decorator_rejected_ce,
                 reason_len > 0 ? reason : "Decorator rejected", 0);
             oxphp_bridge_clear_decorator_reject_reason();
+            oxphp_force_exception_on_current_frame();
             return;
         }
     }
@@ -1852,18 +1891,15 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
     {
         oxphp_php_dec_count_fn_t count_fn = oxphp_bridge_get_php_decorator_count();
         oxphp_php_dec_class_fn_t class_fn = oxphp_bridge_get_php_decorator_class();
-        oxphp_php_dec_cache_key_fn_t key_fn = oxphp_bridge_get_php_decorator_cache_key();
 
-        if (count_fn && class_fn && key_fn) {
+        if (count_fn && class_fn) {
             uint32_t php_count = count_fn(dctx->fn_id);
 
             for (uint32_t i = 0; i < php_count; i++) {
                 const char *cls = class_fn(dctx->fn_id, i);
-                uint64_t cache_key = key_fn(dctx->fn_id, i);
                 if (!cls) continue;
 
-                zval *dec_instance = oxphp_get_cached_decorator(
-                    cls, cache_key, func, i);
+                zval *dec_instance = oxphp_get_cached_decorator(cls, func, i);
                 if (!dec_instance) continue;
 
                 /* Create context for before() */
@@ -1885,10 +1921,11 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                     oxphp_create_decorator_context(&cleanup_ctx, dctx, 0, NULL);
                     for (int j = (int)dctx->decorator_count - 1; j >= 0; j--) {
                         const char *prev_cls = class_fn(dctx->fn_id, (uint32_t)j);
-                        uint64_t prev_key = key_fn(dctx->fn_id, (uint32_t)j);
                         if (!prev_cls) continue;
-                        int prev_idx = (int)(prev_key % OXPHP_DEC_CACHE_MAX);
-                        if (Z_TYPE(decorator_instance_cache[prev_idx]) != IS_OBJECT) continue;
+                        zend_ulong prev_key = oxphp_dec_cache_key(func, (uint32_t)j);
+                        zval *prev_cached = zend_hash_index_find(
+                            &decorator_instance_cache_ht, prev_key);
+                        if (!prev_cached || Z_TYPE_P(prev_cached) != IS_OBJECT) continue;
 
                         zval cleanup_ret;
                         ZVAL_UNDEF(&cleanup_ret);
@@ -1896,8 +1933,8 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                         zend_object *saved_exception = EG(exception);
                         EG(exception) = NULL;
                         zend_call_method_with_1_params(
-                            Z_OBJ(decorator_instance_cache[prev_idx]),
-                            Z_OBJCE(decorator_instance_cache[prev_idx]),
+                            Z_OBJ_P(prev_cached),
+                            Z_OBJCE_P(prev_cached),
                             NULL, "after", &cleanup_ret, &cleanup_ctx);
                         zval_ptr_dtor(&cleanup_ret);
                         /* Restore original exception */
@@ -1910,7 +1947,8 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                         }
                     }
                     zval_ptr_dtor(&cleanup_ctx);
-                    return; /* PHP engine will skip the function */
+                    oxphp_force_exception_on_current_frame();
+                    return;
                 }
 
                 dctx->decorator_count++;
@@ -1943,27 +1981,28 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
     {
         oxphp_php_dec_count_fn_t count_fn = oxphp_bridge_get_php_decorator_count();
         oxphp_php_dec_class_fn_t class_fn = oxphp_bridge_get_php_decorator_class();
-        oxphp_php_dec_cache_key_fn_t key_fn = oxphp_bridge_get_php_decorator_cache_key();
 
-        if (count_fn && class_fn && key_fn && dctx->decorator_count > 0) {
+        if (count_fn && class_fn && dctx->decorator_count > 0) {
             /* Create context with result for after() */
             zval ctx_zval;
             int has_result = success && retval && Z_TYPE_P(retval) != IS_UNDEF;
             oxphp_create_decorator_context(&ctx_zval, dctx, has_result, retval);
 
+            zend_function *func = execute_data->func;
             for (int i = (int)dctx->decorator_count - 1; i >= 0; i--) {
                 const char *cls = class_fn(dctx->fn_id, (uint32_t)i);
-                uint64_t cache_key = key_fn(dctx->fn_id, (uint32_t)i);
                 if (!cls) continue;
 
-                int idx = (int)(cache_key % OXPHP_DEC_CACHE_MAX);
-                if (Z_TYPE(decorator_instance_cache[idx]) != IS_OBJECT) continue;
+                zend_ulong key = oxphp_dec_cache_key(func, (uint32_t)i);
+                zval *cached = zend_hash_index_find(
+                    &decorator_instance_cache_ht, key);
+                if (!cached || Z_TYPE_P(cached) != IS_OBJECT) continue;
 
                 zval after_ret;
                 ZVAL_UNDEF(&after_ret);
                 zend_call_method_with_1_params(
-                    Z_OBJ(decorator_instance_cache[idx]),
-                    Z_OBJCE(decorator_instance_cache[idx]),
+                    Z_OBJ_P(cached),
+                    Z_OBJCE_P(cached),
                     NULL, "after", &after_ret, &ctx_zval);
                 zval_ptr_dtor(&after_ret);
 
@@ -2994,12 +3033,11 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
     /* Cleanup any outstanding promises not awaited by user code. */
     oxphp_bridge_cleanup_outstanding_promises();
 
-    /* Clear decorator instance cache */
-    for (int i = 0; i < decorator_instance_count; i++) {
-        zval_ptr_dtor(&decorator_instance_cache[i]);
-        ZVAL_UNDEF(&decorator_instance_cache[i]);
+    /* Clear decorator instance cache — zvals are dtor'd by the HT's
+     * registered destructor, we just need to empty the table. */
+    if (decorator_instance_cache_initialized) {
+        zend_hash_clean(&decorator_instance_cache_ht);
     }
-    decorator_instance_count = 0;
 
     return SUCCESS;
 }

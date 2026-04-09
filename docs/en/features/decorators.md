@@ -190,11 +190,13 @@ function getProduct(int $id): array
 }
 ```
 
-If `before()` throws an exception, the function does not execute, and `after()` is called in reverse order on all decorators that already completed their `before()`.
+If `before()` throws an exception, OxPHP records the exception and invokes `after()` in reverse order on all decorators that already completed their `before()`. The caller will observe the exception via normal PHP `try`/`catch`, and `after()` is **not** called on the decorator whose `before()` threw.
+
+> **Important caveat about stopping execution.** PHP's `zend_observer_fcall_begin` API — which OxPHP uses to invoke `before()` — does not expose a way to cancel the call itself. When `before()` throws, the decorated function body may still execute a handful of opcodes before the VM unwinds to the nearest exception handler. **Do not rely on `RejectedException` to skip side effects inside the function body.** Treat decorator rejection as "the caller sees an exception" and implement any hard authorization gate inside the function body (or in front of it), not in the decorator.
 
 ## Stopping Execution
 
-A decorator can prevent the function from executing by throwing `OxPHP\Decorator\RejectedException` from `before()`:
+A decorator can signal rejection by throwing `OxPHP\Decorator\RejectedException` from `before()`. The exception propagates to the caller, but (as noted above) it is not a pre-call veto:
 
 ```php
 <?php

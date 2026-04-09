@@ -190,11 +190,13 @@ function getProduct(int $id): array
 }
 ```
 
-如果 `before()` 抛出异常，函数不会执行，并且会对所有已完成 `before()` 的装饰器按反向顺序调用 `after()`。
+如果 `before()` 抛出异常，OxPHP 会记录该异常，并对所有已成功完成 `before()` 的装饰器按反向顺序调用 `after()`。调用方可以通过普通的 PHP `try`/`catch` 捕获该异常，而对于 `before()` 抛出异常的那个装饰器本身，**不会**再调用其 `after()`。
+
+> **关于"阻止执行"的重要说明。** OxPHP 使用 PHP 的 `zend_observer_fcall_begin` API 来调用 `before()`，而该 API 并未提供取消函数调用本身的能力。当 `before()` 抛出异常时，被装饰函数的函数体在 VM 展开到最近的异常处理器之前，仍可能执行若干条 opcode。**请不要依赖 `RejectedException` 来跳过函数体内部的副作用。** 应将装饰器的拒绝理解为"调用方会看到一个异常",而真正的硬性权限校验应放在函数体内部(或调用之前),而不是放在装饰器里。
 
 ## 阻止执行
 
-装饰器可以通过在 `before()` 中抛出 `OxPHP\Decorator\RejectedException` 来阻止函数执行：
+装饰器可以通过在 `before()` 中抛出 `OxPHP\Decorator\RejectedException` 来表示拒绝。异常会传播到调用方,但(如上所述)这并不是"调用前否决":
 
 ```php
 <?php
