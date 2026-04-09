@@ -47,11 +47,12 @@ else
     fi
 fi
 
-# Check 3: oxphp SAPI extension loads
-if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp"; then
-    ok "check #3: oxphp SAPI extension is loaded"
+# Check 3: oxphp SAPI extension loads (actual extension name is oxphp_sapi,
+# per PHP_OXPHP_SAPI_EXTNAME in ext/php_oxphp_sapi.h)
+if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp_sapi"; then
+    ok "check #3: oxphp_sapi extension is loaded"
 else
-    fail "check #3: oxphp SAPI extension not found in php -m"
+    fail "check #3: oxphp_sapi extension not found in php -m"
 fi
 
 # Check 4: oxphp binary serves HTTP and executes a PHP-rendered page
