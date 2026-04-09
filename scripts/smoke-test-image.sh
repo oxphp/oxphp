@@ -48,40 +48,47 @@ else
 fi
 
 # Check 3: oxphp SAPI extension loads
-if docker run --rm "$IMG" php -m 2>/dev/null | grep -q "^oxphp"; then
+if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp"; then
     ok "check #3: oxphp SAPI extension is loaded"
 else
     fail "check #3: oxphp SAPI extension not found in php -m"
 fi
 
 # Check 4: oxphp binary serves HTTP and executes a PHP-rendered page
-CID=$(docker run -d --rm -p 18080:80 "$IMG" 2>/dev/null || true)
+CID=""
+cleanup() { [[ -n "$CID" ]] && docker rm -f "$CID" >/dev/null 2>&1 || true; }
+trap cleanup EXIT INT TERM
+
+CID=$(docker run -d --rm -p 0:80 "$IMG" || true)
 if [[ -z "$CID" ]]; then
     fail "check #4: could not start container"
 else
-    # Poll /health for up to 10s. Internal server may be on a different port
-    # (default 9090) — here we only need to know the main HTTP port is serving.
-    # We fetch "/" and check for either a welcome marker or PHP-rendered content.
-    HEALTH_OK=0
-    for i in $(seq 1 50); do
-        if curl -sf -o /dev/null "http://localhost:18080/" 2>/dev/null; then
-            HEALTH_OK=1
-            break
-        fi
-        sleep 0.2
-    done
-    if [[ "$HEALTH_OK" -eq 1 ]]; then
-        BODY=$(curl -sf "http://localhost:18080/" 2>/dev/null || echo "")
-        if [[ -n "$BODY" ]]; then
-            ok "check #4: oxphp serves HTTP on port 80 and returns a non-empty body"
-        else
-            fail "check #4: oxphp HTTP responded but body is empty"
-        fi
+    HOST_PORT=$(docker port "$CID" 80 2>/dev/null | head -1 | awk -F: '{print $NF}')
+    if [[ -z "$HOST_PORT" ]]; then
+        fail "check #4: could not resolve host port mapping"
     else
-        fail "check #4: oxphp did not respond on port 80 within 10s"
-        docker logs "$CID" 2>&1 | tail -20 >&2 || true
+        # Poll / for up to 10s. We fetch the body and store it to avoid a
+        # second network call after the poll succeeds.
+        HEALTH_OK=0
+        BODY=""
+        for ((i=0; i<50; i++)); do
+            if BODY=$(curl -sf "http://localhost:$HOST_PORT/" 2>/dev/null); then
+                HEALTH_OK=1
+                break
+            fi
+            sleep 0.2
+        done
+        if [[ "$HEALTH_OK" -eq 1 ]]; then
+            if [[ -n "$BODY" ]]; then
+                ok "check #4: oxphp serves HTTP on port 80 and returns a non-empty body"
+            else
+                fail "check #4: oxphp HTTP responded but body is empty"
+            fi
+        else
+            fail "check #4: oxphp did not respond on port 80 within 10s"
+            docker logs "$CID" 2>&1 | tail -20 >&2 || true
+        fi
     fi
-    docker rm -f "$CID" >/dev/null 2>&1 || true
 fi
 
 # Check 5: docker-php-ext-install is present (enables user RUN docker-php-ext-install ...)
