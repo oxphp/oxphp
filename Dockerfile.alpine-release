@@ -1,7 +1,14 @@
 # ══════════════════════════════════════════════════════════════
-# Stage 1: Build bridge library (needs PHP headers for zval accessors)
+# Build arguments
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS bridge-builder
+ARG PHP_VERSION=8.4
+ARG ALPINE_VERSION=3.23
+ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
+
+# ══════════════════════════════════════════════════════════════
+# Stage 1: Build bridge library
+# ══════════════════════════════════════════════════════════════
+FROM ${BASE_IMAGE} AS bridge-builder
 
 RUN apk add --no-cache gcc musl-dev make
 
@@ -11,13 +18,12 @@ COPY ext/bridge/ ./
 RUN make && make install
 
 # ══════════════════════════════════════════════════════════════
-# Stage 2: Build PHP extension (needs phpize + bridge headers)
+# Stage 2: Build PHP extension (oxphp_sapi.so)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS ext-builder
+FROM ${BASE_IMAGE} AS ext-builder
 
 RUN apk add --no-cache gcc musl-dev make autoconf
 
-# Install bridge library (needed for linking)
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
@@ -31,11 +37,13 @@ RUN phpize && \
     make install
 
 # ══════════════════════════════════════════════════════════════
-# Stage 3: Build Rust binary in PHP ZTS image
+# Stage 3: Build Rust binary with the fixed production feature set.
+# Production builds always include plugin-apm and plugin-async — this is
+# the distinguishing trait of Dockerfile.alpine-release vs Dockerfile.
+# To change the production feature set, edit this file directly.
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS builder
+FROM ${BASE_IMAGE} AS builder
 
-# Install Rust + build dependencies
 RUN apk add --no-cache \
     rust \
     cargo \
@@ -53,80 +61,66 @@ RUN apk add --no-cache \
     openssl-dev \
     gnu-libiconv-dev
 
-# Install bridge library (needed for Rust linking)
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
-# Version injected from CI (tag v1.2.3 → "1.2.3")
+# Version injected from CI. Tag v1.2.3 → OXPHP_VERSION=1.2.3.
+# Default "0.0.0-dev" is only used for local test builds of this file
+# outside of CI (useful when manually smoke-testing the prod Dockerfile).
 ARG OXPHP_VERSION="0.0.0-dev"
 
-# Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy source to cache dependencies
+# Cache dependency compilation with production feature set baked in.
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
     cargo build --release --features plugin-apm,plugin-async && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
-# Copy real source and build script
 COPY src ./src
 COPY build.rs ./
 
-# Patch version from build arg
+# Patch Cargo.toml version from the build arg (always applied in prod builds)
 RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
 
+# Production build — hardcoded feature set, no ARG override.
 RUN cargo build --release --features plugin-apm,plugin-async
 
 # ══════════════════════════════════════════════════════════════
-# Stage 4: Runtime
+# Stage 4: Runtime — minimal production image.
+# Ships only the welcome page so users can verify the server boots.
+# Users are expected to mount their own webroot and PHP config.
+# libgcc must be added explicitly: the Rust-compiled oxphp binary
+# dynamically links libgcc_s.so.1, which the PHP base image does not
+# ship (it's a gcc runtime dep, not a PHP dep).
 # ══════════════════════════════════════════════════════════════
-FROM alpine:3.23
+FROM ${BASE_IMAGE}
 
-RUN apk add --no-cache \
-    libgcc \
-    libxml2 \
-    sqlite-libs \
-    libcurl \
-    oniguruma \
-    argon2-libs \
-    zlib \
-    ncurses-libs \
-    readline \
-    gnu-libiconv \
-    && MUSL_LD=$(ls /lib/ld-musl-*.so.1 | head -1) \
-    && case "$(uname -m)" in \
-        x86_64)  ln -sf "$MUSL_LD" /lib/ld-linux-x86-64.so.2 ;; \
-        aarch64) ln -sf "$MUSL_LD" /lib/ld-linux-aarch64.so.1 ;; \
-       esac
+RUN apk add --no-cache libgcc
 
-# Create www-data user (UID 82, compatible with nginx/apache)
-RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
-
-# Copy PHP runtime
-COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
-COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-
-# Copy bridge library
+# Copy bridge library from bridge-builder
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 
-# Copy PHP extension
+# Copy oxphp SAPI extension from ext-builder (merges into existing
+# extensions dir provided by the PHP base image)
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 
-# PHP configuration
-RUN mkdir -p /usr/local/etc/php/conf.d
+# Enable the SAPI extension. Production intentionally does NOT ship an
+# oxphp.ini — production users mount their own PHP config.
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
-# Copy binary from builder
+# Copy oxphp binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
-# Create web root (DOCUMENT_ROOT = /var/www/html/public)
+# Web root (www-data already exists in the PHP base image)
 RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
-# Copy welcome page as the default landing page
+# Welcome page as default index.php — nginx-style landing page so users
+# can verify the server responds after first deploy. Production users
+# replace this with their own webroot via bind-mount or a downstream FROM.
 COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index.php
 
 # Ensure libphp.so and liboxphp_bridge.so are found at runtime
@@ -134,6 +128,6 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 
 USER www-data
 
-EXPOSE 8080
+EXPOSE 80 443
 
 CMD ["oxphp"]

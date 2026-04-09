@@ -1,0 +1,28 @@
+# Supported version matrix for weekly rebuilds and release aliases.
+#
+# Read by:
+#   - .github/workflows/weekly-rebuild.yml (rebuild matrix)
+#   - scripts/move-aliases.sh              (alias destination resolution)
+#
+# Entries in oxphp_versions MUST be listed latest-first. The first entry is
+# treated as "latest oxphp" and receives all latest-oriented aliases. The
+# second entry is treated as "previous" and only receives version-scoped
+# aliases (e.g. 0.3.0-php8.4, 0.3-php8.4).
+
+oxphp_versions:
+  - "0.3.0"   # latest
+
+# PHP 8.5 is not listed: oxphp's Rust FFI bindings and C bridge
+# (ext/bridge/) are not yet compatible with the PHP 8.5 ABI — binaries
+# built against 8.5 crash with SIGBUS on startup. PHP 8.5 will be added
+# here once the bindings are updated. Tracked as a follow-up to the
+# Docker image matrix work.
+php_versions:
+  - "8.4"
+
+alpine_versions:
+  - "3.23"
+
+# The PHP version that receives the default-PHP aliases (`latest`,
+# `0.3.0`, etc.). Must be present in php_versions.
+default_php: "8.4"

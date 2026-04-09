@@ -1,7 +1,14 @@
 # ══════════════════════════════════════════════════════════════
+# Build arguments (overridable from compose.yml or CI)
+# ══════════════════════════════════════════════════════════════
+ARG PHP_VERSION=8.4
+ARG ALPINE_VERSION=3.23
+ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
+
+# ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library (needs PHP headers for zval accessors)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS bridge-builder
+FROM ${BASE_IMAGE} AS bridge-builder
 
 RUN apk add --no-cache gcc musl-dev make
 
@@ -13,7 +20,7 @@ RUN make && make install
 # ══════════════════════════════════════════════════════════════
 # Stage 2: Build PHP extension (needs phpize + bridge headers)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS ext-builder
+FROM ${BASE_IMAGE} AS ext-builder
 
 RUN apk add --no-cache gcc musl-dev make autoconf
 
@@ -33,7 +40,7 @@ RUN phpize && \
 # ══════════════════════════════════════════════════════════════
 # Stage 3: Build Rust binary in PHP ZTS image
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine3.23 AS builder
+FROM ${BASE_IMAGE} AS builder
 
 # Install Rust + build dependencies
 RUN apk add --no-cache \
@@ -59,24 +66,38 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
+# Cargo feature set. Default includes all production plugins. Override
+# via compose build-args or --build-arg on the command line.
+ARG CARGO_FEATURES="plugin-apm,plugin-async"
+
+# Version injected from CI when building a tagged release. Empty default
+# leaves Cargo.toml version untouched.
+ARG OXPHP_VERSION=""
+
 # Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./
-
-# Extra Cargo features beyond defaults (e.g. "plugin-debug")
-ARG CARGO_FEATURES=""
 
 # Create dummy source to cache dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
-    cargo build --release && \
+    if [ -n "${CARGO_FEATURES}" ]; then \
+        cargo build --release --features "${CARGO_FEATURES}"; \
+    else \
+        cargo build --release; \
+    fi && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 # Copy real source and build script
 COPY src ./src
 COPY build.rs ./
 
-# Build release binary (default features include php)
+# Patch version from build arg (only when OXPHP_VERSION is explicitly set)
+RUN if [ -n "${OXPHP_VERSION}" ]; then \
+        sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml; \
+    fi
+
+# Build release binary
 RUN if [ -n "${CARGO_FEATURES}" ]; then \
         cargo build --release --features "${CARGO_FEATURES}"; \
     else \
@@ -84,55 +105,36 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
     fi
 
 # ══════════════════════════════════════════════════════════════
-# Stage 4: Runtime
+# Stage 4: Runtime — PHP ZTS base provides php CLI, phpize,
+# docker-php-ext-install, libphp.so, extensions dir, www-data user,
+# and all PHP runtime dependencies (libxml2, libcurl, etc.).
+# libgcc must be added explicitly: the Rust-compiled oxphp binary
+# dynamically links libgcc_s.so.1, which the PHP base image does not
+# ship (it's a gcc runtime dep, not a PHP dep).
 # ══════════════════════════════════════════════════════════════
-FROM alpine:3.23
+FROM ${BASE_IMAGE}
 
-RUN apk add --no-cache \
-    libgcc \
-    libxml2 \
-    sqlite-libs \
-    libcurl \
-    oniguruma \
-    argon2-libs \
-    zlib \
-    ncurses-libs \
-    readline \
-    gnu-libiconv \
-    # ld-linux compat symlink — Rust binary built on Alpine references /lib/ld-linux-*
-    # but bare Alpine only has /lib/ld-musl-*
-    && MUSL_LD=$(ls /lib/ld-musl-*.so.1 | head -1) \
-    && case "$(uname -m)" in \
-        x86_64)  ln -sf "$MUSL_LD" /lib/ld-linux-x86-64.so.2 ;; \
-        aarch64) ln -sf "$MUSL_LD" /lib/ld-linux-aarch64.so.1 ;; \
-       esac
+RUN apk add --no-cache libgcc
 
-# Create www-data user (UID 82, compatible with nginx/apache)
-# Alpine 3.21 already has www-data group (GID 82), so add user to existing group
-RUN adduser -D -H -u 82 -G www-data -s /sbin/nologin www-data 2>/dev/null || true
-
-# Copy PHP runtime
-COPY --from=builder /usr/local/lib/libphp.so /usr/local/lib/
-COPY --from=builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-
-# Copy bridge library
+# Copy bridge library from bridge-builder
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 
-# Copy PHP extension
+# Copy oxphp SAPI extension from ext-builder (merges into the existing
+# extensions directory provided by the PHP base image).
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 
-# PHP configuration
-RUN mkdir -p /usr/local/etc/php/conf.d
+# PHP configuration — dev image ships oxphp.ini (OPcache + JIT + preloading)
 COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
-# Create web root
+# Create web root (www-data already exists in the PHP base image)
 RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
-# Copy default web files
+# Dev image ships the full www/ including preload.php, worker.php, app/,
+# fixtures/, and public/ with index.php + assets.
 COPY --chown=www-data:www-data www/ /var/www/html/
 
 # Ensure libphp.so and liboxphp_bridge.so are found at runtime
