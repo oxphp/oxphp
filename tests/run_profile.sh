@@ -40,7 +40,9 @@ for suite_file in "${suite_files[@]}"; do
         fi
 
         if [ -z "$local_result" ]; then
-            local clean_line="${test_line%% >> *}"
+            # NB: this block runs at script scope, not inside a function,
+            # so `local` is not valid here.
+            clean_line="${test_line%% >> *}"
             test_name=$(basename "$(echo "$clean_line" | cut -d'|' -f1 | xargs)")
             group=$(dirname "$(echo "$clean_line" | cut -d'|' -f1 | xargs)")
             local_result=$(printf '{"test":"%s","group":"%s","pass":false,"assertions":[],"error":"request failed","meta":{}}' "$test_name" "$group")
