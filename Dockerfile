@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════
 # Build arguments (overridable from compose.yml or CI)
 # ══════════════════════════════════════════════════════════════
-ARG PHP_VERSION=8.5
+ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 
