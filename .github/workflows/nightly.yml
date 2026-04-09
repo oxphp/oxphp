@@ -52,9 +52,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           push: true
+          build-args: |
+            PHP_VERSION=8.4
+            ALPINE_VERSION=3.23
+            OXPHP_VERSION=0.0.0-nightly-${{ github.sha }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:nightly-${{ steps.platform.outputs.suffix }}
-          cache-from: type=gha,scope=${{ steps.platform.outputs.suffix }}
-          cache-to: type=gha,scope=${{ steps.platform.outputs.suffix }},mode=max
+          cache-from: type=gha,scope=nightly-${{ steps.platform.outputs.suffix }}
+          cache-to: type=gha,scope=nightly-${{ steps.platform.outputs.suffix }},mode=max
 
   manifest:
     needs: build
