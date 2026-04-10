@@ -377,6 +377,48 @@ impl RouteConfig {
     }
 }
 
+/// Returns true if the URI path contains a blocked dot-segment.
+///
+/// A dot-segment is any path component starting with `.` (e.g. `.git`, `.env`).
+/// Exception: `.well-known` as the **first** segment with a non-empty sub-path
+/// (`/.well-known/foo`) is allowed per RFC 8615. Bare `/.well-known` and
+/// `/.well-known/` are blocked.
+///
+/// The check runs on percent-decoded input to catch encoded bypasses like `/%2egit/`.
+#[allow(dead_code)] // wired into resolve_request in a subsequent commit
+fn is_blocked_dot_path(uri_path: &str) -> bool {
+    let decoded = match percent_decode_str(uri_path).decode_utf8() {
+        Ok(s) => s,
+        Err(_) => return true, // invalid UTF-8 → block
+    };
+
+    let mut segments = decoded.split('/').filter(|s| !s.is_empty());
+    let mut is_first = true;
+
+    while let Some(seg) = segments.next() {
+        if !seg.starts_with('.') {
+            is_first = false;
+            continue;
+        }
+
+        // .well-known exception: must be first segment AND have a non-empty sub-path
+        if seg == ".well-known" && is_first {
+            match segments.next() {
+                Some(next) if !next.is_empty() && !next.starts_with('.') => {
+                    // .well-known sub-path allowed, but check remaining segments
+                    is_first = false;
+                    continue;
+                }
+                _ => return true, // bare .well-known, .well-known/, or dot-segment after → blocked
+            }
+        }
+
+        return true; // any other dot-segment → blocked
+    }
+
+    false
+}
+
 /// Remove `..` and empty segments from a path to prevent directory traversal.
 fn sanitize_path(path: &str) -> String {
     let mut result = String::with_capacity(path.len());
@@ -793,5 +835,93 @@ mod tests {
             }
             other => panic!("Expected Execute with deep path_info, got {:?}", other),
         }
+    }
+
+    // --- Dot-path blocking tests ---
+
+    #[test]
+    fn test_dot_path_blocks_dot_env() {
+        assert!(is_blocked_dot_path("/.env"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_dot_git_subpath() {
+        assert!(is_blocked_dot_path("/.git/config"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_htaccess() {
+        assert!(is_blocked_dot_path("/.htaccess"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_ds_store() {
+        assert!(is_blocked_dot_path("/.DS_Store"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_mid_path_dot_segment() {
+        assert!(is_blocked_dot_path("/path/.hidden/file.txt"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_deep_dot_file() {
+        assert!(is_blocked_dot_path("/path/to/.env"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_encoded_dot_segment() {
+        // %2e = "."
+        assert!(is_blocked_dot_path("/%2egit/HEAD"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_encoded_dot_env() {
+        assert!(is_blocked_dot_path("/%2eenv"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_well_known_subpath() {
+        assert!(!is_blocked_dot_path("/.well-known/security.txt"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_well_known_deep_subpath() {
+        assert!(!is_blocked_dot_path("/.well-known/acme-challenge/token123"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_bare_well_known() {
+        assert!(is_blocked_dot_path("/.well-known"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_trailing_slash() {
+        assert!(is_blocked_dot_path("/.well-known/"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_not_at_root() {
+        assert!(is_blocked_dot_path("/subdir/.well-known/foo"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_normal_paths() {
+        assert!(!is_blocked_dot_path("/style.css"));
+        assert!(!is_blocked_dot_path("/index.php"));
+        assert!(!is_blocked_dot_path("/path/to/file.txt"));
+        assert!(!is_blocked_dot_path("/"));
+        assert!(!is_blocked_dot_path("/api/v2/users"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_dots_in_filenames() {
+        assert!(!is_blocked_dot_path("/file.name.with.dots.txt"));
+        assert!(!is_blocked_dot_path("/jquery.min.js"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_dot_segment_after() {
+        assert!(is_blocked_dot_path("/.well-known/.secret/file"));
     }
 }
