@@ -1,8 +1,10 @@
+mod proxy;
 mod server;
 
 use std::fmt;
 use std::path::PathBuf;
 
+pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
 
 /// Access log verbosity level.
