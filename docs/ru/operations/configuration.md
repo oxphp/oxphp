@@ -74,6 +74,7 @@ PHP_WORKERS=4:0    # 4 минимум, авто-определение макс�
 
 | Переменная | По умолчанию | Описание |
 |------------|-------------|----------|
+| `FRAME_OPTIONS` | `DENY` | Защита от кликджекинга. `DENY` запрещает встраивание в фреймы, `SAMEORIGIN` разрешает встраивание с того же домена, `off` отключает (используйте, если управляете фреймами через собственный CSP). Устанавливает оба заголовка: `X-Frame-Options` и `Content-Security-Policy: frame-ancestors` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные сети обратных прокси (CIDR через запятую или `private`). Когда задано, OxPHP извлекает реальный IP клиента из `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) или `X-Forwarded-For` методом rightmost-non-trusted. Также обрабатывает `X-Forwarded-Proto` и `X-Forwarded-Host` для `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME` и `SERVER_PORT`. Не задано = функция отключена |
 
 Специальное значение `private` раскрывается во все частные сети RFC-1918, loopback и link-local (IPv4 и IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.

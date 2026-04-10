@@ -3,6 +3,7 @@ pub mod error_pages;
 pub mod metrics;
 pub mod rate_limit;
 pub mod request_id;
+pub mod security_headers;
 pub mod server_header;
 pub mod trace_context;
 pub mod trusted_proxy;
