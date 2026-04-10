@@ -58,6 +58,10 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [分布式追踪与 APM](features/distributed-tracing.md) —— W3C Trace Context、OpenTelemetry、自动埋点和 PHP 追踪 SDK
 - [内部服务器](features/internal-server.md) —— 用于健康检查、Prometheus 指标和实时配置的专用端口
 
+## 安全
+
+- [点路径拦截](security/dot-path-blocking.md) — 自动拦截隐藏文件和目录（`.env`、`.git/`、`.htaccess`）
+
 ## PHP
 
 - [HTTP 请求对象 API](php/request-api.md) —— 通过 `oxphp_http_request()` 以面向对象方式访问请求数据：查询参数、解析后的请求体、请求头、Cookie、文件上传等

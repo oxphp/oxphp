@@ -130,6 +130,11 @@ impl RouteConfig {
         uri_path: &str,
         file_cache: &Arc<FileCache>,
     ) -> Arc<RouteResult> {
+        // Block dot-paths before cache (keeps junk out of LRU)
+        if is_blocked_dot_path(uri_path) {
+            return Arc::new(RouteResult::NotFound);
+        }
+
         // Fast path: check route cache (single lock, O(1) get + LRU promotion).
         // Returns Arc clone (atomic increment) instead of PathBuf heap allocation.
         {
@@ -243,8 +248,14 @@ impl RouteConfig {
         // 8. File exists → serve/execute
         let path_str = file_path.to_string_lossy();
         if file_cache.is_file(&path_str).await {
-            return if file_path.extension().and_then(|s| s.to_str()) == Some("php") {
-                RouteResult::Execute(file_path, None)
+            let is_php = file_path.extension().and_then(|s| s.to_str()) == Some("php");
+            return if is_php {
+                // Block PHP execution inside .well-known
+                if sanitized.starts_with(".well-known/") {
+                    RouteResult::NotFound
+                } else {
+                    RouteResult::Execute(file_path, None)
+                }
             } else {
                 RouteResult::Serve(file_path)
             };
@@ -375,6 +386,48 @@ impl RouteConfig {
 
         None
     }
+}
+
+/// Returns true if the URI path contains a blocked dot-segment.
+///
+/// A dot-segment is any path component starting with `.` (e.g. `.git`, `.env`).
+/// Exception: `.well-known` as the **first** segment with a non-empty sub-path
+/// (`/.well-known/foo`) is allowed per RFC 8615. Bare `/.well-known` and
+/// `/.well-known/` are blocked.
+///
+/// The check runs on percent-decoded input to catch encoded bypasses like `/%2egit/`.
+fn is_blocked_dot_path(uri_path: &str) -> bool {
+    let decoded = match percent_decode_str(uri_path).decode_utf8() {
+        Ok(s) => s,
+        Err(_) => return true, // invalid UTF-8 → block
+    };
+
+    let mut segments = decoded.split('/').filter(|s| !s.is_empty());
+    let mut is_first = true;
+
+    while let Some(seg) = segments.next() {
+        if !seg.starts_with('.') {
+            is_first = false;
+            continue;
+        }
+
+        // .well-known exception: must be first segment AND have a non-empty sub-path
+        if seg == ".well-known" && is_first {
+            match segments.next() {
+                Some(next) if !next.is_empty() && !next.starts_with('.') => {
+                    // .well-known sub-path allowed; clear is_first so a second
+                    // .well-known deeper in the path won't match this exception
+                    is_first = false;
+                    continue;
+                }
+                _ => return true, // bare .well-known, .well-known/, or dot-segment after → blocked
+            }
+        }
+
+        return true; // any other dot-segment → blocked
+    }
+
+    false
 }
 
 /// Remove `..` and empty segments from a path to prevent directory traversal.
@@ -793,5 +846,250 @@ mod tests {
             }
             other => panic!("Expected Execute with deep path_info, got {:?}", other),
         }
+    }
+
+    // --- Dot-path blocking tests ---
+
+    #[test]
+    fn test_dot_path_blocks_dot_env() {
+        assert!(is_blocked_dot_path("/.env"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_dot_git_subpath() {
+        assert!(is_blocked_dot_path("/.git/config"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_htaccess() {
+        assert!(is_blocked_dot_path("/.htaccess"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_ds_store() {
+        assert!(is_blocked_dot_path("/.DS_Store"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_mid_path_dot_segment() {
+        assert!(is_blocked_dot_path("/path/.hidden/file.txt"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_deep_dot_file() {
+        assert!(is_blocked_dot_path("/path/to/.env"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_encoded_dot_segment() {
+        // %2e = "."
+        assert!(is_blocked_dot_path("/%2egit/HEAD"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_encoded_dot_env() {
+        assert!(is_blocked_dot_path("/%2eenv"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_well_known_subpath() {
+        assert!(!is_blocked_dot_path("/.well-known/security.txt"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_well_known_deep_subpath() {
+        assert!(!is_blocked_dot_path("/.well-known/acme-challenge/token123"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_bare_well_known() {
+        assert!(is_blocked_dot_path("/.well-known"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_trailing_slash() {
+        assert!(is_blocked_dot_path("/.well-known/"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_not_at_root() {
+        assert!(is_blocked_dot_path("/subdir/.well-known/foo"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_normal_paths() {
+        assert!(!is_blocked_dot_path("/style.css"));
+        assert!(!is_blocked_dot_path("/index.php"));
+        assert!(!is_blocked_dot_path("/path/to/file.txt"));
+        assert!(!is_blocked_dot_path("/"));
+        assert!(!is_blocked_dot_path("/api/v2/users"));
+    }
+
+    #[test]
+    fn test_dot_path_allows_dots_in_filenames() {
+        assert!(!is_blocked_dot_path("/file.name.with.dots.txt"));
+        assert!(!is_blocked_dot_path("/jquery.min.js"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_dot_segment_after() {
+        assert!(is_blocked_dot_path("/.well-known/.secret/file"));
+    }
+
+    #[test]
+    fn test_dot_path_blocks_well_known_deep_dot_segment() {
+        // dot-segment after a valid .well-known sub-path
+        assert!(is_blocked_dot_path("/.well-known/valid/.hidden"));
+    }
+
+    // --- Dot-path routing integration tests ---
+
+    #[tokio::test]
+    async fn test_resolve_blocks_dot_env() {
+        let dir = setup_test_dir();
+        // Create .env file to prove it would be served without blocking
+        fs::write(dir.path().join(".env"), "SECRET=value").unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/.env", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_blocks_dot_git_config() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        fs::write(dir.path().join(".git/config"), "[core]").unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/.git/config", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_blocks_encoded_dot_path() {
+        let dir = setup_test_dir();
+        fs::write(dir.path().join(".env"), "SECRET=value").unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        // %2e = "."
+        let result = rc.resolve_request("/%2eenv", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_allows_well_known_static_file() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        fs::write(
+            dir.path().join(".well-known/security.txt"),
+            "Contact: security@example.com",
+        )
+        .unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/.well-known/security.txt", &cache)
+            .await;
+        assert!(
+            matches!(*result, RouteResult::Serve(_)),
+            "Expected Serve for .well-known static file, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_blocks_bare_well_known() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/.well-known", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dot_path_not_cached() {
+        let dir = setup_test_dir();
+        fs::write(dir.path().join(".env"), "SECRET=value").unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+
+        // Request a blocked dot-path
+        let result = rc.resolve_request("/.env", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+
+        // Verify it did NOT enter the route cache
+        let route_cache = rc.route_cache.lock().unwrap();
+        assert!(
+            !route_cache.contains("/.env"),
+            "Blocked dot-paths must not pollute the route cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_dot_path_blocked_in_framework_mode() {
+        let dir = setup_test_dir();
+        fs::write(dir.path().join(".env"), "SECRET=value").unwrap();
+        let rc = make_config(dir.path(), Some("index.php"));
+        let cache = Arc::new(FileCache::new(200));
+        // In framework mode, dot-path must still 404 (not fall through to INDEX_FILE)
+        let result = rc.resolve_request("/.env", &cache).await;
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    // --- .well-known PHP blocking tests ---
+
+    #[tokio::test]
+    async fn test_resolve_blocks_php_in_well_known() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        fs::write(
+            dir.path().join(".well-known/test.php"),
+            "<?php echo 'hack';",
+        )
+        .unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/.well-known/test.php", &cache).await;
+        assert!(
+            matches!(*result, RouteResult::NotFound),
+            "PHP files inside .well-known must not execute, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_well_known_missing_file_fallback() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        // No file at .well-known/openid-configuration
+        let rc = make_config(dir.path(), Some("index.php"));
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/.well-known/openid-configuration", &cache)
+            .await;
+        // Should fall through to INDEX_FILE in framework mode
+        assert!(
+            matches!(*result, RouteResult::Execute(ref p, _) if p.ends_with("index.php")),
+            "Missing .well-known file should fall through to INDEX_FILE, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_well_known_missing_file_no_index() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/.well-known/openid-configuration", &cache)
+            .await;
+        assert!(
+            matches!(*result, RouteResult::NotFound),
+            "Missing .well-known file without INDEX_FILE should 404, got {:?}",
+            result
+        );
     }
 }

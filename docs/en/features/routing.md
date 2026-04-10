@@ -106,6 +106,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal and s
 - **Percent-decoding** runs before sanitization, so encoded traversal attempts like `/%2e%2e/etc/passwd` are caught
 - **Segment filtering** removes `..`, `.`, and empty segments from the resolved path
 - **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked
+- **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*`. See [Dot-Path Blocking](../security/dot-path-blocking.md)
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 

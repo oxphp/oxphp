@@ -58,6 +58,10 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Distributed Tracing & APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, auto-instrumentation, and PHP tracing SDK
 - [Internal Server](features/internal-server.md) — dedicated port for health checks, Prometheus metrics, and live configuration
 
+## Security
+
+- [Dot-Path Blocking](security/dot-path-blocking.md) — automatic blocking of hidden files and directories (`.env`, `.git/`, `.htaccess`)
+
 ## PHP
 
 - [HTTP Request API](php/request-api.md) — object-oriented request access via `oxphp_http_request()`: query params, parsed body, headers, cookies, file uploads, and more

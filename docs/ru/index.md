@@ -58,6 +58,10 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [Распределённая трассировка и APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, автоинструментирование и PHP tracing SDK
 - [Внутренний сервер](features/internal-server.md) — выделенный порт для проверок состояния, метрик Prometheus и просмотра конфигурации
 
+## Безопасность
+
+- [Блокировка dot-путей](security/dot-path-blocking.md) — автоматическая блокировка скрытых файлов и директорий (`.env`, `.git/`, `.htaccess`)
+
 ## PHP
 
 - [HTTP Object API](php/request-api.md) — объектно-ориентированный доступ к запросу через `oxphp_http_request()`: параметры строки запроса, разобранное тело, заголовки, куки, загруженные файлы и многое другое
