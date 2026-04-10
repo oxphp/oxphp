@@ -121,6 +121,8 @@ struct RequestData {
     body_offset: usize,
     /// Whether this slot has been populated for the current request.
     active: bool,
+    /// Whether $_SERVER superglobal population is enabled for this request.
+    sg_enabled: bool,
 
     // ── Object API: lazily accessed via bridge callbacks ──
     /// HTTP method string (e.g. "GET", "POST").
@@ -160,6 +162,7 @@ impl RequestData {
             body: Bytes::new(),
             body_offset: 0,
             active: false,
+            sg_enabled: true,
             method_str: String::new(),
             path_str: String::new(),
             full_uri_str: String::new(),
@@ -230,10 +233,8 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
 
         let vars = &mut data.server_vars;
 
-        // Import process environment variables first so CGI vars can override them.
-        for (key, val) in env_snapshot() {
-            vars.push((key.clone(), val.clone()));
-        }
+        // NOTE: Process environment variables are registered directly from the
+        // static snapshot in oxphp_register_server_variables() (zero-clone path).
 
         push_server_var(vars, "SCRIPT_FILENAME", &script_path.to_string_lossy());
         push_server_var(vars, "DOCUMENT_ROOT", &document_root.to_string_lossy());
@@ -416,19 +417,22 @@ pub fn set_request_data(req: &ScriptRequest) {
             .and_then(|s| CString::new(s).ok());
 
         let sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };
+        data.sg_enabled = sg_enabled;
 
         // Clear previous values but keep the Vec allocation
         data.server_vars.clear();
+
+        // Format remote IP once — reused for both server_vars and object API
+        let remote_ip = req.remote_addr.ip().to_string();
 
         if !sg_enabled {
             // Skip server_vars population — object API fields below are always populated.
         } else {
             let vars = &mut data.server_vars;
 
-            // Import process environment variables first so CGI/HTTP vars can override them.
-            for (key, val) in env_snapshot() {
-                vars.push((key.clone(), val.clone()));
-            }
+            // NOTE: Process environment variables are no longer cloned here.
+            // They are registered directly from the static snapshot in
+            // oxphp_register_server_variables() (zero-clone path).
 
             // CGI/1.1 standard variables
             push_server_var(vars, "REQUEST_METHOD", req.method.as_str());
@@ -476,7 +480,7 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
 
             // Connection info
-            push_server_var(vars, "REMOTE_ADDR", &req.remote_addr.ip().to_string());
+            push_server_var(vars, "REMOTE_ADDR", &remote_ip);
             push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
 
             // HTTPS indicator (CGI/1.1: "on" when TLS is active)
@@ -611,8 +615,7 @@ pub fn set_request_data(req: &ScriptRequest) {
         data.query_string_raw.push_str(&req.query_string);
 
         data.remote_addr_str.clear();
-        data.remote_addr_str
-            .push_str(&req.remote_addr.ip().to_string());
+        data.remote_addr_str.push_str(&remote_ip);
 
         data.protocol_version_str.clear();
         data.protocol_version_str.push_str(match req.version {
@@ -625,14 +628,12 @@ pub fn set_request_data(req: &ScriptRequest) {
         });
 
         // Build full URI: scheme://host[:port]/path[?query]
-        // Use format! to avoid borrow conflicts between struct fields.
         {
             let scheme = if req.is_tls { "https" } else { "http" };
-            let host = &data.host_str;
             let port = data.port_val;
+            let default_port: u16 = if req.is_tls { 443 } else { 80 };
             let path = req.uri.path();
             let qs = &req.query_string;
-            let default_port: u16 = if req.is_tls { 443 } else { 80 };
             let port_part = if port != default_port {
                 format!(":{port}")
             } else {
@@ -643,7 +644,7 @@ pub fn set_request_data(req: &ScriptRequest) {
             } else {
                 format!("?{qs}")
             };
-            data.full_uri_str = format!("{scheme}://{host}{port_part}{path}{qs_part}");
+            data.full_uri_str = format!("{scheme}://{}{port_part}{path}{qs_part}", data.host_str);
         }
 
         // Store raw headers for object API iteration
@@ -750,6 +751,7 @@ pub fn clear_request_data() {
         data.body = Bytes::new();
         data.body_offset = 0;
         data.active = false;
+        data.sg_enabled = true;
 
         // Clear object API fields (retain Vec capacity for reuse)
         data.method_str.clear();
@@ -855,10 +857,27 @@ pub fn build_sapi_module() -> sapi_module_struct {
 
 /// Callback: register $_SERVER variables.
 /// Called by PHP during request startup to populate $_SERVER.
+///
+/// Registers static env snapshot first (by reference — no per-request clone),
+/// then per-request CGI/HTTP vars which override any env duplicates.
 unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_void) {
     REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
         if data.active {
+            // Register static process environment vars first (zero clones).
+            // Per-request CGI vars below will override any matching keys.
+            if data.sg_enabled {
+                for (key, value) in env_snapshot() {
+                    php_register_variable_safe(
+                        key.as_ptr(),
+                        value.as_ptr(),
+                        value.to_bytes().len(),
+                        track_vars_array,
+                    );
+                }
+            }
+
+            // Register per-request CGI/HTTP variables (override env vars).
             for (key, value) in &data.server_vars {
                 php_register_variable_safe(
                     key.as_ptr(),

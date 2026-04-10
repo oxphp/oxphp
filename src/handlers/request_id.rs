@@ -1,5 +1,5 @@
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
@@ -7,6 +7,10 @@ use crate::events::{EventHandler, Priority, Propagation, RequestReceived};
 
 /// Atomic counter for request ID generation.
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Cached epoch seconds — updated lazily when the second changes.
+/// Avoids `SystemTime::now()` syscall on every request within the same second.
+static CACHED_EPOCH_SEC: AtomicU32 = AtomicU32::new(0);
 
 /// Per-process unique identifier (lower 16 bits of PID XOR'd with startup nanos).
 /// Differentiates IDs across multiple instances (containers, replicas).
@@ -25,12 +29,24 @@ fn process_id() -> u16 {
 
 /// Generate a request ID: `{timestamp:08x}{process:04x}{counter:08x}` (20 hex chars).
 /// Unique across processes and restarts via process_id component.
+///
+/// The timestamp is cached in an atomic and refreshed every 256 requests
+/// to avoid calling `SystemTime::now()` on every request.
 fn generate_request_id() -> String {
-    let ts = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as u32;
     let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
+
+    // Refresh timestamp every 256 requests (amortized syscall cost)
+    let ts = if counter & 0xFF == 0 {
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as u32;
+        CACHED_EPOCH_SEC.store(ts, Ordering::Relaxed);
+        ts
+    } else {
+        CACHED_EPOCH_SEC.load(Ordering::Relaxed)
+    };
+
     let pid = process_id();
     let mut id = String::with_capacity(20);
     write!(id, "{ts:08x}{pid:04x}{counter:08x}").unwrap();

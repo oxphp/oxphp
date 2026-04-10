@@ -79,12 +79,24 @@ impl Server {
         let mut http_builder = Builder::new(hyper_util::rt::TokioExecutor::new());
         http_builder
             .http1()
-            .timer(hyper_util::rt::TokioTimer::new());
+            .timer(hyper_util::rt::TokioTimer::new())
+            // Flush the write buffer after every response — reduces latency for
+            // pipelined and keep-alive requests that would otherwise wait in buffer.
+            .pipeline_flush(true)
+            // Use vectored I/O (writev) to send headers + body in a single syscall.
+            .writev(true);
         if config.header_read_timeout > Duration::ZERO {
             http_builder
                 .http1()
                 .header_read_timeout(config.header_read_timeout);
         }
+        // HTTP/2: increase flow-control windows from default 64KB to avoid stalls
+        // on typical PHP responses (10-500KB). Connection window bounds total
+        // concurrent transfer; per-stream window bounds individual responses.
+        http_builder
+            .http2()
+            .initial_connection_window_size(8 * 1024 * 1024)
+            .initial_stream_window_size(4 * 1024 * 1024);
 
         Self {
             route_config: Arc::new(route_config),
@@ -136,6 +148,10 @@ impl Server {
         if self.is_shutdown() {
             return Ok(());
         }
+
+        // Disable Nagle's algorithm — send small responses immediately instead of
+        // waiting up to 40ms for more data. Critical for HTTP keep-alive latency.
+        let _ = stream.set_nodelay(true);
 
         self.metrics.connection_opened();
         let _guard = ConnectionGuard(Arc::clone(&self.metrics));

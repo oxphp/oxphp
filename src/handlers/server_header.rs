@@ -1,9 +1,71 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 use http::HeaderValue;
 
 use crate::events::ResponseBuilding;
 use crate::events::{EventHandler, Priority, Propagation};
+
+/// Cached `Date` header value with 1-second resolution.
+/// Avoids `SystemTime::now()` + `httpdate::fmt_http_date()` + `HeaderValue::from_str()`
+/// on every response — replaces 2 allocations + syscall with a single atomic load.
+struct CachedDate {
+    /// Unix epoch second when the cached value was generated.
+    epoch_sec: AtomicU64,
+    /// Pre-built `HeaderValue` — swapped atomically via `OnceLock` + epoch check.
+    /// Protected by the coarse-grained epoch_sec check: only one thread reformats.
+    value: std::sync::RwLock<HeaderValue>,
+}
+
+static CACHED_DATE: OnceLock<CachedDate> = OnceLock::new();
+
+/// Get a `Date` header value, reusing the cached one if still within the same second.
+#[inline]
+fn get_date_header() -> HeaderValue {
+    let now = SystemTime::now();
+    let epoch_sec = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let cached = CACHED_DATE.get_or_init(|| {
+        let formatted = httpdate::fmt_http_date(now);
+        CachedDate {
+            epoch_sec: AtomicU64::new(epoch_sec),
+            value: std::sync::RwLock::new(HeaderValue::from_str(&formatted).unwrap()),
+        }
+    });
+
+    let prev = cached.epoch_sec.load(Ordering::Relaxed);
+    if prev == epoch_sec {
+        // Same second — return cached value (cheap RwLock read)
+        return cached
+            .value
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+    }
+
+    // Second changed — try to be the updater (CAS to avoid thundering herd)
+    if cached
+        .epoch_sec
+        .compare_exchange(prev, epoch_sec, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        let formatted = httpdate::fmt_http_date(now);
+        let hv = HeaderValue::from_str(&formatted).unwrap();
+        *cached.value.write().unwrap_or_else(|e| e.into_inner()) = hv.clone();
+        return hv;
+    }
+
+    // Another thread is updating — read whatever is there (at most 1s stale)
+    cached
+        .value
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
 
 /// Adds `Server`, `Date`, and `X-Request-ID` headers to every response.
 pub struct ServerHeaderHandler;
@@ -16,11 +78,10 @@ impl EventHandler<ResponseBuilding> for ServerHeaderHandler {
             .headers_mut()
             .insert(http::header::SERVER, HeaderValue::from_static("OxPHP"));
 
-        let now = httpdate::fmt_http_date(SystemTime::now());
         event
             .response
             .headers_mut()
-            .insert(http::header::DATE, HeaderValue::from_str(&now).unwrap());
+            .insert(http::header::DATE, get_date_header());
 
         if let Ok(hv) = HeaderValue::from_str(&event.request_id) {
             event.response.headers_mut().insert("x-request-id", hv);

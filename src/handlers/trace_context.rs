@@ -30,24 +30,28 @@ impl EventHandler<RequestReceived> for TraceContextRequestHandler {
 
         let ctx = TraceContext::from_headers(&event.parts.headers);
 
+        // Store the pre-built traceparent header value to avoid format!() in the
+        // response handler. The traceparent_cache is a [u8; 55] fixed array that
+        // already contains "00-{trace_id}-{span_id}-{flags}".
         event
             .metadata
-            .push(("trace_id".to_string(), ctx.trace_id().to_string()));
+            .push(("traceparent".into(), ctx.traceparent().to_string()));
         event
             .metadata
-            .push(("span_id".to_string(), ctx.span_id().to_string()));
+            .push(("trace_id".into(), ctx.trace_id().to_string()));
+        event
+            .metadata
+            .push(("span_id".into(), ctx.span_id().to_string()));
         event.metadata.push((
-            "parent_span_id".to_string(),
+            "parent_span_id".into(),
             ctx.parent_span_id().unwrap_or("").to_string(),
         ));
         event
             .metadata
-            .push(("trace_flags".to_string(), ctx.trace_flags_hex().to_string()));
+            .push(("trace_flags".into(), ctx.trace_flags_hex().to_string()));
 
         if let Some(ts) = ctx.tracestate() {
-            event
-                .metadata
-                .push(("tracestate".to_string(), ts.to_string()));
+            event.metadata.push(("tracestate".into(), ts.to_string()));
         }
 
         Propagation::Continue
@@ -77,21 +81,13 @@ impl EventHandler<ResponseBuilding> for TraceContextResponseHandler {
             return Propagation::Continue;
         }
 
-        let trace_id = match metadata_get(&event.metadata, "trace_id") {
-            Some(v) => v,
-            None => return Propagation::Continue,
-        };
-        let span_id = match metadata_get(&event.metadata, "span_id") {
-            Some(v) => v,
-            None => return Propagation::Continue,
-        };
-        let trace_flags = match metadata_get(&event.metadata, "trace_flags") {
+        // Use the pre-built traceparent from metadata (avoids format!() allocation).
+        let traceparent = match metadata_get(&event.metadata, "traceparent") {
             Some(v) => v,
             None => return Propagation::Continue,
         };
 
-        let traceparent = format!("00-{}-{}-{}", trace_id, span_id, trace_flags);
-        if let Ok(hv) = http::HeaderValue::from_str(&traceparent) {
+        if let Ok(hv) = http::HeaderValue::from_str(traceparent) {
             event.response.headers_mut().insert("traceparent", hv);
         }
 
@@ -163,7 +159,8 @@ mod tests {
         let mut event = make_request_event();
         handler.handle(&mut event);
 
-        // Should have trace_id, span_id, parent_span_id, trace_flags
+        // Should have traceparent, trace_id, span_id, parent_span_id, trace_flags
+        assert!(metadata_get(&event.metadata, "traceparent").is_some());
         assert!(metadata_get(&event.metadata, "trace_id").is_some());
         assert!(metadata_get(&event.metadata, "span_id").is_some());
         assert!(metadata_get(&event.metadata, "parent_span_id").is_some());
@@ -224,6 +221,10 @@ mod tests {
         let handler = TraceContextResponseHandler::new(true);
         let metadata = vec![
             (
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            ),
+            (
                 "trace_id".to_string(),
                 "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
             ),
@@ -252,6 +253,10 @@ mod tests {
         let handler = TraceContextResponseHandler::new(false);
         let metadata = vec![
             (
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            ),
+            (
                 "trace_id".to_string(),
                 "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
             ),
@@ -269,6 +274,10 @@ mod tests {
     fn test_response_handler_injects_tracestate() {
         let handler = TraceContextResponseHandler::new(true);
         let metadata = vec![
+            (
+                "traceparent".to_string(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            ),
             (
                 "trace_id".to_string(),
                 "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
