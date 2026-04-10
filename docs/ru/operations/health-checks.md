@@ -1,6 +1,6 @@
 ---
 title: Проверки работоспособности
-description: Конечные точки внутреннего сервера для мониторинга работоспособности, сбора метрик Prometheus и инспекции конфигурации во время выполнения.
+description: Конечные точки внутреннего сервера для мониторинга работоспособности, проб Kubernetes, метрик Prometheus и инспекции конфигурации.
 ---
 
 # Проверки работоспособности
@@ -19,9 +19,37 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 > **Примечание:** В продакшене привязывайтесь к `127.0.0.1`, если только внутренний сервер не защищён брандмауэром. Конечная точка `/config` раскрывает операционные детали, которые не должны быть публичными.
 
+## Пробы Kubernetes
+
+OxPHP предоставляет отдельные конечные точки для каждого типа проб Kubernetes. Каждая точка также доступна по короткому алиасу (`/healthz`, `/readyz`, `/startupz`).
+
+| Конечная точка | Алиас | Проверки | 200 | 503 |
+|----------------|-------|----------|-----|-----|
+| `/health/liveness` | `/healthz` | Нет (жив, если отвечает) | Всегда | Никогда |
+| `/health/readiness` | `/readyz` | Не в shutdown, executor healthy, нет failed-плагинов | Готов | Не готов |
+| `/health/startup` | `/startupz` | Executor healthy | Готов | Не готов |
+
+**Liveness** всегда возвращает `200 OK`. Если процесс отвечает на HTTP-запрос — он жив. Проверки executor и плагинов не выполняются — это предотвращает перезапуск подов из-за временных проблем пула воркеров.
+
+**Readiness** возвращает `503 Service Unavailable` когда:
+- Сервер завершает работу (graceful shutdown)
+- Пул PHP-воркеров неисправен
+- Любой плагин сообщает об ошибке
+
+При graceful shutdown readiness сразу возвращает `503`, заставляя Kubernetes убрать под из эндпоинтов Service до завершения дренирования.
+
+**Startup** возвращает `503 Service Unavailable` когда executor ещё не готов. Используйте эту пробу для предотвращения преждевременного убийства пода при медленной инициализации.
+
+Все конечные точки проб возвращают `Content-Type: text/plain` с названием пробы в теле (например, `readiness`). Kubernetes проверяет только HTTP-код статуса.
+
+```bash
+# Быстрая проверка
+curl -s -o /dev/null -w '%{http_code}' http://localhost:9090/health/readiness
+```
+
 ## GET /health
 
-Возвращает статус работоспособности сервера в формате JSON. Используйте эту конечную точку для проверок готовности и жизнеспособности.
+Возвращает полный статус работоспособности сервера в формате JSON. Используйте для дашбордов и систем мониторинга, а не для проб Kubernetes.
 
 ```bash
 curl http://localhost:9090/health
@@ -60,15 +88,6 @@ curl http://localhost:9090/health
 | `total_requests` | integer | Общее количество HTTP-запросов, обработанных на основном порту |
 | `active_connections` | integer | Текущее число открытых соединений на основном порту |
 | `executor_healthy` | boolean | Принимает ли пул PHP-воркеров запросы |
-
-**HTTP-коды статуса:**
-
-| Код | Значение |
-|-----|---------|
-| `200 OK` | Все подсистемы работают нормально |
-| `503 Service Unavailable` | Пул PHP-воркеров деградировал или недоступен, либо плагин сообщает об ошибке |
-
-Конечная точка `/health` работает с минимальными затратами — она читает счётчики в памяти без дискового ввода-вывода, обращения к базе данных или выполнения PHP.
 
 ## GET /metrics
 
@@ -119,7 +138,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## Интеграция с Kubernetes
 
-Используйте конечную точку `/health` как для проверки жизнеспособности, так и для проверки готовности:
+Используйте отдельные конечные точки для каждого типа проб:
 
 ```yaml
 apiVersion: apps/v1
@@ -129,37 +148,48 @@ spec:
     spec:
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.2.0
+          image: ghcr.io/oxphp/oxphp:latest
           env:
             - name: INTERNAL_ADDR
               value: "0.0.0.0:9090"
           ports:
             - containerPort: 8080
             - containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 9090
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/liveness
               port: 9090
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/readiness
               port: 9090
-            initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 2
 ```
 
-Ответ `503` от `/health` заставляет Kubernetes исключить под из списка эндпоинтов Service (проверка готовности) или перезапустить его (проверка жизнеспособности) в зависимости от типа проверки.
+| Проба | Реакция на ошибку |
+|-------|-------------------|
+| Startup | Kubernetes ждёт — не убивает под во время инициализации |
+| Liveness | Kubernetes перезапускает под |
+| Readiness | Kubernetes убирает под из эндпоинтов Service (без перезапуска) |
+
+Короткие алиасы (`/healthz`, `/readyz`, `/startupz`) полностью эквивалентны и могут использоваться вместо полных путей.
 
 ## Проверка работоспособности в Docker Compose
 
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:latest
     ports:
       - "8080:80"
     environment:
