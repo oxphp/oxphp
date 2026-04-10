@@ -248,8 +248,14 @@ impl RouteConfig {
         // 8. File exists → serve/execute
         let path_str = file_path.to_string_lossy();
         if file_cache.is_file(&path_str).await {
-            return if file_path.extension().and_then(|s| s.to_str()) == Some("php") {
-                RouteResult::Execute(file_path, None)
+            let is_php = file_path.extension().and_then(|s| s.to_str()) == Some("php");
+            return if is_php {
+                // Block PHP execution inside .well-known
+                if sanitized.starts_with(".well-known/") {
+                    RouteResult::NotFound
+                } else {
+                    RouteResult::Execute(file_path, None)
+                }
             } else {
                 RouteResult::Serve(file_path)
             };
@@ -946,7 +952,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/.env", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -957,7 +963,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/.git/config", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -968,7 +974,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // %2e = "."
         let result = rc.resolve_request("/%2eenv", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -986,7 +992,7 @@ mod tests {
             .resolve_request("/.well-known/security.txt", &cache)
             .await;
         assert!(
-            matches!(result, RouteResult::Serve(_)),
+            matches!(*result, RouteResult::Serve(_)),
             "Expected Serve for .well-known static file, got {:?}",
             result
         );
@@ -999,7 +1005,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/.well-known", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -1011,7 +1017,7 @@ mod tests {
 
         // Request a blocked dot-path
         let result = rc.resolve_request("/.env", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
 
         // Verify it did NOT enter the route cache
         let route_cache = rc.route_cache.lock().unwrap();
@@ -1029,6 +1035,61 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // In framework mode, dot-path must still 404 (not fall through to INDEX_FILE)
         let result = rc.resolve_request("/.env", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
+    }
+
+    // --- .well-known PHP blocking tests ---
+
+    #[tokio::test]
+    async fn test_resolve_blocks_php_in_well_known() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        fs::write(
+            dir.path().join(".well-known/test.php"),
+            "<?php echo 'hack';",
+        )
+        .unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc.resolve_request("/.well-known/test.php", &cache).await;
+        assert!(
+            matches!(*result, RouteResult::NotFound),
+            "PHP files inside .well-known must not execute, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_well_known_missing_file_fallback() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        // No file at .well-known/openid-configuration
+        let rc = make_config(dir.path(), Some("index.php"));
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/.well-known/openid-configuration", &cache)
+            .await;
+        // Should fall through to INDEX_FILE in framework mode
+        assert!(
+            matches!(*result, RouteResult::Execute(ref p, _) if p.ends_with("index.php")),
+            "Missing .well-known file should fall through to INDEX_FILE, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_well_known_missing_file_no_index() {
+        let dir = setup_test_dir();
+        fs::create_dir_all(dir.path().join(".well-known")).unwrap();
+        let rc = make_config(dir.path(), None);
+        let cache = Arc::new(FileCache::new(200));
+        let result = rc
+            .resolve_request("/.well-known/openid-configuration", &cache)
+            .await;
+        assert!(
+            matches!(*result, RouteResult::NotFound),
+            "Missing .well-known file without INDEX_FILE should 404, got {:?}",
+            result
+        );
     }
 }
