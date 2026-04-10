@@ -62,6 +62,9 @@ TLS termination (if configured)
 HTTP parsing + Request ID assignment
   │
   ▼
+Trusted proxy resolution (if TRUSTED_PROXIES set)
+  │
+  ▼
 Rate limiting check
   │
   ▼
@@ -94,14 +97,15 @@ Route resolution
 
 1. **TLS termination** — if `TLS_CERT` and `TLS_KEY` are configured, OxPHP handles TLS directly. No separate reverse proxy is needed.
 2. **HTTP parsing and request ID** — the request is parsed and a unique request ID is generated (or an incoming `X-Request-ID` header is preserved).
-3. **Rate limiting** — if `RATE_LIMIT` is set, the client's IP is checked against the per-IP request counter. Requests that exceed the limit receive a `429 Too Many Requests` response immediately.
-4. **Route resolution** — the URL is matched against the configured routing mode (traditional, framework, SPA, or worker). The result is either a static file, a PHP script, or a 404.
-5. **Static files** — served directly from an in-memory cache (for frequently accessed files) or streamed from disk. OxPHP adds `ETag`, `Last-Modified`, and `Cache-Control` headers automatically.
-6. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 529 immediately.
-7. **Compression** — text-based responses are compressed with Brotli before being sent when the client sends `Accept-Encoding: br` (configurable via `COMPRESSION_LEVEL`).
-8. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
-9. **Early response** — calling `oxphp_finish_request()` sends the HTTP response to the client immediately. The script continues executing in the background — for writing logs, updating caches, sending notifications — without holding the connection open.
-10. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written.
+3. **Trusted proxy resolution** — if `TRUSTED_PROXIES` is set and the connecting IP is trusted, OxPHP extracts the real client IP, protocol, and host from `Forwarded` (RFC 7239) or `X-Forwarded-*` headers. The resolved IP is used for all subsequent steps including rate limiting and access logging. See [Trusted Proxies](../security/trusted-proxies.md).
+4. **Rate limiting** — if `RATE_LIMIT` is set, the client's IP is checked against the per-IP request counter. Requests that exceed the limit receive a `429 Too Many Requests` response immediately.
+5. **Route resolution** — the URL is matched against the configured routing mode (traditional, framework, SPA, or worker). The result is either a static file, a PHP script, or a 404.
+6. **Static files** — served directly from an in-memory cache (for frequently accessed files) or streamed from disk. OxPHP adds `ETag`, `Last-Modified`, and `Cache-Control` headers automatically.
+7. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 529 immediately.
+8. **Compression** — text-based responses are compressed with Brotli before being sent when the client sends `Accept-Encoding: br` (configurable via `COMPRESSION_LEVEL`).
+9. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
+10. **Early response** — calling `oxphp_finish_request()` sends the HTTP response to the client immediately. The script continues executing in the background — for writing logs, updating caches, sending notifications — without holding the connection open.
+11. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written.
 
 ## Worker Mode vs Standard Mode
 
