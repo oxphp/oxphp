@@ -79,17 +79,22 @@ pub async fn handle_request(
             .is_some_and(compression::accepts_brotli);
 
     // ── RequestReceived event ──
-    // Handlers: RequestIdGenerator (-100), RateLimitHandler (-50), MetricsRequestHandler (0)
+    // Handlers: RequestIdGenerator (-100), TrustedProxyHandler (-80),
+    //           RateLimitHandler (-50), MetricsRequestHandler (0)
     let mut received_event = RequestReceived {
         parts,
         remote_addr,
         request_id: String::new(),
         early_response: None,
         // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
-        // + queue_wait_us + php_exec_us ≈ 7-8 entries
-        metadata: Vec::with_capacity(8),
+        // + queue_wait_us + php_exec_us + peer_addr + forwarded_* ≈ 10 entries
+        metadata: Vec::with_capacity(10),
     };
     server.dispatcher.dispatch(&mut received_event);
+
+    // Read back remote_addr — TrustedProxyHandler may have overwritten it
+    // with the real client IP extracted from Forwarded / X-Forwarded-For.
+    let remote_addr = received_event.remote_addr;
 
     // Take ownership — no clone
     let request_id = std::mem::take(&mut received_event.request_id);

@@ -25,13 +25,23 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             .metadata
             .push(("peer_addr".into(), event.remote_addr.to_string()));
 
-        let forwarded = event
-            .parts
-            .headers
-            .get("forwarded")
-            .and_then(|v| v.to_str().ok());
+        // Collect all Forwarded header values (RFC 7230 §3.2.2: may span multiple lines)
+        let forwarded_combined: Option<String> = {
+            let values: Vec<&str> = event
+                .parts
+                .headers
+                .get_all("forwarded")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .collect();
+            if values.is_empty() {
+                None
+            } else {
+                Some(values.join(", "))
+            }
+        };
 
-        if let Some(fwd_value) = forwarded {
+        if let Some(ref fwd_value) = forwarded_combined {
             let entries = parse_forwarded(fwd_value);
 
             let for_ips: Vec<IpAddr> = entries.iter().filter_map(|e| e.forwarded_for).collect();
@@ -51,13 +61,17 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
                     .push(("forwarded_host".into(), host.to_string()));
             }
         } else {
-            if let Some(xff) = event
+            // Collect all X-Forwarded-For values (may span multiple header lines)
+            let xff_values: Vec<&str> = event
                 .parts
                 .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-            {
-                let ips: Vec<IpAddr> = xff
+                .get_all("x-forwarded-for")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .collect();
+            if !xff_values.is_empty() {
+                let ips: Vec<IpAddr> = xff_values
+                    .join(", ")
                     .split(',')
                     .filter_map(|s| s.trim().parse().ok())
                     .collect();
@@ -150,14 +164,12 @@ fn parse_forwarded(value: &str) -> Vec<ForwardedEntry<'_>> {
 fn parse_forwarded_for(val: &str) -> Option<IpAddr> {
     let val = val.trim_matches('"');
     let val = val.trim_start_matches('[').trim_end_matches(']');
-    // For IPv4 with port like "203.0.113.50:1234", strip the port.
-    // For IPv6, colons are part of the address — only strip for single-colon (IPv4:port).
-    let ip_str = if val.contains(':') && !val.contains("::") && val.matches(':').count() == 1 {
-        val.split_once(':').map(|(ip, _)| ip).unwrap_or(val)
-    } else {
-        val
-    };
-    ip_str.parse().ok()
+    // Try direct parse first (handles plain IPv4, IPv6, and IPv4-mapped IPv6)
+    if let Ok(ip) = val.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    // Fallback: strip port suffix (e.g. "203.0.113.50:1234")
+    val.rsplit_once(':').and_then(|(ip, _)| ip.parse().ok())
 }
 
 #[cfg(test)]
