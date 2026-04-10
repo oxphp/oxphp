@@ -344,6 +344,14 @@ async fn dispatch_request(
                 is_tls: server.is_tls(),
                 version: parts.version,
                 path_info,
+                forwarded_proto: metadata
+                    .iter()
+                    .find(|(k, _)| k == "forwarded_proto")
+                    .map(|(_, v)| v.clone()),
+                forwarded_host: metadata
+                    .iter()
+                    .find(|(k, _)| k == "forwarded_host")
+                    .map(|(_, v)| v.clone()),
             };
 
             let queue_start = Instant::now();
