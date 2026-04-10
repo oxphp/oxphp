@@ -1,6 +1,6 @@
 ---
 title: Health Checks
-description: Internal server endpoints for health monitoring, Prometheus metrics, and runtime configuration inspection.
+description: Internal server endpoints for health monitoring, Kubernetes probes, Prometheus metrics, and runtime configuration inspection.
 ---
 
 # Health Checks
@@ -19,9 +19,37 @@ When `INTERNAL_ADDR` is not set, the internal server does not start and no healt
 
 > **Note:** Bind to `127.0.0.1` in production unless the internal server is behind a firewall. The `/config` endpoint exposes operational details that should not be public.
 
+## Kubernetes Probes
+
+OxPHP provides dedicated endpoints for each Kubernetes probe type. Each endpoint is also available under a short alias (`/healthz`, `/readyz`, `/startupz`).
+
+| Endpoint | Alias | Checks | 200 | 503 |
+|----------|-------|--------|-----|-----|
+| `/health/liveness` | `/healthz` | None (alive if responding) | Always | Never |
+| `/health/readiness` | `/readyz` | Not shutting down, executor healthy, no failed plugins | Ready | Not ready |
+| `/health/startup` | `/startupz` | Executor healthy | Ready | Not ready |
+
+**Liveness** always returns `200 OK`. If the process can respond to the HTTP request, it is alive. No executor or plugin checks are performed — this prevents Kubernetes from restarting pods due to transient worker pool issues.
+
+**Readiness** returns `503 Service Unavailable` when:
+- The server is shutting down (graceful shutdown in progress)
+- The PHP worker pool is unhealthy
+- Any plugin reports a failure
+
+During graceful shutdown, readiness immediately returns `503`, causing Kubernetes to remove the pod from Service endpoints before the drain completes.
+
+**Startup** returns `503 Service Unavailable` when the executor is not yet ready. Use this probe to prevent premature liveness kills during slow initialization.
+
+All probe endpoints return `Content-Type: text/plain` with the probe name as the body (e.g., `readiness`). Kubernetes only inspects the HTTP status code.
+
+```bash
+# Quick check
+curl -s -o /dev/null -w '%{http_code}' http://localhost:9090/health/readiness
+```
+
 ## GET /health
 
-Returns the server health status as JSON. Use this endpoint for readiness and liveness probes.
+Returns the full server health status as JSON. Use this for dashboards and monitoring systems, not for Kubernetes probes.
 
 ```bash
 curl http://localhost:9090/health
@@ -60,15 +88,6 @@ curl http://localhost:9090/health
 | `total_requests` | integer | Total HTTP requests processed on the main port |
 | `active_connections` | integer | Currently open connections on the main port |
 | `executor_healthy` | boolean | Whether the PHP worker pool is accepting requests |
-
-**HTTP status codes:**
-
-| Code | Meaning |
-|------|---------|
-| `200 OK` | All subsystems are healthy |
-| `503 Service Unavailable` | PHP worker pool is degraded or unavailable, or a plugin reports a failure |
-
-The `/health` endpoint is lightweight — it reads in-memory counters with no disk I/O, database access, or PHP execution.
 
 ## GET /metrics
 
@@ -119,7 +138,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## Kubernetes Integration
 
-Use the `/health` endpoint for both liveness and readiness probes:
+Use dedicated probe endpoints for each probe type:
 
 ```yaml
 apiVersion: apps/v1
@@ -129,37 +148,48 @@ spec:
     spec:
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.2.0
+          image: ghcr.io/oxphp/oxphp:latest
           env:
             - name: INTERNAL_ADDR
               value: "0.0.0.0:9090"
           ports:
             - containerPort: 8080
             - containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 9090
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/liveness
               port: 9090
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/readiness
               port: 9090
-            initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 2
 ```
 
-A `503` response from `/health` causes Kubernetes to remove the pod from the Service endpoint list (readiness) or restart it (liveness), depending on the probe type.
+| Probe | Effect on failure |
+|-------|-------------------|
+| Startup | Kubernetes waits — does not kill the pod during initialization |
+| Liveness | Kubernetes restarts the pod |
+| Readiness | Kubernetes removes the pod from Service endpoints (no restart) |
+
+The short aliases (`/healthz`, `/readyz`, `/startupz`) are fully equivalent and can be used instead.
 
 ## Docker Compose Health Check
 
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:latest
     ports:
       - "8080:80"
     environment:

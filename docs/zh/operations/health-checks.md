@@ -1,6 +1,6 @@
 ---
 title: 健康检查
-description: 用于健康监控、Prometheus 指标采集和运行时配置检查的内部服务器端点。
+description: 用于健康监控、Kubernetes 探针、Prometheus 指标采集和运行时配置检查的内部服务器端点。
 ---
 
 # 健康检查
@@ -19,9 +19,37 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 > **注意：** 在生产环境中请绑定到 `127.0.0.1`，除非内部服务器部署在防火墙之后。`/config` 端点会暴露不应公开的运维详情。
 
+## Kubernetes 探针
+
+OxPHP 为每种 Kubernetes 探针类型提供专用端点。每个端点也可通过短别名访问（`/healthz`、`/readyz`、`/startupz`）。
+
+| 端点 | 别名 | 检查内容 | 200 | 503 |
+|------|------|----------|-----|-----|
+| `/health/liveness` | `/healthz` | 无（能响应即存活） | 始终 | 从不 |
+| `/health/readiness` | `/readyz` | 未关闭、executor 健康、无失败插件 | 就绪 | 未就绪 |
+| `/health/startup` | `/startupz` | Executor 健康 | 就绪 | 未就绪 |
+
+**Liveness** 始终返回 `200 OK`。如果进程能响应 HTTP 请求，则表明它是存活的。不执行 executor 或插件检查——这可以防止 Kubernetes 因工作进程池的临时问题而重启 Pod。
+
+**Readiness** 在以下情况返回 `503 Service Unavailable`：
+- 服务器正在关闭（优雅关闭进行中）
+- PHP 工作进程池不健康
+- 任何插件报告故障
+
+在优雅关闭期间，readiness 立即返回 `503`，使 Kubernetes 在排空完成前将 Pod 从 Service 端点中移除。
+
+**Startup** 在 executor 尚未就绪时返回 `503 Service Unavailable`。使用此探针可防止在初始化缓慢时过早终止 Pod。
+
+所有探针端点返回 `Content-Type: text/plain`，响应体为探针名称（如 `readiness`）。Kubernetes 只检查 HTTP 状态码。
+
+```bash
+# 快速检查
+curl -s -o /dev/null -w '%{http_code}' http://localhost:9090/health/readiness
+```
+
 ## GET /health
 
-以 JSON 格式返回服务器健康状态。此端点可用于就绪探针和存活探针。
+以 JSON 格式返回服务器完整健康状态。用于仪表盘和监控系统，而非 Kubernetes 探针。
 
 ```bash
 curl http://localhost:9090/health
@@ -54,21 +82,12 @@ curl http://localhost:9090/health
 ```
 
 | 字段 | 类型 | 描述 |
-|-------|------|-------------|
+|------|------|------|
 | `status` | string | 所有子系统健康时为 `"ok"`，否则为 `"degraded"` |
 | `uptime_secs` | integer | 服务器启动后的运行秒数 |
 | `total_requests` | integer | 主端口处理的 HTTP 请求总数 |
 | `active_connections` | integer | 主端口当前打开的连接数 |
 | `executor_healthy` | boolean | PHP 工作进程池是否正在接受请求 |
-
-**HTTP 状态码：**
-
-| 状态码 | 含义 |
-|------|---------|
-| `200 OK` | 所有子系统均健康 |
-| `503 Service Unavailable` | PHP 工作进程池降级或不可用，或某个插件报告故障 |
-
-`/health` 端点非常轻量——它仅读取内存计数器，不涉及磁盘 I/O、数据库访问或 PHP 执行。
 
 ## GET /metrics
 
@@ -119,7 +138,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## Kubernetes 集成
 
-将 `/health` 端点同时用于存活探针和就绪探针：
+为每种探针类型使用专用端点：
 
 ```yaml
 apiVersion: apps/v1
@@ -129,37 +148,48 @@ spec:
     spec:
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.2.0
+          image: ghcr.io/oxphp/oxphp:latest
           env:
             - name: INTERNAL_ADDR
               value: "0.0.0.0:9090"
           ports:
             - containerPort: 8080
             - containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 9090
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 15
           livenessProbe:
             httpGet:
-              path: /health
+              path: /health/liveness
               port: 9090
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /health/readiness
               port: 9090
-            initialDelaySeconds: 2
             periodSeconds: 5
             failureThreshold: 2
 ```
 
-`/health` 返回 `503` 时，Kubernetes 会根据探针类型将 Pod 从 Service 端点列表中移除（就绪探针）或重启它（存活探针）。
+| 探针 | 失败时的效果 |
+|------|-------------|
+| Startup | Kubernetes 等待——初始化期间不终止 Pod |
+| Liveness | Kubernetes 重启 Pod |
+| Readiness | Kubernetes 从 Service 端点中移除 Pod（不重启） |
+
+短别名（`/healthz`、`/readyz`、`/startupz`）完全等效，可替代完整路径使用。
 
 ## Docker Compose 健康检查
 
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:latest
     ports:
       - "8080:80"
     environment:

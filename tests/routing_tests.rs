@@ -55,11 +55,12 @@ async fn start_server_with_options(
         metrics,
         Arc::new(dispatcher),
         None,
-        0,                                         // compression disabled in tests
-        512 * 1024,                                // max_query_body: 512 KB
-        None,                                      // no worker mode
-        Some("public, max-age=86400".to_string()), // static_cache_control
-        true,                                      // static_cache_enabled
+        0,                                                   // compression disabled in tests
+        512 * 1024,                                          // max_query_body: 512 KB
+        None,                                                // no worker mode
+        Some("public, max-age=86400".to_string()),           // static_cache_control
+        true,                                                // static_cache_enabled
+        Arc::new(std::sync::atomic::AtomicBool::new(false)), // shutdown flag
     ));
 
     tokio::spawn(async move {
@@ -243,6 +244,7 @@ async fn test_internal_server_health() {
             config,
             executor,
             plugin_manager,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
     });
@@ -278,6 +280,7 @@ async fn test_internal_server_metrics() {
             config,
             executor,
             plugin_manager,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .await;
     });

@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,6 +25,7 @@ pub async fn run_internal_server(
     config: Arc<Config>,
     executor: Arc<dyn ScriptExecutor>,
     plugin_manager: Arc<PluginManager>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), crate::types::BoxError> {
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -42,6 +44,7 @@ pub async fn run_internal_server(
         let config = Arc::clone(&config);
         let executor = Arc::clone(&executor);
         let pm = Arc::clone(&plugin_manager);
+        let shutdown = Arc::clone(&shutdown);
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
@@ -49,7 +52,10 @@ pub async fn run_internal_server(
                 let config = Arc::clone(&config);
                 let executor = Arc::clone(&executor);
                 let pm = Arc::clone(&pm);
-                async move { handle_internal_request(req, &metrics, &config, &*executor, &pm) }
+                let shutdown = Arc::clone(&shutdown);
+                async move {
+                    handle_internal_request(req, &metrics, &config, &*executor, &pm, &shutdown)
+                }
             });
 
             let io = TokioIo::new(stream);
@@ -67,8 +73,12 @@ fn handle_internal_request(
     config: &Config,
     executor: &dyn ScriptExecutor,
     plugin_manager: &PluginManager,
+    shutdown: &AtomicBool,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let response = match req.uri().path() {
+        "/health/liveness" | "/healthz" => liveness_response(),
+        "/health/readiness" | "/readyz" => readiness_response(executor, plugin_manager, shutdown),
+        "/health/startup" | "/startupz" => startup_response(executor),
         "/health" => health_response(metrics, executor, plugin_manager),
         "/metrics" => metrics_response(metrics, plugin_manager),
         "/config" => config_response(config, plugin_manager),
@@ -94,6 +104,53 @@ fn handle_internal_request(
             .unwrap(),
     };
     Ok(response)
+}
+
+fn liveness_response() -> Response<ResponseBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "text/plain")
+        .body(full_body(Bytes::from_static(b"liveness")))
+        .unwrap()
+}
+
+fn readiness_response(
+    executor: &dyn ScriptExecutor,
+    plugin_manager: &PluginManager,
+    shutdown: &AtomicBool,
+) -> Response<ResponseBody> {
+    let is_ready = !shutdown.load(Ordering::SeqCst)
+        && executor.is_healthy()
+        && !plugin_manager
+            .health_all()
+            .iter()
+            .any(|(_, h)| *h == crate::plugin::PluginHealth::Failed);
+
+    let status = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "text/plain")
+        .body(full_body(Bytes::from_static(b"readiness")))
+        .unwrap()
+}
+
+fn startup_response(executor: &dyn ScriptExecutor) -> Response<ResponseBody> {
+    let status = if executor.is_healthy() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "text/plain")
+        .body(full_body(Bytes::from_static(b"startup")))
+        .unwrap()
 }
 
 fn health_response(
@@ -168,4 +225,107 @@ fn config_response(config: &Config, plugin_manager: &PluginManager) -> Response<
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(full_body(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::EventDispatcher;
+    use crate::executor::stub::StubExecutor;
+    use crate::executor::ScriptExecutor;
+    use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth, PluginManager};
+    use crate::types::ScriptRequest;
+    use std::sync::atomic::AtomicBool;
+
+    /// Executor that always reports unhealthy.
+    struct UnhealthyExecutor;
+    impl ScriptExecutor for UnhealthyExecutor {
+        fn execute(&self, _: ScriptRequest) -> crate::executor::ExecuteResult {
+            unimplemented!()
+        }
+        fn shutdown(&self) {}
+        fn is_healthy(&self) -> bool {
+            false
+        }
+    }
+
+    /// Plugin that always reports Failed health.
+    struct FailedPlugin;
+    impl Plugin for FailedPlugin {
+        fn name(&self) -> &'static str {
+            "failed-test"
+        }
+        fn version(&self) -> &'static str {
+            "0.0.0"
+        }
+        fn init(&mut self, _ctx: &mut PluginContext) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn health(&self) -> PluginHealth {
+            PluginHealth::Failed
+        }
+    }
+
+    #[test]
+    fn test_liveness_always_200() {
+        let resp = liveness_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "text/plain"
+        );
+    }
+
+    #[test]
+    fn test_startup_healthy() {
+        let executor = StubExecutor::new();
+        let resp = startup_response(&executor);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_startup_unhealthy() {
+        let executor = UnhealthyExecutor;
+        let resp = startup_response(&executor);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_readiness_healthy() {
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+        let shutdown = AtomicBool::new(false);
+        let resp = readiness_response(&executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_readiness_503_on_shutdown() {
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+        let shutdown = AtomicBool::new(true);
+        let resp = readiness_response(&executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_readiness_503_on_executor_unhealthy() {
+        let executor = UnhealthyExecutor;
+        let pm = PluginManager::new();
+        let shutdown = AtomicBool::new(false);
+        let resp = readiness_response(&executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_readiness_503_on_plugin_failed() {
+        let executor = StubExecutor::new();
+        let mut pm = PluginManager::new();
+        pm.add(Box::new(FailedPlugin));
+        let mut dispatcher = EventDispatcher::new();
+        pm.init_all(&mut dispatcher).unwrap();
+        let shutdown = AtomicBool::new(false);
+        let resp = readiness_response(&executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
