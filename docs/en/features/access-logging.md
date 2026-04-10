@@ -72,7 +72,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 | `path` | string | Request URI path |
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
-| `remote_addr` | string | Client IP address and port |
+| `remote_addr` | string | Client IP address and port. When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
 | `trace_id` | string | W3C trace ID (present only when `TRACE_CONTEXT=true`) |
 | `span_id` | string | W3C span ID (present only when `TRACE_CONTEXT=true`) |
 

@@ -70,6 +70,12 @@ pub struct ScriptRequest {
     /// Extra path after the `.php` script (e.g. `/user/42` for `/app.php/user/42`).
     /// Set when `SPLIT_PATH_INFO_ENABLED=true` and the URI contains a `.php` prefix.
     pub path_info: Option<String>,
+    /// Original protocol from trusted proxy (e.g. "https").
+    /// Set from `Forwarded: proto=` or `X-Forwarded-Proto` header.
+    pub forwarded_proto: Option<String>,
+    /// Original host from trusted proxy (e.g. "example.com:8443").
+    /// Set from `Forwarded: host=` or `X-Forwarded-Host` header.
+    pub forwarded_host: Option<String>,
 }
 
 /// A PHP error captured during script execution.

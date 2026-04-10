@@ -1253,6 +1253,8 @@ mod tests {
             is_tls: false,
             version: http::Version::HTTP_11,
             path_info: None,
+            forwarded_proto: None,
+            forwarded_host: None,
         };
 
         let result = executor.execute(request);

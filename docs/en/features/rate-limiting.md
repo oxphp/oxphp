@@ -74,6 +74,8 @@ curl http://localhost:9090/metrics | grep rate_limited
 
 OxPHP rate limits by source IP. All users behind a shared NAT or proxy share one counter. If this is causing problems, consider disabling OxPHP's built-in limiter (`RATE_LIMIT=0`) and applying rate limiting at a higher level (e.g. at your load balancer or API gateway) where you have access to user identifiers.
 
+> **Behind a reverse proxy?** Set `TRUSTED_PROXIES` to ensure rate limiting uses the real client IP instead of the proxy's IP. See [Trusted Proxies](../security/trusted-proxies.md).
+
 ### Rate limiting is not working across multiple instances
 
 OxPHP's rate limiter is in-memory and per-instance. If you run multiple OxPHP instances behind a load balancer, each tracks its own independent counters. A client can send `RATE_LIMIT` requests to each instance without triggering a 429. For coordinated rate limiting across instances, use an external limiter at the load balancer or API gateway level.

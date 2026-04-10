@@ -134,6 +134,8 @@ See the full [documentation](docs/en/index.md) for details.
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path
 - **Path traversal protection** with symlink escape detection
+- **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust
+- **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615)
 - **Non-root container** execution as www-data (UID 82)
 
 ---
@@ -228,6 +230,7 @@ All settings are via environment variables — no config files required.
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
 | `SPLIT_PATH_INFO_ENABLED` | `false` | PATH_INFO splitting for `/script.php/extra/path` URIs (legacy CGI compat) |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
+| `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
 
 ### OpenTelemetry (`plugin-otel` feature)
 

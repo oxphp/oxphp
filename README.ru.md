@@ -135,6 +135,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **Пользовательские страницы ошибок** — загружаются при старте, без I/O на горячем пути
 - **Защита от path traversal** с обнаружением выхода за пределы через символические ссылки
 - **Запуск в контейнере без прав root** от имени www-data (UID 82)
+- **Доверенные прокси** — извлечение реального IP клиента из `Forwarded` (RFC 7239) и `X-Forwarded-*` заголовков с CIDR-доверием
 
 ---
 
@@ -228,6 +229,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Ограниченная очередь для асинхронных задач; отклоняются при заполнении |
 | `SPLIT_PATH_INFO_ENABLED` | `false` | Разбиение PATH_INFO для URI вида `/script.php/extra/path` (совместимость с legacy CGI) |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
+| `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
 
 ### OpenTelemetry (feature `plugin-otel`)
 

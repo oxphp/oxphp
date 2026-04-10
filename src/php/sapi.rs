@@ -484,7 +484,14 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
 
             // HTTPS indicator (CGI/1.1: "on" when TLS is active)
-            if req.is_tls {
+            // Check forwarded proto first, then direct TLS
+            let effective_tls = req
+                .forwarded_proto
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case("https"))
+                .unwrap_or(req.is_tls);
+
+            if effective_tls {
                 push_server_var(vars, "HTTPS", "on");
             }
 
@@ -492,12 +499,16 @@ pub fn set_request_data(req: &ScriptRequest) {
             push_server_var(
                 vars,
                 "REQUEST_SCHEME",
-                if req.is_tls { "https" } else { "http" },
+                if effective_tls { "https" } else { "http" },
             );
 
-            // SERVER_NAME and SERVER_PORT from Host header
-            let default_port = if req.is_tls { "443" } else { "80" };
-            if let Some(host) = req.headers.get(header::HOST) {
+            // SERVER_NAME and SERVER_PORT: forwarded host takes priority
+            let default_port = if effective_tls { "443" } else { "80" };
+            if let Some(ref fwd_host) = req.forwarded_host {
+                let (name, port) = parse_host(fwd_host, default_port);
+                push_server_var(vars, "SERVER_NAME", name);
+                push_server_var(vars, "SERVER_PORT", port);
+            } else if let Some(host) = req.headers.get(header::HOST) {
                 if let Ok(host_str) = host.to_str() {
                     let (name, port) = parse_host(host_str, default_port);
                     push_server_var(vars, "SERVER_NAME", name);
@@ -582,32 +593,43 @@ pub fn set_request_data(req: &ScriptRequest) {
         data.path_str.clear();
         data.path_str.push_str(req.uri.path());
 
-        data.is_secure = req.is_tls;
+        // is_secure: forwarded proto takes priority
+        let effective_tls = req
+            .forwarded_proto
+            .as_deref()
+            .map(|p| p.eq_ignore_ascii_case("https"))
+            .unwrap_or(req.is_tls);
+
+        data.is_secure = effective_tls;
         data.scheme_str.clear();
         data.scheme_str
-            .push_str(if req.is_tls { "https" } else { "http" });
+            .push_str(if effective_tls { "https" } else { "http" });
 
-        // Parse host and port from Host header
+        // Parse host and port: forwarded host takes priority
         data.host_str.clear();
-        data.port_val = if req.is_tls { 443 } else { 80 }; // default for scheme
-        if let Some(host_hdr) = req.headers.get(header::HOST) {
-            if let Ok(host_val) = host_hdr.to_str() {
-                // Handle IPv6: [::1]:8080
-                if let Some(bracket_end) = host_val.find(']') {
-                    data.host_str.push_str(&host_val[..=bracket_end]);
-                    if let Some(port_str) = host_val.get(bracket_end + 2..) {
-                        if let Ok(p) = port_str.parse::<u16>() {
-                            data.port_val = p;
-                        }
-                    }
-                } else if let Some(colon) = host_val.rfind(':') {
-                    data.host_str.push_str(&host_val[..colon]);
-                    if let Ok(p) = host_val[colon + 1..].parse::<u16>() {
+        data.port_val = if effective_tls { 443 } else { 80 };
+
+        let host_source = req
+            .forwarded_host
+            .as_deref()
+            .or_else(|| req.headers.get(header::HOST).and_then(|v| v.to_str().ok()));
+
+        if let Some(host_val) = host_source {
+            // Handle IPv6: [::1]:8080
+            if let Some(bracket_end) = host_val.find(']') {
+                data.host_str.push_str(&host_val[..=bracket_end]);
+                if let Some(port_str) = host_val.get(bracket_end + 2..) {
+                    if let Ok(p) = port_str.parse::<u16>() {
                         data.port_val = p;
                     }
-                } else {
-                    data.host_str.push_str(host_val);
                 }
+            } else if let Some(colon) = host_val.rfind(':') {
+                data.host_str.push_str(&host_val[..colon]);
+                if let Ok(p) = host_val[colon + 1..].parse::<u16>() {
+                    data.port_val = p;
+                }
+            } else {
+                data.host_str.push_str(host_val);
             }
         }
 
@@ -629,9 +651,9 @@ pub fn set_request_data(req: &ScriptRequest) {
 
         // Build full URI: scheme://host[:port]/path[?query]
         {
-            let scheme = if req.is_tls { "https" } else { "http" };
+            let scheme = if effective_tls { "https" } else { "http" };
             let port = data.port_val;
-            let default_port: u16 = if req.is_tls { 443 } else { 80 };
+            let default_port: u16 = if effective_tls { 443 } else { 80 };
             let path = req.uri.path();
             let qs = &req.query_string;
             let port_part = if port != default_port {

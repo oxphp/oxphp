@@ -1,8 +1,10 @@
+mod proxy;
 mod server;
 
 use std::fmt;
 use std::path::PathBuf;
 
+pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
 
 /// Access log verbosity level.
@@ -72,6 +74,9 @@ pub struct Config {
     pub tokio_workers: usize,
     /// Bounded channel capacity for PHP request queue.
     pub queue_capacity: usize,
+    /// Trusted reverse proxy networks (CIDR). When set, X-Forwarded-* and
+    /// Forwarded headers from these peers are trusted for client IP extraction.
+    pub trusted_proxies: Option<TrustedProxyConfig>,
 }
 
 /// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
@@ -225,6 +230,14 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(php_worker_count * 128);
 
+        let trusted_proxies = match TrustedProxyConfig::from_env() {
+            Ok(tp) => tp,
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        };
+
         Ok(Self {
             server,
             log_level,
@@ -252,6 +265,7 @@ impl Config {
             php_workers,
             tokio_workers,
             queue_capacity,
+            trusted_proxies,
         })
     }
 
@@ -294,6 +308,7 @@ impl Config {
             "trace_context": self.trace_context,
             "superglobals_enabled": self.superglobals_enabled,
             "split_path_info": self.server.split_path_info,
+            "trusted_proxies": self.trusted_proxies.is_some(),
         })
     }
 }

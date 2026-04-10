@@ -70,6 +70,14 @@ When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping boo
 | `RATE_LIMIT` | `0` (off) | Maximum requests per IP per time window. `0` disables rate limiting |
 | `RATE_WINDOW_SECONDS` | `60` | Rate limit window duration in seconds |
 
+## Security
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
+
+The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
+
 ## TLS
 
 | Variable | Default | Description |
@@ -164,6 +172,7 @@ MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
+TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
