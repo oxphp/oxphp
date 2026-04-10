@@ -99,8 +99,7 @@ mod tests {
 
     #[test]
     fn test_parse_multiple_cidrs() {
-        let nets =
-            TrustedProxyConfig::parse("10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16").unwrap();
+        let nets = TrustedProxyConfig::parse("10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16").unwrap();
         assert_eq!(nets.len(), 3);
     }
 

@@ -292,9 +292,9 @@ async fn async_main(
     }
 
     if let Some(ref tp_config) = config.trusted_proxies {
-        dispatcher.on(handlers::trusted_proxy::TrustedProxyHandler::new(
-            Arc::new(tp_config.clone()),
-        ));
+        dispatcher.on(handlers::trusted_proxy::TrustedProxyHandler::new(Arc::new(
+            tp_config.clone(),
+        )));
         tracing::info!("Trusted proxy handler registered");
     }
 

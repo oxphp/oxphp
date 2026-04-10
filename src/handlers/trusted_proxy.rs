@@ -369,10 +369,8 @@ mod tests {
     #[test]
     fn test_handler_skips_untrusted_peer() {
         let handler = TrustedProxyHandler::new(make_config("10.0.0.0/8"));
-        let mut event = make_event_with_headers(
-            untrusted_addr(),
-            vec![("x-forwarded-for", "1.2.3.4")],
-        );
+        let mut event =
+            make_event_with_headers(untrusted_addr(), vec![("x-forwarded-for", "1.2.3.4")]);
         let original_addr = event.remote_addr;
         let result = handler.handle(&mut event);
         assert_eq!(result, Propagation::Continue);
@@ -385,10 +383,8 @@ mod tests {
     #[test]
     fn test_handler_xff_basic() {
         let handler = TrustedProxyHandler::new(make_config("10.0.0.0/8"));
-        let mut event = make_event_with_headers(
-            trusted_addr(),
-            vec![("x-forwarded-for", "203.0.113.50")],
-        );
+        let mut event =
+            make_event_with_headers(trusted_addr(), vec![("x-forwarded-for", "203.0.113.50")]);
         handler.handle(&mut event);
         assert_eq!(
             event.remote_addr.ip(),
