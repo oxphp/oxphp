@@ -62,6 +62,9 @@ TLS 终止（如已配置）
 HTTP 解析 + 请求 ID 分配
   │
   ▼
+受信任代理解析（TrustedProxyHandler -80）
+  │
+  ▼
 限流检查
   │
   ▼
@@ -94,14 +97,15 @@ HTTP 解析 + 请求 ID 分配
 
 1. **TLS 终止** — 如果配置了 `TLS_CERT` 和 `TLS_KEY`，OxPHP 直接处理 TLS。无需单独的反向代理。
 2. **HTTP 解析与请求 ID** — 解析请求并生成唯一请求 ID（或保留传入的 `X-Request-ID` 头部）。
-3. **限流** — 如果设置了 `RATE_LIMIT`，将根据每 IP 请求计数器检查客户端 IP。超出限制的请求立即收到 `429 Too Many Requests` 响应。
-4. **路由解析** — URL 与配置的路由模式（传统模式、框架模式、SPA 模式或工作进程模式）进行匹配。结果为静态文件、PHP 脚本或 404。
-5. **静态文件** — 直接从内存缓存（高频访问文件）提供或从磁盘流式传输。OxPHP 自动添加 `ETag`、`Last-Modified` 和 `Cache-Control` 头部。
-6. **PHP 执行** — 请求放入有界队列，由可用的工作进程取出。如果队列已满，客户端立即收到 529。
-7. **压缩** — 当客户端发送 `Accept-Encoding: br` 时，基于文本的响应在发送前使用 Brotli 压缩（通过 `COMPRESSION_LEVEL` 配置）。
-8. **SSE 流式传输** — 如果脚本设置了 `Content-Type: text/event-stream` 或调用了 `oxphp_stream_flush()`，OxPHP 切换到流式模式：每次 `flush()` 调用都会立即将分块发送给客户端，而不是缓冲整个响应。在工作进程模式下，SSE 与[纤程多路复用](../features/fiber-multiplexing.md)协作运行。
-9. **提前响应** — 调用 `oxphp_finish_request()` 会立即将 HTTP 响应发送给客户端。脚本继续在后台执行——用于写入日志、更新缓存、发送通知——而不占用连接。
-10. **响应发送** — 完成的响应通过连接发送回客户端，如果启用了[访问日志](../features/access-logging.md)，则触发日志记录。
+3. **受信任代理解析** — 如果设置了 `TRUSTED_PROXIES`，OxPHP 检查连接 IP 是否受信任，并从 `Forwarded`（RFC 7239）或 `X-Forwarded-*` 头中提取真实客户端 IP、协议和主机名。使用 rightmost-non-trusted 算法防止 IP 欺骗。未设置时跳过此步骤。
+4. **限流** — 如果设置了 `RATE_LIMIT`，将根据每 IP 请求计数器检查客户端 IP。超出限制的请求立即收到 `429 Too Many Requests` 响应。
+5. **路由解析** — URL 与配置的路由模式（传统模式、框架模式、SPA 模式或工作进程模式）进行匹配。结果为静态文件、PHP 脚本或 404。
+6. **静态文件** — 直接从内存缓存（高频访问文件）提供或从磁盘流式传输。OxPHP 自动添加 `ETag`、`Last-Modified` 和 `Cache-Control` 头部。
+7. **PHP 执行** — 请求放入有界队列，由可用的工作进程取出。如果队列已满，客户端立即收到 529。
+8. **压缩** — 当客户端发送 `Accept-Encoding: br` 时，基于文本的响应在发送前使用 Brotli 压缩（通过 `COMPRESSION_LEVEL` 配置）。
+9. **SSE 流式传输** — 如果脚本设置了 `Content-Type: text/event-stream` 或调用了 `oxphp_stream_flush()`，OxPHP 切换到流式模式：每次 `flush()` 调用都会立即将分块发送给客户端，而不是缓冲整个响应。在工作进程模式下，SSE 与[纤程多路复用](../features/fiber-multiplexing.md)协作运行。
+10. **提前响应** — 调用 `oxphp_finish_request()` 会立即将 HTTP 响应发送给客户端。脚本继续在后台执行——用于写入日志、更新缓存、发送通知——而不占用连接。
+11. **响应发送** — 完成的响应通过连接发送回客户端，如果启用了[访问日志](../features/access-logging.md)，则触发日志记录。
 
 ## 工作进程模式与标准模式
 
@@ -159,6 +163,7 @@ OxPHP 提供多项保障，确保您的应用在生产环境中稳定运行：
 - [提前响应](../features/early-response.md) — `oxphp_finish_request()` 与后台处理
 - [异步 Promise](../features/async-promises.md) — `oxphp_async()` / `oxphp_async_await()`
 - [内部服务器](../features/internal-server.md) — health、metrics、config
+- [受信任代理](../security/trusted-proxies.md) — 从反向代理头中提取真实客户端 IP
 - [路由](../features/routing.md) — 四种路由模式及 URL 解析方式
 - [配置参考](../operations/configuration.md) — 环境变量完整列表
 - [指标](../operations/metrics.md) — 观测工作进程池和请求管道

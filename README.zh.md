@@ -132,6 +132,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ### 可靠性与运维
 - **有界请求队列** — 队列满时返回 529 进行背压控制
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
+- **受信任代理** — 通过 CIDR 信任从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP
 - **自定义错误页面** — 启动时预加载，热路径零 I/O
 - **路径穿越防护** — 包含符号链接逃逸检测
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
@@ -228,6 +229,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
 | `SPLIT_PATH_INFO_ENABLED` | `false` | 对 `/script.php/extra/path` 形式的 URI 启用 PATH_INFO 拆分（旧版 CGI 兼容） |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
+| `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
 
 ### OpenTelemetry（`plugin-otel` 特性）
 

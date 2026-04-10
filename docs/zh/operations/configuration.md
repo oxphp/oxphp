@@ -70,6 +70,14 @@ PHP_WORKERS=4:0    # 最少 4 个，最多自动检测（CPU × 2）
 | `RATE_LIMIT` | `0`（关闭） | 每个 IP 在时间窗口内的最大请求数。`0` 禁用限流 |
 | `RATE_WINDOW_SECONDS` | `60` | 限流窗口持续时间（秒） |
 
+## 安全
+
+| 变量 | 默认值 | 描述 |
+|------|--------|------|
+| `TRUSTED_PROXIES` | *（未设置）* | 受信任的反向代理网络（逗号分隔 CIDR 或 `private`）。设置后，OxPHP 使用 rightmost-non-trusted 算法从 `Forwarded`（[RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)）或 `X-Forwarded-For` 中提取真实客户端 IP。同时处理 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 以设置 `$_SERVER['HTTPS']`、`REQUEST_SCHEME`、`SERVER_NAME` 和 `SERVER_PORT`。未设置 = 功能禁用 |
+
+特殊值 `private` 展开为所有 RFC-1918 私有网络、回环和链路本地地址（IPv4 和 IPv6）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10`。
+
 ## TLS
 
 | 变量 | 默认值 | 描述 |
@@ -164,6 +172,7 @@ MAX_CONNECTIONS=10000
 INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
+TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
@@ -256,6 +265,7 @@ curl -s http://localhost:9090/config | jq .
 - [优雅关闭](graceful-shutdown.md) — `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程
 - [TLS](../features/tls.md) — TLS 配置与证书要求
 - [限流](../features/rate-limiting.md) — 基于 IP 的限流详情
+- [受信任代理](../security/trusted-proxies.md) — 从反向代理头中提取真实客户端 IP
 - [工作进程模式](../features/worker-mode.md) — 持久化 PHP 工作进程架构
 - [压缩](../features/compression.md) — Brotli 压缩详情
 - [静态文件](../features/static-files.md) — 缓存与文件服务

@@ -25,6 +25,8 @@ OxPHP 内置了基于 IP 的限速器，无需外部依赖或基础设施。启�
 | `RATE_LIMIT` | `0` | 每个 IP 在窗口内的最大请求数。`0` 以零开销完全禁用限速 |
 | `RATE_WINDOW_SECONDS` | `60` | 限速窗口的持续时间（秒） |
 
+> **在反向代理后面？** 设置 `TRUSTED_PROXIES` 以确保速率限制使用真实客户端 IP 而非代理 IP。参见[受信任代理](../security/trusted-proxies.md)。
+
 ```bash
 # 允许每个 IP 在 60 秒窗口内发送 100 个请求
 RATE_LIMIT=100
