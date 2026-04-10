@@ -51,7 +51,7 @@ pub struct Server {
     pub(crate) static_cache_control: Option<String>,
     /// Pre-configured HTTP builder reused across all connections.
     http_builder: Builder<hyper_util::rt::TokioExecutor>,
-    shutdown: AtomicBool,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -68,6 +68,7 @@ impl Server {
         worker_file: Option<PathBuf>,
         static_cache_control: Option<String>,
         static_cache_enabled: bool,
+        shutdown: Arc<AtomicBool>,
     ) -> Self {
         let mut route_config = RouteConfig::new(config);
         if let Some(wf) = worker_file {
@@ -110,7 +111,7 @@ impl Server {
             max_query_body,
             static_cache_control,
             http_builder,
-            shutdown: AtomicBool::new(false),
+            shutdown,
         }
     }
 

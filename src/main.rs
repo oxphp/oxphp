@@ -4,6 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod logging;
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::net::TcpListener;
@@ -348,6 +349,8 @@ async fn async_main(
         tracing::info!("PATH_INFO splitting enabled (SPLIT_PATH_INFO_ENABLED=true)");
     }
 
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
     let server = Arc::new(server::Server::new(
         &config.server,
         executor,
@@ -361,6 +364,7 @@ async fn async_main(
             .static_cache_ttl
             .map(|ttl| format!("public, max-age={ttl}")),
         config.static_cache_enabled,
+        Arc::clone(&shutdown_flag),
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));
 
