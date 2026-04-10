@@ -199,6 +199,12 @@ services:
 
       # Record bind parameters in db.params span attribute.
       # - OTEL_APM_DB_CAPTURE_PARAMS_ENABLED=false
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
 
   # ── Jaeger — tracing backend (UI at http://localhost:16686) ──
