@@ -1141,6 +1141,7 @@ dependencies = [
  "httpdate",
  "hyper",
  "hyper-util",
+ "ipnet",
  "libc",
  "lru",
  "mimalloc",

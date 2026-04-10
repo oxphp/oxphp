@@ -60,6 +60,9 @@ thiserror = "2"
 # C standard library (calloc/free for call_php arg buffers)
 libc = "0.2"
 
+# CIDR matching for trusted proxies
+ipnet = "2"
+
 # Fast allocator
 mimalloc = "0.1"
 
