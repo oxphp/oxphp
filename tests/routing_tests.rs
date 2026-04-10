@@ -190,6 +190,14 @@ async fn test_server_header() {
     let resp = reqwest::get(&url).await.unwrap();
     let server_hdr = resp.headers().get("server").unwrap().to_str().unwrap();
     assert_eq!(server_hdr, "OxPHP");
+
+    let nosniff = resp
+        .headers()
+        .get("x-content-type-options")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(nosniff, "nosniff");
 }
 
 #[tokio::test]
