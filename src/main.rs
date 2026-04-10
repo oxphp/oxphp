@@ -127,6 +127,12 @@ fn main() -> Result<(), types::BoxError> {
     let runtime = if tokio_workers > 1 {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(tokio_workers)
+            // Tokio workers only do I/O + channel ops (PHP runs on OS threads),
+            // so 512KB stack is sufficient. Reduces memory per worker from 2MB.
+            .thread_stack_size(512 * 1024)
+            // Lower global_queue_interval improves fairness and tail latency
+            // under high concurrency (default is 61).
+            .global_queue_interval(32)
             .enable_all()
             .build()?
     } else {

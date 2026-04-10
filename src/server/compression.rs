@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::{header, Response};
+use http::{header, HeaderValue, Response};
 use http_body_util::BodyExt;
 
 use crate::types::{full_body, ResponseBody};
@@ -104,15 +104,14 @@ pub async fn maybe_compress(
     let mut response = Response::from_parts(parts, full_body(Bytes::from(compressed)));
     response
         .headers_mut()
-        .insert(header::CONTENT_ENCODING, "br".parse().unwrap());
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        compressed_len.to_string().parse().unwrap(),
-    );
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
     // Append Vary: Accept-Encoding so caches store both compressed and uncompressed
     response
         .headers_mut()
-        .append(header::VARY, "Accept-Encoding".parse().unwrap());
+        .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     response
 }
 

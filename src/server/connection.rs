@@ -84,7 +84,9 @@ pub async fn handle_request(
         remote_addr,
         request_id: String::new(),
         early_response: None,
-        metadata: Vec::new(),
+        // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
+        // + queue_wait_us + php_exec_us ≈ 7-8 entries
+        metadata: Vec::with_capacity(8),
     };
     server.dispatcher.dispatch(&mut received_event);
 
@@ -229,14 +231,14 @@ async fn dispatch_request(
 
     let mut request_body_size = 0usize;
 
-    let response = match route_result {
+    let response = match &*route_result {
         RouteResult::Serve(file_path) => {
             // Read-only cache check: read lock, no LRU update, no stat() syscall
             let cache_key = file_path.to_string_lossy();
             let was_cached = server.file_cache.content_cached(&cache_key);
 
             let response = static_file::serve(
-                &file_path,
+                file_path,
                 &server.file_cache,
                 server.route_config.canonical_root(),
                 &parts.headers,
@@ -253,6 +255,8 @@ async fn dispatch_request(
             response
         }
         RouteResult::Execute(script_path, path_info) => {
+            let script_path = script_path.clone();
+            let path_info = path_info.clone();
             let is_query = is_query_method(&parts.method);
 
             // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2

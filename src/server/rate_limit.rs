@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -13,6 +14,9 @@ const MAX_TRACKED_IPS: usize = 100_000;
 
 pub struct RateLimiter {
     limits: DashMap<IpAddr, (u32, Instant)>,
+    /// Approximate count of tracked IPs, updated atomically.
+    /// Avoids `DashMap::len()` which iterates all shards under read locks.
+    tracked_count: AtomicUsize,
     max_requests: u32,
     window_secs: u64,
 }
@@ -21,6 +25,7 @@ impl RateLimiter {
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
             limits: DashMap::new(),
+            tracked_count: AtomicUsize::new(0),
             max_requests,
             window_secs,
         }
@@ -32,13 +37,20 @@ impl RateLimiter {
         ip: IpAddr,
         request_id: &str,
     ) -> Option<Response<ResponseBody>> {
-        // Hard cap check BEFORE acquiring entry lock to prevent OOM under IP rotation
-        if self.limits.len() > MAX_TRACKED_IPS {
+        // Hard cap check BEFORE acquiring entry lock to prevent OOM under IP rotation.
+        // Uses approximate atomic counter instead of DashMap::len() (which iterates all shards).
+        if self.tracked_count.load(Ordering::Relaxed) > MAX_TRACKED_IPS {
             self.cleanup();
         }
 
         let now = Instant::now();
-        let mut entry = self.limits.entry(ip).or_insert((0, now));
+        let mut entry = match self.limits.entry(ip) {
+            dashmap::mapref::entry::Entry::Occupied(e) => e.into_ref(),
+            dashmap::mapref::entry::Entry::Vacant(e) => {
+                self.tracked_count.fetch_add(1, Ordering::Relaxed);
+                e.insert((0, now))
+            }
+        };
         let (count, window_start) = entry.value_mut();
 
         // Reset window if expired
@@ -81,6 +93,9 @@ impl RateLimiter {
         self.limits.retain(|_, (_, window_start)| {
             now.duration_since(*window_start).as_secs() < self.window_secs * 2
         });
+        // Re-sync the approximate counter after cleanup
+        self.tracked_count
+            .store(self.limits.len(), Ordering::Relaxed);
     }
 }
 

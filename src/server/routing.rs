@@ -44,7 +44,9 @@ pub struct RouteConfig {
     split_path_info: bool,
     /// Cache of resolved routes keyed by URI path.
     /// Mutex is fine here: hold time is O(1) for both get and put.
-    route_cache: Mutex<LruCache<String, RouteResult>>,
+    /// Stores `Arc<RouteResult>` so cache hits are a single atomic increment
+    /// instead of a `PathBuf::clone()` heap allocation.
+    route_cache: Mutex<LruCache<String, Arc<RouteResult>>>,
 }
 
 impl RouteConfig {
@@ -127,12 +129,13 @@ impl RouteConfig {
         &self,
         uri_path: &str,
         file_cache: &Arc<FileCache>,
-    ) -> RouteResult {
-        // Fast path: check route cache (single lock, O(1) get + LRU promotion)
+    ) -> Arc<RouteResult> {
+        // Fast path: check route cache (single lock, O(1) get + LRU promotion).
+        // Returns Arc clone (atomic increment) instead of PathBuf heap allocation.
         {
             let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(result) = cache.get(uri_path) {
-                return result.clone();
+                return Arc::clone(result);
             }
         }
 
@@ -160,13 +163,15 @@ impl RouteConfig {
             RouteResult::NotFound => result,
         };
 
+        let arc_result = Arc::new(result);
+
         // Cache the result (LruCache handles eviction automatically)
         {
             let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
-            cache.put(uri_path.to_string(), result.clone());
+            cache.put(uri_path.to_string(), Arc::clone(&arc_result));
         }
 
-        result
+        arc_result
     }
 
     /// Check that a resolved path is within the canonical document root.
@@ -437,7 +442,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/style.css", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     #[tokio::test]
@@ -446,7 +451,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/index.php", &cache).await;
-        assert!(matches!(result, RouteResult::Execute(..)));
+        assert!(matches!(*result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -456,7 +461,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     #[tokio::test]
@@ -466,7 +471,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/", &cache).await;
         // index.php exists and is checked first
-        assert!(matches!(result, RouteResult::Execute(..)));
+        assert!(matches!(*result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -475,7 +480,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/nonexistent.txt", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     // --- Framework mode tests ---
@@ -486,7 +491,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/unknown/path", &cache).await;
-        assert!(matches!(result, RouteResult::Execute(..)));
+        assert!(matches!(*result, RouteResult::Execute(..)));
     }
 
     #[tokio::test]
@@ -495,7 +500,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/about.php", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -504,7 +509,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/index.php", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -513,7 +518,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/style.css", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     // --- SPA mode tests ---
@@ -524,7 +529,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.html"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/unknown/path", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     #[tokio::test]
@@ -533,7 +538,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.html"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/style.css", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     // --- Security tests ---
@@ -544,7 +549,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/../etc/passwd", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -554,7 +559,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // %2e%2e = ".."
         let result = rc.resolve_request("/%2e%2e/etc/passwd", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     // --- Symlink escape test ---
@@ -574,7 +579,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/escape/secret.txt", &cache).await;
         assert!(
-            matches!(result, RouteResult::NotFound),
+            matches!(*result, RouteResult::NotFound),
             "Symlink escape should be blocked"
         );
     }
@@ -594,11 +599,11 @@ mod tests {
 
         // First request: cache miss, canonicalize, block
         let result1 = rc.resolve_request("/escape/secret.txt", &cache).await;
-        assert!(matches!(result1, RouteResult::NotFound));
+        assert!(matches!(*result1, RouteResult::NotFound));
 
         // Second request: should hit the canonical cache, still blocked
         let result2 = rc.resolve_request("/escape/secret.txt", &cache).await;
-        assert!(matches!(result2, RouteResult::NotFound));
+        assert!(matches!(*result2, RouteResult::NotFound));
 
         // Verify the canonical path was cached
         let escaped_path = dir.path().join("escape/secret.txt");
@@ -615,7 +620,7 @@ mod tests {
         let rc = make_config(dir.path(), Some("index.php"));
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/", &cache).await;
-        match result {
+        match &*result {
             RouteResult::Execute(path, _) => {
                 assert!(
                     path.ends_with("index.php"),
@@ -636,7 +641,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // /_profiler/ has trailing slash, no _profiler/index.php exists
         let result = rc.resolve_request("/_profiler/", &cache).await;
-        match result {
+        match &*result {
             RouteResult::Execute(path, _) => {
                 assert!(
                     path.ends_with("index.php"),
@@ -656,7 +661,7 @@ mod tests {
         let rc = make_config(dir.path(), None);
         let cache = Arc::new(FileCache::new(200));
         let result = rc.resolve_request("/sub/page.html", &cache).await;
-        assert!(matches!(result, RouteResult::Serve(_)));
+        assert!(matches!(*result, RouteResult::Serve(_)));
     }
 
     #[tokio::test]
@@ -726,7 +731,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // /about.php/user/42 → script=about.php, path_info=/user/42
         let result = rc.resolve_request("/about.php/user/42", &cache).await;
-        match result {
+        match &*result {
             RouteResult::Execute(path, Some(pi)) => {
                 assert!(path.ends_with("about.php"), "got {:?}", path);
                 assert_eq!(pi, "/user/42");
@@ -742,7 +747,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // /about.php → normal execute, no path_info
         let result = rc.resolve_request("/about.php", &cache).await;
-        match result {
+        match &*result {
             RouteResult::Execute(path, None) => {
                 assert!(path.ends_with("about.php"), "got {:?}", path);
             }
@@ -758,7 +763,7 @@ mod tests {
         // Without splitting, /about.php/user/42 is a single path → not found
         let result = rc.resolve_request("/about.php/user/42", &cache).await;
         assert!(
-            matches!(result, RouteResult::NotFound),
+            matches!(*result, RouteResult::NotFound),
             "Without split, path with extra segments should 404"
         );
     }
@@ -770,7 +775,7 @@ mod tests {
         let cache = Arc::new(FileCache::new(200));
         // /missing.php/foo → script doesn't exist → not found
         let result = rc.resolve_request("/missing.php/foo", &cache).await;
-        assert!(matches!(result, RouteResult::NotFound));
+        assert!(matches!(*result, RouteResult::NotFound));
     }
 
     #[tokio::test]
@@ -781,7 +786,7 @@ mod tests {
         let result = rc
             .resolve_request("/index.php/api/v2/users/42/profile", &cache)
             .await;
-        match result {
+        match &*result {
             RouteResult::Execute(path, Some(pi)) => {
                 assert!(path.ends_with("index.php"), "got {:?}", path);
                 assert_eq!(pi, "/api/v2/users/42/profile");
