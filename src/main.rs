@@ -308,12 +308,15 @@ async fn async_main(
 
     tracing::info!(addr = %local_addr, "Server listening");
 
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
     // Spawn internal server if configured (before Server::new consumes executor)
     let internal_handle = if let Some(ref internal_addr) = config.internal_addr {
         let metrics_ref = Arc::clone(&metrics);
         let config_ref = Arc::clone(&config);
         let executor_ref = Arc::clone(&executor);
         let pm_ref = Arc::clone(&plugin_manager);
+        let shutdown_ref = Arc::clone(&shutdown_flag);
         let addr = internal_addr.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = server::internal::run_internal_server(
@@ -322,6 +325,7 @@ async fn async_main(
                 config_ref,
                 executor_ref,
                 pm_ref,
+                shutdown_ref,
             )
             .await
             {
@@ -348,8 +352,6 @@ async fn async_main(
     if config.server.split_path_info {
         tracing::info!("PATH_INFO splitting enabled (SPLIT_PATH_INFO_ENABLED=true)");
     }
-
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     let server = Arc::new(server::Server::new(
         &config.server,

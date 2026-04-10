@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,6 +25,7 @@ pub async fn run_internal_server(
     config: Arc<Config>,
     executor: Arc<dyn ScriptExecutor>,
     plugin_manager: Arc<PluginManager>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), crate::types::BoxError> {
     let listener = TcpListener::bind(addr).await?;
     let local_addr = listener.local_addr()?;
@@ -42,6 +44,7 @@ pub async fn run_internal_server(
         let config = Arc::clone(&config);
         let executor = Arc::clone(&executor);
         let pm = Arc::clone(&plugin_manager);
+        let shutdown = Arc::clone(&shutdown);
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
@@ -49,7 +52,10 @@ pub async fn run_internal_server(
                 let config = Arc::clone(&config);
                 let executor = Arc::clone(&executor);
                 let pm = Arc::clone(&pm);
-                async move { handle_internal_request(req, &metrics, &config, &*executor, &pm) }
+                let shutdown = Arc::clone(&shutdown);
+                async move {
+                    handle_internal_request(req, &metrics, &config, &*executor, &pm, &shutdown)
+                }
             });
 
             let io = TokioIo::new(stream);
@@ -67,6 +73,7 @@ fn handle_internal_request(
     config: &Config,
     executor: &dyn ScriptExecutor,
     plugin_manager: &PluginManager,
+    _shutdown: &AtomicBool,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let response = match req.uri().path() {
         "/health" => health_response(metrics, executor, plugin_manager),
