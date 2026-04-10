@@ -291,6 +291,13 @@ async fn async_main(
         tracing::info!("Trace context handler registered");
     }
 
+    if let Some(ref tp_config) = config.trusted_proxies {
+        dispatcher.on(handlers::trusted_proxy::TrustedProxyHandler::new(
+            Arc::new(tp_config.clone()),
+        ));
+        tracing::info!("Trusted proxy handler registered");
+    }
+
     dispatcher.freeze();
     let dispatcher = Arc::new(dispatcher);
     let plugin_manager = Arc::new(plugin_manager);
