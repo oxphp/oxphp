@@ -38,6 +38,7 @@ async fn start_server_with_options(
         Arc::clone(&metrics),
     ));
     dispatcher.on(oxphp::handlers::server_header::ServerHeaderHandler);
+    dispatcher.on(oxphp::handlers::security_headers::SecurityHeadersHandler::new());
     dispatcher.on(oxphp::handlers::access_log::AccessLogHandler::new(
         oxphp::config::AccessLogLevel::All,
     ));

@@ -261,6 +261,7 @@ async fn async_main(
         &metrics,
     )));
     dispatcher.on(handlers::server_header::ServerHeaderHandler);
+    dispatcher.on(handlers::security_headers::SecurityHeadersHandler::new());
     if config.access_log != oxphp::config::AccessLogLevel::Off {
         dispatcher.on(handlers::access_log::AccessLogHandler::new(
             config.access_log,
