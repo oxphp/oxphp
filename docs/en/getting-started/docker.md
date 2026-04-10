@@ -23,6 +23,8 @@ This copies your application into the container and serves it from `/var/www/htm
 
 For real-world applications, use a multi-stage Dockerfile with separate `dev` and `prod` targets. The `dev` target includes PHP CLI, Composer, and Xdebug. The `prod` target builds on the minimal OxPHP image with only what's needed in production.
 
+> **Tip:** A ready-to-use version of this Dockerfile is available at [`Dockerfile.best.example`](../../../Dockerfile.best.example) in the repository root. Copy it into your project and adjust the extensions to match your needs.
+
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
 FROM php:8.4-zts-alpine3.23 AS php-base

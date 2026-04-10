@@ -23,6 +23,8 @@ COPY --chown=www-data:www-data . /var/www/html
 
 对于实际生产应用，建议使用带有独立 `dev` 和 `prod` 目标的多阶段 Dockerfile。`dev` 目标包含 PHP CLI、Composer 和 Xdebug，`prod` 目标基于最小化 OxPHP 镜像，仅包含生产所需的内容。
 
+> **提示：** 仓库根目录下的 [`Dockerfile.best.example`](../../../Dockerfile.best.example) 提供了该 Dockerfile 的可直接使用版本。将其复制到你的项目中，按需调整扩展即可。
+
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
 FROM php:8.4-zts-alpine3.23 AS php-base

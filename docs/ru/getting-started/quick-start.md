@@ -43,6 +43,8 @@ COPY --chown=www-data:www-data . /var/www/html
 
 Официальный образ включает серверный бинарный файл, PHP 8.4 ZTS, PHP-расширение OxPHP и все зависимости времени выполнения.
 
+> **Совет:** Если вашему приложению нужны дополнительные PHP-расширения (pdo_pgsql, intl, xdebug и т.д.), см. [`Dockerfile.best.example`](../../../Dockerfile.best.example) в корне репозитория — готовый многоэтапный Dockerfile с отдельными целями `dev` и `prod`.
+
 ### 3. Добавьте compose.yaml
 
 ```yaml
