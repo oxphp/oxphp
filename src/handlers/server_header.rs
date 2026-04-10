@@ -67,24 +67,23 @@ fn get_date_header() -> HeaderValue {
         .clone()
 }
 
-/// Adds `Server`, `Date`, and `X-Request-ID` headers to every response.
+/// Adds `Server`, `Date`, `X-Content-Type-Options`, and `X-Request-ID` headers to every response.
 pub struct ServerHeaderHandler;
 
 impl EventHandler<ResponseBuilding> for ServerHeaderHandler {
     #[inline]
     fn handle(&self, event: &mut ResponseBuilding) -> Propagation {
-        event
-            .response
-            .headers_mut()
-            .insert(http::header::SERVER, HeaderValue::from_static("OxPHP"));
+        let headers = event.response.headers_mut();
 
-        event
-            .response
-            .headers_mut()
-            .insert(http::header::DATE, get_date_header());
+        headers.insert(http::header::SERVER, HeaderValue::from_static("OxPHP"));
+        headers.insert(http::header::DATE, get_date_header());
+        headers.insert(
+            http::header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
 
         if let Ok(hv) = HeaderValue::from_str(&event.request_id) {
-            event.response.headers_mut().insert("x-request-id", hv);
+            headers.insert("x-request-id", hv);
         }
 
         Propagation::Continue
@@ -177,6 +176,31 @@ mod tests {
         assert!(date.ends_with(" GMT"), "Date must end with GMT: {date}");
         // Validate it parses back as valid HTTP-date
         httpdate::parse_http_date(date).expect("Date must be valid HTTP-date");
+    }
+
+    #[test]
+    fn test_adds_nosniff_header() {
+        let handler = ServerHeaderHandler;
+        let mut event = ResponseBuilding {
+            request_id: "abc123".to_string(),
+            response: Response::builder()
+                .status(200)
+                .body(full_body(Bytes::from_static(b"OK")))
+                .unwrap(),
+            metadata: Vec::new(),
+        };
+
+        handler.handle(&mut event);
+        assert_eq!(
+            event
+                .response
+                .headers()
+                .get("x-content-type-options")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "nosniff"
+        );
     }
 
     #[test]
