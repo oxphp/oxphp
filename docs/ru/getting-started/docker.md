@@ -23,6 +23,8 @@ COPY --chown=www-data:www-data . /var/www/html
 
 Для реальных приложений используйте многоэтапный Dockerfile с отдельными целями `dev` и `prod`. Цель `dev` включает PHP CLI, Composer и Xdebug. Цель `prod` строится на минимальном образе OxPHP только с тем, что необходимо в продакшене.
 
+> **Совет:** Готовая версия этого Dockerfile доступна в файле [`Dockerfile.best.example`](../../../Dockerfile.best.example) в корне репозитория. Скопируйте его в свой проект и настройте расширения под ваши нужды.
+
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
 FROM php:8.4-zts-alpine3.23 AS php-base

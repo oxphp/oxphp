@@ -43,6 +43,8 @@ COPY --chown=www-data:www-data . /var/www/html
 
 The official image includes the server binary, PHP 8.4 ZTS, the OxPHP PHP extension, and all runtime dependencies.
 
+> **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`Dockerfile.best.example`](../../../Dockerfile.best.example) in the repository root — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
+
 ### 3. Add a compose.yaml
 
 ```yaml
