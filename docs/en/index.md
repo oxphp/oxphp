@@ -17,7 +17,7 @@ On a dedicated [internal port](features/internal-server.md), [health checks](ope
 
 [Logs](features/access-logging.md) are structured JSON: method, path, status, response time, and [request ID](features/request-ids.md) in every line. They are easy to parse in Loki, Elasticsearch, or any other tool without additional grok patterns.
 
-If you want to try [worker mode](features/worker-mode.md), where the PHP process is not recreated on every request, a single environment variable `INDEX_FILE=worker.php` is all it takes. The framework initializes once and then handles thousands of requests without reloading. To switch back to classic mode, just remove the variable.
+If you want to try [worker mode](features/worker-mode.md), where the PHP process is not recreated on every request, a single environment variable `WORKER_FILE=worker.php` is all it takes. The framework initializes once and then handles thousands of requests without reloading. To switch back to classic mode, just remove the variable.
 
 OxPHP also includes capabilities that typically require separate tools or third-party libraries:
 
