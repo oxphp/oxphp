@@ -35,6 +35,7 @@ fn is_query_method(method: &Method) -> bool {
 }
 
 /// Look up a key in the metadata vector, returning empty string if not found.
+#[inline]
 fn metadata_get<'a>(metadata: &'a [(String, String)], key: &str) -> &'a str {
     metadata
         .iter()

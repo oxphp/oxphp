@@ -120,6 +120,7 @@ impl FileCache {
     }
 
     /// Read-only check whether content is in the cache. No LRU update, no I/O.
+    #[inline]
     pub fn content_cached(&self, key: &str) -> bool {
         let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
         guard.content.peek(key).is_some()
