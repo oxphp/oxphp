@@ -161,8 +161,10 @@ impl RouteConfig {
         uri_path: &str,
         file_cache: &Arc<FileCache>,
     ) -> Arc<RouteResult> {
-        // Block dot-paths before cache (keeps junk out of LRU)
-        if is_blocked_dot_path(uri_path) {
+        // Block dot-paths before cache (keeps junk out of LRU). Fast-path:
+        // byte scan rejects any need for percent-decoding for the common
+        // case of clean URIs (`/api/users`, `/style.css`, `/`).
+        if has_dot_segment_markers(uri_path) && is_blocked_dot_path(uri_path) {
             return Arc::new(RouteResult::NotFound);
         }
 
@@ -326,6 +328,36 @@ pub(crate) fn has_php_component(sanitized: &str) -> bool {
     false
 }
 
+/// Byte-level screen: returns true when the URI is *provably clean* of any
+/// dot-segment and percent-encoding, so the full decoded check can be skipped.
+///
+/// The vast majority of legitimate requests (`/api/users`, `/products/42`,
+/// `/style.css`, `/`) trip none of these markers and skip the expensive
+/// percent-decode + split path on the hot path.
+#[inline]
+fn has_dot_segment_markers(uri_path: &str) -> bool {
+    let bytes = uri_path.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    // Leading dot (e.g. `.env` passed without a slash prefix).
+    if bytes[0] == b'.' {
+        return true;
+    }
+    // Look for either `/.` (literal dot-segment start) or `%` (any percent-
+    // encoded sequence — might hide a dot via %2e/%2E).
+    for i in 0..bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            return true;
+        }
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'.' {
+            return true;
+        }
+    }
+    false
+}
+
 /// Returns true if the URI path contains a blocked dot-segment.
 ///
 /// A dot-segment is any path component starting with `.` (e.g. `.git`, `.env`).
@@ -334,6 +366,8 @@ pub(crate) fn has_php_component(sanitized: &str) -> bool {
 /// `/.well-known/` are blocked.
 ///
 /// The check runs on percent-decoded input to catch encoded bypasses like `/%2egit/`.
+/// Callers should first screen via [`has_dot_segment_markers`] to skip this
+/// function entirely for clean URIs.
 fn is_blocked_dot_path(uri_path: &str) -> bool {
     let decoded = match percent_decode_str(uri_path).decode_utf8() {
         Ok(s) => s,
