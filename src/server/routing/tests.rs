@@ -841,3 +841,197 @@ async fn test_resolve_well_known_missing_file_traditional_falls_back() {
         other => panic!("Expected fallback to index.php, got {:?}", other),
     }
 }
+
+// --- Unicode path tests (Cyrillic / CJK / Emoji) ---
+//
+// These tests verify that the byte-level hot-path optimisations
+// (has_dot_segment_markers, already_sanitized, has_php_component,
+// contains_blocked_dot_segment) stay correct for non-ASCII UTF-8 where
+// every continuation byte is 0x80-0xBF and start bytes are 0xC2-0xF4 —
+// none of which collide with the ASCII markers we scan for ('/', '.', '%').
+
+#[test]
+fn test_sanitize_path_preserves_cyrillic() {
+    // `/страница` — raw Cyrillic in the already-decoded input.
+    assert_eq!(sanitize_path("/страница"), "страница");
+    assert_eq!(sanitize_path("/api/пользователи/42"), "api/пользователи/42");
+}
+
+#[test]
+fn test_sanitize_path_preserves_cjk() {
+    assert_eq!(sanitize_path("/文件/列表"), "文件/列表");
+}
+
+#[test]
+fn test_sanitize_path_preserves_emoji() {
+    assert_eq!(sanitize_path("/🎉/party"), "🎉/party");
+    // Multi-codepoint emoji (family): 👨‍👩‍👧 uses ZWJ, still no '/' or '.'.
+    assert_eq!(sanitize_path("/👨‍👩‍👧"), "👨‍👩‍👧");
+}
+
+#[test]
+fn test_sanitize_path_unicode_still_removes_dotdot() {
+    // Traversal must still be stripped even when surrounded by non-ASCII.
+    assert_eq!(sanitize_path("/страница/../другая"), "страница/другая");
+    assert_eq!(sanitize_path("/文件/./список"), "文件/список");
+}
+
+#[test]
+fn test_has_dot_segment_markers_clean_cyrillic() {
+    // Raw Cyrillic has no ASCII markers — must take the zero-alloc fast path.
+    assert!(!has_dot_segment_markers("/страница"));
+    assert!(!has_dot_segment_markers("/api/пользователи"));
+}
+
+#[test]
+fn test_has_dot_segment_markers_clean_cjk_and_emoji() {
+    assert!(!has_dot_segment_markers("/文件/列表"));
+    assert!(!has_dot_segment_markers("/🎉/party"));
+    assert!(!has_dot_segment_markers("/👨‍👩‍👧"));
+}
+
+#[test]
+fn test_has_dot_segment_markers_triggers_on_percent_encoded_unicode() {
+    // Percent-encoded UTF-8 contains '%' → full decode path must run so
+    // we catch any %2e bypass hidden inside.
+    assert!(has_dot_segment_markers(
+        "/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0"
+    ));
+}
+
+#[test]
+fn test_classify_unicode_no_extension() {
+    // Non-ASCII "extension" is not a valid extension — classified as no-ext.
+    assert_eq!(classify_uri("отчёт.документ"), UriKind::NoExtension);
+    assert_eq!(classify_uri("文件.列表"), UriKind::NoExtension);
+    assert_eq!(classify_uri("party.🎉"), UriKind::NoExtension);
+}
+
+#[test]
+fn test_classify_unicode_with_ascii_extension() {
+    // Non-ASCII basename but ASCII extension — proper extension.
+    assert_eq!(classify_uri("страница.html"), UriKind::OtherExtension);
+    assert_eq!(classify_uri("文件.css"), UriKind::OtherExtension);
+    assert_eq!(classify_uri("party/🎉.png"), UriKind::OtherExtension);
+}
+
+#[test]
+fn test_has_php_component_ignores_cyrillic_lookalike() {
+    // U+0420 CYRILLIC CAPITAL LETTER ER encodes as D0 A0 — must NOT match
+    // ASCII `p` (0x70) under the `| 0x20` case-insensitive compare.
+    assert!(!has_php_component("/hack.Рhp")); // first letter is Cyrillic Р
+    assert!(!has_php_component("/admin.рhp")); // Cyrillic р
+}
+
+#[test]
+fn test_has_php_component_true_in_unicode_path() {
+    // Real `.php` after Unicode segments still matches.
+    assert!(has_php_component("/страница/about.php"));
+    assert!(has_php_component("/文件/index.php/user/42"));
+    assert!(has_php_component("/🎉/handler.PHP"));
+}
+
+#[test]
+fn test_contains_blocked_dot_segment_unicode_is_allowed() {
+    // Non-ASCII segments must not be mistaken for dot-segments.
+    assert!(!contains_blocked_dot_segment("/страница/файл"));
+    assert!(!contains_blocked_dot_segment("/文件/列表"));
+    assert!(!contains_blocked_dot_segment("/🎉"));
+}
+
+#[test]
+fn test_contains_blocked_dot_segment_unicode_with_hidden_file() {
+    // A `.hidden` segment after Unicode segments must still be blocked.
+    assert!(contains_blocked_dot_segment("/страница/.hidden"));
+    assert!(contains_blocked_dot_segment("/文件/.git/config"));
+}
+
+#[tokio::test]
+async fn test_resolve_serves_file_with_cyrillic_name() {
+    let dir = setup_test_dir();
+    fs::write(dir.path().join("страница.html"), "<html>Ok</html>").unwrap();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+
+    // Percent-encoded UTF-8 — the form browsers actually send.
+    let result = rc
+        .resolve_request(
+            "/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0.html",
+            &cache,
+        )
+        .await;
+    match &*result {
+        RouteResult::Serve(path) => assert!(path.ends_with("страница.html")),
+        other => panic!("Expected Serve(страница.html), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_resolve_serves_file_with_emoji_name() {
+    let dir = setup_test_dir();
+    fs::write(dir.path().join("🎉.html"), "<html>Party</html>").unwrap();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+
+    // Percent-encoded 🎉 (U+1F389) as UTF-8: F0 9F 8E 89.
+    let result = rc.resolve_request("/%F0%9F%8E%89.html", &cache).await;
+    match &*result {
+        RouteResult::Serve(path) => assert!(path.ends_with("🎉.html")),
+        other => panic!("Expected Serve(🎉.html), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_resolve_executes_php_with_cjk_path() {
+    let dir = setup_test_dir();
+    fs::create_dir_all(dir.path().join("文件")).unwrap();
+    fs::write(dir.path().join("文件/index.php"), "<?php echo 'cjk';").unwrap();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+
+    // /%E6%96%87%E4%BB%B6/index.php
+    let result = rc
+        .resolve_request("/%E6%96%87%E4%BB%B6/index.php", &cache)
+        .await;
+    match &*result {
+        RouteResult::Execute(path, None) => {
+            assert!(path.to_string_lossy().contains("文件"));
+            assert!(path.ends_with("index.php"));
+        }
+        other => panic!("Expected Execute(文件/index.php), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_resolve_blocks_percent_encoded_traversal_in_unicode_path() {
+    // An attacker tries to sneak `%2e%2e` (..) inside a Unicode-looking path.
+    // `/страница/%2e%2e/secret` decodes to `/страница/../secret`; the `..`
+    // segment starts with '.' → contains_blocked_dot_segment() blocks it.
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+
+    let result = rc
+        .resolve_request(
+            "/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0/%2e%2e/secret",
+            &cache,
+        )
+        .await;
+    assert!(matches!(*result, RouteResult::NotFound));
+}
+
+#[tokio::test]
+async fn test_resolve_blocks_percent_encoded_dotfile_after_unicode() {
+    // `/страница/%2egit/HEAD` decodes to `/страница/.git/HEAD` and must
+    // be blocked as a dot-segment.
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc
+        .resolve_request(
+            "/%D1%81%D1%82%D1%80%D0%B0%D0%BD%D0%B8%D1%86%D0%B0/%2egit/HEAD",
+            &cache,
+        )
+        .await;
+    assert!(matches!(*result, RouteResult::NotFound));
+}
