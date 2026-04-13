@@ -106,7 +106,10 @@ impl TraditionalRouter {
         }
 
         let file_path = ctx.document_root.join(sanitized);
-        let file_key = file_path.to_string_lossy().into_owned();
+        // `to_string_lossy()` returns `Cow::Borrowed` on UTF-8 paths (the
+        // overwhelmingly common case on Linux), so this costs nothing on
+        // the hot path. Only non-UTF-8 paths pay for an owned allocation.
+        let file_key = file_path.to_string_lossy();
 
         // 1. `$uri` — exact file (no-extension file like `README`)
         if ctx.file_cache.is_file(&file_key).await {
@@ -136,7 +139,7 @@ impl TraditionalRouter {
         ctx: &ResolveCtx<'_>,
     ) -> RouteResult {
         let file_path = ctx.document_root.join(sanitized);
-        let file_key = file_path.to_string_lossy().into_owned();
+        let file_key = file_path.to_string_lossy();
 
         // Exact `.php` file on disk
         if ctx.file_cache.is_file(&file_key).await {
