@@ -28,6 +28,18 @@ fn make_config(dir: &Path, index_file: Option<&str>) -> RouteConfig {
     RouteConfig::new(&config)
 }
 
+/// Test helper that mirrors the dot-path screen inside `resolve_request`:
+/// byte fast-path, percent-decode on demand, then segment check.
+fn is_blocked_uri(uri: &str) -> bool {
+    if !has_dot_segment_markers(uri) {
+        return false;
+    }
+    match percent_decode_str(uri).decode_utf8() {
+        Ok(s) => contains_blocked_dot_segment(&s),
+        Err(_) => true,
+    }
+}
+
 // --- sanitize_path tests ---
 
 #[test]
@@ -593,92 +605,92 @@ async fn test_route_cache_lru_eviction() {
 
 #[test]
 fn test_dot_path_blocks_dot_env() {
-    assert!(is_blocked_dot_path("/.env"));
+    assert!(is_blocked_uri("/.env"));
 }
 
 #[test]
 fn test_dot_path_blocks_dot_git_subpath() {
-    assert!(is_blocked_dot_path("/.git/config"));
+    assert!(is_blocked_uri("/.git/config"));
 }
 
 #[test]
 fn test_dot_path_blocks_htaccess() {
-    assert!(is_blocked_dot_path("/.htaccess"));
+    assert!(is_blocked_uri("/.htaccess"));
 }
 
 #[test]
 fn test_dot_path_blocks_ds_store() {
-    assert!(is_blocked_dot_path("/.DS_Store"));
+    assert!(is_blocked_uri("/.DS_Store"));
 }
 
 #[test]
 fn test_dot_path_blocks_mid_path_dot_segment() {
-    assert!(is_blocked_dot_path("/path/.hidden/file.txt"));
+    assert!(is_blocked_uri("/path/.hidden/file.txt"));
 }
 
 #[test]
 fn test_dot_path_blocks_deep_dot_file() {
-    assert!(is_blocked_dot_path("/path/to/.env"));
+    assert!(is_blocked_uri("/path/to/.env"));
 }
 
 #[test]
 fn test_dot_path_blocks_encoded_dot_segment() {
-    assert!(is_blocked_dot_path("/%2egit/HEAD"));
+    assert!(is_blocked_uri("/%2egit/HEAD"));
 }
 
 #[test]
 fn test_dot_path_blocks_encoded_dot_env() {
-    assert!(is_blocked_dot_path("/%2eenv"));
+    assert!(is_blocked_uri("/%2eenv"));
 }
 
 #[test]
 fn test_dot_path_allows_well_known_subpath() {
-    assert!(!is_blocked_dot_path("/.well-known/security.txt"));
+    assert!(!is_blocked_uri("/.well-known/security.txt"));
 }
 
 #[test]
 fn test_dot_path_allows_well_known_deep_subpath() {
-    assert!(!is_blocked_dot_path("/.well-known/acme-challenge/token123"));
+    assert!(!is_blocked_uri("/.well-known/acme-challenge/token123"));
 }
 
 #[test]
 fn test_dot_path_blocks_bare_well_known() {
-    assert!(is_blocked_dot_path("/.well-known"));
+    assert!(is_blocked_uri("/.well-known"));
 }
 
 #[test]
 fn test_dot_path_blocks_well_known_trailing_slash() {
-    assert!(is_blocked_dot_path("/.well-known/"));
+    assert!(is_blocked_uri("/.well-known/"));
 }
 
 #[test]
 fn test_dot_path_blocks_well_known_not_at_root() {
-    assert!(is_blocked_dot_path("/subdir/.well-known/foo"));
+    assert!(is_blocked_uri("/subdir/.well-known/foo"));
 }
 
 #[test]
 fn test_dot_path_allows_normal_paths() {
-    assert!(!is_blocked_dot_path("/style.css"));
-    assert!(!is_blocked_dot_path("/index.php"));
-    assert!(!is_blocked_dot_path("/path/to/file.txt"));
-    assert!(!is_blocked_dot_path("/"));
-    assert!(!is_blocked_dot_path("/api/v2/users"));
+    assert!(!is_blocked_uri("/style.css"));
+    assert!(!is_blocked_uri("/index.php"));
+    assert!(!is_blocked_uri("/path/to/file.txt"));
+    assert!(!is_blocked_uri("/"));
+    assert!(!is_blocked_uri("/api/v2/users"));
 }
 
 #[test]
 fn test_dot_path_allows_dots_in_filenames() {
-    assert!(!is_blocked_dot_path("/file.name.with.dots.txt"));
-    assert!(!is_blocked_dot_path("/jquery.min.js"));
+    assert!(!is_blocked_uri("/file.name.with.dots.txt"));
+    assert!(!is_blocked_uri("/jquery.min.js"));
 }
 
 #[test]
 fn test_dot_path_blocks_well_known_dot_segment_after() {
-    assert!(is_blocked_dot_path("/.well-known/.secret/file"));
+    assert!(is_blocked_uri("/.well-known/.secret/file"));
 }
 
 #[test]
 fn test_dot_path_blocks_well_known_deep_dot_segment() {
-    assert!(is_blocked_dot_path("/.well-known/valid/.hidden"));
+    assert!(is_blocked_uri("/.well-known/valid/.hidden"));
 }
 
 // --- Dot-path routing integration tests ---

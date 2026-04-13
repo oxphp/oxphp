@@ -162,11 +162,22 @@ impl RouteConfig {
         file_cache: &Arc<FileCache>,
     ) -> Arc<RouteResult> {
         // Block dot-paths before cache (keeps junk out of LRU). Fast-path:
-        // byte scan rejects any need for percent-decoding for the common
-        // case of clean URIs (`/api/users`, `/style.css`, `/`).
-        if has_dot_segment_markers(uri_path) && is_blocked_dot_path(uri_path) {
-            return Arc::new(RouteResult::NotFound);
-        }
+        // byte scan lets clean URIs (`/api/users`, `/style.css`, `/`) skip
+        // percent-decoding entirely. When markers are present we decode once
+        // and hand the decoded string down the pipeline so the post-cache
+        // decode step can reuse it.
+        let pre_decoded: Option<String> = if has_dot_segment_markers(uri_path) {
+            let decoded = match percent_decode_str(uri_path).decode_utf8() {
+                Ok(s) => s,
+                Err(_) => return Arc::new(RouteResult::NotFound),
+            };
+            if contains_blocked_dot_segment(&decoded) {
+                return Arc::new(RouteResult::NotFound);
+            }
+            Some(decoded.into_owned())
+        } else {
+            None
+        };
 
         // Fast path: route cache (single lock, O(1) get + LRU promotion)
         {
@@ -176,10 +187,14 @@ impl RouteConfig {
             }
         }
 
-        // Decode URI
-        let decoded = match percent_decode_str(uri_path).decode_utf8() {
-            Ok(s) => s.into_owned(),
-            Err(_) => return Arc::new(RouteResult::NotFound),
+        // Decode URI — reuse the buffer produced during the dot-path screen
+        // when available; otherwise decode now.
+        let decoded = match pre_decoded {
+            Some(s) => s,
+            None => match percent_decode_str(uri_path).decode_utf8() {
+                Ok(s) => s.into_owned(),
+                Err(_) => return Arc::new(RouteResult::NotFound),
+            },
         };
 
         // Sanitize path (strip `..`, `.`, empty segments)
@@ -358,22 +373,16 @@ fn has_dot_segment_markers(uri_path: &str) -> bool {
     false
 }
 
-/// Returns true if the URI path contains a blocked dot-segment.
+/// Returns true if the already-decoded path contains a blocked dot-segment.
 ///
 /// A dot-segment is any path component starting with `.` (e.g. `.git`, `.env`).
 /// Exception: `.well-known` as the **first** segment with a non-empty sub-path
 /// (`/.well-known/foo`) is allowed per RFC 8615. Bare `/.well-known` and
 /// `/.well-known/` are blocked.
 ///
-/// The check runs on percent-decoded input to catch encoded bypasses like `/%2egit/`.
-/// Callers should first screen via [`has_dot_segment_markers`] to skip this
-/// function entirely for clean URIs.
-fn is_blocked_dot_path(uri_path: &str) -> bool {
-    let decoded = match percent_decode_str(uri_path).decode_utf8() {
-        Ok(s) => s,
-        Err(_) => return true,
-    };
-
+/// Operates on already-decoded input — callers own the single percent-decode
+/// step so the decoded string can be reused down the pipeline.
+fn contains_blocked_dot_segment(decoded: &str) -> bool {
     let mut segments = decoded.split('/').filter(|s| !s.is_empty());
     let mut is_first = true;
 
