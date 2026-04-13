@@ -205,8 +205,12 @@ impl RouteConfig {
         // Sanitize path (strip `..`, `.`, empty segments)
         let sanitized = sanitize_path(&decoded);
 
+        // Compute has_php_component() once and share it across the
+        // .well-known defence-in-depth check and URI classification.
+        let has_php = has_php_component(&sanitized);
+
         // Defense-in-depth: never execute PHP inside `.well-known/`
-        if sanitized.starts_with(".well-known/") && has_php_component(&sanitized) {
+        if has_php && sanitized.starts_with(".well-known/") {
             let arc = Arc::new(RouteResult::NotFound);
             self.cache_put(uri_path, &arc);
             return arc;
@@ -219,7 +223,7 @@ impl RouteConfig {
             worker_route: self.worker_route.as_ref(),
         };
 
-        let result = match classify_uri(&sanitized) {
+        let result = match classify_uri_with_php(&sanitized, has_php) {
             UriKind::NoExtension => self.mode.resolve_no_extension(&sanitized, &ctx).await,
             UriKind::Php => self.mode.resolve_php(&sanitized, &ctx).await,
             UriKind::OtherExtension => {
@@ -290,10 +294,21 @@ impl RouteConfig {
 }
 
 /// Classify a sanitized URI path into one of three kinds.
+///
+/// Convenience wrapper that computes `has_php_component` internally. Callers
+/// that already have the flag should use [`classify_uri_with_php`] instead
+/// to avoid a redundant scan.
+#[cfg(test)]
 pub(crate) fn classify_uri(sanitized: &str) -> UriKind {
+    classify_uri_with_php(sanitized, has_php_component(sanitized))
+}
+
+/// Classify a sanitized URI path into one of three kinds, reusing a
+/// caller-computed `has_php_component` result.
+pub(crate) fn classify_uri_with_php(sanitized: &str, has_php: bool) -> UriKind {
     // Any `.php` script component (end-of-string or followed by '/') wins.
     // Catches both `/about.php` and `/app.php/user/42` in one rule.
-    if has_php_component(sanitized) {
+    if has_php {
         return UriKind::Php;
     }
 
