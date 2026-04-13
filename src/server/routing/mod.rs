@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use futures_util::future::BoxFuture;
 use lru::LruCache;
@@ -89,10 +89,14 @@ pub struct RouteConfig {
     canonical_root: PathBuf,
     mode: Box<dyn ModeRouter>,
     worker_route: Option<RouteResult>,
-    /// Cache of resolved routes keyed by URI path. Hold time is O(1) for
-    /// both get and put; stores `Arc<RouteResult>` so cache hits are a
+    /// Cache of resolved routes keyed by URI path. Stored under `RwLock`
+    /// so concurrent cache hits take a shared read lock and never contend;
+    /// reads use `peek()` to skip LRU promotion (matches `FileCache`). LRU
+    /// ordering is only updated on insert, which is rare once the cache
+    /// warms — popular entries stay resident because they are re-inserted
+    /// after any eviction. Values are `Arc<RouteResult>` so hits are a
     /// single atomic increment rather than a `PathBuf::clone()`.
-    route_cache: Mutex<LruCache<String, Arc<RouteResult>>>,
+    route_cache: RwLock<LruCache<String, Arc<RouteResult>>>,
 }
 
 impl RouteConfig {
@@ -125,7 +129,7 @@ impl RouteConfig {
             canonical_root,
             mode,
             worker_route: None,
-            route_cache: Mutex::new(LruCache::new(
+            route_cache: RwLock::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
         }
@@ -179,10 +183,11 @@ impl RouteConfig {
             None
         };
 
-        // Fast path: route cache (single lock, O(1) get + LRU promotion)
+        // Fast path: route cache. Read lock + `peek()` — concurrent cache
+        // hits don't contend, LRU ordering isn't touched on read.
         {
-            let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(result) = cache.get(uri_path) {
+            let cache = self.route_cache.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(result) = cache.peek(uri_path) {
                 return Arc::clone(result);
             }
         }
@@ -257,7 +262,7 @@ impl RouteConfig {
     }
 
     fn cache_put(&self, uri_path: &str, result: &Arc<RouteResult>) {
-        let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.route_cache.write().unwrap_or_else(|e| e.into_inner());
         cache.put(uri_path.to_string(), Arc::clone(result));
     }
 
