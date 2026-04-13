@@ -307,7 +307,6 @@ impl Config {
             },
             "trace_context": self.trace_context,
             "superglobals_enabled": self.superglobals_enabled,
-            "split_path_info": self.server.split_path_info,
             "trusted_proxies": self.trusted_proxies.is_some(),
         })
     }

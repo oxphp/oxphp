@@ -13,9 +13,8 @@ OxPHP is configured entirely through environment variables. There are no configu
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port for the main HTTP server |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `index.php` = Framework, `index.html` = SPA |
+| `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `*.php` = Framework, anything else = SPA. See [Routing](../features/routing.md) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | Enable PATH_INFO splitting for URIs like `/script.php/extra/path`. See [Routing — PATH_INFO](../features/routing.md#path_info-splitting) |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N` = fixed thread count, `0` = auto |
 
 ## PHP Workers
@@ -239,7 +238,6 @@ curl -s http://localhost:9090/config | jq .
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,
-  "split_path_info": false,
   "plugins": {
     "otel": {
       "enabled": true,

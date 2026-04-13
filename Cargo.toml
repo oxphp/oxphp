@@ -39,6 +39,9 @@ futures-util = "0.3"
 # URL decoding
 percent-encoding = "2"
 
+# SIMD-accelerated byte search (used in URI classification hot path)
+memchr = "2"
+
 # Lock-free bounded channel for worker pool
 crossbeam-channel = "0.5"
 
@@ -47,6 +50,10 @@ dashmap = "6"
 
 # LRU cache
 lru = "0.12"
+
+# Faster synchronization primitives (smaller uncontended cost than std::sync
+# on Linux; used in the file cache's read-heavy hot path)
+parking_lot = "0.12"
 
 # Compression
 brotli = "7"

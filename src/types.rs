@@ -67,8 +67,10 @@ pub struct ScriptRequest {
     pub is_tls: bool,
     /// HTTP version of the request (e.g., HTTP/1.0, HTTP/1.1, HTTP/2).
     pub version: Version,
-    /// Extra path after the `.php` script (e.g. `/user/42` for `/app.php/user/42`).
-    /// Set when `SPLIT_PATH_INFO_ENABLED=true` and the URI contains a `.php` prefix.
+    /// Extra path after the script component. In Traditional mode this is the
+    /// segment after a `.php` prefix (e.g. `/user/42` for `/app.php/user/42`).
+    /// In Framework mode this is the full original URI rewritten onto the
+    /// front controller.
     pub path_info: Option<String>,
     /// Original protocol from trusted proxy (e.g. "https").
     /// Set from `Forwarded: proto=` or `X-Forwarded-Proto` header.

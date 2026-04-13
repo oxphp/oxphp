@@ -71,7 +71,7 @@ The following variables behave differently compared to a standard PHP-FPM setup:
 | Variable | Behavior |
 |----------|----------|
 | `SERVER_ADDR` | Not set. OxPHP does not populate the local server IP address. |
-| `PATH_INFO` | Not set by default. Enable with `SPLIT_PATH_INFO_ENABLED=true` — see [PATH_INFO Splitting](#path_info-splitting) below. |
+| `PATH_INFO` | Set automatically — see [PATH_INFO Behavior](#path_info-behavior) below. |
 | `PATH_TRANSLATED` | Not set. |
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Not extracted from the `Authorization` header. Read `$_SERVER['HTTP_AUTHORIZATION']` directly. |
 | `REDIRECT_STATUS` | Not set. OxPHP does not use an internal redirect mechanism. |
@@ -98,26 +98,37 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 }
 ```
 
-### PATH_INFO Splitting
+### PATH_INFO Behavior
 
-By default, OxPHP does not split URI paths into script and path-info components. A request to `/app.php/user/42` is treated as a single path — which returns 404 unless a fallback (framework mode or worker mode) catches it.
+`$_SERVER['PATH_INFO']` is populated automatically based on the active routing mode. There is no feature flag — the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed.
 
-Enable `SPLIT_PATH_INFO_ENABLED=true` to activate nginx-style path splitting for legacy applications that rely on `$_SERVER['PATH_INFO']`:
+| Routing mode | When set | Value |
+|---|---|---|
+| **Traditional** (`INDEX_FILE` unset) | Only when the URI contains `.php/` and the script prefix exists on disk | Tail after the script segment |
+| **Framework** (`INDEX_FILE=index.php`) | **Always** — every request is rewritten onto the front controller | Full original URI |
+| **SPA** (`INDEX_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
 
-```bash
-SPLIT_PATH_INFO_ENABLED=true
-```
+#### Traditional mode examples
 
-When enabled, OxPHP scans the URI left-to-right for the first `.php` segment that corresponds to an actual file on disk. Everything after it becomes `PATH_INFO`:
+OxPHP scans the URI left-to-right for the first `.php` segment that corresponds to an actual file on disk. Everything after it becomes `PATH_INFO`:
 
 | Request URI | File on disk | `SCRIPT_NAME` | `PATH_INFO` | `PHP_SELF` |
 |---|---|---|---|---|
 | `/app.php/user/42` | `app.php` exists | `/app.php` | `/user/42` | `/app.php/user/42` |
 | `/index.php/api/v2/users` | `index.php` exists | `/index.php` | `/api/v2/users` | `/index.php/api/v2/users` |
 | `/app.php` | `app.php` exists | `/app.php` | *(absent)* | `/app.php` |
-| `/missing.php/foo` | file not found | — | — | 404 |
+| `/missing.php/foo` | file not found | falls back to `/index.php` | — | depends on fallback |
 
-When disabled (the default), `SCRIPT_NAME` and `PHP_SELF` both contain the full URI path, and `PATH_INFO` is not set.
+#### Framework mode examples
+
+Every non-static request is rewritten onto `index.php`, with `PATH_INFO` carrying the original URI. Your front controller reads `PATH_INFO` to dispatch routes.
+
+| Request URI | `SCRIPT_NAME` | `PATH_INFO` |
+|---|---|---|
+| `/api/users` | `/index.php` | `/api/users` |
+| `/about.php` | `/index.php` | `/about.php` |
+| `/api.php/v1/users` | `/index.php` | `/api.php/v1/users` |
+| `/` | `/index.php` | `/` |
 
 > **Note:** `PATH_TRANSLATED` is not populated. It is rarely used in practice and is not set by nginx or PHP-FPM by default.
 

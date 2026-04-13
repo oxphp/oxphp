@@ -1,136 +1,208 @@
 ---
 title: 路由
-description: 通过四种模式配置 OxPHP 路由——传统文件映射、框架前端控制器、SPA 回退和 Worker 模式。
+description: 通过三种模式配置 OxPHP 路由——传统文件映射、框架前端控制器和 SPA 回退。每种模式都对应一个熟悉的 nginx try_files 配置。
 ---
 
 # 路由
 
-OxPHP 使用四种模式之一处理传入的 HTTP 请求，通过单个环境变量进行控制。所选模式决定了 URL 路径如何映射到磁盘上的文件。
+OxPHP 使用三种模式之一处理传入的 HTTP 请求，通过单个环境变量进行控制。每种模式都对应一个熟悉的 nginx `try_files` 配置，因此您可以准确预测任何 URL 的处理结果。
 
 ## 工作原理
 
-当请求到达时，OxPHP 在将其解析为文件之前，会通过安全管道处理 URL 路径：
+每个请求在进入特定模式逻辑之前都会通过共享管道：
 
-1. **百分号解码** — 将 `%2e%2e` 等编码字符解码为字面值
-2. **路径段过滤** — 去除路径遍历段（`..`）、当前目录段（`.`）和空段
-3. **基于模式的路由** — 根据当前激活的路由模式，将经过清理的路径与文件系统进行匹配
-4. **符号链接验证** — 检查解析后的文件系统路径是否在文档根目录范围内，以防止符号链接逃逸
+1. **点路径过滤** — 包含隐藏段（`.git`、`.env`）的路径会被阻止，`/.well-known/*` 除外（[RFC 8615](https://www.rfc-editor.org/rfc/rfc8615)）
+2. **路由缓存查找** — 最近解析过的 URI 会从 LRU 缓存中返回（10 000 条）
+3. **百分号解码 + 清理** — 将 `%2e%2e` 等编码序列解码，并剥离遍历段（`..`、`.`、空段）
+4. **well-known PHP 阻止** — 纵深防御：`/.well-known/` 内的 `.php` 脚本永不执行
+5. **URI 分类** — 经过清理的路径被一次性分类为 `NoExtension`、`Php` 或 `OtherExtension`
+6. **模式分发** — 每种模式按各自规则处理三种 URI 类型
+7. **符号链接验证** — 每个解析后的文件系统路径必须规范化到文档根目录内
+
+分类步骤是关键的效率优化：静态资源（`/style.css`、`/logo.png`）的磁盘检查在共享层中对 `OtherExtension` URI **只执行一次**，因此三种模式的代价相同。
 
 ## 配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 用于提供文件和 PHP 脚本的根目录 |
-| `INDEX_FILE` | *(未设置)* | 决定路由模式。未设置 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | 将 `/script.php/path` 形式的 URI 拆分为脚本 + `PATH_INFO` |
+| `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = Traditional，`*.php` = Framework，其他任何值 = SPA |
 
-## 传统模式
+## 传统模式（Traditional）
 
-当未设置 `INDEX_FILE` 时，传统模式生效。URL 直接映射到磁盘上的文件，类似于使用 Apache 或 nginx 的经典 PHP 托管方式。
+当 `INDEX_FILE` **未设置**（或为空）时生效。等效的 nginx 配置：
 
-- `/about.php` 执行 `DOCUMENT_ROOT/about.php`
-- `/style.css` 提供 `DOCUMENT_ROOT/style.css`
-- `/` 解析为 `index.php`（若存在），否则为 `index.html`
-- `/blog/` 依次尝试 `blog/index.php`，然后是 `blog/index.html`
-- 任何不匹配文件的路径返回 404
+```nginx
+location / {
+    try_files $uri $uri/ /index.php /index.html =404;
+}
+location ~ \.php$ {
+    try_files $uri =404;          # PATH_INFO 拆分已启用
+}
+```
 
-此模式适用于 WordPress、传统 PHP 应用程序，或任何每个 URL 对应特定文件的项目。
+**解析顺序：**
 
-## 框架模式
+1. **`$uri`** — 磁盘上的精确文件 → 提供文件（如果是 `.php` 则执行）
+2. **`$uri/`** — 目录 → 在其中查找 `index.php`，然后是 `index.html`
+3. **PATH_INFO 拆分** — 当 URI 包含 `.php/` 时，匹配磁盘上的脚本前缀，剩余部分成为 `PATH_INFO`（例如 `/api.php/users/42` → 脚本 `api.php`，`PATH_INFO=/users/42`）
+4. **`/index.php`** — 根前端控制器回退
+5. **`/index.html`** — 根静态索引回退
+6. **`WORKER_FILE`** — 如果配置了 Worker 模式
+7. **404**
 
-当 `INDEX_FILE=index.php` 时，框架模式生效。所有不匹配现有静态文件的请求都会路由到前端控制器，这与 Laravel、Symfony 等 PHP 框架的预期行为完全一致。
+**示例：**
 
-- `/style.css` 直接提供静态文件（若磁盘上存在）
-- `/api/users` 执行 `index.php`（该路径不作为文件存在）
-- `/about.php` 返回 404（直接访问 `.php` 文件被阻止）
-- `/index.php` 返回 404（直接访问前端控制器被阻止）
+| 请求 | 结果 |
+|---|---|
+| `/about.php` | 执行 `about.php` |
+| `/style.css` | 提供 `style.css` |
+| `/blog/`（存在 `blog/index.php`） | 执行 `blog/index.php` |
+| `/api.php/users/42` | 执行 `api.php`，`PATH_INFO=/users/42` |
+| `/missing.txt` | 回退到 `/index.php` |
+| `/some/route` | 回退到 `/index.php` |
 
-阻止直接访问 `.php` 文件可以防止 URL 泄露，并强制所有 PHP 请求通过框架的路由器。
+PATH_INFO 拆分在 Traditional 模式下**始终启用**。没有环境变量开关——之前的 `SPLIT_PATH_INFO_ENABLED` 标志已被移除。
+
+## 框架模式（Framework）
+
+当 `INDEX_FILE=index.php`（或任何以 `.php` 结尾的值）时生效。等效的 nginx 配置：
+
+```nginx
+location ~ \.(?!php$)[a-zA-Z0-9]+$ {
+    try_files $uri =404;          # 静态资源：不存在即硬 404
+}
+location / {
+    rewrite ^ /index.php last;    # 其他一切 → 前端控制器
+}
+location = /index.php {
+    fastcgi_param PATH_INFO $request_uri;
+    fastcgi_pass ...;
+}
+```
+
+**解析规则：**
+
+| URI 类型 | 行为 |
+|---|---|
+| `.css`、`.png`、`.js`……（任何非 php 扩展） | 文件存在则提供，否则**硬 404** |
+| `.php`（任何路径） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
+| 无扩展名（`/api/users`、`/`） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
+
+**示例：**
+
+| 请求 | 结果 | `$_SERVER['PATH_INFO']` |
+|---|---|---|
+| `/style.css`（存在） | 提供 `style.css` | — |
+| `/style.css`（不存在） | **404**（无回退） | — |
+| `/api/users` | 执行 `index.php` | `/api/users` |
+| `/about.php` | 执行 `index.php` | `/about.php` |
+| `/api.php/v1/users` | 执行 `index.php` | `/api.php/v1/users` |
+| `/index.php`（直接） | 执行 `index.php` | `/index.php` |
+| `/` | 执行 `index.php` | `/` |
+
+前端控制器始终在 `PATH_INFO` 中收到**原始 URI**，您的路由器无需单独检查 `REQUEST_URI` 即可决定如何处理。直接访问 `/index.php` 不再被阻止——重写到 `/index.php` 是幂等的，因此直接访问与访问 `/` 的结果相同。
 
 ## SPA 模式
 
-当 `INDEX_FILE=index.html` 时，SPA 模式生效。不匹配现有文件的请求会回退到 HTML 入口点，允许客户端路由器（React Router、Vue Router 等）处理该路径。
+当 `INDEX_FILE=index.html`（或任何不以 `.php` 结尾的值）时生效。等效的 nginx 配置：
 
-- `/style.css` 提供静态文件
-- `/app/dashboard` 提供 `index.html`（客户端路由器处理该路径）
-- `/api.php` 若磁盘上存在该 PHP 脚本，则执行它
-- `/index.html` 返回 404（直接访问索引文件被阻止）
+```nginx
+location ~ \.php$ {
+    try_files $uri =404;          # PHP：文件必须存在，无回退
+}
+location ~ \. {
+    try_files $uri =404;          # 其他扩展名：不存在即硬 404
+}
+location / {
+    try_files /index.html =404;   # 无扩展名路径：直接到 index.html
+}
+```
+
+**解析规则：**
+
+| URI 类型 | 行为 |
+|---|---|
+| `.php` | 文件存在则执行，否则**硬 404** |
+| `.css`、`.png`……（任何其他扩展名） | 文件存在则提供，否则**硬 404** |
+| 无扩展名（`/dashboard`、`/api/users`、`/`） | 直接提供 `/index.html`——**不对 `$uri` 进行磁盘探测** |
+
+**示例：**
+
+| 请求 | 结果 |
+|---|---|
+| `/style.css`（存在） | 提供 `style.css` |
+| `/style.css`（不存在） | **404** |
+| `/dashboard` | 提供 `/index.html` |
+| `/users/42/edit` | 提供 `/index.html` |
+| `/api.php`（存在） | 执行 `api.php` |
+| `/api.php`（不存在） | **404** |
+| `/index.html`（直接） | 提供 `index.html` |
+
+两个值得强调的语义：
+
+- **无扩展名路径不访问磁盘** — SPA 模式从不询问"`/dashboard` 在磁盘上是否存在？"它始终返回索引。这对于客户端路由器是正确的，并避免了不必要的 `stat()` 调用。
+- **缺失的静态文件是硬 404，而非回退** — 缺失的 `/style.css` 不会静默地提供 `index.html`。这能在早期捕获损坏的资源引用，而不是在 JS 期望 CSS 的地方返回 HTML。
 
 ## Worker 模式
 
-当设置了 `WORKER_FILE` 时，Worker 模式路由会自动激活。所有不匹配磁盘上静态文件的传入请求都会被分发到持久化 PHP Worker 进程，而不是返回 404。
+当设置了 `WORKER_FILE` 时，Worker 模式会自动激活。它作为最终 404 **之前**的回退步骤插入到所有三种路由模式中：
 
-- `/style.css` 直接提供静态文件
-- `/api/users` 分发到 Worker（该路径不存在对应文件）
-- `/` 若不存在 `index.php` 或 `index.html`，则分发到 Worker
+| 模式 | Worker 的位置 |
+|---|---|
+| Traditional | 在 `/index.html` 回退之后，404 之前 |
+| Framework | 当 `index.php` 自身缺失时 |
+| SPA | 当 `/index.html` 自身缺失时 |
 
-Worker 模式与 `INDEX_FILE` 兼容。同时设置 `WORKER_FILE` 和 `INDEX_FILE=index.php` 可将 Worker 模式路由与框架模式静态文件处理相结合——静态文件直接提供，其他所有内容都发送到 Worker。
+也就是说，Worker 模式与路由正交：如果您的前端控制器丢失，Worker 会接管。同时设置 `WORKER_FILE` 和 `INDEX_FILE=index.php` 完全受支持。
 
 详细配置请参见 [Worker 模式](worker-mode.md)。
 
-## PATH_INFO 拆分
+## PATH_INFO 行为
 
-一些旧版 PHP 应用使用 `PATH_INFO` 进行路由——在 `.php` 脚本名称后附加额外的路径段（例如 `/api.php/users/42`）。默认情况下，OxPHP 将整个 URI 视为单一文件系统路径，因此这些请求会返回 404。
+`$_SERVER['PATH_INFO']` 根据所用模式以不同方式填充：
 
-设置 `SPLIT_PATH_INFO_ENABLED=true` 以启用路径拆分：
+| 模式 | 何时设置 | 值 |
+|---|---|---|
+| Traditional | 仅当 URI 包含 `.php/`（PATH_INFO 拆分）时 | 脚本段之后的尾部，例如 `/users/42` |
+| Framework | **始终** | 完整的原始 URI，例如 `/api/users` |
+| SPA | 永不 | （PHP 仅对精确的 `.php` 文件调用；无 PATH_INFO） |
 
-```bash
-SPLIT_PATH_INFO_ENABLED=true
-```
-
-启用后，OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.php` 段。其后的所有内容成为 `PATH_INFO`：
-
-```
-/app.php/user/42
-├── 脚本: DOCUMENT_ROOT/app.php
-└── PATH_INFO: /user/42
-```
-
-这会正确填充 `$_SERVER` 以支持 CGI 风格的路由：
-
-| 变量 | 值 |
-|---|---|
-| `SCRIPT_NAME` | `/app.php` |
-| `SCRIPT_FILENAME` | `/var/www/html/public/app.php` |
-| `PATH_INFO` | `/user/42` |
-| `PHP_SELF` | `/app.php/user/42` |
-
-如果在路径中未找到 `.php` 文件，路由将继续按正常解析链处理（Worker 回退、`INDEX_FILE` 回退或 404）。
-
-> **适用场景：** Drupal、MediaWiki、基于 `$_SERVER['PATH_INFO']` 构建的旧版 REST API，或任何此前通过 nginx `fastcgi_split_path_info` 配置的应用。
+在 Traditional 模式下，拆分始终启用——之前的 `SPLIT_PATH_INFO_ENABLED` 环境变量已被移除。如果您需要基于 PATH_INFO 的路由，请使用 Traditional 模式并将 `.php` 脚本作为前缀。
 
 ## 路径安全
 
-OxPHP 应用多层防护来阻止目录遍历和符号链接逃逸攻击：
+OxPHP 应用多层防护以阻止目录遍历、隐藏文件泄露和符号链接逃逸攻击：
 
 - **百分号解码**在清理之前运行，因此像 `/%2e%2e/etc/passwd` 这样的编码遍历尝试会被捕获
 - **路径段过滤**从解析后的路径中移除 `..`、`.` 和空段
 - **符号链接验证**将每个解析后的路径规范化，并验证其仍在文档根目录内。指向被服务目录之外的符号链接会被阻止
-- **点路径拦截**拦截任何以 `.` 开头的路径段（例如 `/.git/config`、`/.env`），`/.well-known/*` 除外。参见[点路径拦截](../security/dot-path-blocking.md)
+- **点路径拦截**拦截任何以 `.` 开头的路径段（例如 `/.git/config`、`/.env`），`/.well-known/*` 按 RFC 8615 除外
+- **well-known PHP 阻止** — 即使有点路径例外，`/.well-known/` 内的 `.php` 脚本也永不执行（纵深防御）
 
 > **注意：** 如果文档根目录在启动时不存在，服务器将以致命错误退出。符号链接逃逸保护需要一个有效的、可解析的文档根目录路径。
 
 ## 故障排除
 
-### 所有请求都返回 404
+### Traditional 模式下所有请求都返回 404
 
-验证 `DOCUMENT_ROOT` 指向正确的目录，且该目录在磁盘上存在。如果文档根目录无法解析，OxPHP 在启动时会退出，所以正在运行的服务器表示该目录在启动时是存在的——但卷挂载错误或路径错误仍会导致每个请求都找不到文件。
-
-**检查：** 在容器内确认文档根路径：
+检查文档根目录中是否存在 `index.php` 或 `index.html`。Traditional 模式的 `try_files` 链只会回退到这两个——如果两者都缺失且 URL 不匹配任何文件，您会得到 404。
 
 ```bash
 docker exec <container> ls /var/www/html/public
 ```
 
-**修复：** 更正 `DOCUMENT_ROOT` 或确保卷挂载了正确的路径。
+### 缺失的静态资源返回 404 而非 SPA shell
 
-### 框架模式对 PHP 路由返回 404
+这在 Framework 和 SPA 模式下是有意为之。缺失的 `/style.css` 是硬 404，而非静默回退到 `index.html`。这能在早期捕获损坏的资源引用。如果您需要回退，请使用 Traditional 模式。
 
-在框架模式下，直接访问 `.php` 文件是被有意阻止的。如果您的应用直接链接到 `.php` 文件，请切换到传统模式（取消设置 `INDEX_FILE`），或将链接更新为使用简洁 URL。
+### 直接访问 `/index.php` 不再返回 404
 
-### 含特殊字符的 URL 返回 404
+在 Framework 模式下，现在允许直接访问前端控制器（重写到 `/index.php` 是幂等的）。如果您之前依赖 404 来检测直接命中，请改为在控制器内部检查 `PATH_INFO`。
 
-OxPHP 在路由前对 URL 进行百分号解码。对 `/café/menu` 等路径的请求可以正常工作。如果路径仍然返回 404，请确认磁盘上存在使用解码名称的文件。
+### Framework 模式下 `PATH_INFO` 为空
+
+确保 `INDEX_FILE` 以 `.php` 结尾。否则 OxPHP 会选择 SPA 模式，而 SPA 模式不填充 `PATH_INFO`。在 Framework 模式下，该变量现在无条件设置——不再需要任何功能开关。
 
 ### 文档根目录内的符号链接返回 404
 

@@ -106,7 +106,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 ### HTTP и сетевое взаимодействие
 - **HTTP/1.1 + HTTP/2** с автоопределением (h2c) через hyper
 - **TLS 1.3** с ALPN (h2 + http/1.1) через rustls
-- **3 режима маршрутизации** — Traditional, Framework (`index.php`), SPA (`index.html`)
+- **3 режима маршрутизации** — Traditional (отображение файлов + всегда-on PATH_INFO), Framework (rewrite на `index.php` с `PATH_INFO=$request_uri`), SPA (`index.html` для путей без расширения, жёсткий 404 для отсутствующих ассетов). Каждый режим воспроизводит знакомую конфигурацию nginx `try_files`
 - **Потоковая передача SSE** через автоопределение `Content-Type: text/event-stream` или `oxphp_stream_flush()` --- кооперативная с мультиплексированием файберов
 - **Настраиваемые таймауты** — чтение заголовков, обработка запроса, keep-alive
 
@@ -201,7 +201,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Адрес и порт для прослушивания |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Путь в файловой системе для раздачи файлов |
-| `INDEX_FILE` | *(не задано)* | Режим маршрутизации: пусто = Traditional, `index.php` = Framework, `index.html` = SPA |
+| `INDEX_FILE` | *(не задано)* | Режим маршрутизации: пусто = Traditional, `*.php` = Framework, любое другое = SPA |
 | `TOKIO_WORKERS` | `0` (CPU / 2, мин. 1) | Потоки асинхронного I/O; `0` = авто |
 | `EXECUTOR` | `sapi` | Исполнитель PHP: `sapi` (настоящий PHP) или `stub` (режим тестирования) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1) | Пул воркеров: `N` = фиксированный, `MIN:MAX` = динамический, `0` = авто |
@@ -227,7 +227,6 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 | `WORKER_MAX_MEMORY_MIB` | `0` (без ограничений) | Макс. память (МиБ) на воркер до рециклизации |
 | `ASYNC_WORKERS` | `0` (отключено) | Выделенные потоки асинхронных воркеров для `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Ограниченная очередь для асинхронных задач; отклоняются при заполнении |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | Разбиение PATH_INFO для URI вида `/script.php/extra/path` (совместимость с legacy CGI) |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
 

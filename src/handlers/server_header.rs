@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use http::HeaderValue;
@@ -9,13 +9,16 @@ use crate::events::{EventHandler, Priority, Propagation};
 
 /// Cached `Date` header value with 1-second resolution.
 /// Avoids `SystemTime::now()` + `httpdate::fmt_http_date()` + `HeaderValue::from_str()`
-/// on every response — replaces 2 allocations + syscall with a single atomic load.
+/// on every response — replaces 2 allocations + syscall with a single atomic load
+/// plus a cheap `Mutex` take on the value clone.
 struct CachedDate {
     /// Unix epoch second when the cached value was generated.
     epoch_sec: AtomicU64,
-    /// Pre-built `HeaderValue` — swapped atomically via `OnceLock` + epoch check.
-    /// Protected by the coarse-grained epoch_sec check: only one thread reformats.
-    value: std::sync::RwLock<HeaderValue>,
+    /// Pre-built `HeaderValue`. Guarded by `Mutex` rather than `RwLock` because
+    /// `std::sync::RwLock::read()` on Linux (pthread_rwlock_t) is measurably
+    /// slower uncontended than a futex-backed `Mutex::lock()`, and writes are
+    /// rare (at most once per second, gated by an `AtomicU64` CAS).
+    value: Mutex<HeaderValue>,
 }
 
 static CACHED_DATE: OnceLock<CachedDate> = OnceLock::new();
@@ -33,16 +36,16 @@ fn get_date_header() -> HeaderValue {
         let formatted = httpdate::fmt_http_date(now);
         CachedDate {
             epoch_sec: AtomicU64::new(epoch_sec),
-            value: std::sync::RwLock::new(HeaderValue::from_str(&formatted).unwrap()),
+            value: Mutex::new(HeaderValue::from_str(&formatted).unwrap()),
         }
     });
 
     let prev = cached.epoch_sec.load(Ordering::Relaxed);
     if prev == epoch_sec {
-        // Same second — return cached value (cheap RwLock read)
+        // Same second — return cached value.
         return cached
             .value
-            .read()
+            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
     }
@@ -55,14 +58,14 @@ fn get_date_header() -> HeaderValue {
     {
         let formatted = httpdate::fmt_http_date(now);
         let hv = HeaderValue::from_str(&formatted).unwrap();
-        *cached.value.write().unwrap_or_else(|e| e.into_inner()) = hv.clone();
+        *cached.value.lock().unwrap_or_else(|e| e.into_inner()) = hv.clone();
         return hv;
     }
 
     // Another thread is updating — read whatever is there (at most 1s stale)
     cached
         .value
-        .read()
+        .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
