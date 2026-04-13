@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -202,12 +203,14 @@ impl RouteConfig {
             },
         };
 
-        // Sanitize path (strip `..`, `.`, empty segments)
-        let sanitized = sanitize_path(&decoded);
+        // Sanitize path (strip `..`, `.`, empty segments). Most URIs are
+        // already clean and yield a borrowed slice — no allocation.
+        let sanitized_cow = sanitize_path(&decoded);
+        let sanitized: &str = &sanitized_cow;
 
         // Compute has_php_component() once and share it across the
         // .well-known defence-in-depth check and URI classification.
-        let has_php = has_php_component(&sanitized);
+        let has_php = has_php_component(sanitized);
 
         // Defense-in-depth: never execute PHP inside `.well-known/`
         if has_php && sanitized.starts_with(".well-known/") {
@@ -223,17 +226,17 @@ impl RouteConfig {
             worker_route: self.worker_route.as_ref(),
         };
 
-        let result = match classify_uri_with_php(&sanitized, has_php) {
-            UriKind::NoExtension => self.mode.resolve_no_extension(&sanitized, &ctx).await,
-            UriKind::Php => self.mode.resolve_php(&sanitized, &ctx).await,
+        let result = match classify_uri_with_php(sanitized, has_php) {
+            UriKind::NoExtension => self.mode.resolve_no_extension(sanitized, &ctx).await,
+            UriKind::Php => self.mode.resolve_php(sanitized, &ctx).await,
             UriKind::OtherExtension => {
                 // Common disk check for non-.php extensions — done once here,
                 // shared across all three modes via file_cache.
-                let candidate = self.document_root.join(&sanitized);
+                let candidate = self.document_root.join(sanitized);
                 if file_cache.is_file(&candidate.to_string_lossy()).await {
                     RouteResult::Serve(candidate)
                 } else {
-                    self.mode.resolve_static_miss(&sanitized, &ctx).await
+                    self.mode.resolve_static_miss(sanitized, &ctx).await
                 }
             }
         };
@@ -429,7 +432,15 @@ fn contains_blocked_dot_segment(decoded: &str) -> bool {
 }
 
 /// Remove `..`, `.` and empty segments from a path to prevent directory traversal.
-fn sanitize_path(path: &str) -> String {
+///
+/// Returns a borrowed slice (leading `/` stripped) when the input is already
+/// clean — no `..`/`.` segments, no `//`, no trailing `/`. Most legitimate
+/// URIs hit the borrow path with zero allocations; only URIs that actually
+/// need rewriting pay for the `String` build.
+fn sanitize_path(path: &str) -> Cow<'_, str> {
+    if let Some(clean) = already_sanitized(path) {
+        return Cow::Borrowed(clean);
+    }
     let mut result = String::with_capacity(path.len());
     for segment in path.split('/') {
         if !segment.is_empty() && segment != ".." && segment != "." {
@@ -439,5 +450,45 @@ fn sanitize_path(path: &str) -> String {
             result.push_str(segment);
         }
     }
-    result
+    Cow::Owned(result)
+}
+
+/// Fast byte-level check for `sanitize_path`'s borrow fast path. Returns
+/// `Some(&path[1..])` when `path` is already in canonical form (exactly one
+/// leading `/`, no `//`, no trailing `/`, no `.` or `..` segments). The
+/// returned slice matches what `sanitize_path` would build via allocation.
+#[inline]
+fn already_sanitized(path: &str) -> Option<&str> {
+    let bytes = path.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'/' || bytes[bytes.len() - 1] == b'/' {
+        return None;
+    }
+    let mut at_segment_start = true;
+    let mut i = 1;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'/' {
+            // `//` → empty segment
+            if at_segment_start {
+                return None;
+            }
+            at_segment_start = true;
+            i += 1;
+            continue;
+        }
+        if at_segment_start && b == b'.' {
+            // Check for `.` or `..` as complete segment (delimited by '/' or end)
+            match bytes.get(i + 1) {
+                None | Some(&b'/') => return None,
+                Some(&b'.') => match bytes.get(i + 2) {
+                    None | Some(&b'/') => return None,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        at_segment_start = false;
+        i += 1;
+    }
+    Some(&path[1..])
 }
