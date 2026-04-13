@@ -572,7 +572,7 @@ async fn test_route_cache_capacity_cap() {
             .await;
     }
 
-    let cache_len = rc.route_cache.read().unwrap().len();
+    let cache_len = rc.route_cache.lock().unwrap().len();
     assert!(
         cache_len <= ROUTE_CACHE_CAPACITY,
         "Route cache size {} exceeds capacity {}",
@@ -593,7 +593,7 @@ async fn test_route_cache_lru_eviction() {
         rc.resolve_request(&format!("/fill_{i}.txt"), &cache).await;
     }
 
-    let lru_cache = rc.route_cache.read().unwrap();
+    let lru_cache = rc.route_cache.lock().unwrap();
     assert!(
         !lru_cache.contains("/style.css"),
         "LRU entry should have been evicted"
@@ -767,7 +767,7 @@ async fn test_resolve_dot_path_not_cached() {
     let result = rc.resolve_request("/.env", &cache).await;
     assert!(matches!(*result, RouteResult::NotFound));
 
-    let route_cache = rc.route_cache.read().unwrap();
+    let route_cache = rc.route_cache.lock().unwrap();
     assert!(
         !route_cache.contains("/.env"),
         "Blocked dot-paths must not pollute the route cache"
