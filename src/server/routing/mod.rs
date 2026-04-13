@@ -287,7 +287,10 @@ impl RouteConfig {
     /// Check that a resolved path stays within the canonical document root.
     /// Results are cached in the file cache to avoid repeated `realpath(3)`.
     async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
-        let cache_key = path.to_string_lossy().to_string();
+        // `to_string_lossy()` returns `Cow::Borrowed` on UTF-8 paths (the
+        // common case), so the lookup is alloc-free; only the insert path
+        // takes ownership.
+        let cache_key = path.to_string_lossy();
 
         if let Some(cached) = file_cache.get_canonical(&cache_key) {
             return match cached {
@@ -302,7 +305,7 @@ impl RouteConfig {
             None => true,
         };
 
-        file_cache.insert_canonical(cache_key, result);
+        file_cache.insert_canonical(cache_key.into_owned(), result);
         valid
     }
 }
