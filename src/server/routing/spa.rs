@@ -44,11 +44,7 @@ impl SpaRouter {
         RouteResult::NotFound
     }
 
-    pub(crate) async fn resolve_php(
-        &self,
-        sanitized: &str,
-        ctx: &ResolveCtx<'_>,
-    ) -> RouteResult {
+    pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         // Execute the PHP script only if it exists exactly as addressed.
         // No PATH_INFO split, no fallback to index.html — hard 404.
         let file_path = ctx.document_root.join(sanitized);

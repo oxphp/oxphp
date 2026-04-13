@@ -133,11 +133,7 @@ impl TraditionalRouter {
         self.root_fallback(ctx).await
     }
 
-    pub(crate) async fn resolve_php(
-        &self,
-        sanitized: &str,
-        ctx: &ResolveCtx<'_>,
-    ) -> RouteResult {
+    pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         let file_path = ctx.document_root.join(sanitized);
         let file_key = file_path.to_string_lossy();
 
