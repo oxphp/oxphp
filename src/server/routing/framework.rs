@@ -31,6 +31,14 @@ impl FrameworkRouter {
     /// Rewrite target: always Execute(index.php) with PATH_INFO=`/` + sanitized.
     /// Falls back to `worker_route` if the front controller is missing.
     fn rewrite(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        // If someone removes index.php but still has a worker configured,
+        // worker takes over. Checked before building PATH_INFO so we skip
+        // the allocation when the worker path wins. Disk check for the
+        // front controller is deferred to the executor layer.
+        if let Some(wr) = ctx.worker_route {
+            return wr.clone();
+        }
+
         // PATH_INFO carries the original URI (with leading `/`). Empty sanitized
         // means root — PATH_INFO is `/`.
         let path_info = if sanitized.is_empty() {
@@ -42,12 +50,6 @@ impl FrameworkRouter {
             s
         };
 
-        // If someone removes index.php but still has a worker configured,
-        // worker takes over. Disk check for the front controller is deferred
-        // to the executor layer (same as before this refactor).
-        if let Some(wr) = ctx.worker_route {
-            return wr.clone();
-        }
         RouteResult::Execute(self.index_file_path.clone(), Some(path_info))
     }
 }
