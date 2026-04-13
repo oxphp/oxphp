@@ -3,7 +3,6 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use futures_util::future::BoxFuture;
 use lru::LruCache;
 use percent_encoding::percent_decode_str;
 
@@ -20,6 +19,42 @@ mod tests;
 use framework::FrameworkRouter;
 use spa::SpaRouter;
 use traditional::TraditionalRouter;
+
+/// Routing mode dispatch. An enum rather than `Box<dyn ModeRouter>` so
+/// each call site becomes a static `match` that rustc can inline, and
+/// async methods return opaque `impl Future` instead of `BoxFuture` —
+/// no heap allocation per request on the cache-miss path.
+pub(crate) enum Mode {
+    Traditional(TraditionalRouter),
+    Framework(FrameworkRouter),
+    Spa(SpaRouter),
+}
+
+impl Mode {
+    async fn resolve_no_extension(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        match self {
+            Mode::Traditional(r) => r.resolve_no_extension(sanitized, ctx).await,
+            Mode::Framework(r) => r.resolve_no_extension(sanitized, ctx),
+            Mode::Spa(r) => r.resolve_no_extension(ctx).await,
+        }
+    }
+
+    async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        match self {
+            Mode::Traditional(r) => r.resolve_php(sanitized, ctx).await,
+            Mode::Framework(r) => r.resolve_php(sanitized, ctx),
+            Mode::Spa(r) => r.resolve_php(sanitized, ctx).await,
+        }
+    }
+
+    async fn resolve_static_miss(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
+        match self {
+            Mode::Traditional(r) => r.resolve_static_miss(ctx).await,
+            Mode::Framework(_) => RouteResult::NotFound,
+            Mode::Spa(_) => RouteResult::NotFound,
+        }
+    }
+}
 
 const ROUTE_CACHE_CAPACITY: usize = 10_000;
 
@@ -57,38 +92,11 @@ pub(crate) struct ResolveCtx<'a> {
     pub worker_route: Option<&'a RouteResult>,
 }
 
-/// Trait implemented by each INDEX_FILE mode. The common layer classifies
-/// the URI and delegates to one of the three methods based on `UriKind`.
-pub(crate) trait ModeRouter: Send + Sync {
-    /// Called for `UriKind::NoExtension` URIs.
-    fn resolve_no_extension<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult>;
-
-    /// Called for `UriKind::Php` URIs. The common layer does NOT check disk
-    /// for these — each mode decides its own rules.
-    fn resolve_php<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult>;
-
-    /// Called for `UriKind::OtherExtension` URIs when the common layer's
-    /// disk check did NOT find a file. Modes decide the fallback policy.
-    fn resolve_static_miss<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult>;
-}
-
 /// Routing configuration with mode dispatch and caching layers.
 pub struct RouteConfig {
     document_root: Arc<PathBuf>,
     canonical_root: PathBuf,
-    mode: Box<dyn ModeRouter>,
+    mode: Mode,
     worker_route: Option<RouteResult>,
     /// Cache of resolved routes keyed by URI path. `Mutex` rather than
     /// `RwLock` because `std::sync::RwLock` wraps `pthread_rwlock_t` on
@@ -119,12 +127,12 @@ impl RouteConfig {
 
         let document_root = Arc::new(config.document_root.clone());
 
-        let mode: Box<dyn ModeRouter> = match config.index_file.as_deref() {
-            None | Some("") => Box::new(TraditionalRouter::new(&document_root)),
+        let mode = match config.index_file.as_deref() {
+            None | Some("") => Mode::Traditional(TraditionalRouter::new(&document_root)),
             Some(name) if name.ends_with(".php") => {
-                Box::new(FrameworkRouter::new(&document_root, name))
+                Mode::Framework(FrameworkRouter::new(&document_root, name))
             }
-            Some(name) => Box::new(SpaRouter::new(&document_root, name)),
+            Some(name) => Mode::Spa(SpaRouter::new(&document_root, name)),
         };
 
         Self {
@@ -239,7 +247,7 @@ impl RouteConfig {
                 if file_cache.is_file(&candidate.to_string_lossy()).await {
                     RouteResult::Serve(candidate)
                 } else {
-                    self.mode.resolve_static_miss(sanitized, &ctx).await
+                    self.mode.resolve_static_miss(&ctx).await
                 }
             }
         };

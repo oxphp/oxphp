@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use futures_util::future::BoxFuture;
-
-use super::{ModeRouter, ResolveCtx, RouteResult};
+use super::{ResolveCtx, RouteResult};
 
 /// SPA routing — `INDEX_FILE="index.html"` (single-page application).
 ///
@@ -33,46 +31,30 @@ impl SpaRouter {
     }
 }
 
-impl ModeRouter for SpaRouter {
-    fn resolve_no_extension<'a>(
-        &'a self,
-        _sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move {
-            // No-extension URIs always resolve to the SPA index; the common
-            // layer never probes disk for `$uri` in this branch.
-            if ctx.file_cache.is_file(&self.index_file_key).await {
-                return RouteResult::Serve(self.index_file_path.clone());
-            }
-            if let Some(wr) = ctx.worker_route {
-                return wr.clone();
-            }
-            RouteResult::NotFound
-        })
+impl SpaRouter {
+    pub(crate) async fn resolve_no_extension(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
+        // No-extension URIs always resolve to the SPA index; the common
+        // layer never probes disk for `$uri` in this branch.
+        if ctx.file_cache.is_file(&self.index_file_key).await {
+            return RouteResult::Serve(self.index_file_path.clone());
+        }
+        if let Some(wr) = ctx.worker_route {
+            return wr.clone();
+        }
+        RouteResult::NotFound
     }
 
-    fn resolve_php<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move {
-            // Execute the PHP script only if it exists exactly as addressed.
-            // No PATH_INFO split, no fallback to index.html — hard 404.
-            let file_path = ctx.document_root.join(sanitized);
-            if ctx.file_cache.is_file(&file_path.to_string_lossy()).await {
-                return RouteResult::Execute(file_path, None);
-            }
-            RouteResult::NotFound
-        })
-    }
-
-    fn resolve_static_miss<'a>(
-        &'a self,
-        _sanitized: &'a str,
-        _ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move { RouteResult::NotFound })
+    pub(crate) async fn resolve_php(
+        &self,
+        sanitized: &str,
+        ctx: &ResolveCtx<'_>,
+    ) -> RouteResult {
+        // Execute the PHP script only if it exists exactly as addressed.
+        // No PATH_INFO split, no fallback to index.html — hard 404.
+        let file_path = ctx.document_root.join(sanitized);
+        if ctx.file_cache.is_file(&file_path.to_string_lossy()).await {
+            return RouteResult::Execute(file_path, None);
+        }
+        RouteResult::NotFound
     }
 }

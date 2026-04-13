@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use futures_util::future::BoxFuture;
-
-use super::{ModeRouter, ResolveCtx, RouteResult};
+use super::{ResolveCtx, RouteResult};
 
 /// Framework routing — `INDEX_FILE="index.php"` (single front controller).
 ///
@@ -54,28 +52,16 @@ impl FrameworkRouter {
     }
 }
 
-impl ModeRouter for FrameworkRouter {
-    fn resolve_no_extension<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move { self.rewrite(sanitized, ctx) })
+impl FrameworkRouter {
+    pub(crate) fn resolve_no_extension(
+        &self,
+        sanitized: &str,
+        ctx: &ResolveCtx<'_>,
+    ) -> RouteResult {
+        self.rewrite(sanitized, ctx)
     }
 
-    fn resolve_php<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move { self.rewrite(sanitized, ctx) })
-    }
-
-    fn resolve_static_miss<'a>(
-        &'a self,
-        _sanitized: &'a str,
-        _ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move { RouteResult::NotFound })
+    pub(crate) fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        self.rewrite(sanitized, ctx)
     }
 }

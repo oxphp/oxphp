@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use futures_util::future::BoxFuture;
-
-use super::{ModeRouter, ResolveCtx, RouteResult};
+use super::{ResolveCtx, RouteResult};
 
 /// Traditional routing — `INDEX_FILE=""`.
 ///
@@ -96,73 +94,65 @@ impl TraditionalRouter {
     }
 }
 
-impl ModeRouter for TraditionalRouter {
-    fn resolve_no_extension<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move {
-            // Root request — skip disk probes of `$uri`, go to fallback chain.
-            if sanitized.is_empty() {
-                return self.root_fallback(ctx).await;
+impl TraditionalRouter {
+    pub(crate) async fn resolve_no_extension(
+        &self,
+        sanitized: &str,
+        ctx: &ResolveCtx<'_>,
+    ) -> RouteResult {
+        // Root request — skip disk probes of `$uri`, go to fallback chain.
+        if sanitized.is_empty() {
+            return self.root_fallback(ctx).await;
+        }
+
+        let file_path = ctx.document_root.join(sanitized);
+        let file_key = file_path.to_string_lossy().into_owned();
+
+        // 1. `$uri` — exact file (no-extension file like `README`)
+        if ctx.file_cache.is_file(&file_key).await {
+            return RouteResult::Serve(file_path);
+        }
+
+        // 2. `$uri/` — directory → look for index.php, then index.html
+        if ctx.file_cache.is_dir(&file_key).await {
+            let php_idx = file_path.join("index.php");
+            if ctx.file_cache.is_file(&php_idx.to_string_lossy()).await {
+                return RouteResult::Execute(php_idx, None);
             }
-
-            let file_path = ctx.document_root.join(sanitized);
-            let file_key = file_path.to_string_lossy().into_owned();
-
-            // 1. `$uri` — exact file (no-extension file like `README`)
-            if ctx.file_cache.is_file(&file_key).await {
-                return RouteResult::Serve(file_path);
+            let html_idx = file_path.join("index.html");
+            if ctx.file_cache.is_file(&html_idx.to_string_lossy()).await {
+                return RouteResult::Serve(html_idx);
             }
+            // Directory exists but has no index — fall through to root fallback.
+        }
 
-            // 2. `$uri/` — directory → look for index.php, then index.html
-            if ctx.file_cache.is_dir(&file_key).await {
-                let php_idx = file_path.join("index.php");
-                if ctx.file_cache.is_file(&php_idx.to_string_lossy()).await {
-                    return RouteResult::Execute(php_idx, None);
-                }
-                let html_idx = file_path.join("index.html");
-                if ctx.file_cache.is_file(&html_idx.to_string_lossy()).await {
-                    return RouteResult::Serve(html_idx);
-                }
-                // Directory exists but has no index — fall through to root fallback.
-            }
-
-            // 3-6. Root fallback chain.
-            self.root_fallback(ctx).await
-        })
+        // 3-6. Root fallback chain.
+        self.root_fallback(ctx).await
     }
 
-    fn resolve_php<'a>(
-        &'a self,
-        sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move {
-            let file_path = ctx.document_root.join(sanitized);
-            let file_key = file_path.to_string_lossy().into_owned();
+    pub(crate) async fn resolve_php(
+        &self,
+        sanitized: &str,
+        ctx: &ResolveCtx<'_>,
+    ) -> RouteResult {
+        let file_path = ctx.document_root.join(sanitized);
+        let file_key = file_path.to_string_lossy().into_owned();
 
-            // Exact `.php` file on disk
-            if ctx.file_cache.is_file(&file_key).await {
-                return RouteResult::Execute(file_path, None);
-            }
+        // Exact `.php` file on disk
+        if ctx.file_cache.is_file(&file_key).await {
+            return RouteResult::Execute(file_path, None);
+        }
 
-            // PATH_INFO split — `$uri` contains `.php/` somewhere
-            if let Some(result) = self.try_split_path_info(sanitized, ctx).await {
-                return result;
-            }
+        // PATH_INFO split — `$uri` contains `.php/` somewhere
+        if let Some(result) = self.try_split_path_info(sanitized, ctx).await {
+            return result;
+        }
 
-            // Fallback chain
-            self.root_fallback(ctx).await
-        })
+        // Fallback chain
+        self.root_fallback(ctx).await
     }
 
-    fn resolve_static_miss<'a>(
-        &'a self,
-        _sanitized: &'a str,
-        ctx: &'a ResolveCtx<'a>,
-    ) -> BoxFuture<'a, RouteResult> {
-        Box::pin(async move { self.root_fallback(ctx).await })
+    pub(crate) async fn resolve_static_miss(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
+        self.root_fallback(ctx).await
     }
 }
