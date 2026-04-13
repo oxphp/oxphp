@@ -51,6 +51,10 @@ dashmap = "6"
 # LRU cache
 lru = "0.12"
 
+# Faster synchronization primitives (smaller uncontended cost than std::sync
+# on Linux; used in the file cache's read-heavy hot path)
+parking_lot = "0.12"
+
 # Compression
 brotli = "7"
 

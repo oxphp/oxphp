@@ -1,7 +1,7 @@
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -10,6 +10,7 @@ use http::{header, HeaderMap, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use lru::LruCache;
+use parking_lot::{Mutex, RwLock};
 use tokio_util::io::ReaderStream;
 
 use crate::types::{full_body, ResponseBody};
@@ -37,24 +38,31 @@ struct ContentEntry {
     last_modified_str: Arc<str>,
 }
 
-struct FileCacheInner {
-    /// Metadata cache: path → file type. O(1) LRU eviction via `lru` crate.
-    meta: LruCache<String, Option<FileType>>,
-
-    /// Content cache: path → entry. O(1) LRU eviction via `lru` crate.
-    /// Total bytes tracked separately for weight-based eviction.
-    content: LruCache<String, ContentEntry>,
-    content_total_bytes: usize,
-
-    /// Canonical path cache: path → canonical path. O(1) LRU eviction.
-    canonical: LruCache<String, Option<PathBuf>>,
+/// Content cache with its own byte budget. Kept as a single struct so the
+/// LRU and the running total stay consistent under one lock.
+struct ContentCache {
+    entries: LruCache<String, ContentEntry>,
+    total_bytes: usize,
 }
 
 /// LRU file cache to reduce filesystem syscalls during routing,
 /// with an optional content cache for small files.
-/// Uses `lru::LruCache` for O(1) eviction (replaces HashMap + counter-based scan).
+///
+/// Three independent locks rather than one big `RwLock<Inner>`:
+/// - `meta`/`canonical` are updated on every routing miss and held very
+///   briefly; `parking_lot::Mutex` has the lowest uncontended cost.
+/// - `content` is read-heavy after warmup and genuinely benefits from
+///   reader parallelism under static-file load; `parking_lot::RwLock`
+///   pays a lower read-lock tax than `std::sync::RwLock` (pthread) and
+///   does not starve readers under occasional writes.
+///
+/// Splitting them removes false serialization between routing (which
+/// touches `meta`/`canonical`) and static serving (which touches
+/// `content`).
 pub struct FileCache {
-    inner: RwLock<FileCacheInner>,
+    meta: Mutex<LruCache<String, Option<FileType>>>,
+    content: RwLock<ContentCache>,
+    canonical: Mutex<LruCache<String, Option<PathBuf>>>,
     /// When true, `get_content()` checks file mtime via `stat()` before returning.
     /// Stale entries are evicted and `None` is returned.
     validate_content: bool,
@@ -72,22 +80,22 @@ impl FileCache {
     pub fn with_revalidation(capacity: usize, validate: bool) -> Self {
         let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap());
         Self {
-            inner: RwLock::new(FileCacheInner {
-                meta: LruCache::new(cap),
-                content: LruCache::unbounded(),
-                content_total_bytes: 0,
-                canonical: LruCache::new(cap),
+            meta: Mutex::new(LruCache::new(cap)),
+            content: RwLock::new(ContentCache {
+                entries: LruCache::unbounded(),
+                total_bytes: 0,
             }),
+            canonical: Mutex::new(LruCache::new(cap)),
             validate_content: validate,
         }
     }
 
     /// Check the cache for a path. Returns (file_type, was_cached).
     pub async fn check(&self, path: &str) -> (Option<FileType>, bool) {
-        // Check cache (read lock + peek — no LRU promotion, no write contention)
+        // Check cache — Mutex + peek (no LRU promotion, no allocation).
         {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(&file_type) = guard.meta.peek(path) {
+            let guard = self.meta.lock();
+            if let Some(&file_type) = guard.peek(path) {
                 return (file_type, true);
             }
         }
@@ -100,10 +108,7 @@ impl FileCache {
         };
 
         // Insert into cache (LruCache handles O(1) eviction automatically)
-        {
-            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            inner.meta.put(path.to_string(), file_type);
-        }
+        self.meta.lock().put(path.to_string(), file_type);
 
         (file_type, false)
     }
@@ -122,8 +127,7 @@ impl FileCache {
     /// Read-only check whether content is in the cache. No LRU update, no I/O.
     #[inline]
     pub fn content_cached(&self, key: &str) -> bool {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        guard.content.peek(key).is_some()
+        self.content.read().entries.peek(key).is_some()
     }
 
     /// Check if cached content matches the request's conditional headers (304 fast path).
@@ -133,24 +137,23 @@ impl FileCache {
     pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
         if self.validate_content {
             // Need write lock for potential eviction
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            let inner = &mut *guard;
-            let entry = inner.content.peek(key)?;
+            let mut guard = self.content.write();
+            let entry = guard.entries.peek(key)?;
             let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
             match current_mtime {
                 Some(mtime) if mtime == entry.modified => {
                     Some(check_not_modified(headers, &entry.etag, &entry.modified))
                 }
                 _ => {
-                    if let Some(evicted) = inner.content.pop(key) {
-                        inner.content_total_bytes -= evicted.bytes.len();
+                    if let Some(evicted) = guard.entries.pop(key) {
+                        guard.total_bytes -= evicted.bytes.len();
                     }
                     None
                 }
             }
         } else {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            let entry = guard.content.peek(key)?;
+            let guard = self.content.read();
+            let entry = guard.entries.peek(key)?;
             Some(check_not_modified(headers, &entry.etag, &entry.modified))
         }
     }
@@ -165,9 +168,8 @@ impl FileCache {
         headers: &HeaderMap,
     ) -> Option<(Arc<str>, Arc<str>)> {
         if self.validate_content {
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            let inner = &mut *guard;
-            let entry = inner.content.peek(key)?;
+            let mut guard = self.content.write();
+            let entry = guard.entries.peek(key)?;
             let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
             match current_mtime {
                 Some(mtime) if mtime == entry.modified => {
@@ -178,15 +180,15 @@ impl FileCache {
                     }
                 }
                 _ => {
-                    if let Some(evicted) = inner.content.pop(key) {
-                        inner.content_total_bytes -= evicted.bytes.len();
+                    if let Some(evicted) = guard.entries.pop(key) {
+                        guard.total_bytes -= evicted.bytes.len();
                     }
                     None
                 }
             }
         } else {
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            let entry = guard.content.peek(key)?;
+            let guard = self.content.read();
+            let entry = guard.entries.peek(key)?;
             if check_not_modified(headers, &entry.etag, &entry.modified) {
                 Some((entry.etag.clone(), entry.last_modified_str.clone()))
             } else {
@@ -209,19 +211,19 @@ impl FileCache {
     ) -> Option<(Bytes, Arc<str>, SystemTime, Arc<str>, Arc<str>)> {
         if self.validate_content {
             // Revalidation needs write lock for potential eviction
-            let mut guard = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            let inner = &mut *guard;
-            if let Some(entry) = inner.content.get(key) {
+            let mut guard = self.content.write();
+            if let Some(entry) = guard.entries.get(key) {
                 let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
                 match current_mtime {
                     Some(mtime) if mtime == entry.modified => {}
                     _ => {
-                        if let Some(evicted) = inner.content.pop(key) {
-                            inner.content_total_bytes -= evicted.bytes.len();
+                        if let Some(evicted) = guard.entries.pop(key) {
+                            guard.total_bytes -= evicted.bytes.len();
                         }
                         return None;
                     }
                 }
+                let entry = guard.entries.peek(key)?;
                 Some((
                     entry.bytes.clone(),
                     entry.mime_type.clone(),
@@ -234,8 +236,8 @@ impl FileCache {
             }
         } else {
             // No revalidation — read lock + peek (no LRU promotion, no contention)
-            let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-            guard.content.peek(key).map(|entry| {
+            let guard = self.content.read();
+            guard.entries.peek(key).map(|entry| {
                 (
                     entry.bytes.clone(),
                     entry.mime_type.clone(),
@@ -262,24 +264,24 @@ impl FileCache {
             return;
         }
 
-        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.content.write();
 
         // Evict LRU entries while over budget — O(1) per eviction via pop_lru()
-        while inner.content_total_bytes + bytes.len() > MAX_CACHE_TOTAL_BYTES {
-            if let Some((_evicted_key, evicted)) = inner.content.pop_lru() {
-                inner.content_total_bytes -= evicted.bytes.len();
+        while guard.total_bytes + bytes.len() > MAX_CACHE_TOTAL_BYTES {
+            if let Some((_evicted_key, evicted)) = guard.entries.pop_lru() {
+                guard.total_bytes -= evicted.bytes.len();
             } else {
                 break;
             }
         }
 
         // Remove old entry if re-inserting same key
-        if let Some(old) = inner.content.pop(&key) {
-            inner.content_total_bytes -= old.bytes.len();
+        if let Some(old) = guard.entries.pop(&key) {
+            guard.total_bytes -= old.bytes.len();
         }
 
-        inner.content_total_bytes += bytes.len();
-        inner.content.put(
+        guard.total_bytes += bytes.len();
+        guard.entries.put(
             key,
             ContentEntry {
                 bytes,
@@ -295,15 +297,13 @@ impl FileCache {
     /// The inner `Option<PathBuf>` distinguishes: `Some(path)` = canonicalization
     /// succeeded, `None` = file did not exist at cache time.
     pub fn get_canonical(&self, key: &str) -> Option<Option<PathBuf>> {
-        let guard = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        guard.canonical.peek(key).cloned()
+        self.canonical.lock().peek(key).cloned()
     }
 
     /// Cache a canonical path result. Uses the same capacity as the metadata cache.
     pub fn insert_canonical(&self, key: String, canonical: Option<PathBuf>) {
-        let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
         // LruCache handles O(1) eviction automatically when at capacity.
-        inner.canonical.put(key, canonical);
+        self.canonical.lock().put(key, canonical);
     }
 }
 
@@ -600,8 +600,8 @@ mod tests {
         // Cache is full at 2, adding third should evict one
         cache.check(&f3.to_string_lossy()).await;
 
-        let inner = cache.inner.read().unwrap();
-        assert!(inner.meta.len() <= 2);
+        let meta = cache.meta.lock();
+        assert!(meta.len() <= 2);
     }
 
     #[tokio::test]
@@ -624,10 +624,10 @@ mod tests {
         // peek() without LRU promotion to avoid write-lock contention)
         cache.check(&f3.to_string_lossy()).await;
 
-        let inner = cache.inner.read().unwrap();
-        assert!(!inner.meta.contains(&f1.to_string_lossy().to_string()));
-        assert!(inner.meta.contains(&f2.to_string_lossy().to_string()));
-        assert!(inner.meta.contains(&f3.to_string_lossy().to_string()));
+        let meta = cache.meta.lock();
+        assert!(!meta.contains(&f1.to_string_lossy().to_string()));
+        assert!(meta.contains(&f2.to_string_lossy().to_string()));
+        assert!(meta.contains(&f3.to_string_lossy().to_string()));
     }
 
     #[tokio::test]
