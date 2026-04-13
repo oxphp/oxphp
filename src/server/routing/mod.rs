@@ -34,7 +34,7 @@ impl Mode {
     async fn resolve_no_extension(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         match self {
             Mode::Traditional(r) => r.resolve_no_extension(sanitized, ctx).await,
-            Mode::Framework(r) => r.resolve_no_extension(sanitized, ctx),
+            Mode::Framework(r) => r.resolve_no_extension(sanitized, ctx).await,
             Mode::Spa(r) => r.resolve_no_extension(ctx).await,
         }
     }
@@ -42,7 +42,7 @@ impl Mode {
     async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         match self {
             Mode::Traditional(r) => r.resolve_php(sanitized, ctx).await,
-            Mode::Framework(r) => r.resolve_php(sanitized, ctx),
+            Mode::Framework(r) => r.resolve_php(sanitized, ctx).await,
             Mode::Spa(r) => r.resolve_php(sanitized, ctx).await,
         }
     }

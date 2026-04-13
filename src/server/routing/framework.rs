@@ -19,24 +19,32 @@ use super::{ResolveCtx, RouteResult};
 ///   `/index.php` with `PATH_INFO` set to the original URI.
 pub(crate) struct FrameworkRouter {
     index_file_path: PathBuf,
+    index_file_key: String,
 }
 
 impl FrameworkRouter {
     pub(crate) fn new(document_root: &Path, index_file: &str) -> Self {
+        let index_file_path = document_root.join(index_file);
+        let index_file_key = index_file_path.to_string_lossy().into_owned();
         Self {
-            index_file_path: document_root.join(index_file),
+            index_file_path,
+            index_file_key,
         }
     }
 
-    /// Rewrite target: always Execute(index.php) with PATH_INFO=`/` + sanitized.
-    /// Falls back to `worker_route` if the front controller is missing.
-    fn rewrite(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
-        // If someone removes index.php but still has a worker configured,
-        // worker takes over. Checked before building PATH_INFO so we skip
-        // the allocation when the worker path wins. Disk check for the
-        // front controller is deferred to the executor layer.
-        if let Some(wr) = ctx.worker_route {
-            return wr.clone();
+    /// Rewrite target: `Execute(index.php)` with PATH_INFO=`/` + sanitized.
+    /// Falls back to `worker_route` when the front controller is missing on
+    /// disk, otherwise returns `NotFound`. The file_cache probe is O(1) on
+    /// cache hit — in Framework mode the same `index.php` is resolved on
+    /// every request, so the entry stays pinned in the meta cache.
+    async fn rewrite(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        if !ctx.file_cache.is_file(&self.index_file_key).await {
+            // Front controller missing — admin-configured worker wins
+            // if present, otherwise hard 404.
+            if let Some(wr) = ctx.worker_route {
+                return wr.clone();
+            }
+            return RouteResult::NotFound;
         }
 
         // PATH_INFO carries the original URI (with leading `/`). Empty sanitized
@@ -55,15 +63,15 @@ impl FrameworkRouter {
 }
 
 impl FrameworkRouter {
-    pub(crate) fn resolve_no_extension(
+    pub(crate) async fn resolve_no_extension(
         &self,
         sanitized: &str,
         ctx: &ResolveCtx<'_>,
     ) -> RouteResult {
-        self.rewrite(sanitized, ctx)
+        self.rewrite(sanitized, ctx).await
     }
 
-    pub(crate) fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
-        self.rewrite(sanitized, ctx)
+    pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        self.rewrite(sanitized, ctx).await
     }
 }
