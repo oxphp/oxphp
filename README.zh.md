@@ -106,7 +106,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ### HTTP 与网络
 - **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
 - **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
-- **3 种路由模式** — 传统模式、框架模式（`index.php`）、SPA 模式（`index.html`）
+- **3 种路由模式** — Traditional（文件映射 + 始终启用 PATH_INFO）、Framework（重写到 `index.php`，`PATH_INFO=$request_uri`）、SPA（无扩展名路径返回 `index.html`，缺失资源硬 404）。每种模式都对应熟悉的 nginx `try_files` 配置
 - **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行
 - **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
 
@@ -201,7 +201,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
-| `INDEX_FILE` | *(未设置)* | 路由模式：空 = 传统模式，`index.php` = 框架模式，`index.html` = SPA 模式 |
+| `INDEX_FILE` | *(未设置)* | 路由模式：空 = Traditional，`*.php` = Framework，其他任何值 = SPA |
 | `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 异步 I/O 线程数；`0` = 自动 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
@@ -227,7 +227,6 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | 对 `/script.php/extra/path` 形式的 URI 启用 PATH_INFO 拆分（旧版 CGI 兼容） |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
 

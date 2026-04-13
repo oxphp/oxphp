@@ -1,136 +1,208 @@
 ---
 title: Routing
-description: Configure OxPHP routing with four modes — traditional file mapping, framework front-controller, SPA fallback, and worker mode.
+description: Configure OxPHP routing with three modes — traditional file mapping, framework front-controller, and SPA fallback. Each mode mirrors the equivalent nginx try_files directive.
 ---
 
 # Routing
 
-OxPHP routes incoming HTTP requests using one of four modes, controlled by a single environment variable. The mode you choose determines how URL paths map to files on disk.
+OxPHP routes incoming HTTP requests using one of three modes, controlled by a single environment variable. Each mode mirrors a familiar nginx `try_files` configuration so you can predict exactly what happens for any URL.
 
 ## How It Works
 
-When a request arrives, OxPHP processes the URL path through a security pipeline before resolving it to a file:
+Every request runs through a shared pipeline before the mode-specific logic kicks in:
 
-1. **Percent-decoding** — encoded characters like `%2e%2e` are decoded to their literal values
-2. **Segment filtering** — path traversal segments (`..`), current-directory segments (`.`), and empty segments are stripped
-3. **Mode-based routing** — the sanitized path is matched against the filesystem according to the active routing mode
-4. **Symlink validation** — the resolved filesystem path is checked against the document root boundary to prevent symlink escapes
+1. **Dot-path filter** — paths containing hidden segments (`.git`, `.env`) are blocked, with an exception for `/.well-known/*` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615))
+2. **Route cache lookup** — recently resolved URIs are returned from an LRU cache (10 000 entries)
+3. **Percent-decoding + sanitization** — encoded sequences like `%2e%2e` are decoded and traversal segments (`..`, `.`, empty) are stripped
+4. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
+5. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
+6. **Mode dispatch** — each mode handles the three URI kinds with its own rules
+7. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root
+
+The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `INDEX_FILE` | *(unset)* | Determines routing mode. Unset = traditional, `index.php` = framework, `index.html` = SPA |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | Split URIs like `/script.php/path` into script + `PATH_INFO` |
+| `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `*.php` = Framework, anything else = SPA |
 
 ## Traditional Mode
 
-Traditional mode is active when `INDEX_FILE` is not set. URLs map directly to files on disk, similar to classic PHP hosting with Apache or nginx.
+Active when `INDEX_FILE` is **not set** (or empty). Equivalent nginx config:
 
-- `/about.php` executes `DOCUMENT_ROOT/about.php`
-- `/style.css` serves `DOCUMENT_ROOT/style.css`
-- `/` resolves to `index.php` if it exists, otherwise `index.html`
-- `/blog/` tries `blog/index.php`, then `blog/index.html`
-- Any path that does not match a file returns 404
+```nginx
+location / {
+    try_files $uri $uri/ /index.php /index.html =404;
+}
+location ~ \.php$ {
+    try_files $uri =404;          # PATH_INFO splitting enabled
+}
+```
 
-This mode works well for WordPress, legacy PHP applications, or any project where each URL corresponds to a specific file.
+**Resolution order:**
+
+1. **`$uri`** — exact file on disk → serve (or execute if `.php`)
+2. **`$uri/`** — directory → look for `index.php`, then `index.html` inside it
+3. **PATH_INFO split** — when the URI contains `.php/`, the script prefix is matched on disk and the remainder becomes `PATH_INFO` (e.g. `/api.php/users/42` → script `api.php`, `PATH_INFO=/users/42`)
+4. **`/index.php`** — root front-controller fallback
+5. **`/index.html`** — root static index fallback
+6. **`WORKER_FILE`** — if worker mode is configured
+7. **404**
+
+**Examples:**
+
+| Request | Result |
+|---|---|
+| `/about.php` | Execute `about.php` |
+| `/style.css` | Serve `style.css` |
+| `/blog/` (with `blog/index.php`) | Execute `blog/index.php` |
+| `/api.php/users/42` | Execute `api.php` with `PATH_INFO=/users/42` |
+| `/missing.txt` | Falls back to `/index.php` |
+| `/some/route` | Falls back to `/index.php` |
+
+PATH_INFO splitting is **always on** in Traditional mode. There is no env switch — the previous `SPLIT_PATH_INFO_ENABLED` flag has been removed.
 
 ## Framework Mode
 
-Framework mode is active when `INDEX_FILE=index.php`. All requests that do not match an existing static file are routed to the front controller, exactly as Laravel, Symfony, and other PHP frameworks expect.
+Active when `INDEX_FILE=index.php` (or any value ending in `.php`). Equivalent nginx config:
 
-- `/style.css` serves the static file directly (if it exists on disk)
-- `/api/users` executes `index.php` (the path does not exist as a file)
-- `/about.php` returns 404 (direct `.php` access is blocked)
-- `/index.php` returns 404 (direct access to the front controller is blocked)
+```nginx
+location ~ \.(?!php$)[a-zA-Z0-9]+$ {
+    try_files $uri =404;          # static assets: hard 404 if missing
+}
+location / {
+    rewrite ^ /index.php last;    # everything else → front controller
+}
+location = /index.php {
+    fastcgi_param PATH_INFO $request_uri;
+    fastcgi_pass ...;
+}
+```
 
-Blocking direct `.php` access prevents URL leaks and enforces that all PHP requests pass through the framework's router.
+**Resolution rules:**
+
+| URI kind | Behavior |
+|---|---|
+| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise **hard 404** |
+| `.php` (any path) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
+| no extension (`/api/users`, `/`) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
+
+**Examples:**
+
+| Request | Result | `$_SERVER['PATH_INFO']` |
+|---|---|---|
+| `/style.css` (exists) | Serve `style.css` | — |
+| `/style.css` (missing) | **404** (no fallback) | — |
+| `/api/users` | Execute `index.php` | `/api/users` |
+| `/about.php` | Execute `index.php` | `/about.php` |
+| `/api.php/v1/users` | Execute `index.php` | `/api.php/v1/users` |
+| `/index.php` (direct) | Execute `index.php` | `/index.php` |
+| `/` | Execute `index.php` | `/` |
+
+The front controller always receives the **original URI** in `PATH_INFO`, letting your router decide what to do without inspecting `REQUEST_URI` separately. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
 
 ## SPA Mode
 
-SPA mode is active when `INDEX_FILE=index.html`. Requests that do not match an existing file fall back to the HTML entry point, allowing client-side routers (React Router, Vue Router, etc.) to handle the path.
+Active when `INDEX_FILE=index.html` (or any non-`.php` value). Equivalent nginx config:
 
-- `/style.css` serves the static file
-- `/app/dashboard` serves `index.html` (the client-side router handles the path)
-- `/api.php` executes the PHP script if it exists on disk
-- `/index.html` returns 404 (direct access to the index file is blocked)
+```nginx
+location ~ \.php$ {
+    try_files $uri =404;          # PHP: file must exist, no fallback
+}
+location ~ \. {
+    try_files $uri =404;          # other extensions: hard 404 if missing
+}
+location / {
+    try_files /index.html =404;   # no-extension paths: straight to index.html
+}
+```
+
+**Resolution rules:**
+
+| URI kind | Behavior |
+|---|---|
+| `.php` | Execute the file if it exists, otherwise **hard 404** |
+| `.css`, `.png`, … (any other extension) | Serve the file if it exists, otherwise **hard 404** |
+| no extension (`/dashboard`, `/api/users`, `/`) | Serve `/index.html` directly — **no disk probe of `$uri`** |
+
+**Examples:**
+
+| Request | Result |
+|---|---|
+| `/style.css` (exists) | Serve `style.css` |
+| `/style.css` (missing) | **404** |
+| `/dashboard` | Serve `/index.html` |
+| `/users/42/edit` | Serve `/index.html` |
+| `/api.php` (exists) | Execute `api.php` |
+| `/api.php` (missing) | **404** |
+| `/index.html` (direct) | Serve `index.html` |
+
+Two semantics worth highlighting:
+
+- **No-extension paths skip the disk** — the SPA mode never asks "does `/dashboard` exist on disk?" It always returns the index. This is correct for client-side routers and avoids unnecessary `stat()` calls.
+- **Missing static files are hard 404, not fallthrough** — a missing `/style.css` does not silently serve `index.html`. This catches broken asset references early instead of returning HTML where JS expected CSS.
 
 ## Worker Mode
 
-Worker mode routing activates automatically when `WORKER_FILE` is set. All incoming requests that do not match a static file on disk are dispatched to the persistent PHP worker process rather than returning 404.
+Worker mode activates automatically when `WORKER_FILE` is set. It plugs into all three routing modes as a fallback step that runs **before** the final 404:
 
-- `/style.css` serves the static file directly
-- `/api/users` dispatches to the worker (no file exists at that path)
-- `/` dispatches to the worker if no `index.php` or `index.html` exists
+| Mode | Where worker fits in |
+|---|---|
+| Traditional | After `/index.html` fallback, before 404 |
+| Framework | When `index.php` is itself missing |
+| SPA | When `/index.html` is itself missing |
 
-Worker mode is compatible with `INDEX_FILE`. Setting both `WORKER_FILE` and `INDEX_FILE=index.php` combines worker mode routing with framework mode static file handling — static files are served directly, and everything else goes to the worker.
+This means worker mode is orthogonal to routing: if your front controller goes missing, the worker takes over. Setting both `WORKER_FILE` and `INDEX_FILE=index.php` is fully supported.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
 
-## PATH_INFO Splitting
+## PATH_INFO Behavior
 
-Some legacy PHP applications use `PATH_INFO` for routing — placing extra path segments after a `.php` script name (e.g., `/api.php/users/42`). By default, OxPHP treats the entire URI as a single filesystem path, so these requests return 404.
+`$_SERVER['PATH_INFO']` is populated differently depending on mode:
 
-Enable `SPLIT_PATH_INFO_ENABLED=true` to activate path splitting:
+| Mode | When set | Value |
+|---|---|---|
+| Traditional | Only when the URI contains `.php/` (PATH_INFO split) | Tail after the script segment, e.g. `/users/42` |
+| Framework | **Always** | Full original URI, e.g. `/api/users` |
+| SPA | Never | (PHP is only invoked for exact `.php` files; no PATH_INFO) |
 
-```bash
-SPLIT_PATH_INFO_ENABLED=true
-```
-
-When enabled, OxPHP scans the URI left-to-right for the first `.php` segment that maps to an existing file on disk. Everything after it becomes `PATH_INFO`:
-
-```
-/app.php/user/42
-├── Script: DOCUMENT_ROOT/app.php
-└── PATH_INFO: /user/42
-```
-
-This populates `$_SERVER` correctly for CGI-style routing:
-
-| Variable | Value |
-|---|---|
-| `SCRIPT_NAME` | `/app.php` |
-| `SCRIPT_FILENAME` | `/var/www/html/public/app.php` |
-| `PATH_INFO` | `/user/42` |
-| `PHP_SELF` | `/app.php/user/42` |
-
-If no `.php` file is found along the path, routing falls through to the normal resolution chain (worker fallback, `INDEX_FILE` fallback, or 404).
-
-> **When to use:** Drupal, MediaWiki, legacy REST APIs built with `$_SERVER['PATH_INFO']`, or any application that was previously configured with nginx `fastcgi_split_path_info`.
+In Traditional mode, splitting is always on — the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed. If you want PATH_INFO routing, use Traditional mode and place a `.php` script as the prefix.
 
 ## Path Security
 
-OxPHP applies multiple layers of protection to prevent directory traversal and symlink escape attacks:
+OxPHP applies multiple layers of protection to prevent directory traversal, hidden file disclosure, and symlink escape attacks:
 
 - **Percent-decoding** runs before sanitization, so encoded traversal attempts like `/%2e%2e/etc/passwd` are caught
 - **Segment filtering** removes `..`, `.`, and empty segments from the resolved path
 - **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked
-- **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*`. See [Dot-Path Blocking](../security/dot-path-blocking.md)
+- **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
+- **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 
 ## Troubleshooting
 
-### All requests return 404
+### All requests return 404 in Traditional mode
 
-Verify that `DOCUMENT_ROOT` points to the correct directory and that the directory exists on disk. OxPHP exits at startup if the document root cannot be resolved, so a running server means the directory existed at startup — but a volume mount or wrong path still causes every request to miss.
-
-**Check:** Confirm the document root path inside the container:
+Check that `index.php` or `index.html` exists at the document root. The Traditional mode's `try_files` chain only falls back to these — if both are missing and no file matches the URL, you get 404.
 
 ```bash
 docker exec <container> ls /var/www/html/public
 ```
 
-**Fix:** Correct `DOCUMENT_ROOT` or ensure your volume mounts the right path.
+### Missing static asset returns 404 instead of the SPA shell
 
-### Framework mode returns 404 for PHP routes
+This is intentional in Framework and SPA modes. A missing `/style.css` is a hard 404, not a silent fallback to `index.html`. This catches broken asset references early. If you want fallthrough, use Traditional mode.
 
-Direct `.php` access is intentionally blocked in framework mode. If your application links directly to `.php` files, switch to traditional mode (`INDEX_FILE` unset) or update the links to use clean URLs.
+### Direct `/index.php` no longer returns 404
 
-### URLs with special characters return 404
+In Framework mode, direct access to the front controller is now allowed (the rewrite to `/index.php` is idempotent). If you previously relied on the 404 to detect direct hits, switch to checking `PATH_INFO` from inside the controller.
 
-OxPHP percent-decodes URLs before routing. Requests for paths like `/café/menu` work correctly. If a path still returns 404, confirm the file exists on disk with the decoded name.
+### `PATH_INFO` is empty in Framework mode
+
+Make sure `INDEX_FILE` ends in `.php`. If it doesn't, OxPHP picks SPA mode, which doesn't populate `PATH_INFO`. The variable is now set unconditionally in Framework mode — you no longer need any feature flag.
 
 ### Symlink inside document root returns 404
 

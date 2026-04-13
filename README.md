@@ -106,7 +106,7 @@ See the full [documentation](docs/en/index.md) for details.
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
 - **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
-- **3 routing modes** — Traditional, Framework (`index.php`), SPA (`index.html`)
+- **3 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (`index.php` rewrite with `PATH_INFO=$request_uri`), SPA (`index.html` for no-extension paths, hard 404 for missing assets). Each mode mirrors a familiar nginx `try_files` configuration
 - **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing
 - **Configurable timeouts** — header read, request, and keep-alive
 
@@ -202,7 +202,7 @@ All settings are via environment variables — no config files required.
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
-| `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `index.php` = Framework, `index.html` = SPA |
+| `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `*.php` = Framework, anything else = SPA |
 | `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Async I/O threads; `0` = auto |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool: `N` = fixed, `MIN:MAX` = dynamic, `0` = auto |
@@ -228,7 +228,6 @@ All settings are via environment variables — no config files required.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
-| `SPLIT_PATH_INFO_ENABLED` | `false` | PATH_INFO splitting for `/script.php/extra/path` URIs (legacy CGI compat) |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
 

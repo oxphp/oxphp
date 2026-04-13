@@ -2,6 +2,6 @@
 # description: Framework routing mode (INDEX_FILE=index.php)
 
 routing/test_all_to_index >> /arbitrary/path | GET | | 200 | content-type:application/json
-routing/test_direct_php_blocked | GET | | 404 |
+routing/test_direct_php_to_index | GET | | 200 | content-type:application/json
 routing/test_static_still_served >> /assets/style.css | GET | | 200 | content-type:text/css
-routing/test_index_php_blocked | GET | | 404 |
+routing/test_index_php_executes >> /index.php | GET | | 200 | content-type:application/json

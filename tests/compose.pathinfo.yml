@@ -1,6 +1,7 @@
-# PATH_INFO splitting mode: SPLIT_PATH_INFO_ENABLED=true.
-# Enables splitting the request URI into SCRIPT_NAME and PATH_INFO components,
-# required by frameworks that embed routing data in the URL path (e.g. /index.php/route).
+# PATH_INFO splitting profile.
+# Verifies Traditional-mode PATH_INFO splitting (`/index.php/api/v1` →
+# SCRIPT_NAME=`/index.php`, PATH_INFO=`/api/v1`). Splitting is now always-on
+# in Traditional routing mode — no env switch required.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.pathinfo.yml up
@@ -22,7 +23,6 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      SPLIT_PATH_INFO_ENABLED: "true"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

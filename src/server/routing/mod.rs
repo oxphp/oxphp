@@ -1,0 +1,380 @@
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use futures_util::future::BoxFuture;
+use lru::LruCache;
+use percent_encoding::percent_decode_str;
+
+use crate::config::ServerConfig;
+use crate::server::response::static_file::FileCache;
+
+mod framework;
+mod spa;
+mod traditional;
+
+#[cfg(test)]
+mod tests;
+
+use framework::FrameworkRouter;
+use spa::SpaRouter;
+use traditional::TraditionalRouter;
+
+const ROUTE_CACHE_CAPACITY: usize = 10_000;
+
+/// Result of route resolution.
+#[derive(Debug, Clone)]
+pub enum RouteResult {
+    /// Execute a PHP script. Optional `path_info` carries the extra path
+    /// after the `.php` segment (e.g. `/user/42` for `/app.php/user/42`),
+    /// or the full original URI when a mode rewrites everything to a single
+    /// front controller (Framework mode).
+    Execute(PathBuf, Option<String>),
+    /// Serve a static file.
+    Serve(PathBuf),
+    /// File not found.
+    NotFound,
+}
+
+/// Classification of a sanitized URI path performed once in the common layer
+/// before delegating to a mode router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UriKind {
+    /// URI has no filename extension at all (`/foo`, `/api/users`, `/`).
+    NoExtension,
+    /// URI refers to a PHP script — either ends in `.php` or contains a
+    /// `.php/` segment (PATH_INFO style). Matched case-insensitively.
+    Php,
+    /// URI has any other alphanumeric extension (`/style.css`, `/logo.png`).
+    OtherExtension,
+}
+
+/// Context passed to every mode router on dispatch.
+pub(crate) struct ResolveCtx<'a> {
+    pub document_root: &'a Path,
+    pub file_cache: &'a Arc<FileCache>,
+    pub worker_route: Option<&'a RouteResult>,
+}
+
+/// Trait implemented by each INDEX_FILE mode. The common layer classifies
+/// the URI and delegates to one of the three methods based on `UriKind`.
+pub(crate) trait ModeRouter: Send + Sync {
+    /// Called for `UriKind::NoExtension` URIs.
+    fn resolve_no_extension<'a>(
+        &'a self,
+        sanitized: &'a str,
+        ctx: &'a ResolveCtx<'a>,
+    ) -> BoxFuture<'a, RouteResult>;
+
+    /// Called for `UriKind::Php` URIs. The common layer does NOT check disk
+    /// for these — each mode decides its own rules.
+    fn resolve_php<'a>(
+        &'a self,
+        sanitized: &'a str,
+        ctx: &'a ResolveCtx<'a>,
+    ) -> BoxFuture<'a, RouteResult>;
+
+    /// Called for `UriKind::OtherExtension` URIs when the common layer's
+    /// disk check did NOT find a file. Modes decide the fallback policy.
+    fn resolve_static_miss<'a>(
+        &'a self,
+        sanitized: &'a str,
+        ctx: &'a ResolveCtx<'a>,
+    ) -> BoxFuture<'a, RouteResult>;
+}
+
+/// Routing configuration with mode dispatch and caching layers.
+pub struct RouteConfig {
+    document_root: Arc<PathBuf>,
+    canonical_root: PathBuf,
+    mode: Box<dyn ModeRouter>,
+    worker_route: Option<RouteResult>,
+    /// Cache of resolved routes keyed by URI path. Hold time is O(1) for
+    /// both get and put; stores `Arc<RouteResult>` so cache hits are a
+    /// single atomic increment rather than a `PathBuf::clone()`.
+    route_cache: Mutex<LruCache<String, Arc<RouteResult>>>,
+}
+
+impl RouteConfig {
+    /// Create route config from server config.
+    ///
+    /// Panics if the document root cannot be canonicalized, since symlink
+    /// escape protection requires a valid, resolvable document root path.
+    pub fn new(config: &ServerConfig) -> Self {
+        let canonical_root = std::fs::canonicalize(&config.document_root).unwrap_or_else(|e| {
+            panic!(
+                "Fatal: cannot canonicalize document_root '{}': {}. \
+                 Symlink escape protection requires a valid document root path.",
+                config.document_root.display(),
+                e
+            );
+        });
+
+        let document_root = Arc::new(config.document_root.clone());
+
+        let mode: Box<dyn ModeRouter> = match config.index_file.as_deref() {
+            None | Some("") => Box::new(TraditionalRouter::new(&document_root)),
+            Some(name) if name.ends_with(".php") => {
+                Box::new(FrameworkRouter::new(&document_root, name))
+            }
+            Some(name) => Box::new(SpaRouter::new(&document_root, name)),
+        };
+
+        Self {
+            document_root,
+            canonical_root,
+            mode,
+            worker_route: None,
+            route_cache: Mutex::new(LruCache::new(
+                NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
+            )),
+        }
+    }
+
+    /// Returns the canonical document root.
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    /// Returns the document root path.
+    pub fn document_root(&self) -> &Path {
+        &self.document_root
+    }
+
+    /// Returns a shared reference to the document root (cheap clone via Arc).
+    pub fn document_root_arc(&self) -> Arc<PathBuf> {
+        Arc::clone(&self.document_root)
+    }
+
+    /// Set the worker file for worker mode routing. When set, all unmatched
+    /// requests fall back to this PHP file before returning NotFound.
+    pub fn set_worker_file(&mut self, path: PathBuf) {
+        self.worker_route = Some(RouteResult::Execute(path, None));
+    }
+
+    /// Resolve a URI path to a route result using the file cache.
+    ///
+    /// Pipeline: dot-path block → route cache → decode → sanitize →
+    /// well-known PHP block → classify → mode dispatch → symlink validation → cache.
+    pub async fn resolve_request(
+        &self,
+        uri_path: &str,
+        file_cache: &Arc<FileCache>,
+    ) -> Arc<RouteResult> {
+        // Block dot-paths before cache (keeps junk out of LRU)
+        if is_blocked_dot_path(uri_path) {
+            return Arc::new(RouteResult::NotFound);
+        }
+
+        // Fast path: route cache (single lock, O(1) get + LRU promotion)
+        {
+            let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(result) = cache.get(uri_path) {
+                return Arc::clone(result);
+            }
+        }
+
+        // Decode URI
+        let decoded = match percent_decode_str(uri_path).decode_utf8() {
+            Ok(s) => s.into_owned(),
+            Err(_) => return Arc::new(RouteResult::NotFound),
+        };
+
+        // Sanitize path (strip `..`, `.`, empty segments)
+        let sanitized = sanitize_path(&decoded);
+
+        // Defense-in-depth: never execute PHP inside `.well-known/`
+        if sanitized.starts_with(".well-known/") && has_php_component(&sanitized) {
+            let arc = Arc::new(RouteResult::NotFound);
+            self.cache_put(uri_path, &arc);
+            return arc;
+        }
+
+        // Classify once and dispatch
+        let ctx = ResolveCtx {
+            document_root: &self.document_root,
+            file_cache,
+            worker_route: self.worker_route.as_ref(),
+        };
+
+        let result = match classify_uri(&sanitized) {
+            UriKind::NoExtension => self.mode.resolve_no_extension(&sanitized, &ctx).await,
+            UriKind::Php => self.mode.resolve_php(&sanitized, &ctx).await,
+            UriKind::OtherExtension => {
+                // Common disk check for non-.php extensions — done once here,
+                // shared across all three modes via file_cache.
+                let candidate = self.document_root.join(&sanitized);
+                if file_cache.is_file(&candidate.to_string_lossy()).await {
+                    RouteResult::Serve(candidate)
+                } else {
+                    self.mode.resolve_static_miss(&sanitized, &ctx).await
+                }
+            }
+        };
+
+        // Symlink-escape protection: the resolved path must live inside
+        // the canonical document root. The worker file is an admin-configured
+        // trusted path that may sit outside DOCUMENT_ROOT — skip it.
+        let result = match &result {
+            RouteResult::Serve(path) | RouteResult::Execute(path, _) => {
+                let is_worker = self
+                    .worker_route
+                    .as_ref()
+                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf, _) if wf == path));
+                if !is_worker && !self.validate_path(path, file_cache).await {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Blocked request: resolved path escapes document root"
+                    );
+                    RouteResult::NotFound
+                } else {
+                    result
+                }
+            }
+            RouteResult::NotFound => result,
+        };
+
+        let arc = Arc::new(result);
+        self.cache_put(uri_path, &arc);
+        arc
+    }
+
+    fn cache_put(&self, uri_path: &str, result: &Arc<RouteResult>) {
+        let mut cache = self.route_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.put(uri_path.to_string(), Arc::clone(result));
+    }
+
+    /// Check that a resolved path stays within the canonical document root.
+    /// Results are cached in the file cache to avoid repeated `realpath(3)`.
+    async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
+        let cache_key = path.to_string_lossy().to_string();
+
+        if let Some(cached) = file_cache.get_canonical(&cache_key) {
+            return match cached {
+                Some(canonical_path) => canonical_path.starts_with(&self.canonical_root),
+                None => true, // file didn't exist at cache time; serve() will 404
+            };
+        }
+
+        let result = tokio::fs::canonicalize(path).await.ok();
+        let valid = match &result {
+            Some(canonical_path) => canonical_path.starts_with(&self.canonical_root),
+            None => true,
+        };
+
+        file_cache.insert_canonical(cache_key, result);
+        valid
+    }
+}
+
+/// Classify a sanitized URI path into one of three kinds.
+pub(crate) fn classify_uri(sanitized: &str) -> UriKind {
+    // Any `.php` script component (end-of-string or followed by '/') wins.
+    // Catches both `/about.php` and `/app.php/user/42` in one rule.
+    if has_php_component(sanitized) {
+        return UriKind::Php;
+    }
+
+    // Otherwise look at the last path segment's extension.
+    let filename = match sanitized.rfind('/') {
+        Some(pos) => &sanitized[pos + 1..],
+        None => sanitized,
+    };
+    if filename.is_empty() {
+        return UriKind::NoExtension;
+    }
+    let Some(dot) = filename.rfind('.') else {
+        return UriKind::NoExtension;
+    };
+    if dot == 0 {
+        // `.env`-like: dot-files are blocked upstream, but treat as no-ext
+        // defensively so nothing slips through here.
+        return UriKind::NoExtension;
+    }
+    let ext = &filename[dot + 1..];
+    if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        UriKind::OtherExtension
+    } else {
+        UriKind::NoExtension
+    }
+}
+
+/// Returns true if `sanitized` contains a `.php` script component —
+/// either ends with `.php` or has `.php/` somewhere inside.
+/// Case-insensitive to defend against `/admin.PHP` on case-insensitive FS.
+pub(crate) fn has_php_component(sanitized: &str) -> bool {
+    let bytes = sanitized.as_bytes();
+    if bytes.len() < 4 {
+        return false;
+    }
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if bytes[i] == b'.'
+            && (bytes[i + 1] == b'p' || bytes[i + 1] == b'P')
+            && (bytes[i + 2] == b'h' || bytes[i + 2] == b'H')
+            && (bytes[i + 3] == b'p' || bytes[i + 3] == b'P')
+        {
+            let end = i + 4;
+            if end == bytes.len() || bytes[end] == b'/' {
+                return true;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// Returns true if the URI path contains a blocked dot-segment.
+///
+/// A dot-segment is any path component starting with `.` (e.g. `.git`, `.env`).
+/// Exception: `.well-known` as the **first** segment with a non-empty sub-path
+/// (`/.well-known/foo`) is allowed per RFC 8615. Bare `/.well-known` and
+/// `/.well-known/` are blocked.
+///
+/// The check runs on percent-decoded input to catch encoded bypasses like `/%2egit/`.
+fn is_blocked_dot_path(uri_path: &str) -> bool {
+    let decoded = match percent_decode_str(uri_path).decode_utf8() {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
+
+    let mut segments = decoded.split('/').filter(|s| !s.is_empty());
+    let mut is_first = true;
+
+    while let Some(seg) = segments.next() {
+        if !seg.starts_with('.') {
+            is_first = false;
+            continue;
+        }
+
+        if seg == ".well-known" && is_first {
+            match segments.next() {
+                Some(next) if !next.is_empty() && !next.starts_with('.') => {
+                    is_first = false;
+                    continue;
+                }
+                _ => return true,
+            }
+        }
+
+        return true;
+    }
+
+    false
+}
+
+/// Remove `..`, `.` and empty segments from a path to prevent directory traversal.
+fn sanitize_path(path: &str) -> String {
+    let mut result = String::with_capacity(path.len());
+    for segment in path.split('/') {
+        if !segment.is_empty() && segment != ".." && segment != "." {
+            if !result.is_empty() {
+                result.push('/');
+            }
+            result.push_str(segment);
+        }
+    }
+    result
+}

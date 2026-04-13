@@ -9,9 +9,6 @@ pub struct ServerConfig {
     pub index_file: Option<String>,
     pub header_read_timeout: Duration,
     pub request_timeout: Duration,
-    /// When enabled, URIs like `/script.php/extra/path` are split into
-    /// SCRIPT_NAME=`/script.php` and PATH_INFO=`/extra/path`.
-    pub split_path_info: bool,
 }
 
 impl ServerConfig {
@@ -22,7 +19,6 @@ impl ServerConfig {
             index_file,
             header_read_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(120),
-            split_path_info: false,
         }
     }
 
@@ -49,17 +45,12 @@ impl ServerConfig {
             Duration::from_secs(request_timeout_seconds)
         };
 
-        let split_path_info = std::env::var("SPLIT_PATH_INFO_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
         Ok(Self {
             listen_addr,
             document_root,
             index_file,
             header_read_timeout,
             request_timeout,
-            split_path_info,
         })
     }
 }

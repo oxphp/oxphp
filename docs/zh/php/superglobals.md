@@ -71,7 +71,7 @@ Cookie: session=xyz          -> HTTP_COOKIE
 | 变量 | 行为 |
 |------|------|
 | `SERVER_ADDR` | 未设置。OxPHP 不填充本地服务器 IP 地址。 |
-| `PATH_INFO` | 默认未设置。通过 `SPLIT_PATH_INFO_ENABLED=true` 启用——详见下方 [PATH_INFO 拆分](#path_info-拆分)。 |
+| `PATH_INFO` | 自动设置——详见下方 [PATH_INFO 行为](#path_info-行为)。 |
 | `PATH_TRANSLATED` | 未设置。 |
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | 不从 `Authorization` 请求头中提取。请直接读取 `$_SERVER['HTTP_AUTHORIZATION']`。 |
 | `REDIRECT_STATUS` | 未设置。OxPHP 不使用内部重定向机制。 |
@@ -98,26 +98,37 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 }
 ```
 
-### PATH_INFO 拆分
+### PATH_INFO 行为
 
-默认情况下，OxPHP 不会将 URI 路径拆分为脚本和路径信息两部分。对 `/app.php/user/42` 的请求会被视为单一路径——除非有回退机制（框架模式或 Worker 模式）捕获，否则会返回 404。
+`$_SERVER['PATH_INFO']` 根据当前路由模式自动填充。没有功能开关——之前的 `SPLIT_PATH_INFO_ENABLED` 环境变量已被移除。
 
-设置 `SPLIT_PATH_INFO_ENABLED=true` 以启用类似 nginx 的路径拆分，适用于依赖 `$_SERVER['PATH_INFO']` 的旧版应用：
+| 路由模式 | 何时设置 | 值 |
+|---|---|---|
+| **Traditional**（未设置 `INDEX_FILE`） | 仅当 URI 包含 `.php/` 且脚本前缀在磁盘上存在时 | 脚本段之后的尾部 |
+| **Framework**（`INDEX_FILE=index.php`） | **始终** — 每个请求都被重写到前端控制器 | 完整的原始 URI |
+| **SPA**（`INDEX_FILE=index.html`） | 永不 — PHP 仅对精确的 `.php` 文件运行，无 PATH_INFO | — |
 
-```bash
-SPLIT_PATH_INFO_ENABLED=true
-```
+#### Traditional 模式示例
 
-启用后，OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.php` 段。其后的所有内容成为 `PATH_INFO`：
+OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.php` 段。其后的所有内容成为 `PATH_INFO`：
 
 | 请求 URI | 磁盘上的文件 | `SCRIPT_NAME` | `PATH_INFO` | `PHP_SELF` |
 |---|---|---|---|---|
 | `/app.php/user/42` | `app.php` 存在 | `/app.php` | `/user/42` | `/app.php/user/42` |
 | `/index.php/api/v2/users` | `index.php` 存在 | `/index.php` | `/api/v2/users` | `/index.php/api/v2/users` |
 | `/app.php` | `app.php` 存在 | `/app.php` | *（不存在）* | `/app.php` |
-| `/missing.php/foo` | 文件未找到 | — | — | 404 |
+| `/missing.php/foo` | 文件未找到 | 回退到 `/index.php` | — | 取决于回退 |
 
-禁用时（默认），`SCRIPT_NAME` 和 `PHP_SELF` 均包含完整的 URI 路径，且不设置 `PATH_INFO`。
+#### Framework 模式示例
+
+每个非静态请求都会被重写到 `index.php`，`PATH_INFO` 携带原始 URI。您的前端控制器读取 `PATH_INFO` 来分发路由。
+
+| 请求 URI | `SCRIPT_NAME` | `PATH_INFO` |
+|---|---|---|
+| `/api/users` | `/index.php` | `/api/users` |
+| `/about.php` | `/index.php` | `/about.php` |
+| `/api.php/v1/users` | `/index.php` | `/api.php/v1/users` |
+| `/` | `/index.php` | `/` |
 
 > **注意：** `PATH_TRANSLATED` 不会被填充。它在实践中很少使用，nginx 和 PHP-FPM 默认也不设置此变量。
 
