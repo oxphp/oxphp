@@ -39,6 +39,9 @@ futures-util = "0.3"
 # URL decoding
 percent-encoding = "2"
 
+# SIMD-accelerated byte search (used in URI classification hot path)
+memchr = "2"
+
 # Lock-free bounded channel for worker pool
 crossbeam-channel = "0.5"
 

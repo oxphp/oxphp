@@ -342,25 +342,30 @@ pub(crate) fn classify_uri_with_php(sanitized: &str, has_php: bool) -> UriKind {
 /// Returns true if `sanitized` contains a `.php` script component —
 /// either ends with `.php` or has `.php/` somewhere inside.
 /// Case-insensitive to defend against `/admin.PHP` on case-insensitive FS.
+///
+/// Uses `memchr` to SIMD-scan for the leading `.` byte; each hit is
+/// verified with an ASCII-case-insensitive byte compare against `php`
+/// and a boundary check. On clean URIs with no `.` (`/`, `/api/users`)
+/// memchr returns immediately on the first empty iteration.
 pub(crate) fn has_php_component(sanitized: &str) -> bool {
     let bytes = sanitized.as_bytes();
     if bytes.len() < 4 {
         return false;
     }
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        if bytes[i] == b'.'
-            && (bytes[i + 1] == b'p' || bytes[i + 1] == b'P')
-            && (bytes[i + 2] == b'h' || bytes[i + 2] == b'H')
-            && (bytes[i + 3] == b'p' || bytes[i + 3] == b'P')
+    for dot in memchr::memchr_iter(b'.', bytes) {
+        if dot + 3 >= bytes.len() {
+            // Not enough room left for ".php" (needs 3 bytes after the dot).
+            return false;
+        }
+        // ASCII case-insensitive compare: set bit 0x20 to force lowercase.
+        if (bytes[dot + 1] | 0x20) == b'p'
+            && (bytes[dot + 2] | 0x20) == b'h'
+            && (bytes[dot + 3] | 0x20) == b'p'
         {
-            let end = i + 4;
+            let end = dot + 4;
             if end == bytes.len() || bytes[end] == b'/' {
                 return true;
             }
-            i = end;
-        } else {
-            i += 1;
         }
     }
     false
