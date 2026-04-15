@@ -7,6 +7,7 @@ use bytes::Bytes;
 use crossbeam_channel::{self, RecvTimeoutError, TrySendError};
 use http::{HeaderName, HeaderValue};
 
+use crate::config::{Config, WorkerMode};
 use crate::executor::ScriptExecutor;
 use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::bindings;
@@ -16,25 +17,6 @@ use crate::types::{ScriptRequest, ScriptResponse};
 
 /// Alias for the channel message type used in both traditional and worker modes.
 type WorkerRequest = WorkerIncomingRequest;
-
-/// Worker scaling mode parsed from `PHP_WORKERS` env var.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerMode {
-    /// Fixed number of workers.
-    Static(usize),
-    /// Dynamic scaling between min and max.
-    Dynamic { min: usize, max: usize },
-}
-
-impl WorkerMode {
-    /// Initial worker count: exact for static, min for dynamic.
-    pub fn worker_count(&self) -> usize {
-        match self {
-            WorkerMode::Static(n) => *n,
-            WorkerMode::Dynamic { min, .. } => *min,
-        }
-    }
-}
 
 /// Per-worker state for the managed worker pool.
 struct ManagedWorker {
@@ -64,47 +46,6 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
-/// Parse `PHP_WORKERS` env var into a `WorkerMode`.
-///
-/// Formats:
-/// - `""` or `"0"` → Static(cpu/2, min 1)
-/// - `"N"` → Static(N)
-/// - `"MIN:MAX"` → Dynamic { min, max }
-/// - `"0:0"` → Dynamic { min: cpu/4 (min 1), max: cpu*2 }
-fn parse_php_workers(val: &str) -> Result<WorkerMode, String> {
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
-    if let Some((left, right)) = val.split_once(':') {
-        if left.is_empty() || right.is_empty() {
-            return Err(format!(
-                "invalid PHP_WORKERS: '{val}' (both MIN and MAX required)"
-            ));
-        }
-        let min_raw: usize = left.parse().map_err(|_| format!("invalid MIN: '{left}'"))?;
-        let max_raw: usize = right
-            .parse()
-            .map_err(|_| format!("invalid MAX: '{right}'"))?;
-        let min = if min_raw == 0 {
-            (cpu / 4).max(1)
-        } else {
-            min_raw
-        };
-        let max = if max_raw == 0 { cpu * 2 } else { max_raw };
-        if min > max {
-            return Err(format!("PHP_WORKERS: min ({min}) > max ({max})"));
-        }
-        Ok(WorkerMode::Dynamic { min, max })
-    } else {
-        let n: usize = val
-            .parse()
-            .map_err(|_| format!("invalid PHP_WORKERS: '{val}'"))?;
-        let count = if n == 0 { (cpu / 2).max(1) } else { n };
-        Ok(WorkerMode::Static(count))
-    }
-}
-
 /// Configuration for worker mode threads.
 /// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.
 struct WorkerModeConfig {
@@ -127,34 +68,9 @@ pub struct SapiExecutor {
 }
 
 impl SapiExecutor {
-    pub fn new(metrics: Arc<Metrics>) -> Self {
-        let mode = std::env::var("PHP_WORKERS")
-            .ok()
-            .and_then(|v| {
-                if v.is_empty() {
-                    None
-                } else {
-                    match parse_php_workers(&v) {
-                        Ok(m) => Some(m),
-                        Err(e) => {
-                            tracing::error!("{e}");
-                            None
-                        }
-                    }
-                }
-            })
-            .unwrap_or_else(|| {
-                let cpu = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4);
-                WorkerMode::Static((cpu / 2).max(1))
-            });
-
-        let idle_timeout_seconds: u64 = std::env::var("PHP_WORKERS_IDLE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
-
+    pub fn new(config: &Config, metrics: Arc<Metrics>) -> Self {
+        let mode = config.worker_mode.clone();
+        let idle_timeout_seconds = config.worker_idle_timeout_seconds;
         let initial_count = mode.worker_count();
 
         // 1. TSRM must be initialized first for ZTS builds
@@ -181,34 +97,16 @@ impl SapiExecutor {
             sapi::install_error_cb();
         }
 
-        let queue_capacity = std::env::var("QUEUE_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(initial_count * 128);
+        let queue_capacity = config.queue_capacity;
 
-        // Parse worker mode config
-        let worker_mode_config = std::env::var("WORKER_FILE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(|path| {
-                let max_requests = std::env::var("WORKER_MAX_REQUESTS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                // Same env var and default as ServerConfig::from_env().
-                let document_root = std::env::var("DOCUMENT_ROOT")
-                    .unwrap_or_else(|_| "/var/www/html/public".to_string());
-                Arc::new(WorkerModeConfig {
-                    worker_file: std::path::PathBuf::from(path),
-                    document_root: std::path::PathBuf::from(document_root),
-                    max_requests,
-                    max_memory_mib,
-                })
-            });
+        let worker_mode_config = config.worker_file.as_ref().map(|path| {
+            Arc::new(WorkerModeConfig {
+                worker_file: path.clone(),
+                document_root: config.server.document_root.clone(),
+                max_requests: config.worker_max_requests,
+                max_memory_mib: config.worker_max_memory_mib,
+            })
+        });
 
         let (request_tx, request_rx) = crossbeam_channel::bounded(queue_capacity);
 
@@ -1067,142 +965,6 @@ fn execute_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Helper to get cpu count for assertions
-    fn cpu_count() -> usize {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-    }
-
-    // ── parse_php_workers tests ──
-
-    #[test]
-    fn test_parse_static_explicit() {
-        assert_eq!(parse_php_workers("8").unwrap(), WorkerMode::Static(8));
-    }
-
-    #[test]
-    fn test_parse_static_one() {
-        assert_eq!(parse_php_workers("1").unwrap(), WorkerMode::Static(1));
-    }
-
-    #[test]
-    fn test_parse_static_zero_auto() {
-        let cpu = cpu_count();
-        assert_eq!(
-            parse_php_workers("0").unwrap(),
-            WorkerMode::Static((cpu / 2).max(1))
-        );
-    }
-
-    #[test]
-    fn test_parse_dynamic_explicit() {
-        assert_eq!(
-            parse_php_workers("2:16").unwrap(),
-            WorkerMode::Dynamic { min: 2, max: 16 }
-        );
-    }
-
-    #[test]
-    fn test_parse_dynamic_min_equals_max() {
-        assert_eq!(
-            parse_php_workers("4:4").unwrap(),
-            WorkerMode::Dynamic { min: 4, max: 4 }
-        );
-    }
-
-    #[test]
-    fn test_parse_dynamic_zero_min_auto() {
-        let cpu = cpu_count();
-        let expected_min = (cpu / 4).max(1);
-        assert_eq!(
-            parse_php_workers("0:16").unwrap(),
-            WorkerMode::Dynamic {
-                min: expected_min,
-                max: 16
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_dynamic_zero_max_auto() {
-        let cpu = cpu_count();
-        assert_eq!(
-            parse_php_workers("2:0").unwrap(),
-            WorkerMode::Dynamic {
-                min: 2,
-                max: cpu * 2
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_dynamic_both_zero() {
-        let cpu = cpu_count();
-        let expected_min = (cpu / 4).max(1);
-        let expected_max = cpu * 2;
-        assert_eq!(
-            parse_php_workers("0:0").unwrap(),
-            WorkerMode::Dynamic {
-                min: expected_min,
-                max: expected_max
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_min_greater_than_max_error() {
-        let result = parse_php_workers("10:5");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("min (10) > max (5)"));
-    }
-
-    #[test]
-    fn test_parse_invalid_number_error() {
-        assert!(parse_php_workers("abc").is_err());
-    }
-
-    #[test]
-    fn test_parse_invalid_min_error() {
-        let result = parse_php_workers("abc:10");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid MIN"));
-    }
-
-    #[test]
-    fn test_parse_invalid_max_error() {
-        let result = parse_php_workers("2:xyz");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("invalid MAX"));
-    }
-
-    #[test]
-    fn test_parse_empty_side_error() {
-        assert!(parse_php_workers(":10").is_err());
-        assert!(parse_php_workers("10:").is_err());
-        assert!(parse_php_workers(":").is_err());
-    }
-
-    #[test]
-    fn test_parse_large_values() {
-        assert_eq!(
-            parse_php_workers("1:1000").unwrap(),
-            WorkerMode::Dynamic { min: 1, max: 1000 }
-        );
-    }
-
-    // ── WorkerMode tests ──
-
-    #[test]
-    fn test_worker_mode_count_static() {
-        assert_eq!(WorkerMode::Static(8).worker_count(), 8);
-    }
-
-    #[test]
-    fn test_worker_mode_count_dynamic() {
-        assert_eq!(WorkerMode::Dynamic { min: 2, max: 16 }.worker_count(), 2);
-    }
 
     // ── now_millis test ──
 

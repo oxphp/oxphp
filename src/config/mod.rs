@@ -1,11 +1,13 @@
 mod proxy;
 mod server;
+mod workers;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
+pub use workers::{parse_php_workers, WorkerMode};
 
 /// Access log verbosity level.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -68,8 +70,12 @@ pub struct Config {
     /// Whether PHP superglobals ($_GET, $_POST, etc.) are populated.
     /// When false, only the object API (oxphp_http_request()) provides request data.
     pub superglobals_enabled: bool,
-    /// PHP worker pool description (e.g. "4", "2:8", "4 (auto)").
-    pub php_workers: String,
+    /// PHP worker pool mode (static count or dynamic min:max).
+    pub worker_mode: WorkerMode,
+    /// True if `worker_mode` was auto-derived (env var unset or empty).
+    pub worker_mode_auto: bool,
+    /// Idle timeout for dynamic worker scale-down (seconds).
+    pub worker_idle_timeout_seconds: u64,
     /// Effective number of Tokio runtime threads.
     pub tokio_workers: usize,
     /// Bounded channel capacity for PHP request queue.
@@ -112,7 +118,9 @@ impl Config {
     pub fn from_env() -> Result<Self, crate::types::BoxError> {
         let server = ServerConfig::from_env()?;
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-        let executor_type = std::env::var("EXECUTOR").unwrap_or_else(|_| "sapi".to_string());
+        let executor_type = std::env::var("EXECUTOR")
+            .unwrap_or_else(|_| "sapi".to_string())
+            .to_ascii_lowercase();
         let max_connections = std::env::var("MAX_CONNECTIONS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -206,18 +214,19 @@ impl Config {
             .unwrap_or(4);
         let default_workers = (cpu / 2).max(1);
 
-        let (php_workers, php_worker_count) = match std::env::var("PHP_WORKERS") {
+        let (worker_mode, worker_mode_auto) = match std::env::var("PHP_WORKERS") {
             Ok(val) if !val.is_empty() => {
-                // Parse worker count for queue_capacity default.
-                let count = if let Some((min_s, _)) = val.split_once(':') {
-                    min_s.parse::<usize>().unwrap_or(default_workers)
-                } else {
-                    val.parse::<usize>().unwrap_or(default_workers)
-                };
-                (val, count)
+                let mode =
+                    parse_php_workers(&val).map_err(|e| -> crate::types::BoxError { e.into() })?;
+                (mode, false)
             }
-            _ => (format!("{default_workers} (auto)"), default_workers),
+            _ => (WorkerMode::Static(default_workers), true),
         };
+
+        let worker_idle_timeout_seconds: u64 = std::env::var("PHP_WORKERS_IDLE_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
 
         let tokio_workers = std::env::var("TOKIO_WORKERS")
             .ok()
@@ -227,7 +236,7 @@ impl Config {
         let queue_capacity = std::env::var("QUEUE_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(php_worker_count * 128);
+            .unwrap_or(worker_mode.worker_count() * 128);
 
         let trusted_proxies = TrustedProxyConfig::from_env()
             .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
@@ -256,11 +265,67 @@ impl Config {
             async_queue_capacity,
             trace_context,
             superglobals_enabled,
-            php_workers,
+            worker_mode,
+            worker_mode_auto,
+            worker_idle_timeout_seconds,
             tokio_workers,
             queue_capacity,
             trusted_proxies,
         })
+    }
+
+    /// Build a minimal `Config` for unit tests without touching the
+    /// process environment. All env-derived values are set to fixed
+    /// defaults so tests are independent of `std::env` state.
+    #[cfg(test)]
+    pub(crate) fn test_minimal() -> Self {
+        use std::time::Duration;
+        Self {
+            server: ServerConfig {
+                listen_addr: "127.0.0.1:0".to_string(),
+                document_root: PathBuf::from("/var/www/html/public"),
+                index_file: None,
+                header_read_timeout: Duration::from_secs(5),
+                request_timeout: Duration::from_secs(120),
+            },
+            log_level: "info".to_string(),
+            executor_type: "stub".to_string(),
+            max_connections: 10_000,
+            drain_timeout_seconds: 30,
+            internal_addr: None,
+            rate_limit: 0,
+            rate_window_seconds: 60,
+            tls_cert: None,
+            tls_key: None,
+            error_pages_dir: None,
+            compression_level: 4,
+            access_log: AccessLogLevel::Off,
+            max_query_body: 512 * 1024,
+            worker_file: None,
+            worker_max_requests: 0,
+            worker_max_memory_mib: 0,
+            static_cache_ttl: Some(2_592_000),
+            static_cache_enabled: true,
+            async_workers: 0,
+            async_queue_capacity: 0,
+            trace_context: false,
+            superglobals_enabled: true,
+            worker_mode: WorkerMode::Static(1),
+            worker_mode_auto: false,
+            worker_idle_timeout_seconds: 30,
+            tokio_workers: 1,
+            queue_capacity: 128,
+            trusted_proxies: None,
+        }
+    }
+
+    /// Human-readable description of the worker pool (e.g. "4", "2:8", "4 (auto)").
+    pub fn php_workers_display(&self) -> String {
+        if self.worker_mode_auto {
+            format!("{} (auto)", self.worker_mode)
+        } else {
+            self.worker_mode.to_string()
+        }
     }
 
     /// Serialize configuration to JSON for the `/config` internal endpoint.
@@ -272,7 +337,7 @@ impl Config {
             "index_file": self.server.index_file,
             "log_level": self.log_level,
             "executor_type": self.executor_type,
-            "php_workers": self.php_workers,
+            "php_workers": self.php_workers_display(),
             "tokio_workers": self.tokio_workers,
             "queue_capacity": self.queue_capacity,
             "max_connections": self.max_connections,
