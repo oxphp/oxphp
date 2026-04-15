@@ -3,48 +3,45 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::registry::{DecoratorRegistry, ResolvedDecorator};
 use super::types::{AttributeTargets, DecoratorAction, DecoratorCallContext, DecoratorCallResult};
 
-/// Global registry pointer — set once at startup, read from worker threads.
-static mut REGISTRY: Option<Arc<DecoratorRegistry>> = None;
+/// Global registry — set once at startup, read from worker threads.
+static REGISTRY: OnceLock<Arc<DecoratorRegistry>> = OnceLock::new();
 
 fn get_registry() -> &'static DecoratorRegistry {
-    #[allow(static_mut_refs)]
-    unsafe {
-        REGISTRY
-            .as_ref()
-            .expect("decorator registry not initialized")
-    }
+    REGISTRY
+        .get()
+        .expect("decorator registry not initialized")
+        .as_ref()
 }
 
 /// Install all bridge callbacks and store the registry globally.
 ///
-/// # Safety
-/// Must be called exactly once, before any worker threads are spawned.
+/// Must be called exactly once; subsequent calls panic.
 pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
+    if REGISTRY.set(registry).is_err() {
+        panic!("decorator registry already initialized");
+    }
+    #[cfg(feature = "php")]
     unsafe {
-        REGISTRY = Some(registry);
-        #[cfg(feature = "php")]
-        {
-            crate::bridge::ffi::oxphp_bridge_set_decorator_resolve(Some(resolve_callback));
-            crate::bridge::ffi::oxphp_bridge_set_decorator_begin(Some(begin_callback));
-            crate::bridge::ffi::oxphp_bridge_set_decorator_end(Some(end_callback));
-            crate::bridge::ffi::oxphp_bridge_set_php_decorator_count(Some(
-                php_decorator_count_callback,
-            ));
-            crate::bridge::ffi::oxphp_bridge_set_php_decorator_class(Some(
-                php_decorator_class_callback,
-            ));
-            crate::bridge::ffi::oxphp_bridge_set_php_decorator_cache_key(Some(
-                php_decorator_cache_key_callback,
-            ));
-            crate::bridge::ffi::oxphp_bridge_set_decorator_register_php(Some(
-                register_php_decorator_callback,
-            ));
-        }
+        crate::bridge::ffi::oxphp_bridge_set_decorator_resolve(Some(resolve_callback));
+        crate::bridge::ffi::oxphp_bridge_set_decorator_begin(Some(begin_callback));
+        crate::bridge::ffi::oxphp_bridge_set_decorator_end(Some(end_callback));
+        crate::bridge::ffi::oxphp_bridge_set_php_decorator_count(Some(
+            php_decorator_count_callback,
+        ));
+        crate::bridge::ffi::oxphp_bridge_set_php_decorator_class(Some(
+            php_decorator_class_callback,
+        ));
+        crate::bridge::ffi::oxphp_bridge_set_php_decorator_cache_key(Some(
+            php_decorator_cache_key_callback,
+        ));
+        crate::bridge::ffi::oxphp_bridge_set_decorator_register_php(Some(
+            register_php_decorator_callback,
+        ));
     }
 }
 
