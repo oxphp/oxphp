@@ -95,15 +95,15 @@ mod tests {
 
     #[test]
     fn test_create_executor_stub() {
-        std::env::set_var("EXECUTOR", "stub");
+        let config = crate::config::Config::test_minimal();
+        assert_eq!(config.executor_type, "stub");
         let metrics = Arc::new(crate::metrics::Metrics::new());
-        let executor = crate::executor::create_executor(metrics);
+        let executor = crate::executor::create_executor(&config, metrics);
         let result = executor.execute(make_request());
         let response = match result {
             ExecuteResult::Immediate(resp) => resp,
             ExecuteResult::Deferred(rx) => rx.blocking_recv().unwrap(),
         };
         assert_eq!(response.status, 200);
-        std::env::remove_var("EXECUTOR");
     }
 }

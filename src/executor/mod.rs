@@ -3,11 +3,11 @@ pub mod async_pool;
 pub mod sapi;
 pub mod stub;
 
-#[cfg(feature = "php")]
-pub use sapi::WorkerMode;
+pub use crate::config::WorkerMode;
 
 use std::sync::Arc;
 
+use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -35,14 +35,11 @@ pub trait ScriptExecutor: Send + Sync {
     fn start_scale_manager(&self) {}
 }
 
-/// Create executor based on `EXECUTOR` env var.
-/// Returns `SapiExecutor` when compiled with `php` feature, otherwise `StubExecutor`.
-pub fn create_executor(metrics: Arc<Metrics>) -> Box<dyn ScriptExecutor> {
-    let executor_type = std::env::var("EXECUTOR")
-        .unwrap_or_else(|_| "sapi".to_string())
-        .to_lowercase();
-
-    match executor_type.as_str() {
+/// Create executor based on `Config::executor_type` (set from the `EXECUTOR`
+/// env var, normalized to lowercase in `Config::from_env`). Returns
+/// `SapiExecutor` when compiled with `php` feature, otherwise `StubExecutor`.
+pub fn create_executor(config: &Config, metrics: Arc<Metrics>) -> Box<dyn ScriptExecutor> {
+    match config.executor_type.as_str() {
         "stub" => {
             tracing::info!("Creating StubExecutor (benchmark mode)");
             Box::new(stub::StubExecutor::new())
@@ -51,11 +48,11 @@ pub fn create_executor(metrics: Arc<Metrics>) -> Box<dyn ScriptExecutor> {
             #[cfg(feature = "php")]
             {
                 tracing::info!("Creating SapiExecutor (PHP mode)");
-                Box::new(sapi::SapiExecutor::new(metrics))
+                Box::new(sapi::SapiExecutor::new(config, metrics))
             }
             #[cfg(not(feature = "php"))]
             {
-                let _ = metrics;
+                let _ = (config, metrics);
                 tracing::warn!("PHP feature not enabled, falling back to StubExecutor");
                 Box::new(stub::StubExecutor::new())
             }

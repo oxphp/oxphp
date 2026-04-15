@@ -118,7 +118,7 @@ fn main() -> Result<(), types::BoxError> {
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
     let executor: Arc<dyn executor::ScriptExecutor> =
-        Arc::from(executor::create_executor(Arc::clone(&metrics)));
+        Arc::from(executor::create_executor(&config, Arc::clone(&metrics)));
 
     // Install crash signal handlers AFTER php_module_startup() to override
     // PHP's zend_signal handlers. Writes diagnostic to stderr + /tmp/oxphp-crash.log.
