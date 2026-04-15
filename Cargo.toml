@@ -76,6 +76,9 @@ mimalloc = "0.1"
 # Bitfield flags
 bitflags = "2"
 
+# Minimal CLI argument parsing
+lexopt = "0.3"
+
 # Cryptographic random bytes (trace ID / span ID generation)
 getrandom = "0.2"
 

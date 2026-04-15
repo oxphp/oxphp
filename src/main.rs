@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 /// Set once in async_main(), read by PHP worker threads for block_on().
 pub static TOKIO_HANDLE: OnceLock<Handle> = OnceLock::new();
 
+use oxphp::cli;
 use oxphp::config;
 use oxphp::events::EventDispatcher;
 use oxphp::executor;
@@ -26,7 +27,19 @@ use oxphp::server;
 use oxphp::types;
 
 fn main() -> Result<(), types::BoxError> {
-    let mut config = Arc::new(config::Config::from_env()?);
+    // Handle CLI flags before any expensive startup (plugin init, PHP MINIT,
+    // Tokio runtime, listener bind). Returns only for the `Run` command;
+    // terminal commands (--help, --version, `config --check`, bad args) exit
+    // directly from inside dispatch().
+    cli::dispatch();
+
+    let mut config = Arc::new(match config::Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("oxphp: config error: {e}");
+            std::process::exit(1);
+        }
+    });
 
     // Create metrics early — needed by executor for worker metrics
     let metrics = Arc::new(Metrics::new());

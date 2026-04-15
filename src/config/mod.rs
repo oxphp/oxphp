@@ -2,7 +2,7 @@ mod proxy;
 mod server;
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
@@ -137,11 +137,10 @@ impl Config {
             Ok(val) => match val.parse::<i32>() {
                 Ok(v) if (0..=11).contains(&v) => v,
                 _ => {
-                    eprintln!(
-                        "Error: COMPRESSION_LEVEL must be 0-11 (got {:?}), 0 = disabled",
-                        val
-                    );
-                    std::process::exit(1);
+                    return Err(format!(
+                        "COMPRESSION_LEVEL must be 0-11 (got {val:?}), 0 = disabled"
+                    )
+                    .into());
                 }
             },
             Err(_) => 4,
@@ -230,13 +229,8 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(php_worker_count * 128);
 
-        let trusted_proxies = match TrustedProxyConfig::from_env() {
-            Ok(tp) => tp,
-            Err(e) => {
-                eprintln!("Error: {e}");
-                std::process::exit(1);
-            }
-        };
+        let trusted_proxies = TrustedProxyConfig::from_env()
+            .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
 
         Ok(Self {
             server,
@@ -309,6 +303,52 @@ impl Config {
             "superglobals_enabled": self.superglobals_enabled,
             "trusted_proxies": self.trusted_proxies.is_some(),
         })
+    }
+
+    /// Validate the current configuration against the filesystem.
+    ///
+    /// Returns a list of problems (empty = OK). Only cheap checks are
+    /// performed: path existence and file/directory kind for `DOCUMENT_ROOT`,
+    /// `WORKER_FILE`, `TLS_CERT`, `TLS_KEY`, and `ERROR_PAGES_DIR`. All
+    /// problems are collected — the function never short-circuits.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        check_dir("DOCUMENT_ROOT", &self.server.document_root, &mut errors);
+        if let Some(worker) = &self.worker_file {
+            check_file("WORKER_FILE", worker, &mut errors);
+        }
+        if let Some(cert) = &self.tls_cert {
+            check_file("TLS_CERT", Path::new(cert), &mut errors);
+        }
+        if let Some(key) = &self.tls_key {
+            check_file("TLS_KEY", Path::new(key), &mut errors);
+        }
+        if let Some(dir) = &self.error_pages_dir {
+            check_dir("ERROR_PAGES_DIR", Path::new(dir), &mut errors);
+        }
+        errors
+    }
+}
+
+fn check_dir(label: &str, path: &Path, errors: &mut Vec<String>) {
+    match path.metadata() {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => errors.push(format!(
+            "{label}: {} exists but is not a directory",
+            path.display()
+        )),
+        Err(e) => errors.push(format!("{label}: {} — {e}", path.display())),
+    }
+}
+
+fn check_file(label: &str, path: &Path, errors: &mut Vec<String>) {
+    match path.metadata() {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => errors.push(format!(
+            "{label}: {} exists but is not a regular file",
+            path.display()
+        )),
+        Err(e) => errors.push(format!("{label}: {} — {e}", path.display())),
     }
 }
 
