@@ -12,7 +12,7 @@ OxPHP разработан для запуска в контейнере. Это
 Простейший способ контейнеризировать ваше приложение:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.2.0
+FROM ghcr.io/oxphp/oxphp:0.3.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.2.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.3.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -154,6 +154,81 @@ docker build --target prod -t myapp:prod .
 ```
 
 > **Примечание:** Цель `dev` основана на `php:8.4-zts-alpine` с добавленным OxPHP, что даёт полный доступ к PHP CLI и Composer. Цель `prod` основана непосредственно на образе OxPHP, что делает продакшен-образ компактным.
+
+## Установка PHP-расширений в продакшене
+
+Начиная с OxPHP 0.3.0 продакшен-образ поставляется с полным PHP-инструментарием (`php`, `docker-php-ext-install`, `phpize`), унаследованным от `php:8.4-zts-alpine`, и **не** устанавливает директиву `USER`. Производные Dockerfile'ы могут устанавливать PHP-расширения напрямую — переключать `USER` не нужно.
+
+### Быстрый старт (один этап)
+
+Минимальный рабочий пример:
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:0.3.0
+
+RUN docker-php-ext-install mysqli pdo_mysql
+
+COPY --chown=www-data:www-data . /var/www/html
+
+CMD ["oxphp"]
+```
+
+`--chown=www-data:www-data` у `COPY` важен: файлы в образе принадлежат `www-data` (uid 82), поэтому сброс привилегий на уровне оркестратора (`--user www-data`) приводит к webroot'у, который непривилегированный процесс может читать и (при необходимости) писать.
+
+Контейнер стартует от root. В продакшене сбрасывайте привилегии на уровне оркестратора (см. заметку о безопасности ниже).
+
+### Лучшая практика (два этапа, меньший образ)
+
+Для минимального итогового образа собирайте расширения в отдельном builder-этапе и копируйте в runtime-этап только готовые `.so`-файлы. Разбор [Многоэтапный Dockerfile](#многоэтапный-dockerfile) выше использует `FROM ghcr.io/oxphp/oxphp:0.3.0 AS prod` — простой, переносимый и рекомендуемый в качестве стартовой точки.
+
+`Dockerfile.best.example` в корне репозитория идёт дальше: его `prod`-таргет основан на чистом `alpine` с явным списком `apk`-зависимостей — в образ копируются только бинарь `oxphp`, `libphp.so`, скомпилированные PHP-расширения и необходимые разделяемые библиотеки. Это уменьшает базовый образ с ~188 МБ до ~76 МБ (~60% экономии, без кода приложения) ценой отслеживания обновлений PHP/Alpine в `apk`-списке. В том же файле есть `prod-cli`-таргет — короткоживущий образ для `php artisan migrate`, Composer'а и других сервисных команд, которые не должны жить в serving-пути.
+
+Обратите внимание: разбор выше всё ещё показывает явные `USER root` / `USER www-data` переключения для defense-in-depth — в v0.3.0 они опциональны, так как базовый образ больше не устанавливает `USER`.
+
+### Запуск CLI-инструментов и миграций
+
+Тот же продакшен-образ может запускать `php`-команды для миграций, Composer'а или разовых проверок. `docker run` заменяет CMD по умолчанию переданной командой — контейнер выполняет команду и выходит, сервер OxPHP при этом не запускается:
+
+```bash
+# Запуск миграций Laravel в prod-образе.
+# Контейнер по умолчанию работает от root, поэтому CLI имеет
+# доступ на запись к смонтированным томам, принадлежащим root.
+docker run --rm \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+
+# Если смонтированный том принадлежит www-data, используйте Docker --user:
+docker run --rm --user www-data \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+```
+
+`docker exec <container> docker-php-ext-install <ext>` также работает с запущенным контейнером без дополнительных флагов — полезно для отладки живого контейнера. Для продакшена фиксируйте расширение в Dockerfile, чтобы оно сохранялось после рестарта.
+
+### Заметка о безопасности
+
+В продакшен-образе нет директивы `USER`, поэтому контейнер по умолчанию работает от root. Это сделано намеренно и совпадает с конвенциями `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine`. В продакшене **обязательно** сбрасывайте привилегии на уровне оркестратора:
+
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.3.0`
+- **Compose:**
+  ```yaml
+  services:
+    oxphp:
+      image: ghcr.io/oxphp/oxphp:0.3.0
+      user: www-data
+  ```
+- **Kubernetes:**
+  ```yaml
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 82
+    runAsGroup: 82
+  ```
+  `runAsNonRoot: true` — defense-in-depth: если `runAsUser` удалят или переопределят в `0`, kubelet отклонит под вместо того, чтобы тихо запустить его от root.
+
+Пользователь `www-data` (uid 82, gid 82) предсоздан базовым образом, а `/var/www/html` передаётся ему во владение при сборке — поэтому любой из путей сброса привилегий приводит к читабельному webroot'у.
 
 ## Docker Compose
 

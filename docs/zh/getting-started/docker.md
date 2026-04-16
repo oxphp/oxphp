@@ -12,7 +12,7 @@ OxPHP 专为容器化运行而设计。本指南涵盖使用 Docker 构建、配
 将应用容器化最简单的方式：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.2.0
+FROM ghcr.io/oxphp/oxphp:0.3.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.2.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.3.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -154,6 +154,80 @@ docker build --target prod -t myapp:prod .
 ```
 
 > **注意：** `dev` 目标基于 `php:8.4-zts-alpine` 并复制了 OxPHP 相关内容，可完整使用 PHP CLI 和 Composer。`prod` 目标直接基于 OxPHP 镜像，保持生产镜像体积精简。
+
+## 在生产环境中安装 PHP 扩展
+
+从 OxPHP 0.3.0 开始，生产镜像从 `php:8.4-zts-alpine` 继承了完整的 PHP 工具链（`php`、`docker-php-ext-install`、`phpize`），并且**不**设置 `USER` 指令。下游 Dockerfile 可以直接安装 PHP 扩展 —— 无需切换 `USER`。
+
+### 快速开始（单阶段）
+
+最简可用示例：
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:0.3.0
+
+RUN docker-php-ext-install mysqli pdo_mysql
+
+COPY --chown=www-data:www-data . /var/www/html
+
+CMD ["oxphp"]
+```
+
+`COPY` 上的 `--chown=www-data:www-data` 很重要：文件在镜像中归 `www-data`（uid 82）所有，这样编排层通过 `--user www-data` 降权后，非特权进程能读（以及在需要时写）到 webroot。
+
+容器默认以 root 启动。在生产环境中，请在编排层降权（见下方安全说明）。
+
+### 最佳实践（双阶段，更小的镜像）
+
+为获得最小的最终镜像，请在独立的构建阶段编译扩展，仅将编译好的 `.so` 文件复制到运行时阶段。上方的 [多阶段 Dockerfile](#多阶段-dockerfile) 使用 `FROM ghcr.io/oxphp/oxphp:0.3.0 AS prod` —— 简单、可移植，推荐作为起点。
+
+仓库根目录下的 `Dockerfile.best.example` 走得更远：其 `prod` 目标基于纯净 `alpine`，通过显式 `apk` 依赖清单，只把 `oxphp` 二进制、`libphp.so`、编译好的 PHP 扩展以及必要的共享库复制进镜像。基础镜像从 ~188 MB 降到 ~76 MB（约 60%，不含应用代码），代价是需要在 PHP/Alpine 升级时维护 `apk` 清单。同一文件还提供 `prod-cli` 目标 —— 用于 `php artisan migrate`、Composer 以及其他不应留在 serving 路径上的短期维护命令。
+
+注意：上方的说明中仍保留显式的 `USER root` / `USER www-data` 切换以实现纵深防御 —— 在 v0.3.0 中这些切换是可选的，因为基础镜像不再设置 `USER`。
+
+### 运行 CLI 工具与迁移
+
+同一生产镜像可以运行 `php` CLI 命令用于迁移、Composer 或临时检查。`docker run` 会以传入的命令替换默认 CMD —— 容器运行该命令并退出，不会同时启动 OxPHP 服务器：
+
+```bash
+# 针对生产镜像运行 Laravel 迁移。
+# 容器默认以 root 运行 —— CLI 对 root 所有的挂载卷拥有写权限。
+docker run --rm \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+
+# 如果挂载卷归 www-data 所有，使用 Docker 的 --user：
+docker run --rm --user www-data \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+```
+
+`docker exec <container> docker-php-ext-install <ext>` 对运行中的容器同样可用，无需额外参数 —— 适合调试一个运行中的容器。生产环境中请把扩展写进 Dockerfile，使其在重启后依然存在。
+
+### 安全说明
+
+生产镜像没有 `USER` 指令，因此容器默认以 root 运行。这是有意为之，与 `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` 的约定一致。生产环境中**必须**在编排层降权：
+
+- **Docker：** `docker run --user www-data ghcr.io/oxphp/oxphp:0.3.0`
+- **Compose：**
+  ```yaml
+  services:
+    oxphp:
+      image: ghcr.io/oxphp/oxphp:0.3.0
+      user: www-data
+  ```
+- **Kubernetes：**
+  ```yaml
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 82
+    runAsGroup: 82
+  ```
+  `runAsNonRoot: true` 是纵深防御：若 `runAsUser` 被删除或覆盖为 `0`，kubelet 会直接拒绝该 Pod，而不是默默以 root 运行。
+
+`www-data` 用户（uid 82，gid 82）由基础镜像预先创建，且 `/var/www/html` 在构建时已 `chown` 给它，所以上述任意降权路径都指向可读的 webroot。
 
 ## Docker Compose
 
