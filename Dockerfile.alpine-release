@@ -126,8 +126,6 @@ COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index
 # Ensure libphp.so and liboxphp_bridge.so are found at runtime
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
-USER www-data
-
 EXPOSE 80 443
 
 CMD ["oxphp"]

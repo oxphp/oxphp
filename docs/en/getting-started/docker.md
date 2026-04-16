@@ -12,7 +12,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.2.0
+FROM ghcr.io/oxphp/oxphp:0.3.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.2.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.3.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -154,6 +154,81 @@ docker build --target prod -t myapp:prod .
 ```
 
 > **Note:** The `dev` target is based on `php:8.4-zts-alpine` with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
+
+## Installing PHP Extensions in Production
+
+Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
+
+### Quick-start pattern (single stage)
+
+The shortest useful example:
+
+```dockerfile
+FROM ghcr.io/oxphp/oxphp:0.3.0
+
+RUN docker-php-ext-install mysqli pdo_mysql
+
+COPY --chown=www-data:www-data . /var/www/html
+
+CMD ["oxphp"]
+```
+
+`--chown=www-data:www-data` on the `COPY` is important: files are owned by `www-data` (uid 82) inside the image, so an orchestrator-level `--user www-data` drop lands on a webroot the unprivileged process can read and (where needed) write to.
+
+The container starts as root. In production, drop privileges at the orchestrator level (see the security note below).
+
+### Best practice pattern (two stages, smaller image)
+
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.3.0 AS prod` — simple, portable, and recommended as a starting point.
+
+`Dockerfile.best.example` in the repository root goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
+
+Note: the walkthrough above still shows explicit `USER root` / `USER www-data` toggles for defense-in-depth — with v0.3.0 they are optional since the base image no longer sets `USER`.
+
+### Running CLI tools and migrations
+
+The same prod image can run `php` CLI commands for migrations, Composer, or ad-hoc inspection. `docker run` replaces the default CMD with the command you pass — the container runs the command and exits, it does not also start the OxPHP server.
+
+```bash
+# Run Laravel migrations against the prod image.
+# Container runs as root by default — the CLI has write access to
+# root-owned mounted volumes.
+docker run --rm \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+
+# If the mounted volume is owned by www-data, pass Docker's --user:
+docker run --rm --user www-data \
+    -v "$(pwd):/var/www/html" \
+    ghcr.io/oxphp/oxphp:0.3.0 \
+    php artisan migrate
+```
+
+`docker exec <container> docker-php-ext-install <ext>` also works on a running container without any additional flags — useful for debugging a live container. For production, persist the extension in your Dockerfile so it survives restarts.
+
+### Security note
+
+The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
+
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.3.0`
+- **Compose:**
+  ```yaml
+  services:
+    oxphp:
+      image: ghcr.io/oxphp/oxphp:0.3.0
+      user: www-data
+  ```
+- **Kubernetes:**
+  ```yaml
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 82
+    runAsGroup: 82
+  ```
+  `runAsNonRoot: true` is defense-in-depth: if `runAsUser` is ever removed or overridden to `0`, the kubelet rejects the pod instead of silently running as root.
+
+The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths lands on a readable webroot.
 
 ## Docker Compose
 
