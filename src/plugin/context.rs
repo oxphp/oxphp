@@ -39,6 +39,7 @@ pub struct PluginContext<'a> {
     php_enums: &'a mut Vec<PhpEnumDef>,
     php_attributes: &'a mut Vec<PhpAttributeDef>,
     php_functions: &'a mut Vec<PhpFunctionDef>,
+    core_flags: &'a mut HashMap<String, String>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -58,6 +59,7 @@ impl<'a> PluginContext<'a> {
         php_enums: &'a mut Vec<PhpEnumDef>,
         php_attributes: &'a mut Vec<PhpAttributeDef>,
         php_functions: &'a mut Vec<PhpFunctionDef>,
+        core_flags: &'a mut HashMap<String, String>,
     ) -> Self {
         Self {
             plugin_name,
@@ -74,6 +76,7 @@ impl<'a> PluginContext<'a> {
             php_enums,
             php_attributes,
             php_functions,
+            core_flags,
         }
     }
 
@@ -104,6 +107,16 @@ impl<'a> PluginContext<'a> {
             plugin_name: self.plugin_name.clone(),
         };
         self.dispatcher.on(wrapper);
+    }
+
+    /// Signal a core configuration flag to `main()`.
+    ///
+    /// Plugins call this instead of `std::env::set_var` when they need to
+    /// influence server-level behaviour (e.g. enabling trace context
+    /// propagation). Flags are read by `main()` after `init_all()` via
+    /// `PluginManager::core_flag()`.
+    pub fn set_core_flag(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.core_flags.insert(key.into(), value.into());
     }
 
     /// Read config: checks `{PLUGIN_NAME}_{KEY}` env var first, then `{KEY}`.
@@ -249,6 +262,7 @@ mod tests {
         php_enums: &'a mut Vec<PhpEnumDef>,
         php_attributes: &'a mut Vec<PhpAttributeDef>,
         php_functions: &'a mut Vec<PhpFunctionDef>,
+        core_flags: &'a mut HashMap<String, String>,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "test_plugin".into(),
@@ -265,6 +279,7 @@ mod tests {
             php_enums,
             php_attributes,
             php_functions,
+            core_flags,
         )
     }
 
@@ -285,6 +300,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -299,6 +315,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
@@ -326,6 +343,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -340,6 +358,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         assert_eq!(ctx.plugin_name(), "test_plugin");
@@ -359,6 +378,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         {
             let mut ctx = make_context(
@@ -374,6 +394,7 @@ mod tests {
                 &mut php_enums,
                 &mut php_attributes,
                 &mut php_functions,
+                &mut core_flags,
             );
 
             // Valid path
@@ -411,6 +432,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -425,6 +447,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         ctx.register_service("my_pool", Box::new(42u32));
@@ -447,6 +470,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -461,6 +485,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         ctx.expose_config("verbose", serde_json::json!(true));
@@ -481,6 +506,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -495,6 +521,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         ctx.register_function(
@@ -538,6 +565,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -552,6 +580,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         ctx.register_decorator(TestDecorator);
@@ -575,6 +604,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -589,6 +619,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         ctx.register_function_as(
@@ -620,6 +651,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -634,6 +666,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         let _ = ctx.register_class("App\\MyClass").build();
@@ -658,6 +691,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -672,6 +706,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         let _ = ctx.register_interface("App\\Countable").build();
@@ -696,6 +731,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -710,6 +746,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         let _ = ctx.register_enum("App\\Status").build();
@@ -734,6 +771,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -748,6 +786,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         let _ = ctx.register_attribute("App\\Route").build();
@@ -772,6 +811,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -786,6 +826,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
 
         let _ = ctx

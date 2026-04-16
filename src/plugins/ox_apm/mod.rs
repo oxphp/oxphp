@@ -463,6 +463,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = PluginContext::new(
             "apm".into(),
@@ -479,6 +480,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);

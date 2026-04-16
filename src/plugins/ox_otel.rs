@@ -22,8 +22,9 @@ use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth};
 /// OpenTelemetry plugin — exports HTTP server spans via OTLP.
 ///
 /// Feature-gated behind `plugin-otel`. Reads standard `OTEL_*` env vars
-/// for configuration. When enabled, sets `TRACE_CONTEXT=true` so the
-/// built-in trace context handler generates trace/span IDs.
+/// for configuration. When enabled, signals `trace_context=true` via
+/// `PluginContext::set_core_flag` so the built-in trace context handler
+/// generates trace/span IDs.
 pub struct OtelPlugin {
     enabled: bool,
     provider: Arc<OnceLock<TracerProvider>>,
@@ -222,10 +223,7 @@ impl Plugin for OtelPlugin {
         self.server_address = std::env::var("LISTEN_ADDR").unwrap_or_default();
 
         // Enable trace context generation in built-in handler
-        #[allow(deprecated)]
-        unsafe {
-            std::env::set_var("TRACE_CONTEXT", "true");
-        }
+        ctx.set_core_flag("trace_context", "true");
 
         // TracerProvider initialization is deferred to on_ready() because
         // BatchSpanProcessor requires an active Tokio runtime, and init()
@@ -522,6 +520,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
 
         let mut ctx = PluginContext::new(
             "otel".into(),
@@ -538,6 +537,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
