@@ -198,6 +198,14 @@ pub struct PluginCompleteView<'a> {
     pub request_body_size: u64,
     pub response_size: u64,
     metadata: &'a [(String, String)],
+    /// PHP errors captured during script execution (empty for static files).
+    pub php_errors: &'a [crate::types::PhpScriptError],
+    /// Serialized APM child spans (JSON). None when APM is disabled or no spans.
+    pub apm_spans_json: Option<&'a str>,
+    /// Time spent waiting in the worker queue (microseconds).
+    pub queue_wait_us: Option<u64>,
+    /// PHP script execution time (microseconds).
+    pub php_exec_us: Option<u64>,
 }
 
 impl<'a> PluginCompleteView<'a> {
@@ -212,6 +220,10 @@ impl<'a> PluginCompleteView<'a> {
         request_body_size: u64,
         response_size: u64,
         metadata: &'a [(String, String)],
+        php_errors: &'a [crate::types::PhpScriptError],
+        apm_spans_json: Option<&'a str>,
+        queue_wait_us: Option<u64>,
+        php_exec_us: Option<u64>,
     ) -> Self {
         Self {
             request_id,
@@ -223,6 +235,10 @@ impl<'a> PluginCompleteView<'a> {
             request_body_size,
             response_size,
             metadata,
+            php_errors,
+            apm_spans_json,
+            queue_wait_us,
+            php_exec_us,
         }
     }
 

@@ -401,12 +401,8 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         let server_address = self.server_address.clone();
         let request_body_size = view.request_body_size;
         let response_size = view.response_size;
-        let queue_wait_us = view
-            .metadata("oxphp.queue_wait_us")
-            .and_then(|v| v.parse::<i64>().ok());
-        let php_exec_us = view
-            .metadata("oxphp.php_exec_us")
-            .and_then(|v| v.parse::<i64>().ok());
+        let queue_wait_us = view.queue_wait_us.map(|v| v as i64);
+        let php_exec_us = view.php_exec_us.map(|v| v as i64);
 
         // Span building + OTel export happens off the hot path
         tokio::spawn(async move {
@@ -647,6 +643,10 @@ mod tests {
             0,
             1024,
             &[],
+            &[],
+            None,
+            None,
+            None,
         );
         handler.handle(&view); // should not panic
     }
@@ -674,6 +674,10 @@ mod tests {
             0,
             1024,
             &metadata,
+            &[],
+            None,
+            None,
+            None,
         );
         handler.handle(&view); // no start_us, no provider => should not panic
     }

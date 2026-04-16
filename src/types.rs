@@ -80,9 +80,11 @@ pub struct ScriptRequest {
     pub forwarded_host: Option<String>,
 }
 
-/// A PHP error captured during script execution.
+/// A PHP error captured during script execution (E_ERROR/E_WARNING/E_NOTICE, exceptions).
+///
+/// Distinct from `crate::plugin::PhpError` (enum for plugin-function call errors).
 #[derive(Debug, Clone)]
-pub struct PhpError {
+pub struct PhpScriptError {
     /// Severity: "error", "warn", "info" (matches tracing level from error_type_str).
     pub level: &'static str,
     /// PHP error constant name: "E_ERROR", "E_WARNING", etc.
@@ -104,7 +106,7 @@ pub struct ScriptResponse {
     /// subsequent chunks arrive via this channel. Channel close = stream end.
     pub stream_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
     /// PHP errors captured during script execution.
-    pub errors: Vec<PhpError>,
+    pub errors: Vec<PhpScriptError>,
     /// Serialized APM child spans (JSON). Populated by SpanStack drain on PHP worker thread.
     /// None when APM is disabled or no spans were created.
     pub apm_spans_json: Option<String>,

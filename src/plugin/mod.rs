@@ -27,6 +27,12 @@ pub use php::{
 };
 pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
+/// Re-export of `crate::types::PhpScriptError` — errors captured from PHP
+/// script execution (E_ERROR, E_WARNING, exceptions). Distinct from
+/// `PhpError` above, which is the enum returned by plugin-registered PHP
+/// functions.
+pub use crate::types::PhpScriptError;
+
 use std::any::Any;
 
 /// Minimal plugin trait — 3 required methods, 4 optional.
