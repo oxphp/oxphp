@@ -94,11 +94,11 @@ thread_local! {
 thread_local! {
     /// PHP errors captured during the current request's script execution.
     /// Drained into ScriptResponse at request completion; cleared at request boundaries.
-    pub(crate) static REQUEST_ERRORS: RefCell<Vec<crate::types::PhpError>> = RefCell::new(Vec::new());
+    pub(crate) static REQUEST_ERRORS: RefCell<Vec<crate::types::PhpScriptError>> = RefCell::new(Vec::new());
 }
 
 /// Take all captured PHP errors for the current request, leaving the Vec empty.
-pub fn take_request_errors() -> Vec<crate::types::PhpError> {
+pub fn take_request_errors() -> Vec<crate::types::PhpScriptError> {
     REQUEST_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
 }
 
@@ -1248,7 +1248,7 @@ unsafe extern "C" fn oxphp_error_cb(
 
     // Capture error into REQUEST_ERRORS for inclusion in ScriptResponse.
     REQUEST_ERRORS.with(|errors| {
-        errors.borrow_mut().push(crate::types::PhpError {
+        errors.borrow_mut().push(crate::types::PhpScriptError {
             level,
             error_type: type_name,
             message: msg.to_string(),

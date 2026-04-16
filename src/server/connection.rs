@@ -87,7 +87,7 @@ pub async fn handle_request(
         request_id: String::new(),
         early_response: None,
         // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
-        // + queue_wait_us + php_exec_us + peer_addr + forwarded_* ≈ 10 entries
+        // + tracestate + peer_addr + forwarded_proto + forwarded_host ≈ 9 entries
         metadata: Vec::with_capacity(10),
     };
     server.dispatcher.dispatch(&mut received_event);
@@ -98,7 +98,7 @@ pub async fn handle_request(
 
     // Take ownership — no clone
     let request_id = std::mem::take(&mut received_event.request_id);
-    let mut metadata = std::mem::take(&mut received_event.metadata);
+    let metadata = std::mem::take(&mut received_event.metadata);
 
     // Check for early response (e.g., 429 from rate limiter)
     if let Some(early_resp) = received_event.early_response {
@@ -117,6 +117,10 @@ pub async fn handle_request(
             request_body_size: 0,
             response_size,
             metadata,
+            php_errors: Vec::new(),
+            apm_spans_json: None,
+            queue_wait_us: None,
+            php_exec_us: None,
         };
         server.dispatcher.dispatch(&mut complete_event);
 
@@ -133,7 +137,7 @@ pub async fn handle_request(
     let result = if server.request_timeout > Duration::ZERO {
         match tokio::time::timeout(
             server.request_timeout,
-            dispatch_request(parts, body, server, remote_addr, &request_id, &mut metadata),
+            dispatch_request(parts, body, server, remote_addr, &request_id, &metadata),
         )
         .await
         {
@@ -152,15 +156,16 @@ pub async fn handle_request(
                         .body(full_body(Bytes::from_static(b"408 Request Timeout")))
                         .unwrap(),
                     0usize,
+                    PhpExecData::default(),
                 ))
             }
         }
     } else {
-        dispatch_request(parts, body, server, remote_addr, &request_id, &mut metadata).await
+        dispatch_request(parts, body, server, remote_addr, &request_id, &metadata).await
     };
 
-    let (response, request_body_size) = match result {
-        Ok((resp, body_size)) => (resp, body_size),
+    let (response, request_body_size, mut php_exec) = match result {
+        Ok((resp, body_size, exec)) => (resp, body_size, exec),
         Err(e) => {
             tracing::error!(error = %e, path = %path_str, request_id = %request_id, "Internal server error");
             (
@@ -170,6 +175,7 @@ pub async fn handle_request(
                     .body(full_body(Bytes::from_static(b"500 Internal Server Error")))
                     .unwrap(),
                 0,
+                PhpExecData::default(),
             )
         }
     };
@@ -214,21 +220,34 @@ pub async fn handle_request(
         request_body_size: request_body_size as u64,
         response_size,
         metadata,
+        php_errors: std::mem::take(&mut php_exec.php_errors),
+        apm_spans_json: php_exec.apm_spans_json.take(),
+        queue_wait_us: php_exec.queue_wait_us,
+        php_exec_us: php_exec.php_exec_us,
     };
     server.dispatcher.dispatch(&mut complete_event);
 
     Ok(response)
 }
 
-/// Returns (response, request_body_size).
+/// Typed data produced by PHP execution and propagated to `RequestComplete`.
+/// Static-file and error paths leave all fields at defaults.
+#[derive(Default)]
+struct PhpExecData {
+    php_errors: Vec<crate::types::PhpScriptError>,
+    apm_spans_json: Option<String>,
+    queue_wait_us: Option<u64>,
+    php_exec_us: Option<u64>,
+}
+
 async fn dispatch_request(
     parts: http::request::Parts,
     body: Incoming,
     server: &Server,
     remote_addr: SocketAddr,
     request_id: &str,
-    metadata: &mut Vec<(String, String)>,
-) -> Result<(Response<ResponseBody>, usize), crate::types::BoxError> {
+    metadata: &[(String, String)],
+) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
         .route_config
@@ -237,7 +256,7 @@ async fn dispatch_request(
 
     let mut request_body_size = 0usize;
 
-    let response = match &*route_result {
+    let (response, exec_data) = match &*route_result {
         RouteResult::Serve(file_path) => {
             // Read-only cache check: read lock, no LRU update, no stat() syscall
             let cache_key = file_path.to_string_lossy();
@@ -258,7 +277,7 @@ async fn dispatch_request(
                 server.metrics.static_cache_miss();
             }
 
-            response
+            (response, PhpExecData::default())
         }
         RouteResult::Execute(script_path, path_info) => {
             let script_path = script_path.clone();
@@ -275,6 +294,7 @@ async fn dispatch_request(
                             b"415 Unsupported Media Type: QUERY requires Content-Type",
                         )))?,
                     0,
+                    PhpExecData::default(),
                 ));
             }
 
@@ -300,6 +320,7 @@ async fn dispatch_request(
                                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                                 .body(full_body(Bytes::from_static(b"413 Payload Too Large")))?,
                             0,
+                            PhpExecData::default(),
                         ));
                     }
                 }
@@ -320,6 +341,7 @@ async fn dispatch_request(
                                         b"413 Payload Too Large",
                                     )))?,
                                 0,
+                                PhpExecData::default(),
                             ));
                         }
                         return Err(e);
@@ -363,29 +385,35 @@ async fn dispatch_request(
             server.metrics.request_queued();
             let execute_result = server.executor.execute(script_request);
 
-            let mut script_response = match execute_result {
+            let (mut script_response, exec_data) = match execute_result {
                 ExecuteResult::Immediate(resp) => {
                     server.metrics.request_dequeued();
-                    let queue_wait_us = queue_start.elapsed().as_micros();
-                    server.metrics.record_queue_wait(queue_wait_us as u64);
-                    metadata.push(("oxphp.queue_wait_us".into(), queue_wait_us.to_string()));
-                    metadata.push((
-                        "oxphp.php_exec_us".into(),
-                        resp.execution_time_us.to_string(),
-                    ));
-                    resp
+                    let queue_wait_us = queue_start.elapsed().as_micros() as u64;
+                    server.metrics.record_queue_wait(queue_wait_us);
+                    let php_exec_us = resp.execution_time_us;
+                    (
+                        resp,
+                        PhpExecData {
+                            queue_wait_us: Some(queue_wait_us),
+                            php_exec_us: Some(php_exec_us),
+                            ..PhpExecData::default()
+                        },
+                    )
                 }
                 ExecuteResult::Deferred(rx) => match rx.await {
                     Ok(resp) => {
                         server.metrics.request_dequeued();
-                        let queue_wait_us = queue_start.elapsed().as_micros();
-                        server.metrics.record_queue_wait(queue_wait_us as u64);
-                        metadata.push(("oxphp.queue_wait_us".into(), queue_wait_us.to_string()));
-                        metadata.push((
-                            "oxphp.php_exec_us".into(),
-                            resp.execution_time_us.to_string(),
-                        ));
-                        resp
+                        let queue_wait_us = queue_start.elapsed().as_micros() as u64;
+                        server.metrics.record_queue_wait(queue_wait_us);
+                        let php_exec_us = resp.execution_time_us;
+                        (
+                            resp,
+                            PhpExecData {
+                                queue_wait_us: Some(queue_wait_us),
+                                php_exec_us: Some(php_exec_us),
+                                ..PhpExecData::default()
+                            },
+                        )
                     }
                     Err(_) => {
                         server.metrics.request_dropped();
@@ -396,56 +424,40 @@ async fn dispatch_request(
                                 .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
                                 .unwrap(),
                             request_body_size,
+                            PhpExecData::default(),
                         ));
                     }
                 },
             };
 
-            // Move APM spans JSON into metadata for completion handler (no clone)
-            if let Some(spans_json) = script_response.apm_spans_json.take() {
-                metadata.push(("oxphp.apm_spans_json".into(), spans_json));
-            }
-
-            // Push PHP errors into metadata for APM plugin
-            if !script_response.errors.is_empty() {
-                metadata.push((
-                    "oxphp.php_error_count".into(),
-                    script_response.errors.len().to_string(),
-                ));
-                // Serialize each error as a metadata entry for the completion handler
-                for (i, err) in script_response.errors.iter().enumerate() {
-                    metadata.push((format!("oxphp.php_error.{i}.level"), err.level.to_string()));
-                    metadata.push((
-                        format!("oxphp.php_error.{i}.type"),
-                        err.error_type.to_string(),
-                    ));
-                    metadata.push((format!("oxphp.php_error.{i}.message"), err.message.clone()));
-                    metadata.push((format!("oxphp.php_error.{i}.file"), err.file.clone()));
-                    metadata.push((format!("oxphp.php_error.{i}.line"), err.line.to_string()));
-                    if let Some(ref trace) = err.stacktrace {
-                        metadata.push((format!("oxphp.php_error.{i}.stacktrace"), trace.clone()));
-                    }
-                }
-            }
+            // Move PHP errors and APM spans into typed exec data (no string serialization)
+            let exec_data = PhpExecData {
+                php_errors: std::mem::take(&mut script_response.errors),
+                apm_spans_json: script_response.apm_spans_json.take(),
+                ..exec_data
+            };
 
             let mut builder = Response::builder().status(script_response.status);
             for (name, value) in &script_response.headers {
                 builder = builder.header(name, value);
             }
-            if let Some(rx) = script_response.stream_rx {
-                // Streaming response: body arrives as chunks via mpsc channel
+            let response = if let Some(rx) = script_response.stream_rx {
                 builder.body(stream_body(script_response.body, rx)).unwrap()
             } else {
                 builder.body(full_body(script_response.body)).unwrap()
-            }
+            };
+            (response, exec_data)
         }
-        RouteResult::NotFound => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(full_body(Bytes::from_static(b"404 Not Found")))?,
+        RouteResult::NotFound => (
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(Bytes::from_static(b"404 Not Found")))?,
+            PhpExecData::default(),
+        ),
     };
 
-    Ok((response, request_body_size))
+    Ok((response, request_body_size, exec_data))
 }
 
 #[cfg(test)]

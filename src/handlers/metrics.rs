@@ -103,6 +103,10 @@ mod tests {
             request_body_size: 100,
             response_size: 500,
             metadata: Vec::new(),
+            php_errors: Vec::new(),
+            apm_spans_json: None,
+            queue_wait_us: None,
+            php_exec_us: None,
         };
 
         let result = handler.handle(&mut event);

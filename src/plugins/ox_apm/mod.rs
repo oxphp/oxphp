@@ -160,41 +160,21 @@ struct ApmCompleteHandler {
 impl PluginCompleteHandler for ApmCompleteHandler {
     fn handle(&self, view: &PluginCompleteView) {
         // ── Log PHP errors synchronously (lightweight, just tracing) ──
-        if let Some(count_str) = view.metadata("oxphp.php_error_count") {
-            let count: usize = count_str.parse().unwrap_or(0);
-            for i in 0..count {
-                let level = view
-                    .metadata(&format!("oxphp.php_error.{i}.level"))
-                    .unwrap_or("unknown");
-                let error_type = view
-                    .metadata(&format!("oxphp.php_error.{i}.type"))
-                    .unwrap_or("unknown");
-                let message = view
-                    .metadata(&format!("oxphp.php_error.{i}.message"))
-                    .unwrap_or("");
-                let file = view
-                    .metadata(&format!("oxphp.php_error.{i}.file"))
-                    .unwrap_or("");
-                let line = view
-                    .metadata(&format!("oxphp.php_error.{i}.line"))
-                    .unwrap_or("0");
-                let stacktrace = view.metadata(&format!("oxphp.php_error.{i}.stacktrace"));
-
-                tracing::info!(
-                    plugin = "apm",
-                    request_id = view.request_id,
-                    php_error_level = level,
-                    php_error_type = error_type,
-                    php_file = file,
-                    php_line = line,
-                    has_stacktrace = stacktrace.is_some(),
-                    "PHP error captured: {message}"
-                );
-            }
+        for err in view.php_errors {
+            tracing::info!(
+                plugin = "apm",
+                request_id = view.request_id,
+                php_error_level = err.level,
+                php_error_type = err.error_type,
+                php_file = %err.file,
+                php_line = err.line,
+                has_stacktrace = err.stacktrace.is_some(),
+                "PHP error captured: {}", err.message
+            );
         }
 
         // ── Export child spans off the hot path via tokio::spawn ──
-        let spans_json = match view.metadata("oxphp.apm_spans_json") {
+        let spans_json = match view.apm_spans_json {
             Some(json) if !json.is_empty() => json.to_string(),
             _ => return,
         };
@@ -631,7 +611,6 @@ mod tests {
         };
 
         let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let metadata = vec![("oxphp.apm_spans_json".to_string(), spans_json.to_string())];
         let view = PluginCompleteView::new(
             "req-1",
             "GET",
@@ -641,7 +620,11 @@ mod tests {
             addr,
             0,
             0,
-            &metadata,
+            &[],
+            &[],
+            Some(spans_json),
+            None,
+            None,
         );
 
         handler.handle(&view); // should not panic even without TracerProvider

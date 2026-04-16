@@ -119,7 +119,16 @@ pub struct RequestComplete {
     /// Response body size in bytes.
     pub response_size: u64,
     /// Plugin metadata propagated through the event pipeline.
+    /// Used for extensible string key-value data (trace context, plugin-specific).
     pub metadata: Vec<(String, String)>,
+    /// PHP errors captured during script execution (empty for static files).
+    pub php_errors: Vec<crate::types::PhpScriptError>,
+    /// Serialized APM child spans (JSON). None when APM is disabled or no spans.
+    pub apm_spans_json: Option<String>,
+    /// Time spent waiting in the worker queue (microseconds).
+    pub queue_wait_us: Option<u64>,
+    /// PHP script execution time (microseconds).
+    pub php_exec_us: Option<u64>,
 }
 
 impl Event for RequestComplete {
