@@ -45,7 +45,12 @@ pub trait Plugin: Send + Sync + Any {
     fn on_ready(&self) {}
 
     /// Cleanup (called in reverse init order during shutdown).
-    fn shutdown(&self) {}
+    ///
+    /// Takes `&mut self` so plugins can join threads, flush exporters,
+    /// drop owned handles, or reset internal state without wrapping
+    /// everything in `Arc<Mutex<…>>` just to satisfy an immutable
+    /// receiver.
+    fn shutdown(&mut self) {}
 
     /// Plugin dependencies (other plugins / services).
     fn dependencies(&self) -> PluginDeps {

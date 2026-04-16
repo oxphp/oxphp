@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
 use crate::events::EventDispatcher;
 
@@ -11,8 +12,14 @@ use super::{Plugin, PluginError, PluginHealth};
 use crate::types::ResponseBody;
 
 /// Loads, initializes, and manages plugin lifecycle.
+///
+/// After `init_all` the manager is typically wrapped in `Arc` and shared
+/// across request handlers. Because request paths (`/health`, `/metrics`)
+/// and the shutdown path need access through the shared `Arc`, the plugin
+/// vec lives behind a `Mutex`. The lock is uncontended in practice —
+/// `/health` takes it briefly, `shutdown_all` takes it once.
 pub struct PluginManager {
-    plugins: Vec<Box<dyn Plugin>>,
+    plugins: Mutex<Vec<Box<dyn Plugin>>>,
     services: HashMap<String, Box<dyn Any + Send + Sync>>,
     config_values: HashMap<String, HashMap<String, serde_json::Value>>,
     metrics_collectors: Vec<Box<dyn PluginMetricsCollector>>,
@@ -29,7 +36,7 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new() -> Self {
         Self {
-            plugins: Vec::new(),
+            plugins: Mutex::new(Vec::new()),
             services: HashMap::new(),
             config_values: HashMap::new(),
             metrics_collectors: Vec::new(),
@@ -46,7 +53,7 @@ impl PluginManager {
 
     /// Register a plugin.
     pub fn add(&mut self, plugin: Box<dyn Plugin>) {
-        self.plugins.push(plugin);
+        self.plugins.get_mut().expect("plugins mutex").push(plugin);
     }
 
     /// Initialize all plugins in dependency order.
@@ -54,16 +61,16 @@ impl PluginManager {
     /// Reorders the internal plugin vec to match topological order so that
     /// `on_ready_all()` runs in init order and `shutdown_all()` in reverse.
     pub fn init_all(&mut self, dispatcher: &mut EventDispatcher) -> Result<(), PluginError> {
-        let order = self.resolve_init_order()?;
+        let plugins = self.plugins.get_mut().expect("plugins mutex");
+        let order = Self::resolve_init_order(plugins)?;
 
         // Reorder plugins to match topological init order.
-        let mut slots: Vec<Option<Box<dyn Plugin>>> = self.plugins.drain(..).map(Some).collect();
+        let mut slots: Vec<Option<Box<dyn Plugin>>> = plugins.drain(..).map(Some).collect();
         for idx in order {
-            self.plugins.push(slots[idx].take().unwrap());
+            plugins.push(slots[idx].take().unwrap());
         }
 
-        for i in 0..self.plugins.len() {
-            let plugin = &mut self.plugins[i];
+        for plugin in plugins.iter_mut() {
             let name = plugin.name().to_string();
             let mut plugin_config = HashMap::new();
             let mut ctx = PluginContext::new(
@@ -94,29 +101,54 @@ impl PluginManager {
     }
 
     /// Call on_ready() for all plugins (after init_all + dispatcher.freeze).
+    /// Catches panics so a single misbehaving plugin cannot poison the mutex
+    /// and take down `/health` or shutdown.
     pub fn on_ready_all(&self) {
-        for plugin in &self.plugins {
-            plugin.on_ready();
+        let plugins = Self::lock_plugins(&self.plugins);
+        for plugin in plugins.iter() {
+            let name = plugin.name();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                plugin.on_ready();
+            }))
+            .is_err()
+            {
+                tracing::error!(name, "Plugin panicked during on_ready");
+            }
         }
     }
 
     /// Shutdown all plugins in reverse init order.
     /// Catches panics and logs errors to ensure all plugins get a chance to shut down.
+    /// Idempotent: after the first call the plugin vec is empty, so subsequent
+    /// calls are no-ops.
+    ///
+    /// Each plugin is popped from the vec, `shutdown()` is called under
+    /// `catch_unwind`, and then the plugin is dropped **outside** the
+    /// `catch_unwind` block. If a `Drop` impl panics, the process aborts
+    /// (standard Rust double-panic semantics). Plugin authors must ensure
+    /// their `Drop` is infallible — the same contract Rust imposes everywhere.
     pub fn shutdown_all(&self) {
+        let mut plugins = Self::lock_plugins(&self.plugins);
         let mut failures = 0usize;
-        for plugin in self.plugins.iter().rev() {
-            let name = plugin.name();
+        // Collect plugins in reverse order first, then release the mutex
+        // guard before running shutdown+drop so that neither runs under lock.
+        let reversed: Vec<_> = std::iter::from_fn(|| plugins.pop()).collect();
+        drop(plugins);
+
+        for mut plugin in reversed {
+            let name = plugin.name().to_string();
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 plugin.shutdown();
             })) {
                 Ok(()) => {
-                    tracing::info!(name, "Plugin shutdown");
+                    tracing::info!(name = %name, "Plugin shutdown");
                 }
                 Err(_) => {
                     failures += 1;
-                    tracing::error!(name, "Plugin panicked during shutdown");
+                    tracing::error!(name = %name, "Plugin panicked during shutdown");
                 }
             }
+            // plugin dropped here, outside the mutex guard
         }
         if failures > 0 {
             tracing::warn!(failures, "Some plugins failed during shutdown");
@@ -124,11 +156,28 @@ impl PluginManager {
     }
 
     /// Get all plugin health statuses (for /health endpoint).
-    pub fn health_all(&self) -> Vec<(&str, PluginHealth)> {
-        self.plugins
+    pub fn health_all(&self) -> Vec<(String, PluginHealth)> {
+        let plugins = Self::lock_plugins(&self.plugins);
+        plugins
             .iter()
-            .map(|p| (p.name(), p.health()))
+            .map(|p| (p.name().to_string(), p.health()))
             .collect()
+    }
+
+    /// Acquire the plugins mutex, recovering from poisoning.
+    /// Poisoning can happen if `name()` or `health()` panic inside
+    /// `health_all` (called under the guard without `catch_unwind`).
+    /// We always recover because the Vec itself is structurally valid.
+    fn lock_plugins(
+        mutex: &Mutex<Vec<Box<dyn Plugin>>>,
+    ) -> std::sync::MutexGuard<'_, Vec<Box<dyn Plugin>>> {
+        match mutex.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("plugins mutex poisoned, recovering");
+                poisoned.into_inner()
+            }
+        }
     }
 
     /// Get plugin config values for /config endpoint.
@@ -178,19 +227,18 @@ impl PluginManager {
 
     /// Validate dependencies and return topological init order (Kahn's algorithm).
     /// Checks that all required deps exist while building the adjacency graph.
-    fn resolve_init_order(&self) -> Result<Vec<usize>, PluginError> {
-        let name_to_idx: HashMap<&str, usize> = self
-            .plugins
+    fn resolve_init_order(plugins: &[Box<dyn Plugin>]) -> Result<Vec<usize>, PluginError> {
+        let name_to_idx: HashMap<&str, usize> = plugins
             .iter()
             .enumerate()
             .map(|(i, p)| (p.name(), i))
             .collect();
 
-        let n = self.plugins.len();
+        let n = plugins.len();
         let mut in_degree = vec![0usize; n];
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
 
-        for (idx, plugin) in self.plugins.iter().enumerate() {
+        for (idx, plugin) in plugins.iter().enumerate() {
             for dep in &plugin.dependencies().required {
                 let &dep_idx = name_to_idx.get(dep).ok_or_else(|| {
                     PluginError::DependencyMissing(format!(
@@ -292,7 +340,7 @@ mod tests {
             self.init_called.store(true, Ordering::SeqCst);
             Ok(())
         }
-        fn shutdown(&self) {
+        fn shutdown(&mut self) {
             self.shutdown_called.store(true, Ordering::SeqCst);
         }
         fn dependencies(&self) -> PluginDeps {
@@ -443,9 +491,9 @@ mod tests {
 
         let health = manager.health_all();
         assert_eq!(health.len(), 3);
-        assert_eq!(health[0], ("healthy", PluginHealth::Ok));
-        assert_eq!(health[1], ("degraded", PluginHealth::Degraded));
-        assert_eq!(health[2], ("failed", PluginHealth::Failed));
+        assert_eq!(health[0], ("healthy".to_string(), PluginHealth::Ok));
+        assert_eq!(health[1], ("degraded".to_string(), PluginHealth::Degraded));
+        assert_eq!(health[2], ("failed".to_string(), PluginHealth::Failed));
     }
 
     #[test]
@@ -503,7 +551,7 @@ mod tests {
             fn init(&mut self, _ctx: &mut PluginContext) -> Result<(), PluginError> {
                 Ok(())
             }
-            fn shutdown(&self) {
+            fn shutdown(&mut self) {
                 let actual = SHUTDOWN_ORDER.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(
                     actual, self.expected_shutdown_order,
