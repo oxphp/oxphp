@@ -132,7 +132,7 @@ impl Plugin for AsyncPlugin {
         Ok(())
     }
 
-    fn shutdown(&self) {
+    fn shutdown(&mut self) {
         if self.enabled {
             tracing::info!(plugin = "async", "Async plugin shutdown complete");
         }

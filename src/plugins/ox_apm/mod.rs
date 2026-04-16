@@ -429,7 +429,7 @@ impl Plugin for ApmPlugin {
         Ok(())
     }
 
-    fn shutdown(&self) {
+    fn shutdown(&mut self) {
         if !self.enabled {
             return;
         }

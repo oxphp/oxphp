@@ -294,7 +294,7 @@ impl Plugin for OtelPlugin {
         }
     }
 
-    fn shutdown(&self) {
+    fn shutdown(&mut self) {
         if !self.enabled {
             return;
         }
