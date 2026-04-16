@@ -56,12 +56,10 @@ fn main() -> Result<(), types::BoxError> {
     plugin_manager.add(Box::new(oxphp::plugins::ox_async::AsyncPlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
 
-    // Re-read trace_context after plugin init — the OTel plugin sets
-    // TRACE_CONTEXT=true via env::set_var during its init(), but Config
-    // was already parsed before plugins ran. Safe to get_mut here because
-    // no clones of the Arc exist yet.
+    // Apply core flags set by plugins during init (e.g. OTel enables trace context).
     if !config.trace_context
-        && std::env::var("TRACE_CONTEXT")
+        && plugin_manager
+            .core_flag("trace_context")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false)
     {

@@ -31,6 +31,10 @@ pub struct PluginManager {
     php_enums: Vec<PhpEnumDef>,
     php_attributes: Vec<PhpAttributeDef>,
     php_functions: Vec<PhpFunctionDef>,
+    /// Flags set by plugins during `init()` to signal core config changes.
+    /// Read by `main()` after `init_all()` to patch `Config` before the
+    /// runtime starts. Replaces the old pattern of `env::set_var` side-effects.
+    core_flags: HashMap<String, String>,
 }
 
 impl PluginManager {
@@ -48,7 +52,13 @@ impl PluginManager {
             php_enums: Vec::new(),
             php_attributes: Vec::new(),
             php_functions: Vec::new(),
+            core_flags: HashMap::new(),
         }
+    }
+
+    /// Read a core flag set by a plugin during `init()`.
+    pub fn core_flag(&self, key: &str) -> Option<&str> {
+        self.core_flags.get(key).map(|s| s.as_str())
     }
 
     /// Register a plugin.
@@ -88,6 +98,7 @@ impl PluginManager {
                 &mut self.php_enums,
                 &mut self.php_attributes,
                 &mut self.php_functions,
+                &mut self.core_flags,
             );
 
             plugin.init(&mut ctx)?;

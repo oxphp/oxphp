@@ -442,6 +442,7 @@ mod tests {
             &mut php_enums,
             &mut php_attributes,
             &mut php_functions,
+            &mut core_flags,
         );
         register_functions(&mut ctx, enabled).unwrap();
         drop(ctx);
