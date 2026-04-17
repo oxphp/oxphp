@@ -61,17 +61,25 @@ OxPHP replaces nginx + PHP-FPM with a single container. The server works out of 
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
-| Language | C / C | Go + C | Go | **Rust** |
+| Language | C | Go + C | Go | **Rust + C** |
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
-| TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
-| Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
-| Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
-| Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
-| Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
+| TLS 1.3 | ✅ | ✅ | ✅ | ✅ (rustls) |
+| Persistent worker state | ❌ | ✅ | ✅ | ✅ |
+| Backpressure / HTTP 529 | manual | ❌ | ❌ | ✅ built-in |
+| Prometheus metrics | plugin | built-in (Caddy admin) | built-in plugin | ✅ built-in |
+| Structured JSON logs | via `log_format` | ✅ | ✅ | ✅ built-in |
+| Per-IP rate limiting | built-in | community module | ❌ | ✅ built-in |
+| Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
 | HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
-| Memory safety | ❌ | partial | partial | ✅ Rust |
+| Memory safety | ❌ (C) | partial (Go + cgo) | ✅ (Go, PHP isolated via IPC) | partial (Rust + C FFI) |
+| WebSocket server | ✅ (proxies) | ✅ (Mercure) | ✅ (centrifuge plugin) | ❌ |
+| Reverse proxy / upstream | ✅ (full-featured) | ✅ (Caddy) | ✅ | ❌ |
+| Native install (non-Docker) | apt/yum/brew/port | brew, static binary | brew, binary | Docker only (for now) |
+| Platforms (runtime) | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | Linux only (glibc/musl) |
+| Supported PHP versions | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 8.4 only (8.5 crashes with SIGBUS) |
+| License | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 (copyleft, issues for SaaS) |
+| Age / production track record | 20+ years | 2+ years | 7+ years | <1 year |
 
 See the full [documentation](docs/en/index.md) for details.
 

@@ -61,17 +61,25 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
-| Language | C / C | Go + C | Go | **Rust** |
+| Язык | C | Go + C | Go | **Rust + C** |
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
-| TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
-| Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
-| Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
-| Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
-| Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
-| HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
-| HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
-| Memory safety | ❌ | partial | partial | ✅ Rust |
+| HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 в планах |
+| TLS 1.3 | ✅ | ✅ | ✅ | ✅ (rustls) |
+| Persistent worker state | ❌ | ✅ | ✅ | ✅ |
+| Backpressure / HTTP 529 | вручную | ❌ | ❌ | ✅ встроено |
+| Метрики Prometheus | плагин | встроено (Caddy admin) | встроенный плагин | ✅ встроено |
+| Structured JSON логи | через `log_format` | ✅ | ✅ | ✅ встроено |
+| Per-IP rate limiting | встроено | community-модуль | ❌ | ✅ встроено |
+| Кастомные страницы ошибок | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preload при старте |
+| HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 в планах |
+| Memory safety | ❌ (C) | частично (Go + cgo) | ✅ (Go, PHP изолирован через IPC) | частично (Rust + C FFI) |
+| WebSocket сервер | ✅ (проксирует) | ✅ (Mercure) | ✅ (centrifuge плагин) | ❌ |
+| Реверс-прокси / upstream | ✅ (полноценный) | ✅ (Caddy) | ✅ | ❌ |
+| Native install (без Docker) | apt/yum/brew/port | brew, static binary | brew, бинарь | только Docker (пока) |
+| Платформы (runtime) | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | только Linux (glibc/musl) |
+| Поддерживаемые версии PHP | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | только 8.4 (8.5 падает с SIGBUS) |
+| Лицензия | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 (копилефт, проблемы в SaaS) |
+| Возраст / production track record | 20+ лет | 2+ года | 7+ лет | <1 года |
 
 Подробнее о возможностях — в [документации](docs/ru/index.md).
 
