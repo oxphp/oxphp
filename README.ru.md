@@ -10,9 +10,15 @@
 </p>
 
 <p align="center">
-  <a href="docs/ru/">Документация</a> · <a href="docs/en/">EN</a> · <a href="docs/zh/">中文</a> · <a href="README.md">README EN</a>
-  <br>
-  <a href="#быстрый-старт">Быстрый старт</a> · <a href="#почему-oxphp">Почему OxPHP</a> · <a href="#конфигурация">Конфигурация</a>
+  <a href="README.md">English</a> · <b>Русский</b> · <a href="README.zh.md">中文</a>
+</p>
+
+<p align="center">
+  Documents: <a href="docs/en/">English</a> · <a href="docs/ru/">Русский</a> · <a href="docs/zh/">中文</a>
+</p>
+
+<p align="center">
+  <a href="#быстрый-старт">Быстрый старт</a> · <a href="#почему-oxphp">Почему OxPHP</a> · <a href="#возможности">Возможности</a> · <a href="#конфигурация">Конфигурация</a> · <a href="#дорожная-карта">Дорожная карта</a>
 </p>
 
 <p align="center">
@@ -38,11 +44,11 @@ FROM ghcr.io/oxphp/oxphp:0.2.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-> **Примечание:** По умолчанию `DOCUMENT_ROOT` равен `/var/www/html/public`. Размещайте точки входа (например, `index.php`) в подкаталоге `public/` — OxPHP раздаёт файлы именно оттуда, а не из корня `/var/www/html`. Это соответствует стандартной структуре фреймворков Laravel, Symfony и Slim.
+> **Примечание:** По умолчанию `DOCUMENT_ROOT` равен `/var/www/html/public`. Размещайте точки входа (например, `index.php`) в подкаталоге `public/`. OxPHP раздаёт файлы именно оттуда, а не из корня `/var/www/html`. Это соответствует стандартной структуре Laravel, Symfony и Slim.
 
 ```bash
-docker build -t my-app . && docker run -p 8080:8080 my-app
-curl http://localhost:8080/
+docker build -t my-app . && docker run -p 80:80 my-app
+curl http://localhost/
 ```
 
 Без конфигурации nginx. Без настройки пулов PHP-FPM. Без менеджера процессов. Просто ваше приложение.
@@ -80,17 +86,16 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 ## Возможности
 
 ### PHP-среда выполнения
-- **Нативное выполнение PHP** через собственный SAPI (`oxphp`) с пулом ZTS-воркеров
+- **Нативное выполнение PHP** — PHP работает непосредственно внутри серверного процесса, в выделенном пуле потоков
 - **Полная поддержка суперглобальных переменных**: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
 - **HTTP Object API** — `oxphp_http_request()` возвращает типизированный объект запроса с ленивой загрузкой, встроенным парсингом JSON, определением MIME-типов загруженных файлов и мутабельным контейнером атрибутов для middleware; см. [документацию HTTP Request API](docs/ru/php/request-api.md)
-- **Нативный мост Rust↔PHP** — без сериализации, через прямой доступ к `zval` посредством C-аксессоров
 - **Система плагинов** с типизированной диспетчеризацией событий, приоритетной очерёдностью и регистрацией PHP-функций
 - **Атрибутные декораторы** — перехват вызовов функций/методов через атрибуты PHP 8+ с нулевым оверхедом для недекорированного кода; поддержка `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS`
-- **Изоляция паник** через `catch_unwind` — сбой PHP не роняет весь сервер
+- **Изоляция сбоев** — фатальная ошибка в одном запросе не роняет весь сервер
 
 ### Модель воркеров
-- **Режим воркера** — постоянные PHP-процессы с мягким сбросом, сохраняющие автозагрузчики и подключения к БД между запросами
-- **Мультиплексирование файберов** — каждый воркер обрабатывает несколько конкурентных запросов через PHP 8.4 Fibers; `oxphp_sleep()` и `oxphp_async_await()` уступают файбер вместо блокировки воркера
+- **Режим воркера** — постоянные PHP-процессы, живущие между запросами; автозагрузчики, сервисные контейнеры и подключения к БД инициализируются один раз и переиспользуются
+- **Мультиплексирование файберов** — каждый воркер обрабатывает несколько конкурентных запросов через PHP 8.4 Fibers; `oxphp_sleep()` и `oxphp_async_await()` уступают текущий файбер вместо блокировки потока воркера
 - **Автоматическая рециклизация** по числу запросов или порогу памяти
 - **Мониторинг здоровья воркеров** — упавшие воркеры автоматически обнаруживаются и перезапускаются
 - **Ранний ответ** через `oxphp_finish_request()` — отправка ответа с продолжением фоновой обработки
@@ -104,8 +109,8 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** --- пакетные и гоночные примитивы
 
 ### HTTP и сетевое взаимодействие
-- **HTTP/1.1 + HTTP/2** с автоопределением (h2c) через hyper
-- **TLS 1.3** с ALPN (h2 + http/1.1) через rustls
+- **HTTP/1.1 + HTTP/2** с автоматическим определением протокола (h2c)
+- **TLS 1.3** с ALPN — HTTP/2 и HTTP/1.1 поверх TLS
 - **3 режима маршрутизации** — Traditional (отображение файлов + всегда-on PATH_INFO), Framework (rewrite на `index.php` с `PATH_INFO=$request_uri`), SPA (`index.html` для путей без расширения, жёсткий 404 для отсутствующих ассетов). Каждый режим воспроизводит знакомую конфигурацию nginx `try_files`
 - **Потоковая передача SSE** через автоопределение `Content-Type: text/event-stream` или `oxphp_stream_flush()` --- кооперативная с мультиплексированием файберов
 - **Настраиваемые таймауты** — чтение заголовков, обработка запроса, keep-alive
@@ -115,7 +120,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **HTTP-кеширование** с ETag, Last-Modified и поддержкой 304 Not Modified
 - **Сжатие Brotli** для текстовых ответов (диапазон 256 Б – 3 МБ)
 - **Аллокатор mimalloc** для снижения задержки выделения памяти под нагрузкой
-- **Настраиваемый Tokio runtime** — многопоточный по умолчанию (CPU/2), настраивается через `TOKIO_WORKERS`
+- **Настраиваемые потоки HTTP-сервера** — многопоточный по умолчанию (CPU/2), настраивается через `TOKIO_WORKERS`
 
 ### Наблюдаемость
 - **W3C Trace Context** — автоматический пропуск `traceparent`/`tracestate`, `$_SERVER['OXPHP_TRACE_ID']` для корреляции PHP-логов
@@ -125,7 +130,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **PHP tracing SDK** — 10 функций `oxphp_trace_*()` для ручного создания спанов, атрибутов, событий, записи ошибок и передачи контекста трассировки
 - **Метрики Prometheus** на `/metrics` — по каждому воркеру, без зависимостей
 - **Проверка работоспособности** на `/health` — готова для проб готовности K8s
-- **Структурированное логирование ошибок** — ошибки PHP направляются через `tracing` с полями `php_error_type`, `php_file`, `php_line`
+- **Структурированное логирование ошибок** — ошибки PHP попадают в серверный лог с полями `php_error_type`, `php_file`, `php_line`
 - **JSON-журнал доступа** с опциональными полями `trace_id`/`span_id` (уровни: `all`, `error`, выключен через `ACCESS_LOG`)
 - **Генерация Request ID** и проброс (`X-Request-ID`); формат на основе трейсов при активном OTel
 
@@ -141,45 +146,45 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 
 ## Архитектура
 
-```
-                    ┌──────────────┐
-                    │  Tokio async │  configurable: single- or multi-threaded
-                    │  HTTP server │  (hyper + hyper-util + mimalloc)
-                    └──────┬───────┘
-                           │
-                    ┌──────▼───────┐
-                    │Route dispatch│  static file / PHP / 404
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Static file   PHP request   Not found
-         (LRU cache)   (channel)      (404)
-                           │
-                    ┌──────▼───────┐
-                    │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  529 when full
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
-         (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
-         ──────────────────┬──────────────────
-                           │
-                    ┌──────▼───────┐
-                    │ Async pool   │  oxphp_async() / oxphp_async_await()
-                    │(crossbeam ch)│  dedicated OS threads (ZTS)
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Async Worker  Async Worker  Async Worker
+```mermaid
+flowchart TD
+    Client([Клиент])
+    HTTP["Асинхронный HTTP-сервер<br/>одно- или многопоточный"]
+    Route{Маршрутизация}
+    Static["Статический файл<br/>LRU-кэш"]
+    Queue[("Ограниченная очередь<br/>529 при переполнении")]
+    NF["404 Not Found"]
+    Pool["Асинхронный пул<br/>oxphp_async / oxphp_async_await"]
+
+    Client --> HTTP
+    HTTP --> Route
+    Route -->|статика| Static
+    Route -->|нет файла| NF
+    Route -->|PHP| Queue
+    Queue --> PhpWorkers
+    PhpWorkers -.-> Pool
+    Pool --> AsyncWorkers
+
+    subgraph PhpWorkers [PHP-воркеры — отдельные потоки ОС]
+        direction BT
+        W1[Воркер]
+        W2[Воркер]
+        W3[Воркер]
+    end
+
+    subgraph AsyncWorkers [Async-воркеры — отдельные потоки ОС]
+        direction BT
+        A1[Воркер]
+        A2[Воркер]
+        A3[Воркер]
+    end
 ```
 
-- **Асинхронный Tokio runtime** — многопоточный по умолчанию, настраивается через `TOKIO_WORKERS`
-- **Пул ZTS-воркеров** — каждый воркер — отдельный поток ОС с изоляцией через `catch_unwind`
-- Воркеры получают запросы через `crossbeam::bounded` и отвечают через `ExecuteResult` (немедленно или отложенно через `oneshot`)
-- **Асинхронный пул** — отдельные потоки ОС для задач `oxphp_async()`, предотвращающие дедлоки с HTTP-пулом
-- **Режим воркера** — постоянные PHP-процессы с мягким сбросом; сохраняют состояние начальной загрузки (автозагрузчики, подключения к БД) между запросами
+- **Асинхронный HTTP-сервер** — многопоточный по умолчанию, настраивается через `TOKIO_WORKERS`
+- **Пул PHP-воркеров** — каждый воркер — отдельный поток ОС; сбой в одном воркере не влияет на остальные
+- Запросы ожидают в ограниченной очереди между HTTP-сервером и PHP-воркерами; очередь возвращает 529 при переполнении
+- **Асинхронный пул** — отдельные потоки для задач `oxphp_async()`, предотвращающие замедление основного пула воркеров
+- **Режим воркера** — постоянные PHP-процессы, живущие между запросами; автозагрузчики и подключения к БД переиспользуются всеми запросами, обрабатываемыми данным воркером
 
 ### Внутренний сервер
 
@@ -199,14 +204,14 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | Адрес и порт для прослушивания |
+| `LISTEN_ADDR` | `0.0.0.0:80` | Адрес и порт для прослушивания |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Путь в файловой системе для раздачи файлов |
 | `INDEX_FILE` | *(не задано)* | Режим маршрутизации: пусто = Traditional, `*.php` = Framework, любое другое = SPA |
-| `TOKIO_WORKERS` | `0` (CPU / 2, мин. 1) | Потоки асинхронного I/O; `0` = авто |
+| `TOKIO_WORKERS` | `0` (CPU / 2, мин. 1) | Потоки HTTP-сервера для обработки соединений; `0` = авто |
 | `EXECUTOR` | `sapi` | Исполнитель PHP: `sapi` (настоящий PHP) или `stub` (режим тестирования) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1) | Пул воркеров: `N` = фиксированный, `MIN:MAX` = динамический, `0` = авто |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Таймаут простоя перед завершением динамического воркера |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Размер ограниченного канала; 529 при переполнении |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Максимум запросов в очереди до возврата сервером 529 |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Таймаут ожидания завершения запросов при плавной остановке |
 | `LOG_LEVEL` | `info` | Детализация логов: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(не задано)* | Внутренний сервер для health/metrics/config (например `0.0.0.0:9090`) |
@@ -225,8 +230,9 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 | `WORKER_FILE` | *(не задано)* | Путь к PHP-скрипту воркера; включает режим постоянных воркеров |
 | `WORKER_MAX_REQUESTS` | `0` (без ограничений) | Макс. запросов на воркер до рециклизации |
 | `WORKER_MAX_MEMORY_MIB` | `0` (без ограничений) | Макс. память (МиБ) на воркер до рециклизации |
+| `SUPERGLOBALS_ENABLED` | `true` | Заполнять `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; установите `false`, чтобы использовать только `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (отключено) | Выделенные потоки асинхронных воркеров для `oxphp_async()` |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Ограниченная очередь для асинхронных задач; отклоняются при заполнении |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Максимум ожидающих асинхронных задач в очереди; задачи отклоняются при заполнении |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
 
@@ -279,15 +285,15 @@ cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && car
 
 # Дымовой тест через Docker
 docker compose build && docker compose up -d
-curl http://localhost:8080/
-curl "http://localhost:8080/test_superglobals.php?foo=bar"
-curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
-curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+curl http://localhost/
+curl "http://localhost/test_superglobals.php?foo=bar"
+curl -X POST -d "key=value" http://localhost/test_superglobals.php
+curl -H "Cookie: session=abc" http://localhost/test_superglobals.php
 
 # Асинхронные промисы
-curl http://localhost:8080/test_async.php
-curl http://localhost:8080/test_async_parallel.php
-curl http://localhost:8080/test_async_die.php
+curl http://localhost/test_async.php
+curl http://localhost/test_async_parallel.php
+curl http://localhost/test_async_die.php
 
 # Внутренний сервер
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
@@ -314,7 +320,7 @@ curl http://localhost:9090/metrics
 | **HTTP/3** | Поддержка HTTP/3 на базе QUIC |
 | **HTTP 103 Early Hints** | Отправка ответов `103 Early Hints`, позволяющих клиентам предварительно загружать ресурсы до получения финального ответа |
 | **Ecosystem Plugins** | Расширенная система плагинов: больше хуков жизненного цикла, более богатый PHP API и документация для сторонних авторов плагинов |
-| ~~**Shared Async Runtime**~~ | ✅ Реализовано — Tokio runtime обеспечивает `oxphp_async()` / `oxphp_async_await()` с тайм-аутами, доставкой результатов и координацией гонки |
+| ~~**Shared Async Runtime**~~ | ✅ Реализовано — один и тот же асинхронный runtime обеспечивает работу как HTTP-сервера, так и `oxphp_async()` / `oxphp_async_await()` с тайм-аутами, доставкой результатов и координацией гонки |
 | **Database Connection Pool** | Встроенный пул соединений через `sqlx`, снижающий накладные расходы на подключение при каждом запросе |
 | **gRPC Server** | *(предварительно)* Альтернативный серверный режим — gRPC вместо HTTP; реализация не гарантирована |
 | ~~**Promise API**~~ | ✅ Реализовано — `oxphp_async()` / `oxphp_async_await()` с выделенным пулом потоков, портативной сериализацией и безопасностью исключений |

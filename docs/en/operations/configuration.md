@@ -15,7 +15,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `*.php` = Framework, anything else = SPA. See [Routing](../features/routing.md) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
-| `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N` = fixed thread count, `0` = auto |
+| `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
 ## PHP Workers
 
@@ -24,7 +24,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `EXECUTOR` | `sapi` | PHP executor backend. `sapi` for PHP execution, `stub` for benchmarking without PHP |
 | `PHP_WORKERS` | CPU / 2 (min 1) | Worker pool size. `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker stays idle before being retired (dynamic mode only) |
-| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Returns 503 when full. For dynamic pools (`MIN:MAX`), initial workers = minimum count |
+| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Returns 529 when full. For dynamic pools (`MIN:MAX`), initial workers = minimum count |
 
 ### Static vs Dynamic Workers
 
@@ -40,6 +40,7 @@ Set `PHP_WORKERS` to `MIN:MAX` for automatic scaling:
 ```bash
 PHP_WORKERS=2:16   # Scale between 2 and 16 workers
 PHP_WORKERS=4:0    # 4 minimum, auto-detect maximum (CPU × 2)
+PHP_WORKERS=0:16   # auto-detect minimum (CPU / 4, min 1), 16 maximum
 ```
 
 In dynamic mode, OxPHP scales workers up when all are busy and scales down when workers have been idle longer than `PHP_WORKERS_IDLE_SECONDS`.
@@ -218,9 +219,14 @@ curl -s http://localhost:9090/config | jq .
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
+  "log_level": "warn",
   "executor_type": "sapi",
+  "php_workers": "8",
+  "tokio_workers": 4,
+  "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
+  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
@@ -235,9 +241,12 @@ curl -s http://localhost:9090/config | jq .
   "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
+  "static_cache_enabled": true,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,
+  "superglobals_enabled": true,
+  "trusted_proxies": false,
   "plugins": {
     "otel": {
       "enabled": true,

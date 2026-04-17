@@ -113,14 +113,17 @@ $response = $client->get('https://api.example.com/users', [
 {
   "timestamp": "2026-03-23T10:15:30.123Z",
   "level": "INFO",
-  "target": "access_log",
-  "request_id": "4bf92f35-00f067aa",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "span_id": "00f067aa0ba902b7",
-  "method": "GET",
-  "path": "/api/users",
-  "status": 200,
-  "duration_us": 1523
+  "fields": {
+    "request_id": "4bf92f3577b34da6-00f067aa",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7",
+    "method": "GET",
+    "path": "/api/users",
+    "status": 200,
+    "duration_us": 1523,
+    "remote_addr": "10.0.0.1:54321",
+    "message": "request completed"
+  }
 }
 ```
 

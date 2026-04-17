@@ -112,7 +112,7 @@ oxphp_request_id(): string
 
 Returns the unique request identifier for the current request. This is the same value sent in the `X-Request-ID` response header. If the client sends an `X-Request-ID` header, OxPHP passes it through unchanged instead of generating a new one.
 
-**Returns:** A 16-character hexadecimal string when OxPHP generates the ID (e.g. `"67b9a3c11a2b0042"`). When the client sends an `X-Request-ID` header, that value is returned as-is (1–64 characters, alphanumeric plus `-`, `_`, `.`).
+**Returns:** A 20-character hexadecimal string when OxPHP generates the ID (e.g. `"67890abc12341a2b0042"`). When the client sends an `X-Request-ID` header, that value is returned as-is (1–64 characters, alphanumeric plus `-`, `_`, `.`).
 
 **Example:**
 
@@ -276,7 +276,7 @@ oxphp_worker(callable $handler): bool
 Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests.
 
 **Parameters:**
-- `$handler` — Called once per request. The handler receives no arguments; use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) for request data.
+- `$handler` — Called once per request. The handler receives no arguments. Use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) or `oxphp_http_request()` inside the handler to access request data.
 
 **Returns:** `true` on graceful shutdown, `false` if not in worker mode.
 

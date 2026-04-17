@@ -3,6 +3,10 @@ title: OxPHP Documentation
 description: Documentation for OxPHP, a high-performance async PHP application server with built-in TLS, compression, rate limiting, metrics, SSE streaming, and worker mode.
 ---
 
+**English** · [Русский](../ru/index.md) · [中文](../zh/index.md)
+
+[Getting Started](#getting-started) · [Features](#features) · [Security](#security) · [PHP](#php) · [Operations](#operations) · [Architecture](#architecture)
+
 # OxPHP Documentation
 
 OxPHP is a high-performance PHP application server that replaces nginx + PHP-FPM with a single binary — built-in TLS, Brotli compression, rate limiting, health checks, Prometheus metrics, SSE streaming, and persistent worker mode included.

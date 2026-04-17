@@ -10,9 +10,15 @@
 </p>
 
 <p align="center">
-  <a href="docs/en/">Docs</a> · <a href="docs/ru/">RU</a> · <a href="docs/zh/">中文</a> · <a href="README.ru.md">README RU</a> · <a href="README.zh.md">README 中文</a>
-  <br>
-  <a href="#quick-start">Quick Start</a> · <a href="#why-oxphp">Why OxPHP</a> · <a href="#configuration">Configuration</a>
+  <b>English</b> · <a href="README.ru.md">Русский</a> · <a href="README.zh.md">中文</a>
+</p>
+
+<p align="center">
+  Documents: <a href="docs/en/">English</a> · <a href="docs/ru/">Русский</a> · <a href="docs/zh/">中文</a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#why-oxphp">Why OxPHP</a> · <a href="#features">Features</a> · <a href="#configuration">Configuration</a> · <a href="#roadmap">Roadmap</a>
 </p>
 
 <p align="center">
@@ -38,11 +44,11 @@ FROM ghcr.io/oxphp/oxphp:0.2.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-> **Note:** By default, `DOCUMENT_ROOT` is `/var/www/html/public`. Place your entry point scripts (e.g. `index.php`) inside the `public/` subdirectory — OxPHP will serve files from there, not from the root of `/var/www/html`. This matches the conventional layout of frameworks like Laravel, Symfony, and Slim out of the box.
+> **Note:** By default, `DOCUMENT_ROOT` is `/var/www/html/public`. Place your entry point scripts (e.g. `index.php`) inside the `public/` subdirectory. OxPHP serves files from there, not from the root of `/var/www/html`. This matches the standard layout of Laravel, Symfony, and Slim.
 
 ```bash
-docker build -t my-app . && docker run -p 8080:8080 my-app
-curl http://localhost:8080/
+docker build -t my-app . && docker run -p 80:80 my-app
+curl http://localhost/
 ```
 
 No nginx config. No PHP-FPM pool tuning. No process manager. Just your app.
@@ -80,19 +86,18 @@ See the full [documentation](docs/en/index.md) for details.
 ## Features
 
 ### PHP Runtime
-- **Native PHP execution** via custom SAPI (`oxphp`) with ZTS worker pool
+- **Native PHP execution** — PHP runs directly inside the server process, in a dedicated thread pool
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input`
 - **HTTP Object API** — `oxphp_http_request()` returns a typed, lazy-loading request object with built-in JSON body parsing, content-detected MIME types for uploads, and a mutable attributes container for middleware; see [HTTP Request API docs](docs/en/php/request-api.md)
-- **Native Rust↔PHP bridge** — zero-serialization via direct `zval` access through C accessor functions
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
 - **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS`
-- **Panic isolation** via `catch_unwind` — a PHP crash does not take down the server
+- **Crash isolation** — a fatal error in one request does not take down the server
 
 ### Worker Model
-- **Worker mode** — persistent PHP processes with soft reset, keeping autoloaders and DB connections alive across requests
-- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the fiber instead of blocking the worker
+- **Worker mode** — persistent PHP processes that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused
+- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread
 - **Automatic recycling** by request count or memory threshold
-- **Worker health monitoring** — dead workers are automatically detected and respawned
+- **Worker health monitoring** — crashed workers are automatically detected and restarted
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work
 
 ### Async Promises
@@ -104,8 +109,8 @@ See the full [documentation](docs/en/index.md) for details.
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — batch and race primitives
 
 ### HTTP & Networking
-- **HTTP/1.1 + HTTP/2** auto-detection (h2c) via hyper
-- **TLS 1.3** with ALPN (h2 + http/1.1) via rustls
+- **HTTP/1.1 + HTTP/2** with automatic protocol detection (h2c)
+- **TLS 1.3** with ALPN — both HTTP/2 and HTTP/1.1 over TLS
 - **3 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (`index.php` rewrite with `PATH_INFO=$request_uri`), SPA (`index.html` for no-extension paths, hard 404 for missing assets). Each mode mirrors a familiar nginx `try_files` configuration
 - **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing
 - **Configurable timeouts** — header read, request, and keep-alive
@@ -115,7 +120,7 @@ See the full [documentation](docs/en/index.md) for details.
 - **HTTP caching** with ETag, Last-Modified, and 304 Not Modified
 - **Brotli compression** for text responses (256 B – 3 MB range)
 - **mimalloc** allocator for lower allocation latency under contention
-- **Configurable Tokio runtime** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
+- **Configurable HTTP server threads** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
 
 ### Observability
 - **W3C Trace Context** — automatic `traceparent`/`tracestate` propagation, `$_SERVER['OXPHP_TRACE_ID']` for PHP log correlation
@@ -125,7 +130,7 @@ See the full [documentation](docs/en/index.md) for details.
 - **PHP tracing SDK** — 10 `oxphp_trace_*()` functions for manual span creation, attributes, events, error recording, and trace context propagation
 - **Prometheus metrics** at `/metrics` — per-worker, zero dependencies
 - **Health check** at `/health` — ready for K8s readiness probes
-- **Structured error logging** — PHP errors routed through `tracing` with `php_error_type`, `php_file`, `php_line`
+- **Structured error logging** — PHP errors appear in the server log with `php_error_type`, `php_file`, `php_line` fields
 - **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`)
 - **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled
 
@@ -142,45 +147,45 @@ See the full [documentation](docs/en/index.md) for details.
 
 ## Architecture
 
-```
-                    ┌──────────────┐
-                    │  Tokio async │  configurable: single- or multi-threaded
-                    │  HTTP server │  (hyper + hyper-util + mimalloc)
-                    └──────┬───────┘
-                           │
-                    ┌──────▼───────┐
-                    │Route dispatch│  static file / PHP / 404
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Static file   PHP request   Not found
-         (LRU cache)   (channel)      (404)
-                           │
-                    ┌──────▼───────┐
-                    │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  529 when full
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
-         (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
-         ──────────────────┬──────────────────
-                           │
-                    ┌──────▼───────┐
-                    │ Async pool   │  oxphp_async() / oxphp_async_await()
-                    │(crossbeam ch)│  dedicated OS threads (ZTS)
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Async Worker  Async Worker  Async Worker
+```mermaid
+flowchart TD
+    Client([Client])
+    HTTP["Async HTTP server<br/>single- or multi-threaded"]
+    Route{Route dispatch}
+    Static["Static file<br/>LRU cache"]
+    Queue[("Bounded queue<br/>529 when full")]
+    NF["404 Not Found"]
+    Pool["Async pool<br/>oxphp_async / oxphp_async_await"]
+
+    Client --> HTTP
+    HTTP --> Route
+    Route -->|static| Static
+    Route -->|miss| NF
+    Route -->|PHP| Queue
+    Queue --> PhpWorkers
+    PhpWorkers -.-> Pool
+    Pool --> AsyncWorkers
+
+    subgraph PhpWorkers [PHP workers — dedicated OS threads]
+        direction BT
+        W1[Worker]
+        W2[Worker]
+        W3[Worker]
+    end
+
+    subgraph AsyncWorkers [Async workers — dedicated OS threads]
+        direction BT
+        A1[Worker]
+        A2[Worker]
+        A3[Worker]
+    end
 ```
 
-- **Tokio async runtime** — multi-threaded by default, tunable via `TOKIO_WORKERS`
-- **ZTS worker pool** — each worker is a dedicated OS thread with `catch_unwind` isolation
-- Workers receive requests via `crossbeam::bounded`, respond via `ExecuteResult` (immediate or deferred via `oneshot`)
-- **Async pool** — separate OS threads for `oxphp_async()` tasks, preventing deadlocks with the HTTP pool
-- **Worker mode** — persistent PHP with soft reset; keeps bootstrap state (autoloaders, DB connections) alive
+- **Async HTTP server** — multi-threaded by default, tunable via `TOKIO_WORKERS`
+- **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others
+- Requests wait in a bounded queue between the HTTP server and the PHP workers; the queue returns 529 when full
+- **Async pool** — separate threads for `oxphp_async()` tasks, preventing slowdowns in the main worker pool
+- **Worker mode** — persistent PHP processes that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
 
 ### Internal Server
 
@@ -200,14 +205,14 @@ All settings are via environment variables — no config files required.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | Address and port to bind |
+| `LISTEN_ADDR` | `0.0.0.0:80` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
 | `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `*.php` = Framework, anything else = SPA |
-| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | Async I/O threads; `0` = auto |
+| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | HTTP server threads for handling connections; `0` = auto |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool: `N` = fixed, `MIN:MAX` = dynamic, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before retiring a dynamic worker |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Bounded channel size; 529 when full |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Max pending requests in the queue before the server returns 529 |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Graceful shutdown drain timeout |
 | `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config (e.g. `0.0.0.0:9090`) |
@@ -226,8 +231,9 @@ All settings are via environment variables — no config files required.
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script; enables persistent worker mode |
 | `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling |
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
+| `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Bounded queue for async tasks; rejected when full |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
 
@@ -280,15 +286,15 @@ cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && car
 
 # Docker smoke tests
 docker compose build && docker compose up -d
-curl http://localhost:8080/
-curl "http://localhost:8080/test_superglobals.php?foo=bar"
-curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
-curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+curl http://localhost/
+curl "http://localhost/test_superglobals.php?foo=bar"
+curl -X POST -d "key=value" http://localhost/test_superglobals.php
+curl -H "Cookie: session=abc" http://localhost/test_superglobals.php
 
 # Async promises
-curl http://localhost:8080/test_async.php
-curl http://localhost:8080/test_async_parallel.php
-curl http://localhost:8080/test_async_die.php
+curl http://localhost/test_async.php
+curl http://localhost/test_async_parallel.php
+curl http://localhost/test_async_die.php
 
 # Internal server
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
@@ -315,7 +321,7 @@ curl http://localhost:9090/metrics
 | **HTTP/3** | QUIC-based HTTP/3 support |
 | **HTTP 103 Early Hints** | Send `103 Early Hints` responses to allow clients to preload resources before the final response |
 | **Ecosystem Plugins** | Expanded plugin system: more lifecycle hooks, richer PHP API, and documentation for third-party plugin authors |
-| ~~**Shared Async Runtime**~~ | ✅ Implemented — Tokio runtime powers `oxphp_async()` / `oxphp_async_await()` with timeouts, result delivery, and race coordination |
+| ~~**Shared Async Runtime**~~ | ✅ Implemented — the same async runtime powers both the HTTP server and `oxphp_async()` / `oxphp_async_await()` with timeouts, result delivery, and race coordination |
 | **Database Connection Pool** | Built-in connection pooling via `sqlx`, reducing per-request connection overhead |
 | **gRPC Server** | *(speculative)* An alternative server mode — gRPC instead of HTTP; very uncertain, may not happen |
 | ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |

@@ -34,10 +34,9 @@ docker pull ghcr.io/oxphp/oxphp:0.2.0
 │   └── oxphp                                        # серверный бинарный файл
 ├── lib/
 │   ├── libphp.so                                    # PHP 8.4 ZTS runtime
-│   ├── liboxphp_bridge.so                           # C-мост (TLS-слот между Rust и PHP)
+│   ├── liboxphp_bridge.so                           # библиотека-мост C
 │   └── php/extensions/no-debug-zts-20240924/
-│       ├── oxphp_sapi.so                            # PHP-расширение OxPHP
-│       └── opcache.so                               # OPcache (из базового PHP)
+│       └── oxphp_sapi.so                            # PHP-расширение OxPHP
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # настройки PHP для OxPHP
@@ -49,7 +48,7 @@ docker pull ghcr.io/oxphp/oxphp:0.2.0
 | Компонент | Размер | Назначение |
 |-----------|--------|------------|
 | `oxphp` | ~8 МБ | HTTP-сервер, маршрутизация, плагины, метрики |
-| `liboxphp_bridge.so` | ~50 КБ | Разделяемый `__thread` TLS-контекст между Rust и PHP |
+| `liboxphp_bridge.so` | ~50 КБ | Разделяемая библиотека-мост, связывающая сервер со средой выполнения PHP |
 | `oxphp_sapi.so` | ~200 КБ | PHP-функции (`oxphp_request_id()`, `OxPHP\Http\Request` и др.) |
 
 Цепочка зависимостей:
@@ -60,7 +59,7 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
   └──► liboxphp_bridge.so ◄── oxphp_sapi.so
 ```
 
-Бинарник `oxphp` динамически линкуется к `libphp.so` и `liboxphp_bridge.so`. PHP-расширение `oxphp_sapi.so` также линкуется к bridge-библиотеке — это единственный способ разделить per-request состояние между Rust и PHP через общий `__thread`-слот в одном `.so`.
+Бинарник `oxphp` линкуется к `libphp.so` и `liboxphp_bridge.so`. PHP-расширение `oxphp_sapi.so` также линкуется к bridge-библиотеке, благодаря чему per-request состояние доступно в вашем PHP-коде.
 
 ### Минимальный Dockerfile
 

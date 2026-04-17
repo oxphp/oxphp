@@ -34,10 +34,9 @@ docker pull ghcr.io/oxphp/oxphp:0.2.0
 │   └── oxphp                                        # 服务器二进制文件
 ├── lib/
 │   ├── libphp.so                                    # PHP 8.4 ZTS 运行时
-│   ├── liboxphp_bridge.so                           # C Bridge（Rust 与 PHP 之间的 TLS 槽）
+│   ├── liboxphp_bridge.so                           # C Bridge 库
 │   └── php/extensions/no-debug-zts-20240924/
-│       ├── oxphp_sapi.so                            # OxPHP PHP 扩展
-│       └── opcache.so                               # OPcache（来自基础 PHP）
+│       └── oxphp_sapi.so                            # OxPHP PHP 扩展
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # OxPHP 的 PHP 配置
@@ -49,7 +48,7 @@ OxPHP 的三个组件及其用途：
 | 组件 | 大小 | 用途 |
 |------|------|------|
 | `oxphp` | ~8 MB | HTTP 服务器、路由、插件、指标 |
-| `liboxphp_bridge.so` | ~50 KB | Rust 与 PHP 之间的共享 `__thread` TLS 上下文 |
+| `liboxphp_bridge.so` | ~50 KB | 连接服务器与 PHP 运行时的共享 Bridge 库 |
 | `oxphp_sapi.so` | ~200 KB | PHP 函数（`oxphp_request_id()`、`OxPHP\Http\Request` 等） |
 
 依赖链：
@@ -60,7 +59,7 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
   └──► liboxphp_bridge.so ◄── oxphp_sapi.so
 ```
 
-`oxphp` 二进制文件动态链接到 `libphp.so` 和 `liboxphp_bridge.so`。PHP 扩展 `oxphp_sapi.so` 同样链接到 Bridge 库 —— 这是通过单个 `.so` 中的共享 `__thread` 槽在 Rust 和 PHP 之间共享 per-request 状态的唯一方式。
+`oxphp` 二进制文件链接到 `libphp.so` 和 `liboxphp_bridge.so`。PHP 扩展 `oxphp_sapi.so` 同样链接到 Bridge 库，从而使 per-request 状态可在您的 PHP 代码中使用。
 
 ### 最小化 Dockerfile
 

@@ -231,7 +231,8 @@ services:
 创建 `oxphp.ini` 文件并将其挂载到容器中，可自定义 PHP 设置。这是配置 OPcache、JIT、会话及其他 PHP 运行时参数的推荐方式。
 
 ```ini
-zend_extension=opcache
+; 请勿添加 zend_extension=opcache —— OPcache 已静态编译到
+; PHP ZTS 基础镜像中，下方 [opcache] 节直接配置即可。
 
 [opcache]
 opcache.enable = 1
@@ -248,6 +249,8 @@ session.save_path = /tmp
 session.use_cookies = 1
 session.use_only_cookies = 1
 ```
+
+> **注意：** 请勿在此文件中添加 `zend_extension=opcache`。OPcache 已内置于 OxPHP 所使用的 PHP ZTS 镜像中，添加 `zend_extension` 行将在每次请求启动时产生警告。
 
 在开发环境中，设置 `opcache.validate_timestamps = 1` 和 `opcache.revalidate_freq = 0`，PHP 将在不重启容器的情况下感知文件变更。
 

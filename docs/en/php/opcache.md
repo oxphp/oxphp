@@ -13,24 +13,22 @@ OxPHP registers itself as a named SAPI, and OPcache treats it identically to oth
 
 - **Shared cache across workers**: all PHP worker threads use the same compiled opcode cache. One worker compiles a file; all workers benefit.
 - **No per-request compilation**: after the first request for each script, subsequent requests skip the parse and compile step entirely.
-- `opcache.enable_cli` does not affect OxPHP — that setting applies only to SAPIs named `cli` and `phpdbg`. OxPHP registers with the SAPI name `cli-server`, so OPcache is controlled solely via `opcache.enable`. The `opcache.enable_cli` setting is useful if you run PHP CLI in the same container (e.g., for migrations or Artisan commands). The official image `ghcr.io/oxphp/oxphp` does not include PHP CLI, so this setting is not configured there.
+- `opcache.enable_cli` does not affect OxPHP — that setting applies only to SAPIs named `cli` and `phpdbg`. OxPHP registers with the SAPI name `cli-server`, so OPcache is controlled solely via `opcache.enable`. The `opcache.enable_cli` setting is useful if you run PHP CLI in the same container (e.g., for migrations or Artisan commands). The official OxPHP image ships PHP CLI alongside the server binary, so you can set `opcache.enable_cli=1` if your CLI scripts benefit from caching.
 
 To enable OPcache, at minimum:
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 ```
+
+> **Note:** The official OxPHP Docker image is based on `php:*-zts-alpine`, which compiles OPcache statically into the PHP binary. Do NOT add `zend_extension=opcache` to your INI file — the extension is already loaded, and adding that line will cause a warning on every PHP startup. Only the `[opcache]` configuration section is needed.
 
 ## Recommended Production Settings
 
 These settings are optimized for production container deployments where PHP files do not change at runtime. Disable timestamp validation and preload compiled files at startup for maximum throughput.
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 opcache.memory_consumption=128
@@ -57,8 +55,6 @@ opcache.jit=tracing
 For development, enable timestamp validation so code changes take effect without restarting the container. Disable JIT to get clearer stack traces during debugging.
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 opcache.memory_consumption=128

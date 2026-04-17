@@ -110,9 +110,14 @@ curl -s http://localhost:9090/config | jq .
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
+  "log_level": "info",
   "executor_type": "sapi",
+  "php_workers": "8",
+  "tokio_workers": 4,
+  "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
+  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
@@ -127,9 +132,12 @@ curl -s http://localhost:9090/config | jq .
   "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
+  "static_cache_enabled": true,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": false,
+  "superglobals_enabled": true,
+  "trusted_proxies": false,
   "plugins": {}
 }
 ```

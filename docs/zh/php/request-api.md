@@ -56,17 +56,15 @@ OxPHP 提供了一套面向对象的 API 用于访问 HTTP 请求数据。你不
 $request = oxphp_http_request();
 ```
 
-在活跃 HTTP 请求期间执行的脚本中，可以在任意位置调用 `oxphp_http_request()`。在 Worker 模式下，也可以通过 `oxphp_worker()` 回调的参数接收请求对象：
+在活跃 HTTP 请求期间执行的脚本中，可以在任意位置调用 `oxphp_http_request()`，包括在 `oxphp_worker()` 回调内部：
 
 ```php
 <?php
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
     $method = $request->method();
     // ...
 });
-```
-
-两种方式返回同一个对象——参数形式只是一种便捷写法。
 
 ---
 
@@ -599,12 +597,11 @@ if (!oxphp_superglobals_enabled()) {
 require __DIR__ . '/vendor/autoload.php';
 $app = new MyApp\Application();
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) use ($app) {
+oxphp_worker(function () use ($app) {
+    $request = oxphp_http_request();
     $app->handle($request);
 });
 ```
-
-传递给回调的 Request 对象与在回调内部调用 `oxphp_http_request()` 所得的对象完全相同——两者都从同一个线程本地状态读取数据。
 
 Request 对象上的所有缓存（已解析的请求头、Cookie、查询参数、请求体）会在下一个请求开始时自动清除。
 
@@ -738,7 +735,9 @@ echo json_encode(['id' => $user->id, 'name' => $user->name]);
 // worker.php
 require __DIR__ . '/vendor/autoload.php';
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
+
     if ($request->path() === '/login' && $request->isMethod('POST')) {
         $username = $request->payload('username');
         $password = $request->payload('password');
