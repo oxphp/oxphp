@@ -61,17 +61,25 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
-| Language | C / C | Go + C | Go | **Rust** |
+| 语言 | C | Go + C | Go | **Rust + C** |
 | HTTP/2 | ✅ | ✅ | ✅ | ✅ |
-| TLS built-in | ✅ | ✅ | ✅ | ✅ (rustls, TLS 1.3) |
-| Worker mode | ❌ | ✅ | ✅ | ✅ |
-| Backpressure / 529 | manual | ❌ | ❌ | ✅ built-in |
-| Prometheus metrics | plugin | plugin | plugin | ✅ built-in |
-| Per-IP rate limiting | nginx module | ❌ | ❌ | ✅ built-in |
-| Custom error pages | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ preloaded at startup |
-| HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
-| HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 roadmap |
-| Memory safety | ❌ | partial | partial | ✅ Rust |
+| HTTP/3 | ✅ | ✅ | ✅ 实验性 | 🔜 路线图 |
+| TLS 1.3 | ✅ | ✅ | ✅ | ✅ (rustls) |
+| 持久化 worker 状态 | ❌ | ✅ | ✅ | ✅ |
+| 背压 / HTTP 529 | 手动 | ❌ | ❌ | ✅ 内置 |
+| Prometheus 指标 | 插件 | 内置 (Caddy admin) | 内置插件 | ✅ 内置 |
+| 结构化 JSON 日志 | 通过 `log_format` | ✅ | ✅ | ✅ 内置 |
+| 按 IP 限流 | 内置 | 社区模块 | ❌ | ✅ 内置 |
+| 自定义错误页 | ✅ (nginx config) | ✅ (Caddyfile) | ❌ | ✅ 启动时预加载 |
+| HTTP 103 Early Hints | ✅ (v1.29+) | ✅ | ✅ | 🔜 路线图 |
+| 内存安全 | ❌ (C) | 部分 (Go + cgo) | ✅ (Go，PHP 通过 IPC 隔离) | 部分 (Rust + C FFI) |
+| WebSocket 服务器 | ✅ (代理) | ✅ (Mercure) | ✅ (centrifuge 插件) | ❌ |
+| 反向代理 / upstream | ✅ (完整) | ✅ (Caddy) | ✅ | ❌ |
+| 原生安装（非 Docker） | apt/yum/brew/port | brew, static binary | brew, 二进制 | 仅 Docker（目前） |
+| 运行平台 | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | 仅 Linux (glibc/musl) |
+| 支持的 PHP 版本 | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 仅 8.4 (8.5 会 SIGBUS 崩溃) |
+| 许可证 | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 (copyleft，SaaS 有隐患) |
+| 年龄 / 生产使用历史 | 20+ 年 | 2+ 年 | 7+ 年 | <1 年 |
 
 详细功能介绍请参阅[文档](docs/zh/index.md)。
 
