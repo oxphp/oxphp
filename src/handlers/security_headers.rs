@@ -11,18 +11,9 @@ pub struct SecurityHeadersHandler {
     frame_ancestors: Option<HeaderValue>,
 }
 
-impl Default for SecurityHeadersHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl SecurityHeadersHandler {
-    pub fn new() -> Self {
-        let raw = std::env::var("FRAME_OPTIONS").unwrap_or_else(|_| "DENY".to_string());
-
-        let upper = raw.to_uppercase();
-        let (fo, fa) = match upper.as_str() {
+    pub fn new(raw: &str) -> Self {
+        let (fo, fa) = match raw.to_uppercase().as_str() {
             "DENY" => (
                 Some(HeaderValue::from_static("DENY")),
                 Some(HeaderValue::from_static("frame-ancestors 'none'")),
@@ -97,8 +88,7 @@ mod tests {
 
     #[test]
     fn test_default_frame_deny() {
-        std::env::remove_var("FRAME_OPTIONS");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("DENY");
         let mut event = make_event();
 
         handler.handle(&mut event);
@@ -127,10 +117,8 @@ mod tests {
 
     #[test]
     fn test_frame_sameorigin() {
-        std::env::set_var("FRAME_OPTIONS", "SAMEORIGIN");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("SAMEORIGIN");
         let mut event = make_event();
-        std::env::remove_var("FRAME_OPTIONS");
 
         handler.handle(&mut event);
 
@@ -158,10 +146,8 @@ mod tests {
 
     #[test]
     fn test_frame_off() {
-        std::env::set_var("FRAME_OPTIONS", "off");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("off");
         let mut event = make_event();
-        std::env::remove_var("FRAME_OPTIONS");
 
         handler.handle(&mut event);
 
@@ -175,10 +161,8 @@ mod tests {
 
     #[test]
     fn test_nosniff_always() {
-        std::env::set_var("FRAME_OPTIONS", "off");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("off");
         let mut event = make_event();
-        std::env::remove_var("FRAME_OPTIONS");
 
         handler.handle(&mut event);
 
@@ -196,10 +180,8 @@ mod tests {
 
     #[test]
     fn test_invalid_value_defaults_deny() {
-        std::env::set_var("FRAME_OPTIONS", "GARBAGE");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("GARBAGE");
         let mut event = make_event();
-        std::env::remove_var("FRAME_OPTIONS");
 
         handler.handle(&mut event);
 
@@ -227,10 +209,8 @@ mod tests {
 
     #[test]
     fn test_case_insensitive() {
-        std::env::set_var("FRAME_OPTIONS", "sameorigin");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("sameorigin");
         let mut event = make_event();
-        std::env::remove_var("FRAME_OPTIONS");
 
         handler.handle(&mut event);
 
@@ -248,8 +228,7 @@ mod tests {
 
     #[test]
     fn test_priority() {
-        std::env::remove_var("FRAME_OPTIONS");
-        let handler = SecurityHeadersHandler::new();
+        let handler = SecurityHeadersHandler::new("DENY");
         assert_eq!(handler.priority(), 100);
     }
 }
