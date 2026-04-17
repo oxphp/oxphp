@@ -13,24 +13,22 @@ OxPHP 将自身注册为具名 SAPI，OPcache 将其与其他服务器 SAPI 同�
 
 - **跨 Worker 共享缓存**：所有 PHP Worker 线程使用同一份编译后的操作码缓存。一个 Worker 编译文件后，所有 Worker 均可受益。
 - **无逐请求编译**：每个脚本首次请求后，后续请求完全跳过解析和编译步骤。
-- `opcache.enable_cli` 不影响 OxPHP——该设置仅适用于名为 `cli` 和 `phpdbg` 的 SAPI。OxPHP 注册的 SAPI 名称为 `cli-server`，因此 OPcache 仅通过 `opcache.enable` 控制。如果你在同一容器中使用 PHP CLI（例如运行迁移或 Artisan 命令），`opcache.enable_cli` 参数会很有用。官方镜像 `ghcr.io/oxphp/oxphp` 不包含 PHP CLI，因此未设置此参数。
+- `opcache.enable_cli` 不影响 OxPHP——该设置仅适用于名为 `cli` 和 `phpdbg` 的 SAPI。OxPHP 注册的 SAPI 名称为 `cli-server`，因此 OPcache 仅通过 `opcache.enable` 控制。如果你在同一容器中使用 PHP CLI（例如运行迁移或 Artisan 命令），`opcache.enable_cli` 参数会很有用。官方 OxPHP 镜像随服务器二进制文件一同提供 PHP CLI，因此如果你的 CLI 脚本能从缓存中受益，可以设置 `opcache.enable_cli=1`。
 
 要启用 OPcache，至少需要以下配置：
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 ```
+
+> **注意：** 官方 OxPHP Docker 镜像基于 `php:*-zts-alpine`，该基础镜像将 OPcache 静态编译进 PHP 二进制文件。**请勿**在 INI 文件中添加 `zend_extension=opcache`——该扩展已加载，添加此行将在每次 PHP 启动时产生警告。只需 `[opcache]` 配置节即可。
 
 ## 推荐生产环境配置
 
 以下配置针对 PHP 文件在运行时不会更改的生产容器部署场景进行了优化。禁用时间戳验证并在启动时预加载编译后的文件，以获得最大吞吐量。
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 opcache.memory_consumption=128
@@ -57,8 +55,6 @@ opcache.jit=tracing
 在开发环境中，启用时间戳验证以使代码变更无需重启容器即可生效。禁用 JIT 以在调试时获得更清晰的堆栈追踪信息。
 
 ```ini
-zend_extension=opcache
-
 [opcache]
 opcache.enable=1
 opcache.memory_consumption=128

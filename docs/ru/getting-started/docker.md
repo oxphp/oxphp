@@ -231,7 +231,8 @@ services:
 Настраивайте параметры PHP, создав файл `oxphp.ini` и монтируя его в контейнер. Это рекомендуемый способ конфигурации OPcache, JIT, сессий и других параметров времени выполнения PHP.
 
 ```ini
-zend_extension=opcache
+; НЕ добавляйте zend_extension=opcache — OPcache уже скомпилирован в
+; PHP ZTS базовый образ. Секция [opcache] ниже настраивает его напрямую.
 
 [opcache]
 opcache.enable = 1
@@ -248,6 +249,8 @@ session.save_path = /tmp
 session.use_cookies = 1
 session.use_only_cookies = 1
 ```
+
+> **Примечание:** Не добавляйте `zend_extension=opcache` в этот файл. OPcache уже встроен в PHP ZTS образ, используемый OxPHP. Строка `zend_extension` будет вызывать предупреждение при каждом запуске запроса.
 
 В процессе разработки установите `opcache.validate_timestamps = 1` и `opcache.revalidate_freq = 0`, чтобы PHP подхватывал изменения файлов без перезапуска контейнера.
 

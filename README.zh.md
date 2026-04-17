@@ -10,9 +10,15 @@
 </p>
 
 <p align="center">
-  <a href="docs/zh/">文档</a> · <a href="docs/en/">EN</a> · <a href="docs/ru/">RU</a> · <a href="README.md">README EN</a> · <a href="README.ru.md">README RU</a>
-  <br>
-  <a href="#快速开始">快速开始</a> · <a href="#为什么选择-oxphp">为什么选择 OxPHP</a> · <a href="#配置">配置</a>
+  <a href="README.md">English</a> · <a href="README.ru.md">Русский</a> · <b>中文</b>
+</p>
+
+<p align="center">
+  Documents: <a href="docs/en/">English</a> · <a href="docs/ru/">Русский</a> · <a href="docs/zh/">中文</a>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> · <a href="#为什么选择-oxphp">为什么选择 OxPHP</a> · <a href="#功能特性">功能特性</a> · <a href="#配置">配置</a> · <a href="#路线图">路线图</a>
 </p>
 
 <p align="center">
@@ -38,11 +44,11 @@ FROM ghcr.io/oxphp/oxphp:0.2.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-> **注意：** 默认情况下，`DOCUMENT_ROOT` 为 `/var/www/html/public`。请将入口脚本（如 `index.php`）放在 `public/` 子目录中 —— OxPHP 将从该目录提供文件服务，而非 `/var/www/html` 根目录。这与 Laravel、Symfony 和 Slim 等框架的标准目录布局一致，开箱即用。
+> **注意：** 默认情况下，`DOCUMENT_ROOT` 为 `/var/www/html/public`。请将入口脚本（如 `index.php`）放在 `public/` 子目录中。OxPHP 将从该目录提供文件服务，而非 `/var/www/html` 根目录。这与 Laravel、Symfony 和 Slim 的标准目录布局一致。
 
 ```bash
-docker build -t my-app . && docker run -p 8080:8080 my-app
-curl http://localhost:8080/
+docker build -t my-app . && docker run -p 80:80 my-app
+curl http://localhost/
 ```
 
 无需 nginx 配置。无需 PHP-FPM 进程池调优。无需进程管理器。只需你的应用。
@@ -80,17 +86,16 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ## 功能特性
 
 ### PHP 运行时
-- **原生 PHP 执行** — 通过自定义 SAPI（`oxphp`）配合 ZTS 工作池运行
+- **原生 PHP 执行** — PHP 直接在服务器进程内运行，使用专用线程池
 - **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
 - **HTTP Object API** — `oxphp_http_request()` 返回类型化、惰性加载的请求对象，内置 JSON 请求体解析、基于文件内容的 MIME 类型检测以及用于中间件的可变属性容器；参见 [HTTP Request API 文档](docs/zh/php/request-api.md)
-- **原生 Rust↔PHP 桥接** — 通过 C 访问函数直接操作 `zval`，零序列化开销
 - **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
 - **基于属性的装饰器** — 通过 PHP 8+ 属性拦截函数/方法调用，对未装饰代码零开销；支持 `TARGET_FUNCTION`、`TARGET_METHOD`、`TARGET_CLASS`
-- **Panic 隔离** — 通过 `catch_unwind` 确保 PHP 崩溃不影响服务器整体运行
+- **故障隔离** — 单个请求中的致命错误不会导致服务器整体崩溃
 
 ### 工作进程模型
-- **工作进程模式** — 持久化 PHP 进程，请求间软重置，保持自动加载器和数据库连接跨请求存活
-- **Fiber 多路复用** — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` 和 `oxphp_async_await()` 让出 Fiber 而非阻塞工作线程
+- **工作进程模式** — 持久化 PHP 进程，跨请求保持存活；自动加载器、服务容器和数据库连接只初始化一次并被复用
+- **Fiber 多路复用** — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` 和 `oxphp_async_await()` 让出当前 Fiber 而非阻塞工作线程
 - **自动回收** — 按请求数或内存阈值自动回收工作进程
 - **工作线程健康监控** — 自动检测崩溃线程并重启
 - **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
@@ -104,8 +109,8 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — 批量等待和竞速原语
 
 ### HTTP 与网络
-- **HTTP/1.1 + HTTP/2** 自动协商（h2c），基于 hyper 实现
-- **TLS 1.3**，支持 ALPN（h2 + http/1.1），基于 rustls 实现
+- **HTTP/1.1 + HTTP/2** 自动协议协商（h2c）
+- **TLS 1.3** 支持 ALPN —— HTTP/2 和 HTTP/1.1 均可通过 TLS 运行
 - **3 种路由模式** — Traditional（文件映射 + 始终启用 PATH_INFO）、Framework（重写到 `index.php`，`PATH_INFO=$request_uri`）、SPA（无扩展名路径返回 `index.html`，缺失资源硬 404）。每种模式都对应熟悉的 nginx `try_files` 配置
 - **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行
 - **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
@@ -115,7 +120,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **HTTP 缓存** — 支持 ETag、Last-Modified 和 304 Not Modified 条件请求
 - **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB）
 - **mimalloc** 分配器 — 降低高并发下的内存分配延迟
-- **可配置 Tokio 运行时** — 默认多线程（CPU / 2），可通过 `TOKIO_WORKERS` 调整
+- **可配置 HTTP 服务器线程** — 默认多线程（CPU / 2），可通过 `TOKIO_WORKERS` 调整
 
 ### 可观测性
 - **W3C Trace Context** — 自动传播 `traceparent`/`tracestate`，`$_SERVER['OXPHP_TRACE_ID']` 用于 PHP 日志关联
@@ -125,7 +130,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **PHP 追踪 SDK** — 10 个 `oxphp_trace_*()` 函数，支持手动创建 Span、设置属性、记录事件、错误记录和追踪上下文传播
 - **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖
 - **健康检查**端点 `/health` — 支持 K8s 就绪探针
-- **结构化错误日志** — PHP 错误通过 `tracing` 输出，包含 `php_error_type`、`php_file`、`php_line` 字段
+- **结构化错误日志** — PHP 错误输出到服务器日志，包含 `php_error_type`、`php_file`、`php_line` 字段
 - **JSON 访问日志** — 可选 `trace_id`/`span_id` 字段（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
 - **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式
 
@@ -141,45 +146,45 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 ## 架构
 
-```
-                    ┌──────────────┐
-                    │  Tokio async │  configurable: single- or multi-threaded
-                    │  HTTP server │  (hyper + hyper-util + mimalloc)
-                    └──────┬───────┘
-                           │
-                    ┌──────▼───────┐
-                    │Route dispatch│  static file / PHP / 404
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Static file   PHP request   Not found
-         (LRU cache)   (channel)      (404)
-                           │
-                    ┌──────▼───────┐
-                    │Bounded queue │  crossbeam bounded channel
-                    │(backpressure)│  529 when full
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         PHP Worker   PHP Worker   PHP Worker    OS threads (ZTS)
-         (SAPI exec)  (SAPI exec)  (SAPI exec)   with thread-local state
-         ──────────────────┬──────────────────
-                           │
-                    ┌──────▼───────┐
-                    │ Async pool   │  oxphp_async() / oxphp_async_await()
-                    │(crossbeam ch)│  dedicated OS threads (ZTS)
-                    └──────┬───────┘
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-         Async Worker  Async Worker  Async Worker
+```mermaid
+flowchart TD
+    Client([客户端])
+    HTTP["异步 HTTP 服务器<br/>单线程或多线程"]
+    Route{路由分发}
+    Static["静态文件<br/>LRU 缓存"]
+    Queue[("有界队列<br/>满时返回 529")]
+    NF["404 Not Found"]
+    Pool["异步池<br/>oxphp_async / oxphp_async_await"]
+
+    Client --> HTTP
+    HTTP --> Route
+    Route -->|静态| Static
+    Route -->|未命中| NF
+    Route -->|PHP| Queue
+    Queue --> PhpWorkers
+    PhpWorkers -.-> Pool
+    Pool --> AsyncWorkers
+
+    subgraph PhpWorkers [PHP 工作线程 — 独立操作系统线程]
+        direction BT
+        W1[工作线程]
+        W2[工作线程]
+        W3[工作线程]
+    end
+
+    subgraph AsyncWorkers [Async 工作线程 — 独立操作系统线程]
+        direction BT
+        A1[工作线程]
+        A2[工作线程]
+        A3[工作线程]
+    end
 ```
 
-- **Tokio 异步运行时** — 默认多线程，可通过 `TOKIO_WORKERS` 调整
-- **ZTS 工作池** — 每个工作线程为独立操作系统线程，通过 `catch_unwind` 实现故障隔离
-- 工作线程通过 `crossbeam::bounded` 接收请求，通过 `ExecuteResult`（即时或经由 `oneshot` 延迟）返回结果
-- **异步池** — 独立操作系统线程用于 `oxphp_async()` 任务，防止与 HTTP 池死锁
-- **工作进程模式** — 持久化 PHP 进程，请求间软重置；保持引导状态（自动加载器、数据库连接）跨请求存活
+- **异步 HTTP 服务器** — 默认多线程，可通过 `TOKIO_WORKERS` 调整
+- **PHP 工作池** — 每个工作线程为独立操作系统线程；一个工作线程崩溃不影响其他线程
+- 请求在 HTTP 服务器与 PHP 工作线程之间的有界队列中等待；队列满时返回 529
+- **异步池** — `oxphp_async()` 任务使用独立线程，防止主工作池出现性能瓶颈
+- **工作进程模式** — 持久化 PHP 进程，跨请求保持存活；自动加载器和数据库连接由该工作线程处理的所有请求共享
 
 ### 内部服务器
 
@@ -199,14 +204,14 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 | 变量 | 默认值 | 描述 |
 |---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | 监听地址和端口 |
+| `LISTEN_ADDR` | `0.0.0.0:80` | 监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
 | `INDEX_FILE` | *(未设置)* | 路由模式：空 = Traditional，`*.php` = Framework，其他任何值 = SPA |
-| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 异步 I/O 线程数；`0` = 自动 |
+| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 处理连接的 HTTP 服务器线程数；`0` = 自动 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下工作线程的空闲超时时间 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 有界队列大小；队列满时返回 529 |
+| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 服务器返回 529 前队列中允许的最大待处理请求数 |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时 |
 | `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
@@ -225,8 +230,9 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径；设置后启用持久化工作进程模式 |
 | `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数 |
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
+| `SUPERGLOBALS_ENABLED` | `true` | 填充 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`；设为 `false` 时仅使用 `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 异步任务有界队列；队列满时拒绝任务 |
+| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 队列中允许的最大待处理异步任务数；队列满时拒绝任务 |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
 
@@ -279,15 +285,15 @@ cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && car
 
 # Docker 冒烟测试
 docker compose build && docker compose up -d
-curl http://localhost:8080/
-curl "http://localhost:8080/test_superglobals.php?foo=bar"
-curl -X POST -d "key=value" http://localhost:8080/test_superglobals.php
-curl -H "Cookie: session=abc" http://localhost:8080/test_superglobals.php
+curl http://localhost/
+curl "http://localhost/test_superglobals.php?foo=bar"
+curl -X POST -d "key=value" http://localhost/test_superglobals.php
+curl -H "Cookie: session=abc" http://localhost/test_superglobals.php
 
 # 异步 Promise
-curl http://localhost:8080/test_async.php
-curl http://localhost:8080/test_async_parallel.php
-curl http://localhost:8080/test_async_die.php
+curl http://localhost/test_async.php
+curl http://localhost/test_async_parallel.php
+curl http://localhost/test_async_die.php
 
 # 内部服务器
 INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
@@ -314,7 +320,7 @@ curl http://localhost:9090/metrics
 | **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |
 | **HTTP 103 Early Hints** | 发送 `103 Early Hints` 响应，允许客户端在最终响应前预加载资源 |
 | **Ecosystem Plugins** | 扩展插件系统：更多生命周期钩子、更丰富的 PHP API，以及第三方插件作者文档 |
-| ~~**Shared Async Runtime**~~ | ✅ 已实现 — Tokio 运行时驱动 `oxphp_async()` / `oxphp_async_await()`，支持超时、结果传递和竞争协调 |
+| ~~**Shared Async Runtime**~~ | ✅ 已实现 — 同一个异步运行时同时驱动 HTTP 服务器和 `oxphp_async()` / `oxphp_async_await()`，支持超时、结果传递和竞速协调 |
 | **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
 | **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |

@@ -3,6 +3,10 @@ title: OxPHP 文档
 description: OxPHP 文档 —— 高性能异步 PHP 应用服务器，内置 TLS、压缩、限速、指标、SSE 流式传输和 Worker 模式。
 ---
 
+[English](../en/index.md) · [Русский](../ru/index.md) · **中文**
+
+[入门](#入门) · [功能特性](#功能特性) · [安全](#安全) · [PHP](#php) · [运维](#运维) · [架构](#架构)
+
 # OxPHP 文档
 
 OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 nginx + PHP-FPM —— 内置 TLS、Brotli 压缩、限速、健康检查、Prometheus 指标、SSE 流式传输和持久化 Worker 模式。

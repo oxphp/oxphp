@@ -56,17 +56,15 @@ OxPHP предоставляет объектно-ориентированный
 $request = oxphp_http_request();
 ```
 
-Вызывайте `oxphp_http_request()` в любом месте скрипта, выполняющегося в контексте активного HTTP-запроса. В режиме worker запрос можно также получить как параметр колбэка `oxphp_worker()`:
+Вызывайте `oxphp_http_request()` в любом месте скрипта, выполняющегося в контексте активного HTTP-запроса, в том числе внутри колбэка `oxphp_worker()`:
 
 ```php
 <?php
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
     $method = $request->method();
     // ...
 });
-```
-
-Оба варианта возвращают один и тот же объект — параметр в колбэке является удобным сокращением.
 
 ---
 
@@ -599,12 +597,11 @@ if (!oxphp_superglobals_enabled()) {
 require __DIR__ . '/vendor/autoload.php';
 $app = new MyApp\Application();
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) use ($app) {
+oxphp_worker(function () use ($app) {
+    $request = oxphp_http_request();
     $app->handle($request);
 });
 ```
-
-Объект Request, передаваемый в колбэк, идентичен результату вызова `oxphp_http_request()` внутри колбэка — оба читают из одного и того же потока-локального состояния.
 
 Все кэши объекта Request (разобранные заголовки, куки, параметры запроса, payload) автоматически очищаются в начале следующего запроса.
 
@@ -738,7 +735,9 @@ echo json_encode(['id' => $user->id, 'name' => $user->name]);
 // worker.php
 require __DIR__ . '/vendor/autoload.php';
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
+
     if ($request->path() === '/login' && $request->isMethod('POST')) {
         $username = $request->payload('username');
         $password = $request->payload('password');

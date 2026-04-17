@@ -15,7 +15,7 @@ OxPHP 完全通过环境变量进行配置。无需管理任何配置文件—�
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件和 PHP 脚本的根目录 |
 | `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = Traditional，`*.php` = Framework，其他任何值 = SPA。详见[路由](../features/routing.md) |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数 |
-| `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N` = 固定线程数，`0` = 自动检测 |
+| `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N > 1` = 固定线程数，未设置 = 自动检测（CPU / 2，最少 1） |
 
 ## PHP 工作进程
 
@@ -24,7 +24,7 @@ OxPHP 完全通过环境变量进行配置。无需管理任何配置文件—�
 | `EXECUTOR` | `sapi` | PHP 执行器后端。`sapi` 用于 PHP 执行，`stub` 用于不依赖 PHP 的基准测试 |
 | `PHP_WORKERS` | CPU / 2（最少 1） | 工作进程池大小。`N` = 固定进程池，`MIN:MAX` = 动态扩缩容，`0` = 自动检测 |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态工作进程在空闲多少秒后退出（仅动态模式） |
-| `QUEUE_CAPACITY` | 初始工作进程数 × 128 | PHP 队列中最大待处理请求数。队列满时返回 503。对于动态进程池（`MIN:MAX`），初始工作进程数等于最小值 |
+| `QUEUE_CAPACITY` | 初始工作进程数 × 128 | PHP 队列中最大待处理请求数。队列满时返回 529。对于动态进程池（`MIN:MAX`），初始工作进程数等于最小值 |
 
 ### 静态进程池与动态进程池
 
@@ -40,6 +40,7 @@ PHP_WORKERS=0      # 自动检测：CPU / 2（最少 1）
 ```bash
 PHP_WORKERS=2:16   # 在 2 到 16 个工作进程之间扩缩容
 PHP_WORKERS=4:0    # 最少 4 个，最多自动检测（CPU × 2）
+PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 个
 ```
 
 在动态模式下，当所有工作进程均处于繁忙状态时，OxPHP 会增加工作进程；当工作进程空闲时间超过 `PHP_WORKERS_IDLE_SECONDS` 时，OxPHP 会减少工作进程。
@@ -218,9 +219,14 @@ curl -s http://localhost:9090/config | jq .
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
+  "log_level": "warn",
   "executor_type": "sapi",
+  "php_workers": "8",
+  "tokio_workers": 4,
+  "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
+  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
@@ -235,9 +241,12 @@ curl -s http://localhost:9090/config | jq .
   "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
+  "static_cache_enabled": true,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,
+  "superglobals_enabled": true,
+  "trusted_proxies": false,
   "plugins": {
     "otel": {
       "enabled": true,

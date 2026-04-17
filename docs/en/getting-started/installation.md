@@ -34,10 +34,9 @@ File layout of the runtime image:
 │   └── oxphp                                        # server binary
 ├── lib/
 │   ├── libphp.so                                    # PHP 8.4 ZTS runtime
-│   ├── liboxphp_bridge.so                           # C bridge (TLS slot between Rust and PHP)
+│   ├── liboxphp_bridge.so                           # C bridge library
 │   └── php/extensions/no-debug-zts-20240924/
-│       ├── oxphp_sapi.so                            # OxPHP PHP extension
-│       └── opcache.so                               # OPcache (from base PHP)
+│       └── oxphp_sapi.so                            # OxPHP PHP extension
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # PHP settings for OxPHP
@@ -49,7 +48,7 @@ The three OxPHP components and their purpose:
 | Component | Size | Purpose |
 |-----------|------|---------|
 | `oxphp` | ~8 MB | HTTP server, routing, plugins, metrics |
-| `liboxphp_bridge.so` | ~50 KB | Shared `__thread` TLS context between Rust and PHP |
+| `liboxphp_bridge.so` | ~50 KB | Shared bridge library that links the server to the PHP runtime |
 | `oxphp_sapi.so` | ~200 KB | PHP functions (`oxphp_request_id()`, `OxPHP\Http\Request`, etc.) |
 
 Dependency chain:
@@ -60,7 +59,7 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
   └──► liboxphp_bridge.so ◄── oxphp_sapi.so
 ```
 
-The `oxphp` binary dynamically links to `libphp.so` and `liboxphp_bridge.so`. The PHP extension `oxphp_sapi.so` also links to the bridge library — this is the only way to share per-request state between Rust and PHP through a common `__thread` slot in a single `.so`.
+The `oxphp` binary links to `libphp.so` and `liboxphp_bridge.so`. The PHP extension `oxphp_sapi.so` also links to the bridge library so that per-request state is available to your PHP code.
 
 ### Minimal Dockerfile
 

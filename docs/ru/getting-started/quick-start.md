@@ -107,7 +107,7 @@ curl http://localhost/
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: oxphp</p>
-<p>Version: 0.1.0</p>
+<p>Version: 0.2.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 

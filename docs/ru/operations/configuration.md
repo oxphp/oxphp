@@ -15,7 +15,7 @@ OxPHP настраивается исключительно через пере�
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневая директория для обслуживания файлов и PHP-скриптов |
 | `INDEX_FILE` | *(не задано)* | Режим маршрутизации: не задано = Traditional, `*.php` = Framework, любое другое = SPA. См. [Маршрутизация](../features/routing.md) |
 | `MAX_CONNECTIONS` | `10000` | Максимальное количество одновременных TCP-соединений |
-| `TOKIO_WORKERS` | CPU / 2 (мин. 1) | Потоки асинхронного ввода-вывода. `1` = однопоточный, `N` = фиксированное число потоков, `0` = авто |
+| `TOKIO_WORKERS` | CPU / 2 (мин. 1) | Потоки асинхронного ввода-вывода. `1` = однопоточный, `N > 1` = фиксированное число потоков, не задано = авто (CPU / 2, мин. 1) |
 
 ## PHP-воркеры
 
@@ -24,7 +24,7 @@ OxPHP настраивается исключительно через пере�
 | `EXECUTOR` | `sapi` | Бэкенд исполнения PHP. `sapi` для выполнения PHP, `stub` для бенчмаркинга без PHP |
 | `PHP_WORKERS` | CPU / 2 (мин. 1) | Размер пула воркеров. `N` = фиксированный пул, `MIN:MAX` = динамическое масштабирование, `0` = авто |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Время простоя в секундах до завершения динамического воркера (только в динамическом режиме) |
-| `QUEUE_CAPACITY` | Начальные воркеры × 128 | Максимальное количество ожидающих запросов в очереди PHP. При заполнении возвращает 503. Для динамических пулов (`MIN:MAX`) начальные воркеры = минимальное количество |
+| `QUEUE_CAPACITY` | Начальные воркеры × 128 | Максимальное количество ожидающих запросов в очереди PHP. При заполнении возвращает 529. Для динамических пулов (`MIN:MAX`) начальные воркеры = минимальное количество |
 
 ### Статические и динамические воркеры
 
@@ -40,6 +40,7 @@ PHP_WORKERS=0      # Авто-определение: CPU / 2 (мин. 1)
 ```bash
 PHP_WORKERS=2:16   # Масштабировать от 2 до 16 воркеров
 PHP_WORKERS=4:0    # 4 минимум, авто-определение максимума (CPU × 2)
+PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, мин. 1), максимум 16
 ```
 
 В динамическом режиме OxPHP масштабирует воркеры вверх, когда все заняты, и вниз, когда воркеры простаивают дольше, чем `PHP_WORKERS_IDLE_SECONDS`.
@@ -218,9 +219,14 @@ curl -s http://localhost:9090/config | jq .
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
   "index_file": "index.php",
+  "log_level": "warn",
   "executor_type": "sapi",
+  "php_workers": "8",
+  "tokio_workers": 4,
+  "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
+  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "request_timeout_seconds": 120,
   "rate_limit": 100,
@@ -235,9 +241,12 @@ curl -s http://localhost:9090/config | jq .
   "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
+  "static_cache_enabled": true,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,
+  "superglobals_enabled": true,
+  "trusted_proxies": false,
   "plugins": {
     "otel": {
       "enabled": true,

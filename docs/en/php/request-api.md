@@ -56,17 +56,16 @@ OxPHP provides an object-oriented API for accessing HTTP request data. Instead o
 $request = oxphp_http_request();
 ```
 
-Call `oxphp_http_request()` anywhere in a script executing inside an active HTTP request. In worker mode, you can also receive the request as a parameter to the `oxphp_worker()` callback:
+Call `oxphp_http_request()` anywhere in a script executing inside an active HTTP request, including inside the `oxphp_worker()` callback:
 
 ```php
 <?php
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
     $method = $request->method();
     // ...
 });
 ```
-
-Both styles return the same object — the parameter form is a convenience shorthand.
 
 ---
 
@@ -599,12 +598,11 @@ In worker mode, a new Request object is created for each incoming request. The p
 require __DIR__ . '/vendor/autoload.php';
 $app = new MyApp\Application();
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) use ($app) {
+oxphp_worker(function () use ($app) {
+    $request = oxphp_http_request();
     $app->handle($request);
 });
 ```
-
-The Request object passed to the callback is identical to calling `oxphp_http_request()` inside the callback — both read from the same thread-local state.
 
 All caches on the Request object (parsed headers, cookies, query parameters, payload) are cleared automatically when the next request begins.
 
@@ -738,7 +736,9 @@ echo json_encode(['id' => $user->id, 'name' => $user->name]);
 // worker.php
 require __DIR__ . '/vendor/autoload.php';
 
-oxphp_worker(function (\OxPHP\Http\RequestInterface $request) {
+oxphp_worker(function () {
+    $request = oxphp_http_request();
+
     if ($request->path() === '/login' && $request->isMethod('POST')) {
         $username = $request->payload('username');
         $password = $request->payload('password');
