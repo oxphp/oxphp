@@ -272,7 +272,9 @@ async fn async_main(
         &metrics,
     )));
     dispatcher.on(handlers::server_header::ServerHeaderHandler);
-    dispatcher.on(handlers::security_headers::SecurityHeadersHandler::new());
+    dispatcher.on(handlers::security_headers::SecurityHeadersHandler::new(
+        &std::env::var("FRAME_OPTIONS").unwrap_or_else(|_| "DENY".to_string()),
+    ));
     if config.access_log != oxphp::config::AccessLogLevel::Off {
         dispatcher.on(handlers::access_log::AccessLogHandler::new(
             config.access_log,
