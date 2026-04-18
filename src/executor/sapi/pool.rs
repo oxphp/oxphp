@@ -289,8 +289,9 @@ pub(super) async fn run_scale_manager(
             }) {
                 let worker = workers_guard.remove(pos);
                 worker.shutdown.store(true, Ordering::Relaxed);
-                // Join in a background thread so the async runtime isn't blocked.
-                std::thread::spawn(move || {
+                // Join on Tokio's blocking pool so the async runtime isn't blocked
+                // and we don't pay pthread_create latency per scale-down event.
+                tokio::task::spawn_blocking(move || {
                     let _ = worker.handle.join();
                 });
                 last_scale_down = Instant::now();
