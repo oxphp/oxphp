@@ -253,18 +253,14 @@ pub(super) async fn run_scale_manager(
             // otherwise thread creation (~10-50μs) blocks the Tokio runtime.
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
-            let spawn_shutdown = Arc::clone(&shutdown);
-            let spawn_last_active = Arc::clone(&last_active);
-            let spawn_rx = request_rx.clone();
             let spawn_id = next_id;
-            let spawn_strategy = strategy.clone();
             drop(workers_guard);
 
-            let handle = spawn_strategy.spawn(SpawnArgs {
+            let handle = strategy.spawn(SpawnArgs {
                 id: spawn_id,
-                rx: spawn_rx,
-                shutdown: spawn_shutdown,
-                last_active: spawn_last_active,
+                rx: request_rx.clone(),
+                shutdown: Arc::clone(&shutdown),
+                last_active: Arc::clone(&last_active),
             });
 
             let mut workers_guard = workers.lock().unwrap();
