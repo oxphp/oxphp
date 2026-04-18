@@ -12,7 +12,7 @@ use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::{bindings, sapi};
 use crate::types::ScriptResponse;
 
-use crate::php::sapi::WorkerIncomingRequest as WorkerRequest;
+use super::pool::WorkerRequest;
 
 /// Configuration for worker mode threads.
 /// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.

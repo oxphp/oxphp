@@ -13,7 +13,7 @@ use crossbeam_channel::RecvTimeoutError;
 use crate::php::{bindings, sapi};
 use crate::types::{ScriptRequest, ScriptResponse};
 
-use crate::php::sapi::WorkerIncomingRequest as WorkerRequest;
+use super::pool::WorkerRequest;
 
 /// Controls whether the worker loop uses blocking `recv()` or `recv_timeout()`.
 /// Static mode workers sleep via futex with zero CPU cost; dynamic mode workers
@@ -108,7 +108,7 @@ fn worker_thread(
                 }
                 match request_rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(wr) => {
-                        last_active.store(super::now_millis(), Ordering::Relaxed);
+                        last_active.store(super::pool::now_millis(), Ordering::Relaxed);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             execute_request(&wr.script, wr.response_tx)
                         }));
