@@ -75,10 +75,10 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | 内存安全 | ❌ (C) | 部分 (Go + cgo) | ✅ (Go，PHP 通过 IPC 隔离) | 部分 (Rust + C FFI) |
 | WebSocket 服务器 | ✅ (代理) | ✅ (Mercure) | ✅ (centrifuge 插件) | ❌ |
 | 反向代理 / upstream | ✅ (完整) | ✅ (Caddy) | ✅ | ❌ |
-| 原生安装（非 Docker） | apt/yum/brew/port | brew, static binary | brew, 二进制 | 仅 Docker（目前） |
+| 原生安装（非 Docker） | apt/yum/brew/port | brew, static binary | brew, 二进制 | 路线图 |
 | 运行平台 | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | 仅 Linux (glibc/musl) |
 | 支持的 PHP 版本 | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 仅 8.4 (8.5 会 SIGBUS 崩溃) |
-| 许可证 | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 (copyleft，SaaS 有隐患) |
+| 许可证 | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 |
 | 年龄 / 生产使用历史 | 20+ 年 | 2+ 年 | 7+ 年 | <1 年 |
 
 详细功能介绍请参阅[文档](docs/zh/index.md)。
@@ -95,20 +95,24 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 ### PHP 运行时
 - **原生 PHP 执行** — PHP 直接在服务器进程内运行，使用专用线程池
-- **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input`
-- **HTTP Object API** — `oxphp_http_request()` 返回类型化、惰性加载的请求对象，内置 JSON 请求体解析、基于文件内容的 MIME 类型检测以及用于中间件的可变属性容器；参见 [HTTP Request API 文档](docs/zh/php/request-api.md)
+- **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input` — 参见 [超全局变量](docs/zh/php/superglobals.md)
+- **HTTP Object API** — `oxphp_http_request()` 返回类型化、惰性加载的请求对象，内置 JSON 请求体解析、基于文件内容的 MIME 类型检测以及用于中间件的可变属性容器 — 参见 [HTTP Request API](docs/zh/php/request-api.md)
+- **跨工作线程共享 OPcache** — 一个工作线程编译文件，其余线程复用缓存字节码 — 参见 [OPcache 与 JIT](docs/zh/php/opcache.md)
+- **PHP 扩展函数** — `oxphp_*()` 辅助函数，用于流式传输、提前响应、异步、追踪和请求访问 — 参见 [PHP 函数参考](docs/zh/php/functions.md)
 - **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册
-- **基于属性的装饰器** — 通过 PHP 8+ 属性拦截函数/方法调用，对未装饰代码零开销；支持 `TARGET_FUNCTION`、`TARGET_METHOD`、`TARGET_CLASS`
+- **基于属性的装饰器** — 通过 PHP 8+ 属性拦截函数/方法调用，对未装饰代码零开销；支持 `TARGET_FUNCTION`、`TARGET_METHOD`、`TARGET_CLASS` — 参见 [装饰器](docs/zh/features/decorators.md)
 - **故障隔离** — 单个请求中的致命错误不会导致服务器整体崩溃
 
 ### 工作进程模型
-- **工作进程模式** — 持久化 PHP 进程，跨请求保持存活；自动加载器、服务容器和数据库连接只初始化一次并被复用
-- **Fiber 多路复用** — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` 和 `oxphp_async_await()` 让出当前 Fiber 而非阻塞工作线程
+- **工作进程模式** — 持久化 PHP 进程，跨请求保持存活；自动加载器、服务容器和数据库连接只初始化一次并被复用 — 参见 [工作进程模式](docs/zh/features/worker-mode.md)
+- **Fiber 多路复用** — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` 和 `oxphp_async_await()` 让出当前 Fiber 而非阻塞工作线程 — 参见 [Fiber 多路复用](docs/zh/features/fiber-multiplexing.md)
 - **自动回收** — 按请求数或内存阈值自动回收工作进程
 - **工作线程健康监控** — 自动检测崩溃线程并重启
-- **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理
+- **提前响应** — 通过 `oxphp_finish_request()` 立即发送响应并继续后台处理 — 参见 [提前响应](docs/zh/features/early-response.md)
 
 ### 异步 Promise
+完整指南：[异步 Promise](docs/zh/features/async-promises.md)。
+
 - **`oxphp_async()` / `oxphp_async_await()`** — 将闭包分发到专用线程池进行真正的并行执行
 - **可移植序列化** — `use` 变量、参数和返回值安全跨线程二进制传输
 - 支持类型：标量、字符串、数组（嵌套）。资源和对象将被拒绝并触发 `E_WARNING`
@@ -118,36 +122,41 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 ### HTTP 与网络
 - **HTTP/1.1 + HTTP/2** 自动协议协商（h2c）
-- **TLS 1.3** 支持 ALPN —— HTTP/2 和 HTTP/1.1 均可通过 TLS 运行
-- **3 种路由模式** — Traditional（文件映射 + 始终启用 PATH_INFO）、Framework（重写到 `index.php`，`PATH_INFO=$request_uri`）、SPA（无扩展名路径返回 `index.html`，缺失资源硬 404）。每种模式都对应熟悉的 nginx `try_files` 配置
-- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行
-- **可配置超时** — 请求头读取、整体请求及 keep-alive 超时
+- **TLS 1.3** 支持 ALPN —— HTTP/2 和 HTTP/1.1 均可通过 TLS 运行 — 参见 [TLS](docs/zh/features/tls.md)
+- **3 种路由模式** — Traditional（文件映射 + 始终启用 PATH_INFO）、Framework（重写到 `index.php`，`PATH_INFO=$request_uri`）、SPA（无扩展名路径返回 `index.html`，缺失资源硬 404）。每种模式都对应熟悉的 nginx `try_files` 配置 — 参见 [路由](docs/zh/features/routing.md)
+- **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行 — 参见 [Server-Sent Events](docs/zh/features/sse.md)
+- **可配置超时** — 请求头读取、整体请求及 keep-alive 超时 — 参见 [超时](docs/zh/features/timeouts.md)
 
 ### 性能
-- **LRU 文件缓存** — 静态文件内存缓存（≤1 MB 完整缓存，更大文件流式传输）
+- **LRU 文件缓存** — 静态文件内存缓存（≤1 MB 完整缓存，更大文件流式传输） — 参见 [静态文件](docs/zh/features/static-files.md)
 - **HTTP 缓存** — 支持 ETag、Last-Modified 和 304 Not Modified 条件请求
-- **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB）
+- **Brotli 压缩** — 对文本响应启用（范围：256 B – 3 MB） — 参见 [压缩](docs/zh/features/compression.md)
 - **mimalloc** 分配器 — 降低高并发下的内存分配延迟
 - **可配置 HTTP 服务器线程** — 默认多线程（CPU / 2），可通过 `TOKIO_WORKERS` 调整
 
 ### 可观测性
+完整指南：[分布式追踪](docs/zh/features/distributed-tracing.md)。
+
 - **W3C Trace Context** — 自动传播 `traceparent`/`tracestate`，`$_SERVER['OXPHP_TRACE_ID']` 用于 PHP 日志关联
 - **OpenTelemetry** — 通过 `plugin-otel` 特性进行 OTLP Span 导出（gRPC/HTTP），支持语义化约定、可配置采样和批处理
 - **APM 自动埋点** — 在引擎层面 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）；每次调用自动成为 Span，无需修改代码
 - **`#[OxPHP\Tracing\Trace]` 装饰器** — 通过 PHP 8 属性注解任意函数或方法，自动创建 Span
 - **PHP 追踪 SDK** — 10 个 `oxphp_trace_*()` 函数，支持手动创建 Span、设置属性、记录事件、错误记录和追踪上下文传播
-- **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖
-- **健康检查**端点 `/health` — 支持 K8s 就绪探针
+- **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖 — 参见 [指标](docs/zh/operations/metrics.md)
+- **健康检查**端点 `/health` — 支持 K8s 就绪探针 — 参见 [健康检查](docs/zh/operations/health-checks.md)
+- **内部服务器** 在独立端口上提供 health、metrics 和运行时配置 — 参见 [内部服务器](docs/zh/features/internal-server.md)
 - **结构化错误日志** — PHP 错误输出到服务器日志，包含 `php_error_type`、`php_file`、`php_line` 字段
-- **JSON 访问日志** — 可选 `trace_id`/`span_id` 字段（级别：`all`、`error`，通过 `ACCESS_LOG` 控制）
-- **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式
+- **JSON 访问日志** — 可选 `trace_id`/`span_id` 字段（级别：`all`、`error`，通过 `ACCESS_LOG` 控制） — 参见 [访问日志](docs/zh/features/access-logging.md)
+- **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式 — 参见 [请求 ID](docs/zh/features/request-ids.md)
 
 ### 可靠性与运维
 - **有界请求队列** — 队列满时返回 529 进行背压控制
-- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429
-- **受信任代理** — 通过 CIDR 信任从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP
-- **自定义错误页面** — 启动时预加载，热路径零 I/O
+- **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429 — 参见 [限流](docs/zh/features/rate-limiting.md)
+- **自定义错误页面** — 启动时预加载，热路径零 I/O — 参见 [错误页](docs/zh/features/error-pages.md)
+- **优雅关闭** — 在 SIGTERM/SIGINT 后，进行中的请求会在 `DRAIN_TIMEOUT_SECONDS` 内排空 — 参见 [优雅关闭](docs/zh/operations/graceful-shutdown.md)
 - **路径穿越防护** — 包含符号链接逃逸检测
+- **受信任代理** — 通过 CIDR 信任从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP — 参见 [受信任代理](docs/zh/security/trusted-proxies.md)
+- **dot-path 阻止** — 对隐藏文件（`.env`、`.git/`）返回 404，`.well-known` 例外（RFC 8615） — 参见 [dot-path 阻止](docs/zh/security/dot-path-blocking.md)
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
 
 ---
@@ -203,6 +212,56 @@ flowchart TD
 | `GET /health` | JSON 格式健康状态（运行时长、请求数、连接数） |
 | `GET /metrics` | Prometheus 文本格式指标 |
 | `GET /config` | JSON 格式运行时配置（TLS 路径已脱敏） |
+
+### 追踪管道（`plugin-otel` + `plugin-apm`）
+
+APM 依赖 OTel，并通过插件服务注册表共享其 `TracerProvider`。Span 收集发生在 PHP 工作线程上；OTLP 导出通过 `tokio::spawn` 在热路径之外执行。
+
+```mermaid
+flowchart LR
+    subgraph Tokio1 ["Tokio 线程 — 请求开始"]
+        TC["trace context 处理器<br/>（优先级 -95）<br/>生成 trace_id / span_id"]
+        OTR["OtelRequestHandler (-80)<br/>记录 start_us，<br/>设置 X-Request-ID"]
+    end
+
+    subgraph PHP ["PHP 工作线程"]
+        SDK["PHP 追踪 SDK<br/>oxphp_trace_*()"]
+        DEC["#[OxPHP\\Apm\\Trace]<br/>装饰器"]
+        HOOKS["APM hooks（33 个函数）<br/>PDO · mysqli · cURL<br/>Redis · Memcached · 文件 I/O"]
+        STACK[("SPAN_STACK<br/>thread-local")]
+        PHPERR["PHP 错误"]
+    end
+
+    subgraph Tokio2 ["Tokio 线程 — 请求结束"]
+        OTC["OtelCompleteHandler<br/>构造根 server span"]
+        APC["ApmCompleteHandler (-70)<br/>解析子 span JSON，<br/>链接到根 span"]
+    end
+
+    subgraph Export ["后台导出（tokio::spawn）"]
+        BATCH["BatchSpanProcessor<br/>（共享 TracerProvider）"]
+        OTLP["OTLP 导出器<br/>gRPC :4317 / HTTP :4318"]
+    end
+
+    TC --> OTR
+    OTR --> SDK
+    OTR --> DEC
+    OTR --> HOOKS
+    SDK --> STACK
+    DEC --> STACK
+    HOOKS --> STACK
+    STACK -->|JSON 通过 apm_spans_json| APC
+    PHPERR -->|结构化日志| APC
+    OTR --> OTC
+    OTC --> BATCH
+    APC --> BATCH
+    BATCH --> OTLP
+```
+
+- **Trace context** 最先生成（优先级 `-95`），在 `TRACE_CONTEXT=true` 时启用（由 OTel 自动打开）。OTel 的 request handler 运行在 `-80` 并记录 `start_us`；APM 的 handler 运行在 `-70`。
+- **Span 收集是 thread-local 的** — 每个 PHP 工作线程拥有各自的 `SPAN_STACK`。APM hooks、`#[Trace]` 装饰器以及 `oxphp_trace_*()` SDK 都压入同一个栈；请求结束时子 span 会序列化为 JSON。
+- **共享 `TracerProvider`** — OTel 将 `otel.provider` 注册为插件服务；APM 获取同一个 `Arc<OnceLock<TracerProvider>>`，两个插件写入同一个 batch 处理器。
+- **热路径外导出** — 两个 complete handler 都使用 `tokio::spawn`，HTTP 响应在 span 发送之前返回给客户端。
+- **Provider 生命周期** — OTel 在 `on_ready()`（Tokio 运行时启动之后）初始化 `BatchSpanProcessor`。关闭时 `force_flush()` + `shutdown()` 会排空剩余 span。
 
 ---
 
