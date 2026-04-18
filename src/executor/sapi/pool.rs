@@ -197,6 +197,7 @@ pub(super) async fn run_scale_manager(
             tracing::warn!(dead, remaining = total, "Dead workers detected, respawning");
         }
 
+        // Respawn to maintain minimum (unconditional — dead worker recovery).
         while workers_guard.len() < min {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
@@ -217,6 +218,7 @@ pub(super) async fn run_scale_manager(
         }
         let total = workers_guard.len();
 
+        // Count idle workers (last_active > 200ms ago).
         let idle_count = workers_guard
             .iter()
             .filter(|w| now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > 200)
@@ -228,6 +230,8 @@ pub(super) async fn run_scale_manager(
             idle_count == 0 && total < max && last_scale_up.elapsed() >= Duration::from_millis(500);
 
         if needs_scale_up {
+            // Prepare Arcs inside the lock, then drop it before spawning the OS thread —
+            // otherwise thread creation (~10-50μs) blocks the Tokio runtime.
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
             let spawn_shutdown = Arc::clone(&shutdown);
@@ -263,12 +267,14 @@ pub(super) async fn run_scale_manager(
             continue;
         }
 
+        // Scale-down: retire one worker idle longer than the threshold.
         if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
             if let Some(pos) = workers_guard.iter().position(|w| {
                 now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
             }) {
                 let worker = workers_guard.remove(pos);
                 worker.shutdown.store(true, Ordering::Relaxed);
+                // Join in a background thread so the async runtime isn't blocked.
                 std::thread::spawn(move || {
                     let _ = worker.handle.join();
                 });
