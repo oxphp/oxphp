@@ -16,15 +16,19 @@ mod pool;
 mod traditional;
 mod worker_mode;
 
-use pool::{now_millis, run_scale_manager, run_worker_monitor, ManagedWorker, WorkerRequest};
-use traditional::{spawn_worker, WorkerLoopMode};
-use worker_mode::{spawn_worker_mode, WorkerModeConfig};
+use pool::{
+    now_millis, run_scale_manager, run_worker_monitor, spawn_initial, ManagedWorker, SpawnStrategy,
+    WorkerRequest,
+};
+use traditional::WorkerLoopMode;
+use worker_mode::WorkerModeConfig;
 
 pub struct SapiExecutor {
     request_tx: Option<crossbeam_channel::Sender<WorkerRequest>>,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     workers: Arc<Mutex<Vec<ManagedWorker>>>,
     mode: WorkerMode,
+    strategy: SpawnStrategy,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     idle_timeout_seconds: u64,
@@ -101,37 +105,15 @@ impl SapiExecutor {
             wm
         });
 
-        let mut managed_workers = Vec::with_capacity(initial_count);
-        for i in 0..initial_count {
-            let shutdown = Arc::new(AtomicBool::new(false));
-            let last_active = Arc::new(AtomicU64::new(now_millis()));
-            let handle = if let Some(ref wmc) = worker_mode_config {
-                let stats = Arc::clone(&worker_metrics.as_ref().unwrap().slots[i]);
-                spawn_worker_mode(
-                    i,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    wmc.clone(),
-                    stats,
-                    Arc::clone(worker_metrics.as_ref().unwrap()),
-                )
-            } else {
-                spawn_worker(
-                    i,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    loop_mode,
-                )
-            };
-            managed_workers.push(ManagedWorker {
-                id: i,
-                handle,
-                shutdown,
-                last_active,
-            });
-        }
+        let strategy = if let Some(ref wmc) = worker_mode_config {
+            SpawnStrategy::WorkerMode {
+                config: wmc.clone(),
+                metrics: Arc::clone(worker_metrics.as_ref().unwrap()),
+            }
+        } else {
+            SpawnStrategy::Traditional { loop_mode }
+        };
+        let managed_workers = spawn_initial(&strategy, &request_rx, initial_count);
 
         // Set initial metrics
         metrics.set_workers_current(initial_count);
@@ -173,6 +155,7 @@ impl SapiExecutor {
             request_rx,
             workers: Arc::new(Mutex::new(managed_workers)),
             mode,
+            strategy,
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_seconds,
@@ -228,8 +211,7 @@ impl ScriptExecutor for SapiExecutor {
         let request_rx = self.request_rx.clone();
         let global_shutdown = Arc::clone(&self.global_shutdown);
         let metrics = Arc::clone(&self.metrics);
-        let wmc = self.worker_mode_config.clone();
-        let wm = self.worker_metrics.clone();
+        let strategy = self.strategy.clone();
 
         match &self.mode {
             WorkerMode::Static(target) => {
@@ -241,8 +223,7 @@ impl ScriptExecutor for SapiExecutor {
                         target,
                         global_shutdown,
                         metrics,
-                        wmc,
-                        wm,
+                        strategy,
                     )
                     .await;
                 });
@@ -261,8 +242,7 @@ impl ScriptExecutor for SapiExecutor {
                         idle_timeout_seconds,
                         global_shutdown,
                         metrics,
-                        wmc,
-                        wm,
+                        strategy,
                     )
                     .await;
                 });
@@ -326,6 +306,9 @@ mod tests {
             request_rx: rx,
             workers: Arc::new(Mutex::new(Vec::new())),
             mode: WorkerMode::Static(1),
+            strategy: SpawnStrategy::Traditional {
+                loop_mode: WorkerLoopMode::Static,
+            },
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_seconds: 30,

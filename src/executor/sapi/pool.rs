@@ -1,7 +1,7 @@
 //! Shared worker-pool machinery: slot tracking, channel alias, monitor
-//! (static mode) and scale manager (dynamic mode). Does not know about
-//! traditional vs worker-mode lifecycle — spawn decisions live in the
-//! caller today (Task 5 will introduce `SpawnStrategy`).
+//! (static mode) and scale manager (dynamic mode). Spawn decisions are
+//! centralized through the `SpawnStrategy` enum so monitor / scale-up /
+//! respawn paths never branch on worker-mode configuration.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +33,81 @@ pub(super) fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Bundles the parameters every spawn call needs, regardless of model.
+pub(super) struct SpawnArgs {
+    pub id: usize,
+    pub rx: crossbeam_channel::Receiver<WorkerRequest>,
+    pub shutdown: Arc<AtomicBool>,
+    pub last_active: Arc<AtomicU64>,
+}
+
+/// How to spawn a worker thread. Built once in `SapiExecutor::new()` and
+/// cloned into the monitor / scale manager so respawn / scale-up paths
+/// don't branch on worker-mode configuration at every call site.
+#[derive(Clone)]
+pub(super) enum SpawnStrategy {
+    Traditional {
+        loop_mode: WorkerLoopMode,
+    },
+    WorkerMode {
+        config: Arc<WorkerModeConfig>,
+        metrics: Arc<WorkerMetrics>,
+    },
+}
+
+impl SpawnStrategy {
+    pub(super) fn spawn(&self, args: SpawnArgs) -> std::thread::JoinHandle<()> {
+        match self {
+            Self::Traditional { loop_mode } => spawn_worker(
+                args.id,
+                args.rx,
+                args.shutdown,
+                args.last_active,
+                *loop_mode,
+            ),
+            Self::WorkerMode { config, metrics } => {
+                let slot = args.id % metrics.slots.len();
+                let stats = Arc::clone(&metrics.slots[slot]);
+                spawn_worker_mode(
+                    args.id,
+                    args.rx,
+                    args.shutdown,
+                    args.last_active,
+                    config.clone(),
+                    stats,
+                    Arc::clone(metrics),
+                )
+            }
+        }
+    }
+}
+
+/// Spawn `count` workers and return the initial `ManagedWorker` vector.
+pub(super) fn spawn_initial(
+    strategy: &SpawnStrategy,
+    request_rx: &crossbeam_channel::Receiver<WorkerRequest>,
+    count: usize,
+) -> Vec<ManagedWorker> {
+    let mut managed = Vec::with_capacity(count);
+    for id in 0..count {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let last_active = Arc::new(AtomicU64::new(now_millis()));
+        let handle = strategy.spawn(SpawnArgs {
+            id,
+            rx: request_rx.clone(),
+            shutdown: Arc::clone(&shutdown),
+            last_active: Arc::clone(&last_active),
+        });
+        managed.push(ManagedWorker {
+            id,
+            handle,
+            shutdown,
+            last_active,
+        });
+    }
+    managed
+}
+
 /// Health monitor for static mode: detects dead workers and respawns to target count.
 pub(super) async fn run_worker_monitor(
     workers: Arc<Mutex<Vec<ManagedWorker>>>,
@@ -40,11 +115,10 @@ pub(super) async fn run_worker_monitor(
     target: usize,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    worker_mode_config: Option<Arc<WorkerModeConfig>>,
-    worker_metrics: Option<Arc<WorkerMetrics>>,
+    strategy: SpawnStrategy,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
-    let mut next_id = target; // IDs above initial range
+    let mut next_id = target;
 
     loop {
         interval.tick().await;
@@ -69,28 +143,12 @@ pub(super) async fn run_worker_monitor(
         while guard.len() < target {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
-            let handle = if let Some(ref wmc) = worker_mode_config {
-                let wm = worker_metrics.as_ref().unwrap();
-                let slot_idx = next_id % wm.slots.len();
-                let stats = Arc::clone(&wm.slots[slot_idx]);
-                spawn_worker_mode(
-                    next_id,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    wmc.clone(),
-                    stats,
-                    Arc::clone(wm),
-                )
-            } else {
-                spawn_worker(
-                    next_id,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    WorkerLoopMode::Static,
-                )
-            };
+            let handle = strategy.spawn(SpawnArgs {
+                id: next_id,
+                rx: request_rx.clone(),
+                shutdown: Arc::clone(&shutdown),
+                last_active: Arc::clone(&last_active),
+            });
             guard.push(ManagedWorker {
                 id: next_id,
                 handle,
@@ -113,14 +171,13 @@ pub(super) async fn run_scale_manager(
     idle_timeout_seconds: u64,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    worker_mode_config: Option<Arc<WorkerModeConfig>>,
-    worker_metrics: Option<Arc<WorkerMetrics>>,
+    strategy: SpawnStrategy,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_scale_up = Instant::now();
     let mut last_scale_down = Instant::now();
     let idle_timeout_ms = idle_timeout_seconds * 1000;
-    let mut next_id = max; // start IDs above initial range to avoid collisions
+    let mut next_id = max;
 
     loop {
         interval.tick().await;
@@ -131,7 +188,6 @@ pub(super) async fn run_scale_manager(
         let mut workers_guard = workers.lock().unwrap();
         let now = now_millis();
 
-        // Clean up exited workers
         let before = workers_guard.len();
         workers_guard.retain(|w| !w.handle.is_finished());
         let dead = before - workers_guard.len();
@@ -141,32 +197,15 @@ pub(super) async fn run_scale_manager(
             tracing::warn!(dead, remaining = total, "Dead workers detected, respawning");
         }
 
-        // Respawn to maintain minimum (unconditional — dead worker recovery)
         while workers_guard.len() < min {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
-            let handle = if let Some(ref wmc) = worker_mode_config {
-                let wm = worker_metrics.as_ref().unwrap();
-                let slot_idx = next_id % wm.slots.len();
-                let stats = Arc::clone(&wm.slots[slot_idx]);
-                spawn_worker_mode(
-                    next_id,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    wmc.clone(),
-                    stats,
-                    Arc::clone(wm),
-                )
-            } else {
-                spawn_worker(
-                    next_id,
-                    request_rx.clone(),
-                    Arc::clone(&shutdown),
-                    Arc::clone(&last_active),
-                    WorkerLoopMode::Dynamic,
-                )
-            };
+            let handle = strategy.spawn(SpawnArgs {
+                id: next_id,
+                rx: request_rx.clone(),
+                shutdown: Arc::clone(&shutdown),
+                last_active: Arc::clone(&last_active),
+            });
             workers_guard.push(ManagedWorker {
                 id: next_id,
                 handle,
@@ -178,56 +217,33 @@ pub(super) async fn run_scale_manager(
         }
         let total = workers_guard.len();
 
-        // Count idle workers (last_active > 200ms ago)
         let idle_count = workers_guard
             .iter()
             .filter(|w| now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > 200)
             .count();
 
-        // Update metrics
         metrics.set_workers_current(total);
 
-        // Scale-up: no idle workers and under max
         let needs_scale_up =
             idle_count == 0 && total < max && last_scale_up.elapsed() >= Duration::from_millis(500);
 
         if needs_scale_up {
-            // Prepare Arcs inside lock, but drop lock before spawning the OS thread
-            // to avoid blocking the Tokio runtime during thread creation (~10-50μs).
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
             let spawn_shutdown = Arc::clone(&shutdown);
             let spawn_last_active = Arc::clone(&last_active);
             let spawn_rx = request_rx.clone();
             let spawn_id = next_id;
-            let spawn_wmc = worker_mode_config.clone();
-            let spawn_wm = worker_metrics.clone();
+            let spawn_strategy = strategy.clone();
             drop(workers_guard);
 
-            let handle = if let Some(wmc) = spawn_wmc {
-                let wm = spawn_wm.as_ref().unwrap();
-                let slot_idx = spawn_id % wm.slots.len();
-                let stats = Arc::clone(&wm.slots[slot_idx]);
-                spawn_worker_mode(
-                    spawn_id,
-                    spawn_rx,
-                    spawn_shutdown,
-                    spawn_last_active,
-                    wmc,
-                    stats,
-                    Arc::clone(wm),
-                )
-            } else {
-                spawn_worker(
-                    spawn_id,
-                    spawn_rx,
-                    spawn_shutdown,
-                    spawn_last_active,
-                    WorkerLoopMode::Dynamic,
-                )
-            };
+            let handle = spawn_strategy.spawn(SpawnArgs {
+                id: spawn_id,
+                rx: spawn_rx,
+                shutdown: spawn_shutdown,
+                last_active: spawn_last_active,
+            });
 
-            // Re-lock to insert
             let mut workers_guard = workers.lock().unwrap();
             workers_guard.push(ManagedWorker {
                 id: next_id,
@@ -247,14 +263,12 @@ pub(super) async fn run_scale_manager(
             continue;
         }
 
-        // Scale-down: retire workers idle longer than threshold
         if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
             if let Some(pos) = workers_guard.iter().position(|w| {
                 now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
             }) {
                 let worker = workers_guard.remove(pos);
                 worker.shutdown.store(true, Ordering::Relaxed);
-                // Join in background thread to avoid blocking the async runtime
                 std::thread::spawn(move || {
                     let _ = worker.handle.join();
                 });
