@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
-use crossbeam_channel::{self, RecvTimeoutError, TrySendError};
+use crossbeam_channel::{self, TrySendError};
 use http::{HeaderName, HeaderValue};
 
 use crate::config::{Config, WorkerMode};
