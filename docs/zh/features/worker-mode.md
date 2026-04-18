@@ -79,6 +79,13 @@ OxPHP 在请求之间执行软重置。以下状态会自动清理：
 
 当 Worker 被回收时，PHP 进程终止，新进程启动，重新执行 Worker 脚本的外部作用域。对于最大请求数和最大内存回收，当前请求会正常完成后 Worker 才退出。对于基于错误的回收，Worker 在失败的请求之后退出。
 
+## 开发模式下的代码热重载
+
+Worker 模式将 bootstrap 状态（自动加载器、DI 容器、数据库连接）保留在内存中，因此仅靠 `opcache.validate_timestamps=1` 不足以加载在外层作用域中执行过的代码的变更。开发循环中有两种选择：
+
+- **每次请求都回收 Worker。** 设置 `WORKER_MAX_REQUESTS=1`，每次请求都会重新执行外层作用域。你会失去 worker 模式的性能优势，但会获得 FPM 风格的重载语义——是积极开发中最简单、最可靠的方式。
+- **保持 Worker 热态，仅刷新请求处理器。** 将 `WORKER_MAX_REQUESTS` 设为较大值，启用 `opcache.validate_timestamps=1`，并保持 bootstrap 最小化。在请求回调内加载的代码会在下次请求时被 OPcache 刷新；在外层作用域仅加载一次的代码则不会。完整的注意事项清单请参阅 [OPcache 与 JIT → 开发环境配置](../php/opcache.md#开发环境配置)。
+
 ## 故障排除
 
 ### 请求挂起且永不完成

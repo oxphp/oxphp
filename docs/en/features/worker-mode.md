@@ -79,6 +79,13 @@ Workers are automatically recycled (restarted with a fresh PHP process) when any
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For max-requests and max-memory recycling, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
+## Development Reloading
+
+Worker Mode persists bootstrap state (autoloader, DI container, DB connections) in memory, so `opcache.validate_timestamps=1` alone is not enough to pick up changes to code that ran during the outer scope. For development loops there are two options:
+
+- **Recycle every request.** Set `WORKER_MAX_REQUESTS=1` to re-execute the outer scope on every request. This trades the worker-mode performance win for FPM-style reload semantics — simplest and most reliable for active development.
+- **Keep the worker warm, reload request handlers.** Leave `WORKER_MAX_REQUESTS` at a higher value, enable `opcache.validate_timestamps=1`, and keep your bootstrap minimal. Code loaded inside the request callback will be refreshed by OPcache on the next request; code loaded once in the outer scope will not. See [OPcache and JIT → Development Settings](../php/opcache.md#development-settings) for the full list of caveats.
+
 ## Troubleshooting
 
 ### Requests hang and never complete

@@ -68,6 +68,17 @@ opcache.jit=disable
 
 With `validate_timestamps=1`, OPcache checks file modification times every `revalidate_freq` seconds. This adds a small per-request overhead but lets you edit PHP files and see changes on the next request.
 
+**This is the recommended development-mode reload strategy for OxPHP.** OPcache performs the check inline on every include, so code edits are picked up at the next request with no container restart and no external file-watcher daemon. Use `revalidate_freq=0` for immediate stat-per-include (highest accuracy, slightly more I/O), or `revalidate_freq=2` to amortize the stat cost — the default shown above is a good balance, especially if your `DOCUMENT_ROOT` is on a slow bind-mount (Docker on macOS/Windows).
+
+### What is NOT reloaded by `validate_timestamps`
+
+A few classes of changes still require a container restart (or worker recycle) even with `validate_timestamps=1`:
+
+- **Preloaded files** (`opcache.preload`) are linked into the server at startup and are never revalidated. Edit a preloaded file — restart the container.
+- **Worker Mode bootstrap state** — in [Worker Mode](../features/worker-mode.md), the autoloader, DI container, and any objects built in the outer scope live in worker memory. OPcache will recompile changed class files, but the worker will not re-run its bootstrap. For dev worker loops, set `WORKER_MAX_REQUESTS=1` to recycle after every request, which re-executes the outer scope and picks up all changes.
+- **Framework-level caches** — compiled Symfony container, Laravel route/config/view cache, Composer optimized classmap. These are `.php` files OPcache revalidates, but the values inside them reference stale class paths or container IDs. Run the framework's `cache:clear` command; OPcache alone is not enough.
+- **Non-PHP files** — `.env`, `composer.json`, YAML/JSON config, template files compiled outside OPcache. OPcache tracks only files it compiled; everything else needs a restart.
+
 ## JIT Compilation
 
 OPcache's JIT compiler translates PHP opcodes into native machine code at runtime. Use `tracing` mode for the best optimization:
