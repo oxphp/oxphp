@@ -68,6 +68,17 @@ opcache.jit=disable
 
 设置 `validate_timestamps=1` 后，OPcache 每隔 `revalidate_freq` 秒检查一次文件修改时间。这会带来少量的逐请求开销，但允许你编辑 PHP 文件后在下次请求时立即看到变更。
 
+**这是 OxPHP 在开发模式下推荐的代码热重载方案。** OPcache 在每次 include 时内联执行检查，因此代码编辑会在下次请求时被自动加载，无需重启容器，也无需外部文件监视守护进程。`revalidate_freq=0` 表示每次 include 都立即 stat 检查（精度最高，I/O 稍多）；`revalidate_freq=2` 可摊销 stat 开销——上面示例中的默认值是一个合理的折中，特别是当 `DOCUMENT_ROOT` 挂载在较慢的 bind-mount 上时（macOS/Windows 上的 Docker）。
+
+### `validate_timestamps` 不会重载的内容
+
+即使设置了 `validate_timestamps=1`，仍有几类变更需要重启容器（或回收 Worker）才能生效：
+
+- **预加载文件**（`opcache.preload`）在服务器启动时被链接进来，永远不会被重新验证。编辑 preload 文件后——重启容器。
+- **Worker 模式的 bootstrap 状态** ——在 [Worker 模式](../features/worker-mode.md) 中，自动加载器、DI 容器以及在外层作用域构建的所有对象都驻留在 Worker 内存中。OPcache 会重新编译已更改的类文件，但 Worker 不会重新执行其 bootstrap。在开发循环中，设置 `WORKER_MAX_REQUESTS=1` 以便每次请求后回收 Worker，这将重新运行外层作用域并加载所有变更。
+- **框架级缓存** ——编译后的 Symfony 容器、Laravel 路由/配置/视图缓存、Composer 优化过的 classmap。它们是 `.php` 文件，OPcache 确实会重新验证，但其中的值仍指向过期的类路径或容器 ID。请运行框架的 `cache:clear` 命令——仅靠 OPcache 是不够的。
+- **非 PHP 文件** —— `.env`、`composer.json`、YAML/JSON 配置、在 OPcache 之外编译的模板。OPcache 只跟踪它自己编译过的文件；其他所有文件都需要重启。
+
 ## JIT 编译
 
 OPcache 的 JIT 编译器在运行时将 PHP 操作码转译为本机机器码。建议使用 `tracing` 模式以获得最佳优化效果：
