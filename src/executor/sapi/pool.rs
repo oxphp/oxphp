@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::config::WorkerMode;
 use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::sapi::WorkerIncomingRequest;
 
@@ -106,6 +107,24 @@ pub(super) fn spawn_initial(
         });
     }
     managed
+}
+
+/// Seed the worker-count gauges and spawn counters from the initial pool size.
+pub(super) fn seed_metrics(metrics: &Metrics, mode: &WorkerMode, initial_count: usize) {
+    metrics.set_workers_current(initial_count);
+    for _ in 0..initial_count {
+        metrics.worker_spawned();
+    }
+    match mode {
+        WorkerMode::Static(n) => {
+            metrics.set_workers_min(*n);
+            metrics.set_workers_max(*n);
+        }
+        WorkerMode::Dynamic { min, max } => {
+            metrics.set_workers_min(*min);
+            metrics.set_workers_max(*max);
+        }
+    }
 }
 
 /// Health monitor for static mode: detects dead workers and respawns to target count.

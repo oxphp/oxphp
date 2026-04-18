@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -17,11 +17,101 @@ mod traditional;
 mod worker_mode;
 
 use pool::{
-    now_millis, run_scale_manager, run_worker_monitor, spawn_initial, ManagedWorker, SpawnStrategy,
-    WorkerRequest,
+    now_millis, run_scale_manager, run_worker_monitor, ManagedWorker, SpawnStrategy, WorkerRequest,
 };
 use traditional::WorkerLoopMode;
 use worker_mode::WorkerModeConfig;
+
+/// TSRM + SAPI + module startup + error callback installation, in order.
+/// Panics on unrecoverable failure to match the previous behavior verbatim.
+fn php_startup() {
+    // 1. TSRM must be initialized first for ZTS builds
+    if !unsafe { bindings::php_tsrm_startup() } {
+        panic!("php_tsrm_startup() failed");
+    }
+
+    // 2. Build and register our SAPI module
+    let mut module = sapi::build_sapi_module();
+    unsafe {
+        bindings::sapi_startup(&mut module);
+    }
+
+    // 3. Start the PHP engine (PHP 8.4: 2 arguments)
+    let startup_result = unsafe { bindings::php_module_startup(&mut module, std::ptr::null_mut()) };
+    if startup_result != 0 {
+        panic!("php_module_startup() failed with code {startup_result}");
+    }
+
+    // 4. Install structured error logging callback (must be after php_module_startup)
+    unsafe {
+        sapi::install_error_cb();
+    }
+}
+
+/// Build the spawn strategy once based on `WORKER_FILE` presence.
+///
+/// Side effects (worker-mode branch only):
+/// - registers `oxphp_bridge_set_worker_callbacks`,
+/// - creates `WorkerMetrics` and publishes it via `metrics.set_worker_metrics`.
+fn build_spawn_strategy(config: &Config, metrics: &Metrics) -> SpawnStrategy {
+    if let Some(ref worker_file) = config.worker_file {
+        let wmc = Arc::new(WorkerModeConfig {
+            worker_file: worker_file.clone(),
+            document_root: config.server.document_root.clone(),
+            max_requests: config.worker_max_requests,
+            max_memory_mib: config.worker_max_memory_mib,
+        });
+
+        unsafe {
+            bindings::oxphp_bridge_set_worker_callbacks(
+                sapi::get_worker_wait_callback(),
+                sapi::get_worker_send_callback(),
+            );
+        }
+
+        let max_workers = config.worker_mode.max_worker_count();
+        let wm = Arc::new(WorkerMetrics::new(max_workers));
+        metrics.set_worker_metrics(Arc::clone(&wm));
+
+        SpawnStrategy::WorkerMode {
+            config: wmc,
+            metrics: wm,
+        }
+    } else {
+        let loop_mode = match &config.worker_mode {
+            WorkerMode::Static(_) => WorkerLoopMode::Static,
+            WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
+        };
+        SpawnStrategy::Traditional { loop_mode }
+    }
+}
+
+fn log_startup(
+    mode: &WorkerMode,
+    strategy: &SpawnStrategy,
+    initial_count: usize,
+    queue_capacity: usize,
+    idle_timeout_seconds: u64,
+) {
+    if let SpawnStrategy::WorkerMode { config, .. } = strategy {
+        tracing::info!(
+            mode = ?mode,
+            workers = initial_count,
+            queue_capacity,
+            idle_timeout_seconds,
+            worker_file = %config.worker_file.display(),
+            "PHP worker pool started (worker mode)"
+        );
+    } else {
+        tracing::info!(
+            mode = ?mode,
+            workers = initial_count,
+            queue_capacity,
+            idle_timeout_seconds,
+            "PHP worker pool started"
+        );
+    }
+}
 
 pub struct SapiExecutor {
     request_tx: Option<crossbeam_channel::Sender<WorkerRequest>>,
@@ -32,8 +122,6 @@ pub struct SapiExecutor {
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     idle_timeout_seconds: u64,
-    worker_mode_config: Option<Arc<WorkerModeConfig>>,
-    worker_metrics: Option<Arc<WorkerMetrics>>,
 }
 
 impl SapiExecutor {
@@ -41,114 +129,23 @@ impl SapiExecutor {
         let mode = config.worker_mode.clone();
         let idle_timeout_seconds = config.worker_idle_timeout_seconds;
         let initial_count = mode.worker_count();
-
-        // 1. TSRM must be initialized first for ZTS builds
-        if !unsafe { bindings::php_tsrm_startup() } {
-            panic!("php_tsrm_startup() failed");
-        }
-
-        // 2. Build and register our SAPI module
-        let mut module = sapi::build_sapi_module();
-
-        unsafe {
-            bindings::sapi_startup(&mut module);
-        }
-
-        // 3. Start the PHP engine (PHP 8.4: 2 arguments)
-        let startup_result =
-            unsafe { bindings::php_module_startup(&mut module, std::ptr::null_mut()) };
-        if startup_result != 0 {
-            panic!("php_module_startup() failed with code {startup_result}");
-        }
-
-        // 4. Install structured error logging callback (must be after php_module_startup)
-        unsafe {
-            sapi::install_error_cb();
-        }
-
         let queue_capacity = config.queue_capacity;
 
-        let worker_mode_config = config.worker_file.as_ref().map(|path| {
-            Arc::new(WorkerModeConfig {
-                worker_file: path.clone(),
-                document_root: config.server.document_root.clone(),
-                max_requests: config.worker_max_requests,
-                max_memory_mib: config.worker_max_memory_mib,
-            })
-        });
+        php_startup();
 
         let (request_tx, request_rx) = crossbeam_channel::bounded(queue_capacity);
 
-        let loop_mode = match &mode {
-            WorkerMode::Static(_) => WorkerLoopMode::Static,
-            WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
-        };
+        let strategy = build_spawn_strategy(config, &metrics);
+        let managed_workers = pool::spawn_initial(&strategy, &request_rx, initial_count);
 
-        // Register worker callbacks once before spawning any worker mode threads
-        if worker_mode_config.is_some() {
-            unsafe {
-                bindings::oxphp_bridge_set_worker_callbacks(
-                    sapi::get_worker_wait_callback(),
-                    sapi::get_worker_send_callback(),
-                );
-            }
-        }
-
-        // Create worker mode metrics if worker mode is active
-        let max_workers = match &mode {
-            WorkerMode::Static(n) => *n,
-            WorkerMode::Dynamic { max, .. } => *max,
-        };
-        let worker_metrics = worker_mode_config.as_ref().map(|_| {
-            let wm = Arc::new(WorkerMetrics::new(max_workers));
-            metrics.set_worker_metrics(Arc::clone(&wm));
-            wm
-        });
-
-        let strategy = if let Some(ref wmc) = worker_mode_config {
-            SpawnStrategy::WorkerMode {
-                config: wmc.clone(),
-                metrics: Arc::clone(worker_metrics.as_ref().unwrap()),
-            }
-        } else {
-            SpawnStrategy::Traditional { loop_mode }
-        };
-        let managed_workers = spawn_initial(&strategy, &request_rx, initial_count);
-
-        // Set initial metrics
-        metrics.set_workers_current(initial_count);
-        for _ in 0..initial_count {
-            metrics.worker_spawned();
-        }
-        match &mode {
-            WorkerMode::Static(n) => {
-                metrics.set_workers_min(*n);
-                metrics.set_workers_max(*n);
-            }
-            WorkerMode::Dynamic { min, max } => {
-                metrics.set_workers_min(*min);
-                metrics.set_workers_max(*max);
-            }
-        }
-
-        if worker_mode_config.is_some() {
-            tracing::info!(
-                mode = ?mode,
-                workers = initial_count,
-                queue_capacity,
-                idle_timeout_seconds,
-                worker_file = %worker_mode_config.as_ref().unwrap().worker_file.display(),
-                "PHP worker pool started (worker mode)"
-            );
-        } else {
-            tracing::info!(
-                mode = ?mode,
-                workers = initial_count,
-                queue_capacity,
-                idle_timeout_seconds,
-                "PHP worker pool started"
-            );
-        }
+        pool::seed_metrics(&metrics, &mode, initial_count);
+        log_startup(
+            &mode,
+            &strategy,
+            initial_count,
+            queue_capacity,
+            idle_timeout_seconds,
+        );
 
         Self {
             request_tx: Some(request_tx),
@@ -159,8 +156,6 @@ impl SapiExecutor {
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_seconds,
-            worker_mode_config,
-            worker_metrics,
         }
     }
 }
@@ -312,8 +307,6 @@ mod tests {
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_seconds: 30,
-            worker_mode_config: None,
-            worker_metrics: None,
         };
 
         let request = ScriptRequest {
