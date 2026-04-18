@@ -279,11 +279,13 @@ mod tests {
     // ── now_millis test ──
 
     #[test]
-    fn test_now_millis_reasonable() {
-        let ms = now_millis();
-        // Should be after 2020 and before 2100
-        assert!(ms > 1_577_836_800_000); // 2020-01-01
-        assert!(ms < 4_102_444_800_000); // 2100-01-01
+    fn test_now_millis_monotonic() {
+        let a = now_millis();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let b = now_millis();
+        assert!(b >= a, "now_millis must be non-decreasing");
+        // Sanity bound: a single sleep+call shouldn't exceed 10s even on slow CI.
+        assert!(b - a < 10_000);
     }
 
     #[test]

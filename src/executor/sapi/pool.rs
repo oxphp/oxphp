@@ -4,8 +4,8 @@
 //! respawn paths never branch on worker-mode configuration.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::config::WorkerMode;
 use crate::metrics::{Metrics, WorkerMetrics};
@@ -27,11 +27,12 @@ pub(super) struct ManagedWorker {
     pub last_active: Arc<AtomicU64>,
 }
 
+/// Monotonic ms-since-process-start. Used for `last_active` stamps and
+/// idle-timeout math — never for user-visible timestamps. Monotonic clock
+/// avoids false idle detection if the system wall clock jumps backwards.
 pub(super) fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Bundles the parameters every spawn call needs, regardless of model.
