@@ -55,6 +55,12 @@ In dynamic mode, OxPHP scales workers up when all are busy and scales down when 
 
 When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are automatically recycled when they reach the request or memory limit.
 
+## SAPI / PHP
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SUPERGLOBALS_ENABLED` | `true` | Populate PHP superglobals (`$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`, `php://input`) before script execution. Set to `false` or `0` to skip population — request data is then only available through the object API (`oxphp_http_request()`). Useful for applications that consume the object API directly and want to avoid the cost of building superglobals on every request |
+
 ## Timeouts
 
 | Variable | Default | Description |
