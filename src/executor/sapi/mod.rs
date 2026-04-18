@@ -347,5 +347,11 @@ mod tests {
             }
             ExecuteResult::Deferred(_) => panic!("expected Immediate, got Deferred"),
         }
+
+        // PHP was never initialized in this test, so the real `Drop` impl would
+        // call `php_module_shutdown` / `sapi_shutdown` / `tsrm_shutdown` against
+        // uninitialized state — undefined behaviour under the `php` feature.
+        // Leak the executor; the test process exits immediately after.
+        std::mem::forget(executor);
     }
 }
