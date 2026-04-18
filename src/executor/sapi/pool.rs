@@ -160,17 +160,24 @@ pub(super) async fn run_worker_monitor(
             );
         }
 
-        while guard.len() < target {
+        // Compute how many to spawn, then drop the Mutex — pthread_create
+        // (~10-50μs per thread) must not run under the lock.
+        let to_spawn = target.saturating_sub(guard.len());
+        drop(guard);
+
+        let mut new = Vec::with_capacity(to_spawn);
+        for _ in 0..to_spawn {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
+            let id = next_id;
             let handle = strategy.spawn(SpawnArgs {
-                id: next_id,
+                id,
                 rx: request_rx.clone(),
                 shutdown: Arc::clone(&shutdown),
                 last_active: Arc::clone(&last_active),
             });
-            guard.push(ManagedWorker {
-                id: next_id,
+            new.push(ManagedWorker {
+                id,
                 handle,
                 shutdown,
                 last_active,
@@ -179,6 +186,8 @@ pub(super) async fn run_worker_monitor(
             metrics.worker_spawned();
         }
 
+        let mut guard = workers.lock().unwrap();
+        guard.extend(new);
         metrics.set_workers_current(guard.len());
     }
 }
@@ -218,17 +227,24 @@ pub(super) async fn run_scale_manager(
         }
 
         // Respawn to maintain minimum (unconditional — dead worker recovery).
-        while workers_guard.len() < min {
+        // Compute the count, drop the Mutex, spawn OS threads outside the lock,
+        // then re-acquire — pthread_create must not run under `workers`.
+        let to_spawn_min = min.saturating_sub(workers_guard.len());
+        drop(workers_guard);
+
+        let mut new = Vec::with_capacity(to_spawn_min);
+        for _ in 0..to_spawn_min {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
+            let id = next_id;
             let handle = strategy.spawn(SpawnArgs {
-                id: next_id,
+                id,
                 rx: request_rx.clone(),
                 shutdown: Arc::clone(&shutdown),
                 last_active: Arc::clone(&last_active),
             });
-            workers_guard.push(ManagedWorker {
-                id: next_id,
+            new.push(ManagedWorker {
+                id,
                 handle,
                 shutdown,
                 last_active,
@@ -236,6 +252,9 @@ pub(super) async fn run_scale_manager(
             next_id += 1;
             metrics.worker_spawned();
         }
+
+        let mut workers_guard = workers.lock().unwrap();
+        workers_guard.extend(new);
         let total = workers_guard.len();
 
         // Count idle workers (last_active > 200ms ago).
