@@ -44,9 +44,9 @@ pub(super) struct SpawnArgs {
 }
 
 /// How to spawn a worker thread. Built once in `SapiExecutor::new()` and
-/// cloned into the monitor / scale manager so respawn / scale-up paths
-/// don't branch on worker-mode configuration at every call site.
-#[derive(Clone)]
+/// shared (`Arc<SpawnStrategy>`) with the monitor / scale manager so the
+/// respawn / scale-up paths don't branch on worker-mode configuration
+/// at every call site.
 pub(super) enum SpawnStrategy {
     Traditional {
         loop_mode: WorkerLoopMode,
@@ -135,7 +135,7 @@ pub(super) async fn run_worker_monitor(
     target: usize,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    strategy: SpawnStrategy,
+    strategy: Arc<SpawnStrategy>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut next_id = target;
@@ -200,7 +200,7 @@ pub(super) async fn run_scale_manager(
     idle_timeout_seconds: u64,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
-    strategy: SpawnStrategy,
+    strategy: Arc<SpawnStrategy>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_scale_up = Instant::now();

@@ -118,7 +118,7 @@ pub struct SapiExecutor {
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     workers: Arc<Mutex<Vec<ManagedWorker>>>,
     mode: WorkerMode,
-    strategy: SpawnStrategy,
+    strategy: Arc<SpawnStrategy>,
     global_shutdown: Arc<AtomicBool>,
     metrics: Arc<Metrics>,
     idle_timeout_seconds: u64,
@@ -135,7 +135,7 @@ impl SapiExecutor {
 
         let (request_tx, request_rx) = crossbeam_channel::bounded(queue_capacity);
 
-        let strategy = build_spawn_strategy(config, &metrics);
+        let strategy = Arc::new(build_spawn_strategy(config, &metrics));
         let managed_workers = pool::spawn_initial(&strategy, &request_rx, initial_count);
 
         pool::seed_metrics(&metrics, &mode, initial_count);
@@ -206,7 +206,7 @@ impl ScriptExecutor for SapiExecutor {
         let request_rx = self.request_rx.clone();
         let global_shutdown = Arc::clone(&self.global_shutdown);
         let metrics = Arc::clone(&self.metrics);
-        let strategy = self.strategy.clone();
+        let strategy = Arc::clone(&self.strategy);
 
         match &self.mode {
             WorkerMode::Static(target) => {
@@ -303,9 +303,9 @@ mod tests {
             request_rx: rx,
             workers: Arc::new(Mutex::new(Vec::new())),
             mode: WorkerMode::Static(1),
-            strategy: SpawnStrategy::Traditional {
+            strategy: Arc::new(SpawnStrategy::Traditional {
                 loop_mode: WorkerLoopMode::Static,
-            },
+            }),
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics,
             idle_timeout_seconds: 30,
