@@ -255,7 +255,7 @@ pub(super) async fn run_scale_manager(
 
         let mut workers_guard = workers.lock().unwrap();
         workers_guard.extend(new);
-        let total = workers_guard.len();
+        let mut total = workers_guard.len();
 
         // Count idle workers (last_active > 200ms ago).
         let idle_count = workers_guard
@@ -263,14 +263,12 @@ pub(super) async fn run_scale_manager(
             .filter(|w| now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > 200)
             .count();
 
-        metrics.set_workers_current(total);
-
         let needs_scale_up =
             idle_count == 0 && total < max && last_scale_up.elapsed() >= Duration::from_millis(500);
 
         if needs_scale_up {
             // Prepare Arcs inside the lock, then drop it before spawning the OS thread —
-            // otherwise thread creation (~10-50μs) blocks the Tokio runtime.
+            // pthread_create must not run under `workers`.
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
             let spawn_id = next_id;
@@ -283,27 +281,20 @@ pub(super) async fn run_scale_manager(
                 last_active: Arc::clone(&last_active),
             });
 
-            let mut workers_guard = workers.lock().unwrap();
-            workers_guard.push(ManagedWorker {
-                id: next_id,
+            let mut g = workers.lock().unwrap();
+            g.push(ManagedWorker {
+                id: spawn_id,
                 handle,
                 shutdown,
                 last_active,
             });
+            total = g.len();
             next_id += 1;
             last_scale_up = Instant::now();
             metrics.worker_spawned();
-            metrics.set_workers_current(workers_guard.len());
-            tracing::info!(
-                id = next_id - 1,
-                total = workers_guard.len(),
-                "Scale-up: spawned worker"
-            );
-            continue;
-        }
-
-        // Scale-down: retire one worker idle longer than the threshold.
-        if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(id = spawn_id, total, "Scale-up: spawned worker");
+        } else if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
+            // Scale-down: retire one worker idle longer than the threshold.
             if let Some(pos) = workers_guard.iter().position(|w| {
                 now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
             }) {
@@ -314,11 +305,14 @@ pub(super) async fn run_scale_manager(
                 tokio::task::spawn_blocking(move || {
                     let _ = worker.handle.join();
                 });
+                total -= 1;
                 last_scale_down = Instant::now();
                 metrics.worker_retired();
-                metrics.set_workers_current(total - 1);
-                tracing::info!(total = total - 1, "Scale-down: retired worker");
+                tracing::info!(total, "Scale-down: retired worker");
             }
         }
+
+        // Single gauge publish per tick — scale-up/down/no-op all funnel here.
+        metrics.set_workers_current(total);
     }
 }
