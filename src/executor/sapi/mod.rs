@@ -16,9 +16,7 @@ mod pool;
 mod traditional;
 mod worker_mode;
 
-use pool::{
-    now_millis, run_scale_manager, run_worker_monitor, ManagedWorker, SpawnStrategy, WorkerRequest,
-};
+use pool::{run_scale_manager, run_worker_monitor, ManagedWorker, SpawnStrategy, WorkerRequest};
 use traditional::WorkerLoopMode;
 use worker_mode::WorkerModeConfig;
 
@@ -274,6 +272,7 @@ impl Drop for SapiExecutor {
 
 #[cfg(test)]
 mod tests {
+    use super::pool::now_millis;
     use super::*;
 
     // ── now_millis test ──

@@ -140,7 +140,7 @@ fn async_worker_thread(
     unsafe {
         bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
         bindings::oxphp_bridge_set_request_info(
-            b"GET\0".as_ptr() as *const c_char,
+            c"GET".as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,

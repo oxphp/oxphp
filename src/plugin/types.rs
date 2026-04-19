@@ -324,7 +324,7 @@ mod tests {
         let _bool_t = PhpValue::Bool(true);
         let _bool_f = PhpValue::Bool(false);
         let _int = PhpValue::Int(42);
-        let _float = PhpValue::Float(3.14);
+        let _float = PhpValue::Float(2.5);
         let _string = PhpValue::String("hello".to_string());
         let _array = PhpValue::Array;
         let _expr = PhpValue::ConstExpr("PHP_INT_MAX".to_string());
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(PhpValue::Bool(false).to_string(), "false");
         assert_eq!(PhpValue::Int(42).to_string(), "42");
         assert_eq!(PhpValue::Int(-1).to_string(), "-1");
-        assert_eq!(PhpValue::Float(3.14).to_string(), "3.14");
+        assert_eq!(PhpValue::Float(2.5).to_string(), "2.5");
         assert_eq!(PhpValue::String("hello".to_string()).to_string(), "'hello'");
         assert_eq!(PhpValue::Array.to_string(), "[]");
         assert_eq!(

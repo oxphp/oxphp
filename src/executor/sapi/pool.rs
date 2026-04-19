@@ -192,6 +192,7 @@ pub(super) async fn run_worker_monitor(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_scale_manager(
     workers: Arc<Mutex<Vec<ManagedWorker>>>,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,

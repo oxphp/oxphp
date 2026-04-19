@@ -16,8 +16,16 @@ jobs:
       - run: cargo fmt -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: no-default
+            flags: "--no-default-features --all-targets"
+          - name: default
+            flags: "--all-targets"
     steps:
       - uses: actions/checkout@v4
       - name: Rust version
@@ -29,10 +37,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: clippy-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: clippy-${{ steps.rust.outputs.hash }}-
-      - run: cargo clippy --no-default-features -- -D warnings
+          key: clippy-${{ matrix.name }}-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: clippy-${{ matrix.name }}-${{ steps.rust.outputs.hash }}-
+      - name: Clippy
+        env:
+          CLIPPY_FLAGS: ${{ matrix.flags }}
+        run: cargo clippy $CLIPPY_FLAGS -- -D warnings
 
+  # Tests run with --no-default-features because default features link against
+  # libphp.so, which isn't installed on the CI runner. The clippy "default" job
+  # above type-checks the plugin-apm / plugin-async paths that this omits.
   test:
     name: Test
     runs-on: ubuntu-latest

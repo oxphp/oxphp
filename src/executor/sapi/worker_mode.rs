@@ -95,7 +95,7 @@ fn worker_mode_thread(
         bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
         // Set minimal request info for the boot request
         bindings::oxphp_bridge_set_request_info(
-            b"GET\0".as_ptr() as *const std::os::raw::c_char,
+            c"GET".as_ptr(),
             std::ptr::null(),
             std::ptr::null(),
             0,

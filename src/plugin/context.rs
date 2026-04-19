@@ -249,6 +249,7 @@ mod tests {
     use crate::events::EventDispatcher;
     use crate::plugin::handler::PluginInternalRequest;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_context<'a>(
         dispatcher: &'a mut EventDispatcher,
         services: &'a mut HashMap<String, Box<dyn Any + Send + Sync>>,

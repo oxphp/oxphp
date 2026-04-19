@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_apm_plugin_shutdown_disabled() {
-        let plugin = ApmPlugin::new();
+        let mut plugin = ApmPlugin::new();
         plugin.shutdown(); // should not panic
     }
 

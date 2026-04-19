@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_otel_shutdown_disabled() {
-        let plugin = OtelPlugin::new();
+        let mut plugin = OtelPlugin::new();
         plugin.shutdown(); // should not panic
     }
 

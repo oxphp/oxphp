@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_shutdown_noop_when_disabled() {
-        let plugin = AsyncPlugin::new();
+        let mut plugin = AsyncPlugin::new();
         plugin.shutdown(); // should not panic
     }
 }

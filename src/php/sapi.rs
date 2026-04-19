@@ -64,26 +64,29 @@ thread_local! {
     static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
 }
 
+/// Per-promise pending state: oneshot receiver paired with a cancellation flag.
+type PromiseEntry = (
+    tokio::sync::oneshot::Receiver<AsyncResult>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
+
 thread_local! {
     /// Promise ID -> (oneshot receiver, cancellation flag). HTTP worker threads only.
-    static PROMISE_MAP: RefCell<HashMap<u64, (
-        tokio::sync::oneshot::Receiver<AsyncResult>,
-        std::sync::Arc<std::sync::atomic::AtomicBool>,
-    )>> = RefCell::new(HashMap::new());
+    static PROMISE_MAP: RefCell<HashMap<u64, PromiseEntry>> = RefCell::new(HashMap::new());
 
     /// Per-thread monotonic promise ID counter.
-    static PROMISE_COUNTER: std::cell::Cell<u64> = std::cell::Cell::new(0);
+    static PROMISE_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
     /// Async task channel sender. Set once per HTTP/worker-mode thread.
     static ASYNC_TX: RefCell<Option<crossbeam_channel::Sender<AsyncTask>>>
-        = RefCell::new(None);
+        = const { RefCell::new(None) };
 
     /// Per-promise freeze/borrow cleanup state.
     static PROMISE_CLEANUP: RefCell<HashMap<u64, PromiseCleanup>>
         = RefCell::new(HashMap::new());
 
     /// True on async worker threads, false on HTTP workers.
-    static IS_ASYNC_WORKER: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static IS_ASYNC_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// Pre-fetched async results waiting to be consumed by `take_ready_result`.
     /// Populated by `await_is_ready` when a non-blocking poll finds a completed promise.
@@ -94,7 +97,7 @@ thread_local! {
 thread_local! {
     /// PHP errors captured during the current request's script execution.
     /// Drained into ScriptResponse at request completion; cleared at request boundaries.
-    pub(crate) static REQUEST_ERRORS: RefCell<Vec<crate::types::PhpScriptError>> = RefCell::new(Vec::new());
+    pub(crate) static REQUEST_ERRORS: RefCell<Vec<crate::types::PhpScriptError>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Take all captured PHP errors for the current request, leaving the Vec empty.
@@ -859,8 +862,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
     }
 
     sapi_module_struct {
-        name: b"cli-server\0".as_ptr() as *mut c_char,
-        pretty_name: b"OxPHP\0".as_ptr() as *mut c_char,
+        name: c"cli-server".as_ptr() as *mut c_char,
+        pretty_name: c"OxPHP".as_ptr() as *mut c_char,
 
         startup: Some(oxphp_startup),
         shutdown: Some(oxphp_shutdown),
@@ -1794,7 +1797,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 fqn: class.fqn,
                 factory: class
                     .storage_factory
-                    .unwrap_or_else(|| Box::new(|| std::ptr::null_mut())),
+                    .unwrap_or_else(|| Box::new(std::ptr::null_mut)),
                 drop_fn: class.storage_drop.unwrap_or_else(|| Box::new(|_| {})),
                 clone_fn: class.storage_clone,
             });
@@ -1802,7 +1805,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             // Even classes without storage need an entry to keep indices aligned.
             class_metas.push(ClassMeta {
                 fqn: class.fqn,
-                factory: Box::new(|| std::ptr::null_mut()),
+                factory: Box::new(std::ptr::null_mut),
                 drop_fn: Box::new(|_| {}),
                 clone_fn: None,
             });
@@ -3144,7 +3147,7 @@ unsafe extern "C" fn req_query_param_cb(
                 }
             } else if pair == search_str {
                 *out_len = 0;
-                return b"\0".as_ptr() as *const c_char; // empty value, not null
+                return c"".as_ptr(); // empty value, not null
             }
         }
         *out_len = 0;
@@ -3211,7 +3214,7 @@ unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void
                 cb(
                     pair.as_ptr() as *const c_char,
                     pair.len(),
-                    b"\0".as_ptr() as *const c_char,
+                    c"".as_ptr(),
                     0,
                     user_data,
                 );

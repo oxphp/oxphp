@@ -426,6 +426,7 @@ mod tests {
         let mut php_enums = Vec::new();
         let mut php_attributes = Vec::new();
         let mut php_functions: Vec<PhpFunctionDef> = Vec::new();
+        let mut core_flags: HashMap<String, String> = HashMap::new();
 
         let mut ctx = PluginContext::new(
             "async".into(),
