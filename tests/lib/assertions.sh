@@ -74,7 +74,13 @@ run_runner_test() {
     # Determine URL — static file tests don't have .php
     local url
     if [ -n "$url_override" ]; then
-        url="${base_url}${url_override}"
+        # Override starting with `?` is a query-string suffix on the default
+        # PHP test URL; anything else (e.g. `/custom/path`) fully replaces it.
+        if [[ "$url_override" == \?* ]]; then
+            url="${base_url}/tests/${test_path}.php${url_override}"
+        else
+            url="${base_url}${url_override}"
+        fi
     elif [[ "$test_path" == static_files/* ]]; then
         # Map static file tests to fixture paths
         case "$test_name" in
@@ -167,6 +173,18 @@ import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name 
                 else
                     assertions_list=$(python3 -c "
 import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name missing','pass':False,'expected':'missing','actual':'$hdr_value'}); print(json.dumps(a))" "$assertions_list")
+                    pass=false
+                fi
+            elif [[ "$hdr_expect" == \~* ]]; then
+                # Prefix `~` enables substring match (useful when the server
+                # appends `;charset=…` or other parameters to a content-type).
+                local hdr_needle="${hdr_expect#\~}"
+                if [[ "$hdr_value" == *"$hdr_needle"* ]]; then
+                    assertions_list=$(python3 -c "
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name contains $hdr_needle','pass':True}); print(json.dumps(a))" "$assertions_list")
+                else
+                    assertions_list=$(python3 -c "
+import json, sys; a=json.loads(sys.argv[1]); a.append({'name':'header $hdr_name contains $hdr_needle','pass':False,'expected':'contains $hdr_needle','actual':'$hdr_value'}); print(json.dumps(a))" "$assertions_list")
                     pass=false
                 fi
             else

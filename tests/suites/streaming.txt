@@ -1,6 +1,6 @@
 # profile: default
 # description: Streaming and SSE
 
-streaming/test_stream_flush
+streaming/test_stream_flush | GET | | 200 | transfer-encoding:chunked
 streaming/test_sse_autodetect
-streaming/test_sse_output_format
+streaming/test_sse_output_format | GET | | 200 | content-type:~text/event-stream

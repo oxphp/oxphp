@@ -9,7 +9,7 @@ superglobals/test_request_method_patch | PATCH | -d "" | |
 superglobals/test_request_method_head | HEAD | | |
 superglobals/test_request_method_options | OPTIONS | | |
 superglobals/test_request_uri
-superglobals/test_query_string
+superglobals/test_query_string >> ?foo=bar
 superglobals/test_query_string_empty
 superglobals/test_server_protocol_11
 superglobals/test_server_name

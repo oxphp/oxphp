@@ -1,6 +1,7 @@
 <?php
-require __DIR__ . '/../test_helper.php';
-$t = new TestCase('content_type_header', 'headers');
+// Runner-side test: validates that a PHP-set Content-Type survives to the
+// client. Does NOT use TestCase/done() because test_helper.php::output()
+// forces Content-Type: application/json, which would mask the real value.
+// The runner asserts on the response header only.
 header('Content-Type: text/plain');
-$t->assertTrue('Content-Type header set to text/plain', true);
-$t->done();
+echo "ok";

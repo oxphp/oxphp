@@ -9,8 +9,8 @@ http_object/test_full_uri
 http_object/test_scheme
 http_object/test_host
 http_object/test_port
-http_object/test_query_string
-http_object/test_query_parsed
+http_object/test_query_string >> ?key=val&num=42
+http_object/test_query_parsed >> ?key=val&num=42
 http_object/test_is_secure
 http_object/test_http_protocol
 http_object/test_http_protocol_version

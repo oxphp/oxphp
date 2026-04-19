@@ -7,6 +7,10 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 
+# Exported so suite curl_args (evaluated in assertions.sh) can reference
+# fixtures via a portable host path, e.g. `-F "file=@$FIXTURES_DIR/small.txt"`.
+export FIXTURES_DIR="${TESTS_DIR}/fixtures/uploads"
+
 # ── Colors ───────────────────────────────────────────────────
 if [ -t 1 ]; then
     RED='\033[0;31m'
@@ -118,16 +122,19 @@ http_request() {
     http_code=$(curl -s -o "$tmp_body" -D "$tmp_headers" -w '%{http_code}' \
         --max-time 15 ${curl_flags[@]+"${curl_flags[@]}"} "$@" "$url" 2>/dev/null) || http_code="000"
 
-    local body headers_raw
-    body=$(cat "$tmp_body" 2>/dev/null || echo "")
-    headers_raw=$(cat "$tmp_headers" 2>/dev/null || echo "")
-    rm -f "$tmp_headers" "$tmp_body"
-
+    # Read body + headers inside python to preserve binary bodies (PNG, etc)
+    # and any NUL bytes that would be truncated by shell command substitution.
     python3 -c "
 import json, sys
 status = int(sys.argv[1])
-body = sys.argv[2]
-headers_raw = sys.argv[3]
+with open(sys.argv[2], 'rb') as f:
+    body_bytes = f.read()
+try:
+    body = body_bytes.decode('utf-8')
+except UnicodeDecodeError:
+    body = body_bytes.decode('latin-1')
+with open(sys.argv[3], 'r', encoding='utf-8', errors='replace') as f:
+    headers_raw = f.read()
 headers = {}
 for line in headers_raw.split('\n'):
     line = line.strip()
@@ -135,7 +142,9 @@ for line in headers_raw.split('\n'):
         key, _, value = line.partition(': ')
         headers[key.lower().strip()] = value.strip()
 print(json.dumps({'status': status, 'headers': headers, 'body': body}, ensure_ascii=False))
-" "$http_code" "$body" "$headers_raw"
+" "$http_code" "$tmp_body" "$tmp_headers"
+
+    rm -f "$tmp_headers" "$tmp_body"
 }
 
 # get_mapped_port <profile>

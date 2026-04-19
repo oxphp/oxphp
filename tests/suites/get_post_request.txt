@@ -1,12 +1,12 @@
 # profile: default
 # description: $_GET, $_POST, $_REQUEST parsing
 
-get_post_request/test_get_simple
-get_post_request/test_get_array
-get_post_request/test_get_nested
-get_post_request/test_get_encoded
-get_post_request/test_get_empty_value
-get_post_request/test_get_no_value
+get_post_request/test_get_simple >> ?a=1&b=2
+get_post_request/test_get_array >> ?tags%5B%5D=php&tags%5B%5D=rust
+get_post_request/test_get_nested >> ?user%5Bname%5D=dio&user%5Bage%5D=30
+get_post_request/test_get_encoded >> ?q=hello%20world
+get_post_request/test_get_empty_value >> ?key=
+get_post_request/test_get_no_value >> ?key
 get_post_request/test_post_urlencoded | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "name=dio&lang=php" | |
 get_post_request/test_post_multipart | POST | -F "name=dio" -F "lang=php" | |
-get_post_request/test_request_merge | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "post_key=post_val" | |
+get_post_request/test_request_merge >> ?get_key=get_val | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "post_key=post_val" | |

@@ -4,6 +4,6 @@
 routing/test_direct_php_file
 routing/test_nested_directory
 routing/test_index_fallback
-routing/test_not_found | GET | | 404 |
-routing/test_path_traversal | GET | | 404 |
+routing/test_not_found >> /nonexistent-path-for-404-test | GET | | 404 |
+routing/test_path_traversal >> /../../../etc/passwd | GET | | 404 |
 routing/test_percent_decoding

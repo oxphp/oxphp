@@ -9,7 +9,7 @@ headers/test_header_replace | GET | | 200 | x-foo:baz
 headers/test_header_no_replace
 headers/test_header_remove
 headers/test_header_remove_then_readd | GET | | 200 | x-cycle:v2
-headers/test_content_type_header | GET | | 200 | content-type:text/plain
+headers/test_content_type_header | GET | | 200 | content-type:~text/plain
 headers/test_location_redirect | GET | | 302 | location:exists
 headers/test_headers_list
 headers/test_server_header_present | GET | | 200 | server:OxPHP

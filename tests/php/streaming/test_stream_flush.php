@@ -1,12 +1,9 @@
 <?php
-
+// Runner-side test: oxphp_stream_flush() forces the response into streaming
+// mode. Does NOT use TestCase/done() because done() calls header() after
+// flushing, which raises "headers already sent". The runner asserts on
+// HTTP status and the streaming transfer encoding.
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
-
-$t = new TestCase('stream_flush', 'streaming');
-
+echo 'STREAMED';
 oxphp_stream_flush();
-$t->assertTrue('oxphp_is_streaming() === true after oxphp_stream_flush()', oxphp_is_streaming() === true);
-
-$t->done();

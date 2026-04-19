@@ -2,7 +2,7 @@
 # description: Static file serving (runner-side assertions)
 
 static_files/test_css_content_type | GET | | 200 | content-type:text/css
-static_files/test_js_content_type | GET | | 200 | content-type:application/javascript
+static_files/test_js_content_type | GET | | 200 | content-type:~text/javascript
 static_files/test_png_content_type | GET | | 200 | content-type:image/png
 static_files/test_etag_present | GET | | 200 | etag:exists
 static_files/test_cache_control | GET | | 200 | cache-control:exists

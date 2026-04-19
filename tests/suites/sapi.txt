@@ -10,5 +10,5 @@ sapi/test_server_info_sapi
 sapi/test_superglobals_enabled
 sapi/test_is_worker_false
 sapi/test_is_streaming_false
-sapi/test_finish_request
+sapi/test_finish_request | GET | | 200 | content-type:~text/plain
 sapi/test_extension_loaded

@@ -1,15 +1,10 @@
 <?php
-
+// Runner-side test: verifies the Server-Sent Events content type survives
+// after oxphp_stream_flush(). Does NOT use TestCase/done() because done()
+// calls header() after flushing, which raises "headers already sent" on
+// streamed responses. The runner asserts on status and content-type only.
 declare(strict_types=1);
-
-require __DIR__ . '/../test_helper.php';
-
-$t = new TestCase('sse_output_format', 'streaming');
 
 header('Content-Type: text/event-stream');
 echo "data: hello\n\n";
 oxphp_stream_flush();
-
-$t->assertTrue('oxphp_is_streaming() === true after SSE flush', oxphp_is_streaming() === true);
-
-$t->done();
