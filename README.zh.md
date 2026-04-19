@@ -302,6 +302,8 @@ flowchart LR
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 队列中允许的最大待处理异步任务数；队列满时拒绝任务 |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
+| `PHP_DENY_DIRS` | *（未设置）* | 禁止执行 PHP 的目录 glob 模式。仅限传统模式。示例：`/uploads/**,/cache/**` |
+| `PHP_DENY_FALLBACK` | `404` | HTTP 状态码（400–599）或指向 PHP 回退脚本的路径。命中 `PHP_DENY_DIRS` 时返回该状态码（可与 `ERROR_PAGES_DIR` 中的自定义 HTML 配合），或在 `$_SERVER` 中携带 `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` 执行回退脚本 |
 
 ### OpenTelemetry（`plugin-otel` 特性）
 
@@ -325,6 +327,17 @@ flowchart LR
 | `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获、PHP 追踪 SDK。需要 `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的查询将标记 `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中 |
+
+### 加固遗留 PHP 应用
+
+`PHP_DENY_DIRS` 在传统路由模式下锁定可写的公共子目录 —— 这是上传 PHP shell（WordPress、较旧的 CMS）的典型攻击面。
+
+```bash
+# 阻止遗留 PHP 应用可写公共子目录下的 PHP 执行。
+export PHP_DENY_DIRS=/uploads/**,/cache/**,/tmp/**
+export PHP_DENY_FALLBACK=403
+# 可选：搭配 ERROR_PAGES_DIR=/var/errors 提供自定义 403.html
+```
 
 ---
 

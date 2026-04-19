@@ -84,6 +84,7 @@ curl http://localhost:9090/metrics
 | 指标 | 类型 | 描述 |
 |--------|------|-------------|
 | `oxphp_rate_limited_total` | counter | 被限流器拒绝的请求数（返回 429） |
+| `oxphp_php_deny_total` | counter | 被 `PHP_DENY_DIRS` 阻止的请求数（`.php` 执行被拒绝）。参见 [PHP 执行拒绝名单](../security/php-deny-dirs.md) |
 
 ## 静态文件缓存指标
 

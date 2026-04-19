@@ -61,15 +61,28 @@ const ROUTE_CACHE_CAPACITY: usize = 10_000;
 /// Result of route resolution.
 #[derive(Debug, Clone)]
 pub enum RouteResult {
-    /// Execute a PHP script. Optional `path_info` carries the extra path
-    /// after the `.php` segment (e.g. `/user/42` for `/app.php/user/42`),
-    /// or the full original URI when a mode rewrites everything to a single
-    /// front controller (Framework mode).
-    Execute(PathBuf, Option<String>),
+    /// Execute a PHP script. `path_info` carries the extra path after the
+    /// `.php` segment (PATH_INFO splitting). On the deny-fallback path
+    /// `path_info` is always `None` — the original URI lives in
+    /// `denied_meta.path` so it is not duplicated.
+    /// `denied_meta` is `Some` only when this `Execute` is the PHP-script
+    /// fallback for a `PHP_DENY_DIRS` match — drives `$_SERVER` enrichment.
+    /// `Arc` keeps the variant 8-byte-tagged in the common (None) case and
+    /// turns the rare-path clone into one atomic increment.
+    Execute(
+        PathBuf,
+        Option<String>,
+        Option<Arc<crate::config::DeniedMeta>>,
+    ),
     /// Serve a static file.
     Serve(PathBuf),
     /// File not found.
     NotFound,
+    /// Request was blocked by `PHP_DENY_DIRS` with an HTTP-status fallback.
+    /// `ErrorPagesHandler` may substitute a body. Kept as a dedicated variant
+    /// (not a generic `StatusCode`) so `connection.rs` can count denials
+    /// without guessing about the source of the status code.
+    Denied(u16),
 }
 
 /// Classification of a sanitized URI path performed once in the common layer
@@ -90,6 +103,7 @@ pub(crate) struct ResolveCtx<'a> {
     pub document_root: &'a Path,
     pub file_cache: &'a Arc<FileCache>,
     pub worker_route: Option<&'a RouteResult>,
+    pub php_deny: Option<&'a crate::config::PhpDeny>,
 }
 
 /// Routing configuration with mode dispatch and caching layers.
@@ -98,6 +112,7 @@ pub struct RouteConfig {
     canonical_root: PathBuf,
     mode: Mode,
     worker_route: Option<RouteResult>,
+    php_deny: Option<crate::config::PhpDeny>,
     /// Cache of resolved routes keyed by URI path. `Mutex` rather than
     /// `RwLock` because `std::sync::RwLock` wraps `pthread_rwlock_t` on
     /// Linux and is ~2–3× slower than a futex-based `Mutex` in the
@@ -135,11 +150,18 @@ impl RouteConfig {
             Some(name) => Mode::Spa(SpaRouter::new(&document_root, name)),
         };
 
+        let php_deny =
+            crate::config::PhpDeny::from_env(&canonical_root, config.index_file.as_deref())
+                .unwrap_or_else(|e| {
+                    panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
+                });
+
         Self {
             document_root,
             canonical_root,
             mode,
             worker_route: None,
+            php_deny,
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
@@ -164,7 +186,7 @@ impl RouteConfig {
     /// Set the worker file for worker mode routing. When set, all unmatched
     /// requests fall back to this PHP file before returning NotFound.
     pub fn set_worker_file(&mut self, path: PathBuf) {
-        self.worker_route = Some(RouteResult::Execute(path, None));
+        self.worker_route = Some(RouteResult::Execute(path, None, None));
     }
 
     /// Resolve a URI path to a route result using the file cache.
@@ -235,6 +257,7 @@ impl RouteConfig {
             document_root: &self.document_root,
             file_cache,
             worker_route: self.worker_route.as_ref(),
+            php_deny: self.php_deny.as_ref(),
         };
 
         let result = match classify_uri_with_php(sanitized, has_php) {
@@ -256,11 +279,11 @@ impl RouteConfig {
         // the canonical document root. The worker file is an admin-configured
         // trusted path that may sit outside DOCUMENT_ROOT — skip it.
         let result = match &result {
-            RouteResult::Serve(path) | RouteResult::Execute(path, _) => {
+            RouteResult::Serve(path) | RouteResult::Execute(path, _, _) => {
                 let is_worker = self
                     .worker_route
                     .as_ref()
-                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf, _) if wf == path));
+                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf, _, _) if wf == path));
                 if !is_worker && !self.validate_path(path, file_cache).await {
                     tracing::warn!(
                         path = %path.display(),
@@ -271,11 +294,24 @@ impl RouteConfig {
                     result
                 }
             }
-            RouteResult::NotFound => result,
+            RouteResult::NotFound | RouteResult::Denied(_) => result,
         };
 
         let arc = Arc::new(result);
-        self.cache_put(uri_path, &arc);
+        // Skip the route cache for `PHP_DENY_DIRS` results. Both `Denied`
+        // and `Execute(_, _, Some(_))` are produced from attacker-controlled
+        // URIs with effectively unbounded cardinality — caching them would
+        // let an attacker spraying random `/uploads/{nonce}.php` evict hot
+        // legitimate entries from the LRU. Re-running `resolve_php` on a
+        // repeat denial costs only the `globset` byte scan; no disk I/O,
+        // no syscall.
+        let should_cache = !matches!(
+            &*arc,
+            RouteResult::Denied(_) | RouteResult::Execute(_, _, Some(_))
+        );
+        if should_cache {
+            self.cache_put(uri_path, &arc);
+        }
         arc
     }
 

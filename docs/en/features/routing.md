@@ -179,6 +179,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 - **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
+- **PHP execution deny-list** — in Traditional mode, `PHP_DENY_DIRS` blocks `.php` execution inside configured glob patterns (e.g. `/uploads/**`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny-dirs.md)
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 

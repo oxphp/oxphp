@@ -152,7 +152,7 @@ async fn test_traditional_direct_php_file() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/about.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, None) => {
+        RouteResult::Execute(path, None, None) => {
             assert!(path.ends_with("about.php"), "got {:?}", path);
         }
         other => panic!("Expected Execute(about.php), got {:?}", other),
@@ -166,7 +166,7 @@ async fn test_traditional_root_prefers_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/", &cache).await;
     match &*result {
-        RouteResult::Execute(path, _) => {
+        RouteResult::Execute(path, _, _) => {
             assert!(path.ends_with("index.php"), "got {:?}", path);
         }
         other => panic!("Expected Execute(index.php), got {:?}", other),
@@ -192,7 +192,7 @@ async fn test_traditional_missing_static_falls_back_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/nonexistent.txt", &cache).await;
     match &*result {
-        RouteResult::Execute(path, _) => {
+        RouteResult::Execute(path, _, _) => {
             assert!(path.ends_with("index.php"), "got {:?}", path);
         }
         other => panic!("Expected fallback to index.php, got {:?}", other),
@@ -206,7 +206,7 @@ async fn test_traditional_missing_no_extension_falls_back_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/some/unknown/route", &cache).await;
     match &*result {
-        RouteResult::Execute(path, _) => {
+        RouteResult::Execute(path, _, _) => {
             assert!(path.ends_with("index.php"), "got {:?}", path);
         }
         other => panic!("Expected fallback to index.php, got {:?}", other),
@@ -230,7 +230,7 @@ async fn test_traditional_split_path_info_basic() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/about.php/user/42", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("about.php"), "got {:?}", path);
             assert_eq!(pi, "/user/42");
         }
@@ -247,7 +247,7 @@ async fn test_traditional_split_path_info_deep() {
         .resolve_request("/index.php/api/v2/users/42/profile", &cache)
         .await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/api/v2/users/42/profile");
         }
@@ -263,7 +263,7 @@ async fn test_traditional_split_path_info_missing_script_falls_back() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/missing.php/foo", &cache).await;
     match &*result {
-        RouteResult::Execute(path, _) => {
+        RouteResult::Execute(path, _, _) => {
             assert!(path.ends_with("index.php"));
         }
         other => panic!("Expected fallback to index.php, got {:?}", other),
@@ -302,7 +302,7 @@ async fn test_traditional_directory_with_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/sub", &cache).await;
     match &*result {
-        RouteResult::Execute(path, None) => {
+        RouteResult::Execute(path, None, None) => {
             assert!(path.ends_with("sub/index.php"), "got {:?}", path);
         }
         other => panic!("Expected Execute(sub/index.php), got {:?}", other),
@@ -318,7 +318,7 @@ async fn test_framework_unknown_route_goes_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/unknown/path", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/unknown/path");
         }
@@ -333,7 +333,7 @@ async fn test_framework_root_goes_to_index_php_with_slash_path_info() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/");
         }
@@ -350,7 +350,7 @@ async fn test_framework_direct_php_rewrites_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/about.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/about.php");
         }
@@ -366,7 +366,7 @@ async fn test_framework_direct_index_php_allowed() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/index.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/index.php");
         }
@@ -401,7 +401,7 @@ async fn test_framework_php_path_info() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/api.php/v1/users", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/api.php/v1/users");
         }
@@ -469,7 +469,7 @@ async fn test_spa_existing_php_executes() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/about.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, None) => {
+        RouteResult::Execute(path, None, None) => {
             assert!(path.ends_with("about.php"));
         }
         other => panic!("Expected Execute(about.php), got {:?}", other),
@@ -816,7 +816,7 @@ async fn test_resolve_well_known_missing_file_in_framework_rewrites() {
         .await;
     // no extension → resolve_no_extension → rewrite to index.php
     match &*result {
-        RouteResult::Execute(path, Some(pi)) => {
+        RouteResult::Execute(path, Some(pi), _) => {
             assert!(path.ends_with("index.php"));
             assert_eq!(pi, "/.well-known/openid-configuration");
         }
@@ -835,7 +835,7 @@ async fn test_resolve_well_known_missing_file_traditional_falls_back() {
         .await;
     // Traditional: no extension → resolve_no_extension → root fallback → index.php exists
     match &*result {
-        RouteResult::Execute(path, _) => {
+        RouteResult::Execute(path, _, _) => {
             assert!(path.ends_with("index.php"));
         }
         other => panic!("Expected fallback to index.php, got {:?}", other),
@@ -994,7 +994,7 @@ async fn test_resolve_executes_php_with_cjk_path() {
         .resolve_request("/%E6%96%87%E4%BB%B6/index.php", &cache)
         .await;
     match &*result {
-        RouteResult::Execute(path, None) => {
+        RouteResult::Execute(path, None, None) => {
             assert!(path.to_string_lossy().contains("文件"));
             assert!(path.ends_with("index.php"));
         }
@@ -1034,4 +1034,151 @@ async fn test_resolve_blocks_percent_encoded_dotfile_after_unicode() {
         )
         .await;
     assert!(matches!(*result, RouteResult::NotFound));
+}
+
+#[cfg(test)]
+mod php_deny_integration {
+    use super::*;
+    use crate::config::ServerConfig;
+    use crate::server::response::static_file::FileCache;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    // Shared lock — the env-var-driven PhpDeny loader is process-global.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn setup(
+        dir_layout: &[(&str, &[u8])],
+        env: &[(&str, Option<&str>)],
+        index_file: Option<&str>,
+    ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
+        // Hold the lock for the full setup so env mutations don't race other tests.
+        // Guard is dropped on function exit — by then RouteConfig has captured
+        // whatever PhpDeny it needed, so the env can be safely restored.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = TempDir::new().unwrap();
+        for (rel, body) in dir_layout {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+
+        // Save previous env, apply overrides.
+        let prev: Vec<(String, Option<String>)> = env
+            .iter()
+            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in env {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+
+        let cfg = ServerConfig {
+            listen_addr: "127.0.0.1:0".to_string(),
+            document_root: dir.path().to_path_buf(),
+            index_file: index_file.map(|s| s.to_string()),
+            header_read_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(120),
+        };
+        let cache = Arc::new(FileCache::new(1024));
+        let rc = super::RouteConfig::new(&cfg);
+
+        // Restore env so other tests aren't polluted.
+        for (k, prev_val) in prev {
+            match prev_val {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+
+        (dir, cache, rc)
+    }
+
+    #[tokio::test]
+    async fn deny_status_blocks_uploaded_php() {
+        let (_dir, cache, rc) = setup(
+            &[("uploads/shell.php", b"<?php echo 'pwned';")],
+            &[
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        assert!(matches!(&*result, RouteResult::Denied(404)));
+    }
+
+    #[tokio::test]
+    async fn deny_status_403_explicit() {
+        let (_dir, cache, rc) = setup(
+            &[("uploads/shell.php", b"<?php echo 'pwned';")],
+            &[
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", Some("403")),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        assert!(matches!(&*result, RouteResult::Denied(403)));
+    }
+
+    #[tokio::test]
+    async fn deny_status_blocks_nonexistent_php_no_existence_oracle() {
+        let (_dir, cache, rc) = setup(
+            &[], // no file on disk
+            &[
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/ghost.php", &cache).await;
+        // Must be StatusCode (deny), not NotFound (would be an existence oracle).
+        assert!(matches!(&*result, RouteResult::Denied(404)));
+    }
+
+    #[tokio::test]
+    async fn deny_leaves_static_files_alone() {
+        let (_dir, cache, rc) = setup(
+            &[("uploads/image.png", b"\x89PNG")],
+            &[
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/image.png", &cache).await;
+        assert!(matches!(&*result, RouteResult::Serve(_)));
+    }
+
+    #[tokio::test]
+    async fn deny_script_fallback_returns_execute_with_meta() {
+        let (_dir, cache, rc) = setup(
+            &[
+                ("uploads/shell.php", b"<?php echo 'pwned';"),
+                ("_security/denied.php", b"<?php http_response_code(404);"),
+            ],
+            &[
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", Some("/_security/denied.php")),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        match &*result {
+            RouteResult::Execute(_, path_info, Some(meta)) => {
+                // path_info is None on the deny-script path — the original
+                // URI lives in `meta.path` only (no duplicate String alloc).
+                assert!(path_info.is_none());
+                assert_eq!(meta.path, "uploads/shell.php");
+                assert_eq!(meta.pattern, "uploads/**");
+                assert_eq!(meta.fallback_script_uri, "/_security/denied.php");
+            }
+            other => panic!("expected Execute with DeniedMeta, got {other:?}"),
+        }
+    }
 }

@@ -78,6 +78,12 @@ pub struct ScriptRequest {
     /// Original host from trusted proxy (e.g. "example.com:8443").
     /// Set from `Forwarded: host=` or `X-Forwarded-Host` header.
     pub forwarded_host: Option<String>,
+    /// Metadata for `$_SERVER['OXPHP_DENIED_*']` population — set only when
+    /// this request was routed here by the `PHP_DENY_DIRS` fallback.
+    /// Boxed behind `Arc` so the field stays 8 bytes when `None` (the
+    /// dominant case) and the rare-path clone is one atomic increment
+    /// instead of three String clones.
+    pub denied_meta: Option<Arc<crate::config::DeniedMeta>>,
 }
 
 /// A PHP error captured during script execution (E_ERROR/E_WARNING/E_NOTICE, exceptions).

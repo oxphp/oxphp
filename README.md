@@ -302,6 +302,8 @@ All settings are via environment variables — no config files required.
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
+| `PHP_DENY_DIRS` | *(unset)* | Glob patterns of directories where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**` |
+| `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_DIRS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
 
 ### OpenTelemetry (`plugin-otel` feature)
 
@@ -325,6 +327,17 @@ All settings are via environment variables — no config files required.
 | `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP tracing SDK. Requires `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold (ms). Queries above this get `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in `db.params` span attribute |
+
+### Hardening legacy PHP apps
+
+`PHP_DENY_DIRS` locks down writable public subdirectories in Traditional routing mode — the typical attack surface for uploaded PHP shells (WordPress, older CMSes).
+
+```bash
+# Block PHP execution in writable public subdirs of a legacy PHP app.
+export PHP_DENY_DIRS=/uploads/**,/cache/**,/tmp/**
+export PHP_DENY_FALLBACK=403
+# Optional: pair with ERROR_PAGES_DIR=/var/errors for a custom 403.html
+```
 
 ---
 

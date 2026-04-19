@@ -58,7 +58,7 @@ impl FrameworkRouter {
             s
         };
 
-        RouteResult::Execute(self.index_file_path.clone(), Some(path_info))
+        RouteResult::Execute(self.index_file_path.clone(), Some(path_info), None)
     }
 }
 

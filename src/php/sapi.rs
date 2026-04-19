@@ -456,7 +456,42 @@ pub fn set_request_data(req: &ScriptRequest) {
 
             // SCRIPT_NAME, PHP_SELF, PATH_INFO
             let uri_path = req.uri.path();
-            if let Some(ref path_info) = req.path_info {
+            if let Some(meta) = &req.denied_meta {
+                // Deny-fallback: a different script runs than the URI requested.
+                // SCRIPT_NAME must identify the fallback script (CGI contract),
+                // not the attacker-requested URI. PATH_INFO carries the original
+                // sanitized URI (with leading `/` per CGI/1.1 §4.1.6) so the
+                // fallback can route on it. OXPHP_DENIED_* expose matcher
+                // metadata for logging / SIEM integration.
+                //
+                // `fallback_script_uri` is precomputed at config load using
+                // the canonical DOCUMENT_ROOT — deriving it here via
+                // `strip_prefix(&req.document_root)` would be wrong because
+                // the raw `DOCUMENT_ROOT` may differ from its canonical form
+                // (e.g. `/tmp` vs `/private/tmp` on macOS, or any symlinked
+                // deployment), causing a silent fallback to the attacker URI.
+                let script_name = meta.fallback_script_uri.as_str();
+
+                // `original_path` = `/` + sanitized URI. `meta.path` is stored
+                // without the leading slash, so we prepend it once into a
+                // pre-sized buffer instead of paying for `format!`'s
+                // intermediate `Arguments` machinery.
+                let mut original_path = String::with_capacity(meta.path.len() + 1);
+                original_path.push('/');
+                original_path.push_str(&meta.path);
+
+                // `php_self` = `script_name` ++ `original_path`. Same trick.
+                let mut php_self = String::with_capacity(script_name.len() + original_path.len());
+                php_self.push_str(script_name);
+                php_self.push_str(&original_path);
+
+                push_server_var(vars, "SCRIPT_NAME", script_name);
+                push_server_var(vars, "PHP_SELF", &php_self);
+                push_server_var(vars, "DOCUMENT_URI", script_name);
+                push_server_var(vars, "PATH_INFO", &original_path);
+                push_server_var(vars, "OXPHP_DENIED_PATH", &original_path);
+                push_server_var(vars, "OXPHP_DENIED_PATTERN", &meta.pattern);
+            } else if let Some(ref path_info) = req.path_info {
                 // With PATH_INFO splitting: SCRIPT_NAME = URI minus PATH_INFO suffix
                 let script_name = &uri_path[..uri_path.len() - path_info.len()];
                 push_server_var(vars, "SCRIPT_NAME", script_name);

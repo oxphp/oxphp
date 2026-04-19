@@ -1,3 +1,4 @@
+mod php_deny;
 mod proxy;
 mod server;
 mod workers;
@@ -5,6 +6,7 @@ mod workers;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny};
 pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
 pub use workers::{parse_php_workers, WorkerMode};

@@ -66,6 +66,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 
 - [Dot-Path Blocking](security/dot-path-blocking.md) — automatic blocking of hidden files and directories (`.env`, `.git/`, `.htaccess`)
 - [Trusted Proxies](security/trusted-proxies.md) — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust
+- [PHP Execution Deny-List](security/php-deny-dirs.md) — block `.php` execution inside writable public directories (e.g. `/uploads/**`) to defeat uploaded-shell attacks on legacy apps
 
 ## PHP
 
