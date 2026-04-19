@@ -3,5 +3,7 @@ require __DIR__ . '/../test_helper.php';
 $t = new TestCase('header_replace', 'headers');
 header('X-Foo: bar');
 header('X-Foo: baz');
-$t->assertTrue('X-Foo header replaced with baz', true);
+$joined = implode("\n", headers_list());
+$t->assertContains('headers_list contains X-Foo: baz', $joined, 'X-Foo: baz');
+$t->assertNotContains('headers_list drops earlier X-Foo: bar', $joined, 'X-Foo: bar');
 $t->done();
