@@ -48,7 +48,12 @@ run_runner_test() {
     local test_path method curl_args expected_status header_checks
     test_path=$(echo "${fields[0]}" | xargs)
     method=$(echo "${fields[1]:-GET}" | xargs)
-    curl_args=$(echo "${fields[2]:-}" | xargs)
+    # Do not pipe curl_args through xargs — it strips quotes and mangles
+    # shell tokens like `-d ""` or `-H "X: y"`. Trim whitespace via parameter
+    # expansion so embedded quotes survive for the eval below.
+    curl_args="${fields[2]:-}"
+    curl_args="${curl_args#"${curl_args%%[![:space:]]*}"}"
+    curl_args="${curl_args%"${curl_args##*[![:space:]]}"}"
     expected_status=$(echo "${fields[3]:-200}" | xargs)
     header_checks=$(echo "${fields[4]:-}" | xargs)
 
