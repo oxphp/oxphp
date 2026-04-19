@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::{ResolveCtx, RouteResult};
 
@@ -42,7 +43,7 @@ impl TraditionalRouter {
     /// Shared fallback chain: root `/index.php` → `/index.html` → worker → NotFound.
     async fn root_fallback(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
         if ctx.file_cache.is_file(&self.root_index_php_key).await {
-            return RouteResult::Execute(self.root_index_php.clone(), None);
+            return RouteResult::Execute(self.root_index_php.clone(), None, None);
         }
         if ctx.file_cache.is_file(&self.root_index_html_key).await {
             return RouteResult::Serve(self.root_index_html.clone());
@@ -86,7 +87,7 @@ impl TraditionalRouter {
                 } else {
                     None
                 };
-                return Some(RouteResult::Execute(candidate, path_info));
+                return Some(RouteResult::Execute(candidate, path_info, None));
             }
             i = end;
         }
@@ -120,7 +121,7 @@ impl TraditionalRouter {
         if ctx.file_cache.is_dir(&file_key).await {
             let php_idx = file_path.join("index.php");
             if ctx.file_cache.is_file(&php_idx.to_string_lossy()).await {
-                return RouteResult::Execute(php_idx, None);
+                return RouteResult::Execute(php_idx, None, None);
             }
             let html_idx = file_path.join("index.html");
             if ctx.file_cache.is_file(&html_idx.to_string_lossy()).await {
@@ -134,12 +135,40 @@ impl TraditionalRouter {
     }
 
     pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        // PHP_DENY_DIRS check — runs *before* disk I/O so we never leak
+        // existence info via timing. Only applied in Traditional mode; the
+        // router itself is Traditional-specific.
+        if let Some(deny) = ctx.php_deny {
+            if let Some(pattern) = deny.matches(sanitized) {
+                tracing::info!(
+                    path = %sanitized,
+                    pattern = %pattern,
+                    "PHP execution denied by PHP_DENY_DIRS"
+                );
+                return match deny.fallback() {
+                    crate::config::DenyFallback::Status(code) => RouteResult::Denied(*code),
+                    crate::config::DenyFallback::Script { path, uri } => RouteResult::Execute(
+                        path.clone(),
+                        // path_info=None: SAPI reads the original URI from
+                        // `denied_meta.path` instead — avoids a duplicate
+                        // String allocation on the fallback path.
+                        None,
+                        Some(Arc::new(crate::config::DeniedMeta {
+                            path: sanitized.to_string(),
+                            pattern: pattern.to_string(),
+                            fallback_script_uri: uri.clone(),
+                        })),
+                    ),
+                };
+            }
+        }
+
         let file_path = ctx.document_root.join(sanitized);
         let file_key = file_path.to_string_lossy();
 
         // Exact `.php` file on disk
         if ctx.file_cache.is_file(&file_key).await {
-            return RouteResult::Execute(file_path, None);
+            return RouteResult::Execute(file_path, None, None);
         }
 
         // PATH_INFO split — `$uri` contains `.php/` somewhere

@@ -330,6 +330,7 @@ mod tests {
             path_info: None,
             forwarded_proto: None,
             forwarded_host: None,
+            denied_meta: None,
         };
 
         let result = executor.execute(request);

@@ -157,6 +157,9 @@ pub struct Metrics {
     /// Requests rejected by rate limiter (429).
     rate_limited_total: AtomicU64,
 
+    /// Requests denied by PHP_DENY_DIRS.
+    php_deny_total: AtomicU64,
+
     /// Static file cache hits and misses.
     static_cache_hits: AtomicU64,
     static_cache_misses: AtomicU64,
@@ -246,6 +249,7 @@ impl Metrics {
             queue_wait_sum_us: AtomicU64::new(0),
             queue_wait_count: AtomicU64::new(0),
             rate_limited_total: AtomicU64::new(0),
+            php_deny_total: AtomicU64::new(0),
             static_cache_hits: AtomicU64::new(0),
             static_cache_misses: AtomicU64::new(0),
             compressed_responses_total: AtomicU64::new(0),
@@ -337,6 +341,10 @@ impl Metrics {
 
     pub fn rate_limited(&self) {
         self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn php_denied(&self) {
+        self.php_deny_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn static_cache_hit(&self) {
@@ -644,6 +652,17 @@ impl Metrics {
             out,
             "oxphp_rate_limited_total {}",
             self.rate_limited_total.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_php_deny_total Requests blocked by PHP_DENY_DIRS."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_php_deny_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_php_deny_total {}",
+            self.php_deny_total.load(Ordering::Relaxed)
         );
 
         // ── Static file cache ──

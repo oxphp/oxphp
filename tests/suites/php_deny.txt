@@ -1,0 +1,6 @@
+# profile: php_deny
+# description: PHP_DENY_DIRS with default 404 fallback
+
+php_deny/test_deny_blocks_upload_shell >> /uploads/shell.php | GET | | 404 |
+php_deny/test_deny_nonexistent_php >> /uploads/ghost-nosuchfile.php | GET | | 404 |
+php_deny/test_deny_static_still_served >> /uploads/image.png | GET | | 200 |

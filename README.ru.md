@@ -302,6 +302,8 @@ flowchart LR
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Максимум ожидающих асинхронных задач в очереди; задачи отклоняются при заполнении |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
+| `PHP_DENY_DIRS` | *(не задано)* | Glob-паттерны директорий, в которых выполнение PHP запрещено. Только режим Traditional. Пример: `/uploads/**,/cache/**` |
+| `PHP_DENY_FALLBACK` | `404` | HTTP-код (400–599) или путь к PHP-скрипту-фолбэку. При совпадении с `PHP_DENY_DIRS` возвращается статус (с опциональным кастомным HTML из `ERROR_PAGES_DIR`) либо выполняется фолбэк-скрипт с `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` в `$_SERVER` |
 
 ### OpenTelemetry (feature `plugin-otel`)
 
@@ -325,6 +327,17 @@ flowchart LR
 | `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментирование, захват ошибок, PHP tracing SDK. Требуется `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленных запросов (мс). Запросы выше порога получают `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params` |
+
+### Защита унаследованных PHP-приложений
+
+`PHP_DENY_DIRS` закрывает доступные для записи публичные подкаталоги в режиме Traditional — типичную поверхность атаки для залитых PHP-шеллов (WordPress, старые CMS).
+
+```bash
+# Блокируем выполнение PHP в доступных для записи публичных подкаталогах унаследованного приложения.
+export PHP_DENY_DIRS=/uploads/**,/cache/**,/tmp/**
+export PHP_DENY_FALLBACK=403
+# По желанию: в паре с ERROR_PAGES_DIR=/var/errors для кастомной 403.html
+```
 
 ---
 

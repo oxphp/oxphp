@@ -279,9 +279,13 @@ async fn dispatch_request(
 
             (response, PhpExecData::default())
         }
-        RouteResult::Execute(script_path, path_info) => {
+        RouteResult::Execute(script_path, path_info, denied_meta) => {
             let script_path = script_path.clone();
             let path_info = path_info.clone();
+            let denied_meta = denied_meta.clone();
+            if denied_meta.is_some() {
+                server.metrics.php_denied();
+            }
             let is_query = is_query_method(&parts.method);
 
             // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2
@@ -379,6 +383,7 @@ async fn dispatch_request(
                     .iter()
                     .find(|(k, _)| k == "forwarded_host")
                     .map(|(_, v)| v.clone()),
+                denied_meta,
             };
 
             let queue_start = Instant::now();
@@ -455,6 +460,20 @@ async fn dispatch_request(
                 .body(full_body(Bytes::from_static(b"404 Not Found")))?,
             PhpExecData::default(),
         ),
+        RouteResult::Denied(code) => {
+            // `Denied` is emitted exclusively by the `PHP_DENY_DIRS`
+            // status-fallback path in `routing/traditional.rs`, so the
+            // metric increment here is source-specific by construction.
+            server.metrics.php_denied();
+            (
+                Response::builder()
+                    .status(
+                        StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    )
+                    .body(full_body(Bytes::new()))?,
+                PhpExecData::default(),
+            )
+        }
     };
 
     Ok((response, request_body_size, exec_data))

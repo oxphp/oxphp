@@ -49,7 +49,7 @@ impl SpaRouter {
         // No PATH_INFO split, no fallback to index.html — hard 404.
         let file_path = ctx.document_root.join(sanitized);
         if ctx.file_cache.is_file(&file_path.to_string_lossy()).await {
-            return RouteResult::Execute(file_path, None);
+            return RouteResult::Execute(file_path, None, None);
         }
         RouteResult::NotFound
     }

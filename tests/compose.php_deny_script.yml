@@ -1,0 +1,30 @@
+# PHP_DENY_DIRS with a PHP-script fallback.
+# Denied requests are rewritten to /_security/denied.php, which can read
+# OXPHP_DENIED_PATH and OXPHP_DENIED_PATTERN from $_SERVER and emit its own
+# response body (TestCase JSON in this fixture).
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.php_deny_script.yml up
+services:
+  oxphp-php_deny_script:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PHP_DENY_DIRS: /uploads/**
+      PHP_DENY_FALLBACK: /_security/denied.php
+    volumes:
+      - ./fixtures/php_deny/public:/var/www/html/public
+      - ./php:/var/www/html/public/tests

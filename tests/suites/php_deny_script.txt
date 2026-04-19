@@ -1,0 +1,4 @@
+# profile: php_deny_script
+# description: PHP_DENY_DIRS with PHP script fallback
+
+php_deny/test_deny_script_fallback >> /uploads/shell.php | GET | | 404 |

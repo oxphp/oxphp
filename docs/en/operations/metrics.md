@@ -84,6 +84,7 @@ High queue wait times indicate that all workers are busy and you should increase
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_rate_limited_total` | counter | Requests rejected by the rate limiter (returned 429) |
+| `oxphp_php_deny_total` | counter | Requests blocked by `PHP_DENY_DIRS` (`.php` execution denied). See [PHP Execution Deny-List](../security/php-deny-dirs.md) |
 
 ## Static File Cache Metrics
 
