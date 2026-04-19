@@ -1075,6 +1075,11 @@ unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
 
 // ─── Header Handling ────────────────────────────────────────
 
+// Return-value bit flags for sapi_module.header_handler (php-src/main/SAPI.h).
+// SAPI_HEADER_ADD tells PHP to append the header into SG(sapi_headers).headers
+// so builtins like headers_list() / apache_response_headers() can see it.
+const SAPI_HEADER_ADD_TO_LIST: c_int = 1 << 0;
+
 unsafe extern "C" fn oxphp_header_handler(
     sapi_header: *mut sapi_header_struct,
     op: sapi_header_op_enum,
@@ -1116,30 +1121,34 @@ unsafe extern "C" fn oxphp_header_handler(
                 r.borrow_mut()
                     .headers
                     .retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+                0
             }
             sapi_header_op_enum::SAPI_HEADER_REPLACE | sapi_header_op_enum::SAPI_HEADER_ADD => {
-                if let Some(colon_pos) = header_str.find(':') {
-                    let name = header_str[..colon_pos].trim().to_string();
-                    let value = header_str[colon_pos + 1..].trim().to_string();
+                // PHP pre-removes prior occurrences for REPLACE in sapi_header_op() before
+                // dispatching here, so both arms only decide append-or-not.
+                let Some(colon_pos) = header_str.find(':') else {
+                    // Malformed header (no colon): skip both our list and PHP's sapi_headers
+                    // so headers_list() stays consistent with what goes on the wire.
+                    return 0;
+                };
+                let name = header_str[..colon_pos].trim().to_string();
+                let value = header_str[colon_pos + 1..].trim().to_string();
 
-                    // Auto-detect SSE: enable streaming when PHP sets Content-Type: text/event-stream
-                    if name.eq_ignore_ascii_case("content-type")
-                        && value.contains("text/event-stream")
-                    {
-                        bindings::oxphp_bridge_set_stream_mode(true);
-                    }
-
-                    let mut resp = r.borrow_mut();
-                    if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
-                        resp.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
-                    }
-                    resp.headers.push((name, value));
+                // Auto-detect SSE: enable streaming when PHP sets Content-Type: text/event-stream
+                if name.eq_ignore_ascii_case("content-type") && value.contains("text/event-stream")
+                {
+                    bindings::oxphp_bridge_set_stream_mode(true);
                 }
-            }
-            _ => {}
-        }
 
-        0
+                let mut resp = r.borrow_mut();
+                if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
+                    resp.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+                }
+                resp.headers.push((name, value));
+                SAPI_HEADER_ADD_TO_LIST
+            }
+            _ => 0,
+        }
     })
 }
 
