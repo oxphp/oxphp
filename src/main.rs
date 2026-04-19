@@ -30,13 +30,18 @@ fn main() -> Result<(), types::BoxError> {
     // Handle CLI flags before any expensive startup (plugin init, PHP MINIT,
     // Tokio runtime, listener bind). Returns only for the `Run` command;
     // terminal commands (--help, --version, `config --check`, bad args) exit
-    // directly from inside dispatch().
+    // directly from inside dispatch() with plain-text UX output.
     cli::dispatch();
+
+    // JSON logging active from here on — every subsequent startup error is
+    // structured. Guard held in main() so the non-blocking writer drains on
+    // normal shutdown and the tokio runtime panic path alike.
+    let _log_guard = logging::init()?;
 
     let mut config = Arc::new(match config::Config::from_env() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("oxphp: config error: {e}");
+            tracing::error!(error = %e, "config error");
             std::process::exit(1);
         }
     });
@@ -186,8 +191,6 @@ async fn async_main(
     // Register fiber scheduler callbacks (try_recv, prepare_request)
     #[cfg(feature = "php")]
     oxphp::php::sapi::register_fiber_callbacks();
-
-    let _log_guard = logging::init(&config.log_level)?;
 
     let mode = if config.worker_file.is_some() {
         "worker"

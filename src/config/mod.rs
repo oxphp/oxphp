@@ -160,9 +160,9 @@ impl Config {
             Ok("error") => AccessLogLevel::Error,
             Ok("") | Err(_) => AccessLogLevel::Off,
             Ok(other) => {
-                eprintln!(
-                    "Warning: unknown ACCESS_LOG value {:?}, expected \"all\", \"error\", or empty — defaulting to off",
-                    other
+                tracing::warn!(
+                    value = %other,
+                    "unknown ACCESS_LOG value, expected \"all\", \"error\", or empty — defaulting to off"
                 );
                 AccessLogLevel::Off
             }
