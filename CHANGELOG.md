@@ -13,6 +13,10 @@ All notable changes to OxPHP are documented in this file.
   - `OxPHP\BorrowedProxy` → `OxPHP\Async\BorrowedProxy`
 - Async functions (`oxphp_async`, `oxphp_async_await`, etc.) are now provided by `plugin-async` feature flag. Without it, functions are not available. Function names are unchanged.
 
+### Changed
+
+- `oxphp_request_heartbeat($time)` now also resets PHP's own `max_execution_time` timer to `$time` seconds alongside the server-side deadline. Previously only the server deadline was extended, so long-running scripts could still be killed by Zend's "Maximum execution time exceeded" fatal even after a heartbeat. Scripts that opted out of the PHP timer via `set_time_limit(0)` or `max_execution_time=0` are left alone — the heartbeat does not re-enable a disabled timer.
+
 ## [0.2.0] - 2026-03-27
 
 ### Added

@@ -15,6 +15,7 @@
 #include "ext/json/php_json.h"
 #include "ext/spl/spl_exceptions.h"
 #include "ext/session/php_session.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -984,7 +985,7 @@ PHP_FUNCTION(oxphp_server_info)
 
 /* {{{ oxphp_request_heartbeat(int $time = 10): bool
  * Extend the execution deadline by $time seconds from now.
- * Returns false if $time is non-positive or no deadline is set. */
+ * Returns false if $time is non-positive. */
 PHP_FUNCTION(oxphp_request_heartbeat)
 {
     zend_long time = 10;
@@ -998,11 +999,31 @@ PHP_FUNCTION(oxphp_request_heartbeat)
         RETURN_FALSE;
     }
 
+    /* Clamp $time to INT_MAX up front. zend_set_timeout() takes int, and
+     * time * 1000000 on the server-deadline path would overflow int64 for
+     * values above ~2^43. INT_MAX seconds (~68 years) is already absurd
+     * for a heartbeat, so a single clamp serves both sides. */
+    if (time > INT_MAX) {
+        php_error_docref(NULL, E_WARNING,
+            "oxphp_request_heartbeat(): $time=%lld exceeds INT_MAX; "
+            "clamped to %d seconds",
+            (long long)time, INT_MAX);
+        time = INT_MAX;
+    }
+
     /* Extend deadline by $time seconds from now */
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-    oxphp_bridge_set_deadline(now_us + time * 1000000);
+    oxphp_bridge_set_deadline(now_us + (int64_t)time * 1000000);
+
+    /* Also extend PHP's own max_execution_time timer so Zend doesn't
+     * kill the script with "Maximum execution time exceeded" before the
+     * server deadline is reached. Skip if the script opted out of the
+     * timer entirely (max_execution_time = 0 / set_time_limit(0)). */
+    if (EG(timeout_seconds) > 0) {
+        zend_set_timeout((int)time, /* reset_signals */ 0);
+    }
 
     RETURN_TRUE;
 }
