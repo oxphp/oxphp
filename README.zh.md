@@ -41,10 +41,10 @@
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-> **注意：** 默认情况下，`DOCUMENT_ROOT` 为 `/var/www/html/public`。请将入口脚本（如 `index.php`）放在 `public/` 子目录中。OxPHP 将从该目录提供文件服务，而非 `/var/www/html` 根目录。这与 Laravel、Symfony 和 Slim 的标准目录布局一致。
+> **注意：** 默认情况下，`DOCUMENT_ROOT` 为 `/var/www/html/public` —— 上面的代码片段将应用直接复制到 document root。对于 Laravel、Symfony、Slim 或任何已包含 `public/` 子目录的项目，请改用 `COPY --chown=www-data:www-data . /var/www/html`：框架自带的 `public/` 会对齐默认的 `DOCUMENT_ROOT`。
 
 ```bash
 docker build -t my-app . && docker run -p 80:80 my-app

@@ -41,10 +41,10 @@
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-> **Примечание:** По умолчанию `DOCUMENT_ROOT` равен `/var/www/html/public`. Размещайте точки входа (например, `index.php`) в подкаталоге `public/`. OxPHP раздаёт файлы именно оттуда, а не из корня `/var/www/html`. Это соответствует стандартной структуре Laravel, Symfony и Slim.
+> **Примечание:** По умолчанию `DOCUMENT_ROOT` равен `/var/www/html/public` — пример выше копирует приложение прямо в document root. Для Laravel, Symfony, Slim и любых проектов с собственным подкаталогом `public/` используйте `COPY --chown=www-data:www-data . /var/www/html`: `public/` фреймворка совпадёт с дефолтным `DOCUMENT_ROOT`.
 
 ```bash
 docker build -t my-app . && docker run -p 80:80 my-app

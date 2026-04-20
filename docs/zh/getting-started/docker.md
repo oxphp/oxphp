@@ -14,10 +14,10 @@ OxPHP 专为容器化运行而设计。本指南涵盖使用 Docker 构建、配
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.3.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-这会将应用复制到容器中，并从 `/var/www/html/public` 提供服务。服务器默认监听 `80` 端口。
+这会将应用复制到容器中。默认 `DOCUMENT_ROOT` 为 `/var/www/html/public`；对于 Laravel、Symfony 或任何已包含 `public/` 子目录的项目，请改用 `COPY --chown=www-data:www-data . /var/www/html`，使框架自带的 `public/` 对齐默认值。服务器默认监听 `80` 端口。
 
 ## 多阶段 Dockerfile
 
@@ -103,6 +103,8 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 EXPOSE 80 443
@@ -134,6 +136,8 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 USER www-data
@@ -168,7 +172,7 @@ FROM ghcr.io/oxphp/oxphp:0.3.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 CMD ["oxphp"]
 ```

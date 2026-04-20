@@ -41,10 +41,10 @@ Two lines. That's it.
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-> **Note:** By default, `DOCUMENT_ROOT` is `/var/www/html/public`. Place your entry point scripts (e.g. `index.php`) inside the `public/` subdirectory. OxPHP serves files from there, not from the root of `/var/www/html`. This matches the standard layout of Laravel, Symfony, and Slim.
+> **Note:** By default, `DOCUMENT_ROOT` is `/var/www/html/public` — the snippet above copies your app directly into the document root. For Laravel, Symfony, Slim, or any project that already ships a `public/` subdirectory, use `COPY --chown=www-data:www-data . /var/www/html` instead: the framework's own `public/` lines up with the default `DOCUMENT_ROOT`.
 
 ```bash
 docker build -t my-app . && docker run -p 80:80 my-app
