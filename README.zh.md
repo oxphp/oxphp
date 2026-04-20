@@ -53,6 +53,8 @@ curl http://localhost/
 
 无需 nginx 配置。无需 PHP-FPM 进程池调优。无需进程管理器。只需你的应用。
 
+完整指南请参阅[快速开始](docs/zh/getting-started/quick-start.md)。
+
 ---
 
 ## 为什么选择 OxPHP？

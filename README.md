@@ -53,6 +53,8 @@ curl http://localhost/
 
 No nginx config. No PHP-FPM pool tuning. No process manager. Just your app.
 
+See the full [Quick Start guide](docs/en/getting-started/quick-start.md) for more details.
+
 ---
 
 ## Why OxPHP?
