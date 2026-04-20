@@ -221,7 +221,7 @@ update_analytics($event);
 oxphp_request_heartbeat(int $time = 10): bool
 ```
 
-从调用时刻起将 `REQUEST_TIMEOUT_SECONDS` 截止时间延长 `$time` 秒。在长时间运行的循环中定期调用此函数，以防止 OxPHP 在处理过程中中止请求。
+从调用时刻起将 `REQUEST_TIMEOUT_SECONDS` 截止时间延长 `$time` 秒，同时将 PHP 自身的 `max_execution_time` 定时器重置为 `$time` 秒。在长时间运行的循环中定期调用此函数，可避免 OxPHP 在服务器层面中止请求，也可避免 Zend 抛出 "Maximum execution time exceeded" 致命错误。
 
 **参数：**
 - `$time` — 延长超时截止时间的秒数。默认值：`10`
@@ -229,6 +229,8 @@ oxphp_request_heartbeat(int $time = 10): bool
 **返回值：** 成功时返回 `true`，若 `$time` 为零或负数则返回 `false`。
 
 > **注意：** 每次调用都会相对于当前时间设置新的截止时间，而非相对于原始请求开始时间。在请求的第 100 秒时调用 `oxphp_request_heartbeat(30)`，截止时间将设置为从当前时刻起 30 秒后（即从请求开始起第 130 秒）。
+
+> **注意：** 如果脚本已通过 `set_time_limit(0)` 或 `max_execution_time=0` 禁用 PHP 定时器，`oxphp_request_heartbeat()` 不会重新启用它——PHP 定时器保持禁用状态。
 
 **示例：**
 

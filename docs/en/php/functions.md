@@ -221,7 +221,7 @@ update_analytics($event);
 oxphp_request_heartbeat(int $time = 10): bool
 ```
 
-Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the moment of the call. Call this periodically in long-running loops to prevent OxPHP from killing the request mid-processing.
+Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the moment of the call, and simultaneously resets PHP's execution timer to `$time` seconds. Call this periodically in long-running loops to prevent OxPHP from killing the request mid-processing — either at the server level or via Zend's "Maximum execution time exceeded" fatal.
 
 **Parameters:**
 - `$time` — Seconds to extend the timeout deadline by. Default: `10`
@@ -229,6 +229,8 @@ Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the momen
 **Returns:** `true` on success, `false` if `$time` is zero or negative.
 
 > **Note:** Each call sets a new deadline relative to the current time, not the original request start. Calling `oxphp_request_heartbeat(30)` at the 100-second mark of a request sets the deadline 30 seconds from now (130 seconds from request start).
+
+> **Note:** If the script has already opted out of PHP's execution timer (`set_time_limit(0)` or `max_execution_time=0`), the PHP-side timer is left disabled — `oxphp_request_heartbeat()` will not re-enable it.
 
 **Example:**
 

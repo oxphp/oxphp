@@ -4,3 +4,6 @@
 timeout/test_fast_request_ok
 timeout/test_slow_request_timeout | GET | | 408
 timeout/test_heartbeat_extends
+timeout/test_heartbeat_resets_php_timer
+timeout/test_heartbeat_respects_disabled_php_timer
+timeout/test_heartbeat_clamps_oversized_time
