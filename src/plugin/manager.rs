@@ -24,6 +24,7 @@ pub struct PluginManager {
     config_values: HashMap<String, HashMap<String, serde_json::Value>>,
     metrics_collectors: Vec<Box<dyn PluginMetricsCollector>>,
     internal_routes: HashMap<String, Box<dyn PluginInternalHandler>>,
+    internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)>,
     native_php_functions: Vec<PluginNativeFunctionDef>,
     decorators: Vec<PluginDecoratorDef>,
     php_classes: Vec<PhpClassDef>,
@@ -45,6 +46,7 @@ impl PluginManager {
             config_values: HashMap::new(),
             metrics_collectors: Vec::new(),
             internal_routes: HashMap::new(),
+            internal_route_prefixes: Vec::new(),
             native_php_functions: Vec::new(),
             decorators: Vec::new(),
             php_classes: Vec::new(),
@@ -91,6 +93,7 @@ impl PluginManager {
                 &mut plugin_config,
                 &mut self.metrics_collectors,
                 &mut self.internal_routes,
+                &mut self.internal_route_prefixes,
                 &mut self.native_php_functions,
                 &mut self.decorators,
                 &mut self.php_classes,
@@ -107,6 +110,12 @@ impl PluginManager {
             }
             tracing::info!(name = %name, version = plugin.version(), "Plugin initialized");
         }
+
+        // Sort prefix registry longest-first so longest-prefix-wins dispatch
+        // is a simple linear scan. Called once after every plugin has had a
+        // chance to register its prefixes.
+        self.internal_route_prefixes
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
         Ok(())
     }
@@ -204,12 +213,22 @@ impl PluginManager {
     }
 
     /// Route an internal server request to a plugin handler.
+    /// Exact matches win; otherwise fall back to the longest registered
+    /// prefix (the prefix Vec is sorted descending by length in `init_all`).
     /// Returns None if no plugin owns this path.
     pub fn handle_internal_route(
         &self,
         req: &PluginInternalRequest,
     ) -> Option<http::Response<ResponseBody>> {
-        self.internal_routes.get(req.path).map(|h| h.handle(req))
+        if let Some(h) = self.internal_routes.get(req.path) {
+            return Some(h.handle(req));
+        }
+        for (prefix, h) in &self.internal_route_prefixes {
+            if req.path.starts_with(prefix.as_str()) {
+                return Some(h.handle(req));
+            }
+        }
+        None
     }
 
     /// Take native plugin PHP function definitions (empties the internal vec).
@@ -587,5 +606,109 @@ mod tests {
         let mut dispatcher = EventDispatcher::new();
         manager.init_all(&mut dispatcher).unwrap();
         manager.shutdown_all();
+    }
+
+    #[test]
+    fn test_prefix_route_matches_path_below() {
+        use crate::plugin::handler::PluginInternalRequest;
+        use bytes::Bytes;
+
+        let mut manager = PluginManager::new();
+        manager.internal_route_prefixes.push((
+            "/__test/runs/".into(),
+            Box::new(|_req: &PluginInternalRequest| {
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .body(crate::types::full_body(Bytes::from_static(b"match")))
+                    .unwrap()
+            }),
+        ));
+        let headers = http::HeaderMap::new();
+        let req = PluginInternalRequest {
+            method: &http::Method::GET,
+            path: "/__test/runs/abc-123",
+            headers: &headers,
+            query: None,
+        };
+        let resp = manager.handle_internal_route(&req);
+        assert!(resp.is_some());
+        assert_eq!(resp.unwrap().status(), http::StatusCode::OK);
+    }
+
+    #[test]
+    fn test_exact_route_wins_over_prefix() {
+        use crate::plugin::handler::PluginInternalRequest;
+        use bytes::Bytes;
+
+        let mut manager = PluginManager::new();
+        manager.internal_routes.insert(
+            "/__test/runs".into(),
+            Box::new(|_req: &PluginInternalRequest| {
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("x-match", "exact")
+                    .body(crate::types::full_body(Bytes::new()))
+                    .unwrap()
+            }),
+        );
+        manager.internal_route_prefixes.push((
+            "/__test/".into(),
+            Box::new(|_req: &PluginInternalRequest| {
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("x-match", "prefix")
+                    .body(crate::types::full_body(Bytes::new()))
+                    .unwrap()
+            }),
+        ));
+        let headers = http::HeaderMap::new();
+        let req = PluginInternalRequest {
+            method: &http::Method::GET,
+            path: "/__test/runs",
+            headers: &headers,
+            query: None,
+        };
+        let resp = manager.handle_internal_route(&req).expect("matched");
+        assert_eq!(resp.headers().get("x-match").unwrap(), "exact");
+    }
+
+    #[test]
+    fn test_longest_prefix_wins() {
+        use crate::plugin::handler::PluginInternalRequest;
+        use bytes::Bytes;
+
+        let mut manager = PluginManager::new();
+        manager.internal_route_prefixes.push((
+            "/__test/runs/".into(),
+            Box::new(|_req: &PluginInternalRequest| {
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("x-match", "runs")
+                    .body(crate::types::full_body(Bytes::new()))
+                    .unwrap()
+            }),
+        ));
+        manager.internal_route_prefixes.push((
+            "/__test/".into(),
+            Box::new(|_req: &PluginInternalRequest| {
+                http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header("x-match", "ns")
+                    .body(crate::types::full_body(Bytes::new()))
+                    .unwrap()
+            }),
+        ));
+        manager
+            .internal_route_prefixes
+            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        let headers = http::HeaderMap::new();
+        let req = PluginInternalRequest {
+            method: &http::Method::GET,
+            path: "/__test/runs/abc",
+            headers: &headers,
+            query: None,
+        };
+        let resp = manager.handle_internal_route(&req).expect("matched");
+        assert_eq!(resp.headers().get("x-match").unwrap(), "runs");
     }
 }

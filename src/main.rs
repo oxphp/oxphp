@@ -59,6 +59,8 @@ fn main() -> Result<(), types::BoxError> {
     plugin_manager.add(Box::new(oxphp::plugins::ox_apm::ApmPlugin::new()));
     #[cfg(feature = "plugin-async")]
     plugin_manager.add(Box::new(oxphp::plugins::ox_async::AsyncPlugin::new()));
+    #[cfg(feature = "plugin-profiler")]
+    plugin_manager.add(Box::new(oxphp::plugins::ox_profiler::ProfilerPlugin::new()));
     plugin_manager.init_all(&mut dispatcher)?;
 
     // Apply core flags set by plugins during init (e.g. OTel enables trace context).

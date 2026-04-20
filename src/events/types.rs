@@ -86,6 +86,13 @@ pub struct RequestReceived {
     pub early_response: Option<Response<ResponseBody>>,
     /// Plugin metadata accumulated from plugin handlers.
     pub metadata: Vec<(String, String)>,
+    /// Profiling mode selected by a plugin (e.g. `ox_profiler`), drained into
+    /// `ScriptRequest.profiling_mode` before worker dispatch. `None` means no
+    /// plugin asked for a mode — the executor falls back to `ApmOnly` when
+    /// APM is enabled, else `Off`.
+    pub profiling_mode: Option<crate::profiling::ProfilingMode>,
+    /// Optional run identifier that accompanies the profiling mode decision.
+    pub profiling_run_id: Option<String>,
 }
 
 impl Event for RequestReceived {
@@ -123,8 +130,8 @@ pub struct RequestComplete {
     pub metadata: Vec<(String, String)>,
     /// PHP errors captured during script execution (empty for static files).
     pub php_errors: Vec<crate::types::PhpScriptError>,
-    /// Serialized APM child spans (JSON). None when APM is disabled or no spans.
-    pub apm_spans_json: Option<String>,
+    /// Finalized span tree for the request. `None` when APM is disabled or no spans.
+    pub profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     /// Time spent waiting in the worker queue (microseconds).
     pub queue_wait_us: Option<u64>,
     /// PHP script execution time (microseconds).

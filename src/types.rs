@@ -84,6 +84,14 @@ pub struct ScriptRequest {
     /// dominant case) and the rare-path clone is one atomic increment
     /// instead of three String clones.
     pub denied_meta: Option<Arc<crate::config::DeniedMeta>>,
+    /// Profiling mode selected for this request. The profiler plugin (or any
+    /// future mode-aware plugin) writes this on the Tokio thread via
+    /// `PluginRequestActions::set_profiling_decision`; the worker thread reads
+    /// it and passes it into `ProfilingContext::reset` at RINIT.
+    pub profiling_mode: crate::profiling::ProfilingMode,
+    /// Run identifier minted by the profiler when `ProfileAll` is selected.
+    /// Used by future PRs for storage / export correlation.
+    pub profiling_run_id: Option<String>,
 }
 
 /// A PHP error captured during script execution (E_ERROR/E_WARNING/E_NOTICE, exceptions).
@@ -113,9 +121,9 @@ pub struct ScriptResponse {
     pub stream_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
     /// PHP errors captured during script execution.
     pub errors: Vec<PhpScriptError>,
-    /// Serialized APM child spans (JSON). Populated by SpanStack drain on PHP worker thread.
-    /// None when APM is disabled or no spans were created.
-    pub apm_spans_json: Option<String>,
+    /// Finalized span tree for the request. Produced by `ProfilingContext::finalize()` on the
+    /// PHP worker thread. `None` when APM is disabled or no spans were created.
+    pub profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -127,7 +135,7 @@ impl std::fmt::Debug for ScriptResponse {
             .field("execution_time_us", &self.execution_time_us)
             .field("streaming", &self.stream_rx.is_some())
             .field("errors_count", &self.errors.len())
-            .field("has_apm_spans", &self.apm_spans_json.is_some())
+            .field("has_profile_tree", &self.profile_tree.is_some())
             .finish()
     }
 }
@@ -141,7 +149,7 @@ impl Default for ScriptResponse {
             execution_time_us: 0,
             stream_rx: None,
             errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
         }
     }
 }

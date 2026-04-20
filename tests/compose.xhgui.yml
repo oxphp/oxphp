@@ -1,0 +1,79 @@
+# xhgui profile: profiler + xhgui + mongo, opt-in test.
+# Proves HTTP push + xhgui envelope work end-to-end.
+# Usage: bash tests/run_all.sh --profile=xhgui
+#
+# Image pins (2026-04): xhgui/xhgui:0.23.3 — `latest` (0.24.x) and 0.23.6
+# ship ext-mongodb 2.x which trips xhgui's bundled alcaeus/mongo-php-adapter
+# on the renamed `MongoDB\Driver\ReadPreference::RP_PRIMARY` constant.
+# mongo:7 is the happy path for 0.23.3.
+services:
+  mongo:
+    image: mongo:7
+    restart: "no"
+    networks: [xhgui-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  xhgui:
+    # Pinned to 0.23.3: `latest`/0.23.6 ship ext-mongodb 2.x whose
+    # bundled alcaeus/mongo-php-adapter trips on the renamed
+    # MongoDB\Driver\ReadPreference::RP_PRIMARY constant. Earlier tags
+    # (<0.23.3) additionally shipped a placeholder nginx config that
+    # returns 404 for every URL.
+    image: xhgui/xhgui:0.23.3
+    restart: "no"
+    networks: [xhgui-net]
+    environment:
+      XHGUI_MONGO_HOSTNAME: mongo
+      XHGUI_MONGO_DATABASE: xhgui
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      # xhgui's run-list page lives at "/". There is no /run/list route.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  oxphp-xhgui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        CARGO_FEATURES: "plugin-apm,plugin-async,plugin-profiler"
+    ports:
+      - "80"
+    networks: [xhgui-net]
+    restart: "no"
+    depends_on:
+      xhgui:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PROFILER_ENABLED: "true"
+      PROFILER_AUTH_TOKEN: "test-token"
+      PROFILER_OUTPUT_DIR: "/tmp/oxphp-profiles"
+      PROFILER_OUTPUT_FORMATS: "xhprof"
+      PROFILER_EXPORT_URL: "http://xhgui/run/import"
+      PROFILER_EXPORT_FORMAT: "xhprof"
+      # Xhgui envelope auto-detects from the /run/import suffix.
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+
+networks:
+  xhgui-net:
+    driver: bridge

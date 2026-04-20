@@ -62,6 +62,12 @@ thread_local! {
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     /// Pending request from non-blocking try_recv, awaiting prepare_received_request().
     static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
+    /// Worker mode: whether the current request started with profiling enabled
+    /// (mode != Off at RINIT). Captured by `setup_request_tls` and read by
+    /// `worker_send_callback` to drive the `do_finalize` formula — mirrors
+    /// the `profiling_active` local in `traditional.rs` across the split
+    /// RINIT/RSHUTDOWN callbacks that worker mode uses.
+    static PROFILING_WAS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Per-promise pending state: oneshot receiver paired with a cancellation flag.
@@ -325,7 +331,7 @@ pub fn try_early_send() -> bool {
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
-                apm_spans_json: None, // early response — spans not finished yet
+                profile_tree: None, // early response — spans not finished yet
             });
             true
         } else {
@@ -370,7 +376,7 @@ pub fn send_streaming_headers() -> bool {
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: Some(chunk_rx),
                 errors: Vec::new(), // Streaming: errors accumulate during stream, not captured here.
-                apm_spans_json: None, // streaming — spans not finished yet
+                profile_tree: None, // streaming — spans not finished yet
             });
             true
         } else {
@@ -1948,6 +1954,30 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 /// # Safety
 /// Called from C code via function pointer.
 unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
+    // Read the captured RINIT profiling flag once up front — mirrors the
+    // `profiling_active` local in traditional.rs across the split
+    // RINIT/RSHUTDOWN callbacks that worker mode uses. Only referenced
+    // when at least one profiling plugin is compiled in.
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    let profiling_active = PROFILING_WAS_ACTIVE.with(|f| f.get());
+
+    // On the early-response paths below we skip full finalize (the response
+    // has already been sent, so profile data can't be attached), but the
+    // bridge may still be in ProfileAll/ApmOnly. Drain and reset it so the
+    // next request on this worker thread starts clean — otherwise the C
+    // observer would keep firing for requests with `profiling_mode=Off`
+    // whose `setup_request_tls` skipped `set_profiling_mode`.
+    #[cfg(feature = "plugin-profiler")]
+    let reset_profiler_bridge_if_dirty = || {
+        if profiling_active
+            || crate::profiling::get_profiling_mode()
+                != crate::profiling::flush::PROFILING_MODE_OFF_RAW
+        {
+            crate::profiling::profiler_rshutdown_flush();
+            crate::profiling::set_profiling_mode(crate::profiling::ProfilingMode::Off);
+        }
+    };
+
     // Cleanup any outstanding async promises from this request
     cleanup_outstanding_promises_callback();
 
@@ -1957,6 +1987,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         close_stream();
         // If early TX was already consumed by streaming headers, we're done
         if was_early_sent() {
+            #[cfg(feature = "plugin-profiler")]
+            reset_profiler_bridge_if_dirty();
             record_worker_request_metrics();
             clear_buffers();
             return 0;
@@ -1965,6 +1997,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // If response was already sent early (finish_request), we're done
     if was_early_sent() {
+        #[cfg(feature = "plugin-profiler")]
+        reset_profiler_bridge_if_dirty();
         record_worker_request_metrics();
         clear_buffers();
         return 0;
@@ -1980,11 +2014,41 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     let body = Bytes::from(raw_output);
     let headers = parse_raw_headers(raw_headers);
 
-    // Drain APM spans from PHP worker thread before sending response
-    #[cfg(feature = "plugin-apm")]
-    let apm_spans_json = crate::plugins::ox_apm::spans::drain_and_serialize();
-    #[cfg(not(feature = "plugin-apm"))]
-    let apm_spans_json: Option<String> = None;
+    // Finalize APM / profiler spans on the PHP worker thread before sending
+    // the response. Mirrors the traditional executor's RSHUTDOWN logic: drain
+    // the C-side ring buffer, finalize the PROFILING_CONTEXT, and reset the
+    // bridge mode so the next request on this worker starts clean. Gated on
+    // the bridge mode (not the initial request mode) so mid-request SDK
+    // promotion via `OxPHP\Profile\start()` is still captured.
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    let profile_tree = {
+        #[cfg(feature = "plugin-profiler")]
+        let do_finalize = profiling_active
+            || crate::profiling::get_profiling_mode()
+                != crate::profiling::flush::PROFILING_MODE_OFF_RAW;
+        #[cfg(not(feature = "plugin-profiler"))]
+        let do_finalize = profiling_active;
+
+        if do_finalize {
+            #[cfg(feature = "plugin-profiler")]
+            crate::profiling::profiler_rshutdown_flush();
+
+            let tree = crate::profiling::PROFILING_CONTEXT.with(|ctx| ctx.borrow_mut().finalize());
+
+            #[cfg(feature = "plugin-profiler")]
+            crate::profiling::set_profiling_mode(crate::profiling::ProfilingMode::Off);
+
+            if tree.is_empty() {
+                None
+            } else {
+                Some(tree)
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(any(feature = "plugin-apm", feature = "plugin-profiler")))]
+    let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
@@ -1995,7 +2059,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
-                apm_spans_json,
+                profile_tree,
             });
         }
     });
@@ -2135,6 +2199,33 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
 
     // Set up SAPI data for the new request
     set_request_data(&req.script);
+
+    // Reset profiling context for the new request and prime the C-side
+    // profiler observer mode — mirrors the traditional executor's RINIT
+    // logic. Worker mode reuses a single `php_request_startup` for the
+    // worker's lifetime, so this is the only place per-request profiling
+    // TLS can be initialized. Skip entirely when the request's mode is
+    // Off so the common case pays no FFI cost.
+    //
+    // Stash the initial `profiling_active` flag in TLS so the
+    // `worker_send_callback` RSHUTDOWN path can match the
+    // `profiling_active || bridge_mode != OFF` formula used by
+    // `traditional.rs`. Always updated, even when the branch below is
+    // skipped, so a prior request's value can't leak into this one.
+    PROFILING_WAS_ACTIVE
+        .with(|f| f.set(req.script.profiling_mode != crate::profiling::ProfilingMode::Off));
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    if req.script.profiling_mode != crate::profiling::ProfilingMode::Off {
+        crate::profiling::PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                req.script.profiling_mode,
+                req.script.trace_id.clone(),
+                req.script.span_id.clone(),
+            );
+        });
+        #[cfg(feature = "plugin-profiler")]
+        crate::profiling::set_profiling_mode(req.script.profiling_mode);
+    }
 
     let start = Instant::now();
     set_early_tx(start, req.response_tx);

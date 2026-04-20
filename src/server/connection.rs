@@ -89,6 +89,8 @@ pub async fn handle_request(
         // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
         // + tracestate + peer_addr + forwarded_proto + forwarded_host ≈ 9 entries
         metadata: Vec::with_capacity(10),
+        profiling_mode: None,
+        profiling_run_id: None,
     };
     server.dispatcher.dispatch(&mut received_event);
 
@@ -99,6 +101,8 @@ pub async fn handle_request(
     // Take ownership — no clone
     let request_id = std::mem::take(&mut received_event.request_id);
     let metadata = std::mem::take(&mut received_event.metadata);
+    let profiling_mode = received_event.profiling_mode;
+    let profiling_run_id = std::mem::take(&mut received_event.profiling_run_id);
 
     // Check for early response (e.g., 429 from rate limiter)
     if let Some(early_resp) = received_event.early_response {
@@ -118,7 +122,7 @@ pub async fn handle_request(
             response_size,
             metadata,
             php_errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
         };
@@ -133,14 +137,21 @@ pub async fn handle_request(
     let path_str = parts.uri.path().to_string();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
-    // Apply request timeout if configured
+    // Apply request timeout if configured. Only one branch runs, so the
+    // `profiling_run_id` can be moved into whichever `dispatch_request` call
+    // is selected — no clone on the hot path.
+    let dispatch = dispatch_request(
+        parts,
+        body,
+        server,
+        remote_addr,
+        &request_id,
+        &metadata,
+        profiling_mode,
+        profiling_run_id,
+    );
     let result = if server.request_timeout > Duration::ZERO {
-        match tokio::time::timeout(
-            server.request_timeout,
-            dispatch_request(parts, body, server, remote_addr, &request_id, &metadata),
-        )
-        .await
-        {
+        match tokio::time::timeout(server.request_timeout, dispatch).await {
             Ok(inner_result) => inner_result,
             Err(_) => {
                 tracing::warn!(
@@ -161,7 +172,7 @@ pub async fn handle_request(
             }
         }
     } else {
-        dispatch_request(parts, body, server, remote_addr, &request_id, &metadata).await
+        dispatch.await
     };
 
     let (response, request_body_size, mut php_exec) = match result {
@@ -221,7 +232,7 @@ pub async fn handle_request(
         response_size,
         metadata,
         php_errors: std::mem::take(&mut php_exec.php_errors),
-        apm_spans_json: php_exec.apm_spans_json.take(),
+        profile_tree: php_exec.profile_tree.take(),
         queue_wait_us: php_exec.queue_wait_us,
         php_exec_us: php_exec.php_exec_us,
     };
@@ -235,11 +246,12 @@ pub async fn handle_request(
 #[derive(Default)]
 struct PhpExecData {
     php_errors: Vec<crate::types::PhpScriptError>,
-    apm_spans_json: Option<String>,
+    profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     queue_wait_us: Option<u64>,
     php_exec_us: Option<u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_request(
     parts: http::request::Parts,
     body: Incoming,
@@ -247,6 +259,8 @@ async fn dispatch_request(
     remote_addr: SocketAddr,
     request_id: &str,
     metadata: &[(String, String)],
+    profiling_mode_override: Option<crate::profiling::ProfilingMode>,
+    profiling_run_id: Option<String>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -358,6 +372,26 @@ async fn dispatch_request(
             request_body_size = body_bytes.len();
             let query_string = parts.uri.query().unwrap_or("").to_string();
 
+            // Profiling mode fallback: if no plugin opted in, default to
+            // ApmOnly when the APM plugin is compiled in (preserves pre-PR
+            // behaviour) and Off otherwise. NB: `plugin-profiler` being in
+            // the default feature set does not change this default —
+            // profiler runs are opt-in per request via trigger
+            // (bearer/header/cookie/sample), so an always-on default would
+            // silently profile every request. The profiler plugin upgrades
+            // the mode to ProfileAll inside on_request_start when a trigger
+            // matches.
+            let profiling_mode = profiling_mode_override.unwrap_or({
+                #[cfg(feature = "plugin-apm")]
+                {
+                    crate::profiling::ProfilingMode::ApmOnly
+                }
+                #[cfg(not(feature = "plugin-apm"))]
+                {
+                    crate::profiling::ProfilingMode::Off
+                }
+            });
+
             let script_request = ScriptRequest {
                 request_id: request_id.to_string(),
                 script_path,
@@ -384,6 +418,8 @@ async fn dispatch_request(
                     .find(|(k, _)| k == "forwarded_host")
                     .map(|(_, v)| v.clone()),
                 denied_meta,
+                profiling_mode,
+                profiling_run_id: profiling_run_id.clone(),
             };
 
             let queue_start = Instant::now();
@@ -435,10 +471,10 @@ async fn dispatch_request(
                 },
             };
 
-            // Move PHP errors and APM spans into typed exec data (no string serialization)
+            // Move PHP errors and profile tree into typed exec data.
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),
-                apm_spans_json: script_response.apm_spans_json.take(),
+                profile_tree: script_response.profile_tree.take(),
                 ..exec_data
             };
 
@@ -549,6 +585,8 @@ mod tests {
             request_id: String::new(),
             early_response: None,
             metadata: Vec::new(),
+            profiling_mode: None,
+            profiling_run_id: None,
         };
 
         handler.handle(&mut event);
@@ -577,6 +615,8 @@ mod tests {
                     request_id: String::new(),
                     early_response: None,
                     metadata: Vec::new(),
+                    profiling_mode: None,
+                    profiling_run_id: None,
                 };
 
                 handler.handle(&mut event);

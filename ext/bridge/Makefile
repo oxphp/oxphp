@@ -7,6 +7,11 @@ PREFIX ?= /usr/local
 PHP_INCLUDES := $(shell php-config --includes 2>/dev/null)
 CFLAGS += $(PHP_INCLUDES)
 
+# Caller-supplied additional flags (e.g. -DOXPHP_WITH_PROFILER=1 when the
+# Cargo `plugin-profiler` feature is active). Appended, not overridden, so
+# env CFLAGS clobbering does not drop the defaults above.
+CFLAGS += $(EXTRA_CFLAGS)
+
 LIBNAME = liboxphp_bridge.so
 OBJECTS = oxphp_bridge.o
 

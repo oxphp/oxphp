@@ -80,6 +80,8 @@ pub struct PluginRequestActions {
     pub(crate) metadata: Vec<(String, String)>,
     pub(crate) early_response: Option<http::Response<ResponseBody>>,
     pub(crate) request_id_override: Option<String>,
+    pub(crate) profiling_mode: Option<crate::profiling::ProfilingMode>,
+    pub(crate) profiling_run_id: Option<String>,
 }
 
 impl PluginRequestActions {
@@ -88,6 +90,8 @@ impl PluginRequestActions {
             metadata: Vec::new(),
             early_response: None,
             request_id_override: None,
+            profiling_mode: None,
+            profiling_run_id: None,
         }
     }
 
@@ -104,6 +108,19 @@ impl PluginRequestActions {
     /// Override the request ID (e.g. with a trace-derived identifier).
     pub fn set_request_id(&mut self, id: String) {
         self.request_id_override = Some(id);
+    }
+
+    /// Select a profiling mode for this request (and record its run id). The
+    /// worker thread reads these fields before calling
+    /// `ProfilingContext::reset`, so a later plugin can still override the
+    /// decision. Typical callers: `ox_profiler` (ProfileAll on trigger hit).
+    pub fn set_profiling_decision(
+        &mut self,
+        mode: crate::profiling::ProfilingMode,
+        run_id: String,
+    ) {
+        self.profiling_mode = Some(mode);
+        self.profiling_run_id = Some(run_id);
     }
 }
 
@@ -200,8 +217,8 @@ pub struct PluginCompleteView<'a> {
     metadata: &'a [(String, String)],
     /// PHP errors captured during script execution (empty for static files).
     pub php_errors: &'a [crate::types::PhpScriptError],
-    /// Serialized APM child spans (JSON). None when APM is disabled or no spans.
-    pub apm_spans_json: Option<&'a str>,
+    /// Finalized span tree for the request. `None` when APM is disabled or no spans.
+    pub profile_tree: Option<&'a std::sync::Arc<crate::profiling::SpanTree>>,
     /// Time spent waiting in the worker queue (microseconds).
     pub queue_wait_us: Option<u64>,
     /// PHP script execution time (microseconds).
@@ -221,7 +238,7 @@ impl<'a> PluginCompleteView<'a> {
         response_size: u64,
         metadata: &'a [(String, String)],
         php_errors: &'a [crate::types::PhpScriptError],
-        apm_spans_json: Option<&'a str>,
+        profile_tree: Option<&'a std::sync::Arc<crate::profiling::SpanTree>>,
         queue_wait_us: Option<u64>,
         php_exec_us: Option<u64>,
     ) -> Self {
@@ -236,7 +253,7 @@ impl<'a> PluginCompleteView<'a> {
             response_size,
             metadata,
             php_errors,
-            apm_spans_json,
+            profile_tree,
             queue_wait_us,
             php_exec_us,
         }

@@ -24,6 +24,7 @@ bytes = "1"
 mime_guess = "2"
 
 # Serialization
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Logging
@@ -52,6 +53,30 @@ dashmap = "6"
 
 # LRU cache
 lru = "0.12"
+
+# Inline small-vector storage. Used by ProfilingContext to keep a
+# seq → local_id map without heap-allocating for the common case
+# of < 32 simultaneously open spans. Already pulled transitively
+# (tokio etc.); listed explicitly to make the direct dep visible.
+smallvec = "1"
+
+# Lock-free Arc swap — used by the profiler filter registry to
+# replace a global Mutex on the BEGIN-event hot path with a
+# copy-on-write snapshot that readers load with a single atomic.
+arc-swap = "1"
+
+# pprof.proto encoding for the profiler exporter. Generated via
+# prost-build at compile time from proto/pprof.proto.
+prost = "0.13"
+
+# Gzip compression. Used by the pprof exporter (Content-Type:
+# application/vnd.google.pprof+proto+gzip) and available for
+# future compressed payloads. Uses the system zlib backend (native
+# C implementation) — ~2× faster than miniz_oxide at the same
+# level, and the Dockerfile already installs `zlib-dev` for other
+# deps. zlib-ng would be marginally faster still but requires
+# cmake, which the Alpine builder image does not install.
+flate2 = { version = "1", default-features = false, features = ["zlib"] }
 
 # Faster synchronization primitives (smaller uncontended cost than std::sync
 # on Linux; used in the file cache's read-heavy hot path)
@@ -96,17 +121,33 @@ opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-clie
 opentelemetry-semantic-conventions = { version = "0.27", optional = true }
 tonic = { version = "0.12", optional = true }
 
+# Profiler plugin deps (optional — used by ox_profiler plugin)
+rand = { version = "0.8", features = ["small_rng", "std_rng"], optional = true }
+subtle = { version = "2.6", optional = true }
+# HTTP client for the optional remote export (PROFILER_EXPORT_URL).
+# rustls-tls keeps the Alpine builder openssl-free (pure-Rust ring
+# backend). Already in [dev-dependencies] for integration tests.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+
 [features]
 default = ["php"]
-php = ["plugin-apm", "plugin-async"]
+php = ["plugin-apm", "plugin-async", "plugin-profiler"]
 plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 plugin-apm = ["plugin-otel"]
 plugin-async = []
+plugin-profiler = ["dep:rand", "dep:subtle", "dep:reqwest"]
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+[build-dependencies]
+# Compiles bundled .proto files into Rust types at build time
+# (pprof.proto for src/profiling/export/pprof.rs).
+# Requires `protoc` on PATH. Alpine: `apk add --no-cache
+# protobuf-dev`. macOS: `brew install protobuf`.
+prost-build = "0.13"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

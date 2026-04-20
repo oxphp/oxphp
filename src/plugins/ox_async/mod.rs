@@ -160,6 +160,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -177,6 +178,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,
@@ -261,6 +263,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -278,6 +281,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,
@@ -313,6 +317,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -330,6 +335,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,
@@ -383,6 +389,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -400,6 +407,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,

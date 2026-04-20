@@ -5,22 +5,33 @@ ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 
+# Toggles -DOXPHP_WITH_PROFILER=1 in both C build stages. Production
+# feature set includes plugin-profiler, so the default is 1. Kept as an
+# ARG for local smoke-tests of a profiler-less binary (paired with a
+# matching edit to the --features list below).
+ARG OXPHP_WITH_PROFILER=1
+
 # ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS bridge-builder
+
+ARG OXPHP_WITH_PROFILER
 
 RUN apk add --no-cache gcc musl-dev make
 
 WORKDIR /build
 COPY ext/bridge/ ./
 
-RUN make && make install
+RUN export EXTRA_CFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" && \
+    make && make install
 
 # ══════════════════════════════════════════════════════════════
 # Stage 2: Build PHP extension (oxphp_sapi.so)
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS ext-builder
+
+ARG OXPHP_WITH_PROFILER
 
 RUN apk add --no-cache gcc musl-dev make autoconf
 
@@ -32,15 +43,18 @@ COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/o
 COPY ext/bridge/oxphp_bridge.h ./bridge/
 
 RUN phpize && \
-    ./configure --enable-oxphp-sapi && \
+    CPPFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" \
+        ./configure --enable-oxphp-sapi && \
     make && \
     make install
 
 # ══════════════════════════════════════════════════════════════
 # Stage 3: Build Rust binary with the fixed production feature set.
-# Production builds always include plugin-apm and plugin-async — this is
-# the distinguishing trait of Dockerfile.alpine-release vs Dockerfile.
-# To change the production feature set, edit this file directly.
+# Production builds always include plugin-apm, plugin-async, and
+# plugin-profiler — this is the distinguishing trait of
+# Dockerfile.alpine-release vs Dockerfile. To change the production
+# feature set, edit this file directly (and the matching
+# OXPHP_WITH_PROFILER build-arg if the profiler is involved).
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS builder
 
@@ -59,7 +73,8 @@ RUN apk add --no-cache \
     libxml2-dev \
     zlib-dev \
     openssl-dev \
-    gnu-libiconv-dev
+    gnu-libiconv-dev \
+    protobuf-dev
 
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
@@ -72,22 +87,25 @@ WORKDIR /build
 ARG OXPHP_VERSION="0.0.0-dev"
 
 COPY Cargo.toml Cargo.lock ./
+# build.rs runs prost_build::compile_protos unconditionally, so proto/
+# must be present even for the dep-cache build below.
+COPY proto ./proto
+COPY build.rs ./
 
 # Cache dependency compilation with production feature set baked in.
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
-    cargo build --release --features plugin-apm,plugin-async && \
+    cargo build --release --features plugin-apm,plugin-async,plugin-profiler && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 COPY src ./src
-COPY build.rs ./
 
 # Patch Cargo.toml version from the build arg (always applied in prod builds)
 RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
 
 # Production build — hardcoded feature set, no ARG override.
-RUN cargo build --release --features plugin-apm,plugin-async
+RUN cargo build --release --features plugin-apm,plugin-async,plugin-profiler
 
 # ══════════════════════════════════════════════════════════════
 # Stage 4: Runtime — minimal production image.

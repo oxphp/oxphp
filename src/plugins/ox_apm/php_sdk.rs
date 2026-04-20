@@ -7,7 +7,7 @@ use crate::bridge::call::NativeCall;
 use crate::plugin::types::{PhpType, PhpValue};
 use crate::plugin::PluginContext;
 
-use super::spans::{now_us, SpanEvent, SPAN_STACK};
+use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 
 /// Register all `oxphp_apm_*` PHP functions.
 ///
@@ -50,21 +50,25 @@ pub fn register_functions(
             };
 
             // Collect attributes from optional array arg
-            let mut attrs = Vec::new();
+            let mut attrs: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
             if call.argc() > 1 {
                 if let Ok(false) = call.arg_is_null(1) {
                     let _ = call.arg_array_foreach(1, |k, v| {
-                        let key = match k {
-                            crate::bridge::call::ArrayKey::Str(s) => s.to_string(),
-                            crate::bridge::call::ArrayKey::Int(i) => i.to_string(),
+                        let key: std::sync::Arc<str> = match k {
+                            crate::bridge::call::ArrayKey::Str(s) => std::sync::Arc::from(s),
+                            crate::bridge::call::ArrayKey::Int(i) => {
+                                std::sync::Arc::from(i.to_string().as_str())
+                            }
                         };
-                        let val = v.as_str().unwrap_or("").to_string();
+                        let val: std::sync::Arc<str> =
+                            std::sync::Arc::from(v.as_str().unwrap_or(""));
                         attrs.push((key, val));
                     });
                 }
             }
 
-            let local_id = SPAN_STACK.with(|stack| stack.borrow_mut().push(name, attrs));
+            let local_id = PROFILING_CONTEXT
+                .with(|stack| stack.borrow_mut().push(std::sync::Arc::from(name), attrs));
             call.ret_long(local_id as i64);
             Ok(())
         })?;
@@ -83,7 +87,7 @@ pub fn register_functions(
                 Err(_) => return Ok(()),
             };
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 stack.borrow_mut().pop(span_id);
             });
             Ok(())
@@ -100,13 +104,13 @@ pub fn register_functions(
                 return Ok(());
             }
 
-            let key = match call.arg_str(0) {
-                Ok(s) => s.to_string(),
+            let key: std::sync::Arc<str> = match call.arg_str(0) {
+                Ok(s) => std::sync::Arc::from(s),
                 Err(_) => return Ok(()),
             };
 
             // Read value as string for now (mixed type conversion is complex)
-            let value = read_mixed_as_string(call, 1);
+            let value: std::sync::Arc<str> = std::sync::Arc::from(read_mixed_as_string(call, 1));
 
             // Determine target span: explicit span_id or current
             let explicit_id = if call.argc() > 2 {
@@ -123,7 +127,7 @@ pub fn register_functions(
                 None
             };
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
                 let span = if let Some(id) = explicit_id {
                     stack.get_mut(id)
@@ -154,15 +158,18 @@ pub fn register_functions(
             };
 
             // Collect event attributes
-            let mut attrs = Vec::new();
+            let mut attrs: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
             if call.argc() > 1 {
                 if let Ok(false) = call.arg_is_null(1) {
                     let _ = call.arg_array_foreach(1, |k, v| {
-                        let key = match k {
-                            crate::bridge::call::ArrayKey::Str(s) => s.to_string(),
-                            crate::bridge::call::ArrayKey::Int(i) => i.to_string(),
+                        let key: std::sync::Arc<str> = match k {
+                            crate::bridge::call::ArrayKey::Str(s) => std::sync::Arc::from(s),
+                            crate::bridge::call::ArrayKey::Int(i) => {
+                                std::sync::Arc::from(i.to_string())
+                            }
                         };
-                        let val = v.as_str().unwrap_or("").to_string();
+                        let val: std::sync::Arc<str> =
+                            std::sync::Arc::from(v.as_str().unwrap_or(""));
                         attrs.push((key, val));
                     });
                 }
@@ -185,10 +192,11 @@ pub fn register_functions(
             let event = SpanEvent {
                 name,
                 attributes: attrs,
-                timestamp_us: now_us(),
+                timestamp_ns: now_ns(),
+                kind: SpanEventKind::Custom,
             };
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
                 let span = if let Some(id) = explicit_id {
                     stack.get_mut(id)
@@ -226,7 +234,7 @@ pub fn register_functions(
                 None
             };
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
                 let span = if let Some(id) = explicit_id {
                     stack.get_mut(id)
@@ -280,7 +288,7 @@ pub fn register_functions(
                 None
             };
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
                 let span = if let Some(id) = explicit_id {
                     stack.get_mut(id)
@@ -304,7 +312,7 @@ pub fn register_functions(
                 return Ok(());
             }
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let stack = stack.borrow();
                 let tid = stack.trace_id();
                 if tid.is_empty() {
@@ -325,9 +333,9 @@ pub fn register_functions(
                 return Ok(());
             }
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let stack = stack.borrow();
-                let span_id = stack.current().map(|s| s.span_id.as_str()).unwrap_or("");
+                let span_id = stack.current().map(|s| s.span_id.as_ref()).unwrap_or("");
                 call.ret_str(span_id);
             });
             Ok(())
@@ -342,14 +350,14 @@ pub fn register_functions(
                 return Ok(());
             }
 
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let stack = stack.borrow();
                 let trace_id = stack.trace_id();
                 if trace_id.is_empty() {
                     call.ret_str("");
                     return;
                 }
-                let span_id = stack.current().map(|s| s.span_id.as_str()).unwrap_or("");
+                let span_id = stack.current().map(|s| s.span_id.as_ref()).unwrap_or("");
                 if span_id.is_empty() {
                     call.ret_str("");
                     return;
@@ -407,6 +415,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -424,6 +433,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,

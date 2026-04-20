@@ -5,22 +5,38 @@ ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 
+# Toggles -DOXPHP_WITH_PROFILER=1 in both C build stages. Must match the
+# Cargo `plugin-profiler` feature (on by default in Cargo.toml). Set to 0
+# when building with --no-default-features or a feature set that excludes
+# plugin-profiler — the observer registration in ext/oxphp_sapi.c then
+# compiles out and the PHP-side plugin runtime has nothing to hook into.
+ARG OXPHP_WITH_PROFILER=1
+
 # ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library (needs PHP headers for zval accessors)
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS bridge-builder
+
+ARG OXPHP_WITH_PROFILER
 
 RUN apk add --no-cache gcc musl-dev make
 
 WORKDIR /build
 COPY ext/bridge/ ./
 
-RUN make && make install
+# Append -DOXPHP_WITH_PROFILER=1 via EXTRA_CFLAGS (see ext/bridge/Makefile)
+# so the Makefile's CFLAGS defaults (-O2, -fPIC, -D_GNU_SOURCE, PHP includes)
+# are preserved. Exported so both `make` and `make install` see the same
+# value (install re-evaluates the all-target's dep graph).
+RUN export EXTRA_CFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" && \
+    make && make install
 
 # ══════════════════════════════════════════════════════════════
 # Stage 2: Build PHP extension (needs phpize + bridge headers)
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS ext-builder
+
+ARG OXPHP_WITH_PROFILER
 
 RUN apk add --no-cache gcc musl-dev make autoconf
 
@@ -32,8 +48,13 @@ WORKDIR /build/ext
 COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/oxphp_fiber.c ./
 COPY ext/bridge/oxphp_bridge.h ./bridge/
 
+# Propagate -DOXPHP_WITH_PROFILER=1 into phpize's generated Makefile via
+# CPPFLAGS (appended by autoconf to every compile line). Using CPPFLAGS
+# instead of CFLAGS avoids clobbering the phpize-emitted optimisation and
+# PHP ABI flags that land in CFLAGS itself.
 RUN phpize && \
-    ./configure --enable-oxphp-sapi && \
+    CPPFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" \
+        ./configure --enable-oxphp-sapi && \
     make && \
     make install
 
@@ -58,7 +79,8 @@ RUN apk add --no-cache \
     libxml2-dev \
     zlib-dev \
     openssl-dev \
-    gnu-libiconv-dev
+    gnu-libiconv-dev \
+    protobuf-dev
 
 # Install bridge library (needed for Rust linking)
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
@@ -91,6 +113,7 @@ RUN mkdir src && \
 # Copy real source and build script
 COPY src ./src
 COPY build.rs ./
+COPY proto ./proto
 
 # Patch version from build arg (only when OXPHP_VERSION is explicitly set)
 RUN if [ -n "${OXPHP_VERSION}" ]; then \

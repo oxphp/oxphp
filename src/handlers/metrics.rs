@@ -81,6 +81,8 @@ mod tests {
             request_id: "test".to_string(),
             early_response: None,
             metadata: Vec::new(),
+            profiling_mode: None,
+            profiling_run_id: None,
         };
 
         let result = handler.handle(&mut event);
@@ -104,7 +106,7 @@ mod tests {
             response_size: 500,
             metadata: Vec::new(),
             php_errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
         };

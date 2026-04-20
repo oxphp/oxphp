@@ -31,7 +31,7 @@ impl ScriptExecutor for StubExecutor {
             execution_time_us: 0,
             stream_rx: None,
             errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
         })
     }
 
@@ -70,6 +70,8 @@ mod tests {
             forwarded_proto: None,
             forwarded_host: None,
             denied_meta: None,
+            profiling_mode: crate::profiling::ProfilingMode::Off,
+            profiling_run_id: None,
         }
     }
 

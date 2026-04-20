@@ -330,6 +330,8 @@ mod tests {
             forwarded_proto: None,
             forwarded_host: None,
             denied_meta: None,
+            profiling_mode: crate::profiling::ProfilingMode::Off,
+            profiling_run_id: None,
         };
 
         let result = executor.execute(request);

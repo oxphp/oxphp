@@ -56,6 +56,8 @@ mod tests {
             request_id: "test123".to_string(),
             early_response: None,
             metadata: Vec::new(),
+            profiling_mode: None,
+            profiling_run_id: None,
         }
     }
 

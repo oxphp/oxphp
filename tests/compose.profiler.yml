@@ -1,0 +1,42 @@
+# Profiler mode: ox_profiler plugin enabled with a known token.
+# Activated via X-OxPHP-Profile / OXPROF cookie / ?__oxprof=...
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.profiler.yml up
+services:
+  oxphp-profiler:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        # plugin-profiler is part of Cargo's default feature set, so an
+        # empty CARGO_FEATURES would already include it. Listed explicitly
+        # here to document the intent and to keep the build reproducible
+        # if the default set changes.
+        CARGO_FEATURES: "plugin-apm,plugin-async,plugin-profiler"
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PROFILER_ENABLED: "true"
+      PROFILER_AUTH_TOKEN: "test-token"
+      # Disk storage. Single format keeps the test fast and
+      # the assertion (test_storage_files_present.php) targets only
+      # the .collapsed extension.
+      PROFILER_OUTPUT_DIR: "/tmp/oxphp-profiles"
+      PROFILER_OUTPUT_FORMATS: "collapsed"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+networks:
+  test-net:
+    driver: bridge

@@ -83,7 +83,7 @@ mod tests {
             response_size: 0,
             metadata: Vec::new(),
             php_errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
         }

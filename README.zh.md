@@ -151,6 +151,20 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **JSON 访问日志** — 可选 `trace_id`/`span_id` 字段（级别：`all`、`error`，通过 `ACCESS_LOG` 控制） — 参见 [访问日志](docs/zh/features/access-logging.md)
 - **请求 ID** 生成与透传（`X-Request-ID`）；OTel 启用时使用追踪衍生格式 — 参见 [请求 ID](docs/zh/features/request-ids.md)
 
+### 性能分析（`plugin-profiler` 特性）
+
+完整指南：[性能分析](docs/zh/features/profiling.md)。
+
+- **按请求捕获性能分析数据** — 通过 cookie（`OXPROF`）、请求头（`X-OxPHP-Profile`）、查询参数（`?__oxprof=`）或统计采样（`PROFILER_SAMPLE_RATE`）触发；令牌以常量时间比对
+- **四种导出格式** — xhprof（用于 xhgui）、speedscope（用于 speedscope.app）、pprof（Go 工具 / Pyroscope）、collapsed（FlameGraph）
+- **丰富的 Span 数据** — wall-time、CPU 时间、内存（起止）、事件、属性 — 全流程纳秒精度
+- **PHP SDK** — 7 个函数（`OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}`）+ 7 个属性（4 个 observer 过滤器：`#[Profile]` / `#[Exclude]` / `#[Sample]` / `#[Tag]`；3 个装饰器：`#[Mark]` / `#[SlowThreshold]` / `#[MemoryThreshold]`）
+- **与 APM 共享 Span 树** — 两个插件共用同一个 `Arc<SpanTree>`；无重复采集；APM 继续仅将显式 span 导出到 OTel，而 Profiler 保留完整树
+- **内存 LRU + 磁盘保留** — 最近 `PROFILER_RETENTION_COUNT` 次运行随时可取，令牌桶限速写入，每 5 秒原子 rename 的后台裁剪
+- **HTTP 推送** — 将性能分析数据推送至 xhgui 或任意收集器；3 次指数退避重试（100/200/400 毫秒），墙钟上限 5 秒；自动检测 xhgui 信封
+- **内部 HTTP 路由** 位于 `/__profiler/` — 8 个端点（list / metadata / raw / speedscope 302 / DELETE / config / stats / landing），可选 bearer 认证及路径穿越校验
+- **Prometheus 指标** — 6 个计数器 + 1 个 gauge（runs、spans、bytes、disk drops、push failures、truncated、in-memory runs），通过 `/metrics` 暴露
+
 ### 可靠性与运维
 - **有界请求队列** — 队列满时返回 529 进行背压控制
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429 — 参见 [限流](docs/zh/features/rate-limiting.md)
@@ -251,7 +265,7 @@ flowchart LR
     SDK --> STACK
     DEC --> STACK
     HOOKS --> STACK
-    STACK -->|JSON 通过 apm_spans_json| APC
+    STACK -->|Arc<SpanTree> 通过 profile_tree| APC
     PHPERR -->|结构化日志| APC
     OTR --> OTC
     OTC --> BATCH
@@ -396,7 +410,7 @@ curl http://localhost:9090/metrics
 | ~~**OpenTelemetry**~~ | ✅ 已实现 — 通过 `plugin-otel` 特性进行 OTLP 追踪导出，W3C context 传播，每请求 Span 支持标准语义化约定 |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ 已实现 — `plugin-apm` 特性：自动追踪 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O），`#[OxPHP\Tracing\Trace]` 装饰器，10 个 `oxphp_trace_*()` SDK 函数，PHP 错误捕获 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
-| **Built-in PHP Profiler** | 通过属性装饰器（`#[Timer]`、`#[Span]`）实现低开销性能分析，与服务器指标和追踪直接集成 |
+| ~~**Built-in PHP Profiler**~~ | ✅ 已实现 — `plugin-profiler` 特性：按请求性能分析，支持 xhprof/speedscope/pprof/collapsed 格式，PHP SDK，属性触发，内存 LRU + 磁盘保留，HTTP 推送至 xhgui，`/__profiler/` 内部路由，Prometheus 指标 — 参见 [性能分析](docs/zh/features/profiling.md) |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |
 | **Non-Docker Install** | 通过系统包管理器（apt、brew 等）原生安装 |
 | **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |

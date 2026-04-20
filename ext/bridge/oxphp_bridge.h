@@ -1246,6 +1246,154 @@ void oxphp_apm_unhook_all(void);
 /** Get number of hooks currently installed on this thread (diagnostics). */
 int oxphp_apm_hook_count_installed(void);
 
+/* ─── Profiler observer ──────────────────────────
+ * Per-thread observer state used by the ox_profiler plugin. The C
+ * Observer callbacks live in this library; Rust drives them via the
+ * four entry points below and consumes batched events through
+ * oxphp_profiler_flush_span_events (defined in Rust, called from C). */
+
+/* Mode byte. Mirrors src/profiling/mod.rs::ProfilingMode. */
+#define OXPHP_PROFILING_MODE_OFF         0
+#define OXPHP_PROFILING_MODE_APM_ONLY    1
+#define OXPHP_PROFILING_MODE_PROFILE_ALL 2
+
+/* Event kind tag inside the ring buffer. */
+#define OXPHP_SPAN_EVENT_KIND_BEGIN 1
+#define OXPHP_SPAN_EVENT_KIND_END   2
+
+/* Ring-buffer event. Sized to fit one cache line (64 bytes). Field
+ * order is load-bearing — Rust mirrors it via #[repr(C)] in
+ * src/profiling/flush.rs. The two reserved fields keep the struct
+ * a clean 64-byte multiple and leave room for future extensions
+ * (span_id back-reference, allocator tag, etc.). */
+typedef struct ox_span_event_s {
+    uint8_t  kind;             /* OXPHP_SPAN_EVENT_KIND_*               */
+    uint8_t  reserved0;        /* keep zero — alignment / future flags  */
+    uint16_t name_len;         /* bytes in name_ptr (0 if anonymous)    */
+    uint32_t reserved1;        /* keep zero — alignment / future flags  */
+    uint64_t seq;              /* monotonic per-thread BEGIN counter    */
+    uint64_t ts_ns;            /* CLOCK_MONOTONIC_RAW                   */
+    uint64_t cpu_ns;           /* CLOCK_THREAD_CPUTIME_ID               */
+    int64_t  mem;              /* zend_memory_usage(0)                  */
+    int64_t  mem_peak;         /* zend_memory_peak_usage(0)             */
+    const char *name_ptr;      /* points into g_prof.name_arena         */
+    uint64_t reserved2;        /* keep zero — pads to 64 bytes          */
+} ox_span_event_t;
+
+/* Set the per-thread profiling mode. Called from Rust at RINIT,
+ * before php_request_startup(). When mode != PROFILE_ALL, the
+ * observer begin/end callbacks early-return; when mode ==
+ * PROFILE_ALL, they record events into the TLS ring buffer.
+ * Setting OFF also resets the ring buffer / open-stack state. */
+void oxphp_bridge_set_profiling_mode(uint8_t mode);
+
+/* Read the current per-thread mode. Used by tests and by the
+ * observer init callback to decide whether to attach handlers. */
+uint8_t oxphp_bridge_get_profiling_mode(void);
+
+/* Snapshot the per-thread open-span stack (BEGIN events without a
+ * matching END yet). The heap hook reads this to attribute
+ * allocations to the current span path.
+ *
+ * Writes up to `max_depth` u32 seq tags into `dst`, root → current.
+ * Returns the actual depth, OR 255 if the real depth overflows the
+ * 32-entry mirror (caller should set its truncated flag). */
+uint8_t oxphp_bridge_snapshot_open_stack(uint32_t *dst, uint8_t max_depth);
+
+/* Drain any partial ring-buffer contents into Rust. Called from
+ * Rust at RSHUTDOWN, before PROFILING_CONTEXT::finalize. Idempotent
+ * (a second call when the buffer is empty is a no-op). */
+void oxphp_bridge_profiler_rshutdown_flush(void);
+
+/* Set the per-thread "paused" flag for the profiler observer.
+ * When 1, the begin callback early-returns
+ * without pushing a span; the end callback still pops the
+ * open_stack so already-open spans close naturally. Default 0
+ * (not paused). Cleared on set_profiling_mode(OFF). */
+void oxphp_bridge_set_profiling_paused(uint8_t paused);
+
+/* Read the per-thread paused flag. */
+uint8_t oxphp_bridge_is_profiling_paused(void);
+
+/* Read zend_memory_usage(0) — current allocated bytes for this
+ * thread's request (used by MemoryThresholdDecorator).
+ * Returns 0 if not inside a PHP request. */
+int64_t oxphp_bridge_get_memory_usage_bytes(void);
+
+/* ─── Profiler observer filters ─────────────────
+ *
+ * Per-zend_function attribute resolution for the four filter
+ * attributes #[Profile], #[Exclude], #[Sample(rate)],
+ * #[Tag(key, value)]. Rust registers a resolver callback at plugin
+ * init; observer init calls it once per function the first time the
+ * function is observed; the resulting spec_id + decision quad is
+ * cached per-thread for hot-path lookup in begin/end.
+ *
+ * spec_id = 0 means "no filter, default behaviour" — the fast path
+ * for functions without any profiler attribute. */
+
+/* Resolver callback type. Implemented in src/profiling/filter.rs.
+ * Receives the function id, its class-scope and own attribute name
+ * lists, and an opaque ctx pointer used by the arg-reader helpers
+ * below. Populates the four out_* params with the decision values
+ * the C hot path needs without re-entering Rust. Returns spec_id
+ * (0 if no filter applies after composition). */
+typedef uint32_t (*oxphp_profiler_resolve_filter_fn_t)(
+    uintptr_t fn_id,
+    const char *const *class_attr_names,
+    uint32_t class_attr_count,
+    const char *const *fn_attr_names,
+    uint32_t fn_attr_count,
+    void *attr_resolver_ctx,
+    uint8_t *out_excluded,
+    uint8_t *out_force_profile,
+    uint8_t *out_has_sample,
+    float   *out_sample_rate);
+
+/* Register the resolver. Called by Rust at plugin init, BEFORE
+ * the first observer begin fires. Setting NULL clears the resolver
+ * (default — observer init won't try to resolve filters). */
+void oxphp_bridge_set_filter_resolver(oxphp_profiler_resolve_filter_fn_t resolver);
+
+/* Helper exposed back to Rust during a resolver call. Reads the
+ * `attr_idx`-th occurrence of attribute `attr_name` and returns its
+ * `arg_idx`-th constructor arg as a UTF-8 string. NUL-terminates;
+ * returns the bytes written (capped at out_cap-1). Returns 0 when
+ * the attribute / arg / type doesn't match. `is_class_scope`
+ * selects between function and class attributes on the resolver
+ * context. */
+size_t oxphp_bridge_read_attr_arg_str(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    char *out, size_t out_cap);
+
+/* Same shape, returns a double via `*out`. Returns 1 on success,
+ * 0 on absence / type mismatch. Integer args are widened to double. */
+int oxphp_bridge_read_attr_arg_double(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    double *out);
+
+/* Diagnostic: read the cached spec_id for a function. Returns 255
+ * if not yet cached. Used by tests. */
+uint32_t oxphp_bridge_get_filter_spec_id_cached(uintptr_t fn_id);
+
+/* Diagnostic: clear the per-thread filter cache. Used between
+ * integration tests when the same Zend function should be re-resolved. */
+void oxphp_bridge_clear_filter_cache(void);
+
+/* Set the per-request span cap. Process-wide, set once at plugin
+ * init from ProfilerConfig.max_spans. 0 means "unlimited". Reached
+ * caps sets open_stack_overflow so Rust can flag the resulting
+ * SpanTree as truncated. */
+void oxphp_bridge_set_profiler_max_spans(uint32_t cap);
+
 #ifdef __cplusplus
 }
 #endif
