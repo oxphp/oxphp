@@ -74,7 +74,7 @@ COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/lib/php/extensions/no-debug-zts
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 EXPOSE 80 443 9090
 
@@ -114,7 +114,7 @@ RUN { \
 
 USER www-data
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 If your application does not need additional extensions, this is sufficient:
@@ -122,7 +122,7 @@ If your application does not need additional extensions, this is sufficient:
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 Build and run:
@@ -132,7 +132,7 @@ docker build -t my-app .
 docker run -p 80:80 my-app
 ```
 
-The server listens on port `80` by default. The document root is `/var/www/html/public`. Laravel and Symfony projects already contain a `public/` directory, so copying the project into `/var/www/html/` is sufficient. If your project structure differs, override the document root with the `DOCUMENT_ROOT` environment variable.
+The server listens on port `80` by default. The document root is `/var/www/html/public` — the snippets above copy the project directly into it. For Laravel, Symfony, or other frameworks that already ship a `public/` subdirectory, use `COPY --chown=www-data:www-data . /var/www/html` instead so the framework's own `public/` lines up with the default. If your structure differs further, override the document root with the `DOCUMENT_ROOT` environment variable.
 
 ## Source Build (Without PHP)
 

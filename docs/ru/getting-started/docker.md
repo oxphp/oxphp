@@ -14,10 +14,10 @@ OxPHP разработан для запуска в контейнере. Это
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.3.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-Эта команда копирует ваше приложение в контейнер и обслуживает его из `/var/www/html/public`. По умолчанию сервер слушает порт `80`.
+Эта команда копирует ваше приложение в контейнер. По умолчанию `DOCUMENT_ROOT` — `/var/www/html/public`; для Laravel, Symfony и любых проектов с собственным подкаталогом `public/` используйте `COPY --chown=www-data:www-data . /var/www/html`, чтобы `public/` фреймворка совпал с дефолтом. По умолчанию сервер слушает порт `80`.
 
 ## Многоэтапный Dockerfile
 
@@ -103,6 +103,8 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 EXPOSE 80 443
@@ -134,6 +136,8 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 USER www-data
@@ -168,7 +172,7 @@ FROM ghcr.io/oxphp/oxphp:0.3.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 CMD ["oxphp"]
 ```

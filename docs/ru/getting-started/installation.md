@@ -74,7 +74,7 @@ COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/lib/php/extensions/no-debug-zts
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 EXPOSE 80 443 9090
 
@@ -114,7 +114,7 @@ RUN { \
 
 USER www-data
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 Если приложению не нужны дополнительные расширения, достаточно:
@@ -122,7 +122,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 Соберите и запустите:
@@ -132,7 +132,7 @@ docker build -t my-app .
 docker run -p 80:80 my-app
 ```
 
-По умолчанию сервер слушает порт `80`. Корень документов — `/var/www/html/public`. Проекты на Laravel и Symfony уже содержат директорию `public/`, поэтому достаточно скопировать проект в `/var/www/html/`. Если структура проекта отличается, переопределите корень документов через переменную окружения `DOCUMENT_ROOT`.
+По умолчанию сервер слушает порт `80`. Корень документов — `/var/www/html/public` — сниппеты выше копируют проект прямо в него. Для Laravel, Symfony и других фреймворков с собственным подкаталогом `public/` используйте `COPY --chown=www-data:www-data . /var/www/html`, чтобы `public/` фреймворка совпал с дефолтным корнем. Если структура отличается ещё сильнее, переопределите корень документов через переменную окружения `DOCUMENT_ROOT`.
 
 ## Сборка из исходного кода (без PHP)
 

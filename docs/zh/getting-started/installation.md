@@ -74,7 +74,7 @@ COPY --from=ghcr.io/oxphp/oxphp:0.2.0 /usr/local/lib/php/extensions/no-debug-zts
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 EXPOSE 80 443 9090
 
@@ -114,7 +114,7 @@ RUN { \
 
 USER www-data
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 如果应用不需要额外扩展，以下配置即可：
@@ -122,7 +122,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.2.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
 构建并运行：
@@ -132,7 +132,7 @@ docker build -t my-app .
 docker run -p 80:80 my-app
 ```
 
-服务器默认监听 `80` 端口，文档根目录为 `/var/www/html/public`。Laravel 和 Symfony 项目已包含 `public/` 目录，因此只需将项目复制到 `/var/www/html/` 即可。如果项目结构不同，请通过 `DOCUMENT_ROOT` 环境变量覆盖文档根目录。
+服务器默认监听 `80` 端口，文档根目录为 `/var/www/html/public` —— 上面的代码片段将项目直接复制到该目录。对于 Laravel、Symfony 等已包含 `public/` 子目录的框架，请改用 `COPY --chown=www-data:www-data . /var/www/html`，使框架自带的 `public/` 对齐默认根目录。如果项目结构进一步不同，请通过 `DOCUMENT_ROOT` 环境变量覆盖文档根目录。
 
 ## 源码构建（不含 PHP）
 

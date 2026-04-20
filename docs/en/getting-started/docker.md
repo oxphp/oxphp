@@ -14,10 +14,10 @@ The simplest way to containerize your application:
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.3.0
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-This copies your application into the container and serves it from `/var/www/html/public`. The server listens on port `80` by default.
+This copies your application into the container. The default `DOCUMENT_ROOT` is `/var/www/html/public` — for Laravel, Symfony, or any project that already ships a `public/` subdirectory, use `COPY --chown=www-data:www-data . /var/www/html` instead so the framework's own `public/` aligns with the default. The server listens on port `80` by default.
 
 ## Multi-Stage Dockerfile
 
@@ -103,6 +103,8 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 EXPOSE 80 443
@@ -134,6 +136,8 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
+# Framework layout: project ships a public/ subdir (Laravel/Symfony/Slim).
+# For a bare index.php at the project root, copy into /var/www/html/public instead.
 COPY --chown=www-data:www-data . /var/www/html
 
 USER www-data
@@ -168,7 +172,7 @@ FROM ghcr.io/oxphp/oxphp:0.3.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
-COPY --chown=www-data:www-data . /var/www/html
+COPY --chown=www-data:www-data . /var/www/html/public
 
 CMD ["oxphp"]
 ```
