@@ -1,4 +1,5 @@
 pub mod functions;
+pub mod synthetic;
 
 use crate::plugin::types::MagicMethod;
 use crate::plugin::types::PhpType;
@@ -56,6 +57,11 @@ impl Plugin for AsyncPlugin {
     }
 
     fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
+        // Publish synthetic-promise C-ABI shims to the bridge. Must run
+        // on the main thread before PHP workers spawn; `init` is called
+        // exactly once in that slot.
+        synthetic::register_with_bridge();
+
         // Determine enabled state: ASYNC_WORKERS=0 (or absent) means disabled.
         let workers: u32 = ctx
             .config("WORKERS")

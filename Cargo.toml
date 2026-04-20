@@ -129,13 +129,19 @@ subtle = { version = "2.6", optional = true }
 # backend). Already in [dev-dependencies] for integration tests.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
+# Ordered hashmap (used by Shared\Array str-keyed storage)
+indexmap = "2"
+
 [features]
 default = ["php"]
-php = ["plugin-apm", "plugin-async", "plugin-profiler"]
+php = ["plugin-apm", "plugin-async", "plugin-profiler", "plugin-shared"]
 plugin-otel = ["opentelemetry", "opentelemetry_sdk", "opentelemetry-otlp", "opentelemetry-semantic-conventions", "tonic"]
 plugin-apm = ["plugin-otel"]
 plugin-async = []
 plugin-profiler = ["dep:rand", "dep:subtle", "dep:reqwest"]
+# Shared primitives depend on synthetic promises (waker lists for Channel,
+# Mutex::with(timeout), etc.), which live in the ox_async module.
+plugin-shared = ["plugin-async"]
 
 [profile.release]
 lto = "fat"
@@ -150,5 +156,37 @@ strip = "symbols"
 prost-build = "0.13"
 
 [dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["async_tokio"] }
+loom = "0.7"
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[bench]]
+name = "synthetic_promise"
+harness = false
+required-features = ["plugin-async"]
+
+[[bench]]
+name = "channel_throughput"
+path = "benches/shared/channel_throughput.rs"
+harness = false
+required-features = ["plugin-shared"]
+
+[[bench]]
+name = "channel_recv_fiber"
+path = "benches/shared/channel_recv_fiber.rs"
+harness = false
+required-features = ["plugin-shared"]
+
+[[bench]]
+name = "map_set_many"
+path = "benches/shared/map_set_many.rs"
+harness = false
+required-features = ["plugin-shared"]
+
+[[bench]]
+name = "pool_uncontested"
+path = "benches/shared/pool_uncontested.rs"
+harness = false
+required-features = ["plugin-shared"]

@@ -2678,6 +2678,15 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         }
     }
 
+    /* Register OxPHP\Shared\Shareable interface BEFORE plugin classes so
+     * `.implements("OxPHP\\Shared\\Shareable")` on Counter/Flag/Once can
+     * resolve during the plugin class registration loop below. Without
+     * this the interface lookup in the loop returns NULL and
+     * zend_class_implements is skipped silently. */
+    if (oxphp_shareable_register_ce() == FAILURE) {
+        return FAILURE;
+    }
+
     /* ═══════════════════════════════════════════════════════════
      * Register plugin classes
      * ═══════════════════════════════════════════════════════════ */
@@ -2749,10 +2758,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     handlers->free_obj = oxphp_plugin_free_object;
                     handlers->clone_obj = oxphp_plugin_clone_object;
                     cls_ce->default_object_handlers = handlers;
-                } else {
-                    /* Even without custom storage, set the handlers for consistency */
-                    cls_ce->default_object_handlers = handlers;
                 }
+                /* No `else`: for classes without custom storage, leave
+                 * default_object_handlers inherited from the parent.
+                 * Overriding with our custom-handlers slot (which has
+                 * offset = XtOffsetOf(oxphp_custom_object, std) = 16 to
+                 * reach the outer wrapper) would poison plain zend_object
+                 * allocations (e.g. `new TypeException()` created via
+                 * zend_throw_exception), since those objects have no
+                 * oxphp_custom_object prefix — PHP's property/GC paths
+                 * read `handlers->offset` and compute a wrong outer ptr,
+                 * causing SIGSEGV once the exception is freed. */
 
                 /* Implement interfaces */
                 int icount = oxphp_bridge_get_class_interface_count(i);
@@ -2992,6 +3008,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             "_type", sizeof("_type")-1, ZEND_ACC_PROTECTED);
     }
 
+    /* OxPHP\Shared\Shareable interface is registered earlier in MINIT
+     * (before the plugin class loop) so .implements() can resolve during
+     * plugin class registration — see the earlier oxphp_shareable_register_ce
+     * call for rationale. */
+
     /* OxPHP\Decorator\AttributeInterface */
     {
         zend_class_entry tmp_ce;
@@ -3067,6 +3088,14 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 }
 /* }}} */
 
+/* {{{ MSHUTDOWN — clear ox_shared class_entry cache */
+PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
+{
+    oxphp_shareable_unregister_ce();
+    return SUCCESS;
+}
+/* }}} */
+
 /* {{{ RINIT — per-thread APM hook installation */
 PHP_RINIT_FUNCTION(oxphp_sapi)
 {
@@ -3097,7 +3126,7 @@ zend_module_entry oxphp_sapi_module_entry = {
     PHP_OXPHP_SAPI_EXTNAME,
     oxphp_sapi_functions,
     PHP_MINIT(oxphp_sapi),
-    NULL,   /* MSHUTDOWN */
+    PHP_MSHUTDOWN(oxphp_sapi),
     PHP_RINIT(oxphp_sapi),   /* RINIT */
     PHP_RSHUTDOWN(oxphp_sapi),   /* RSHUTDOWN */
     PHP_MINFO(oxphp_sapi),

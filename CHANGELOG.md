@@ -33,6 +33,67 @@ All notable changes to OxPHP are documented in this file.
 
 - `oxphp_request_heartbeat($time)` now also resets PHP's own `max_execution_time` timer to `$time` seconds alongside the server-side deadline. Previously only the server deadline was extended, so long-running scripts could still be killed by Zend's "Maximum execution time exceeded" fatal even after a heartbeat. Scripts that opted out of the PHP timer via `set_time_limit(0)` or `max_execution_time=0` are left alone — the heartbeat does not re-enable a disabled timer.
 
+## [0.3.0] - 2026-04-21
+
+Release theme: **shared state for PHP workers without Redis**. Seven process-wide concurrent primitives (`OxPHP\Shared\Counter` / `Flag` / `Once` / `Mutex` / `Channel` / `Map` / `Pool`) land, plus the introspection, metrics, and docs to operate them.
+
+### Added
+
+#### `OxPHP\Shared\*` primitives
+
+See the [Shared State overview](docs/en/features/shared-state.md) for the concept and mental model, and the per-type docs for API reference, runnable examples, and gotchas.
+
+- [`Shared\Counter`](docs/en/features/shared-counter.md) — atomic int64 with `inc` / `dec` / `add` / `compareAndSet` / `addBatch` / `reset`.
+- [`Shared\Flag`](docs/en/features/shared-flag.md) — atomic bool with `test` / `set` / `clear` / `exchange` / `compareAndSet`.
+- [`Shared\Once`](docs/en/features/shared-once.md) — run-once container with `init(factory)` / `trySet` / `get`. Reentrant `init` throws `DeadlockException`.
+- [`Shared\Mutex`](docs/en/features/shared-mutex.md) — poisoning mutex guarding a stored value. `with(callable, timeout)` and `tryWith(callable)` scope-guard the critical section; poisoning isolates failed-mid-update state.
+- [`Shared\Channel`](docs/en/features/shared-channel.md) — bounded MPMC queue with fiber-aware `send` / `recv`. `sendMany` / `recvMany` for batching.
+- [`Shared\Map`](docs/en/features/shared-map.md) — concurrent `string → mixed` store with `get` / `set` / `update` / `getOrSet` / `setIfAbsent` / batched `setMany` / `getMany` / `removeMany`. Per-instance cap via `maxEntries`.
+- [`Shared\Pool`](docs/en/features/shared-pool.md) — bounded object pool with lazy factory, optional destroy callback, strict `maxSize` budget, per-thread affinity, and idle-timeout eviction. `with($body)` scope-guards acquire/release.
+
+#### Shared-registry observability
+
+See [Shared Observability](docs/en/operations/shared-observability.md) for the operator's reference.
+
+- Internal-server endpoints: `/__ox_shared/summary`, `/entries`, `/entry?id=…`, `/preview?id=…`, `/types`, `/graph?id=…` for live registry introspection.
+- Prometheus metrics under `oxphp_shared_*` — aggregate-per-type (`objects_total`, `operations_total`, `bytes`, `capacity_saturation`) plus per-instance for Channel / Map / Pool.
+- Cross-thread deadlock detector — `oxphp_shared_deadlock_detected_total` ticks when the wait-for scanner finds a mutex cycle.
+- Shared `preview` previews are gated behind `SHARED_INTROSPECTION_PREVIEW_ENABLED` so production deployments can disable value exposure without losing shape counts.
+
+#### Configuration
+
+All tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to `OX_SHARED_*` and bare keys). See [Shared State → Configuration](docs/en/features/shared-state.md#configuration) for the full table. Highlights:
+
+- `SHARED_MAX_ENTRIES` (default 100 000) / `SHARED_MAX_BYTES` (default 1 GiB) — global caps.
+- `SHARED_CYCLE_DETECT_DEPTH` (16) / `SHARED_CYCLE_DETECT_EDGES` (10 000) — cycle-check walker bounds.
+- `SHARED_INTROSPECTION_ENABLED` / `SHARED_METRICS_ENABLED` — per-feature kill switches.
+- `SHARED_LOCK_DIAGNOSTICS` (`off` / `warn` / `strict`) — escalates reentry / deadlock signals.
+
+#### Rust plugin-author API
+
+- `MapInner::retain<F>` — exposes `DashMap::retain` with proper refcount release for nested `SharedValue::Shared` targets. Lets plugin authors prune a map in a single shard-walk instead of the N-lock `keys()`+`remove()` pattern.
+
+#### Documentation
+
+- [`docs/en/features/shared-state.md`](docs/en/features/shared-state.md) — overview, mental model, type-selection matrix, canonical hand-rolled-counter → `Shared\*` migration example.
+- Per-type docs for all seven v1 types (see list above).
+- [`docs/en/operations/shared-observability.md`](docs/en/operations/shared-observability.md) — introspection endpoints, Prometheus catalogue, diagnostic playbooks.
+- [`docs/en/features/migrating-to-external-store.md`](docs/en/features/migrating-to-external-store.md) — when and how to promote `Shared\*` state to Redis / NATS / Kafka.
+
+#### Tooling
+
+- `tests/soak/pool_soak.sh` + `tests/soak/workload.php` — manual (non-CI) 24h soak harness for pre-release Shared\Pool stability sign-off. Not wired into `tests/run_all.sh`; [invocation notes in the observability doc](docs/en/operations/shared-observability.md#long-running-soak-harness).
+
+### Performance
+
+- `Shared\Pool` acquire/release uncontested hot path: **≤ 5 µs gate, ~0.9 µs observed in Docker**. Per-thread affinity keeps slots hot in the acquiring thread without cross-thread handoff.
+- Map `set` / `get` path avoids serialisation for nested `Shareable` refs — the refcount-bump retain path is cycle-checked before any mutation, so rejected inserts leak nothing.
+
+### Fixed
+
+- Pool chaos reclaim: in-flight slot counts are refunded when a SAPI worker thread panics mid-acquire, so a crashing worker no longer silently burns budget in the surviving workers' view.
+- Cross-thread `Shared\*` access no longer depends on the `worker_liveness` hook for Map / Counter / Flag / Once / Mutex — only Pool uses thread-registration (for its affinity + reclaim paths).
+
 ## [0.2.0] - 2026-03-27
 
 ### Added

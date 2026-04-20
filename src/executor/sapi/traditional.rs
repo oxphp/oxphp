@@ -64,6 +64,17 @@ fn worker_thread(
         bindings::oxphp_bridge_set_worker_id(worker_id as i32);
     }
 
+    // Register this thread as a live Shared\Pool worker so cross-thread
+    // releases routed to our ThreadKey park (rather than destroy-inline
+    // under the dead-owner branch). See src/plugins/ox_shared/worker_liveness.rs
+    // for the rationale — pthread_kill(tid, 0) is unsafe under pthread_t
+    // reuse, so Pool uses an explicit registry instead.
+    register_as_live_pool_worker();
+    // Allocate the per-worker idle-eviction flag; the central scheduler
+    // (src/plugins/ox_shared/eviction.rs) sets it when our idle deques
+    // have slots past their idle_timeout.
+    register_pool_evict_flag();
+
     tracing::info!(worker = %thread_name, "PHP worker thread started");
 
     match loop_mode {
@@ -141,8 +152,80 @@ fn worker_thread(
         }
     }
 
+    // Unregister from the Shared\Pool liveness set before the thread
+    // actually exits — any subsequent cross-thread release targeted
+    // at our ThreadKey then correctly takes the dead-owner destroy
+    // path. Runs on both the normal channel-closed tail and the
+    // panic-break branch above.
+    unregister_as_live_pool_worker();
+    unregister_pool_evict_flag();
+
     tracing::info!(worker = %thread_name, "PHP worker thread stopped");
 }
+
+// ── Shared\Pool liveness hooks ───────────────────────────────────────
+// One-line shims so the worker loop doesn't need its own cfg guards.
+// When the `plugin-shared` feature is off, both calls compile away.
+
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn register_as_live_pool_worker() {
+    crate::plugins::ox_shared::worker_liveness::register_worker();
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn register_as_live_pool_worker() {}
+
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn unregister_as_live_pool_worker() {
+    crate::plugins::ox_shared::worker_liveness::unregister_worker();
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn unregister_as_live_pool_worker() {}
+
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn register_pool_evict_flag() {
+    crate::plugins::ox_shared::eviction::register(
+        crate::plugins::ox_shared::types::pool::current_thread_key(),
+    );
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn register_pool_evict_flag() {}
+
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn unregister_pool_evict_flag() {
+    crate::plugins::ox_shared::eviction::unregister(
+        crate::plugins::ox_shared::types::pool::current_thread_key(),
+    );
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn unregister_pool_evict_flag() {}
+
+/// Request-frame hook: if the central eviction scheduler raised our
+/// flag, drain this thread's stale slots across every Pool. Called
+/// from `execute_request` after `php_request_startup` so PHP context
+/// is live for `$destroy` invocations.
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn drain_pool_stale_if_requested() {
+    if crate::plugins::ox_shared::eviction::take_evict_request() {
+        crate::plugins::ox_shared::eviction::drain_stale_for_current_thread();
+    }
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn drain_pool_stale_if_requested() {}
 
 /// RAII guard that clears SAPI request data on drop (even on panic).
 struct RequestDataGuard;
@@ -227,6 +310,12 @@ fn execute_request(
             ..Default::default()
         });
     }
+
+    // Shared\Pool idle-timeout eviction check. Runs here — after PHP
+    // request startup, before the user script — because `$destroy`
+    // needs a live `EG(current_execute_data)` frame to execute
+    // bytecode. Compiles away when `plugin-shared` is off.
+    drain_pool_stale_if_requested();
 
     let script_path_str = request.script_path.to_str().unwrap_or("");
     let script_path = CString::new(script_path_str).unwrap_or_default();

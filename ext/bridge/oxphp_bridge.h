@@ -1007,6 +1007,12 @@ void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
+/* Returns 1 if the calling thread is currently inside a PHP fiber,
+ * else 0. Cheap (single field read). Used by Shared\Channel (and
+ * other primitives) to choose between synthetic-promise fiber-suspend
+ * and crossbeam thread-block when timeout > 0. */
+int oxphp_bridge_in_fiber(void);
+
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
@@ -1090,6 +1096,34 @@ int oxphp_portable_deserialize_ht(const unsigned char *buf, size_t len,
 /* Free a buffer returned by oxphp_portable_serialize / oxphp_portable_serialize_ht. */
 void oxphp_portable_free(unsigned char *buf);
 
+/* Iterate a PHP array (passed as zval*) and portbuf-serialize each value
+ * independently. Useful for batch channel send: each array element becomes
+ * one channel payload.
+ *
+ * Returns 0 on success, -1 on internal failure, -3 if the zval is not an
+ * array. On success:
+ *   *out_concat      — libc::malloc'd buffer with all per-element portbufs
+ *                      concatenated (NULL when total length == 0).
+ *   *out_concat_len  — total byte length.
+ *   *out_offsets     — libc::malloc'd [size_t; n+1] array of payload
+ *                      boundaries (NULL when n == 0).
+ *   *out_n           — number of elements (== number of payloads).
+ *
+ * Caller frees both outputs via oxphp_portable_free (forwards to libc::free).
+ * String keys are ignored — the array is treated as a values-only sequence,
+ * mirroring PHP's `array_values()` semantics for batch operations. */
+int oxphp_iter_array_to_portbufs(const zval *arr,
+                                  unsigned char **out_concat,
+                                  size_t *out_concat_len,
+                                  size_t **out_offsets,
+                                  size_t *out_n);
+
+/* Deserialize a portbuf and append the resulting zval to `arr` via
+ * zend_hash_next_index_insert (indexed push). Returns 0 on success,
+ * -1 on deserialize failure. `arr` must already be a zval of type
+ * IS_ARRAY (caller initialises via array_init_size / oxphp_ret_array_init). */
+int oxphp_arr_push_portbuf(zval *arr, const unsigned char *buf, size_t len);
+
 /* Free a HashTable returned by oxphp_portable_deserialize_ht. */
 void oxphp_portable_free_ht(HashTable *ht);
 
@@ -1103,9 +1137,11 @@ zval *oxphp_closure_get_this(zval *closure);
 void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
 void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id);
 
-/* Check if a HashTable contains any IS_OBJECT or IS_RESOURCE values.
- * Returns 1 if found, 0 if clean. Dereferences IS_REFERENCE wrappers. */
-int oxphp_ht_has_objects_or_resources(HashTable *ht);
+/* Check if a HashTable contains any IS_RESOURCE or non-Shareable IS_OBJECT values.
+ * Shareable objects (implementing OxPHP\Shared\Shareable) are allowed through.
+ * Recurses into nested arrays. Returns 1 if a non-shareable value is found, 0 if clean.
+ * Dereferences IS_REFERENCE wrappers. */
+int oxphp_ht_has_non_shareable_objects(HashTable *ht);
 
 /* Copy a zval into an array at a string key (ZVAL_COPY semantics). */
 void oxphp_arr_add_zval(zval *arr, const char *key, zval *val);
@@ -1393,6 +1429,219 @@ void oxphp_bridge_clear_filter_cache(void);
  * caps sets open_stack_overflow so Rust can flag the resulting
  * SpanTree as truncated. */
 void oxphp_bridge_set_profiler_max_spans(uint32_t cap);
+
+/* ─── Shareable interface ───────────────────
+ *
+ * OxPHP\Shared\Shareable is an internal-only PHP interface implemented
+ * by every Shared\* wrapper type. Registered at MINIT; retained as a
+ * process-global class_entry pointer (internal classes survive ZTS
+ * per-thread cloning — this pointer is valid in every worker thread).
+ */
+#ifdef PHP_H
+extern zend_class_entry *oxphp_shareable_ce;
+#endif
+
+/* Register `OxPHP\\Shared\\Shareable` as an internal interface.
+ * Called once from PHP_MINIT_FUNCTION. Returns SUCCESS or FAILURE. */
+int oxphp_shareable_register_ce(void);
+
+/* Clear the cached ce pointer. Called from PHP_MSHUTDOWN_FUNCTION. */
+int oxphp_shareable_unregister_ce(void);
+
+/* Returns 1 iff z is a zval with an object whose class implements
+ * Shareable. Returns 0 for non-objects, non-implementers, or if
+ * oxphp_shareable_ce is NULL (not yet registered). Safe to call from
+ * any thread after MINIT. Takes an opaque pointer (zval*) so callers
+ * that do not include php.h (Rust FFI) can still invoke it. */
+int oxphp_is_shareable(void *z);
+
+/* ─── Synthetic promise callbacks ───────────
+ *
+ * Cross-thread promise plumbing that lets Shared primitives (Channel,
+ * Mutex-with-timeout) park a fiber on an arbitrary Rust waker while
+ * reusing `oxphp_bridge_fiber_await`. Rust registers four shims at
+ * AsyncPlugin::init (main thread); C-side forwarders call through the
+ * stored pointers.
+ *
+ * Contract:
+ *   - alloc()      -> int64_t  synthetic promise id (always negative;
+ *                               async-pool ids are >= 0, so the two id
+ *                               spaces cannot collide).
+ *   - resolve(id, payload_bytes, payload_len) -> 1 delivered, 0 noop.
+ *   - reject(id, cls_fqn, message)            -> 1 delivered, 0 noop.
+ *   - cancel(id)                              -> 1 delivered, 0 noop.
+ *
+ * Payload bytes are the portable-serialised zval representation of the
+ * resolved value (empty buffer = void). See ext/bridge/oxphp_bridge.c
+ * `oxphp_portable_serialize/deserialize` for the format.
+ */
+typedef int64_t (*oxphp_async_synth_alloc_fn_t)(void);
+typedef int (*oxphp_async_synth_resolve_fn_t)(int64_t id,
+                                               const uint8_t *payload_bytes,
+                                               size_t payload_len);
+typedef int (*oxphp_async_synth_reject_fn_t)(int64_t id,
+                                              const char *cls_fqn,
+                                              const char *message);
+typedef int (*oxphp_async_synth_cancel_fn_t)(int64_t id);
+
+void oxphp_bridge_set_async_synth_alloc(oxphp_async_synth_alloc_fn_t fn);
+void oxphp_bridge_set_async_synth_resolve(oxphp_async_synth_resolve_fn_t fn);
+void oxphp_bridge_set_async_synth_reject(oxphp_async_synth_reject_fn_t fn);
+void oxphp_bridge_set_async_synth_cancel(oxphp_async_synth_cancel_fn_t fn);
+
+int64_t oxphp_async_synthetic_promise_alloc(void);
+int     oxphp_async_synthetic_promise_resolve(int64_t id,
+                                               const uint8_t *payload_bytes,
+                                               size_t payload_len);
+int     oxphp_async_synthetic_promise_reject(int64_t id,
+                                              const char *cls_fqn,
+                                              const char *message);
+int     oxphp_async_synthetic_promise_cancel(int64_t id);
+
+/* ─── Shared wrapper cross-thread helpers ────────────────────
+ *
+ * Bridge between a PHP-side Shared\* wrapper object and the Rust-side
+ * SharedRegistry. Used by the portable serializer's tag-7 path to
+ * transfer Shared\* instances across worker threads in oxphp_async.
+ *
+ * oxphp_plugin_get_shared_handle: reads the SharedHandle { u64 shared_id,
+ *   u8 type_tag } stored inside the custom-object's rust_data slot.
+ *   Returns 0 on success, negative on non-shareable / uninitialised.
+ *
+ * oxphp_shared_wrapper_new: constructs a fresh Shared\* wrapper bound
+ *   to an existing registry entry (identified by shared_id) and calls
+ *   oxphp_shared_retain on behalf of the receiver. Caller is expected
+ *   to balance the sender-side retain with oxphp_shared_release.
+ *   Returns 0 on success, negative if the entry is no longer alive or
+ *   the type_tag is not supported yet.
+ *
+ * Both helpers take `zval *`, so their declarations live inside the
+ * `#ifdef PHP_H` block; callers are C units that include php.h.
+ */
+#ifdef PHP_H
+int oxphp_plugin_get_shared_handle(zval *obj,
+                                   uint8_t *out_type_tag,
+                                   uint64_t *out_shared_id);
+int oxphp_shared_wrapper_new(zval *out,
+                             uint8_t type_tag,
+                             uint64_t shared_id);
+
+/* ─── Synchronous closure-invoke shims ─────────────────
+ * See oxphp_bridge.c for full contract.
+ */
+#ifndef OXPHP_SHARED_INVOKE_OK
+#define OXPHP_SHARED_INVOKE_OK           0
+#define OXPHP_SHARED_INVOKE_PHP_THREW    1
+#define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
+#endif
+
+int oxphp_shared_invoke_0_portbuf(zval *callable,
+                                  uint8_t **out_ret_buf,
+                                  size_t *out_ret_len);
+
+int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
+                                         const uint8_t *state_buf,
+                                         size_t state_len,
+                                         uint8_t **new_state_buf,
+                                         size_t *new_state_len,
+                                         uint8_t **out_ret_buf,
+                                         size_t *out_ret_len,
+                                         int *did_mutate);
+#endif
+
+/* ─── Cross-thread fcc spike helpers ─────────────────────────────────────
+ * Cross-thread fcc invocation probe. Lives here so both Rust
+ * (plugin functions) and C (runtime) can reach it. Not a stable
+ * API — superseded by the real Pool FFI below. */
+
+/**
+ * Capture a PHP callable's fcc for later cross-thread invocation.
+ * Stores the callable zval (refcount bumped) + the capturing
+ * pthread id in a process-global slot. Returns the captured
+ * pthread id via `out_tid` so the PHP-side test can compare with
+ * the invoker's tid.
+ *
+ * Returns 0 on success, -1 if `zend_fcall_info_init` fails
+ * (argument isn't a callable).
+ *
+ * Calling it repeatedly overwrites the slot and drops the old
+ * callable's refcount on the CAPTURING thread, matching normal
+ * zval lifetime; the assumption holds as long as the producer
+ * keeps issuing capture calls on the original thread or the
+ * process exits before the cross-thread dtor would run.
+ */
+int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid);
+
+/**
+ * Invoke the captured callable with zero arguments. Writes the
+ * return value as a portbuf buffer to `*out_ret_buf` (caller frees
+ * with `oxphp_portable_free`). Also writes the pthread id of the
+ * capture and the invocation thread so the test can assert a
+ * genuine cross-thread invocation occurred.
+ *
+ * Status codes:
+ *   0   — OK, buffer filled.
+ *  -1   — no captured fcc (capture never called).
+ *  -2   — callable threw; `EG(exception)` is set.
+ *  -3   — internal serialisation failure.
+ */
+int oxphp_pool_spike_invoke(
+    uint64_t *out_captured_tid,
+    uint64_t *out_current_tid,
+    uint8_t **out_ret_buf,
+    size_t *out_ret_len);
+
+/**
+ * Reset the spike slot (drop the stored callable). Meant to run
+ * on the capturing thread. Safe to call when the slot is empty.
+ * Used by tests to avoid leaking the captured zval across
+ * consecutive capture/invoke cycles.
+ */
+void oxphp_pool_spike_reset(void);
+
+/* ─── Shared\Pool helpers ───────────────────
+ * Real pool factory / body / slot lifecycle helpers. The spike
+ * above is a standalone probe and lives alongside these until it
+ * can be retired.
+ *
+ * Lifetime contract:
+ *   - `oxphp_pool_fcc_new`  → paired with `oxphp_pool_fcc_free`.
+ *   - `oxphp_pool_factory_invoke` out-param is owned by pool;
+ *      pair with `oxphp_pool_slot_free` at pool-drop.
+ *   - `oxphp_pool_slot_to_user` does not transfer ownership;
+ *      the pool retains the slot-zval.
+ *
+ * All *_free helpers invoke `zval_ptr_dtor` and must be called
+ * on a Zend-initialised worker thread. v1 leaks on pool-drop;
+ * a follow-up will wire the shutdown-driven cleanup path. */
+
+int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap);
+void oxphp_pool_fcc_free(void *fcc_heap);
+int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap);
+int oxphp_pool_body_invoke(void *body_callable_zv,
+                            void *slot_zv_heap,
+                            void *user_out_zv);
+void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv);
+void oxphp_pool_slot_free(void *slot_zv_heap);
+
+/* Best-effort $destroy($resource) + slot release. See
+ * oxphp_bridge.c for the full contract. `destroy_fcc_heap`
+ * may be NULL (skip invocation). Exceptions are captured via
+ * oxphp_bridge_capture_fatal and cleared. Always returns 0. */
+int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
+
+/* Shared\Pool\Handle rust_data wrapper helpers. See
+ * oxphp_bridge.c §Shared\Pool\Handle rust_data wrapper helpers
+ * for the storage layout and semantics. */
+int oxphp_shared_pool_handle_alloc(void *out_zv,
+                                    uint64_t pool_id,
+                                    uint64_t owner_tid,
+                                    void *slot_zv_heap);
+int oxphp_shared_pool_handle_read(void *handle_zv,
+                                   uint64_t *out_pool_id,
+                                   uint64_t *out_owner_tid,
+                                   void **out_slot_zv_heap);
+void oxphp_shared_pool_handle_clear(void *handle_zv);
 
 #ifdef __cplusplus
 }

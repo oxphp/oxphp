@@ -1559,10 +1559,34 @@ unsafe extern "C" fn method_dispatch_callback(
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
             tracing::warn!(class_index, method = name_str, error = %e, "Plugin method error");
+            // Mirror native-function dispatch: throw a PHP exception so the
+            // caller's catch block sees it instead of the generic Error from
+            // the C-side `if (rc != 0 && !EG(exception))` fallback.
+            if unsafe { crate::bridge::ffi::oxphp_exception_pending() } == 0 {
+                let (class, message, code) = match &e {
+                    crate::plugin::php::PhpError::Exception {
+                        class,
+                        message,
+                        code,
+                    } => (class.as_str(), message.as_str(), *code),
+                    other => ("RuntimeException", &*other.to_string(), 0),
+                };
+                let cls_c = CString::new(class).unwrap_or_default();
+                let msg_c = CString::new(message).unwrap_or_default();
+                unsafe {
+                    crate::bridge::ffi::oxphp_throw_exception(cls_c.as_ptr(), msg_c.as_ptr(), code);
+                }
+            }
             -1
         }
         Err(_) => {
             tracing::error!(class_index, method = name_str, "Plugin method panicked");
+            if unsafe { crate::bridge::ffi::oxphp_exception_pending() } == 0 {
+                let msg = CString::new("Internal error: plugin method panicked").unwrap();
+                unsafe {
+                    crate::bridge::ffi::oxphp_throw_exception(std::ptr::null(), msg.as_ptr(), 0);
+                }
+            }
             -1
         }
     }
@@ -1772,10 +1796,52 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 );
             }
 
-            // Magic methods
+            // Magic methods — register as real PHP methods on the class so
+            // `zend_do_link_class` caches them into `ce->clone` / `ce->__get` /
+            // etc. during class finalization. Without the add_method step,
+            // `clone $obj` runs only the `clone_obj` handler and never calls
+            // the user's `__clone` magic handler, which is why
+            // `test_map_forbidden_clone` failed silently before this change.
+            //
+            // The legacy `set_magic` flag is kept for now in case any
+            // C-side code still reads it, but the dispatch now goes
+            // through the regular method path.
             for i in 0..MagicMethod::COUNT {
                 if class.magic_handlers[i].is_some() {
                     crate::bridge::ffi::oxphp_bridge_class_set_magic(handle, i as c_int, 1);
+                    let magic =
+                        MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
+                    let (req, total) = magic.arity();
+                    // Arity-> zend_function_entry gap: the C side installs
+                    // every method with `num_args = 0` and a variadic
+                    // arginfo, because the dispatch hop into Rust doesn't
+                    // care about typed slots. PHP's magic-method validator
+                    // (`zend_check_magic_method_implementation`) disagrees —
+                    // it trips a MINIT-time fatal like "Method ::__get()
+                    // must take exactly 1 argument". Until the C side
+                    // gains per-method arg_info, skip non-zero-arity
+                    // magics and fall back to the legacy `set_magic` flag
+                    // path (currently a no-op observer). `__clone` and
+                    // other 0-arity magics go through the full add_method
+                    // path so `zend_do_link_class` caches them into the
+                    // class entry (required for `clone $obj` to invoke
+                    // the user handler).
+                    if (req, total) != (0, 0) {
+                        continue;
+                    }
+                    let mname = CString::new(magic.php_name()).unwrap();
+                    let (ret_tag, ret_nullable) = magic.return_tag();
+                    crate::bridge::ffi::oxphp_bridge_class_add_method(
+                        handle,
+                        mname.as_ptr(),
+                        visibility_to_zend(Visibility::Public),
+                        0,
+                        0,
+                        0,
+                        0,
+                        ret_tag,
+                        if ret_nullable { 1 } else { 0 },
+                    );
                 }
             }
 
@@ -1792,10 +1858,36 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 methods_map.insert(method.name, handler);
             }
         }
+        // Magic handlers share the same dispatch table — keyed by their PHP
+        // name (`__clone`, `__toString`, …) so a single
+        // `oxphp_method_dispatch` callback covers both explicit methods and
+        // magic methods registered via `.magic(...)`. `MagicHandler` is a
+        // `Box<dyn Fn(...)>`, which does not unsize-coerce to
+        // `Box<dyn PluginNativeFunction>`, so re-box through a closure that
+        // forwards the call — the blanket `Fn -> PluginNativeFunction` impl
+        // then kicks in.
+        let mut magic_handlers = class.magic_handlers;
+        for i in 0..MagicMethod::COUNT {
+            if let Some(handler) = magic_handlers[i].take() {
+                let magic =
+                    MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
+                // Mirror the add_method skip above: only 0-arity magics
+                // are registered on the class right now, so only their
+                // handlers need to live in the dispatch map.
+                if magic.arity() != (0, 0) {
+                    continue;
+                }
+                let wrapped: Box<dyn PluginNativeFunction> =
+                    Box::new(move |call: &mut crate::bridge::call::NativeCall| handler(call));
+                methods_map.insert(magic.php_name().to_string(), wrapped);
+            }
+        }
         method_dispatch.push(methods_map);
 
-        // Build magic dispatch for this class.
-        magic_dispatch.push(class.magic_handlers);
+        // Magic dispatch map is kept empty — magic handlers live in the
+        // method dispatch map above. The array is still populated so the
+        // per-class indexing assumed elsewhere stays in sync.
+        magic_dispatch.push(magic_handlers);
 
         // Build class meta for storage.
         if class.has_custom_storage {
@@ -2304,6 +2396,26 @@ pub fn store_promise(
     });
 }
 
+/// Register a synthetic-promise receiver with the current thread's
+/// `PROMISE_MAP` so `oxphp_bridge_fiber_await(id, ...)` drains it the
+/// same way as an async-pool task result.
+///
+/// Callers live in `src/plugins/ox_async/synthetic.rs`; the receiver's
+/// payload is already an `AsyncResult` (synthetic sources construct
+/// one from `PromisePayload` before sending), so no enum refactor to
+/// `PROMISE_MAP` is required. `cancelled` is provided by the caller
+/// for API symmetry with `store_promise`; synthetic promises today
+/// ignore it (cancellation is signalled through the oneshot payload),
+/// but future plumbing (e.g., fiber_await timeout signalling back to
+/// the synthetic resolver) can use it.
+pub(crate) fn register_synthetic_receiver(
+    id: u64,
+    rx: tokio::sync::oneshot::Receiver<AsyncResult>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    store_promise(id, rx, cancelled);
+}
+
 pub fn take_promise(
     id: u64,
 ) -> Option<(
@@ -2462,6 +2574,13 @@ pub fn set_async_tokio_handle(handle: tokio::runtime::Handle) {
     ASYNC_TOKIO_HANDLE
         .set(handle)
         .expect("ASYNC_TOKIO_HANDLE already set");
+}
+
+/// Borrow the process-global Tokio runtime handle, if it has been installed.
+/// Safe to call from any thread (including PHP worker threads). Returns
+/// `None` during early startup / unit tests where no runtime was registered.
+pub fn async_tokio_handle() -> Option<&'static tokio::runtime::Handle> {
+    ASYNC_TOKIO_HANDLE.get()
 }
 
 // ─── Async Metrics ──────────────────────────────────────────────

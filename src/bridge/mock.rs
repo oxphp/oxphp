@@ -332,6 +332,40 @@ pub unsafe fn oxphp_portable_deserialize_ht(
 pub unsafe fn oxphp_portable_free(_buf: *mut u8) {}
 pub unsafe fn oxphp_portable_free_ht(_ht: *mut c_void) {}
 
+// Cross-thread fcc spike mocks (no-op on host).
+pub unsafe fn oxphp_pool_spike_capture(_callable: *mut c_void, _out_tid: *mut u64) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_pool_spike_invoke(
+    _out_captured: *mut u64,
+    _out_current: *mut u64,
+    _out_buf: *mut *mut u8,
+    _out_len: *mut usize,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_pool_spike_reset() {}
+
+pub unsafe fn oxphp_iter_array_to_portbufs(
+    _arr: *const c_void,
+    out_concat: *mut *mut u8,
+    out_concat_len: *mut usize,
+    out_offsets: *mut *mut usize,
+    out_n: *mut usize,
+) -> c_int {
+    unsafe {
+        *out_concat = std::ptr::null_mut();
+        *out_concat_len = 0;
+        *out_offsets = std::ptr::null_mut();
+        *out_n = 0;
+    }
+    -1
+}
+
+pub unsafe fn oxphp_arr_push_portbuf(_arr: *mut c_void, _buf: *const u8, _len: usize) -> c_int {
+    -1
+}
+
 // Closure inspection
 pub unsafe fn oxphp_closure_get_op_array(_closure: *mut c_void) -> *const c_void {
     std::ptr::null()
@@ -361,7 +395,7 @@ pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
 
 // ── Async plugin helpers ──
 
-pub unsafe fn oxphp_ht_has_objects_or_resources(_ht: *mut c_void) -> c_int {
+pub unsafe fn oxphp_ht_has_non_shareable_objects(_ht: *mut c_void) -> c_int {
     0
 }
 pub unsafe fn oxphp_bridge_fiber_await(
@@ -370,6 +404,12 @@ pub unsafe fn oxphp_bridge_fiber_await(
     _retval: *mut c_void,
 ) -> c_int {
     1 // not in fiber — blocking path
+}
+pub unsafe fn oxphp_bridge_in_fiber() -> c_int {
+    0
+}
+pub unsafe fn oxphp_is_shareable(_z: *const c_void) -> c_int {
+    0 // no CE registered in host tests
 }
 pub unsafe fn oxphp_bridge_set_borrow_proxy_ce(_ce: *mut c_void) {}
 pub unsafe fn oxphp_arr_add_zval(_arr: *mut c_void, _key: *const c_char, _val: *mut c_void) {}
@@ -403,6 +443,19 @@ pub unsafe fn oxphp_bridge_await_any_dispatch(
 ) -> c_int {
     -1
 }
+
+// ── Synthetic promise bridge setters ──
+
+pub unsafe fn oxphp_bridge_set_async_synth_alloc(_f: extern "C" fn() -> i64) {}
+pub unsafe fn oxphp_bridge_set_async_synth_resolve(
+    _f: extern "C" fn(i64, *const u8, usize) -> c_int,
+) {
+}
+pub unsafe fn oxphp_bridge_set_async_synth_reject(
+    _f: extern "C" fn(i64, *const c_char, *const c_char) -> c_int,
+) {
+}
+pub unsafe fn oxphp_bridge_set_async_synth_cancel(_f: extern "C" fn(i64) -> c_int) {}
 
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
@@ -629,3 +682,85 @@ pub unsafe fn oxphp_exception_get(
 ) {
 }
 pub unsafe fn oxphp_exception_clear() {}
+
+// ── Shared\* synchronous invoke shims ──────────────
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn oxphp_shared_invoke_0_portbuf(
+    _callable: *mut c_void,
+    _out_ret_buf: *mut *mut u8,
+    _out_ret_len: *mut usize,
+) -> c_int {
+    -1
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn oxphp_shared_invoke_byref_1_portbuf(
+    _callable: *mut c_void,
+    _state_buf: *const u8,
+    _state_len: usize,
+    _new_state_buf: *mut *mut u8,
+    _new_state_len: *mut usize,
+    _out_ret_buf: *mut *mut u8,
+    _out_ret_len: *mut usize,
+    _did_mutate: *mut c_int,
+) -> c_int {
+    -1
+}
+
+pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
+pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
+#[allow(dead_code)]
+pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
+
+// ── Shared\Pool bridge (host mock) ───────────────────────
+// Host tests cannot invoke PHP, so every factory/body path fails
+// immediately. Tests that exercise pool logic must live under
+// feature=php (docker) — the mock here is enough to compile the
+// FFI declarations on host.
+pub unsafe fn oxphp_pool_fcc_new(
+    _callable_zval: *mut c_void,
+    _out_fcc_heap: *mut *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_pool_fcc_free(_fcc_heap: *mut c_void) {}
+pub unsafe fn oxphp_pool_factory_invoke(
+    _fcc_heap: *mut c_void,
+    _out_slot_zv_heap: *mut *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_pool_body_invoke(
+    _body_callable_zv: *mut c_void,
+    _slot_zv_heap: *mut c_void,
+    _user_out_zv: *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_pool_slot_to_user(_slot_zv_heap: *mut c_void, _user_out_zv: *mut c_void) {}
+pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {}
+pub unsafe fn oxphp_pool_destroy_invoke(
+    _destroy_fcc_heap: *mut c_void,
+    _slot_zv_heap: *mut c_void,
+) -> c_int {
+    0
+}
+
+pub unsafe fn oxphp_shared_pool_handle_alloc(
+    _out_zv: *mut c_void,
+    _pool_id: u64,
+    _owner_tid: u64,
+    _slot_zv_heap: *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_shared_pool_handle_read(
+    _handle_zv: *mut c_void,
+    _out_pool_id: *mut u64,
+    _out_owner_tid: *mut u64,
+    _out_slot_zv_heap: *mut *mut c_void,
+) -> c_int {
+    -1
+}
+pub unsafe fn oxphp_shared_pool_handle_clear(_handle_zv: *mut c_void) {}

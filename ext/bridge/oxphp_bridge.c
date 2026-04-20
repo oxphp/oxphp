@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <pthread.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -1968,6 +1969,10 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
     return 1; /* not in fiber — caller should do blocking await */
 }
 
+int oxphp_bridge_in_fiber(void) {
+    return EG(current_fiber_context) != NULL ? 1 : 0;
+}
+
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
     uint32_t argc, void *args, void *closure_zval
@@ -2256,6 +2261,19 @@ static void portbuf_u64(portbuf_t *b, uint64_t v) {
 /* Forward declaration for recursive serialization */
 static int portbuf_ser_zval(portbuf_t *b, const zval *zv);
 
+/* Forward declarations for Shared\* wrapper helpers (tag 7).
+ * Full definitions live near the bottom of this file alongside
+ * oxphp_is_shareable. Rust FFI exports (oxphp_shared_retain/release/
+ * is_alive) are used by those helpers and by the serializer itself. */
+extern int oxphp_shared_retain(uint64_t id);
+extern int oxphp_shared_release(uint64_t id);
+int oxphp_plugin_get_shared_handle(zval *obj,
+                                   uint8_t *out_type_tag,
+                                   uint64_t *out_shared_id);
+int oxphp_shared_wrapper_new(zval *out,
+                             uint8_t type_tag,
+                             uint64_t shared_id);
+
 static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
     if (portbuf_ensure(b, 16) != 0) return -1;
 
@@ -2323,8 +2341,32 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
         }
         case IS_REFERENCE:
             return portbuf_ser_zval(b, Z_REFVAL_P(zv));
+        case IS_OBJECT: {
+            if (!oxphp_is_shareable((void *)zv)) {
+                /* Non-shareable object — fall through to null. */
+                portbuf_u8(b, 0);
+                break;
+            }
+            uint8_t  type_tag;
+            uint64_t shared_id;
+            if (oxphp_plugin_get_shared_handle((zval *)zv, &type_tag, &shared_id) != 0) {
+                /* Uninitialised or broken wrapper — serialize as null. */
+                portbuf_u8(b, 0);
+                break;
+            }
+            if (portbuf_ensure(b, 1 + 1 + 8) != 0) return -1;
+            portbuf_u8(b, 7);
+            portbuf_u8(b, type_tag);
+            /* write shared_id (u64 host-endian — memcpy preserves host layout;
+             * serializer is intra-host only, all workers share endianness). */
+            memcpy(b->data + b->len, &shared_id, 8);
+            b->len += 8;
+            /* Sender-side retain; balanced by deserializer-side release. */
+            oxphp_shared_retain(shared_id);
+            break;
+        }
         default:
-            /* Objects, resources — serialize as null */
+            /* Non-shareable objects, resources — serialize as null */
             portbuf_u8(b, 0);
             break;
     }
@@ -2464,6 +2506,23 @@ static int portrd_deser_zval(portrd_t *r, zval *out) {
             }
             break;
         }
+        case 7: { /* Shared\* wrapper */
+            uint8_t  type_tag;
+            uint64_t shared_id;
+            if (portrd_u8(r, &type_tag) != 0) return -1;
+            if (portrd_u64(r, &shared_id) != 0) return -1;
+            if (oxphp_shared_wrapper_new(out, type_tag, shared_id) != 0) {
+                /* Entry evicted between send and recv (rare) — release
+                 * sender-side retain and leave null. */
+                oxphp_shared_release(shared_id);
+                ZVAL_NULL(out);
+                break;
+            }
+            /* Balance the sender-side retain. Receiver's wrapper retain
+             * was done inside oxphp_shared_wrapper_new. */
+            oxphp_shared_release(shared_id);
+            break;
+        }
         default:
             ZVAL_NULL(out);
             break;
@@ -2522,6 +2581,142 @@ void oxphp_portable_free_ht(HashTable *ht) {
     if (ht) {
         zend_array_destroy(ht);
     }
+}
+
+/* Iterate a PHP array and portbuf-serialize each element independently.
+ * Produces:
+ *   (a) one libc::malloc'd buffer holding every per-element portbuf
+ *       concatenated (NULL when the total length is zero, e.g. empty
+ *       array or all-null elements);
+ *   (b) a libc::malloc'd [size_t; n+1] offsets array whose i-th entry is
+ *       the byte offset of payload i inside the concat buffer, with
+ *       offsets[n] == total length.
+ *
+ * On any failure partial allocations are freed and all out-params are
+ * zeroed, so the caller can early-return on non-zero.
+ *
+ * String keys are ignored — this is intentionally `array_values()`-style
+ * for batch channel send. */
+int oxphp_iter_array_to_portbufs(const zval *arr,
+                                  unsigned char **out_concat,
+                                  size_t *out_concat_len,
+                                  size_t **out_offsets,
+                                  size_t *out_n) {
+    if (!out_concat || !out_concat_len || !out_offsets || !out_n) return -1;
+    *out_concat = NULL;
+    *out_concat_len = 0;
+    *out_offsets = NULL;
+    *out_n = 0;
+    if (!arr || Z_TYPE_P(arr) != IS_ARRAY) return -3;
+
+    HashTable *ht = Z_ARRVAL_P(arr);
+    uint32_t count = zend_hash_num_elements(ht);
+    if (count == 0) return 0;
+
+    /* Phase 1: serialize each element to a transient per-element buffer.
+     * We keep every per-element buffer via its (ptr, len) tuple, then
+     * concatenate in a single malloc at the end. */
+    unsigned char **bufs = (unsigned char **)calloc(count, sizeof(unsigned char *));
+    size_t *lens = (size_t *)calloc(count, sizeof(size_t));
+    if (!bufs || !lens) {
+        free(bufs);
+        free(lens);
+        return -1;
+    }
+
+    uint32_t i = 0;
+    zval *val;
+    int err = 0;
+    ZEND_HASH_FOREACH_VAL(ht, val) {
+        if (i >= count) break;
+        /* Dereference IS_REFERENCE wrappers so the serializer sees the
+         * underlying scalar/array/object. */
+        zval *z = val;
+        if (Z_TYPE_P(z) == IS_REFERENCE) {
+            z = Z_REFVAL_P(z);
+        }
+        if (oxphp_portable_serialize(z, 1, &bufs[i], &lens[i]) != 0) {
+            err = -1;
+            break;
+        }
+        i++;
+    } ZEND_HASH_FOREACH_END();
+
+    if (err != 0) {
+        for (uint32_t j = 0; j < i; j++) {
+            if (bufs[j]) free(bufs[j]);
+        }
+        free(bufs);
+        free(lens);
+        return -1;
+    }
+
+    /* Adjust count if iteration stopped short for any reason. */
+    count = i;
+
+    /* Phase 2: compute total length, allocate final buffers. */
+    size_t total = 0;
+    for (uint32_t j = 0; j < count; j++) {
+        total += lens[j];
+    }
+
+    unsigned char *concat = NULL;
+    if (total > 0) {
+        concat = (unsigned char *)malloc(total);
+        if (!concat) {
+            for (uint32_t j = 0; j < count; j++) {
+                if (bufs[j]) free(bufs[j]);
+            }
+            free(bufs);
+            free(lens);
+            return -1;
+        }
+    }
+
+    size_t *offsets = (size_t *)malloc((count + 1) * sizeof(size_t));
+    if (!offsets) {
+        if (concat) free(concat);
+        for (uint32_t j = 0; j < count; j++) {
+            if (bufs[j]) free(bufs[j]);
+        }
+        free(bufs);
+        free(lens);
+        return -1;
+    }
+
+    size_t cursor = 0;
+    offsets[0] = 0;
+    for (uint32_t j = 0; j < count; j++) {
+        if (lens[j] > 0 && concat && bufs[j]) {
+            memcpy(concat + cursor, bufs[j], lens[j]);
+        }
+        cursor += lens[j];
+        offsets[j + 1] = cursor;
+        if (bufs[j]) free(bufs[j]);
+    }
+    free(bufs);
+    free(lens);
+
+    *out_concat = concat;
+    *out_concat_len = total;
+    *out_offsets = offsets;
+    *out_n = count;
+    return 0;
+}
+
+/* Deserialize a portbuf slice and append the resulting zval to `arr` via
+ * zend_hash_next_index_insert. `arr` must already be IS_ARRAY. */
+int oxphp_arr_push_portbuf(zval *arr, const unsigned char *buf, size_t len) {
+    if (!arr || Z_TYPE_P(arr) != IS_ARRAY) return -1;
+    zval tmp;
+    ZVAL_UNDEF(&tmp);
+    if (oxphp_portable_deserialize(buf, len, 1, &tmp) != 0) {
+        zval_ptr_dtor(&tmp);
+        return -1;
+    }
+    /* add_next_index_zval transfers ownership — no extra addref needed. */
+    zend_hash_next_index_insert(Z_ARRVAL_P(arr), &tmp);
+    return 0;
 }
 
 /* === Async Promise: Closure Inspection === */
@@ -2835,7 +3030,7 @@ void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce) {
     borrow_proxy_ce = ce;
 }
 
-int oxphp_ht_has_objects_or_resources(HashTable *ht) {
+int oxphp_ht_has_non_shareable_objects(HashTable *ht) {
     if (!ht) return 0;
     zval *val;
     ZEND_HASH_FOREACH_VAL(ht, val) {
@@ -2843,8 +3038,12 @@ int oxphp_ht_has_objects_or_resources(HashTable *ht) {
         if (Z_TYPE_P(check) == IS_REFERENCE) {
             check = Z_REFVAL_P(check);
         }
-        if (Z_TYPE_P(check) == IS_OBJECT || Z_TYPE_P(check) == IS_RESOURCE) {
-            return 1;
+        if (Z_TYPE_P(check) == IS_RESOURCE) return 1;
+        if (Z_TYPE_P(check) == IS_OBJECT) {
+            if (!oxphp_is_shareable((void *)check)) return 1;
+        }
+        if (Z_TYPE_P(check) == IS_ARRAY) {
+            if (oxphp_ht_has_non_shareable_objects(Z_ARRVAL_P(check))) return 1;
         }
     } ZEND_HASH_FOREACH_END();
     return 0;
@@ -3880,4 +4079,760 @@ oxphp_profiler_observer_init(zend_execute_data *execute_data) {
         oxphp_profiler_begin,
         oxphp_profiler_end,
     };
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Shareable interface
+ * ═══════════════════════════════════════════════════════════ */
+
+zend_class_entry *oxphp_shareable_ce = NULL;
+
+int oxphp_shareable_register_ce(void)
+{
+    zend_class_entry tmp_ce;
+    INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Shared", "Shareable", NULL);
+    oxphp_shareable_ce = zend_register_internal_interface(&tmp_ce);
+    if (!oxphp_shareable_ce) {
+        return FAILURE;
+    }
+    return SUCCESS;
+}
+
+int oxphp_shareable_unregister_ce(void)
+{
+    /* The engine frees the class_entry at module shutdown; just clear
+     * our cached pointer so a later re-init of the module starts fresh. */
+    oxphp_shareable_ce = NULL;
+    return SUCCESS;
+}
+
+int oxphp_is_shareable(void *z)
+{
+    zval *zv = (zval *)z;
+    if (zv == NULL) return 0;
+    if (Z_TYPE_P(zv) != IS_OBJECT) return 0;
+    if (oxphp_shareable_ce == NULL) return 0;
+    return instanceof_function(Z_OBJCE_P(zv), oxphp_shareable_ce) ? 1 : 0;
+}
+
+/* ─── Synthetic promise callbacks ─────── */
+
+static oxphp_async_synth_alloc_fn_t   g_synth_alloc   = NULL;
+static oxphp_async_synth_resolve_fn_t g_synth_resolve = NULL;
+static oxphp_async_synth_reject_fn_t  g_synth_reject  = NULL;
+static oxphp_async_synth_cancel_fn_t  g_synth_cancel  = NULL;
+
+void oxphp_bridge_set_async_synth_alloc(oxphp_async_synth_alloc_fn_t fn) {
+    g_synth_alloc = fn;
+}
+void oxphp_bridge_set_async_synth_resolve(oxphp_async_synth_resolve_fn_t fn) {
+    g_synth_resolve = fn;
+}
+void oxphp_bridge_set_async_synth_reject(oxphp_async_synth_reject_fn_t fn) {
+    g_synth_reject = fn;
+}
+void oxphp_bridge_set_async_synth_cancel(oxphp_async_synth_cancel_fn_t fn) {
+    g_synth_cancel = fn;
+}
+
+int64_t oxphp_async_synthetic_promise_alloc(void)
+{
+    return g_synth_alloc ? g_synth_alloc() : 0;
+}
+
+int oxphp_async_synthetic_promise_resolve(int64_t id,
+                                           const uint8_t *payload_bytes,
+                                           size_t payload_len)
+{
+    return g_synth_resolve ? g_synth_resolve(id, payload_bytes, payload_len) : 0;
+}
+
+int oxphp_async_synthetic_promise_reject(int64_t id,
+                                          const char *cls_fqn,
+                                          const char *message)
+{
+    return g_synth_reject ? g_synth_reject(id, cls_fqn, message) : 0;
+}
+
+int oxphp_async_synthetic_promise_cancel(int64_t id)
+{
+    return g_synth_cancel ? g_synth_cancel(id) : 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Shared wrapper cross-thread helpers
+ *  Used by portbuf_ser_zval (tag 7) and portrd_deser_zval (tag 7)
+ *  to cross a Shared\* object between threads. SharedHandle is
+ *  #[repr(C)] in Rust so reading offsets 0 (u64 id) and 8 (u8 tag)
+ *  is well-defined.
+ * ═══════════════════════════════════════════════════════════ */
+
+/* Extern declarations for Rust FFI exports (registry.rs). */
+extern int oxphp_shared_retain(uint64_t id);
+extern int oxphp_shared_release(uint64_t id);
+extern int oxphp_shared_is_alive(uint64_t id);
+
+int oxphp_plugin_get_shared_handle(zval *obj,
+                                   uint8_t *out_type_tag,
+                                   uint64_t *out_shared_id) {
+    if (!obj || Z_TYPE_P(obj) != IS_OBJECT) return -1;
+    if (!oxphp_is_shareable((void *)obj)) return -1;
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(obj));
+    if (intern == NULL || intern->rust_data == NULL) return -1;
+    /* SharedHandle layout: u64 shared_id at 0, u8 type_tag at 8 */
+    unsigned char *storage = (unsigned char *)intern->rust_data;
+    uint64_t sid;
+    memcpy(&sid, storage, sizeof(uint64_t));
+    uint8_t tt = storage[8];
+    if (sid == 0) return -1; /* uninitialised wrapper */
+    *out_shared_id = sid;
+    *out_type_tag  = tt;
+    return 0;
+}
+
+int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
+    if (!out) return -1;
+    if (!oxphp_shared_is_alive(shared_id)) return -1;
+
+    /* Look up the PHP class_entry by type_tag. */
+    const char *fqn;
+    switch (type_tag) {
+        case 10: fqn = "OxPHP\\Shared\\Counter"; break;
+        case 11: fqn = "OxPHP\\Shared\\Flag";    break;
+        case 12: fqn = "OxPHP\\Shared\\Once";    break;
+        case 40: fqn = "OxPHP\\Shared\\Mutex";   break;
+        default: return -1; /* unknown type tag */
+    }
+    zend_string *cname = zend_string_init(fqn, strlen(fqn), 0);
+    zend_class_entry *ce = zend_lookup_class_ex(cname, NULL, 0);
+    zend_string_release(cname);
+    if (ce == NULL) return -1;
+
+    /* object_init_ex invokes the class's create_object handler
+     * (→ oxphp_plugin_create_object → storage_factory) but does NOT
+     * run __construct. Storage is populated with a fresh SharedHandle
+     * { shared_id: 0, type_tag: ... } by the factory; we overwrite
+     * shared_id with the transferred value below. */
+    if (object_init_ex(out, ce) != SUCCESS) return -1;
+
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(out));
+    if (intern == NULL || intern->rust_data == NULL) {
+        zval_ptr_dtor(out);
+        return -1;
+    }
+    unsigned char *storage = (unsigned char *)intern->rust_data;
+    memcpy(storage, &shared_id, sizeof(uint64_t));
+    storage[8] = type_tag;
+
+    /* Receiver-side retain. Receiver's Drop will release. */
+    oxphp_shared_retain(shared_id);
+    return 0;
+}
+
+/* ─── Shared\* synchronous closure-invoke shims ─────────
+ *
+ * Same-thread synchronous invocation of a PHP callable, with state
+ * crossing the Rust↔C boundary as portbuf bytes (same wire format
+ * as oxphp_portable_serialize / oxphp_portable_deserialize).
+ *
+ * Rust never touches emalloc — all zvals allocated and freed here.
+ * On closure throw, EG(exception) stays set; caller returns
+ * RETURN_THROWS-style from its plugin method handler.
+ *
+ * Spec: .internal/technical-docs/en/features/shared/40-ffi-conventions.md
+ *       §Convention 1.5 + §Convention 2
+ */
+
+#define OXPHP_SHARED_INVOKE_OK          0
+#define OXPHP_SHARED_INVOKE_PHP_THREW   1
+#define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
+
+/* Invoke a zero-argument closure/callable. Returns its portbuf-encoded
+ * return value in *out_ret_buf (emalloc'd via the same free path as
+ * oxphp_portable_serialize — caller calls oxphp_portable_free).
+ *
+ * On closure throw: returns OXPHP_SHARED_INVOKE_PHP_THREW. EG(exception)
+ * stays set for the caller's plugin-method wrapper to surface.
+ */
+int oxphp_shared_invoke_0_portbuf(zval *callable,
+                                  uint8_t **out_ret_buf,
+                                  size_t *out_ret_len)
+{
+    if (!callable || !out_ret_buf || !out_ret_len) return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    *out_ret_buf = NULL;
+    *out_ret_len = 0;
+
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+    if (err) efree(err);
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+
+    zend_call_known_function(fcc.function_handler,
+                             fcc.object,
+                             fcc.called_scope,
+                             &ret_zv,
+                             0, NULL, NULL);
+
+    if (EG(exception)) {
+        zval_ptr_dtor(&ret_zv);
+        return OXPHP_SHARED_INVOKE_PHP_THREW;
+    }
+
+    /* Serialise ret_zv into portbuf bytes for Rust to decode. */
+    if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
+        zval_ptr_dtor(&ret_zv);
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+
+    zval_ptr_dtor(&ret_zv);
+    return OXPHP_SHARED_INVOKE_OK;
+}
+
+/* Invoke a 1-argument closure where arg 0 is a by-reference zval
+ * materialised from the caller's SharedValue (encoded in state_buf).
+ * After the closure returns, re-serialise the (possibly mutated)
+ * state zval into *new_state_buf for Rust to write back.
+ *
+ * Semantics:
+ *   *did_mutate is always set to 1 by this shim — we cannot cheaply
+ *   diff pre/post, so callers always write back on INVOKE_OK. Rust
+ *   keeps the state lock held across this call.
+ *
+ * On closure throw: state is NOT materialised back; *new_state_buf
+ * stays NULL. EG(exception) stays set.
+ */
+int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
+                                         const uint8_t *state_buf,
+                                         size_t state_len,
+                                         uint8_t **new_state_buf,
+                                         size_t *new_state_len,
+                                         uint8_t **out_ret_buf,
+                                         size_t *out_ret_len,
+                                         int *did_mutate)
+{
+    if (!callable || !state_buf || state_len == 0 ||
+        !new_state_buf || !new_state_len ||
+        !out_ret_buf || !out_ret_len || !did_mutate) {
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+    *new_state_buf = NULL;
+    *new_state_len = 0;
+    *out_ret_buf = NULL;
+    *out_ret_len = 0;
+    *did_mutate = 0;
+
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+    if (err) efree(err);
+
+    /* Materialise state_buf into a stack zval on the invoking thread. */
+    zval state_zv;
+    ZVAL_UNDEF(&state_zv);
+    if (oxphp_portable_deserialize(state_buf, state_len, 1, &state_zv) != 0) {
+        zval_ptr_dtor(&state_zv);
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+
+    /* Wrap as a by-reference zval so mutations inside the closure
+     * persist on the outer state_zv. ZVAL_MAKE_REF upgrades in
+     * place to IS_REFERENCE. */
+    ZVAL_MAKE_REF(&state_zv);
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+
+    zval args[1];
+    ZVAL_COPY_VALUE(&args[0], &state_zv);
+
+    zend_call_known_function(fcc.function_handler,
+                             fcc.object,
+                             fcc.called_scope,
+                             &ret_zv,
+                             1, args, NULL);
+
+    /* Unwrap the reference so serialise sees the underlying value.
+     * Do this BEFORE checking EG(exception) so partial mutations made
+     * by the closure before it threw are preserved in new_state_buf.
+     * Callers check the return code to decide whether to apply the
+     * new state; they always free new_state_buf when rc != INVOKE_OK. */
+    zval *state_inner = Z_ISREF(state_zv) ? Z_REFVAL(state_zv) : &state_zv;
+
+    if (oxphp_portable_serialize(state_inner, 1, new_state_buf, new_state_len) != 0) {
+        zval_ptr_dtor(&state_zv);
+        zval_ptr_dtor(&ret_zv);
+        return EG(exception) ? OXPHP_SHARED_INVOKE_PHP_THREW : OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+
+    if (EG(exception)) {
+        /* State serialised above for callers that want to keep partial
+         * mutations (Mutex "no rollback on PHP throw" policy).
+         * Caller is responsible for freeing *new_state_buf. */
+        zval_ptr_dtor(&state_zv);
+        zval_ptr_dtor(&ret_zv);
+        return OXPHP_SHARED_INVOKE_PHP_THREW;
+    }
+
+    if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
+        oxphp_portable_free(*new_state_buf);
+        *new_state_buf = NULL;
+        *new_state_len = 0;
+        zval_ptr_dtor(&state_zv);
+        zval_ptr_dtor(&ret_zv);
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    }
+
+    *did_mutate = 1;
+    zval_ptr_dtor(&state_zv);
+    zval_ptr_dtor(&ret_zv);
+    return OXPHP_SHARED_INVOKE_OK;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Cross-thread fcc spike
+ *
+ *  Probes whether a `zend_fcall_info_cache` captured on thread A
+ *  is safely invokable from thread B under ZTS. If not, Pool's
+ *  factory path has to store the callable's function NAME and
+ *  re-resolve per invoking thread (extra indirection). Temporary
+ *  probe — superseded by the real Pool FFI path below.
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    zend_fcall_info_cache fcc;
+    zval callable_zv;        /* keeps the Closure/callable alive */
+    uint64_t captured_tid;
+    int in_use;
+} spike_pool_slot_t;
+
+/* Process-global: populated on capture, read on invoke. No mutex:
+ * the spike's PHP test is strictly request-at-a-time. Real Pool
+ * will use proper synchronisation. */
+static spike_pool_slot_t spike_pool_slot = {0};
+
+static inline uint64_t spike_current_tid(void) {
+    /* pthread_self() returns an opaque handle — on Linux/musl it's
+     * a pointer; cast to uintptr_t for a stable-per-thread id. */
+    return (uint64_t)(uintptr_t)pthread_self();
+}
+
+void oxphp_pool_spike_reset(void) {
+    if (spike_pool_slot.in_use) {
+        zval_ptr_dtor(&spike_pool_slot.callable_zv);
+        memset(&spike_pool_slot, 0, sizeof(spike_pool_slot));
+    }
+}
+
+int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid) {
+    if (!callable_zval || !out_tid) return -1;
+    zval *callable = (zval *)callable_zval;
+
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return -1;
+    }
+    if (err) efree(err);
+
+    /* Drop any previous capture. Runs on the current thread, which
+     * may not be the prior capturer — zval_ptr_dtor on a closure
+     * allocated elsewhere is exactly the kind of hazard the spike
+     * is meant to flush out. For this probe we accept the risk and
+     * cover it with explicit `reset()` calls in the test runner. */
+    oxphp_pool_spike_reset();
+
+    ZVAL_COPY(&spike_pool_slot.callable_zv, callable);
+    spike_pool_slot.fcc = fcc;
+    spike_pool_slot.captured_tid = spike_current_tid();
+    spike_pool_slot.in_use = 1;
+
+    *out_tid = spike_pool_slot.captured_tid;
+    return 0;
+}
+
+int oxphp_pool_spike_invoke(
+    uint64_t *out_captured_tid,
+    uint64_t *out_current_tid,
+    uint8_t **out_ret_buf,
+    size_t *out_ret_len)
+{
+    if (!out_captured_tid || !out_current_tid || !out_ret_buf || !out_ret_len) return -1;
+    *out_captured_tid = 0;
+    *out_current_tid = spike_current_tid();
+    *out_ret_buf = NULL;
+    *out_ret_len = 0;
+
+    if (!spike_pool_slot.in_use) return -1;
+    *out_captured_tid = spike_pool_slot.captured_tid;
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+
+    zend_call_known_function(
+        spike_pool_slot.fcc.function_handler,
+        spike_pool_slot.fcc.object,
+        spike_pool_slot.fcc.called_scope,
+        &ret_zv,
+        0, NULL, NULL);
+
+    if (EG(exception)) {
+        zval_ptr_dtor(&ret_zv);
+        return -2;
+    }
+
+    if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
+        zval_ptr_dtor(&ret_zv);
+        return -3;
+    }
+    zval_ptr_dtor(&ret_zv);
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Shared\Pool helpers
+ *
+ *  Factory/body closure invocation + slot-zval lifecycle.
+ *  Called from Rust's oxphp_shared_pool_* FFI.
+ *
+ *  oxphp_pool_fcc_t is emalloc'd at pool_create, holds a
+ *  ZVAL_COPY of the callable so its op_array outlives any
+ *  one thread — the spike above verified `zend_call_known_function`
+ *  on the stored fcc is safe to invoke from any worker under ZTS.
+ *
+ *  Per-resource zvals are emalloc'd once at factory invocation
+ *  and owned by the pool; acquire ZVAL_COPYs them into user
+ *  out-zvals; release does not touch the slot zval (it stays
+ *  refcounted by the pool). Only pool-drop should efree the
+ *  slot; v1 leaks on drop.
+ * ═══════════════════════════════════════════════════════════ */
+
+typedef struct {
+    zend_fcall_info_cache fcc;
+    zval callable_zv; /* keeps the Closure/callable op_array alive */
+} oxphp_pool_fcc_t;
+
+/* Allocate a fcc_heap from a user callable. Returns 0 on success
+ * with `*out_fcc_heap` populated, -1 if `callable` is not a valid
+ * PHP callable. The caller must pair with oxphp_pool_fcc_free. */
+int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
+    if (!callable_zval || !out_fcc_heap) return -1;
+    *out_fcc_heap = NULL;
+
+    zval *callable = (zval *)callable_zval;
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return -1;
+    }
+    if (err) efree(err);
+
+    oxphp_pool_fcc_t *heap = emalloc(sizeof(oxphp_pool_fcc_t));
+    heap->fcc = fcc;
+    ZVAL_COPY(&heap->callable_zv, callable);
+    *out_fcc_heap = (void *)heap;
+    return 0;
+}
+
+/* Free a fcc_heap. In v1 the pool leaks these at registry drop;
+ * later shutdown-drain wiring will invoke this explicitly on the
+ * creating worker. zval_ptr_dtor from a non-Zend-initialised
+ * thread is unsafe — callers MUST ensure they run inside
+ * `php_request_startup` bounds. */
+void oxphp_pool_fcc_free(void *fcc_heap) {
+    if (!fcc_heap) return;
+    oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
+    zval_ptr_dtor(&heap->callable_zv);
+    efree(heap);
+}
+
+/* Invoke the factory with 0 args. On success, emalloc a fresh
+ * zval and ZVAL_COPY the factory's return into it; the heap
+ * pointer is written to `*out_slot_zv_heap`. The pool owns this
+ * allocation from here on.
+ *
+ * Status codes:
+ *   0  — OK, `*out_slot_zv_heap` populated (IS_OBJECT guaranteed).
+ *  -1  — factory threw; EG(exception) set, nothing allocated.
+ *  -2  — factory returned non-object. v1 requires objects so the
+ *        release path can match via spl_object_id-style identity
+ *        stored in the Shared\Pool\Handle wrapper's rust_data slot.
+ *        Caller surfaces TypeException; nothing allocated. */
+int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap) {
+    if (!fcc_heap || !out_slot_zv_heap) return -1;
+    *out_slot_zv_heap = NULL;
+
+    oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+
+    zend_call_known_function(heap->fcc.function_handler,
+                              heap->fcc.object,
+                              heap->fcc.called_scope,
+                              &ret_zv,
+                              0, NULL, NULL);
+
+    if (EG(exception)) {
+        zval_ptr_dtor(&ret_zv);
+        return -1;
+    }
+    if (Z_TYPE(ret_zv) != IS_OBJECT) {
+        zval_ptr_dtor(&ret_zv);
+        return -2;
+    }
+
+    zval *slot_zv = emalloc(sizeof(zval));
+    ZVAL_COPY(slot_zv, &ret_zv);
+    zval_ptr_dtor(&ret_zv);
+    *out_slot_zv_heap = (void *)slot_zv;
+    return 0;
+}
+
+/* Invoke a 1-arg body: body($resource). The resource is the
+ * pool's slot_zv — the body receives a ZVAL_COPY'd reference,
+ * so object-method calls on it affect the underlying resource
+ * naturally (Z_OBJ identity preserved).
+ *
+ * On success, ZVAL_COPY the return into `*user_out_zv`. On
+ * throw, EG(exception) stays set and `user_out_zv` is untouched.
+ *
+ * Status codes:
+ *   0  — OK, user_out_zv filled.
+ *  -1  — body is not a valid callable.
+ *  -2  — body threw; EG(exception) set. */
+int oxphp_pool_body_invoke(void *body_callable_zv,
+                            void *slot_zv_heap,
+                            void *user_out_zv)
+{
+    if (!body_callable_zv || !slot_zv_heap || !user_out_zv) return -1;
+    zval *body = (zval *)body_callable_zv;
+    zval *slot = (zval *)slot_zv_heap;
+    zval *out = (zval *)user_out_zv;
+
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(body, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return -1;
+    }
+    if (err) efree(err);
+
+    zval args[1];
+    ZVAL_COPY(&args[0], slot);
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+
+    zend_call_known_function(fcc.function_handler,
+                              fcc.object,
+                              fcc.called_scope,
+                              &ret_zv,
+                              1, args, NULL);
+
+    zval_ptr_dtor(&args[0]);
+
+    if (EG(exception)) {
+        zval_ptr_dtor(&ret_zv);
+        return -2;
+    }
+
+    ZVAL_COPY(out, &ret_zv);
+    zval_ptr_dtor(&ret_zv);
+    return 0;
+}
+
+/* ZVAL_COPY a heap slot-zval into a user out-zval. Used by
+ * pool_acquire (hand resource to user) and by Handle::get()
+ * (read-only accessor — pool retains ownership). */
+void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv) {
+    if (!slot_zv_heap || !user_out_zv) return;
+    zval *slot = (zval *)slot_zv_heap;
+    zval *out = (zval *)user_out_zv;
+    ZVAL_COPY(out, slot);
+}
+
+/* zval_ptr_dtor + efree on a slot-zval heap allocation. Same
+ * thread-safety caveat as oxphp_pool_fcc_free: must run on a
+ * Zend-initialised worker thread. */
+void oxphp_pool_slot_free(void *slot_zv_heap) {
+    if (!slot_zv_heap) return;
+    zval *slot = (zval *)slot_zv_heap;
+    zval_ptr_dtor(slot);
+    efree(slot);
+}
+
+/* Best-effort $destroy($resource) invocation, then slot teardown.
+ *
+ * Called by `PoolInner::on_shutdown_notify` and `on_drop` on the
+ * thread that drains the pool — which may not be the thread that
+ * minted the resource, and may not even be inside a live PHP
+ * request. We guard both hazards:
+ *
+ *  - If `destroy_fcc_heap == NULL` (user opted out by passing
+ *    `$destroy: null`), we skip invocation entirely.
+ *  - If `EG(current_execute_data) == NULL` we skip invocation
+ *    too: `zend_call_known_function` requires a request context
+ *    (symbol tables, VM stack). The slot-zval is still released
+ *    — `zval_ptr_dtor` is refcount arithmetic and safe anywhere
+ *    the bridge is loaded.
+ *  - If $destroy throws, we serialise the message via
+ *    `oxphp_bridge_capture_fatal` (operator-visible via the
+ *    thread-local pop path) and clear the exception so the
+ *    drain loop can continue. Drain callers have no PHP frame
+ *    to propagate into.
+ *
+ * Always frees `slot_zv_heap` (zval_ptr_dtor + efree). Always
+ * returns 0 — best-effort, never signals failure upward. */
+int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
+    if (!slot_zv_heap) return 0;
+    zval *slot = (zval *)slot_zv_heap;
+
+    if (destroy_fcc_heap && EG(current_execute_data)) {
+        oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)destroy_fcc_heap;
+
+        zval args[1];
+        ZVAL_COPY(&args[0], slot);
+
+        zval ret_zv;
+        ZVAL_UNDEF(&ret_zv);
+
+        zend_call_known_function(heap->fcc.function_handler,
+                                  heap->fcc.object,
+                                  heap->fcc.called_scope,
+                                  &ret_zv,
+                                  1, args, NULL);
+
+        zval_ptr_dtor(&args[0]);
+
+        if (EG(exception)) {
+            zend_object *ex = EG(exception);
+            zend_class_entry *ce = ex->ce;
+            zval rv;
+            zval *msg_zv = zend_read_property(
+                ce, ex, "message", sizeof("message") - 1, 1, &rv);
+            if (msg_zv && Z_TYPE_P(msg_zv) == IS_STRING) {
+                oxphp_bridge_capture_fatal(
+                    Z_STRVAL_P(msg_zv), Z_STRLEN_P(msg_zv));
+            }
+            zend_clear_exception();
+        }
+
+        zval_ptr_dtor(&ret_zv);
+    }
+
+    zval_ptr_dtor(slot);
+    efree(slot);
+    return 0;
+}
+
+/* ─── Shared\Pool\Handle rust_data wrapper helpers ──────────────
+ * Handle's storage struct (Rust `#[repr(C)] PoolHandleStorage`):
+ *   u64    pool_id       @ offset 0
+ *   u64    owner_tid     @ offset 8
+ *   void * slot_zv_heap  @ offset 16
+ * Total: 24 bytes on LP64.
+ *
+ * The Rust side registers `OxPHP\Shared\Pool\Handle` via
+ * `register_class` + `with_storage(PoolHandleStorage::default)` —
+ * the storage_factory zero-inits the slot when object_init_ex
+ * runs, so a Handle before alloc-fill has pool_id=0 and
+ * slot_zv_heap=NULL. We treat NULL slot as "cleared" to make
+ * the release / auto-release paths idempotent.
+ */
+
+static zend_class_entry *oxphp_pool_handle_ce_lookup(void) {
+    zend_string *cname = zend_string_init(
+        "OxPHP\\Shared\\Pool\\Handle",
+        sizeof("OxPHP\\Shared\\Pool\\Handle") - 1,
+        0);
+    zend_class_entry *ce = zend_lookup_class_ex(cname, NULL, 0);
+    zend_string_release(cname);
+    return ce;
+}
+
+/* Allocate a new Handle object into out_zv and populate its
+ * storage. Returns 0 on success, -1 if the class is not
+ * registered or object_init_ex fails. */
+int oxphp_shared_pool_handle_alloc(void *out_zv,
+                                    uint64_t pool_id,
+                                    uint64_t owner_tid,
+                                    void *slot_zv_heap) {
+    if (!out_zv) return -1;
+    zval *out = (zval *)out_zv;
+
+    zend_class_entry *ce = oxphp_pool_handle_ce_lookup();
+    if (!ce) return -1;
+    if (object_init_ex(out, ce) != SUCCESS) return -1;
+
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(out));
+    if (!intern || !intern->rust_data) {
+        zval_ptr_dtor(out);
+        return -1;
+    }
+    unsigned char *storage = (unsigned char *)intern->rust_data;
+    memcpy(storage,       &pool_id,       sizeof(uint64_t));
+    memcpy(storage + 8,   &owner_tid,     sizeof(uint64_t));
+    memcpy(storage + 16,  &slot_zv_heap,  sizeof(void *));
+    return 0;
+}
+
+/* Read the three storage fields from a Handle zval. Returns 0 on
+ * success, -1 if the zval is not an object, not a Handle, or its
+ * storage was cleared (slot_zv_heap == NULL). */
+int oxphp_shared_pool_handle_read(void *handle_zv,
+                                   uint64_t *out_pool_id,
+                                   uint64_t *out_owner_tid,
+                                   void **out_slot_zv_heap) {
+    if (!handle_zv || !out_pool_id || !out_owner_tid || !out_slot_zv_heap) return -1;
+    zval *zv = (zval *)handle_zv;
+    if (Z_TYPE_P(zv) != IS_OBJECT) return -1;
+
+    zend_class_entry *ce = oxphp_pool_handle_ce_lookup();
+    if (!ce || Z_OBJCE_P(zv) != ce) return -1;
+
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(zv));
+    if (!intern || !intern->rust_data) return -1;
+
+    unsigned char *storage = (unsigned char *)intern->rust_data;
+    memcpy(out_pool_id,       storage,       sizeof(uint64_t));
+    memcpy(out_owner_tid,     storage + 8,   sizeof(uint64_t));
+    memcpy(out_slot_zv_heap,  storage + 16,  sizeof(void *));
+    if (*out_slot_zv_heap == NULL) return -1; /* already released */
+    return 0;
+}
+
+/* Zero the slot_zv_heap field after an explicit release. The
+ * Rust-side Drop on PoolHandleStorage treats NULL as "nothing to
+ * do", which makes double-release and acquire→release→<scope end>
+ * both safe. */
+void oxphp_shared_pool_handle_clear(void *handle_zv) {
+    if (!handle_zv) return;
+    zval *zv = (zval *)handle_zv;
+    if (Z_TYPE_P(zv) != IS_OBJECT) return;
+
+    zend_class_entry *ce = oxphp_pool_handle_ce_lookup();
+    if (!ce || Z_OBJCE_P(zv) != ce) return;
+
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(zv));
+    if (!intern || !intern->rust_data) return;
+
+    unsigned char *storage = (unsigned char *)intern->rust_data;
+    void *null_ptr = NULL;
+    memcpy(storage + 16, &null_ptr, sizeof(void *));
 }

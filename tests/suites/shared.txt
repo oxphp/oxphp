@@ -1,0 +1,33 @@
+# profile: default
+# description: Shared state primitives — Channel, Map, Pool
+
+shared/test_channel_basic
+shared/test_channel_forbidden_clone
+shared/test_channel_try_send_full
+shared/test_channel_try_recv_empty
+shared/test_channel_send_timeout
+shared/test_channel_recv_timeout
+shared/test_channel_close_send
+shared/test_channel_close_recv_drain
+shared/test_channel_send_many
+shared/test_channel_recv_many
+shared/test_map_basic
+shared/test_map_maxentries
+shared/test_map_exception_lifecycle
+shared/test_map_cycle
+shared/test_map_batched
+shared/test_map_forbidden_clone
+shared/test_map_nested_shareable
+shared/test_map_update
+shared/test_pool_basic
+shared/test_pool_with
+shared/test_pool_timeout
+shared/test_pool_forbidden_clone
+shared/test_pool_destroy
+shared/test_pool_factory_throw
+shared/test_pool_factory_non_object
+shared/test_pool_multiple_instances
+shared/test_pool_default_timeout
+shared/test_pool_idle_eviction
+shared/test_pool_perf
+shared/test_pool_observability

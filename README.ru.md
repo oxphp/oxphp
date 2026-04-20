@@ -122,6 +122,20 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **Поддержка таймаутов** — таймауты для каждой задачи с `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — пакетные и гоночные примитивы
 
+### Разделяемое состояние (`OxPHP\Shared\*`)
+Конкурентные примитивы уровня процесса — позволяют PHP-воркерам координировать изменяемое состояние без Redis, Memcached или APCu. Всё внутри процесса: стоимость операции — микросекунды, а не сетевой round-trip. Полное руководство: [Разделяемое состояние](docs/ru/features/shared-state.md), [справочник наблюдаемости](docs/ru/operations/shared-observability.md).
+
+- **`Shared\Counter`** — атомарный int64 (`inc`, `dec`, `add`, `compareAndSet`) — см. [Counter](docs/ru/features/shared-counter.md)
+- **`Shared\Flag`** — атомарный bool с `compareAndSet` для one-shot переходов — см. [Flag](docs/ru/features/shared-flag.md)
+- **`Shared\Once`** — контейнер однократной инициализации с reentrancy-safe фабрикой — см. [Once](docs/ru/features/shared-once.md)
+- **`Shared\Mutex`** — отравляемый мьютекс над хранимым значением, с reentrancy и кросс-поточной детекцией дедлоков — см. [Mutex](docs/ru/features/shared-mutex.md)
+- **`Shared\Channel`** — ограниченная MPMC-очередь, fiber-aware (блокирующий recv уступает текущий файбер) — см. [Channel](docs/ru/features/shared-channel.md)
+- **`Shared\Map`** — конкурентное key-value хранилище со строковыми ключами, batched `setMany`/`getMany` и cycle-check для вложенных значений — см. [Map](docs/ru/features/shared-map.md)
+- **`Shared\Pool`** — ограниченный пул объектов с строгим per-thread affinity, идл-таймаут эвикцией и chaos-reclaim при гибели воркера — см. [Pool](docs/ru/features/shared-pool.md)
+- **Встроенная наблюдаемость** — Prometheus-метрики `oxphp_shared_*` и JSON-эндпоинты `/__ox_shared/{summary,entries,entry,preview,types,graph}` на внутреннем порту
+- **Refcount + lifecycle-safety** — handle не может пережить запись в реестре; cycle-детектор отвергает графы, которые привели бы к утечке памяти
+- Когда перерастёте, см. [Миграция на внешнее хранилище](docs/ru/features/migrating-to-external-store.md)
+
 ### HTTP и сетевое взаимодействие
 - **HTTP/1.1 + HTTP/2** с автоматическим определением протокола (h2c)
 - **TLS 1.3** с ALPN — HTTP/2 и HTTP/1.1 поверх TLS — см. [TLS](docs/ru/features/tls.md)
@@ -343,6 +357,21 @@ flowchart LR
 | `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментирование, захват ошибок, PHP tracing SDK. Требуется `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленных запросов (мс). Запросы выше порога получают `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params` |
+
+### Разделяемое состояние (feature `plugin-shared`)
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `SHARED_ENABLED` | `true` | Главный переключатель слоя `OxPHP\Shared\*` |
+| `SHARED_MAX_ENTRIES` | `100000` | Максимум записей в реестре (counters + flags + maps + …) до `OutOfCapacityException` |
+| `SHARED_MAX_BYTES` | `1073741824` (1 ГиБ) | Мягкий лимит на агрегированную память Shared\*-записей |
+| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Доля `MAX_*`, при которой срабатывает `oxphp_shared_capacity_warn` |
+| `SHARED_LOCK_DIAGNOSTICS` | `warn` (release) / `strict` (debug) | Детектор дедлоков: `off`, `warn` (только лог), `strict` (разрывать цикл) |
+| `SHARED_CYCLE_DETECT_DEPTH` | `16` | Макс. глубина BFS при проверке вложенных Shareable-вставок на циклы |
+| `SHARED_CYCLE_DETECT_EDGES` | `10000` | Макс. число рёбер на одну проверку (защита от плотных графов) |
+| `SHARED_INTROSPECTION_ENABLED` | `true` | Переключатель JSON-эндпоинтов `/__ox_shared/*` на внутреннем сервере |
+| `SHARED_METRICS_ENABLED` | `true` | Переключатель Prometheus-серий `oxphp_shared_*` |
+| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Макс. время дренажа Channel/Pool при graceful shutdown |
 
 ### Защита унаследованных PHP-приложений
 

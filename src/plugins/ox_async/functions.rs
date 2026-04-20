@@ -155,23 +155,33 @@ fn handler_async(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
         ));
     }
 
-    // Validate use-vars: reject objects/resources (not safe to cross threads)
-    if !static_vars.is_null() && unsafe { ffi::oxphp_ht_has_objects_or_resources(static_vars) != 0 }
+    // Validate use-vars: reject resources and non-Shareable objects (not safe to cross threads)
+    if !static_vars.is_null()
+        && unsafe { ffi::oxphp_ht_has_non_shareable_objects(static_vars) != 0 }
     {
         return Err(async_err(
-            "oxphp_async(): closure use-vars must not contain objects or resources",
+            "oxphp_async(): closure use-vars must not contain resources or non-Shareable objects",
         ));
     }
 
-    // Validate variadic args (indices 1..argc): reject Object/Resource types
+    // Validate variadic args (indices 1..argc): reject resources and non-Shareable objects
     let argc = call.argc();
     for i in 1..argc {
         let t = call.arg_type(i)?;
-        if t == ValType::Object || t == ValType::Resource {
+        if t == ValType::Resource {
             return Err(async_err(format!(
-                "oxphp_async(): argument {} must not be an object or resource",
+                "oxphp_async(): argument {} must not be a resource",
                 i
             )));
+        }
+        if t == ValType::Object {
+            let arg_ptr = unsafe { call.raw_arg_ptr(i) };
+            if unsafe { crate::bridge::ffi::oxphp_is_shareable(arg_ptr as *const c_void) } == 0 {
+                return Err(async_err(format!(
+                    "oxphp_async(): argument {} is a non-Shareable object; only OxPHP\\Shared\\* instances may cross thread boundary",
+                    i
+                )));
+            }
         }
     }
 
@@ -610,7 +620,9 @@ mod tests {
 
     #[test]
     fn test_read_bridge_exception_with_null_ptrs() {
-        // Mock FFI returns null pointers — should get default class/message
+        // Mock FFI returns null pointers — should get default class/message.
+        // The read path also appends the bridge's last-error via
+        // oxphp_exception_get, producing a composite message.
         let err = read_bridge_exception();
         match err {
             PhpError::Exception {
@@ -619,7 +631,10 @@ mod tests {
                 code,
             } => {
                 assert_eq!(class, EXCEPTION_CLASS);
-                assert_eq!(message, "Async task failed");
+                assert!(
+                    message.starts_with("Async task failed"),
+                    "unexpected message prefix: {message:?}"
+                );
                 assert_eq!(code, 0);
             }
             _ => panic!("Expected PhpError::Exception"),

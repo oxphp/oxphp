@@ -31,6 +31,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - **[Режим воркеров](features/worker-mode.md)** — постоянные PHP-процессы с [мультиплексированием файберов](features/fiber-multiplexing.md)
 - **[SSE-стриминг](features/sse.md)** — Server-Sent Events в реальном времени из PHP
 - **[Асинхронные промисы](features/async-promises.md)** — фоновое выполнение PHP-замыканий без блокировки воркера
+- **[Разделяемое состояние](features/shared-state.md)** — процесс-wide примитивы (Counter, Flag, Once, Mutex, Channel, Map, Pool) для координации воркеров без Redis или APCu
 - **[Декораторы](features/decorators.md)** — перехват вызовов через атрибуты PHP 8
 - **[Распределённая трассировка и APM](features/distributed-tracing.md)** — W3C Trace Context, OpenTelemetry, автоматическое инструментирование вызовов базы данных/HTTP/кэша/файлов и PHP tracing SDK
 
@@ -58,6 +59,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [SSE](features/sse.md) — стриминг Server-Sent Events в реальном времени из PHP
 - [Ранний ответ](features/early-response.md) — немедленная отправка ответа с продолжением фоновой обработки
 - [Асинхронные промисы](features/async-promises.md) — выполнение PHP-замыканий в фоновых потоках с ожиданием результатов
+- [Разделяемое состояние](features/shared-state.md) — process-wide примитивы: [Counter](features/shared-counter.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [наблюдаемость](operations/shared-observability.md); [миграция на внешнее хранилище](features/migrating-to-external-store.md)
 - [Декораторы](features/decorators.md) — перехват вызовов функций и методов с помощью атрибутов PHP 8
 - [Распределённая трассировка и APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, автоинструментирование и PHP tracing SDK
 - [Внутренний сервер](features/internal-server.md) — выделенный порт для проверок состояния, метрик Prometheus и просмотра конфигурации

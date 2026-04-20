@@ -7,3 +7,5 @@ pub mod ox_async;
 pub mod ox_otel;
 #[cfg(feature = "plugin-profiler")]
 pub mod ox_profiler;
+#[cfg(feature = "plugin-shared")]
+pub mod ox_shared;

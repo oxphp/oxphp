@@ -130,6 +130,15 @@ impl<'a> PluginContext<'a> {
             .ok()
     }
 
+    /// Read config: checks ONLY `{PLUGIN_NAME}_{KEY}` env var. Unlike
+    /// `config()`, this does NOT fall back to the bare `{KEY}`. Use for
+    /// plugins whose bare key names might collide with other plugins'
+    /// options (e.g. `MAX_ENTRIES`).
+    pub fn config_prefixed(&self, key: &str) -> Option<String> {
+        let prefixed = format!("{}_{}", self.plugin_name.to_uppercase(), key);
+        std::env::var(&prefixed).ok()
+    }
+
     /// Register a typed service (shared with other plugins).
     pub fn register_service(&mut self, name: &str, service: Box<dyn Any + Send + Sync>) {
         self.services.insert(name.to_string(), service);
@@ -357,6 +366,61 @@ mod tests {
 
         std::env::remove_var("TEST_PLUGIN_API_KEY");
         std::env::remove_var("_OXPHP_TEST_SHARED_KEY");
+    }
+
+    #[test]
+    fn test_config_prefixed_strict() {
+        // Set both the prefixed and the bare env var.
+        std::env::set_var("TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY", "prefixed-value");
+        std::env::set_var("OXPHP_TEST_STRICT_BARE_KEY", "bare-value");
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut services = HashMap::new();
+        let mut config = HashMap::new();
+        let mut metrics = Vec::new();
+        let mut routes = HashMap::new();
+        let mut prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
+        let mut native_php = Vec::new();
+        let mut decorators = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
+
+        let ctx = make_context(
+            &mut dispatcher,
+            &mut services,
+            &mut config,
+            &mut metrics,
+            &mut routes,
+            &mut prefixes,
+            &mut native_php,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+            &mut core_flags,
+        );
+
+        // Prefixed var is consulted and returned.
+        assert_eq!(
+            ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"),
+            Some("prefixed-value".to_string())
+        );
+
+        // Only the prefixed form is checked; when it's absent, the bare var
+        // must NOT be used as a fallback (that's `config()`'s job).
+        std::env::remove_var("TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY");
+        assert_eq!(ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"), None);
+
+        // A key that is never set should always return None.
+        assert_eq!(ctx.config_prefixed("ABSOLUTELY_MISSING"), None);
+
+        std::env::remove_var("OXPHP_TEST_STRICT_BARE_KEY");
     }
 
     #[test]

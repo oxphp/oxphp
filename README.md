@@ -122,6 +122,20 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 - **Timeout support** — per-task timeouts with `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — batch and race primitives
 
+### Shared State (`OxPHP\Shared\*`)
+Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/features/shared-state.md) and [observability reference](docs/en/operations/shared-observability.md).
+
+- **`Shared\Counter`** — atomic int64 (`inc`, `dec`, `add`, `compareAndSet`) — see [Counter](docs/en/features/shared-counter.md)
+- **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/features/shared-flag.md)
+- **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/features/shared-once.md)
+- **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/features/shared-mutex.md)
+- **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/en/features/shared-channel.md)
+- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/en/features/shared-map.md)
+- **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/en/features/shared-pool.md)
+- **Built-in observability** — `oxphp_shared_*` Prometheus counters and `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON endpoints on the internal port
+- **Refcount + lifecycle safety** — handles cannot outlive the registry entry; cycle detector rejects graphs that would leak memory
+- When you outgrow it, see [Migrating to an external store](docs/en/features/migrating-to-external-store.md)
+
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2** with automatic protocol detection (h2c)
 - **TLS 1.3** with ALPN — both HTTP/2 and HTTP/1.1 over TLS — see [TLS](docs/en/features/tls.md)
@@ -343,6 +357,21 @@ All settings are via environment variables — no config files required.
 | `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP tracing SDK. Requires `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold (ms). Queries above this get `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in `db.params` span attribute |
+
+### Shared State (`plugin-shared` feature)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SHARED_ENABLED` | `true` | Master switch for the `OxPHP\Shared\*` layer |
+| `SHARED_MAX_ENTRIES` | `100000` | Max number of registry entries (counters + flags + maps + …) before `OutOfCapacityException` |
+| `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Soft cap on aggregate memory used by Shared\* entries |
+| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Fraction of `MAX_*` at which `oxphp_shared_capacity_warn` fires |
+| `SHARED_LOCK_DIAGNOSTICS` | `warn` (release) / `strict` (debug) | Mutex deadlock detection: `off`, `warn` (log only), `strict` (break the cycle) |
+| `SHARED_CYCLE_DETECT_DEPTH` | `16` | Max BFS depth when checking nested-Shareable insertions for cycles |
+| `SHARED_CYCLE_DETECT_EDGES` | `10000` | Max edges walked per cycle check (guard against dense graphs) |
+| `SHARED_INTROSPECTION_ENABLED` | `true` | Toggle the `/__ox_shared/*` JSON endpoints on the internal server |
+| `SHARED_METRICS_ENABLED` | `true` | Toggle the `oxphp_shared_*` Prometheus series |
+| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Max time to drain Channel/Pool entries on graceful shutdown |
 
 ### Hardening legacy PHP apps
 

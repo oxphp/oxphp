@@ -1,4 +1,10 @@
 fn main() {
+    // Loom tests are gated by `#![cfg(loom)]` and only compile when
+    // invoked as `RUSTFLAGS="--cfg loom" cargo test --test loom_*`.
+    // Declare the cfg to rustc so `cargo clippy --all-targets`
+    // doesn't emit "unexpected cfg condition name: loom" warnings.
+    println!("cargo::rustc-check-cfg=cfg(loom)");
+
     // The C bridge library (ext/bridge) and the PHP extension
     // (ext/oxphp_sapi.c) are compiled out-of-band by the Dockerfile
     // or by a local `make` invocation against the Makefile. When the

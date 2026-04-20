@@ -228,6 +228,34 @@ extern "C" {
     pub fn oxphp_portable_free(buf: *mut u8);
     pub fn oxphp_portable_free_ht(ht: *mut c_void);
 
+    // Cross-thread fcc spike (temporary probe; superseded by the real
+    // Pool FFI below).
+    pub fn oxphp_pool_spike_capture(callable_zv: *mut c_void, out_tid: *mut u64) -> c_int;
+    pub fn oxphp_pool_spike_invoke(
+        out_captured_tid: *mut u64,
+        out_current_tid: *mut u64,
+        out_ret_buf: *mut *mut u8,
+        out_ret_len: *mut usize,
+    ) -> c_int;
+    pub fn oxphp_pool_spike_reset();
+
+    /// Split a PHP array into N independent portbuf-serialized payloads.
+    /// Returns 0 on success, -3 if `arr` is not an array, -1 other.
+    /// On success `*out_concat` and `*out_offsets` are libc::malloc'd;
+    /// caller frees via `oxphp_portable_free`.
+    pub fn oxphp_iter_array_to_portbufs(
+        arr: *const c_void,
+        out_concat: *mut *mut u8,
+        out_concat_len: *mut usize,
+        out_offsets: *mut *mut usize,
+        out_n: *mut usize,
+    ) -> c_int;
+
+    /// Deserialize a portbuf and push the resulting zval into `arr`
+    /// (which must already be IS_ARRAY). Returns 0 on success, -1 on
+    /// deserialize failure or bad arr.
+    pub fn oxphp_arr_push_portbuf(arr: *mut c_void, buf: *const u8, len: usize) -> c_int;
+
     // Closure inspection
     pub fn oxphp_closure_get_op_array(closure: *mut c_void) -> *const c_void;
     pub fn oxphp_closure_get_static_vars(closure: *mut c_void, out_ht: *mut *mut c_void) -> c_int;
@@ -243,8 +271,14 @@ extern "C" {
     pub fn oxphp_bridge_is_async_worker() -> c_int;
 
     // ── Async plugin helpers ──
-    pub fn oxphp_ht_has_objects_or_resources(ht: *mut c_void) -> c_int;
+    pub fn oxphp_ht_has_non_shareable_objects(ht: *mut c_void) -> c_int;
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
+    pub fn oxphp_bridge_in_fiber() -> c_int;
+
+    /// Returns 1 iff the zval is an object implementing OxPHP\Shared\Shareable.
+    /// Returns 0 for non-objects, non-implementers, or if the CE isn't
+    /// registered yet (MINIT hasn't run).
+    pub fn oxphp_is_shareable(z: *const c_void) -> c_int;
     pub fn oxphp_bridge_set_borrow_proxy_ce(ce: *mut c_void);
     pub fn oxphp_arr_add_zval(arr: *mut c_void, key: *const c_char, val: *mut c_void);
     pub fn oxphp_arr_add_index_zval(arr: *mut c_void, idx: u64, val: *mut c_void);
@@ -267,6 +301,78 @@ extern "C" {
         out_winner_id: *mut i64,
         retval: *mut c_void,
     ) -> c_int;
+
+    // ── Synthetic promise bridge setters ──
+    //
+    // Rust registers these four shims from `AsyncPlugin::init` so future
+    // Shared primitives can create a promise id, park it on PROMISE_MAP,
+    // and resolve it from any thread. The C-side forwarders live in
+    // ext/bridge/oxphp_bridge.c.
+    pub fn oxphp_bridge_set_async_synth_alloc(f: extern "C" fn() -> i64);
+    pub fn oxphp_bridge_set_async_synth_resolve(f: extern "C" fn(i64, *const u8, usize) -> c_int);
+    pub fn oxphp_bridge_set_async_synth_reject(
+        f: extern "C" fn(i64, *const c_char, *const c_char) -> c_int,
+    );
+    pub fn oxphp_bridge_set_async_synth_cancel(f: extern "C" fn(i64) -> c_int);
+
+    // ── Shared\* synchronous invoke shims ──────────────
+
+    pub fn oxphp_shared_invoke_0_portbuf(
+        callable: *mut c_void,
+        out_ret_buf: *mut *mut u8,
+        out_ret_len: *mut usize,
+    ) -> c_int;
+
+    pub fn oxphp_shared_invoke_byref_1_portbuf(
+        callable: *mut c_void,
+        state_buf: *const u8,
+        state_len: usize,
+        new_state_buf: *mut *mut u8,
+        new_state_len: *mut usize,
+        out_ret_buf: *mut *mut u8,
+        out_ret_len: *mut usize,
+        did_mutate: *mut c_int,
+    ) -> c_int;
+
+    // ── Shared\Pool bridge ───────────────────
+    // See ext/bridge/oxphp_bridge.h §Shared\Pool helpers for the
+    // lifetime contract. Pointers returned via out-params are
+    // emalloc'd in C and owned by the pool (Rust) until the pool
+    // drops. All *_free calls must run on a Zend-initialised worker.
+    pub fn oxphp_pool_fcc_new(callable_zval: *mut c_void, out_fcc_heap: *mut *mut c_void) -> c_int;
+    pub fn oxphp_pool_fcc_free(fcc_heap: *mut c_void);
+    pub fn oxphp_pool_factory_invoke(
+        fcc_heap: *mut c_void,
+        out_slot_zv_heap: *mut *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_pool_body_invoke(
+        body_callable_zv: *mut c_void,
+        slot_zv_heap: *mut c_void,
+        user_out_zv: *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_pool_slot_to_user(slot_zv_heap: *mut c_void, user_out_zv: *mut c_void);
+    pub fn oxphp_pool_slot_free(slot_zv_heap: *mut c_void);
+    pub fn oxphp_pool_destroy_invoke(
+        destroy_fcc_heap: *mut c_void,
+        slot_zv_heap: *mut c_void,
+    ) -> c_int;
+
+    // Shared\Pool\Handle rust_data wrapper helpers. Handle storage
+    // layout mirrors `PoolHandleStorage` (repr(C)): u64 pool_id,
+    // u64 owner_tid, `*mut c_void` slot_zv_heap.
+    pub fn oxphp_shared_pool_handle_alloc(
+        out_zv: *mut c_void,
+        pool_id: u64,
+        owner_tid: u64,
+        slot_zv_heap: *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_shared_pool_handle_read(
+        handle_zv: *mut c_void,
+        out_pool_id: *mut u64,
+        out_owner_tid: *mut u64,
+        out_slot_zv_heap: *mut *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_shared_pool_handle_clear(handle_zv: *mut c_void);
 
     // Async fatal error capture
     pub fn oxphp_bridge_capture_fatal(msg: *const c_char, len: usize);
@@ -441,3 +547,11 @@ extern "C" {
     );
     pub fn oxphp_exception_clear();
 }
+
+pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
+pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
+/// Mirrors the C header constant. Rust callers branch via a `_` arm rather
+/// than naming this, so rustc flags it as dead; keep the name for parity
+/// with `ext/bridge/oxphp_bridge.h` so future consumers can reference it.
+#[allow(dead_code)]
+pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;

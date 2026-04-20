@@ -1,0 +1,5 @@
+# profile: worker
+# description: Shared state primitives — Channel fiber tests
+
+shared/test_channel_fiber_producer_consumer
+shared/test_channel_shutdown_drain

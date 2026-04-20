@@ -226,6 +226,91 @@ impl MagicMethod {
     pub fn index(self) -> usize {
         self as usize
     }
+
+    /// PHP-expected return type tag for this magic method, mapped to the
+    /// bridge's `OXPHP_RT_*` constants. PHP emits compile-time warnings
+    /// like "Method X::__toString() implemented without string return
+    /// type" when a class declares a magic method without the expected
+    /// signature, so class registration needs to hand this through to
+    /// `zend_function_entry.arg_info`.
+    ///
+    /// Returns `(tag, is_nullable)`. `BRIDGE_RT_NONE` means "let PHP
+    /// apply the default" — safe for magics whose return type is
+    /// user-defined (`__construct`, `__invoke`, `__call`, ...).
+    pub fn return_tag(self) -> (i32, bool) {
+        match self {
+            MagicMethod::ToString => (BRIDGE_RT_STRING, false),
+            MagicMethod::Isset => (BRIDGE_RT_BOOL, false),
+            MagicMethod::Clone
+            | MagicMethod::Destruct
+            | MagicMethod::Unset
+            | MagicMethod::Wakeup => (BRIDGE_RT_VOID, false),
+            MagicMethod::Sleep | MagicMethod::Serialize | MagicMethod::DebugInfo => {
+                (BRIDGE_RT_ARRAY, false)
+            }
+            MagicMethod::Get | MagicMethod::Set | MagicMethod::Call | MagicMethod::CallStatic => {
+                (BRIDGE_RT_MIXED, false)
+            }
+            MagicMethod::Construct
+            | MagicMethod::Invoke
+            | MagicMethod::Unserialize
+            | MagicMethod::SetState => (BRIDGE_RT_NONE, false),
+        }
+    }
+
+    /// PHP-required arity: `(required, total)` parameter count. Needed so
+    /// `zend_register_internal_class_ex` doesn't reject the generated
+    /// `zend_function_entry` with a fatal like
+    /// *"Method X::__get() must take exactly 1 argument"*.
+    ///
+    /// Values follow the magic method contract in the PHP manual
+    /// (<https://www.php.net/manual/en/language.oop5.magic.php>).
+    pub fn arity(self) -> (usize, usize) {
+        match self {
+            MagicMethod::Destruct
+            | MagicMethod::Clone
+            | MagicMethod::ToString
+            | MagicMethod::DebugInfo
+            | MagicMethod::Serialize
+            | MagicMethod::Sleep
+            | MagicMethod::Wakeup => (0, 0),
+            MagicMethod::Get
+            | MagicMethod::Isset
+            | MagicMethod::Unset
+            | MagicMethod::Unserialize
+            | MagicMethod::SetState => (1, 1),
+            MagicMethod::Set | MagicMethod::Call | MagicMethod::CallStatic => (2, 2),
+            // User-defined signature — leave the validator alone.
+            MagicMethod::Construct | MagicMethod::Invoke => (0, 0),
+        }
+    }
+
+    /// Inverse of [`index`]. Returns `None` when `idx` is out of range.
+    ///
+    /// Kept in sync with the enum ordering above — asserts in tests keep
+    /// the mapping honest if anyone reorders the variants.
+    pub fn from_index(idx: usize) -> Option<MagicMethod> {
+        Some(match idx {
+            0 => MagicMethod::Construct,
+            1 => MagicMethod::Destruct,
+            2 => MagicMethod::Clone,
+            3 => MagicMethod::Get,
+            4 => MagicMethod::Set,
+            5 => MagicMethod::Isset,
+            6 => MagicMethod::Unset,
+            7 => MagicMethod::Call,
+            8 => MagicMethod::CallStatic,
+            9 => MagicMethod::ToString,
+            10 => MagicMethod::Invoke,
+            11 => MagicMethod::DebugInfo,
+            12 => MagicMethod::Serialize,
+            13 => MagicMethod::Unserialize,
+            14 => MagicMethod::Sleep,
+            15 => MagicMethod::Wakeup,
+            16 => MagicMethod::SetState,
+            _ => return None,
+        })
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

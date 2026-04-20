@@ -100,18 +100,20 @@ ARG OXPHP_VERSION=""
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source to cache dependencies
-RUN mkdir src && \
+RUN mkdir src benches && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
+    echo "fn main() {}" > benches/synthetic_promise.rs && \
     if [ -n "${CARGO_FEATURES}" ]; then \
         cargo build --release --features "${CARGO_FEATURES}"; \
     else \
         cargo build --release; \
     fi && \
-    rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
+    rm -rf src benches target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 # Copy real source and build script
 COPY src ./src
+COPY benches ./benches
 COPY build.rs ./
 COPY proto ./proto
 

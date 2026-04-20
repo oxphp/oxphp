@@ -122,6 +122,20 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **超时支持** — 每任务超时，抛出 `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — 批量等待和竞速原语
 
+### 共享状态（`OxPHP\Shared\*`）
+进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/features/shared-state.md)，[可观测性参考](docs/zh/operations/shared-observability.md)。
+
+- **`Shared\Counter`** — 原子 int64（`inc`、`dec`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/features/shared-counter.md)
+- **`Shared\Flag`** — 支持 `compareAndSet` 的原子 bool，用于一次性状态切换 — 参见 [Flag](docs/zh/features/shared-flag.md)
+- **`Shared\Once`** — 带可重入安全工厂的单次初始化容器 — 参见 [Once](docs/zh/features/shared-once.md)
+- **`Shared\Mutex`** — 带毒化机制的互斥锁，保护存储值，支持可重入与跨线程死锁检测 — 参见 [Mutex](docs/zh/features/shared-mutex.md)
+- **`Shared\Channel`** — 有界 MPMC 队列，Fiber-aware（阻塞 recv 会让出当前 Fiber）— 参见 [Channel](docs/zh/features/shared-channel.md)
+- **`Shared\Map`** — 字符串键并发存储，支持批量 `setMany`/`getMany` 以及嵌套值的循环检测 — 参见 [Map](docs/zh/features/shared-map.md)
+- **`Shared\Pool`** — 有界对象池，严格按线程亲和性分配，支持空闲超时驱逐和工作线程死亡后的混沌回收 — 参见 [Pool](docs/zh/features/shared-pool.md)
+- **内置可观测性** — `oxphp_shared_*` Prometheus 指标 + 内部端口上的 `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON 端点
+- **引用计数 + 生命周期安全** — 句柄不会比注册表条目存活更久；循环检测器会拒绝可能导致内存泄漏的图结构
+- 当规模超出承载时，请参阅 [迁移到外部存储](docs/zh/features/migrating-to-external-store.md)
+
 ### HTTP 与网络
 - **HTTP/1.1 + HTTP/2** 自动协议协商（h2c）
 - **TLS 1.3** 支持 ALPN —— HTTP/2 和 HTTP/1.1 均可通过 TLS 运行 — 参见 [TLS](docs/zh/features/tls.md)
@@ -343,6 +357,21 @@ flowchart LR
 | `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获、PHP 追踪 SDK。需要 `OTEL_ENABLED=true` |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的查询将标记 `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中 |
+
+### 共享状态（`plugin-shared` 特性）
+
+| 变量 | 默认值 | 描述 |
+|---|---|---|
+| `SHARED_ENABLED` | `true` | `OxPHP\Shared\*` 层的总开关 |
+| `SHARED_MAX_ENTRIES` | `100000` | 注册表条目最大数量（counters + flags + maps + …），超出后抛出 `OutOfCapacityException` |
+| `SHARED_MAX_BYTES` | `1073741824`（1 GiB） | Shared\* 条目聚合内存的软上限 |
+| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | 触发 `oxphp_shared_capacity_warn` 的 `MAX_*` 占用比例 |
+| `SHARED_LOCK_DIAGNOSTICS` | `warn`（release）/ `strict`（debug） | 互斥锁死锁检测：`off`、`warn`（仅记录日志）、`strict`（打破环路） |
+| `SHARED_CYCLE_DETECT_DEPTH` | `16` | 嵌套 Shareable 插入循环检查的最大 BFS 深度 |
+| `SHARED_CYCLE_DETECT_EDGES` | `10000` | 单次循环检查最多遍历的边数（防御稠密图） |
+| `SHARED_INTROSPECTION_ENABLED` | `true` | 内部服务器上 `/__ox_shared/*` JSON 端点开关 |
+| `SHARED_METRICS_ENABLED` | `true` | `oxphp_shared_*` Prometheus 指标系列开关 |
+| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | 优雅关闭时 Channel/Pool 排空的最大等待时间 |
 
 ### 加固遗留 PHP 应用
 
