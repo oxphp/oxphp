@@ -2264,9 +2264,18 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv);
 /* Forward declarations for Shared\* wrapper helpers (tag 7).
  * Full definitions live near the bottom of this file alongside
  * oxphp_is_shareable. Rust FFI exports (oxphp_shared_retain/release/
- * is_alive) are used by those helpers and by the serializer itself. */
-extern int oxphp_shared_retain(uint64_t id);
-extern int oxphp_shared_release(uint64_t id);
+ * is_alive) are used by those helpers and by the serializer itself.
+ *
+ * Weak linkage: the bridge library is also dlopen()'d by a bare `php`
+ * CLI invocation (via /usr/local/etc/php/conf.d/extension.ini), with
+ * no oxphp Rust binary in the process to provide these symbols. musl
+ * does eager relocation on dlopen, so non-weak references would abort
+ * the load. With weak linkage the unresolved refs become NULL; the
+ * call sites below are guarded by NULL checks or by semantic
+ * invariants (cross-thread serialization only runs from oxphp's Rust
+ * workers, never from CLI). */
+extern int oxphp_shared_retain(uint64_t id) __attribute__((weak));
+extern int oxphp_shared_release(uint64_t id) __attribute__((weak));
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
                                    uint64_t *out_shared_id);
@@ -2361,7 +2370,14 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
              * serializer is intra-host only, all workers share endianness). */
             memcpy(b->data + b->len, &shared_id, 8);
             b->len += 8;
-            /* Sender-side retain; balanced by deserializer-side release. */
+            /* Sender-side retain; balanced by deserializer-side release.
+             * Weak-linked — if the oxphp Rust binary isn't in the process
+             * there is nothing to retain against; serialize as null. */
+            if (oxphp_shared_retain == NULL) {
+                b->len -= (1 + 1 + 8); /* roll back tag+type+id */
+                portbuf_u8(b, 0);
+                break;
+            }
             oxphp_shared_retain(shared_id);
             break;
         }
@@ -2514,13 +2530,17 @@ static int portrd_deser_zval(portrd_t *r, zval *out) {
             if (oxphp_shared_wrapper_new(out, type_tag, shared_id) != 0) {
                 /* Entry evicted between send and recv (rare) — release
                  * sender-side retain and leave null. */
-                oxphp_shared_release(shared_id);
+                if (oxphp_shared_release != NULL) {
+                    oxphp_shared_release(shared_id);
+                }
                 ZVAL_NULL(out);
                 break;
             }
             /* Balance the sender-side retain. Receiver's wrapper retain
              * was done inside oxphp_shared_wrapper_new. */
-            oxphp_shared_release(shared_id);
+            if (oxphp_shared_release != NULL) {
+                oxphp_shared_release(shared_id);
+            }
             break;
         }
         default:
@@ -3391,9 +3411,19 @@ int oxphp_apm_hook_count_installed(void) {
 
 /* Forward declaration. The flush sink is implemented in Rust
  * (src/profiling/flush.rs) and exported as a #[no_mangle]
- * extern "C" symbol; the dynamic linker resolves it at load time. */
+ * extern "C" symbol; the dynamic linker resolves it at load time
+ * when the oxphp Rust binary is the process image.
+ *
+ * Weak linkage: under a bare `php` CLI invocation (no oxphp binary
+ * in the process) musl's eager relocation would otherwise abort the
+ * dlopen of liboxphp_bridge.so. See the matching comment near the
+ * oxphp_shared_* declarations for the full rationale. Under that
+ * configuration g_prof.mode stays at OXPHP_PROFILING_MODE_OFF, so
+ * oxphp_prof_flush_buffer() never populates the ring buffer; the
+ * NULL check below is belt-and-suspenders. */
 extern void oxphp_profiler_flush_span_events(const ox_span_event_t *events,
-                                              uint32_t count);
+                                              uint32_t count)
+    __attribute__((weak));
 
 static __thread struct {
     uint8_t  mode;
@@ -3472,7 +3502,11 @@ static void oxphp_prof_init_env(void) {
  * from the public RSHUTDOWN flush below. */
 static void oxphp_prof_flush_buffer(void) {
     if (g_prof.buf_len == 0) return;
-    oxphp_profiler_flush_span_events(g_prof.buf, g_prof.buf_len);
+    /* Weak-linked — NULL when the bridge is loaded without the oxphp
+     * Rust binary (e.g. a standalone `php` CLI session). */
+    if (oxphp_profiler_flush_span_events != NULL) {
+        oxphp_profiler_flush_span_events(g_prof.buf, g_prof.buf_len);
+    }
     g_prof.buf_len = 0;
     g_prof.name_arena_used = 0;
 }
@@ -3826,9 +3860,11 @@ static inline uint64_t oxphp_prof_clock_cpu_ns(void) {
 }
 
 /* Forward declaration — implemented in Rust (src/profiling/filter.rs)
- * as #[no_mangle] pub extern "C". The dynamic linker resolves it at
- * load time. */
-extern uint8_t oxphp_profiler_sample_hit(float rate);
+ * as #[no_mangle] pub extern "C". Weak for the same reason as
+ * oxphp_profiler_flush_span_events above. When the bridge is loaded
+ * by a bare `php` CLI, g_prof.mode stays OFF and oxphp_profiler_begin
+ * returns before the sample-hit branch is reached. */
+extern uint8_t oxphp_profiler_sample_hit(float rate) __attribute__((weak));
 
 static void oxphp_profiler_begin(zend_execute_data *execute_data) {
     /* Paused short-circuit applies regardless of filter spec. */
@@ -3858,6 +3894,10 @@ static void oxphp_profiler_begin(zend_execute_data *execute_data) {
     }
 
     if (filter != NULL && filter->has_sample) {
+        /* Weak-linked — NULL under a bare `php` CLI dlopen. The
+         * mode-first gate above already prevents this branch in
+         * that case, but guard anyway for defense in depth. */
+        if (oxphp_profiler_sample_hit == NULL) return;
         if (!oxphp_profiler_sample_hit(filter->sample_rate)) return;
     }
 
@@ -4167,10 +4207,12 @@ int oxphp_async_synthetic_promise_cancel(int64_t id)
  *  is well-defined.
  * ═══════════════════════════════════════════════════════════ */
 
-/* Extern declarations for Rust FFI exports (registry.rs). */
-extern int oxphp_shared_retain(uint64_t id);
-extern int oxphp_shared_release(uint64_t id);
-extern int oxphp_shared_is_alive(uint64_t id);
+/* Extern declarations for Rust FFI exports (registry.rs). Weak for
+ * the same reason as the earlier declarations — see the comment
+ * above oxphp_shared_retain's first declaration near line 2268. */
+extern int oxphp_shared_retain(uint64_t id) __attribute__((weak));
+extern int oxphp_shared_release(uint64_t id) __attribute__((weak));
+extern int oxphp_shared_is_alive(uint64_t id) __attribute__((weak));
 
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
@@ -4192,6 +4234,9 @@ int oxphp_plugin_get_shared_handle(zval *obj,
 
 int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
     if (!out) return -1;
+    /* Weak-linked — if the oxphp Rust binary is absent the shared
+     * registry does not exist, so no id can be alive. */
+    if (oxphp_shared_is_alive == NULL) return -1;
     if (!oxphp_shared_is_alive(shared_id)) return -1;
 
     /* Look up the PHP class_entry by type_tag. */
@@ -4224,8 +4269,14 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
     memcpy(storage, &shared_id, sizeof(uint64_t));
     storage[8] = type_tag;
 
-    /* Receiver-side retain. Receiver's Drop will release. */
-    oxphp_shared_retain(shared_id);
+    /* Receiver-side retain. Receiver's Drop will release.
+     * oxphp_shared_is_alive above already short-circuits to -1 when
+     * the weak-linked registry is absent, so reaching this point
+     * implies the retain symbol is also resolved. Kept explicit for
+     * local readability. */
+    if (oxphp_shared_retain != NULL) {
+        oxphp_shared_retain(shared_id);
+    }
     return 0;
 }
 
