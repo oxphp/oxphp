@@ -86,7 +86,7 @@ OxPHP останавливается, если директория `ERROR_PAGES
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.2.0
+  ghcr.io/oxphp/oxphp:0.3.0
 ```
 
 ### Ответ 429 всё равно показывает стандартное тело
@@ -98,7 +98,7 @@ docker run --rm -v ./errors:/var/www/errors:ro \
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:0.3.0
     ports:
       - "8080:8080"
     volumes:

@@ -10,7 +10,7 @@ description: Get OxPHP running in under 5 minutes. Create a project, write a PHP
 If you already have a PHP project with a `public/` directory:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.2.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.3.0
 ```
 
 Open `http://localhost/` — your application is running.
@@ -18,7 +18,7 @@ Open `http://localhost/` — your application is running.
 To enable the internal server (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.2.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.3.0
 ```
 
 ---
@@ -36,7 +36,7 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Create a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.2.0
+FROM ghcr.io/oxphp/oxphp:0.3.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
@@ -107,7 +107,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: oxphp</p>
-<p>Version: 0.2.0</p>
+<p>Version: 0.3.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 

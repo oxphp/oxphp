@@ -214,7 +214,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:0.3.0
     ports:
       - "8080:80"
     volumes:

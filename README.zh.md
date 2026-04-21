@@ -39,7 +39,7 @@
 两行命令，仅此而已。
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.2.0
+FROM ghcr.io/oxphp/oxphp:0.3.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```

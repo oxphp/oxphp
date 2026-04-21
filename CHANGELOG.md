@@ -2,40 +2,9 @@
 
 All notable changes to OxPHP are documented in this file.
 
-## [Unreleased]
+## [0.3.0] - 2026-04-22
 
-### Added
-
-#### Profiling
-
-- Per-request PHP profiler (`plugin-profiler` feature — now part of the default Cargo feature set; `-DOXPHP_WITH_PROFILER=1` propagated to both C build stages) with four output formats: xhprof, speedscope, pprof, collapsed
-- PHP SDK: `OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}` functions
-- Seven PHP attributes: `#[Profile]`, `#[Exclude]`, `#[Sample]`, `#[Tag]`, `#[Mark]`, `#[SlowThreshold]`, `#[MemoryThreshold]`
-- Trigger modes: cookie (`OXPROF=<token>`), header (`X-OxPHP-Profile: <token>`), query (`?__oxprof=<token>`), and statistical (`PROFILER_SAMPLE_RATE`)
-- In-memory LRU cache (`PROFILER_RETENTION_COUNT`) + disk retention with background trimmer (5-second cadence, atomic rename)
-- Token-bucket disk write rate limiting (`PROFILER_DISK_MAX_PER_SEC`)
-- HTTP push (`PROFILER_EXPORT_URL`) with 3× exponential backoff retry, 5 s wallclock cap, bearer-token auth, xhgui envelope auto-detect
-- Internal HTTP routes at `/__profiler/` — list, metadata, raw format download, speedscope redirect, DELETE, config, stats — with optional bearer-token auth and path-traversal revalidation
-- Prometheus metrics: `oxphp_profiler_runs_total{source}`, `spans_collected_total`, `bytes_written_total{format}`, `disk_drops_total`, `http_push_failures_total`, `truncated_total`, `in_memory_runs`
-- `xhgui` Docker test profile demonstrating the full push → mongo → xhgui UI flow
-- Per-locale documentation at `docs/{en,ru,zh}/features/profiling.md`
-
-### Breaking Changes
-
-- **Async namespace migration**: All async-related PHP classes moved under `OxPHP\Async\` namespace:
-  - `OxPHP\AsyncException` → `OxPHP\Async\Exception`
-  - `OxPHP\AsyncTimeoutException` → `OxPHP\Async\TimeoutException`
-  - `OxPHP\AsyncBorrowException` → `OxPHP\Async\BorrowException`
-  - `OxPHP\BorrowedProxy` → `OxPHP\Async\BorrowedProxy`
-- Async functions (`oxphp_async`, `oxphp_async_await`, etc.) are now provided by `plugin-async` feature flag. Without it, functions are not available. Function names are unchanged.
-
-### Changed
-
-- `oxphp_request_heartbeat($time)` now also resets PHP's own `max_execution_time` timer to `$time` seconds alongside the server-side deadline. Previously only the server deadline was extended, so long-running scripts could still be killed by Zend's "Maximum execution time exceeded" fatal even after a heartbeat. Scripts that opted out of the PHP timer via `set_time_limit(0)` or `max_execution_time=0` are left alone — the heartbeat does not re-enable a disabled timer.
-
-## [0.3.0] - 2026-04-21
-
-Release theme: **shared state for PHP workers without Redis**. Seven process-wide concurrent primitives (`OxPHP\Shared\Counter` / `Flag` / `Once` / `Mutex` / `Channel` / `Map` / `Pool`) land, plus the introspection, metrics, and docs to operate them.
+Headline work since `v0.2.0`: **shared state for PHP workers without Redis** (seven `OxPHP\Shared\*` primitives), a per-request **PHP profiler**, **APM auto-instrumentation**, trusted-proxy and Kubernetes integrations for production deployments, security-header hardening, and a cosign-signed parametrized Docker image matrix.
 
 ### Added
 
@@ -60,9 +29,60 @@ See [Shared Observability](docs/en/operations/shared-observability.md) for the o
 - Cross-thread deadlock detector — `oxphp_shared_deadlock_detected_total` ticks when the wait-for scanner finds a mutex cycle.
 - Shared `preview` previews are gated behind `SHARED_INTROSPECTION_PREVIEW_ENABLED` so production deployments can disable value exposure without losing shape counts.
 
+#### Profiling
+
+- Per-request PHP profiler (`plugin-profiler` feature — now part of the default Cargo feature set; `-DOXPHP_WITH_PROFILER=1` propagated to both C build stages) with four output formats: xhprof, speedscope, pprof, collapsed.
+- PHP SDK: `OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}` functions.
+- Seven PHP attributes: `#[Profile]`, `#[Exclude]`, `#[Sample]`, `#[Tag]`, `#[Mark]`, `#[SlowThreshold]`, `#[MemoryThreshold]`.
+- Trigger modes: cookie (`OXPROF=<token>`), header (`X-OxPHP-Profile: <token>`), query (`?__oxprof=<token>`), and statistical (`PROFILER_SAMPLE_RATE`).
+- In-memory LRU cache (`PROFILER_RETENTION_COUNT`) + disk retention with background trimmer (5-second cadence, atomic rename).
+- Token-bucket disk write rate limiting (`PROFILER_DISK_MAX_PER_SEC`).
+- HTTP push (`PROFILER_EXPORT_URL`) with 3× exponential backoff retry, 5 s wallclock cap, bearer-token auth, xhgui envelope auto-detect.
+- Internal HTTP routes at `/__profiler/` — list, metadata, raw format download, speedscope redirect, DELETE, config, stats — with optional bearer-token auth and path-traversal revalidation.
+- Prometheus metrics: `oxphp_profiler_runs_total{source}`, `spans_collected_total`, `bytes_written_total{format}`, `disk_drops_total`, `http_push_failures_total`, `truncated_total`, `in_memory_runs`.
+- `xhgui` Docker test profile demonstrating the full push → mongo → xhgui UI flow.
+- Per-locale documentation at `docs/{en,ru,zh}/features/profiling.md`.
+
+#### APM & tracing
+
+- APM plugin (`plugin-apm`) with auto-instrumentation, PHP tracing SDK, and error capture.
+- Plugin PHP builder API for registering Rust-backed PHP functions and classes from plugins. Async and APM subsystems migrated from the C extension into Rust plugins.
+- Return-type support in the C builder API for plugin methods.
+
+#### HTTP & routing
+
+- **Trusted proxy support** via `TRUSTED_PROXIES` — accepts trusted-proxy CIDR list (or `private`), processes RFC 7239 `Forwarded` and `X-Forwarded-*` headers, and overrides `REMOTE_ADDR`, `HTTPS`, `REQUEST_SCHEME`, `SERVER_NAME`, `SERVER_PORT` for PHP using the rightmost-non-trusted algorithm.
+- **Kubernetes health probes** at `/readyz` and `/livez` with graceful-shutdown awareness.
+- `PATH_INFO` splitting via `SPLIT_PATH_INFO_ENABLED` — nginx/PHP-FPM-style front-controller routing.
+- `PHP_DENY_DIRS` env var to block `.php` execution in specified paths.
+- Dot-path access blocked by default, with an RFC 8615 `.well-known` exception.
+
+#### Security headers
+
+- `X-Content-Type-Options: nosniff` on all responses.
+- Configurable `X-Frame-Options` (`FRAME_OPTIONS`, default `SAMEORIGIN`) for clickjacking protection.
+
+#### Operations
+
+- CLI argument parsing: `--help`, `--version`, `--config --check`.
+- Startup errors emitted as structured JSON logs (previously plain text).
+- Docker `HEALTHCHECK` wired into `compose.yml`.
+
+#### Supply chain & packaging
+
+- Parametrized Docker image matrix: two Dockerfiles (dev + `Dockerfile.alpine-release`) sharing `ARG PHP_VERSION` / `ARG ALPINE_VERSION` / `ARG BASE_IMAGE`.
+- Canonical minor-floating (`{ver}-php{minor}-alpine{alpine}`) and patch-pinned tags published to `ghcr.io/oxphp/oxphp`, plus aliases (`php{minor}`, `latest`, etc.).
+- cosign-signed release images via GitHub OIDC.
+- Weekly rebuild workflow re-publishes canonical tags with fresh upstream PHP patches and re-signs.
+- Prod image now ships `php` CLI, `docker-php-ext-install`, `phpize`, and `www-data` out of the box (was bare alpine in 0.2.0).
+
+#### Testing
+
+- PHP integration test suite — 186 tests across 21 groups and 12 Docker profiles, covering apm, async, errors, framework, pathinfo, ratelimit, TLS, timeout, worker and more.
+
 #### Configuration
 
-All tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to `OX_SHARED_*` and bare keys). See [Shared State → Configuration](docs/en/features/shared-state.md#configuration) for the full table. Highlights:
+All Shared-state tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to `OX_SHARED_*` and bare keys). See [Shared State → Configuration](docs/en/features/shared-state.md#configuration) for the full table. Highlights:
 
 - `SHARED_MAX_ENTRIES` (default 100 000) / `SHARED_MAX_BYTES` (default 1 GiB) — global caps.
 - `SHARED_CYCLE_DETECT_DEPTH` (16) / `SHARED_CYCLE_DETECT_EDGES` (10 000) — cycle-check walker bounds.
@@ -76,7 +96,7 @@ All tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to
 #### Documentation
 
 - [`docs/en/features/shared-state.md`](docs/en/features/shared-state.md) — overview, mental model, type-selection matrix, canonical hand-rolled-counter → `Shared\*` migration example.
-- Per-type docs for all seven v1 types (see list above).
+- Per-type docs for all seven Shared\* v1 types (see list above).
 - [`docs/en/operations/shared-observability.md`](docs/en/operations/shared-observability.md) — introspection endpoints, Prometheus catalogue, diagnostic playbooks.
 - [`docs/en/features/migrating-to-external-store.md`](docs/en/features/migrating-to-external-store.md) — when and how to promote `Shared\*` state to Redis / NATS / Kafka.
 
@@ -84,15 +104,51 @@ All tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to
 
 - `tests/soak/pool_soak.sh` + `tests/soak/workload.php` — manual (non-CI) 24h soak harness for pre-release Shared\Pool stability sign-off. Not wired into `tests/run_all.sh`; [invocation notes in the observability doc](docs/en/operations/shared-observability.md#long-running-soak-harness).
 
+### Changed
+
+- **Routing refactored** into per-mode modules with a performance and behavior overhaul.
+- **Request latency reduced across all stack layers** — hot-path allocations, routing, and response assembly.
+- `oxphp_request_heartbeat($time)` now also resets PHP's own `max_execution_time` timer to `$time` seconds alongside the server-side deadline. Previously only the server deadline was extended, so long-running scripts could still be killed by Zend's "Maximum execution time exceeded" fatal even after a heartbeat. Scripts that opted out of the PHP timer via `set_time_limit(0)` or `max_execution_time=0` are left alone — the heartbeat does not re-enable a disabled timer.
+- Welcome page redesigned as a minimal "is running" status page.
+- **Prod image `USER` policy**: `Dockerfile.alpine-release` no longer sets a final `USER` — matches `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine` conventions. Deployments drop privileges at the orchestrator level (`docker run --user www-data`, Compose `user:`, Kubernetes `runAsUser`). `chown www-data:www-data /var/www/html` still runs at build time.
+- SAPI executor split into per-file modules; worker pool hot path tightened.
+- Decorator registry migrated from `unsafe static mut` to `OnceLock`.
+- Legacy plugin modules removed in favor of `ox_*` rewrites.
+- PHP worker config parsing centralized in `Config`.
+- Hyper updated to 1.9; unused `serde` dependency dropped.
+
+### Breaking Changes
+
+- **Async namespace migration**: all async-related PHP classes moved under `OxPHP\Async\`:
+  - `OxPHP\AsyncException` → `OxPHP\Async\Exception`
+  - `OxPHP\AsyncTimeoutException` → `OxPHP\Async\TimeoutException`
+  - `OxPHP\AsyncBorrowException` → `OxPHP\Async\BorrowException`
+  - `OxPHP\BorrowedProxy` → `OxPHP\Async\BorrowedProxy`
+- Async functions (`oxphp_async`, `oxphp_async_await`, etc.) are now provided by the `plugin-async` feature flag. Without it, the functions are not available. Function names are unchanged.
+- **Plugin API**: `Plugin::shutdown` now takes `&mut self` (was `&self`). Plugin authors must update implementations.
+- **Plugin config**: `env::set_var` side-effects from plugin init no longer propagate to the core server — plugins must publish core-relevant flags through the explicit core-flags API.
+- **`RequestComplete` event**: string-serialized metadata replaced with typed fields.
+
 ### Performance
 
 - `Shared\Pool` acquire/release uncontested hot path: **≤ 5 µs gate, ~0.9 µs observed in Docker**. Per-thread affinity keeps slots hot in the acquiring thread without cross-thread handoff.
 - Map `set` / `get` path avoids serialisation for nested `Shareable` refs — the refcount-bump retain path is cycle-checked before any mutation, so rejected inserts leak nothing.
+- Request path: fewer allocations and clones across routing, response assembly and hot-path dispatch.
 
 ### Fixed
 
 - Pool chaos reclaim: in-flight slot counts are refunded when a SAPI worker thread panics mid-acquire, so a crashing worker no longer silently burns budget in the surviving workers' view.
 - Cross-thread `Shared\*` access no longer depends on the `worker_liveness` hook for Map / Counter / Flag / Once / Mutex — only Pool uses thread-registration (for its affinity + reclaim paths).
+- Async worker SIGBUS from cross-thread `MAP_PTR` access.
+- `headers_list()` returning empty — the header handler now returns `SAPI_HEADER_ADD`.
+- `payload()` returning null for JSON body after a PDO query reused the request buffer.
+- `SecurityHeadersHandler` env-variable race: `FRAME_OPTIONS` is now resolved at startup rather than read per request.
+- Decorator `RejectedException` dispatch and instance-cache collisions across requests.
+- `-Wint-to-pointer-cast` warning in bridge `server_context` assignment.
+- Default-feature (`php`) compile/clippy errors that were previously masked by the `--no-default-features` CI profile.
+- TLS test profile now generates v3 certificates dynamically and the runner supports HTTPS.
+- E2E runner `curl_args` parsing no longer strips shell quotes incorrectly.
+- Cancelled-task exception class corrected to `OxPHP\Async\Exception`.
 
 ## [0.2.0] - 2026-03-27
 
@@ -268,5 +324,6 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.3.0]: https://github.com/oxphp/oxphp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/oxphp/oxphp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/oxphp/oxphp/releases/tag/v0.1.0

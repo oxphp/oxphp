@@ -128,7 +128,7 @@ TRACE_CONTEXT=true
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:0.3.0
     ports:
       - "80:80"
       - "9090:9090"

@@ -119,7 +119,7 @@ OxPHP 监听单个端口。要同时支持两种协议，请使用处理 HTTP �
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:0.3.0
     ports:
       - "443:443"
     environment:

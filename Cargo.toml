@@ -1,6 +1,6 @@
 [package]
 name = "oxphp"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Asynchronous PHP application server"
 license = "AGPL-3.0-only"
@@ -164,6 +164,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
 name = "synthetic_promise"
+path = "benches/synthetic_promise.rs"
 harness = false
 required-features = ["plugin-async"]
 

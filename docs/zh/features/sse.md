@@ -155,7 +155,7 @@ SSE 端点需要禁用请求超时或将其设置得足够高。每个活跃的 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.2.0
+    image: ghcr.io/oxphp/oxphp:0.3.0
     ports:
       - "8080:8080"
     volumes:
