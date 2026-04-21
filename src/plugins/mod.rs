@@ -5,3 +5,5 @@ pub mod ox_apm;
 pub mod ox_async;
 #[cfg(feature = "plugin-otel")]
 pub mod ox_otel;
+#[cfg(feature = "plugin-profiler")]
+pub mod ox_profiler;

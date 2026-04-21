@@ -1028,6 +1028,7 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
 #include "Zend/zend_hash.h"
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
+#include "Zend/zend_attributes.h"
 
 /* Custom object struct — defined here because it depends on zend_object from php.h.
  * oxphp_bridge.h declares this inside #ifdef PHP_H, but the header is included
@@ -3172,4 +3173,711 @@ void oxphp_apm_unhook_all(void) {
 
 int oxphp_apm_hook_count_installed(void) {
     return apm_hook_count;
+}
+
+/* ============================================================ *
+ * Profiler observer state                                      *
+ * ============================================================ *
+ *
+ * Per-thread state for the ox_profiler plugin's observer hook.
+ * Adds the TLS struct and entry points so Rust can read/write the
+ * mode flag and drain the ring buffer; the Observer install +
+ * begin/end callbacks are defined below.
+ */
+
+#define OXPHP_PROF_BUF_DEPTH        256
+#define OXPHP_PROF_OPEN_STACK_MAX    32
+#define OXPHP_PROF_NAME_ARENA_BYTES 8192
+#define OXPHP_PROF_NAME_MAX_BYTES     64
+
+/* Forward declaration. The flush sink is implemented in Rust
+ * (src/profiling/flush.rs) and exported as a #[no_mangle]
+ * extern "C" symbol; the dynamic linker resolves it at load time. */
+extern void oxphp_profiler_flush_span_events(const ox_span_event_t *events,
+                                              uint32_t count);
+
+static __thread struct {
+    uint8_t  mode;
+    uint8_t  paused;            /* set/cleared by oxphp_bridge_set_profiling_paused */
+    uint8_t  open_depth;
+    uint8_t  open_stack_overflow;
+    uint16_t buf_len;
+    uint16_t name_arena_used;
+
+    uint64_t next_seq;          /* incremented on every BEGIN */
+
+    uint32_t force_profile_fn_count; /* mirrors count of force_profile=1 entries in g_filter_cache; reset only by clear_filter_cache() */
+    uint8_t  capture_mem;
+    uint8_t  capture_cpu;
+
+    ox_span_event_t buf[OXPHP_PROF_BUF_DEPTH];
+
+    /* Open-stack mirror: 32-bit BEGIN seq tags from root → current.
+     * The heap hook will read this; currently only written by the
+     * observer begin/end callbacks. */
+    uint32_t open_stack[OXPHP_PROF_OPEN_STACK_MAX];
+
+    /* Parallel to open_stack: records the zend_function* whose BEGIN
+     * actually pushed the entry. The end callback compares this
+     * against execute_data->func and only pops when they match —
+     * correctness guard for mixed-capture runs (ApmOnly with
+     * force_profile fns, PROFILE_ALL + pause/resume, sample misses,
+     * max_spans cap) where begin decides not to push but end still
+     * fires for the same function. Without the check, end would
+     * unbalance a span that belongs to a different (outer) function. */
+    uintptr_t open_fn_stack[OXPHP_PROF_OPEN_STACK_MAX];
+
+    /* Per-flush string arena. Reset whenever buf_len returns to 0. */
+    char     name_arena[OXPHP_PROF_NAME_ARENA_BYTES];
+} g_prof;
+
+/* Process-wide cap on span count per request. Set once at plugin
+ * init from ProfilerConfig.max_spans via oxphp_bridge_set_profiler_max_spans.
+ * 0 means "no cap" (we map it to UINT32_MAX internally). */
+static uint32_t g_prof_max_spans_cap = UINT32_MAX;
+
+/* Sticky flag — stays 1 once a request was seen with mode==PROFILE_ALL.
+ * Used by oxphp_profiler_end so end events for begins captured under
+ * the previous mode still drain (avoids unbalanced open_stack at the
+ * request boundary). Cleared in oxphp_bridge_set_profiling_mode(OFF). */
+static __thread uint8_t oxphp_prof_was_active = 0;
+
+_Static_assert(sizeof(ox_span_event_t) == 64,
+               "ox_span_event_t must be exactly 64 bytes (one cache line)");
+
+/* Process-wide capture toggles. Read once from env at library load;
+ * each thread copies them into g_prof on first set_profiling_mode. */
+static uint8_t oxphp_prof_capture_mem_default = 1;
+static uint8_t oxphp_prof_capture_cpu_default = 1;
+
+static uint8_t oxphp_prof_parse_env_bool(const char *val, uint8_t dflt) {
+    if (val == NULL) return dflt;
+    if (val[0] == '\0') return dflt;
+    if (strcmp(val, "true") == 0 || strcmp(val, "1") == 0) return 1;
+    if (strcmp(val, "false") == 0 || strcmp(val, "0") == 0) return 0;
+    return dflt;
+}
+
+__attribute__((constructor))
+static void oxphp_prof_init_env(void) {
+    oxphp_prof_capture_mem_default =
+        oxphp_prof_parse_env_bool(getenv("PROFILER_CAPTURE_MEM"), 1);
+    oxphp_prof_capture_cpu_default =
+        oxphp_prof_parse_env_bool(getenv("PROFILER_CAPTURE_CPU"), 1);
+}
+
+/* --- internal helpers ----------------------------------------- */
+
+/* Drain the ring buffer into Rust, then reset buf_len + name_arena.
+ * Called from the begin/end callbacks when the buffer fills, and
+ * from the public RSHUTDOWN flush below. */
+static void oxphp_prof_flush_buffer(void) {
+    if (g_prof.buf_len == 0) return;
+    oxphp_profiler_flush_span_events(g_prof.buf, g_prof.buf_len);
+    g_prof.buf_len = 0;
+    g_prof.name_arena_used = 0;
+}
+
+/* --- public entry points -------------------------------------- */
+
+void oxphp_bridge_set_profiling_mode(uint8_t mode) {
+    g_prof.mode = mode;
+    g_prof.capture_mem = oxphp_prof_capture_mem_default;
+    g_prof.capture_cpu = oxphp_prof_capture_cpu_default;
+    if (mode == OXPHP_PROFILING_MODE_OFF) {
+        /* Clean reset between requests so the next worker run
+         * starts with empty state. We do not flush here — anything
+         * still in the buffer when mode flips to OFF is dropped on
+         * purpose (the request that produced it is over). */
+        g_prof.buf_len = 0;
+        g_prof.name_arena_used = 0;
+        g_prof.open_depth = 0;
+        g_prof.open_stack_overflow = 0;
+        g_prof.next_seq = 0;
+        g_prof.paused = 0;          /* Fresh request starts unpaused */
+        /* force_profile_fn_count intentionally preserved: mirrors g_filter_cache, not per-request */
+        oxphp_prof_was_active = 0;
+    }
+}
+
+uint8_t oxphp_bridge_get_profiling_mode(void) {
+    return g_prof.mode;
+}
+
+uint8_t oxphp_bridge_snapshot_open_stack(uint32_t *dst, uint8_t max_depth) {
+    if (g_prof.open_stack_overflow) return 255;
+    uint8_t n = g_prof.open_depth;
+    if (n > max_depth) n = max_depth;
+    if (dst != NULL && n > 0) {
+        memcpy(dst, g_prof.open_stack, (size_t)n * sizeof(uint32_t));
+    }
+    return n;
+}
+
+void oxphp_bridge_profiler_rshutdown_flush(void) {
+    oxphp_prof_flush_buffer();
+}
+
+/* ── Profiler paused flag ───────────────────────────── */
+
+void oxphp_bridge_set_profiling_paused(uint8_t paused) {
+    g_prof.paused = paused ? 1 : 0;
+}
+
+uint8_t oxphp_bridge_is_profiling_paused(void) {
+    return g_prof.paused;
+}
+
+int64_t oxphp_bridge_get_memory_usage_bytes(void) {
+    /* zend_memory_usage(0) returns the current allocated bytes
+     * across all opcaches for this request. Outside a PHP request
+     * (e.g. between RINIT/RSHUTDOWN) the engine returns 0 by
+     * convention. The MemoryThresholdDecorator uses this for
+     * delta-based threshold detection. */
+    return (int64_t)zend_memory_usage(0);
+}
+
+/* ============================================================ *
+ * Profiler filter cache                                        *
+ * ============================================================ */
+
+#define OXPHP_PROF_FILTER_CACHE_INIT_CAP   256
+#define OXPHP_PROF_FILTER_CACHE_MAX_CAP   4096
+
+/* Per-thread cache entry. Holds spec_id (Rust handle) + the four
+ * hot-path decision values mirrored from the spec, so begin/end
+ * never re-enter Rust to ask "should I create this span?". */
+typedef struct {
+    uintptr_t fn_id;          /* 0 = empty slot (zend_function* never NULL) */
+    uint32_t  spec_id;        /* 0 = no filter (cached fast path) */
+    uint8_t   excluded;       /* 1 = skip span creation */
+    uint8_t   force_profile;  /* 1 = create even when mode != PROFILE_ALL */
+    uint8_t   has_sample;     /* 1 = sample_rate is set */
+    uint8_t   reserved;       /* keep zero — alignment */
+    float     sample_rate;    /* only meaningful when has_sample == 1 */
+} ox_filter_cache_entry_t;
+
+static __thread struct {
+    ox_filter_cache_entry_t *entries;
+    uint32_t                  cap;        /* power-of-two */
+    uint32_t                  size;       /* number of non-empty slots */
+} g_filter_cache;
+
+/* Resolver function pointer set by Rust at init. NULL = no
+ * filtering (observer creates spans for all functions). */
+static oxphp_profiler_resolve_filter_fn_t g_filter_resolver = NULL;
+
+void oxphp_bridge_set_filter_resolver(oxphp_profiler_resolve_filter_fn_t resolver) {
+    g_filter_resolver = resolver;
+}
+
+/* fxhash-style mix to (uintptr_t)func → bucket index. cap is
+ * power-of-two so & cap-1 == mod cap. */
+static uint32_t oxphp_filter_cache_hash(uintptr_t fn_id, uint32_t cap) {
+    uint64_t h = (uint64_t)fn_id;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return (uint32_t)(h & ((uint64_t)cap - 1));
+}
+
+static int oxphp_filter_cache_grow(void) {
+    uint32_t new_cap = (g_filter_cache.cap == 0)
+                       ? OXPHP_PROF_FILTER_CACHE_INIT_CAP
+                       : g_filter_cache.cap * 2;
+    if (new_cap > OXPHP_PROF_FILTER_CACHE_MAX_CAP) {
+        return 0;  /* abort grow; observer init falls back to re-resolve */
+    }
+    ox_filter_cache_entry_t *new_entries =
+        calloc(new_cap, sizeof(ox_filter_cache_entry_t));
+    if (!new_entries) return 0;
+
+    uint32_t mask = new_cap - 1;
+    for (uint32_t i = 0; i < g_filter_cache.cap; i++) {
+        if (g_filter_cache.entries[i].fn_id == 0) continue;
+        uint32_t h = oxphp_filter_cache_hash(g_filter_cache.entries[i].fn_id, new_cap);
+        while (new_entries[h].fn_id != 0) h = (h + 1) & mask;
+        new_entries[h] = g_filter_cache.entries[i];
+    }
+
+    free(g_filter_cache.entries);
+    g_filter_cache.entries = new_entries;
+    g_filter_cache.cap = new_cap;
+    return 1;
+}
+
+/* Look up an existing entry. Returns NULL on miss. */
+static ox_filter_cache_entry_t *oxphp_filter_cache_lookup(uintptr_t fn_id) {
+    if (g_filter_cache.cap == 0) return NULL;
+    uint32_t mask = g_filter_cache.cap - 1;
+    uint32_t h = oxphp_filter_cache_hash(fn_id, g_filter_cache.cap);
+    while (g_filter_cache.entries[h].fn_id != 0) {
+        if (g_filter_cache.entries[h].fn_id == fn_id) {
+            return &g_filter_cache.entries[h];
+        }
+        h = (h + 1) & mask;
+    }
+    return NULL;
+}
+
+/* Insert / overwrite an entry. Grows if load > 0.75. Silently no-ops
+ * past max cap (the function will just be re-resolved every time). */
+static void oxphp_filter_cache_put(const ox_filter_cache_entry_t *entry) {
+    if (g_filter_cache.cap == 0) {
+        if (!oxphp_filter_cache_grow()) return;
+    }
+    if (g_filter_cache.size * 4 >= g_filter_cache.cap * 3) {
+        if (!oxphp_filter_cache_grow()) return;
+    }
+    uint32_t mask = g_filter_cache.cap - 1;
+    uint32_t h = oxphp_filter_cache_hash(entry->fn_id, g_filter_cache.cap);
+    while (g_filter_cache.entries[h].fn_id != 0
+           && g_filter_cache.entries[h].fn_id != entry->fn_id) {
+        h = (h + 1) & mask;
+    }
+    uint8_t prev_force = (g_filter_cache.entries[h].fn_id == entry->fn_id)
+                         ? g_filter_cache.entries[h].force_profile
+                         : 0;
+    if (g_filter_cache.entries[h].fn_id == 0) g_filter_cache.size++;
+    g_filter_cache.entries[h] = *entry;
+    if (entry->force_profile && !prev_force) {
+        g_prof.force_profile_fn_count++;
+    } else if (!entry->force_profile && prev_force) {
+        if (g_prof.force_profile_fn_count > 0) g_prof.force_profile_fn_count--;
+    }
+}
+
+uint32_t oxphp_bridge_get_filter_spec_id_cached(uintptr_t fn_id) {
+    ox_filter_cache_entry_t *e = oxphp_filter_cache_lookup(fn_id);
+    return e ? e->spec_id : 255;
+}
+
+void oxphp_bridge_clear_filter_cache(void) {
+    free(g_filter_cache.entries);
+    g_filter_cache.entries = NULL;
+    g_filter_cache.cap = 0;
+    g_filter_cache.size = 0;
+    g_prof.force_profile_fn_count = 0;
+}
+
+/* Resolver context — stack-allocated by observer init, passed
+ * opaquely to Rust, used by the read_attr_arg_* helpers below
+ * to look up attribute args by (name, occurrence, arg_idx). */
+typedef struct {
+    zend_class_entry *scope;          /* may be NULL for free functions */
+    HashTable        *fn_attrs;       /* func->common.attributes — may be NULL */
+    HashTable        *class_attrs;    /* scope ? scope->attributes : NULL */
+} ox_attr_resolver_ctx_t;
+
+/* Look up the `idx`-th attribute named `attr_name` in `attrs`.
+ * Repeated attributes (e.g. multiple #[Tag(...)] on one function)
+ * are addressed via idx (idx=0 = first occurrence). */
+static zend_attribute *
+oxphp_lookup_nth_attribute(HashTable *attrs, const char *attr_name, uint32_t idx) {
+    if (!attrs) return NULL;
+    uint32_t seen = 0;
+    zend_attribute *a;
+    ZEND_HASH_FOREACH_PTR(attrs, a) {
+        if (a && a->name && strcmp(ZSTR_VAL(a->name), attr_name) == 0) {
+            if (seen == idx) return a;
+            seen++;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return NULL;
+}
+
+size_t oxphp_bridge_read_attr_arg_str(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    char *out, size_t out_cap)
+{
+    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
+    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
+    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
+    if (!attr || arg_idx >= attr->argc || out_cap == 0) return 0;
+
+    zval val;
+    if (zend_get_attribute_value(&val, attr, arg_idx, ctx->scope) != SUCCESS) {
+        return 0;
+    }
+    size_t written = 0;
+    if (Z_TYPE(val) == IS_STRING) {
+        size_t src_len = Z_STRLEN(val);
+        size_t copy = src_len < out_cap - 1 ? src_len : out_cap - 1;
+        memcpy(out, Z_STRVAL(val), copy);
+        out[copy] = '\0';
+        written = copy;
+    }
+    zval_ptr_dtor(&val);
+    return written;
+}
+
+int oxphp_bridge_read_attr_arg_double(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    double *out)
+{
+    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
+    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
+    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
+    if (!attr || arg_idx >= attr->argc) return 0;
+
+    zval val;
+    if (zend_get_attribute_value(&val, attr, arg_idx, ctx->scope) != SUCCESS) {
+        return 0;
+    }
+    int ok = 0;
+    if (Z_TYPE(val) == IS_DOUBLE) {
+        *out = Z_DVAL(val);
+        ok = 1;
+    } else if (Z_TYPE(val) == IS_LONG) {
+        *out = (double)Z_LVAL(val);
+        ok = 1;
+    }
+    zval_ptr_dtor(&val);
+    return ok;
+}
+
+/* ============================================================ *
+ * Profiler observer init + begin/end callbacks                 *
+ * ============================================================ */
+
+#include "Zend/zend_observer.h"
+#include "Zend/zend_compile.h"
+/* zend_attributes.h is included higher up alongside the other PHP
+ * headers (filter cache needs zend_attribute earlier). */
+
+/* Synthesise a span name for a zend_function. Returns a pointer into
+ * a per-thread static buffer (overwritten on next call). May return
+ * NULL when the function has no name and no scope. Caller copies into
+ * the per-flush arena via oxphp_prof_arena_copy(). */
+static const char *oxphp_prof_synthesise_name(zend_function *func, size_t *out_len) {
+    static __thread char tmp[OXPHP_PROF_NAME_MAX_BYTES + 1];
+
+    if (func == NULL) { *out_len = 0; return NULL; }
+
+    const char *fn  = func->common.function_name
+                       ? ZSTR_VAL(func->common.function_name)
+                       : "{closure}";
+    size_t       fnl = func->common.function_name
+                       ? ZSTR_LEN(func->common.function_name)
+                       : 9;
+
+    if (func->common.scope) {
+        const char *cn  = ZSTR_VAL(func->common.scope->name);
+        size_t       cnl = ZSTR_LEN(func->common.scope->name);
+        size_t       total = cnl + 2 + fnl;
+        if (total > OXPHP_PROF_NAME_MAX_BYTES) total = OXPHP_PROF_NAME_MAX_BYTES;
+        size_t cn_take = (cnl < total - 2) ? cnl : (total - 2);
+        size_t fn_take = total - 2 - cn_take;
+        memcpy(tmp, cn, cn_take);
+        tmp[cn_take]     = ':';
+        tmp[cn_take + 1] = ':';
+        memcpy(tmp + cn_take + 2, fn, fn_take);
+        *out_len = total;
+        tmp[total] = '\0';
+        return tmp;
+    }
+
+    if (fnl > OXPHP_PROF_NAME_MAX_BYTES) fnl = OXPHP_PROF_NAME_MAX_BYTES;
+    memcpy(tmp, fn, fnl);
+    tmp[fnl] = '\0';
+    *out_len = fnl;
+    return tmp;
+}
+
+/* Copy `name` of `name_len` bytes into the per-thread arena. Returns a
+ * pointer into the arena, or NULL when the arena is full. Pointer is
+ * valid only until the next flush (which resets the arena). */
+static const char *oxphp_prof_arena_copy(const char *name, size_t name_len) {
+    if (name == NULL || name_len == 0) return NULL;
+    if (name_len > OXPHP_PROF_NAME_MAX_BYTES) name_len = OXPHP_PROF_NAME_MAX_BYTES;
+    if ((size_t)g_prof.name_arena_used + name_len > OXPHP_PROF_NAME_ARENA_BYTES) {
+        return NULL;
+    }
+    char *dst = &g_prof.name_arena[g_prof.name_arena_used];
+    memcpy(dst, name, name_len);
+    g_prof.name_arena_used += (uint16_t)name_len;
+    return dst;
+}
+
+static inline uint64_t oxphp_prof_clock_mono_ns(void) {
+    struct timespec ts;
+    /* CLOCK_MONOTONIC (not _RAW) goes through the vDSO on Linux, so
+     * it's ~10-20 ns instead of ~300 ns for a full syscall. The NTP
+     * slew that _RAW avoids is irrelevant for intra-request span
+     * durations, and the observer reads the same clock on BEGIN and
+     * END so any slew applies equally to both. */
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static inline uint64_t oxphp_prof_clock_cpu_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* Forward declaration — implemented in Rust (src/profiling/filter.rs)
+ * as #[no_mangle] pub extern "C". The dynamic linker resolves it at
+ * load time. */
+extern uint8_t oxphp_profiler_sample_hit(float rate);
+
+static void oxphp_profiler_begin(zend_execute_data *execute_data) {
+    /* Paused short-circuit applies regardless of filter spec. */
+    if (UNEXPECTED(g_prof.paused)) return;
+
+    /* Mode-first gate: skip the filter cache lookup entirely when
+     * mode=OFF and no force_profile attribute has been resolved on
+     * this thread. This is the common production path. */
+    if (g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL
+        && g_prof.force_profile_fn_count == 0) {
+        return;
+    }
+
+    /* Consult the per-fn filter spec cached at observer init. */
+    uintptr_t fn_id = (uintptr_t)execute_data->func;
+    ox_filter_cache_entry_t *filter = oxphp_filter_cache_lookup(fn_id);
+
+    /* Decision tree (per spec §6 composition rules):
+     * 1. Excluded — never create a span.
+     * 2. !PROFILE_ALL && !force_profile — default mode-only check
+     *    rejects.
+     * 3. has_sample — roll PRNG; skip if uniform > rate. */
+    if (filter != NULL && filter->excluded) return;
+
+    if (g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL) {
+        if (filter == NULL || !filter->force_profile) return;
+    }
+
+    if (filter != NULL && filter->has_sample) {
+        if (!oxphp_profiler_sample_hit(filter->sample_rate)) return;
+    }
+
+    /* Per-request span cap. next_seq grows monotonically under
+     * mode != OFF; once the cap is reached we stop emitting new
+     * span events. A sentinel (fn_id=0) is still pushed to
+     * open_fn_stack so the matching end pops in LIFO order — this
+     * is required for correctness under recursion, where the
+     * outer fn_id on the stack equals the inner fn_id and the
+     * plain fn_id-mismatch guard would otherwise mis-pop an
+     * outer frame. zend_function* is never NULL, so 0 is a safe
+     * sentinel value. */
+    if (UNEXPECTED(g_prof.next_seq >= g_prof_max_spans_cap)) {
+        g_prof.open_stack_overflow = 1;  /* signal truncation to Rust */
+        if (g_prof.open_depth < OXPHP_PROF_OPEN_STACK_MAX) {
+            g_prof.open_stack[g_prof.open_depth] = 0;
+            g_prof.open_fn_stack[g_prof.open_depth] = 0;
+            g_prof.open_depth++;
+        }
+        return;
+    }
+
+    oxphp_prof_was_active = 1;
+
+    if (UNEXPECTED(g_prof.buf_len == OXPHP_PROF_BUF_DEPTH)) {
+        oxphp_prof_flush_buffer();
+    }
+
+    size_t name_len = 0;
+    const char *raw = oxphp_prof_synthesise_name(execute_data->func, &name_len);
+    const char *arena_name = oxphp_prof_arena_copy(raw, name_len);
+
+    uint64_t seq = ++g_prof.next_seq;
+    ox_span_event_t *ev = &g_prof.buf[g_prof.buf_len++];
+    ev->kind        = OXPHP_SPAN_EVENT_KIND_BEGIN;
+    ev->reserved0   = 0;
+    ev->name_len    = arena_name ? (uint16_t)name_len : 0;
+    ev->reserved1   = 0;
+    ev->seq         = seq;
+    ev->ts_ns       = oxphp_prof_clock_mono_ns();
+    ev->cpu_ns      = g_prof.capture_cpu ? oxphp_prof_clock_cpu_ns() : 0;
+    ev->mem         = g_prof.capture_mem ? (int64_t)zend_memory_usage(0) : 0;
+    ev->mem_peak    = g_prof.capture_mem ? (int64_t)zend_memory_peak_usage(0) : 0;
+    ev->name_ptr    = arena_name;
+    /* Pass spec_id to Rust so apply_events can attach tags after
+     * pushing the BEGIN event. spec_id 0 = no tag work. */
+    ev->reserved2   = filter != NULL ? (uint64_t)filter->spec_id : 0;
+
+    /* Mirror open-span stack for the heap hook. seq tags are
+     * 64-bit but we only keep the low 32 bits in the mirror — heap
+     * attribution doesn't need them to be unique across the whole
+     * process, only within a request, and 32 bits is enough for any
+     * realistic per-request span count.
+     *
+     * open_fn_stack mirrors fn_id at the same depth so the end
+     * callback can distinguish "my begin pushed" from "my begin was
+     * skipped but an outer span is still open". */
+    if (g_prof.open_depth < OXPHP_PROF_OPEN_STACK_MAX) {
+        g_prof.open_stack[g_prof.open_depth] = (uint32_t)(seq & 0xFFFFFFFFu);
+        g_prof.open_fn_stack[g_prof.open_depth] = fn_id;
+        g_prof.open_depth++;
+    } else {
+        g_prof.open_stack_overflow = 1;
+    }
+}
+
+static void oxphp_profiler_end(zend_execute_data *execute_data, zval *retval) {
+    (void)retval;
+    /* Allow drain when mode just flipped from PROFILE_ALL to OFF
+     * (oxphp_prof_was_active stays 1 until the next set_profiling_mode
+     * call). Without this, end events for begins captured under the
+     * previous mode would be lost and Rust would mark them leaked. */
+    if (EXPECTED(g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL)
+        && !oxphp_prof_was_active) {
+        return;
+    }
+
+    if (g_prof.open_depth == 0) return;
+
+    /* Correctness guard: if the begin for THIS function was skipped
+     * (paused, sample miss, force_profile-only with fn not in filter),
+     * open_fn_stack top belongs to an outer span — popping would
+     * unbalance it. Skip silently.
+     *
+     * The check uses execute_data->func which is the same pointer the
+     * observer API keyed the handler-pair cache on, so equality with
+     * the value begin stored is guaranteed for well-formed recursion. */
+    uintptr_t fn_id = (uintptr_t)(execute_data ? execute_data->func : NULL);
+    uintptr_t top_fn = g_prof.open_fn_stack[g_prof.open_depth - 1];
+
+    /* Sentinel path: begin was dropped because max_spans cap was
+     * reached. Consume the slot silently; do not emit an END event.
+     * Under recursion the outer fn_id equals the dropped begin's
+     * fn_id, so this LIFO sentinel is the only way to keep begin/end
+     * pairs aligned. */
+    if (top_fn == 0) {
+        g_prof.open_depth--;
+        return;
+    }
+    if (top_fn != fn_id) {
+        return;
+    }
+
+    if (UNEXPECTED(g_prof.buf_len == OXPHP_PROF_BUF_DEPTH)) {
+        oxphp_prof_flush_buffer();
+    }
+
+    g_prof.open_depth--;
+    uint64_t seq = (uint64_t)g_prof.open_stack[g_prof.open_depth];
+
+    ox_span_event_t *ev = &g_prof.buf[g_prof.buf_len++];
+    ev->kind        = OXPHP_SPAN_EVENT_KIND_END;
+    ev->reserved0   = 0;
+    ev->name_len    = 0;
+    ev->reserved1   = 0;
+    ev->seq         = seq;
+    ev->ts_ns       = oxphp_prof_clock_mono_ns();
+    ev->cpu_ns      = g_prof.capture_cpu ? oxphp_prof_clock_cpu_ns() : 0;
+    ev->mem         = g_prof.capture_mem ? (int64_t)zend_memory_usage(0) : 0;
+    ev->mem_peak    = g_prof.capture_mem ? (int64_t)zend_memory_peak_usage(0) : 0;
+    ev->name_ptr    = NULL;
+    ev->reserved2   = 0;
+}
+
+/* Set the per-request span cap. 0 is interpreted as "unlimited" and
+ * stored as UINT32_MAX so the hot-path comparison stays a simple
+ * unsigned less-than. Process-wide; intended to be called once from
+ * Rust at plugin init (ProfilerPlugin::init). */
+void oxphp_bridge_set_profiler_max_spans(uint32_t cap) {
+    g_prof_max_spans_cap = cap ? cap : UINT32_MAX;
+}
+
+/* Per-fn-creation init. The Observer API caches the returned handler
+ * pair for the lifetime of `execute_data->func`, so we MUST NOT make
+ * the result depend on a runtime-mutable flag (the cached result
+ * would freeze early-on-first-request decisions for the rest of the
+ * process). Instead we always return our handler pair for user
+ * functions; the begin/end callbacks themselves consult g_prof.mode. */
+zend_observer_fcall_handlers
+oxphp_profiler_observer_init(zend_execute_data *execute_data) {
+    if (UNEXPECTED(execute_data == NULL || execute_data->func == NULL)) {
+        return (zend_observer_fcall_handlers){NULL, NULL};
+    }
+    if (execute_data->func->common.type != ZEND_USER_FUNCTION) {
+        /* Internal functions skipped at the gate (PROFILER_INTERNAL
+         * toggle). */
+        return (zend_observer_fcall_handlers){NULL, NULL};
+    }
+
+    /* Resolve filter spec for this function on first observation,
+     * cache the result per (fn, thread). spec_id 0 is "no filter,
+     * default behaviour" — still cached so subsequent inits skip
+     * the resolve work. */
+    uintptr_t fn_id = (uintptr_t)execute_data->func;
+    if (g_filter_resolver != NULL && oxphp_filter_cache_lookup(fn_id) == NULL) {
+        const char *fn_attr_names[64];
+        uint32_t fn_attr_count = 0;
+        HashTable *fn_attrs = execute_data->func->common.attributes;
+        if (fn_attrs) {
+            zend_attribute *a;
+            ZEND_HASH_FOREACH_PTR(fn_attrs, a) {
+                if (a && a->name && fn_attr_count < 64) {
+                    fn_attr_names[fn_attr_count++] = ZSTR_VAL(a->name);
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+
+        const char *class_attr_names[64];
+        uint32_t class_attr_count = 0;
+        HashTable *class_attrs = execute_data->func->common.scope
+                                 ? execute_data->func->common.scope->attributes
+                                 : NULL;
+        if (class_attrs) {
+            zend_attribute *a;
+            ZEND_HASH_FOREACH_PTR(class_attrs, a) {
+                if (a && a->name && class_attr_count < 64) {
+                    class_attr_names[class_attr_count++] = ZSTR_VAL(a->name);
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+
+        /* Pre-filter: skip the Rust call when no attribute begins
+         * with "OxPHP\Profile\" — the fast path for ~100% of fns
+         * in a typical app. The cache still stores spec_id 0 so we
+         * don't repeat this work. */
+        int has_profile_attr = 0;
+        for (uint32_t i = 0; i < fn_attr_count && !has_profile_attr; i++) {
+            if (strncmp(fn_attr_names[i], "OxPHP\\Profile\\", 14) == 0) has_profile_attr = 1;
+        }
+        for (uint32_t i = 0; i < class_attr_count && !has_profile_attr; i++) {
+            if (strncmp(class_attr_names[i], "OxPHP\\Profile\\", 14) == 0) has_profile_attr = 1;
+        }
+
+        ox_filter_cache_entry_t entry = {0};
+        entry.fn_id = fn_id;
+
+        if (has_profile_attr) {
+            ox_attr_resolver_ctx_t actx = {
+                .scope       = execute_data->func->common.scope,
+                .fn_attrs    = fn_attrs,
+                .class_attrs = class_attrs,
+            };
+            entry.spec_id = g_filter_resolver(
+                fn_id,
+                class_attr_count > 0 ? class_attr_names : NULL,
+                class_attr_count,
+                fn_attr_count > 0 ? fn_attr_names : NULL,
+                fn_attr_count,
+                &actx,
+                &entry.excluded,
+                &entry.force_profile,
+                &entry.has_sample,
+                &entry.sample_rate);
+        }
+        oxphp_filter_cache_put(&entry);
+    }
+
+    return (zend_observer_fcall_handlers){
+        oxphp_profiler_begin,
+        oxphp_profiler_end,
+    };
 }

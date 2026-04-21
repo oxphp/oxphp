@@ -151,6 +151,20 @@ Full guide: [Distributed tracing](docs/en/features/distributed-tracing.md).
 - **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`) — see [Access logging](docs/en/features/access-logging.md)
 - **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled — see [Request IDs](docs/en/features/request-ids.md)
 
+### Profiling (`plugin-profiler` feature)
+
+Full guide: [Profiling](docs/en/features/profiling.md).
+
+- **Per-request profile capture** — triggered by cookie (`OXPROF`), header (`X-OxPHP-Profile`), query (`?__oxprof=`), or statistical sampling (`PROFILER_SAMPLE_RATE`); constant-time token compare
+- **Four export formats** — xhprof (for xhgui), speedscope (for speedscope.app), pprof (Go tools / Pyroscope), collapsed (FlameGraph)
+- **Rich per-span data** — wall-time, CPU time, memory (start/end), events, attributes — nanosecond precision throughout
+- **PHP SDK** — 7 functions (`OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}`) + 7 attributes (4 observer-filter: `#[Profile]` / `#[Exclude]` / `#[Sample]` / `#[Tag]`; 3 decorators: `#[Mark]` / `#[SlowThreshold]` / `#[MemoryThreshold]`)
+- **Shared tree with APM** — both plugins read one `Arc<SpanTree>`; no double collection; APM continues to export only explicit spans to OTel while the profiler keeps the full tree
+- **In-memory LRU + disk retention** — last `PROFILER_RETENTION_COUNT` runs always retrievable, token-bucket rate-limited writes, 5 s atomic-rename background trimmer
+- **HTTP push** — ship profiles to xhgui or any collector; 3× exponential backoff (100/200/400 ms) with 5 s wallclock cap; xhgui envelope auto-detect
+- **Internal HTTP routes** at `/__profiler/` — 8 endpoints (list / metadata / raw / speedscope redirect / DELETE / config / stats / landing) with optional bearer-token auth and path-traversal validation
+- **Prometheus metrics** — 6 counters + 1 gauge (runs, spans, bytes, disk drops, push failures, truncated, in-memory runs) via `/metrics`
+
 ### Reliability & Operations
 - **Bounded request queue** with 529 backpressure when full
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/en/features/rate-limiting.md)
@@ -251,7 +265,7 @@ flowchart LR
     SDK --> STACK
     DEC --> STACK
     HOOKS --> STACK
-    STACK -->|JSON via apm_spans_json| APC
+    STACK -->|Arc<SpanTree> via profile_tree| APC
     PHPERR -->|structured log| APC
     OTR --> OTC
     OTC --> BATCH
@@ -396,7 +410,7 @@ curl http://localhost:9090/metrics
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O), `#[OxPHP\Tracing\Trace]` decorator, 10 `oxphp_trace_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
-| **Built-in PHP Profiler** | Low-overhead profiling via attribute decorators (`#[Timer]`, `#[Span]`), integrated with server metrics and tracing |
+| ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/en/features/profiling.md) |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |
 | **Non-Docker Install** | Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |

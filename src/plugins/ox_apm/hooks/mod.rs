@@ -14,7 +14,7 @@
 //!    looks up each pending function in Zend's tables and replaces its handler.
 //!
 //! 4. **Runtime** (C, during PHP execution): The wrapper calls before → original → after.
-//!    The Rust callbacks create/close spans on the thread-local `SpanStack`.
+//!    The Rust callbacks create/close spans on the thread-local `ProfilingContext`.
 
 pub mod curl;
 pub mod file_io;
@@ -30,7 +30,7 @@ use std::time::Instant;
 /// popped by `after_callback`. Carries state between the two calls.
 #[derive(Debug)]
 pub struct HookFrame {
-    /// Span local ID returned by `SpanStack::push`.
+    /// Span local ID returned by `ProfilingContext::push`.
     pub span_local_id: u32,
     /// Timestamp when the before callback fired (for precise timing).
     pub start: Instant,
@@ -208,10 +208,13 @@ unsafe extern "C" fn before_callback(
     let start = Instant::now();
 
     // Push a span onto the APM span stack
-    let local_id = super::spans::SPAN_STACK.with(|stack| {
+    let local_id = crate::profiling::PROFILING_CONTEXT.with(|stack| {
         stack.borrow_mut().push(
-            span_name,
-            vec![("source".to_string(), "auto-hook".to_string())],
+            std::sync::Arc::from(span_name),
+            vec![(
+                std::sync::Arc::from("source"),
+                std::sync::Arc::from("auto-hook"),
+            )],
         )
     });
 
@@ -232,7 +235,7 @@ unsafe extern "C" fn after_callback(
     _return_value: *mut std::ffi::c_void,
 ) {
     if let Some(frame) = pop_frame() {
-        super::spans::SPAN_STACK.with(|stack| {
+        crate::profiling::PROFILING_CONTEXT.with(|stack| {
             stack.borrow_mut().pop(frame.span_local_id);
         });
     }

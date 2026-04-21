@@ -1,0 +1,4 @@
+# profile: xhgui
+# description: HTTP push of xhprof envelope to xhgui + visibility check
+
+profiler/test_xhgui_import

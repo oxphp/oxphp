@@ -90,6 +90,12 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(zend_execute_d
 static void oxphp_decorator_begin(zend_execute_data *execute_data);
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval);
 
+/* Profiler observer init — defined in ext/bridge/oxphp_bridge.c.
+ * Registered globally at MINIT alongside the decorator observer;
+ * multiple registrations are merged by the Zend Observer API. */
+extern zend_observer_fcall_handlers
+oxphp_profiler_observer_init(zend_execute_data *execute_data);
+
 /* ═══════════════════════════════════════════════════════════════
  *  OxPHP\Http\Request — ZEND_METHOD implementations
  * ═══════════════════════════════════════════════════════════════ */
@@ -3028,6 +3034,27 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
     /* Register decorator observer */
     zend_observer_fcall_register(oxphp_decorator_observer_init);
+
+    /* Register profiler observer. The init callback always returns
+     * handlers for user functions; the begin/end pair early-returns
+     * when g_prof.mode != PROFILE_ALL.
+     *
+     * Gated at compile time on OXPHP_WITH_PROFILER (Cargo feature
+     * plugin-profiler) and at runtime on PROFILER_ENABLED. Because the
+     * Zend Observer API freezes init results per-function after first
+     * observation, the runtime gate is read once at MINIT — toggling
+     * PROFILER_ENABLED at runtime is not supported (process restart
+     * required). */
+#ifdef OXPHP_WITH_PROFILER
+    {
+        const char *profiler_enabled = getenv("PROFILER_ENABLED");
+        if (profiler_enabled != NULL
+            && (strcmp(profiler_enabled, "true") == 0
+                || strcmp(profiler_enabled, "1") == 0)) {
+            zend_observer_fcall_register(oxphp_profiler_observer_init);
+        }
+    }
+#endif
 
     /* APM hook approval — validates targets against loaded extensions.
        No handler replacement here; that happens per-thread in RINIT. */

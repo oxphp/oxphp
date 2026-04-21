@@ -151,6 +151,20 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **JSON-журнал доступа** с опциональными полями `trace_id`/`span_id` (уровни: `all`, `error`, выключен через `ACCESS_LOG`) — см. [Журнал доступа](docs/ru/features/access-logging.md)
 - **Генерация Request ID** и проброс (`X-Request-ID`); формат на основе трейсов при активном OTel — см. [Request ID](docs/ru/features/request-ids.md)
 
+### Профилирование (фича `plugin-profiler`)
+
+Полное руководство: [Профилирование](docs/ru/features/profiling.md).
+
+- **Захват профиля на каждый запрос** — триггер через cookie (`OXPROF`), заголовок (`X-OxPHP-Profile`), параметр запроса (`?__oxprof=`) или статистическую выборку (`PROFILER_SAMPLE_RATE`); сравнение токена за константное время
+- **Четыре формата экспорта** — xhprof (для xhgui), speedscope (для speedscope.app), pprof (инструменты Go / Pyroscope), collapsed (FlameGraph)
+- **Подробные данные спанов** — wall-time, CPU-time, память (вход/выход), события, атрибуты — наносекундная точность на всём конвейере
+- **PHP SDK** — 7 функций (`OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}`) + 7 атрибутов (4 observer-фильтра: `#[Profile]` / `#[Exclude]` / `#[Sample]` / `#[Tag]`; 3 декоратора: `#[Mark]` / `#[SlowThreshold]` / `#[MemoryThreshold]`)
+- **Общее дерево с APM** — оба плагина читают одно `Arc<SpanTree>`; дублирования сбора нет; APM продолжает отправлять в OTel только явные спаны, а профилировщик сохраняет полное дерево
+- **LRU в памяти + хранение на диске** — последние `PROFILER_RETENTION_COUNT` запусков всегда доступны, запись с rate-limit через token-bucket, неблокирующая фоновая обрезка каждые 5 с с атомарным rename
+- **HTTP push** — отправка профилей в xhgui или любой коллектор; 3× повторных попыток с экспоненциальной задержкой (100/200/400 мс) и бюджетом 5 с wallclock; автоопределение xhgui-конверта
+- **Внутренние HTTP-маршруты** на `/__profiler/` — 8 эндпоинтов (list / metadata / raw / 302 на speedscope / DELETE / config / stats / landing) с опциональной bearer-аутентификацией и защитой от path traversal
+- **Метрики Prometheus** — 6 счётчиков + 1 gauge (runs, spans, bytes, disk drops, push failures, truncated, in-memory runs) через `/metrics`
+
 ### Надёжность и эксплуатация
 - **Ограниченная очередь запросов** с противодавлением (529) при переполнении
 - **Ограничение частоты запросов по IP** с заголовками `X-RateLimit-*` и ответами 429 — см. [Rate limiting](docs/ru/features/rate-limiting.md)
@@ -251,7 +265,7 @@ flowchart LR
     SDK --> STACK
     DEC --> STACK
     HOOKS --> STACK
-    STACK -->|JSON через apm_spans_json| APC
+    STACK -->|Arc<SpanTree> через profile_tree| APC
     PHPERR -->|структурированный лог| APC
     OTR --> OTC
     OTC --> BATCH
@@ -396,7 +410,7 @@ curl http://localhost:9090/metrics
 | ~~**OpenTelemetry**~~ | ✅ Реализовано — экспорт трейсов OTLP через feature `plugin-otel`, пропуск контекста W3C, спаны для каждого запроса со стандартными семантическими конвенциями |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Реализовано — feature `plugin-apm`: автоматическая трассировка 33 внутренних PHP-функций (PDO, mysqli, cURL, Redis, Memcached, файловый I/O), декоратор `#[OxPHP\Tracing\Trace]`, 10 SDK-функций `oxphp_trace_*()`, захват ошибок PHP |
 | **Custom Metrics** | PHP API для регистрации пользовательских метрик Prometheus из кода приложения |
-| **Built-in PHP Profiler** | Низконакладное профилирование через атрибуты декораторов (`#[Timer]`, `#[Span]`), интегрированное с метриками сервера и трассировкой |
+| ~~**Built-in PHP Profiler**~~ | ✅ Реализовано — фича `plugin-profiler`: профилирование на каждый запрос с форматами xhprof/speedscope/pprof/collapsed, PHP SDK, триггеры-атрибуты, LRU в памяти + хранение на диске, HTTP push в xhgui, внутренние маршруты `/__profiler/`, метрики Prometheus — см. [Профилирование](docs/ru/features/profiling.md) |
 | **Dockerfile.bookworm** | Официальный образ на базе Debian Bookworm как альтернатива Alpine |
 | **Non-Docker Install** | Нативная установка через системные пакетные менеджеры (apt, brew и т.д.) |
 | **HTTP/3** | Поддержка HTTP/3 на базе QUIC |

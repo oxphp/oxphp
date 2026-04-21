@@ -4,6 +4,22 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+#### Profiling
+
+- Per-request PHP profiler (`plugin-profiler` feature — now part of the default Cargo feature set; `-DOXPHP_WITH_PROFILER=1` propagated to both C build stages) with four output formats: xhprof, speedscope, pprof, collapsed
+- PHP SDK: `OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}` functions
+- Seven PHP attributes: `#[Profile]`, `#[Exclude]`, `#[Sample]`, `#[Tag]`, `#[Mark]`, `#[SlowThreshold]`, `#[MemoryThreshold]`
+- Trigger modes: cookie (`OXPROF=<token>`), header (`X-OxPHP-Profile: <token>`), query (`?__oxprof=<token>`), and statistical (`PROFILER_SAMPLE_RATE`)
+- In-memory LRU cache (`PROFILER_RETENTION_COUNT`) + disk retention with background trimmer (5-second cadence, atomic rename)
+- Token-bucket disk write rate limiting (`PROFILER_DISK_MAX_PER_SEC`)
+- HTTP push (`PROFILER_EXPORT_URL`) with 3× exponential backoff retry, 5 s wallclock cap, bearer-token auth, xhgui envelope auto-detect
+- Internal HTTP routes at `/__profiler/` — list, metadata, raw format download, speedscope redirect, DELETE, config, stats — with optional bearer-token auth and path-traversal revalidation
+- Prometheus metrics: `oxphp_profiler_runs_total{source}`, `spans_collected_total`, `bytes_written_total{format}`, `disk_drops_total`, `http_push_failures_total`, `truncated_total`, `in_memory_runs`
+- `xhgui` Docker test profile demonstrating the full push → mongo → xhgui UI flow
+- Per-locale documentation at `docs/{en,ru,zh}/features/profiling.md`
+
 ### Breaking Changes
 
 - **Async namespace migration**: All async-related PHP classes moved under `OxPHP\Async\` namespace:

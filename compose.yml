@@ -11,7 +11,8 @@ services:
         # Alpine base version. Override with: ALPINE_VERSION=3.23 docker compose build
         ALPINE_VERSION: "3.23"
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
-        # All plugins are included by default via the "php" feature.
+        # Default features (see Cargo.toml `default`) include the "php"
+        # aggregate (plugin-apm, plugin-async) plus plugin-profiler.
         CARGO_FEATURES: ""
     ports:
       - "80:80"

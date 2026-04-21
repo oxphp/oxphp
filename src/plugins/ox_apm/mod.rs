@@ -1,7 +1,6 @@
 pub mod connection_meta;
 pub mod hooks;
 pub mod php_sdk;
-pub mod spans;
 pub mod sql;
 
 use std::cell::RefCell;
@@ -25,7 +24,7 @@ use crate::plugin::handler::{
 };
 use crate::plugin::{Plugin, PluginContext, PluginDeps, PluginError, PluginHealth};
 
-use self::spans::SPAN_STACK;
+use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 
 // ---------------------------------------------------------------------------
 // Thread-local to pass span local IDs between on_begin and on_end.
@@ -54,8 +53,11 @@ impl crate::decorator::Decorator for TraceDecorator {
     }
 
     fn on_begin(&self, ctx: &DecoratorCallContext) -> DecoratorAction {
-        let local_id =
-            SPAN_STACK.with(|stack| stack.borrow_mut().push(ctx.target.to_string(), vec![]));
+        let local_id = PROFILING_CONTEXT.with(|stack| {
+            stack
+                .borrow_mut()
+                .push(Arc::from(ctx.target.as_ref()), vec![])
+        });
 
         DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().push(local_id));
 
@@ -66,18 +68,22 @@ impl crate::decorator::Decorator for TraceDecorator {
         let local_id = DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().pop());
 
         if let Some(local_id) = local_id {
-            SPAN_STACK.with(|stack| {
+            PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
 
                 // If the decorated function threw, mark the span as error before closing.
                 if !result.success {
                     if let Some(span) = stack.get_mut(local_id) {
                         span.status_code = 2; // Error
-                        if let Some(ref exc_class) = result.exception_class {
-                            span.events.push(spans::SpanEvent {
+                        if let Some(exc_class) = result.exception_class.clone() {
+                            span.events.push(SpanEvent {
                                 name: "exception".into(),
-                                attributes: vec![("exception.type".into(), exc_class.clone())],
-                                timestamp_us: spans::now_us(),
+                                attributes: vec![(
+                                    std::sync::Arc::from("exception.type"),
+                                    std::sync::Arc::from(exc_class),
+                                )],
+                                timestamp_ns: now_ns(),
+                                kind: SpanEventKind::Exception,
                             });
                         }
                     }
@@ -139,7 +145,7 @@ struct ApmRequestHandler;
 
 impl PluginRequestHandler for ApmRequestHandler {
     fn handle(&self, _view: &PluginRequestView, _actions: &mut PluginRequestActions) {
-        // NOTE: SpanStack reset and connection_meta::clear happen on the PHP
+        // NOTE: ProfilingContext reset and connection_meta::clear happen on the PHP
         // worker thread in execute_request() (executor/sapi.rs), not here.
         // This handler runs on Tokio thread — different TLS from PHP workers.
         // Kept for future use (e.g. extracting metadata for Tokio-side processing).
@@ -174,8 +180,8 @@ impl PluginCompleteHandler for ApmCompleteHandler {
         }
 
         // ── Export child spans off the hot path via tokio::spawn ──
-        let spans_json = match view.apm_spans_json {
-            Some(json) if !json.is_empty() => json.to_string(),
+        let tree = match view.profile_tree {
+            Some(t) if !t.is_empty() => Arc::clone(t),
             _ => return,
         };
         if self.provider.get().is_none() {
@@ -189,61 +195,45 @@ impl PluginCompleteHandler for ApmCompleteHandler {
             let provider = provider.get().unwrap(); // safe: checked above
             let tracer = provider.tracer("oxphp-apm");
 
-            let parsed: Vec<serde_json::Value> = match serde_json::from_str(&spans_json) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(plugin = "apm", error = %e, "Failed to parse APM spans JSON");
-                    return;
-                }
-            };
-
             let mut exported = 0u32;
 
-            for span_val in &parsed {
-                let tid = span_val["tid"].as_str().unwrap_or("");
-                let sid = span_val["sid"].as_str().unwrap_or("");
-                let pid = span_val["pid"].as_str().unwrap_or("");
-                let name = span_val["n"].as_str().unwrap_or("unknown");
-                let start_us = span_val["s"].as_u64().unwrap_or(0);
-                let end_us = span_val["e"].as_u64().unwrap_or(0);
-                let status_code = span_val["sc"].as_u64().unwrap_or(0) as u8;
-                let status_msg = span_val["sm"].as_str();
-                let leaked = span_val["l"].as_bool().unwrap_or(false);
-
-                let trace_id = match TraceId::from_hex(tid) {
+            for span in tree.finished_spans() {
+                let trace_id = match TraceId::from_hex(&span.trace_id) {
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let span_id = match SpanId::from_hex(sid) {
+                let span_id = match SpanId::from_hex(&span.span_id) {
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let parent_span_id = SpanId::from_hex(pid).ok();
+                let parent_span_id = SpanId::from_hex(&span.parent_span_id).ok();
 
-                let start_time = UNIX_EPOCH + std::time::Duration::from_micros(start_us);
-                let end_time = UNIX_EPOCH + std::time::Duration::from_micros(end_us);
+                let start_time = UNIX_EPOCH + std::time::Duration::from_nanos(span.start_ns);
+                let end_time = UNIX_EPOCH + std::time::Duration::from_nanos(span.end_ns);
 
-                let mut attributes: Vec<KeyValue> = Vec::new();
-                if let Some(attrs) = span_val["a"].as_array() {
-                    for pair in attrs {
-                        if let (Some(k), Some(v)) = (pair[0].as_str(), pair[1].as_str()) {
-                            attributes.push(KeyValue::new(k.to_string(), v.to_string()));
-                        }
-                    }
-                }
-                if leaked {
+                let mut attributes: Vec<KeyValue> = span
+                    .attributes
+                    .iter()
+                    .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+                    .collect();
+                if span.leaked {
                     attributes.push(KeyValue::new("oxphp.span.leaked", true));
                 }
 
-                let status = match status_code {
-                    2 => Status::error(status_msg.unwrap_or("error").to_string()),
+                let status = match span.status_code {
+                    2 => Status::error(
+                        span.status_message
+                            .as_deref()
+                            .unwrap_or("error")
+                            .to_string(),
+                    ),
                     1 => Status::Ok,
                     _ => Status::Unset,
                 };
 
                 use opentelemetry::trace::Span as _;
 
-                let mut builder = SpanBuilder::from_name(name.to_string())
+                let mut builder = SpanBuilder::from_name(span.name.to_string())
                     .with_trace_id(trace_id)
                     .with_span_id(span_id)
                     .with_kind(SpanKind::Internal)
@@ -262,8 +252,6 @@ impl PluginCompleteHandler for ApmCompleteHandler {
                     );
                     let parent_otel_ctx =
                         opentelemetry::Context::new().with_remote_span_context(parent_ctx);
-                    // Use end_with_timestamp to set the correct end time.
-                    // drop() would call end() which overwrites with SystemTime::now().
                     builder
                         .start_with_context(&tracer, &parent_otel_ctx)
                         .end_with_timestamp(end_time);
@@ -436,6 +424,7 @@ mod tests {
         let mut config_values = HashMap::new();
         let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
         let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
         let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
         let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
         let mut php_classes = Vec::new();
@@ -453,6 +442,7 @@ mod tests {
             &mut config_values,
             &mut metrics_collectors,
             &mut internal_routes,
+            &mut internal_route_prefixes,
             &mut native_php_functions,
             &mut decorators,
             &mut php_classes,
@@ -601,9 +591,33 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_handler_with_spans_json() {
-        // Simulate spans JSON that would come from PHP worker thread
-        let spans_json = r#"[{"tid":"aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb","sid":"1111111111111111","pid":"2222222222222222","n":"test.span","s":1700000000000000,"e":1700000000000500,"a":[["key","val"]],"ev":[],"sc":0,"sm":null,"l":false}]"#;
+    fn test_complete_handler_with_profile_tree() {
+        use crate::profiling::{FinishedSpan, ProfilingMode, SpanTree};
+
+        let finished = vec![FinishedSpan {
+            local_id: 1,
+            trace_id: "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb".into(),
+            span_id: "1111111111111111".into(),
+            parent_span_id: "2222222222222222".into(),
+            name: "test.span".into(),
+            start_ns: 1700000000000000,
+            end_ns: 1700000000000500,
+            cpu_ns: 0,
+            mem_enter: 0,
+            mem_exit: 0,
+            mem_peak: 0,
+            attributes: vec![("key".into(), "val".into())],
+            events: vec![],
+            status_code: 0,
+            status_message: None,
+            leaked: false,
+        }];
+        let tree = Arc::new(SpanTree {
+            finished,
+            trace_id: "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb".into(),
+            root_span_id: "2222222222222222".into(),
+            mode: ProfilingMode::ApmOnly,
+        });
 
         let handler = ApmCompleteHandler {
             slow_query_ms: 100,
@@ -622,7 +636,7 @@ mod tests {
             0,
             &[],
             &[],
-            Some(spans_json),
+            Some(&tree),
             None,
             None,
         );
@@ -687,7 +701,13 @@ mod tests {
     #[test]
     fn test_trace_decorator_on_begin_creates_span() {
         // Reset span stack and decorator span IDs
-        SPAN_STACK.with(|s| s.borrow_mut().reset("trace-1".into(), "root-1".into()));
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-1".into(),
+                "root-1".into(),
+            )
+        });
         DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().clear());
 
         let decorator = TraceDecorator;
@@ -697,11 +717,11 @@ mod tests {
         assert_eq!(action, DecoratorAction::Continue);
 
         // Verify a span was pushed onto the stack
-        SPAN_STACK.with(|s| {
+        PROFILING_CONTEXT.with(|s| {
             let stack = s.borrow();
             assert_eq!(stack.open_count(), 1);
             let current = stack.current().unwrap();
-            assert_eq!(current.name, "App\\Service::findById");
+            assert_eq!(current.name.as_ref(), "App\\Service::findById");
         });
 
         // Verify local_id was saved in thread-local
@@ -713,7 +733,13 @@ mod tests {
     #[test]
     fn test_trace_decorator_on_end_closes_span() {
         // Reset span stack and decorator span IDs
-        SPAN_STACK.with(|s| s.borrow_mut().reset("trace-2".into(), "root-2".into()));
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-2".into(),
+                "root-2".into(),
+            )
+        });
         DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().clear());
 
         let decorator = TraceDecorator;
@@ -721,7 +747,7 @@ mod tests {
 
         // Begin
         decorator.on_begin(&ctx);
-        assert_eq!(SPAN_STACK.with(|s| s.borrow().open_count()), 1);
+        assert_eq!(PROFILING_CONTEXT.with(|s| s.borrow().open_count()), 1);
 
         // End (success)
         let result = DecoratorCallResult {
@@ -732,18 +758,18 @@ mod tests {
         decorator.on_end(&ctx, &result);
 
         // Span should be closed (moved to finished)
-        SPAN_STACK.with(|s| {
+        PROFILING_CONTEXT.with(|s| {
             let stack = s.borrow();
             assert_eq!(stack.open_count(), 0);
             assert_eq!(stack.finished_count(), 1);
         });
 
         // Verify the finished span
-        SPAN_STACK.with(|s| {
+        PROFILING_CONTEXT.with(|s| {
             let mut stack = s.borrow_mut();
             let finished = stack.take_finished();
             assert_eq!(finished.len(), 1);
-            assert_eq!(finished[0].name, "my_function");
+            assert_eq!(finished[0].name.as_ref(), "my_function");
             assert_eq!(finished[0].status_code, 0); // Unset (success)
             assert!(finished[0].events.is_empty());
             assert!(!finished[0].leaked);
@@ -758,7 +784,13 @@ mod tests {
     #[test]
     fn test_trace_decorator_on_end_records_exception() {
         // Reset span stack and decorator span IDs
-        SPAN_STACK.with(|s| s.borrow_mut().reset("trace-3".into(), "root-3".into()));
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-3".into(),
+                "root-3".into(),
+            )
+        });
         DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().clear());
 
         let decorator = TraceDecorator;
@@ -776,19 +808,25 @@ mod tests {
         decorator.on_end(&ctx, &result);
 
         // Span should be closed with error status
-        SPAN_STACK.with(|s| {
+        PROFILING_CONTEXT.with(|s| {
             let mut stack = s.borrow_mut();
             let finished = stack.take_finished();
             assert_eq!(finished.len(), 1);
-            assert_eq!(finished[0].name, "App\\PaymentService::charge");
+            assert_eq!(finished[0].name.as_ref(), "App\\PaymentService::charge");
             assert_eq!(finished[0].status_code, 2); // Error
 
             // Should have an exception event
             assert_eq!(finished[0].events.len(), 1);
             assert_eq!(finished[0].events[0].name, "exception");
             assert_eq!(finished[0].events[0].attributes.len(), 1);
-            assert_eq!(finished[0].events[0].attributes[0].0, "exception.type");
-            assert_eq!(finished[0].events[0].attributes[0].1, "RuntimeException");
+            assert_eq!(
+                finished[0].events[0].attributes[0].0.as_ref(),
+                "exception.type"
+            );
+            assert_eq!(
+                finished[0].events[0].attributes[0].1.as_ref(),
+                "RuntimeException"
+            );
         });
     }
 }

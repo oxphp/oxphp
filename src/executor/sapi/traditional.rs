@@ -166,13 +166,35 @@ fn execute_request(
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 
-    // Reset APM span stack on the PHP worker thread with trace context from the request.
-    // This MUST happen on the worker thread (not Tokio) because SPAN_STACK is thread-local.
-    #[cfg(feature = "plugin-apm")]
-    crate::plugins::ox_apm::spans::SPAN_STACK.with(|s| {
-        s.borrow_mut()
-            .reset(request.trace_id.clone(), request.span_id.clone());
-    });
+    // Capture whether profiling is active for this request. Used both to
+    // guard the RINIT setup below and to guard the RSHUTDOWN finalize/attach
+    // block so we skip 3 FFI calls + an Arc allocation on the hot path.
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    let profiling_active = request.profiling_mode != crate::profiling::ProfilingMode::Off;
+
+    // Reset profiling context on the PHP worker thread with the mode selected
+    // by the trigger (ox_profiler) or the default (ApmOnly when plugin-apm is
+    // on, Off otherwise — both set by dispatch_request). This MUST happen on
+    // the worker thread (not Tokio) because PROFILING_CONTEXT is thread-local.
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    if profiling_active {
+        crate::profiling::PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                request.profiling_mode,
+                request.trace_id.clone(),
+                request.span_id.clone(),
+            );
+        });
+    }
+    // Tell the C-side profiler observer which mode to use for this
+    // request. Must happen before php_request_startup() so the
+    // observer init callback and the first begin() see the right
+    // mode. APM does not use this flag (its hooks have their own
+    // state), so the gate is plugin-profiler only.
+    #[cfg(feature = "plugin-profiler")]
+    if profiling_active {
+        crate::profiling::set_profiling_mode(request.profiling_mode);
+    }
     #[cfg(feature = "plugin-apm")]
     crate::plugins::ox_apm::connection_meta::clear();
 
@@ -253,10 +275,51 @@ fn execute_request(
     // so the single-threaded Tokio runtime doesn't pay the parsing cost.
     let headers = sapi::parse_raw_headers(raw_headers);
 
-    #[cfg(feature = "plugin-apm")]
-    let apm_spans_json = crate::plugins::ox_apm::spans::drain_and_serialize();
-    #[cfg(not(feature = "plugin-apm"))]
-    let apm_spans_json: Option<String> = None;
+    // Finalize the profiling context if any mode-aware plugin is compiled in —
+    // mirrors the reset() guard above. Without this, `plugin-profiler` alone
+    // would reach `reset(ProfileAll, …)` at RINIT but never call `finalize()`,
+    // so `ProfilerCompleteHandler` would always see `profile_tree: None`.
+    //
+    // If profiling was Off at RINIT we skip the flush/finalize trio entirely,
+    // UNLESS the PHP SDK (`OxPHP\Profile\start()`) promoted the bridge mode
+    // mid-request — in which case `get_profiling_mode()` reports non-Off and
+    // we must still flush so spans the C observer captured make it out.
+    #[cfg(any(feature = "plugin-apm", feature = "plugin-profiler"))]
+    let profile_tree = {
+        #[cfg(feature = "plugin-profiler")]
+        let do_finalize = profiling_active
+            || crate::profiling::get_profiling_mode()
+                != crate::profiling::flush::PROFILING_MODE_OFF_RAW;
+        #[cfg(not(feature = "plugin-profiler"))]
+        let do_finalize = profiling_active;
+
+        if do_finalize {
+            // Drain any partial ring buffer left by the C observer so all
+            // events make it into PROFILING_CONTEXT before we finalize.
+            // Idempotent — a second call when the buffer is empty is a
+            // no-op.
+            #[cfg(feature = "plugin-profiler")]
+            crate::profiling::profiler_rshutdown_flush();
+
+            let tree = crate::profiling::PROFILING_CONTEXT.with(|ctx| ctx.borrow_mut().finalize());
+
+            // Reset the C-side mode so the next request on this worker
+            // thread starts cleanly. Also clears the sticky was-active
+            // flag and the open_stack mirror.
+            #[cfg(feature = "plugin-profiler")]
+            crate::profiling::set_profiling_mode(crate::profiling::ProfilingMode::Off);
+
+            if tree.is_empty() {
+                None
+            } else {
+                Some(tree)
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(any(feature = "plugin-apm", feature = "plugin-profiler")))]
+    let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
     Some(ScriptResponse {
         status,
@@ -265,6 +328,6 @@ fn execute_request(
         execution_time_us: start.elapsed().as_micros() as u64,
         stream_rx: None,
         errors: sapi::take_request_errors(),
-        apm_spans_json,
+        profile_tree,
     })
 }

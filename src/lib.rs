@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod php;
 pub mod plugin;
 pub mod plugins;
+pub mod profiling;
 pub mod server;
 pub mod trace_context;
 pub mod types;

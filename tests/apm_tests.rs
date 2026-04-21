@@ -1,14 +1,14 @@
 #[cfg(feature = "plugin-apm")]
 mod apm {
     use oxphp::plugins::ox_apm::connection_meta;
-    use oxphp::plugins::ox_apm::spans::{SpanEvent, SpanStack};
     use oxphp::plugins::ox_apm::sql;
+    use oxphp::profiling::{ProfilingContext, ProfilingMode, SpanEvent, SpanEventKind};
 
     #[test]
     fn test_full_request_lifecycle() {
         // Simulate a request: reset → push spans → pop → take
-        let mut stack = SpanStack::new();
-        stack.reset("trace123".into(), "root456".into());
+        let mut stack = ProfilingContext::new();
+        stack.reset(ProfilingMode::ApmOnly, "trace123".into(), "root456".into());
 
         // PHP SDK: oxphp_trace_start equivalent
         let s1 = stack.push("user.fetch".into(), vec![("user.id".into(), "42".into())]);
@@ -20,7 +20,9 @@ mod apm {
                 ("db.system".into(), "mysql".into()),
                 (
                     "db.statement".into(),
-                    sql::obfuscate("SELECT * FROM users WHERE id = 42"),
+                    std::sync::Arc::from(
+                        sql::obfuscate("SELECT * FROM users WHERE id = 42").as_str(),
+                    ),
                 ),
                 (
                     "db.operation".into(),
@@ -38,36 +40,38 @@ mod apm {
 
         // PDO span is child of user.fetch span
         let pdo_span = &finished[0];
-        assert_eq!(pdo_span.name, "PDO::query");
+        assert_eq!(pdo_span.name.as_ref(), "PDO::query");
         assert_eq!(
             pdo_span
                 .attributes
                 .iter()
-                .find(|(k, _)| k == "db.statement")
+                .find(|(k, _)| k.as_ref() == "db.statement")
                 .unwrap()
-                .1,
+                .1
+                .as_ref(),
             "SELECT * FROM users WHERE id = ?"
         );
         assert_eq!(
             pdo_span
                 .attributes
                 .iter()
-                .find(|(k, _)| k == "db.operation")
+                .find(|(k, _)| k.as_ref() == "db.operation")
                 .unwrap()
-                .1,
+                .1
+                .as_ref(),
             "SELECT"
         );
         assert!(!pdo_span.leaked);
 
         let user_span = &finished[1];
-        assert_eq!(user_span.name, "user.fetch");
-        assert_eq!(user_span.parent_span_id, "root456");
+        assert_eq!(user_span.name.as_ref(), "user.fetch");
+        assert_eq!(user_span.parent_span_id.as_ref(), "root456");
     }
 
     #[test]
     fn test_leaked_span_cleanup() {
-        let mut stack = SpanStack::new();
-        stack.reset("t1".into(), "r1".into());
+        let mut stack = ProfilingContext::new();
+        stack.reset(ProfilingMode::ApmOnly, "t1".into(), "r1".into());
 
         stack.push("never_closed".into(), vec![]);
         let leaked = stack.force_close_all();
@@ -75,7 +79,7 @@ mod apm {
 
         let finished = stack.take_finished();
         assert!(finished[0].leaked);
-        assert_eq!(finished[0].name, "never_closed");
+        assert_eq!(finished[0].name.as_ref(), "never_closed");
     }
 
     #[test]
@@ -108,8 +112,12 @@ mod apm {
     #[test]
     fn test_nested_spans_with_metadata() {
         // Simulate: HTTP handler → DB query → cache lookup
-        let mut stack = SpanStack::new();
-        stack.reset("trace_abc".into(), "server_span".into());
+        let mut stack = ProfilingContext::new();
+        stack.reset(
+            ProfilingMode::ApmOnly,
+            "trace_abc".into(),
+            "server_span".into(),
+        );
 
         let handler = stack.push("OrderController::show".into(), vec![]);
 
@@ -140,13 +148,13 @@ mod apm {
 
         assert_eq!(db_span.parent_span_id, handler_span.span_id);
         assert_eq!(cache_span.parent_span_id, handler_span.span_id);
-        assert_eq!(handler_span.parent_span_id, "server_span");
+        assert_eq!(handler_span.parent_span_id.as_ref(), "server_span");
     }
 
     #[test]
     fn test_error_on_span() {
-        let mut stack = SpanStack::new();
-        stack.reset("t1".into(), "r1".into());
+        let mut stack = ProfilingContext::new();
+        stack.reset(ProfilingMode::ApmOnly, "t1".into(), "r1".into());
 
         let s = stack.push("risky_op".into(), vec![]);
 
@@ -163,7 +171,8 @@ mod apm {
                         "SQLSTATE[HY000] [2002] Connection refused".into(),
                     ),
                 ],
-                timestamp_us: oxphp::plugins::ox_apm::spans::now_us(),
+                timestamp_ns: oxphp::profiling::now_ns(),
+                kind: SpanEventKind::Exception,
             });
         }
 
@@ -178,17 +187,17 @@ mod apm {
     #[test]
     fn test_request_isolation() {
         // Verify spans don't leak between requests
-        let mut stack = SpanStack::new();
+        let mut stack = ProfilingContext::new();
 
         // Request 1
-        stack.reset("trace_1".into(), "root_1".into());
+        stack.reset(ProfilingMode::ApmOnly, "trace_1".into(), "root_1".into());
         stack.push("req1_span".into(), vec![]);
         stack.force_close_all();
         let r1 = stack.take_finished();
         assert_eq!(r1.len(), 1);
 
         // Request 2
-        stack.reset("trace_2".into(), "root_2".into());
+        stack.reset(ProfilingMode::ApmOnly, "trace_2".into(), "root_2".into());
         assert_eq!(stack.open_count(), 0);
         assert_eq!(stack.finished_count(), 0);
 
@@ -196,6 +205,6 @@ mod apm {
         stack.pop(s);
         let r2 = stack.take_finished();
         assert_eq!(r2.len(), 1);
-        assert_eq!(r2[0].trace_id, "trace_2");
+        assert_eq!(r2[0].trace_id.as_ref(), "trace_2");
     }
 }

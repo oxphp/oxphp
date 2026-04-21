@@ -47,6 +47,12 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
                     event.request_id = id;
                 }
                 event.metadata.extend(actions.metadata);
+                if let Some(mode) = actions.profiling_mode {
+                    event.profiling_mode = Some(mode);
+                }
+                if let Some(run_id) = actions.profiling_run_id {
+                    event.profiling_run_id = Some(run_id);
+                }
             }
             Err(_) => {
                 tracing::error!(plugin = %self.plugin_name, "Plugin request handler panicked");
@@ -141,7 +147,7 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
                 event.response_size,
                 &event.metadata,
                 &event.php_errors,
-                event.apm_spans_json.as_deref(),
+                event.profile_tree.as_ref(),
                 event.queue_wait_us,
                 event.php_exec_us,
             );
@@ -183,6 +189,8 @@ mod tests {
             request_id: "test123".to_string(),
             early_response: None,
             metadata: Vec::new(),
+            profiling_mode: None,
+            profiling_run_id: None,
         }
     }
 
@@ -262,7 +270,7 @@ mod tests {
             response_size: 0,
             metadata: Vec::new(),
             php_errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
         };
@@ -368,7 +376,7 @@ mod tests {
             response_size: 0,
             metadata: Vec::new(),
             php_errors: Vec::new(),
-            apm_spans_json: None,
+            profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
         };

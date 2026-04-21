@@ -1,0 +1,18 @@
+# profile: profiler
+# description: PHP SDK functions and decorator attributes
+
+profiler/test_is_active
+profiler/test_start_stop
+profiler/test_pause_resume
+profiler/test_mark
+profiler/test_metric
+profiler/test_decorator_mark
+profiler/test_decorator_slow_threshold
+profiler/test_decorator_memory_threshold
+profiler/test_attr_profile
+profiler/test_attr_exclude
+profiler/test_attr_sample
+profiler/test_attr_tag
+profiler/test_attr_composition
+profiler/test_storage_files_present
+profiler/test_internal_routes
