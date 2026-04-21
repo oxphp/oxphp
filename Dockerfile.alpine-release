@@ -50,10 +50,10 @@ RUN phpize && \
 
 # ══════════════════════════════════════════════════════════════
 # Stage 3: Build Rust binary with the fixed production feature set.
-# Production builds always include plugin-apm, plugin-async, and
-# plugin-profiler — this is the distinguishing trait of
-# Dockerfile.alpine-release vs Dockerfile. To change the production
-# feature set, edit this file directly (and the matching
+# Production builds always include plugin-apm, plugin-async,
+# plugin-profiler, and plugin-shared — this is the distinguishing
+# trait of Dockerfile.alpine-release vs Dockerfile. To change the
+# production feature set, edit this file directly (and the matching
 # OXPHP_WITH_PROFILER build-arg if the profiler is involved).
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE} AS builder
@@ -96,7 +96,7 @@ COPY build.rs ./
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
-    cargo build --release --features plugin-apm,plugin-async,plugin-profiler && \
+    cargo build --release --features plugin-apm,plugin-async,plugin-profiler,plugin-shared && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 COPY src ./src
@@ -105,7 +105,7 @@ COPY src ./src
 RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
 
 # Production build — hardcoded feature set, no ARG override.
-RUN cargo build --release --features plugin-apm,plugin-async,plugin-profiler
+RUN cargo build --release --features plugin-apm,plugin-async,plugin-profiler,plugin-shared
 
 # ══════════════════════════════════════════════════════════════
 # Stage 4: Runtime — minimal production image.
