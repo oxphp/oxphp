@@ -127,7 +127,36 @@ jobs:
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve last-published upstream digest
+        id: published
+        env:
+          PHP_MINOR: ${{ matrix.php }}
+        run: |
+          # Last weekly publish records the upstream digest in the manifest
+          # annotation `org.oxphp.upstream-digest` (set by the publish step
+          # below). Empty annotation => first run for this PHP minor; treat
+          # as new (proceed with full build).
+          LAST=$(docker buildx imagetools inspect \
+            "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}" --raw 2>/dev/null \
+            | jq -r '.annotations["org.oxphp.upstream-digest"] // ""' || echo "")
+          echo "digest=$LAST" >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to rebuild
+        id: decide
+        env:
+          UPSTREAM: ${{ steps.base_digest.outputs.digest }}
+          PUBLISHED: ${{ steps.published.outputs.digest }}
+        run: |
+          if [[ "$UPSTREAM" = "$PUBLISHED" && -n "$PUBLISHED" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream digest unchanged ($UPSTREAM); skipping build."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Rebuilding: upstream=$UPSTREAM published=${PUBLISHED:-(none)}"
+          fi
+
       - name: Resolve PHP patch version from base image
+        if: steps.decide.outputs.skip != 'true'
         id: php_patch
         env:
           PHP_MINOR: ${{ matrix.php }}
@@ -144,6 +173,7 @@ jobs:
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
 
       - name: Build image from Dockerfile.alpine-release (cache key includes base digest)
+        if: steps.decide.outputs.skip != 'true'
         env:
           PHP_MINOR: ${{ matrix.php }}
           ALPINE_VER: ${{ matrix.alpine }}
@@ -159,17 +189,20 @@ jobs:
             --build-arg "OXPHP_VERSION=${OXPHP_VER}" \
             --cache-from "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST}" \
             --cache-to "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST},mode=max" \
+            --annotation "manifest:org.oxphp.upstream-digest=${BASE_DIGEST}" \
             --load \
             -t oxphp:ci \
             .
 
       - name: Smoke test
+        if: steps.decide.outputs.skip != 'true'
         env:
           EXPECTED_PHP: ${{ steps.php_patch.outputs.patch }}
         run: |
           ./scripts/smoke-test-image.sh oxphp:ci "$EXPECTED_PHP"
 
       - name: Push arch-specific minor-floating tag
+        if: steps.decide.outputs.skip != 'true'
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
@@ -181,6 +214,7 @@ jobs:
           docker push "$TAG"
 
       - name: Push arch-specific patch-pinned tag
+        if: steps.decide.outputs.skip != 'true'
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_PATCH: ${{ steps.php_patch.outputs.patch }}
@@ -192,6 +226,7 @@ jobs:
           docker push "$TAG"
 
       - name: Record PHP patch for downstream jobs
+        if: steps.decide.outputs.skip != 'true'
         env:
           PHP_PATCH: ${{ steps.php_patch.outputs.patch }}
           OXPHP_VER: ${{ matrix.oxphp }}
@@ -203,6 +238,7 @@ jobs:
           echo "$PHP_PATCH" > "/tmp/outputs/php_patch_${OXPHP_VER}_${PHP_MINOR}_${ALPINE_VER}_${ARCH}.txt"
 
       - name: Upload PHP patch artifact
+        if: steps.decide.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: php-patch-${{ matrix.oxphp }}-${{ matrix.php }}-${{ matrix.alpine }}-${{ matrix.arch }}
@@ -210,10 +246,80 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────
+  # Job 2.5: subset PHP integration suite — only when build wasn't skipped
+  # ──────────────────────────────────────────────────────────────
+  # Same focused 6-suite scope as release.yml::php-suite — covers SAPI-class
+  # regressions from upstream PHP patches without doubling weekly cost. The
+  # `if: needs.build.result == 'success'` clause is a coarse proxy for
+  # "actually built something" — when every cell in `build` short-circuits
+  # via the digest check, GitHub still reports `result: success` because no
+  # cell failed, so the suite runs against the previously-published image.
+  # Acceptable false-positive: one extra ~5-min subset run per weekly cycle
+  # when nothing actually changed.
+  # ──────────────────────────────────────────────────────────────
+  php-suite-subset:
+    needs: [plan, build]
+    if: ${{ needs.build.result == 'success' }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.merge_matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ matrix.oxphp }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull just-built amd64 image and tag as oxphp:dev
+        env:
+          OXPHP_VER: ${{ matrix.oxphp }}
+          PHP_MINOR: ${{ matrix.php }}
+          ALPINE_VER: ${{ matrix.alpine }}
+        run: |
+          SRC="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64"
+          docker pull "$SRC"
+          docker tag "$SRC" oxphp:dev
+
+      - name: Run focused PHP integration suites
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: |
+          set -eo pipefail
+          # Mirrors release.yml::php-suite scope. Keep in sync.
+          SUITES=(
+            headers
+            cookies
+            get_post_request
+            input
+            pathinfo
+            errors
+          )
+          FAILED=()
+          for suite in "${SUITES[@]}"; do
+            echo "::group::Suite: $suite"
+            if ! ./tests/run_all.sh --no-build --suite="$suite"; then
+              FAILED+=("$suite")
+            fi
+            echo "::endgroup::"
+          done
+          if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo "FAILED suites: ${FAILED[*]}" >&2
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────────────────────
   # Job 3: per-(oxphp, PHP, alpine) manifest merge + sign + aliases
   # ──────────────────────────────────────────────────────────────
   manifest:
-    needs: [plan, build]
+    needs: [plan, build, php-suite-subset]
+    if: ${{ needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
