@@ -24,8 +24,13 @@ jobs:
         include:
           - name: no-default
             flags: "--no-default-features --all-targets"
-          - name: default
+            php_id: ""
+          - name: default-php8.4
             flags: "--all-targets"
+            php_id: "80400"
+          - name: default-php8.5
+            flags: "--all-targets"
+            php_id: "80500"
     steps:
       - uses: actions/checkout@v4
       - name: Rust version
@@ -42,6 +47,7 @@ jobs:
       - name: Clippy
         env:
           CLIPPY_FLAGS: ${{ matrix.flags }}
+          PHP_VERSION_ID: ${{ matrix.php_id }}
         run: cargo clippy $CLIPPY_FLAGS -- -D warnings
 
   # Tests run with --no-default-features because default features link against

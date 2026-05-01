@@ -155,7 +155,7 @@ fn resolver_class_tag_appears_before_function_tag_via_apply_events() {
         let mut f = 0u8;
         let mut h = 0u8;
         let mut r = 0.0_f32;
-        let id = unsafe {
+        unsafe {
             oxphp_profiler_resolve_filter(
                 0xdead0003,
                 std::ptr::null(),
@@ -168,8 +168,7 @@ fn resolver_class_tag_appears_before_function_tag_via_apply_events() {
                 &mut h,
                 &mut r,
             )
-        };
-        id
+        }
     };
     // We can't easily inject `merged` directly into the registry for
     // a different spec_id without exposing intern(). Verify the

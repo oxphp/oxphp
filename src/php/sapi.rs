@@ -1889,8 +1889,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         // forwards the call — the blanket `Fn -> PluginNativeFunction` impl
         // then kicks in.
         let mut magic_handlers = class.magic_handlers;
-        for i in 0..MagicMethod::COUNT {
-            if let Some(handler) = magic_handlers[i].take() {
+        for (i, slot) in magic_handlers.iter_mut().enumerate() {
+            if let Some(handler) = slot.take() {
                 let magic =
                     MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
                 // Mirror the add_method skip above: only 0-arity magics

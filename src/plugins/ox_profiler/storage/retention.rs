@@ -130,7 +130,6 @@ mod tests {
     use super::*;
     use crate::plugins::ox_profiler::trigger::ActivationSource;
     use tempfile::TempDir;
-    use tokio::io::AsyncWriteExt as _;
 
     fn meta(run_id: &str, ts: u64) -> RunMeta {
         RunMeta {
