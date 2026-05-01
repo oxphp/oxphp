@@ -5,7 +5,7 @@ description: 通过 Docker 镜像安装 OxPHP 或从源码构建，涵盖前置�
 
 # 安装
 
-OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 ZTS、OxPHP 扩展以及所有运行时依赖。
+OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 或 8.5 ZTS、OxPHP 扩展以及所有运行时依赖。默认的 `:0.3.0` 和 `:latest` 标签随附 PHP 8.4；如需 PHP 8.5，请使用 `:0.3.0-php8.5`、`:php8.5` 或任意 `*-php8.5*` 标签变体。
 
 ## Docker（推荐）
 
@@ -18,7 +18,7 @@ docker pull ghcr.io/oxphp/oxphp:0.3.0
 该镜像包含：
 
 - **OxPHP 服务器二进制文件** —— 异步 HTTP 服务器
-- **PHP 8.4 ZTS** —— 支持多 Worker 执行的线程安全 PHP 运行时
+- **PHP ZTS 运行时** —— 8.4 或 8.5，取决于所拉取的标签；支持多 Worker 执行的线程安全 PHP
 - **OxPHP PHP 扩展**（`oxphp_sapi.so`）—— 提供 `oxphp_request_id()`、`oxphp_server_info()`、`oxphp_worker()` 等内置函数
 - **Bridge 库**（`liboxphp_bridge.so`）—— 连接 Rust 服务器与 PHP 运行时
 - **Alpine Linux** 基础镜像 —— 最小化运行时占用
@@ -33,7 +33,7 @@ docker pull ghcr.io/oxphp/oxphp:0.3.0
 ├── bin/
 │   └── oxphp                                        # 服务器二进制文件
 ├── lib/
-│   ├── libphp.so                                    # PHP 8.4 ZTS 运行时
+│   ├── libphp.so                                    # PHP ZTS 运行时（8.4 或 8.5，与镜像标签一致）
 │   ├── liboxphp_bridge.so                           # C Bridge 库
 │   └── php/extensions/no-debug-zts-20240924/
 │       └── oxphp_sapi.so                            # OxPHP PHP 扩展
@@ -63,7 +63,7 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
 
 ### 最小化 Dockerfile
 
-基础镜像 `php:8.4-zts-alpine3.23` 已包含 `libphp.so` 及其所有依赖。只需复制三个 OxPHP 构件即可：
+基础镜像 `php:8.4-zts-alpine3.23`（或 `php:8.5-zts-alpine3.23`）已包含 `libphp.so` 及其所有依赖。请确保 `FROM` 中的 PHP 次版本与所复制的 OxPHP 标签一致。只需复制三个 OxPHP 构件即可：
 
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
@@ -151,7 +151,7 @@ cargo build --release --no-default-features
 ### 前置条件
 
 - Rust 工具链（1.91.1 或更高版本）
-- PHP 8.4（启用 ZTS，即 Zend Thread Safety）
+- PHP 8.4 或 8.5（启用 ZTS，即 Zend Thread Safety）
 - C 编译器（gcc 或 clang）
 - `phpize` 及 PHP 开发头文件
 
@@ -177,7 +177,7 @@ export LD_LIBRARY_PATH=/usr/local/lib
 ./target/release/oxphp
 ```
 
-> **注意：** 部署到 Alpine Linux 时，须在运行 PHP 的同一个 `php:8.4-zts-alpine` 镜像内构建 Rust 二进制文件。混用 glibc 和 musl 构建会导致运行时错误。官方 Docker 镜像已正确处理此问题。
+> **注意：** 部署到 Alpine Linux 时，须在运行 PHP 的同一个 `php:{8.4,8.5}-zts-alpine` 镜像内构建 Rust 二进制文件 —— 次版本应与所发布的 OxPHP 镜像标签一致。混用 glibc 和 musl 构建会导致运行时错误。官方 Docker 镜像已正确处理此问题。
 
 ## 验证安装
 
