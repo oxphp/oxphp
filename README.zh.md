@@ -446,7 +446,6 @@ curl http://localhost:9090/metrics
 | **HTTP 103 Early Hints** | 发送 `103 Early Hints` 响应，允许客户端在最终响应前预加载资源 |
 | **Ecosystem Plugins** | 扩展插件系统：更多生命周期钩子、更丰富的 PHP API，以及第三方插件作者文档 |
 | ~~**Shared Async Runtime**~~ | ✅ 已实现 — 同一个异步运行时同时驱动 HTTP 服务器和 `oxphp_async()` / `oxphp_async_await()`，支持超时、结果传递和竞速协调 |
-| **Database Connection Pool** | 通过 `sqlx` 提供内置连接池，减少每请求的连接建立开销 |
 | **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
 | ~~**Fiber Multiplexing**~~ | ✅ 已实现 — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` / `oxphp_usleep()` 和 `oxphp_async_await()` 协作式让出 Fiber |
