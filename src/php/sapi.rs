@@ -916,6 +916,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
 
         additional_functions: std::ptr::null(),
         input_filter_init: None,
+        #[cfg(php_v8_5)]
+        pre_request_init: None,
     }
 }
 
