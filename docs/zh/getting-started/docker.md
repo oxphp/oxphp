@@ -157,11 +157,11 @@ docker build --target dev -t myapp:dev .
 docker build --target prod -t myapp:prod .
 ```
 
-> **注意：** `dev` 目标基于 `php:8.4-zts-alpine` 并复制了 OxPHP 相关内容，可完整使用 PHP CLI 和 Composer。`prod` 目标直接基于 OxPHP 镜像，保持生产镜像体积精简。
+> **注意：** `dev` 目标基于 `php:8.4-zts-alpine`（如需匹配 OxPHP 的 `:*-php8.5*` 变体，请将 `8.4` 替换为 `8.5`）并复制了 OxPHP 相关内容，可完整使用 PHP CLI 和 Composer。`prod` 目标直接基于 OxPHP 镜像，保持生产镜像体积精简。
 
 ## 在生产环境中安装 PHP 扩展
 
-从 OxPHP 0.3.0 开始，生产镜像从 `php:8.4-zts-alpine` 继承了完整的 PHP 工具链（`php`、`docker-php-ext-install`、`phpize`），并且**不**设置 `USER` 指令。下游 Dockerfile 可以直接安装 PHP 扩展 —— 无需切换 `USER`。
+从 OxPHP 0.3.0 开始，生产镜像从 `php:8.4-zts-alpine`（或 `php:8.5-zts-alpine`，对应 `:*-php8.5*` 变体）继承了完整的 PHP 工具链（`php`、`docker-php-ext-install`、`phpize`），并且**不**设置 `USER` 指令。下游 Dockerfile 可以直接安装 PHP 扩展 —— 无需切换 `USER`。
 
 ### 快速开始（单阶段）
 

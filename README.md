@@ -79,7 +79,7 @@ OxPHP replaces nginx + PHP-FPM with a single container. The server works out of 
 | Reverse proxy / upstream | ✅ (full-featured) | ✅ (Caddy) | ✅ | ❌ |
 | Native install (non-Docker) | apt/yum/brew/port | brew, static binary | brew, binary | roadmap |
 | Platforms (runtime) | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | Linux only (glibc/musl) |
-| Supported PHP versions | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 8.4 only (8.5 crashes with SIGBUS) |
+| Supported PHP versions | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 8.4 and 8.5 |
 | License | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 |
 | Age / production track record | 20+ years | 2+ years | 7+ years | <1 year |
 
@@ -434,7 +434,6 @@ curl http://localhost:9090/metrics
 
 | Feature | Description |
 |---|---|
-| **PHP 8.5** | Support for PHP 8.5 |
 | ~~**Trace Context (W3C)**~~ | ✅ Implemented — automatic propagation of `traceparent` / `tracestate` headers (W3C spec), enabled via `TRACE_CONTEXT=true` |
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O), `#[OxPHP\Tracing\Trace]` decorator, 10 `oxphp_trace_*()` SDK functions, PHP error capture |

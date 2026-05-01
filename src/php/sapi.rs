@@ -916,6 +916,8 @@ pub fn build_sapi_module() -> sapi_module_struct {
 
         additional_functions: std::ptr::null(),
         input_filter_init: None,
+        #[cfg(php_v8_5)]
+        pre_request_init: None,
     }
 }
 
@@ -1155,6 +1157,16 @@ unsafe extern "C" fn oxphp_header_handler(
                 }
                 resp.headers.push((name, value));
                 SAPI_HEADER_ADD_TO_LIST
+            }
+            #[cfg(php_v8_5)]
+            sapi_header_op_enum::SAPI_HEADER_DELETE_PREFIX => {
+                // Cold path: only invoked by an explicit two-arg
+                // `header_remove($name, $prefix)` from PHP 8.5.6+.
+                crate::php::header_match::delete_headers_with_prefix(
+                    &mut r.borrow_mut().headers,
+                    header_bytes,
+                );
+                0
             }
             _ => 0,
         }
@@ -1867,8 +1879,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         // forwards the call — the blanket `Fn -> PluginNativeFunction` impl
         // then kicks in.
         let mut magic_handlers = class.magic_handlers;
-        for i in 0..MagicMethod::COUNT {
-            if let Some(handler) = magic_handlers[i].take() {
+        for (i, slot) in magic_handlers.iter_mut().enumerate() {
+            if let Some(handler) = slot.take() {
                 let magic =
                     MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
                 // Mirror the add_method skip above: only 0-arity magics

@@ -5,7 +5,7 @@ description: Install OxPHP via Docker image or build from source. Covers prerequ
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.3.0` and `:latest` tags ship PHP 8.4; opt into PHP 8.5 with the `:0.3.0-php8.5`, `:php8.5`, or any `*-php8.5*` tag variant.
 
 ## Docker (Recommended)
 
@@ -18,7 +18,7 @@ docker pull ghcr.io/oxphp/oxphp:0.3.0
 The image includes:
 
 - **OxPHP server binary** — the async HTTP server
-- **PHP 8.4 ZTS** — thread-safe PHP runtime for multi-worker execution
+- **PHP ZTS runtime** — 8.4 or 8.5, depending on the tag pulled; thread-safe PHP for multi-worker execution
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
@@ -33,7 +33,7 @@ File layout of the runtime image:
 ├── bin/
 │   └── oxphp                                        # server binary
 ├── lib/
-│   ├── libphp.so                                    # PHP 8.4 ZTS runtime
+│   ├── libphp.so                                    # PHP ZTS runtime (8.4 or 8.5, matches the image tag)
 │   ├── liboxphp_bridge.so                           # C bridge library
 │   └── php/extensions/no-debug-zts-20240924/
 │       └── oxphp_sapi.so                            # OxPHP PHP extension
@@ -63,7 +63,7 @@ The `oxphp` binary links to `libphp.so` and `liboxphp_bridge.so`. The PHP extens
 
 ### Minimal Dockerfile
 
-The base image `php:8.4-zts-alpine3.23` already contains `libphp.so` and all its dependencies. You only need to copy the three OxPHP artifacts:
+The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from. You only need to copy the three OxPHP artifacts:
 
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
@@ -151,7 +151,7 @@ Building OxPHP with full PHP support requires the bridge library and PHP extensi
 ### Prerequisites
 
 - Rust toolchain (1.91.1 or later)
-- PHP 8.4 with ZTS (Zend Thread Safety) enabled
+- PHP 8.4 or 8.5 with ZTS (Zend Thread Safety) enabled
 - C compiler (gcc or clang)
 - `phpize` and PHP development headers
 
@@ -177,7 +177,7 @@ export LD_LIBRARY_PATH=/usr/local/lib
 ./target/release/oxphp
 ```
 
-> **Note:** When deploying to Alpine Linux, build inside the same `php:8.4-zts-alpine` image used for the PHP runtime. Mixing glibc and musl builds causes runtime errors. The official Docker image handles this correctly.
+> **Note:** When deploying to Alpine Linux, build inside the same `php:{8.4,8.5}-zts-alpine` image used for the PHP runtime — match the minor of the OxPHP image you ship. Mixing glibc and musl builds causes runtime errors. The official Docker image handles this correctly.
 
 ## Verifying Installation
 

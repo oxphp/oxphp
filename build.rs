@@ -33,6 +33,8 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=ssl");
         println!("cargo:rustc-link-lib=dylib=crypto");
         println!("cargo:rustc-link-lib=dylib=z");
+
+        detect_and_emit_php_cfg();
     }
 
     // Compile bundled .proto files into Rust types.
@@ -47,4 +49,64 @@ fn main() {
         .expect("failed to compile proto/pprof.proto — is protoc on PATH?");
 
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+/// Detect the linked PHP version and emit `cargo:rustc-cfg=php_v8_X`.
+///
+/// Source order: `PHP_VERSION_ID` env (cross-compile / override), then
+/// `php-config --vernum`, then a fallback to PHP 8.4 with a `cargo:warning`.
+/// An unknown vernum panics with instructions to extend `KNOWN_PHP_VERSIONS`.
+#[cfg(feature = "php")]
+fn detect_and_emit_php_cfg() {
+    const KNOWN_PHP_VERSIONS: &[(u32, u32, &str)] = &[
+        // (min_vernum_inclusive, max_vernum_exclusive, mod_name)
+        (80400, 80500, "v8_4"),
+        (80500, 80600, "v8_5"),
+    ];
+
+    // Always declare check-cfg so `cargo clippy --all-targets` doesn't warn.
+    for &(_, _, name) in KNOWN_PHP_VERSIONS {
+        println!("cargo::rustc-check-cfg=cfg(php_{})", name);
+    }
+
+    // Force re-run when the override env changes. Deliberately NOT
+    // `rerun-if-env-changed=PATH`: PATH churns constantly on dev hosts
+    // (direnv / nvm / asdf hooks fire on every cd) and re-running build.rs
+    // on every PATH change torches incremental builds. A developer who
+    // swaps PHP toolchain runs `cargo clean` once. CI pins toolchain via
+    // base image, so PATH is stable there anyway.
+    println!("cargo:rerun-if-env-changed=PHP_VERSION_ID");
+
+    let vernum = std::env::var("PHP_VERSION_ID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .or_else(|| {
+            std::process::Command::new("php-config")
+                .arg("--vernum")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+        })
+        .unwrap_or_else(|| {
+            println!(
+                "cargo:warning=php-config not found and PHP_VERSION_ID unset; assuming PHP 8.4 ABI"
+            );
+            80400
+        });
+
+    for &(lo, hi, name) in KNOWN_PHP_VERSIONS {
+        if vernum >= lo && vernum < hi {
+            println!("cargo:rustc-cfg=php_{}", name);
+            return;
+        }
+    }
+
+    panic!(
+        "unsupported PHP version {vernum}. To add support:\n\
+         1. append (vernum_lo, vernum_hi, \"v8_X\") to KNOWN_PHP_VERSIONS in build.rs\n\
+         2. create src/php/bindings/v8_X.rs (start by copying the previous version)\n\
+         3. wire #[cfg(php_v8_X)] mod v8_X; pub use v8_X::*; in src/php/bindings/mod.rs\n\
+         Known versions: {KNOWN_PHP_VERSIONS:?}"
+    );
 }
