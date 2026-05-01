@@ -1,22 +1,30 @@
 <?php
-// Runner-side test: validates header_remove("Set-Cookie", "PHPSESSID=") only
-// removes the matching prefixed cookie, leaving other Set-Cookie headers
-// intact. PHP 8.5 dispatches this via SAPI_HEADER_DELETE_PREFIX; PHP 8.4
-// ignores the prefix arg entirely (no-op), so we cannot observe the new
-// semantic on 8.4 and the test trivially passes there.
+// Runner-side test: validates that header_remove("Set-Cookie", "PHPSESSID=")
+// only removes the matching prefixed cookie, leaving other Set-Cookie headers
+// intact.
 //
-// TestCase has no skip() helper at the time of writing, so on 8.4 we just
-// call $t->done() with no assertions registered (vacuous PASS). On 8.5 the
-// real assertions run; without a SAPI_HEADER_DELETE_PREFIX handler arm in
-// oxphp_header_handler the PHPSESSID cookie stays in headers_list() and
-// assertNotContains fails.
+// PHP 8.5 introduced this 2-arg form of header_remove() and dispatches it
+// through SAPI_HEADER_DELETE_PREFIX. The OxPHP SAPI handler for that op
+// is wired in src/php/sapi.rs (cfg-gated under php_v8_5).
+//
+// Compatibility:
+//   - PHP 8.4: header_remove() is 1-arg; the prefix arg silently ignored.
+//   - PHP 8.5.0–8.5.5: SAPI op exists at C level but the userland 2-arg
+//     signature isn't exposed yet (lands in 8.5.6+).
+//   - PHP 8.5.6+: 2-arg userland form available; this test exercises it.
+//
+// We use reflection to probe for the 2-arg form rather than hard-coding
+// a PHP_VERSION_ID < 80506 check — robust to any patch where the
+// signature first lands.
 
 require __DIR__ . '/../test_helper.php';
 $t = new TestCase('header_remove_prefix', 'headers');
 
-if (PHP_VERSION_ID < 80500) {
-    // 8.4 ignores the prefix arg in header_remove(), so this test cannot
-    // observe the 8.5 semantic. Record a vacuous PASS on 8.4.
+$rf = new ReflectionFunction('header_remove');
+if ($rf->getNumberOfParameters() < 2) {
+    // 2-arg form not exposed in this PHP build. The op may still exist at
+    // the C SAPI level (8.5.0–8.5.5) but is not invokable from PHP, so
+    // there's nothing to assert here. Record vacuous PASS.
     $t->done();
     return;
 }
