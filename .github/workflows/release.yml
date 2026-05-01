@@ -157,9 +157,9 @@ jobs:
   # Runs a curated subset of tests/run_all.sh (suites known to be green on
   # main) against the just-built amd64 image for each PHP version.
   # Skips arm64 — qemu emulation is slow and the codepaths exercised here
-  # are arch-independent at the integration level. Failure aborts manifest
-  # creation and alias-flip, so latest/{ver} users never see a regressed
-  # image.
+  # are arch-independent at the integration level. Failure aborts the
+  # downstream manifest+alias chain FOR THAT PHP VERSION ONLY, so a 8.5
+  # regression cannot block a clean 8.4 publish (or vice-versa).
   #
   # Suite list intentionally excludes:
   #   - shared/*    — pre-existing baseline failures (HTTP 500 from PHP)
@@ -167,16 +167,19 @@ jobs:
   #   - profiler/*  — pre-existing internal_routes failure
   #   - worker/*    — pre-existing shared-state tests under worker mode
   # When those land green, expand the suite list here.
+  #
+  # Per-version jobs (rather than a single matrix) so each PHP minor has
+  # its own independent dep chain into manifest/sign/aliases — `needs:` in
+  # GitHub Actions only sees aggregate matrix results, so a single matrix
+  # would propagate one cell's failure to the whole downstream chain.
   # ──────────────────────────────────────────────────────────────
-  php-suite:
+  php-suite-84:
     needs: build
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { php: "8.4", alpine: "3.23" }
-          - { php: "8.5", alpine: "3.23" }
+    if: always() && needs.build.result != 'cancelled'
     runs-on: ubuntu-latest
+    env:
+      PHP_MINOR: "8.4"
+      ALPINE_VER: "3.23"
     steps:
       - uses: actions/checkout@v4
 
@@ -196,22 +199,76 @@ jobs:
       - name: Pull just-built amd64 image and tag as oxphp:dev
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
         run: |
-          # build job pushed `${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64`.
-          # tests/compose.*.yml expect `oxphp:dev` locally — re-tag to match.
+          # docker pull fails fast (and skips this whole chain) when the
+          # build cell for this PHP version did not push a tag — the
+          # natural "this version's build failed" signal.
           SRC="${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64"
           docker pull "$SRC"
           docker tag "$SRC" oxphp:dev
 
       - name: Run focused PHP integration suites
         env:
-          PHP_VERSION: ${{ matrix.php }}
+          PHP_VERSION: ${{ env.PHP_MINOR }}
         run: |
           set -eo pipefail
-          # Only run suites known to be green on main.
-          # Add more here as baseline failures get fixed.
+          SUITES=(
+            headers
+            cookies
+            get_post_request
+            input
+            pathinfo
+            errors
+          )
+          FAILED=()
+          for suite in "${SUITES[@]}"; do
+            echo "::group::Suite: $suite"
+            if ! ./tests/run_all.sh --no-build --suite="$suite"; then
+              FAILED+=("$suite")
+            fi
+            echo "::endgroup::"
+          done
+          if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo "FAILED suites: ${FAILED[*]}" >&2
+            exit 1
+          fi
+
+  php-suite-85:
+    needs: build
+    if: always() && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    env:
+      PHP_MINOR: "8.5"
+      ALPINE_VER: "3.23"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract oxphp version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull just-built amd64 image and tag as oxphp:dev
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          SRC="${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64"
+          docker pull "$SRC"
+          docker tag "$SRC" oxphp:dev
+
+      - name: Run focused PHP integration suites
+        env:
+          PHP_VERSION: ${{ env.PHP_MINOR }}
+        run: |
+          set -eo pipefail
           SUITES=(
             headers
             cookies
@@ -235,21 +292,19 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────
   # Job 2: per-(PHP, Alpine) manifest-list creation
+  # Per-version jobs so an 8.5 manifest failure (or skipped chain due to
+  # build/php-suite failure) does not block 8.4 manifest publication.
   # ──────────────────────────────────────────────────────────────
-  manifest:
-    needs: [build, php-suite]
+  manifest-84:
+    needs: php-suite-84
+    if: always() && needs.php-suite-84.result == 'success'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { php: "8.4", alpine: "3.23" }
-          - { php: "8.5", alpine: "3.23" }
+    env:
+      PHP_MINOR: "8.4"
+      ALPINE_VER: "3.23"
     outputs:
-      canonical_minor_84: ${{ steps.canonicals.outputs.minor_84 }}
-      canonical_patch_84: ${{ steps.canonicals.outputs.patch_84 }}
-      canonical_minor_85: ${{ steps.canonicals.outputs.minor_85 }}
-      canonical_patch_85: ${{ steps.canonicals.outputs.patch_85 }}
+      canonical_minor: ${{ steps.canonicals.outputs.minor }}
+      canonical_patch: ${{ steps.canonicals.outputs.patch }}
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -267,14 +322,11 @@ jobs:
       - name: Download PHP patch artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: php-patch-${{ matrix.php }}-${{ matrix.alpine }}-*
+          pattern: php-patch-${{ env.PHP_MINOR }}-${{ env.ALPINE_VER }}-*
           path: /tmp/patches
 
       - name: Verify PHP patch consistency across arches
         id: patch
-        env:
-          PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
         run: |
           AMD=$(cat "/tmp/patches/php-patch-${PHP_MINOR}-${ALPINE_VER}-amd64/php_patch_${PHP_MINOR}_${ALPINE_VER}_amd64.txt")
           ARM=$(cat "/tmp/patches/php-patch-${PHP_MINOR}-${ALPINE_VER}-arm64/php_patch_${PHP_MINOR}_${ALPINE_VER}_arm64.txt")
@@ -287,8 +339,6 @@ jobs:
       - name: Create minor-floating multi-arch manifest
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
         run: |
           docker buildx imagetools create \
             -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
@@ -298,9 +348,7 @@ jobs:
       - name: Create patch-pinned multi-arch manifest
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
-          ALPINE_VER: ${{ matrix.alpine }}
         run: |
           docker buildx imagetools create \
             -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
@@ -311,19 +359,86 @@ jobs:
         id: canonicals
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
-          ALPINE_VER: ${{ matrix.alpine }}
         run: |
-          SAFE_PHP=$(echo "$PHP_MINOR" | tr . _)
-          echo "minor_${SAFE_PHP}=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
-          echo "patch_${SAFE_PHP}=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "minor=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "patch=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+
+  manifest-85:
+    needs: php-suite-85
+    if: always() && needs.php-suite-85.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      PHP_MINOR: "8.5"
+      ALPINE_VER: "3.23"
+    outputs:
+      canonical_minor: ${{ steps.canonicals.outputs.minor }}
+      canonical_patch: ${{ steps.canonicals.outputs.patch }}
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract oxphp version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download PHP patch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: php-patch-${{ env.PHP_MINOR }}-${{ env.ALPINE_VER }}-*
+          path: /tmp/patches
+
+      - name: Verify PHP patch consistency across arches
+        id: patch
+        run: |
+          AMD=$(cat "/tmp/patches/php-patch-${PHP_MINOR}-${ALPINE_VER}-amd64/php_patch_${PHP_MINOR}_${ALPINE_VER}_amd64.txt")
+          ARM=$(cat "/tmp/patches/php-patch-${PHP_MINOR}-${ALPINE_VER}-arm64/php_patch_${PHP_MINOR}_${ALPINE_VER}_arm64.txt")
+          if [[ "$AMD" != "$ARM" ]]; then
+            echo "error: PHP patch mismatch across arches. amd64=$AMD arm64=$ARM" >&2
+            exit 1
+          fi
+          echo "patch=$AMD" >> "$GITHUB_OUTPUT"
+
+      - name: Create minor-floating multi-arch manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          docker buildx imagetools create \
+            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+
+      - name: Create patch-pinned multi-arch manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PHP_PATCH: ${{ steps.patch.outputs.patch }}
+        run: |
+          docker buildx imagetools create \
+            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+
+      - name: Export canonical tag names
+        id: canonicals
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PHP_PATCH: ${{ steps.patch.outputs.patch }}
+        run: |
+          echo "minor=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "patch=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
 
   # ──────────────────────────────────────────────────────────────
-  # Job 3: cosign signing of canonical tags
+  # Job 3: cosign signing of canonical tags (per-version)
   # ──────────────────────────────────────────────────────────────
-  sign:
-    needs: manifest
+  sign-84:
+    needs: manifest-84
+    if: always() && needs.manifest-84.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Log in to GitHub Container Registry
@@ -338,31 +453,49 @@ jobs:
 
       - name: Sign canonical tags
         env:
-          CANONICAL_MINOR_84: ${{ needs.manifest.outputs.canonical_minor_84 }}
-          CANONICAL_PATCH_84: ${{ needs.manifest.outputs.canonical_patch_84 }}
-          CANONICAL_MINOR_85: ${{ needs.manifest.outputs.canonical_minor_85 }}
-          CANONICAL_PATCH_85: ${{ needs.manifest.outputs.canonical_patch_85 }}
+          CANONICAL_MINOR: ${{ needs.manifest-84.outputs.canonical_minor }}
+          CANONICAL_PATCH: ${{ needs.manifest-84.outputs.canonical_patch }}
         run: |
-          for TAG in "$CANONICAL_MINOR_84" "$CANONICAL_PATCH_84" \
-                     "$CANONICAL_MINOR_85" "$CANONICAL_PATCH_85"; do
-            if [[ -n "$TAG" ]]; then
-              echo "Signing $TAG"
-              cosign sign --yes "$TAG"
-            fi
+          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH"; do
+            echo "Signing $TAG"
+            cosign sign --yes "$TAG"
+          done
+
+  sign-85:
+    needs: manifest-85
+    if: always() && needs.manifest-85.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign canonical tags
+        env:
+          CANONICAL_MINOR: ${{ needs.manifest-85.outputs.canonical_minor }}
+          CANONICAL_PATCH: ${{ needs.manifest-85.outputs.canonical_patch }}
+        run: |
+          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH"; do
+            echo "Signing $TAG"
+            cosign sign --yes "$TAG"
           done
 
   # ──────────────────────────────────────────────────────────────
-  # Job 4: move aliases to newly-published canonicals
+  # Job 4: move aliases to newly-published canonicals (per-version)
   # ──────────────────────────────────────────────────────────────
-  aliases:
-    needs: sign
+  aliases-84:
+    needs: sign-84
+    if: always() && needs.sign-84.result == 'success'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { php: "8.4", alpine: "3.23" }
-          - { php: "8.5", alpine: "3.23" }
+    env:
+      PHP_MINOR: "8.4"
+      ALPINE_VER: "3.23"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -392,8 +525,6 @@ jobs:
       - name: Move aliases
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
           REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
           REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
@@ -407,7 +538,71 @@ jobs:
       - name: Sign moved aliases (they now resolve to canonical digests)
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          PHP_MINOR: ${{ matrix.php }}
+        run: |
+          SEMVER_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+          LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
+          DEFAULT_PHP=$(yq '.default_php' .github/supported-versions.yml)
+
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${SEMVER_MINOR}-php${PHP_MINOR}"
+
+          if [[ "$VERSION" == "$LATEST_OXPHP" ]]; then
+            cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}"
+            if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
+              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
+              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:latest"
+            fi
+          fi
+
+  aliases-85:
+    needs: sign-85
+    if: always() && needs.sign-85.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      PHP_MINOR: "8.5"
+      ALPINE_VER: "3.23"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install yq
+        run: |
+          sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Extract oxphp version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Move aliases
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
+            "$VERSION" \
+            "$PHP_MINOR" \
+            "$ALPINE_VER"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign moved aliases (they now resolve to canonical digests)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           SEMVER_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
           LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
