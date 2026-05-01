@@ -1158,6 +1158,26 @@ unsafe extern "C" fn oxphp_header_handler(
                 resp.headers.push((name, value));
                 SAPI_HEADER_ADD_TO_LIST
             }
+            #[cfg(php_v8_5)]
+            sapi_header_op_enum::SAPI_HEADER_DELETE_PREFIX => {
+                // PHP 8.5 semantics — verified against `main/SAPI.c:604-637`
+                // of PHP-8.5.6 (`sapi_remove_header()` with `prefix_len > 0`):
+                //   sapi_header.header     = full wire-form prefix, e.g.
+                //                            "Set-Cookie: PHPSESSID="
+                //   sapi_header.header_len = its length
+                //   match condition        = case-insensitive starts-with
+                //                            against existing header line
+                //
+                // header_remove("Set-Cookie", "PHPSESSID=") arrives here as
+                // header_str = "Set-Cookie: PHPSESSID=" — PHP rebuilt the
+                // wire-form prefix before dispatching.
+                let prefix_lc = header_str.to_ascii_lowercase();
+                r.borrow_mut().headers.retain(|(n, v)| {
+                    let line = format!("{n}: {v}");
+                    !line.to_ascii_lowercase().starts_with(&prefix_lc)
+                });
+                0
+            }
             _ => 0,
         }
     })
