@@ -6,7 +6,7 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 // `super` (mod.rs). Importing here keeps the extern blocks below readable
 // and gives a single point of failure if the wiring breaks.
 #[cfg(any(php_v8_4, php_v8_5))]
-use super::{sapi_header_op_enum, sapi_module_struct};
+use super::sapi_module_struct;
 
 pub type zend_result = c_int;
 
