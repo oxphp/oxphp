@@ -17,12 +17,6 @@ permissions:
 jobs:
   # ──────────────────────────────────────────────────────────────
   # Job 1: per-(PHP, Alpine, arch) build + push arch-specific tags
-  #
-  # PHP 8.5 is intentionally absent from the matrix. oxphp's Rust FFI
-  # bindings and C bridge in ext/bridge/ are not yet compatible with
-  # the PHP 8.5 ABI; attempting to run a 8.5-linked binary crashes
-  # with SIGBUS on startup. 8.5 will be added here once the bindings
-  # are updated.
   # ──────────────────────────────────────────────────────────────
   build:
     strategy:
@@ -31,6 +25,8 @@ jobs:
         include:
           - { php: "8.4", alpine: "3.23", arch: "amd64", runner: "ubuntu-latest" }
           - { php: "8.4", alpine: "3.23", arch: "arm64", runner: "ubuntu-24.04-arm" }
+          - { php: "8.5", alpine: "3.23", arch: "amd64", runner: "ubuntu-latest" }
+          - { php: "8.5", alpine: "3.23", arch: "arm64", runner: "ubuntu-24.04-arm" }
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -156,19 +152,104 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────
+  # Job 1.5: pre-publish gate — focused PHP integration suite
+  #
+  # Runs a curated subset of tests/run_all.sh (suites known to be green on
+  # main) against the just-built amd64 image for each PHP version.
+  # Skips arm64 — qemu emulation is slow and the codepaths exercised here
+  # are arch-independent at the integration level. Failure aborts manifest
+  # creation and alias-flip, so latest/{ver} users never see a regressed
+  # image.
+  #
+  # Suite list intentionally excludes:
+  #   - shared/*    — pre-existing baseline failures (HTTP 500 from PHP)
+  #   - streaming/* — pre-existing test_stream_flush failure
+  #   - profiler/*  — pre-existing internal_routes failure
+  #   - worker/*    — pre-existing shared-state tests under worker mode
+  # When those land green, expand the suite list here.
+  # ──────────────────────────────────────────────────────────────
+  php-suite:
+    needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { php: "8.4", alpine: "3.23" }
+          - { php: "8.5", alpine: "3.23" }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract oxphp version from tag
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull just-built amd64 image and tag as oxphp:dev
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PHP_MINOR: ${{ matrix.php }}
+          ALPINE_VER: ${{ matrix.alpine }}
+        run: |
+          # build job pushed `${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64`.
+          # tests/compose.*.yml expect `oxphp:dev` locally — re-tag to match.
+          SRC="${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64"
+          docker pull "$SRC"
+          docker tag "$SRC" oxphp:dev
+
+      - name: Run focused PHP integration suites
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: |
+          set -eo pipefail
+          # Only run suites known to be green on main.
+          # Add more here as baseline failures get fixed.
+          SUITES=(
+            headers
+            cookies
+            get_post_request
+            input
+            pathinfo
+            errors
+          )
+          FAILED=()
+          for suite in "${SUITES[@]}"; do
+            echo "::group::Suite: $suite"
+            if ! ./tests/run_all.sh --no-build --suite="$suite"; then
+              FAILED+=("$suite")
+            fi
+            echo "::endgroup::"
+          done
+          if [[ ${#FAILED[@]} -gt 0 ]]; then
+            echo "FAILED suites: ${FAILED[*]}" >&2
+            exit 1
+          fi
+
+  # ──────────────────────────────────────────────────────────────
   # Job 2: per-(PHP, Alpine) manifest-list creation
   # ──────────────────────────────────────────────────────────────
   manifest:
-    needs: build
+    needs: [build, php-suite]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - { php: "8.4", alpine: "3.23" }
+          - { php: "8.5", alpine: "3.23" }
     outputs:
       canonical_minor_84: ${{ steps.canonicals.outputs.minor_84 }}
       canonical_patch_84: ${{ steps.canonicals.outputs.patch_84 }}
+      canonical_minor_85: ${{ steps.canonicals.outputs.minor_85 }}
+      canonical_patch_85: ${{ steps.canonicals.outputs.patch_85 }}
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -259,8 +340,11 @@ jobs:
         env:
           CANONICAL_MINOR_84: ${{ needs.manifest.outputs.canonical_minor_84 }}
           CANONICAL_PATCH_84: ${{ needs.manifest.outputs.canonical_patch_84 }}
+          CANONICAL_MINOR_85: ${{ needs.manifest.outputs.canonical_minor_85 }}
+          CANONICAL_PATCH_85: ${{ needs.manifest.outputs.canonical_patch_85 }}
         run: |
-          for TAG in "$CANONICAL_MINOR_84" "$CANONICAL_PATCH_84"; do
+          for TAG in "$CANONICAL_MINOR_84" "$CANONICAL_PATCH_84" \
+                     "$CANONICAL_MINOR_85" "$CANONICAL_PATCH_85"; do
             if [[ -n "$TAG" ]]; then
               echo "Signing $TAG"
               cosign sign --yes "$TAG"
@@ -278,6 +362,7 @@ jobs:
       matrix:
         include:
           - { php: "8.4", alpine: "3.23" }
+          - { php: "8.5", alpine: "3.23" }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
