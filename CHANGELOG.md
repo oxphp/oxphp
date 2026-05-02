@@ -2,11 +2,14 @@
 
 All notable changes to OxPHP are documented in this file.
 
-## [Unreleased]
+## [0.4.0] - 2026-05-02
+
+Headline work since `v0.3.0`: **PHP 8.5 support** (opt-in via `:php8.5*` tags, `latest` still resolves to 8.4 pending soak), and a chain of fiber / `Shared\*` / streaming bugfixes that surfaced once worker-mode `Channel`/`Map`/`Pool` traffic and `oxphp_async()` workers got real exercise.
 
 ### Added
 
 - PHP 8.5 support. Build pipeline now produces `:php8.5`, `:php8.5-alpine{X.Y}`, and patch-pinned `:0.X.Y-php8.5.Z-alpine{X.Y}` tags alongside the existing 8.4 ones. `latest` and unsuffixed `{ver}` continue to resolve to PHP 8.4 in this release; the default flip to 8.5 lands in a follow-up release after a soak window. To opt in early, pull `:php8.5` (or any `*-php8.5*` variant).
+- `SAPI_HEADER_DELETE_PREFIX` support (PHP 8.5.6+) — `header_remove('X-Foo-')` now strips every previously-set header whose `"{name}: {value}"` line case-insensitively starts with the given prefix, matching upstream SAPI behavior. PHP < 8.5.6 keeps the existing exact-match semantics.
 
 ### Fixed
 
@@ -344,6 +347,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.4.0]: https://github.com/oxphp/oxphp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/oxphp/oxphp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/oxphp/oxphp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/oxphp/oxphp/releases/tag/v0.1.0
