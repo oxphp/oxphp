@@ -27,10 +27,32 @@ run_php_test() {
     # Check if body is valid test JSON
     if printf '%s' "$body" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'test' in d and 'pass' in d" 2>/dev/null; then
         printf '%s\n' "$body"
+        return 0
+    fi
+
+    local test_name group
+    test_name=$(basename "$test_path")
+    group=$(dirname "$test_path")
+
+    # Smoke-style fallback used by tests/php/shared/*: scripts emit
+    #   echo "OK\n";              -> pass
+    #   echo "FAIL: <reason>\n";  -> fail (with reason as error)
+    # FAIL is checked first so that a FAIL line wins over any earlier OK
+    # debug output the test may have printed.
+    local fail_line ok_line
+    fail_line=$(printf '%s' "$body" | grep -m1 -E '^FAIL[: \[]' || true)
+    ok_line=$(printf '%s' "$body" | grep -m1 -E '^OK([: ]|$)' || true)
+
+    if [ -n "$fail_line" ]; then
+        local err_msg
+        err_msg=$(printf '%s' "$fail_line" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))")
+        printf '{"test":"%s","group":"%s","pass":false,"assertions":[],"error":%s,"meta":{}}\n' \
+            "$test_name" "$group" "$err_msg"
+    elif [ -n "$ok_line" ]; then
+        printf '{"test":"%s","group":"%s","pass":true,"assertions":[{"name":"smoke OK","pass":true}],"error":null,"meta":{}}\n' \
+            "$test_name" "$group"
     else
-        local test_name group status
-        test_name=$(basename "$test_path")
-        group=$(dirname "$test_path")
+        local status
         status=$(printf '%s' "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',0))" 2>/dev/null)
         printf '{"test":"%s","group":"%s","pass":false,"assertions":[],"error":"HTTP %s: non-JSON response","meta":{}}\n' \
             "$test_name" "$group" "$status"
