@@ -1709,6 +1709,15 @@ pub fn register_class(
                             });
                         }
                         other => {
+                            // rc=1 means "not in oxphp fiber"; we only land
+                            // here when in_fiber == true, so the SAPI predicate
+                            // and `oxphp_current_fiber` disagree — a logic bug
+                            // worth crashing on in dev. Release builds degrade
+                            // to a Custom error so the worker stays up.
+                            debug_assert!(
+                                other != 1,
+                                "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
+                            );
                             unsafe { bridge_ffi::oxphp_portable_free(buf) };
                             return Err(PhpError::Custom(format!("send: fiber_await rc={other}")));
                         }
@@ -1886,7 +1895,18 @@ pub fn register_class(
                         call.ret_null();
                         Ok(())
                     }
-                    other => Err(PhpError::Custom(format!("recv: fiber_await rc={other}"))),
+                    other => {
+                        // rc=1 means "not in oxphp fiber"; we only land here
+                        // when in_fiber == true, so the SAPI predicate and
+                        // `oxphp_current_fiber` disagree — a logic bug worth
+                        // crashing on in dev. Release builds degrade to a
+                        // Custom error so the worker stays up.
+                        debug_assert!(
+                            other != 1,
+                            "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
+                        );
+                        Err(PhpError::Custom(format!("recv: fiber_await rc={other}")))
+                    }
                 }
             } else {
                 // Thread-block path.

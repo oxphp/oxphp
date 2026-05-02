@@ -2045,6 +2045,15 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
 }
 /* }}} */
 
+/* SAPI-side predicate for `oxphp_bridge_in_fiber`. Returns 1 iff the
+ * calling thread is inside an oxphp scheduler fiber — i.e. a fiber
+ * that `oxphp_fiber_suspend_for_await` can suspend. User-level
+ * `Fiber::start()` does NOT touch `oxphp_current_fiber`, so it
+ * correctly reports 0. */
+int oxphp_in_oxphp_fiber(void) {
+    return oxphp_current_fiber != NULL ? 1 : 0;
+}
+
 /* Fiber-aware await helper. Called from Rust handler via FFI.
  * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
  *         -1 = error (exception details in bridge TLS), -2 = timeout */
@@ -3083,6 +3092,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
+    oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
 
     return SUCCESS;
 }

@@ -1969,18 +1969,20 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
     return 1; /* not in fiber — caller should do blocking await */
 }
 
+static oxphp_in_fiber_check_fn_t sapi_in_fiber_check = NULL;
+
+void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn) {
+    sapi_in_fiber_check = fn;
+}
+
 int oxphp_bridge_in_fiber(void) {
-    /* PHP initializes EG(current_fiber_context) to EG(main_fiber_context)
-     * during request startup, so a plain `!= NULL` check is always true and
-     * misleads the caller into the fiber-suspend path even on the main
-     * thread — where oxphp_current_fiber is NULL and fiber_await returns 1
-     * ("not in fiber"). Real fiber contexts (oxphp request fibers and user
-     * `Fiber` objects) set current to a distinct context, so the proper
-     * "are we in a fiber?" predicate compares against main_fiber_context. */
-    zend_fiber_context *cur = EG(current_fiber_context);
-    if (cur == NULL) return 0;
-    if (cur == EG(main_fiber_context)) return 0;
-    return 1;
+    /* The only authoritative answer lives in the SAPI: it owns the
+     * `oxphp_current_fiber` __thread pointer that `oxphp_bridge_fiber_await`
+     * keys off. Bridge-only callers (unit tests, bare CLI) get 0. */
+    if (sapi_in_fiber_check != NULL) {
+        return sapi_in_fiber_check();
+    }
+    return 0;
 }
 
 int64_t oxphp_bridge_async_dispatch(

@@ -11,6 +11,7 @@ shared/test_channel_close_send
 shared/test_channel_close_recv_drain
 shared/test_channel_send_many
 shared/test_channel_recv_many
+shared/test_channel_recv_in_user_fiber
 shared/test_map_basic
 shared/test_map_maxentries
 shared/test_map_exception_lifecycle

@@ -999,6 +999,7 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
 );
 
 typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
+typedef int (*oxphp_in_fiber_check_fn_t)(void);
 
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
@@ -1007,10 +1008,22 @@ void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
-/* Returns 1 if the calling thread is currently inside a PHP fiber,
- * else 0. Cheap (single field read). Used by Shared\Channel (and
- * other primitives) to choose between synthetic-promise fiber-suspend
- * and crossbeam thread-block when timeout > 0. */
+/** Register the SAPI predicate that decides whether the calling thread
+ *  is inside an oxphp-managed scheduler fiber. The bridge has no way
+ *  to tell on its own — `EG(current_fiber_context)` is non-null on the
+ *  main thread of every request, and a user-level `Fiber::start()`
+ *  installs a context that the oxphp scheduler does not own. The SAPI
+ *  keys the predicate off its private `oxphp_current_fiber` __thread
+ *  pointer, which is the only authoritative source. */
+void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn);
+
+/* Returns 1 if the calling thread is currently inside an oxphp
+ * scheduler fiber (the only context where `oxphp_bridge_fiber_await`
+ * can suspend), else 0. Cheap (single function pointer call). Used by
+ * Shared\Channel (and other primitives) to choose between
+ * synthetic-promise fiber-suspend and crossbeam thread-block when
+ * timeout > 0. Returns 0 when no SAPI callback is registered (unit
+ * tests, bare CLI without the extension). */
 int oxphp_bridge_in_fiber(void);
 
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
