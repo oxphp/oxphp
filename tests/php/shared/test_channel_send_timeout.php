@@ -10,7 +10,7 @@ $ch->send('fill');
 $start = microtime(true);
 $threw = false;
 try {
-    $ch->send('blocked', timeout: 0.1);
+    $ch->send('blocked', 0.1);
 } catch (OxPHP\Shared\TimeoutException $e) {
     $threw = true;
 }
