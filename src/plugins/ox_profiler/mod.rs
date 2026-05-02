@@ -57,10 +57,10 @@ struct ProfilerRequestHandler {
 
 impl PluginRequestHandler for ProfilerRequestHandler {
     fn handle(&self, view: &PluginRequestView, actions: &mut PluginRequestActions) {
-        // `rand::thread_rng()` is a TLS-backed handle — zero lock
+        // `rand::rng()` is a TLS-backed handle — zero lock
         // contention across Tokio workers and no allocation. Each
         // worker gets its own auto-seeded generator on first use.
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         if let Some(decision) = should_profile(view, &self.config, &mut rng) {
             tracing::debug!(
                 plugin = "profiler",

@@ -8,7 +8,7 @@ use opentelemetry::trace::{
 };
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
-use opentelemetry_sdk::trace::{BatchConfigBuilder, Sampler, TracerProvider};
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::trace as semconv;
 
@@ -27,7 +27,7 @@ use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth};
 /// generates trace/span IDs.
 pub struct OtelPlugin {
     enabled: bool,
-    provider: Arc<OnceLock<TracerProvider>>,
+    provider: Arc<OnceLock<SdkTracerProvider>>,
     server_address: String,
 }
 
@@ -89,7 +89,7 @@ impl OtelPlugin {
             }
         }
 
-        Resource::new(kvs)
+        Resource::builder().with_attributes(kvs).build()
     }
 
     /// Parse `OTEL_EXPORTER_OTLP_HEADERS` into key=value pairs.
@@ -110,8 +110,8 @@ impl OtelPlugin {
         headers
     }
 
-    /// Initialize the TracerProvider with OTLP exporter.
-    fn init_provider(&self) -> Result<TracerProvider, PluginError> {
+    /// Initialize the SdkTracerProvider with OTLP exporter.
+    fn init_provider(&self) -> Result<SdkTracerProvider, PluginError> {
         let protocol =
             std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL").unwrap_or_else(|_| "grpc".into());
 
@@ -174,18 +174,8 @@ impl OtelPlugin {
             }
         };
 
-        // BatchConfigBuilder::default() reads OTEL_BSP_* env vars automatically
-        let batch_config = BatchConfigBuilder::default().build();
-
-        let batch_processor = opentelemetry_sdk::trace::BatchSpanProcessor::builder(
-            exporter,
-            opentelemetry_sdk::runtime::Tokio,
-        )
-        .with_batch_config(batch_config)
-        .build();
-
-        let provider = TracerProvider::builder()
-            .with_span_processor(batch_processor)
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
             .with_sampler(sampler)
             .with_resource(resource)
             .build();
@@ -225,9 +215,9 @@ impl Plugin for OtelPlugin {
         // Enable trace context generation in built-in handler
         ctx.set_core_flag("trace_context", "true");
 
-        // TracerProvider initialization is deferred to on_ready() because
+        // SdkTracerProvider initialization is deferred to on_ready() because
         // BatchSpanProcessor requires an active Tokio runtime, and init()
-        // runs before the runtime starts. The OnceLock<TracerProvider> is
+        // runs before the runtime starts. The OnceLock<SdkTracerProvider> is
         // filled in on_ready(); handlers check provider.get() and no-op if None.
 
         let protocol =
@@ -257,7 +247,7 @@ impl Plugin for OtelPlugin {
             std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "oxphp".into()),
         );
 
-        // Share TracerProvider with other plugins (e.g. APM)
+        // Share SdkTracerProvider with other plugins (e.g. APM)
         ctx.register_service("otel.provider", Box::new(self.provider.clone()));
 
         // Register handlers
@@ -278,16 +268,16 @@ impl Plugin for OtelPlugin {
         match self.init_provider() {
             Ok(provider) => {
                 if self.provider.set(provider).is_err() {
-                    tracing::warn!(plugin = "otel", "TracerProvider already initialized");
+                    tracing::warn!(plugin = "otel", "SdkTracerProvider already initialized");
                 } else {
                     tracing::info!(
                         plugin = "otel",
-                        "TracerProvider started (OTLP export active)"
+                        "SdkTracerProvider started (OTLP export active)"
                     );
                 }
             }
             Err(e) => {
-                tracing::error!(plugin = "otel", error = %e, "Failed to initialize TracerProvider");
+                tracing::error!(plugin = "otel", error = %e, "Failed to initialize SdkTracerProvider");
             }
         }
     }
@@ -298,10 +288,8 @@ impl Plugin for OtelPlugin {
         }
         if let Some(provider) = self.provider.get() {
             // Force flush remaining spans
-            for result in provider.force_flush() {
-                if let Err(e) = result {
-                    tracing::warn!(error = %e, "OTel flush error during shutdown");
-                }
+            if let Err(e) = provider.force_flush() {
+                tracing::warn!(error = %e, "OTel flush error during shutdown");
             }
             if let Err(e) = provider.shutdown() {
                 tracing::warn!(error = %e, "OTel provider shutdown error");
@@ -357,7 +345,7 @@ impl PluginRequestHandler for OtelRequestHandler {
 // ─── Complete handler ───────────────────────────────────────
 
 struct OtelCompleteHandler {
-    provider: Arc<OnceLock<TracerProvider>>,
+    provider: Arc<OnceLock<SdkTracerProvider>>,
     server_address: String,
 }
 
@@ -742,7 +730,7 @@ mod tests {
         std::env::remove_var("OTEL_SERVICE_VERSION");
         std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
         let resource = OtelPlugin::build_resource();
-        let sn = resource.get(opentelemetry::Key::new("service.name"));
+        let sn = resource.get(&opentelemetry::Key::new("service.name"));
         assert_eq!(sn.map(|v| v.to_string()), Some("oxphp".to_string()));
     }
 
@@ -756,25 +744,25 @@ mod tests {
 
         assert_eq!(
             resource
-                .get(opentelemetry::Key::new("service.name"))
+                .get(&opentelemetry::Key::new("service.name"))
                 .map(|v| v.to_string()),
             Some("my-app".to_string())
         );
         assert_eq!(
             resource
-                .get(opentelemetry::Key::new("service.version"))
+                .get(&opentelemetry::Key::new("service.version"))
                 .map(|v| v.to_string()),
             Some("2.0.0".to_string())
         );
         assert_eq!(
             resource
-                .get(opentelemetry::Key::new("env"))
+                .get(&opentelemetry::Key::new("env"))
                 .map(|v| v.to_string()),
             Some("prod".to_string())
         );
         assert_eq!(
             resource
-                .get(opentelemetry::Key::new("region"))
+                .get(&opentelemetry::Key::new("region"))
                 .map(|v| v.to_string()),
             Some("us-east-1".to_string())
         );

@@ -218,14 +218,14 @@ impl TraceContext {
 /// Generate a 128-bit random trace ID as 32 lowercase hex chars.
 fn generate_trace_id() -> [u8; 32] {
     let mut raw = [0u8; 16];
-    getrandom::getrandom(&mut raw).expect("getrandom failed");
+    getrandom::fill(&mut raw).expect("getrandom failed");
     hex_encode_16(&raw)
 }
 
 /// Generate a 64-bit random span ID as 16 lowercase hex chars.
 fn generate_span_id() -> [u8; 16] {
     let mut raw = [0u8; 8];
-    getrandom::getrandom(&mut raw).expect("getrandom failed");
+    getrandom::fill(&mut raw).expect("getrandom failed");
     hex_encode_8(&raw)
 }
 

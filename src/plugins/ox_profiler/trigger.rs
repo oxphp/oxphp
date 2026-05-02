@@ -6,7 +6,7 @@
 //! (header / cookie / query-string token match, or random sampling hit).
 //! `None` means "run at ApmOnly or Off as usual".
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 use subtle::ConstantTimeEq;
 
 use crate::plugin::handler::PluginRequestView;
@@ -54,7 +54,7 @@ pub fn should_profile<R: Rng + ?Sized>(
     }
 
     // Random sampling: no token required.
-    if cfg.sample_rate > 0.0 && rng.gen::<f64>() < cfg.sample_rate {
+    if cfg.sample_rate > 0.0 && rng.random::<f64>() < cfg.sample_rate {
         return Some(ActivationDecision {
             source: ActivationSource::SampleRate,
             mode: ProfilingMode::ProfileAll,
@@ -119,7 +119,7 @@ fn generate_run_id<R: Rng + ?Sized>(req: &PluginRequestView, rng: &mut R) -> Str
         .unwrap_or(0);
 
     let req_id_prefix: String = req.request_id.chars().take(8).collect();
-    let rand4: u16 = rng.gen();
+    let rand4: u16 = rng.random();
     format!("{ts_ms}-{req_id_prefix}-{rand4:04x}")
 }
 

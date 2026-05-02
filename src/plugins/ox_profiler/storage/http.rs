@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 
 use crate::profiling::export::{
     export_collapsed, export_pprof, export_speedscope, export_xhprof, CollapsedMetric, XhprofMode,
@@ -148,7 +148,7 @@ impl HttpPusher {
             // ±20% jitter on the backoff constant so a backend flap
             // doesn't resync all pushers into a thundering herd.
             let base = RETRY_BACKOFFS[attempt as usize - 1];
-            let factor: f64 = rand::thread_rng().gen_range(0.8..1.2);
+            let factor: f64 = rand::rng().random_range(0.8..1.2);
             let delay = base.mul_f64(factor);
             tokio::time::sleep(delay).await;
         }
