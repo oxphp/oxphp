@@ -27,7 +27,7 @@ $expected = 45; // sum 0..9
 // Producer: send 10 items, 2ms apart; close when done.
 $producer = oxphp_async(function () use ($ch) {
     for ($i = 0; $i < 10; $i++) {
-        $ch->send($i, 5.0);
+        $ch->send($i, timeout: 5.0);
         usleep(2_000);
     }
     $ch->close();
@@ -36,7 +36,7 @@ $producer = oxphp_async(function () use ($ch) {
 // Consumer: recv until closed+drained (recv returns null), summing.
 $consumer = oxphp_async(function () use ($ch) {
     $sum = 0;
-    while (($item = $ch->recv(2.0)) !== null) {
+    while (($item = $ch->recv(timeout: 2.0)) !== null) {
         $sum += $item;
     }
     return $sum;

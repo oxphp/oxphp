@@ -1629,6 +1629,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             for method in &iface.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
                 let (rt, rn) = php_type_to_bridge(&method.return_type);
+                let pa = build_param_arrays(&method.params);
                 crate::bridge::ffi::oxphp_bridge_interface_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1638,6 +1639,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.is_variadic as c_int,
                     rt,
                     rn,
+                    pa.name_ptrs.as_ptr(),
+                    pa.types.as_ptr(),
+                    pa.optional.as_ptr(),
                 );
             }
             for constant in &iface.constants {
@@ -1713,6 +1717,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             for method in &enum_def.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
                 let (rt, rn) = php_type_to_bridge(&method.return_type);
+                let pa = build_param_arrays(&method.params);
                 crate::bridge::ffi::oxphp_bridge_enum_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1722,6 +1727,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.is_variadic as c_int,
                     rt,
                     rn,
+                    pa.name_ptrs.as_ptr(),
+                    pa.types.as_ptr(),
+                    pa.optional.as_ptr(),
                 );
             }
         }
@@ -1795,6 +1803,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             for method in &class.methods {
                 let mname = CString::new(method.name.as_str()).unwrap();
                 let (rt, rn) = php_type_to_bridge(&method.return_type);
+                let pa = build_param_arrays(&method.params);
                 crate::bridge::ffi::oxphp_bridge_class_add_method(
                     handle,
                     mname.as_ptr(),
@@ -1805,6 +1814,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     method.is_variadic as c_int,
                     rt,
                     rn,
+                    pa.name_ptrs.as_ptr(),
+                    pa.types.as_ptr(),
+                    pa.optional.as_ptr(),
                 );
             }
 
@@ -1853,6 +1865,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                         0,
                         ret_tag,
                         if ret_nullable { 1 } else { 0 },
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        std::ptr::null(),
                     );
                 }
             }
@@ -1928,6 +1943,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
     for func in functions {
         let fqn = CString::new(func.fqn.as_str()).unwrap();
         let (rt, rn) = php_type_to_bridge(&func.return_type);
+        let pa = build_param_arrays(&func.params);
         unsafe {
             crate::bridge::ffi::oxphp_bridge_register_plugin_function(
                 fqn.as_ptr(),
@@ -1936,6 +1952,9 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 func.is_variadic as c_int,
                 rt,
                 rn,
+                pa.name_ptrs.as_ptr(),
+                pa.types.as_ptr(),
+                pa.optional.as_ptr(),
             );
         }
         if let Some(handler) = func.handler {
@@ -1994,6 +2013,37 @@ fn php_type_to_bridge(t: &Option<PhpType>) -> (c_int, c_int) {
             let (tag, nullable) = inner.to_bridge_tag();
             (tag as c_int, nullable as c_int)
         }
+    }
+}
+
+/// Owning bundle of arrays passed to the bridge for parameter metadata.
+///
+/// Field order matters: `_names` (which owns the C strings) must be declared
+/// before `name_ptrs` so that the strings outlive the pointer slice during
+/// the FFI call.
+struct ParamArrays {
+    _names: Vec<CString>,
+    name_ptrs: Vec<*const c_char>,
+    types: Vec<c_int>,
+    optional: Vec<c_int>,
+}
+
+fn build_param_arrays(params: &[PhpParamDef]) -> ParamArrays {
+    let names: Vec<CString> = params
+        .iter()
+        .map(|p| CString::new(p.name.as_str()).expect("plugin param name contains NUL"))
+        .collect();
+    let name_ptrs: Vec<*const c_char> = names.iter().map(|c| c.as_ptr()).collect();
+    let types: Vec<c_int> = params
+        .iter()
+        .map(|p| p.php_type.to_bridge_tag().0 as c_int)
+        .collect();
+    let optional: Vec<c_int> = params.iter().map(|p| c_int::from(!p.required)).collect();
+    ParamArrays {
+        _names: names,
+        name_ptrs,
+        types,
+        optional,
     }
 }
 

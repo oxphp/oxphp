@@ -9,7 +9,7 @@ header('Content-Type: text/plain');
 $ch = new OxPHP\Shared\Channel(1);
 
 $start = microtime(true);
-$got = $ch->recv(0.1);
+$got = $ch->recv(timeout: 0.1);
 $elapsed = microtime(true) - $start;
 
 if ($got !== null) { echo "FAIL: recv timeout should return null, got " . var_export($got, true) . "\n"; exit; }

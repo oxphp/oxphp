@@ -2480,6 +2480,62 @@ static const zend_internal_arg_info *oxphp_build_return_arginfo(int rt, int null
 }
 /* }}} */
 
+/* {{{ Build a full per-method/function arginfo with parameter names.
+ *
+ * Returns a `(1 + total_params)` array. Slot 0 carries the return type info;
+ * slots 1..total_params carry each parameter's name and an MAY_BE_ANY type
+ * mask so existing callers that pass mismatched types are not rejected at
+ * the PHP layer (the dispatch hop into Rust is what enforces typing today).
+ * The variadic bit is set on the last slot when `is_variadic` is true.
+ *
+ * `param_names[i]` must point to long-lived storage — the bridge strdup's
+ * names at registration time, so the pointer can be borrowed directly.
+ */
+static const zend_internal_arg_info *oxphp_build_method_arginfo(
+    int required_params, int total_params, int is_variadic,
+    int return_type, int return_nullable,
+    const char * const *param_names)
+{
+    if (total_params <= 0) {
+        return oxphp_build_return_arginfo(return_type, return_nullable);
+    }
+
+    int slots = 1 + total_params;
+    zend_internal_arg_info *info = calloc(slots, sizeof(zend_internal_arg_info));
+    if (!info) return NULL;
+
+    /* Slot 0: return-type. The `name` field encodes required_num_args here
+     * (per PHP's internal convention used by ZEND_BEGIN_ARG_INFO_EX). */
+    info[0].name = (const char *)(zend_uintptr_t)required_params;
+    uint32_t return_mask = 0;
+    int return_zend_type = oxphp_rt_to_zend(return_type);
+    if (return_type != OXPHP_RT_NONE && return_zend_type >= 0) {
+        if (return_zend_type == _IS_BOOL) {
+            return_mask = MAY_BE_FALSE | MAY_BE_TRUE;
+        } else {
+            return_mask = (1u << return_zend_type);
+        }
+        if (return_nullable) {
+            return_mask |= MAY_BE_NULL;
+        }
+    }
+    info[0].type.type_mask = return_mask;
+
+    /* Slots 1..total_params: per-parameter info. */
+    for (int i = 0; i < total_params; i++) {
+        const char *pname = (param_names && param_names[i]) ? param_names[i] : "_";
+        info[1 + i].name = pname;
+        uint32_t mask = MAY_BE_ANY;
+        if (is_variadic && i == total_params - 1) {
+            mask |= _ZEND_IS_VARIADIC_BIT;
+        }
+        info[1 + i].type.type_mask = mask;
+    }
+
+    return info;
+}
+/* }}} */
+
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
  * compile-time optimization of function_exists('literal') can see them. */
@@ -2520,11 +2576,28 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     fn_entries[i].handler = ZEND_FN(oxphp_native_dispatch);
                     int rt = oxphp_bridge_get_plugin_function_return_type(i);
                     int rn = oxphp_bridge_get_plugin_function_return_nullable(i);
-                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
-                    fn_entries[i].arg_info = rt_info
-                        ? rt_info
+                    int total = oxphp_bridge_get_plugin_function_total(i);
+                    int required = oxphp_bridge_get_plugin_function_required(i);
+                    int is_variadic = oxphp_bridge_get_plugin_function_is_variadic(i);
+                    const char **pnames = NULL;
+                    if (total > 0) {
+                        pnames = calloc(total, sizeof(const char *));
+                        if (pnames) {
+                            for (int p = 0; p < total; p++) {
+                                pnames[p] = oxphp_bridge_get_plugin_function_param_name(i, p);
+                            }
+                        }
+                    }
+                    const zend_internal_arg_info *info = oxphp_build_method_arginfo(
+                        required, total, is_variadic, rt, rn, pnames);
+                    free((void *)pnames);
+                    fn_entries[i].arg_info = info
+                        ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
-                    fn_entries[i].num_args = 0;
+                    /* num_args MUST equal the number of param slots in arg_info[1..],
+                     * otherwise PHP indexes past the array. With param names
+                     * present, that's `total`. With no params, fall back to 0. */
+                    fn_entries[i].num_args = info ? (uint32_t)total : 0;
                     fn_entries[i].flags = 0;
                 }
                 zend_register_functions(NULL, fn_entries, NULL, MODULE_PERSISTENT);
@@ -2552,11 +2625,25 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     methods[m].handler = NULL; /* interface methods have no handler */
                     int rt = oxphp_bridge_get_interface_method_return_type(i, m);
                     int rn = oxphp_bridge_get_interface_method_return_nullable(i, m);
-                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
-                    methods[m].arg_info = rt_info
-                        ? rt_info
+                    int total = oxphp_bridge_get_interface_method_total(i, m);
+                    int required = oxphp_bridge_get_interface_method_required(i, m);
+                    int is_variadic = oxphp_bridge_get_interface_method_is_variadic(i, m);
+                    const char **pnames = NULL;
+                    if (total > 0) {
+                        pnames = calloc(total, sizeof(const char *));
+                        if (pnames) {
+                            for (int p = 0; p < total; p++) {
+                                pnames[p] = oxphp_bridge_get_interface_method_param_name(i, m, p);
+                            }
+                        }
+                    }
+                    const zend_internal_arg_info *info = oxphp_build_method_arginfo(
+                        required, total, is_variadic, rt, rn, pnames);
+                    free((void *)pnames);
+                    methods[m].arg_info = info
+                        ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
-                    methods[m].num_args = 0;
+                    methods[m].num_args = info ? (uint32_t)total : 0;
                     methods[m].flags = oxphp_bridge_get_interface_method_flags(i, m)
                                      | ZEND_ACC_ABSTRACT | ZEND_ACC_PUBLIC;
                 }
@@ -2621,11 +2708,25 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     methods[m].handler = ZEND_FN(oxphp_method_dispatch);
                     int rt = oxphp_bridge_get_enum_method_return_type(i, m);
                     int rn = oxphp_bridge_get_enum_method_return_nullable(i, m);
-                    const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
-                    methods[m].arg_info = rt_info
-                        ? rt_info
+                    int total = oxphp_bridge_get_enum_method_total(i, m);
+                    int required = oxphp_bridge_get_enum_method_required(i, m);
+                    int is_variadic = oxphp_bridge_get_enum_method_is_variadic(i, m);
+                    const char **pnames = NULL;
+                    if (total > 0) {
+                        pnames = calloc(total, sizeof(const char *));
+                        if (pnames) {
+                            for (int p = 0; p < total; p++) {
+                                pnames[p] = oxphp_bridge_get_enum_method_param_name(i, m, p);
+                            }
+                        }
+                    }
+                    const zend_internal_arg_info *info = oxphp_build_method_arginfo(
+                        required, total, is_variadic, rt, rn, pnames);
+                    free((void *)pnames);
+                    methods[m].arg_info = info
+                        ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
-                    methods[m].num_args = 0;
+                    methods[m].num_args = info ? (uint32_t)total : 0;
                     methods[m].flags = oxphp_bridge_get_enum_method_flags(i, m);
                 }
             }
@@ -2712,11 +2813,25 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                         methods[m].handler = ZEND_FN(oxphp_method_dispatch);
                         int rt = oxphp_bridge_get_class_method_return_type(i, m);
                         int rn = oxphp_bridge_get_class_method_return_nullable(i, m);
-                        const zend_internal_arg_info *rt_info = oxphp_build_return_arginfo(rt, rn);
-                        methods[m].arg_info = rt_info
-                            ? rt_info
+                        int total = oxphp_bridge_get_class_method_total(i, m);
+                        int required = oxphp_bridge_get_class_method_required(i, m);
+                        int is_variadic = oxphp_bridge_get_class_method_is_variadic(i, m);
+                        const char **pnames = NULL;
+                        if (total > 0) {
+                            pnames = calloc(total, sizeof(const char *));
+                            if (pnames) {
+                                for (int p = 0; p < total; p++) {
+                                    pnames[p] = oxphp_bridge_get_class_method_param_name(i, m, p);
+                                }
+                            }
+                        }
+                        const zend_internal_arg_info *info = oxphp_build_method_arginfo(
+                            required, total, is_variadic, rt, rn, pnames);
+                        free((void *)pnames);
+                        methods[m].arg_info = info
+                            ? info
                             : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
-                        methods[m].num_args = 0;
+                        methods[m].num_args = info ? (uint32_t)total : 0;
                         methods[m].flags = oxphp_bridge_get_class_method_visibility(i, m)
                                          | oxphp_bridge_get_class_method_flags(i, m);
                     }

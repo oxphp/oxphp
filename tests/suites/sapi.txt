@@ -12,3 +12,4 @@ sapi/test_is_worker_false
 sapi/test_is_streaming_false
 sapi/test_finish_request | GET | | 200 | content-type:~text/plain
 sapi/test_extension_loaded
+sapi/test_named_args
