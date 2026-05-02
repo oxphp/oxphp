@@ -4387,6 +4387,10 @@ int oxphp_async_synthetic_promise_cancel(int64_t id)
 extern int oxphp_shared_retain(uint64_t id) __attribute__((weak));
 extern int oxphp_shared_release(uint64_t id) __attribute__((weak));
 extern int oxphp_shared_is_alive(uint64_t id) __attribute__((weak));
+/* Returns NUL-terminated PHP class FQN for a SharedType tag, or NULL
+ * for unknown tags. Static-lifetime — never free. Single source of
+ * truth for the tag→class mapping is `SharedType` in registry.rs. */
+extern const char *oxphp_shared_class_name(uint8_t type_tag) __attribute__((weak));
 
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
@@ -4413,15 +4417,15 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
     if (oxphp_shared_is_alive == NULL) return -1;
     if (!oxphp_shared_is_alive(shared_id)) return -1;
 
-    /* Look up the PHP class_entry by type_tag. */
-    const char *fqn;
-    switch (type_tag) {
-        case 10: fqn = "OxPHP\\Shared\\Counter"; break;
-        case 11: fqn = "OxPHP\\Shared\\Flag";    break;
-        case 12: fqn = "OxPHP\\Shared\\Once";    break;
-        case 40: fqn = "OxPHP\\Shared\\Mutex";   break;
-        default: return -1; /* unknown type tag */
-    }
+    /* Look up the PHP class_entry by type_tag. The Rust registry
+     * (SharedType::php_class_cstr) is the single source of truth.
+     * Weak-linked: in a bare PHP CLI dlopen() the Rust binary is
+     * absent, so the symbol resolves to NULL and we fail closed.
+     * Cross-thread tag-7 deserialization only runs from oxphp's Rust
+     * workers anyway, where the symbol is always present. */
+    if (oxphp_shared_class_name == NULL) return -1;
+    const char *fqn = oxphp_shared_class_name(type_tag);
+    if (fqn == NULL) return -1; /* unknown type tag */
     zend_string *cname = zend_string_init(fqn, strlen(fqn), 0);
     zend_class_entry *ce = zend_lookup_class_ex(cname, NULL, 0);
     zend_string_release(cname);
