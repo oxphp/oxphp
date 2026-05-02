@@ -64,6 +64,22 @@ impl SharedType {
             Self::Pool => "OxPHP\\Shared\\Pool",
         }
     }
+
+    /// NUL-terminated FQN, suitable for direct use as a `*const c_char`
+    /// from C without an intermediate copy. Backs `oxphp_shared_class_name`,
+    /// which the C bridge calls during cross-thread (tag-7) deserialization
+    /// instead of duplicating the tag→class mapping.
+    pub fn php_class_cstr(&self) -> &'static std::ffi::CStr {
+        match self {
+            Self::Counter => c"OxPHP\\Shared\\Counter",
+            Self::Flag => c"OxPHP\\Shared\\Flag",
+            Self::Once => c"OxPHP\\Shared\\Once",
+            Self::Mutex => c"OxPHP\\Shared\\Mutex",
+            Self::Channel => c"OxPHP\\Shared\\Channel",
+            Self::Map => c"OxPHP\\Shared\\Map",
+            Self::Pool => c"OxPHP\\Shared\\Pool",
+        }
+    }
 }
 
 /// Each `Entry` in the registry is explicitly reference-counted via
@@ -283,7 +299,7 @@ impl SharedRegistry {
 // ─── FFI ──────────────────────────────────────────────────────────────
 
 use crate::plugins::ox_shared::error::ffi_entry;
-use std::os::raw::c_int;
+use std::os::raw::{c_char, c_int};
 
 #[no_mangle]
 pub extern "C" fn oxphp_shared_registry_init() -> c_int {
@@ -327,6 +343,22 @@ pub extern "C" fn oxphp_shared_is_alive(id: u64) -> c_int {
     match REGISTRY.get() {
         Some(reg) => reg.is_alive(id) as c_int,
         None => 0,
+    }
+}
+
+/// Returns the NUL-terminated PHP class FQN for a `SharedType` tag, or
+/// `NULL` for an unknown tag. The pointer is to a `&'static CStr` and is
+/// valid for the lifetime of the process — caller must NOT free it.
+///
+/// Called by the C bridge from `oxphp_shared_wrapper_new` during tag-7
+/// (cross-thread Shareable) deserialization. Single source of truth for
+/// the tag→FQN mapping — the C side calls this instead of duplicating
+/// the switch.
+#[no_mangle]
+pub extern "C" fn oxphp_shared_class_name(type_tag: u8) -> *const c_char {
+    match SharedType::from_tag(type_tag) {
+        Some(t) => t.php_class_cstr().as_ptr(),
+        None => std::ptr::null(),
     }
 }
 
@@ -426,6 +458,50 @@ mod tests {
         for tag in [SharedType::Counter, SharedType::Flag, SharedType::Once] {
             let byte = tag as u8;
             assert_eq!(SharedType::from_tag(byte), Some(tag));
+        }
+    }
+
+    /// Pins the contract `oxphp_shared_wrapper_new` (C bridge) relies on
+    /// when rebuilding a Shareable wrapper on a worker thread: every
+    /// `SharedType` variant must map to a non-null FQN.
+    #[test]
+    fn class_name_ffi_covers_every_shared_type() {
+        use std::ffi::CStr;
+        let cases = [
+            (SharedType::Counter, "OxPHP\\Shared\\Counter"),
+            (SharedType::Flag, "OxPHP\\Shared\\Flag"),
+            (SharedType::Once, "OxPHP\\Shared\\Once"),
+            (SharedType::Mutex, "OxPHP\\Shared\\Mutex"),
+            (SharedType::Channel, "OxPHP\\Shared\\Channel"),
+            (SharedType::Map, "OxPHP\\Shared\\Map"),
+            (SharedType::Pool, "OxPHP\\Shared\\Pool"),
+        ];
+        for (ty, expected_fqn) in cases {
+            let ptr = oxphp_shared_class_name(ty as u8);
+            assert!(
+                !ptr.is_null(),
+                "tag {} ({:?}) not handled by oxphp_shared_class_name",
+                ty as u8,
+                ty
+            );
+            let actual = unsafe { CStr::from_ptr(ptr) }
+                .to_str()
+                .expect("FQN must be valid UTF-8");
+            assert_eq!(actual, expected_fqn, "FQN mismatch for {:?}", ty);
+        }
+    }
+
+    #[test]
+    fn class_name_ffi_returns_null_for_unknown_tag() {
+        for tag in [0u8, 1, 99, 200, 255] {
+            assert!(
+                SharedType::from_tag(tag).is_none(),
+                "tag {tag} unexpectedly known"
+            );
+            assert!(
+                oxphp_shared_class_name(tag).is_null(),
+                "unknown tag {tag} must map to NULL"
+            );
         }
     }
 }
