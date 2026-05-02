@@ -52,7 +52,7 @@ crossbeam-channel = "0.5"
 dashmap = "6"
 
 # LRU cache
-lru = "0.12"
+lru = "0.18"
 
 # Inline small-vector storage. Used by ProfilingContext to keep a
 # seq → local_id map without heap-allocating for the common case
@@ -83,7 +83,7 @@ flate2 = { version = "1", default-features = false, features = ["zlib"] }
 parking_lot = "0.12"
 
 # Compression
-brotli = "7"
+brotli = "8"
 
 # HTTP date formatting (RFC 7231)
 httpdate = "1"
@@ -107,7 +107,7 @@ bitflags = "2"
 lexopt = "0.3"
 
 # Cryptographic random bytes (trace ID / span ID generation)
-getrandom = "0.2"
+getrandom = "0.4"
 
 # TLS
 tokio-rustls = "0.26"
@@ -115,19 +115,19 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-pemfile = "2"
 
 # OpenTelemetry (optional — used by otel plugin)
-opentelemetry = { version = "0.27", optional = true }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["http-proto", "reqwest-client"], optional = true }
-opentelemetry-semantic-conventions = { version = "0.27", optional = true }
-tonic = { version = "0.12", optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.31", optional = true }
+tonic = { version = "0.14", optional = true }
 
 # Profiler plugin deps (optional — used by ox_profiler plugin)
-rand = { version = "0.8", features = ["small_rng", "std_rng"], optional = true }
+rand = { version = "0.10", features = ["std_rng", "thread_rng"], optional = true }
 subtle = { version = "2.6", optional = true }
 # HTTP client for the optional remote export (PROFILER_EXPORT_URL).
 # rustls-tls keeps the Alpine builder openssl-free (pure-Rust ring
 # backend). Already in [dev-dependencies] for integration tests.
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 
 # Ordered hashmap (used by Shared\Array str-keyed storage)
 indexmap = "2"
@@ -158,7 +158,7 @@ prost-build = "0.13"
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["async_tokio"] }
 loom = "0.7"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 

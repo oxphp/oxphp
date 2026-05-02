@@ -343,7 +343,7 @@ struct Xoshiro256 {
 impl Xoshiro256 {
     fn new() -> Self {
         let mut seed = [0u8; 32];
-        let _ = getrandom::getrandom(&mut seed);
+        let _ = getrandom::fill(&mut seed);
         let mut s = [0u64; 4];
         for (i, chunk) in seed.chunks_exact(8).enumerate() {
             s[i] = u64::from_le_bytes(chunk.try_into().unwrap());

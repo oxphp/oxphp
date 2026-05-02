@@ -12,7 +12,7 @@ use opentelemetry::trace::{
     SpanBuilder, SpanId, SpanKind, Status, TraceFlags, TraceId, TracerProvider as _,
 };
 use opentelemetry::KeyValue;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 
 use crate::decorator::types::{
     AttributeTargets, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
@@ -160,7 +160,7 @@ impl PluginRequestHandler for ApmRequestHandler {
 struct ApmCompleteHandler {
     #[allow(dead_code)]
     slow_query_ms: u64,
-    provider: Arc<OnceLock<TracerProvider>>,
+    provider: Arc<OnceLock<SdkTracerProvider>>,
 }
 
 impl PluginCompleteHandler for ApmCompleteHandler {
@@ -364,8 +364,8 @@ impl Plugin for ApmPlugin {
                 .build()?;
         }
 
-        let provider: Arc<OnceLock<TracerProvider>> = ctx
-            .service::<Arc<OnceLock<TracerProvider>>>("otel.provider")
+        let provider: Arc<OnceLock<SdkTracerProvider>> = ctx
+            .service::<Arc<OnceLock<SdkTracerProvider>>>("otel.provider")
             .cloned()
             .unwrap_or_else(|| Arc::new(OnceLock::new()));
 
