@@ -152,6 +152,22 @@ COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extens
 COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
+# Build-time assert: bare `php` CLI must dlopen the extension successfully.
+# Same rationale as Dockerfile.alpine-release — turns a stale-cache or
+# upstream-PHP-bump silent breakage into a build failure with full context.
+# `-n` skips all ini scanning (oxphp.ini's preload.php is not yet copied at
+# this point of the build) and `-d extension=` loads only the extension we
+# want to verify. We deliberately do NOT add `-d display_startup_errors=1`
+# because dlopen errors are emitted unconditionally to stderr; surfacing
+# them via `2>&1` is enough.
+ENV LD_LIBRARY_PATH=/usr/local/lib
+RUN out=$(php -n -d extension=oxphp_sapi.so -m 2>&1) && \
+    echo "$out" | grep -qx oxphp_sapi || { \
+        echo "FATAL: oxphp_sapi failed to load. php -m output:"; \
+        echo "$out"; \
+        exit 1; \
+    }
+
 # Copy binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
@@ -162,8 +178,9 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 # fixtures/, and public/ with index.php + assets.
 COPY --chown=www-data:www-data www/ /var/www/html/
 
-# Ensure libphp.so and liboxphp_bridge.so are found at runtime
-ENV LD_LIBRARY_PATH=/usr/local/lib
+# LD_LIBRARY_PATH is set above before the build-time extension load assert
+# so that check finds liboxphp_bridge.so; persist it for runtime so `oxphp`
+# and any downstream `php` invocations resolve it.
 
 USER www-data
 
