@@ -442,7 +442,25 @@ extern "C" {
         is_variadic: c_int,
         return_type: c_int,
         return_nullable: c_int,
+        param_names: *const *const c_char,
+        param_types: *const c_int,
+        param_optional: *const c_int,
     );
+    pub fn oxphp_bridge_get_class_method_param_name(
+        class_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> *const c_char;
+    pub fn oxphp_bridge_get_class_method_param_type(
+        class_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
+    pub fn oxphp_bridge_get_class_method_param_optional(
+        class_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
     pub fn oxphp_bridge_class_set_magic(class_handle: c_int, magic_type: c_int, has_handler: c_int);
     pub fn oxphp_bridge_class_enable_custom_object(class_handle: c_int);
 
@@ -457,7 +475,25 @@ extern "C" {
         is_variadic: c_int,
         return_type: c_int,
         return_nullable: c_int,
+        param_names: *const *const c_char,
+        param_types: *const c_int,
+        param_optional: *const c_int,
     );
+    pub fn oxphp_bridge_get_interface_method_param_name(
+        iface_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> *const c_char;
+    pub fn oxphp_bridge_get_interface_method_param_type(
+        iface_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
+    pub fn oxphp_bridge_get_interface_method_param_optional(
+        iface_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
     pub fn oxphp_bridge_interface_add_constant(
         iface_handle: c_int,
         name: *const c_char,
@@ -482,7 +518,25 @@ extern "C" {
         is_variadic: c_int,
         return_type: c_int,
         return_nullable: c_int,
+        param_names: *const *const c_char,
+        param_types: *const c_int,
+        param_optional: *const c_int,
     );
+    pub fn oxphp_bridge_get_enum_method_param_name(
+        enum_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> *const c_char;
+    pub fn oxphp_bridge_get_enum_method_param_type(
+        enum_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
+    pub fn oxphp_bridge_get_enum_method_param_optional(
+        enum_index: c_int,
+        method_index: c_int,
+        param_index: c_int,
+    ) -> c_int;
 
     // ─── Plugin Attribute Registry ──────────────────────────────
     pub fn oxphp_bridge_register_attribute(
@@ -512,6 +566,18 @@ extern "C" {
         is_variadic: c_int,
         return_type: c_int,
         return_nullable: c_int,
+        param_names: *const *const c_char,
+        param_types: *const c_int,
+        param_optional: *const c_int,
+    ) -> c_int;
+    pub fn oxphp_bridge_get_plugin_function_param_name(
+        index: c_int,
+        param_index: c_int,
+    ) -> *const c_char;
+    pub fn oxphp_bridge_get_plugin_function_param_type(index: c_int, param_index: c_int) -> c_int;
+    pub fn oxphp_bridge_get_plugin_function_param_optional(
+        index: c_int,
+        param_index: c_int,
     ) -> c_int;
 
     // ─── Method Dispatch ────────────────────────────────────────

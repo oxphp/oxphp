@@ -538,7 +538,31 @@ pub unsafe fn oxphp_bridge_class_add_method(
     _is_variadic: c_int,
     _return_type: c_int,
     _return_nullable: c_int,
+    _param_names: *const *const c_char,
+    _param_types: *const c_int,
+    _param_optional: *const c_int,
 ) {
+}
+pub unsafe fn oxphp_bridge_get_class_method_param_name(
+    _class_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> *const c_char {
+    std::ptr::null()
+}
+pub unsafe fn oxphp_bridge_get_class_method_param_type(
+    _class_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_get_class_method_param_optional(
+    _class_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
 }
 pub unsafe fn oxphp_bridge_class_set_magic(
     _class_handle: c_int,
@@ -565,7 +589,31 @@ pub unsafe fn oxphp_bridge_interface_add_method(
     _is_variadic: c_int,
     _return_type: c_int,
     _return_nullable: c_int,
+    _param_names: *const *const c_char,
+    _param_types: *const c_int,
+    _param_optional: *const c_int,
 ) {
+}
+pub unsafe fn oxphp_bridge_get_interface_method_param_name(
+    _iface_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> *const c_char {
+    std::ptr::null()
+}
+pub unsafe fn oxphp_bridge_get_interface_method_param_type(
+    _iface_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_get_interface_method_param_optional(
+    _iface_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
 }
 pub unsafe fn oxphp_bridge_interface_add_constant(
     _iface_handle: c_int,
@@ -596,7 +644,31 @@ pub unsafe fn oxphp_bridge_enum_add_method(
     _is_variadic: c_int,
     _return_type: c_int,
     _return_nullable: c_int,
+    _param_names: *const *const c_char,
+    _param_types: *const c_int,
+    _param_optional: *const c_int,
 ) {
+}
+pub unsafe fn oxphp_bridge_get_enum_method_param_name(
+    _enum_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> *const c_char {
+    std::ptr::null()
+}
+pub unsafe fn oxphp_bridge_get_enum_method_param_type(
+    _enum_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_get_enum_method_param_optional(
+    _enum_index: c_int,
+    _method_index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
 }
 
 // ─── Plugin Attribute Registry ──────────────────────────────
@@ -633,6 +705,27 @@ pub unsafe fn oxphp_bridge_register_plugin_function(
     _is_variadic: c_int,
     _return_type: c_int,
     _return_nullable: c_int,
+    _param_names: *const *const c_char,
+    _param_types: *const c_int,
+    _param_optional: *const c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_get_plugin_function_param_name(
+    _index: c_int,
+    _param_index: c_int,
+) -> *const c_char {
+    std::ptr::null()
+}
+pub unsafe fn oxphp_bridge_get_plugin_function_param_type(
+    _index: c_int,
+    _param_index: c_int,
+) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_get_plugin_function_param_optional(
+    _index: c_int,
+    _param_index: c_int,
 ) -> c_int {
     0
 }
