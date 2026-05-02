@@ -246,6 +246,14 @@ fn execute_request(
     let start = Instant::now();
 
     sapi::clear_buffers();
+    // Bridge ctx is `__thread` and persists across requests on the same PHP
+    // worker thread. Without this, stream_mode/headers_sent/finished from a
+    // prior streaming request leak into the next, making `oxphp_flush()` skip
+    // `send_streaming_headers()` and silently drop the stream channel —
+    // observable as the chunked Transfer-Encoding disappearing after the
+    // first oxphp_stream_flush call on a worker. Worker-mode does this in
+    // `setup_request_tls`; traditional needs the same guarantee.
+    unsafe { bindings::oxphp_bridge_reset_request_ctx() };
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 
