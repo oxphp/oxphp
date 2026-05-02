@@ -243,15 +243,25 @@ impl ProfilerRouter {
         };
         let index_path = disk.output_dir.join("index.json");
         // Serialize with DiskWriter's append path and the retention
-        // sweep. `PluginInternalHandler::handle` is sync, so we use
-        // `blocking_lock()` — documented for use from sync code;
-        // blocks the current thread until the lock is free. The
-        // admin router runs off the hot HTTP path so a short block
-        // here is acceptable. Must NOT be called from within an
-        // async context that already holds a Tokio worker; the
-        // internal-route plumbing invokes handlers from a sync
-        // dispatcher so this is safe here.
-        let _guard = disk.index_lock.blocking_lock();
+        // sweep. The plugin trait calls handle() synchronously, but the
+        // internal HTTP server itself runs the dispatcher inside hyper's
+        // async service — so this thread IS a tokio worker. A naked
+        // `blocking_lock()` panics with "Cannot block the current thread
+        // from within a runtime". A try_lock retry with a hard deadline
+        // is correct in every runtime (current_thread or multi_thread)
+        // and degrades to 503 instead of panicking when truly contended.
+        let _guard = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Ok(g) = disk.index_lock.try_lock() {
+                    break g;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return text(StatusCode::SERVICE_UNAVAILABLE, "503 index lock contended");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        };
         // TODO(async-discipline): sync fs in sync trait handler; see list_runs.
         let contents = match std::fs::read_to_string(&index_path) {
             Ok(s) => s,

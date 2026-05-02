@@ -90,7 +90,7 @@ WORKDIR /build
 
 # Cargo feature set. Default includes all production plugins. Override
 # via compose build-args or --build-arg on the command line.
-ARG CARGO_FEATURES="plugin-apm,plugin-async"
+ARG CARGO_FEATURES="plugin-apm,plugin-async,plugin-shared"
 
 # Version injected from CI when building a tagged release. Empty default
 # leaves Cargo.toml version untouched.

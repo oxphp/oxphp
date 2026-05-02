@@ -1970,7 +1970,17 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
 }
 
 int oxphp_bridge_in_fiber(void) {
-    return EG(current_fiber_context) != NULL ? 1 : 0;
+    /* PHP initializes EG(current_fiber_context) to EG(main_fiber_context)
+     * during request startup, so a plain `!= NULL` check is always true and
+     * misleads the caller into the fiber-suspend path even on the main
+     * thread — where oxphp_current_fiber is NULL and fiber_await returns 1
+     * ("not in fiber"). Real fiber contexts (oxphp request fibers and user
+     * `Fiber` objects) set current to a distinct context, so the proper
+     * "are we in a fiber?" predicate compares against main_fiber_context. */
+    zend_fiber_context *cur = EG(current_fiber_context);
+    if (cur == NULL) return 0;
+    if (cur == EG(main_fiber_context)) return 0;
+    return 1;
 }
 
 int64_t oxphp_bridge_async_dispatch(
