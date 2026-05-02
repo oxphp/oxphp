@@ -130,6 +130,26 @@ COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extens
 # oxphp.ini — production users mount their own PHP config.
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
+# Build-time assert: bare `php` CLI must dlopen the extension successfully.
+# Without this guard, a stale buildx layer cache or an upstream PHP patch
+# bump that bumps ZEND_MODULE_API_NO can ship an image whose extension
+# silently fails to load — `oxphp` (the Rust binary) keeps working because
+# it embeds libphp directly, but `php -m` no longer reports oxphp_sapi.
+# The CI smoke test catches this, but only after the image is built; this
+# RUN turns a smoke-test failure into a build failure, plus prints the
+# load warnings to the build log so the cause is obvious.
+# `-n` skips all ini scanning (no surprise from ini-loaded extensions or
+# preload paths in conf.d) and `-d extension=` loads only the extension we
+# want to verify. Dlopen errors land on stderr unconditionally, so `2>&1`
+# is enough to surface them.
+ENV LD_LIBRARY_PATH=/usr/local/lib
+RUN out=$(php -n -d extension=oxphp_sapi.so -m 2>&1) && \
+    echo "$out" | grep -qx oxphp_sapi || { \
+        echo "FATAL: oxphp_sapi failed to load. php -m output:"; \
+        echo "$out"; \
+        exit 1; \
+    }
+
 # Copy oxphp binary from builder
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
 
@@ -141,8 +161,9 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 # replace this with their own webroot via bind-mount or a downstream FROM.
 COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index.php
 
-# Ensure libphp.so and liboxphp_bridge.so are found at runtime
-ENV LD_LIBRARY_PATH=/usr/local/lib
+# LD_LIBRARY_PATH is set above before the build-time extension load assert
+# so `php -m` finds liboxphp_bridge.so during that check; persist it for
+# runtime too so `oxphp` and any downstream `php` invocations resolve it.
 
 EXPOSE 80 443
 

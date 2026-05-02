@@ -31,8 +31,12 @@ else
     fail "check #1: php CLI missing or not ZTS"
 fi
 
-# Check 2: PHP version matches expectation (if provided)
-ACTUAL_PHP=$(docker run --rm "$IMG" php -r 'echo PHP_VERSION;' 2>/dev/null || echo "MISSING")
+# Check 2: PHP version matches expectation (if provided).
+# We pin INI scanning off (-n) so a broken extension.ini cannot leak a startup
+# warning into stdout and corrupt the captured version string. (Independently,
+# 2>/dev/null suppresses stderr; -n is the belt-and-suspenders against PHP
+# variants that send startup messages to stdout.)
+ACTUAL_PHP=$(docker run --rm "$IMG" php -n -r 'echo PHP_VERSION;' 2>/dev/null || echo "MISSING")
 if [[ -n "$EXPECTED_PHP" ]]; then
     if [[ "$ACTUAL_PHP" == "$EXPECTED_PHP" ]]; then
         ok "check #2: PHP version is exactly $EXPECTED_PHP"
@@ -48,11 +52,26 @@ else
 fi
 
 # Check 3: oxphp SAPI extension loads (actual extension name is oxphp_sapi,
-# per PHP_OXPHP_SAPI_EXTNAME in ext/php_oxphp_sapi.h)
+# per PHP_OXPHP_SAPI_EXTNAME in ext/php_oxphp_sapi.h).
+# On failure we re-run with stderr visible and dump the relevant pieces of
+# image state so the CI log carries enough info to root-cause without
+# needing a follow-up build.
 if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp_sapi"; then
     ok "check #3: oxphp_sapi extension is loaded"
 else
     fail "check #3: oxphp_sapi extension not found in php -m"
+    {
+        echo "    --- diagnostics ---"
+        echo "    php -m (stdout+stderr):"
+        docker run --rm "$IMG" sh -c 'php -d display_startup_errors=1 -m 2>&1' | sed 's/^/      /'
+        echo "    extension.ini contents:"
+        docker run --rm "$IMG" sh -c 'cat /usr/local/etc/php/conf.d/extension.ini 2>&1' | sed 's/^/      /'
+        echo "    extension files present:"
+        docker run --rm "$IMG" sh -c 'find /usr/local/lib/php/extensions -maxdepth 2 -name "oxphp*" -ls 2>&1 || echo "(none)"' | sed 's/^/      /'
+        echo "    bridge library:"
+        docker run --rm "$IMG" sh -c 'ls -la /usr/local/lib/liboxphp_bridge.so 2>&1' | sed 's/^/      /'
+        echo "    --- end diagnostics ---"
+    } >&2
 fi
 
 # Check 4: oxphp binary serves HTTP and executes a PHP-rendered page
