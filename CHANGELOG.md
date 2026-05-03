@@ -2,6 +2,17 @@
 
 All notable changes to OxPHP are documented in this file.
 
+## Unreleased
+
+### Added
+
+- New PHP class `OxPHP\Server\Worker` — unified runtime handle for worker introspection. Methods: `current`, `isWorkerMode`, `getId`, `getRequestCount`, `getStartTime`, `getMemoryUsage`, `getRss`, `getMaxMemoryBytes`, `serve`. Available in both traditional and worker modes. See `docs/en/php/worker-class.md`.
+- New PHP exception `OxPHP\Server\InvalidServeContextException`, thrown by `Worker::serve()` when called outside worker mode.
+
+### Changed
+
+- `getRequestCount()` reflects the number of requests the OS thread has handled (1-based, both modes — traditional mode reuses persistent threads, so the counter grows there too). The internal counter now increments at request **start** rather than at completion, so the value observed inside the first handler call is `1`.
+
 ## [0.4.0] - 2026-05-02
 
 Headline work since `v0.3.0`: **PHP 8.5 support** (opt-in via `:php8.5*` tags, `latest` still resolves to 8.4 pending soak), and a chain of fiber / `Shared\*` / streaming bugfixes that surfaced once worker-mode `Channel`/`Map`/`Pool` traffic and `oxphp_async()` workers got real exercise.
