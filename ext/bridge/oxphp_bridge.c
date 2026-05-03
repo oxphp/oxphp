@@ -1771,8 +1771,10 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.stream_mode = false;
     ctx.headers_sent = false;
     ctx.finished = false;
-    /* Note: requests_done is NOT incremented here — the caller (oxphp_worker loop)
-     * increments it explicitly after send_response, keeping the side effect visible. */
+    /* Note: requests_done and worker_start_time are deliberately NOT
+     * touched here — they are thread-persistent and only mutated by
+     * oxphp_bridge_increment_requests_done() / set_worker_start_time(),
+     * called from Rust at request start / thread boot respectively. */
 }
 
 int oxphp_bridge_worker_wait(void) {
@@ -1832,6 +1834,10 @@ uint8_t oxphp_bridge_get_exit_reason(void) {
 
 uint64_t oxphp_bridge_get_requests_done(void) {
     return ctx.requests_done;
+}
+
+void oxphp_bridge_increment_requests_done(void) {
+    ctx.requests_done++;
 }
 
 uint64_t oxphp_bridge_get_memory_usage(void) {

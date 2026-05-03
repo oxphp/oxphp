@@ -995,6 +995,12 @@ uint8_t oxphp_bridge_get_exit_reason(void);
 /** Get the number of requests completed by this worker. */
 uint64_t oxphp_bridge_get_requests_done(void);
 
+/** Increment requests_done by 1. Called from Rust at the start of each
+ *  request handling — both traditional mode (per-request in
+ *  execute_request) and worker mode (per-handler-dispatch in scheduler).
+ *  Thread-local; survives per-request resets. */
+void oxphp_bridge_increment_requests_done(void);
+
 /** Get the current PHP memory usage (set after each request). */
 uint64_t oxphp_bridge_get_memory_usage(void);
 
