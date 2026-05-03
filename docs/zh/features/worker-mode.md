@@ -136,15 +136,31 @@ services:
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
+## PHP API
+
+Worker 内省和 Worker 入口点通过
+[`OxPHP\Server\Worker`](../php/worker-class.md) 类提供。
+
+```php
+<?php
+$worker = OxPHP\Server\Worker::current();
+$worker->serve(function () {
+    handleRequest();
+});
+```
+
+**旧的自由函数**（`oxphp_is_worker`、`oxphp_worker_id`、`oxphp_worker`）
+仍然可用，并通过相同的内部状态工作。新代码应优先使用类 API。
+
 ## PHP 示例
 
 ### 检测 Worker 模式
 
-使用 `oxphp_is_worker()` 检查当前进程是否在 Worker 模式下运行。这对于编写能在传统模式和 Worker 模式下都能工作的代码非常有用。
+使用 `OxPHP\Server\Worker::isWorkerMode()` 检查当前进程是否在 Worker 模式下运行。这对于编写能在传统模式和 Worker 模式下都能工作的代码非常有用。
 
 ```php
 <?php
-if (oxphp_is_worker()) {
+if (OxPHP\Server\Worker::isWorkerMode()) {
     // 复用持久连接
     $redis = new Redis();
     $redis->pconnect('redis', 6379);
