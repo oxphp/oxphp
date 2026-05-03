@@ -285,8 +285,8 @@ oxphp_worker(callable $handler): bool
 以下任一条件满足时，Worker 循环退出：
 - 服务器优雅关闭
 - 处理程序连续抛出 3 个未捕获的异常或致命错误
-- Worker 达到 `WORKER_MAX_REQUESTS` 限制
 - Worker 超出 `WORKER_MAX_MEMORY_MIB` 限制
+- 应用层调用了 [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 
 > **注意：** `oxphp_worker()` 仅在配置了 `WORKER_FILE` 时有效。在传统模式下，它会记录警告并返回 `false`。
 

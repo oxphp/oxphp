@@ -89,15 +89,16 @@ typedef struct {
     /** Number of requests completed by this worker (worker mode). */
     uint64_t requests_done;
 
-    /** Max requests before worker recycle (0 = unlimited). */
-    uint64_t max_requests;
-
     /** Max memory in bytes before worker recycle (0 = unlimited).
      *  Pre-computed from MB to avoid per-request multiplication. */
     uint64_t max_memory_bytes;
 
-    /** Exit reason for worker mode (0=shutdown, 1=max_requests, 2=max_memory, 3=error). */
+    /** Exit reason for worker mode (0=shutdown, 1=scheduled, 2=max_memory, 3=error). */
     uint8_t exit_reason;
+
+    /** Whether Worker::scheduleExit() has been called for this worker.
+     *  Once true, the worker loop exits after the current request completes. */
+    bool exit_scheduled;
 
     /** Whether the current handler invocation failed (bailout/fatal error). */
     bool handler_failed;
@@ -939,7 +940,7 @@ typedef int (*oxphp_worker_send_fn_t)(void);
 void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn);
 
 /** Set worker mode TLS flags for this thread. */
-void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib);
+void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib);
 
 /** Check if this thread is in worker mode. */
 bool oxphp_bridge_is_worker_mode(void);
@@ -989,7 +990,15 @@ int oxphp_execute_script_safe(void *file_handle);
 
 /* ─── Worker Mode Metrics Getters ─────────────────────────── */
 
-/** Get the exit reason for the last worker mode exit. */
+/** Set the exit flag with reason 'scheduled' (1). Idempotent.
+ *  Called from PHP via Worker::scheduleExit(). */
+void oxphp_bridge_schedule_exit(void);
+
+/** True if Worker::scheduleExit() has been called for the current worker. */
+bool oxphp_bridge_is_exit_scheduled(void);
+
+/** Get the exit reason for the last worker mode exit
+ *  (0=none, 1=scheduled, 2=max_memory, 3=error). */
 uint8_t oxphp_bridge_get_exit_reason(void);
 
 /** Get the number of requests completed by this worker. */

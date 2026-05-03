@@ -56,7 +56,6 @@ fn build_spawn_strategy(config: &Config, metrics: &Metrics) -> SpawnStrategy {
         let wmc = Arc::new(WorkerModeConfig {
             worker_file: worker_file.clone(),
             document_root: config.server.document_root.clone(),
-            max_requests: config.worker_max_requests,
             max_memory_mib: config.worker_max_memory_mib,
         });
 

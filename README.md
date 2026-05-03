@@ -326,8 +326,7 @@ All settings are via environment variables — no config files required.
 | `ACCESS_LOG` | *(off)* | Per-request JSON log: `all`, `error`, or unset |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
 | `WORKER_FILE` | *(unset)* | Path to worker PHP script; enables persistent worker mode |
-| `WORKER_MAX_REQUESTS` | `0` (unlimited) | Max requests per worker before recycling |
-| `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling |
+| `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling. Application-driven recycling is available via `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |

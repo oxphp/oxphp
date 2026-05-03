@@ -75,7 +75,7 @@ With `validate_timestamps=1`, OPcache checks file modification times every `reva
 A few classes of changes still require a container restart (or worker recycle) even with `validate_timestamps=1`:
 
 - **Preloaded files** (`opcache.preload`) are linked into the server at startup and are never revalidated. Edit a preloaded file — restart the container.
-- **Worker Mode bootstrap state** — in [Worker Mode](../features/worker-mode.md), the autoloader, DI container, and any objects built in the outer scope live in worker memory. OPcache will recompile changed class files, but the worker will not re-run its bootstrap. For dev worker loops, set `WORKER_MAX_REQUESTS=1` to recycle after every request, which re-executes the outer scope and picks up all changes.
+- **Worker Mode bootstrap state** — in [Worker Mode](../features/worker-mode.md), the autoloader, DI container, and any objects built in the outer scope live in worker memory. OPcache will recompile changed class files, but the worker will not re-run its bootstrap. For dev worker loops, call [`Worker::scheduleExit()`](worker-class.md#scheduleexit) at the end of each request (e.g. behind an `OXPHP_DEV` env flag) to recycle the worker, which re-executes the outer scope and picks up all changes.
 - **Framework-level caches** — compiled Symfony container, Laravel route/config/view cache, Composer optimized classmap. These are `.php` files OPcache revalidates, but the values inside them reference stale class paths or container IDs. Run the framework's `cache:clear` command; OPcache alone is not enough.
 - **Non-PHP files** — `.env`, `composer.json`, YAML/JSON config, template files compiled outside OPcache. OPcache tracks only files it compiled; everything else needs a restart.
 

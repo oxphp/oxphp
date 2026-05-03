@@ -325,8 +325,7 @@ flowchart LR
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径；设置后启用持久化工作进程模式 |
-| `WORKER_MAX_REQUESTS` | `0`（无限制） | 每个工作进程回收前的最大请求数 |
-| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB） |
+| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）。应用层主动回收请使用 `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | 填充 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`；设为 `false` 时仅使用 `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 队列中允许的最大待处理异步任务数；队列满时拒绝任务 |

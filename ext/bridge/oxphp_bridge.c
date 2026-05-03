@@ -1751,12 +1751,12 @@ void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_wor
     rust_worker_send = send_fn;
 }
 
-void oxphp_bridge_set_worker_mode(uint64_t max_requests, uint64_t max_memory_mib) {
+void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib) {
     ctx.worker_mode = 1;
-    ctx.max_requests = max_requests;
     ctx.max_memory_bytes = max_memory_mib * 1024 * 1024;  /* pre-compute to avoid per-request mul */
     ctx.requests_done = 0;
     ctx.exit_reason = 0;
+    ctx.exit_scheduled = false;
     ctx.current_memory_bytes = 0;
 }
 
@@ -1828,6 +1828,15 @@ void oxphp_bridge_set_cancelled(bool cancelled) {
 
 bool oxphp_bridge_is_cancelled(void) {
     return ctx.cancelled;
+}
+
+void oxphp_bridge_schedule_exit(void) {
+    ctx.exit_scheduled = true;
+    ctx.exit_reason = 1;  /* 'scheduled' */
+}
+
+bool oxphp_bridge_is_exit_scheduled(void) {
+    return ctx.exit_scheduled;
 }
 
 uint8_t oxphp_bridge_get_exit_reason(void) {

@@ -21,6 +21,9 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 | `getMemoryUsage(): int` | 当前 PHP 内存使用量（字节，`zend_memory_usage(0)`）。 |
 | `getRss(): int` | 进程常驻内存集大小（字节）。不缓存——每次请求最多调用一次。 |
 | `getMaxMemoryBytes(): int` | 配置的内存上限（字节）。`0` 表示无限制。 |
+| `scheduleExit(): void` | 标记 Worker 在当前请求完成后优雅退出。在传统模式下为 no-op。 |
+| `isExitScheduled(): bool` | 如果已对当前 Worker 调用过 `scheduleExit()`，则返回 `true`。在传统模式下始终为 `false`。 |
+| `getExitReason(): ?string` | 待退出原因：`'scheduled'`、`'max_memory'`、`'error'`，无待退出时为 `null`。在传统模式下始终为 `null`。 |
 | `serve(callable $h): void` | 进入请求循环。在非 Worker 模式下抛出 `InvalidServeContextException`。 |
 
 ## 模式矩阵
@@ -35,6 +38,9 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 | `getMemoryUsage()` | 调用时的实时 PHP 内存。 | 调用时的实时 PHP 内存。 |
 | `getRss()` | 进程实时 RSS。 | 进程实时 RSS。 |
 | `getMaxMemoryBytes()` | `0`（不应用回收上限）。 | `WORKER_MAX_MEMORY_MIB` × 1 MiB 的值；未设置则为 `0`。 |
+| `scheduleExit()` | No-op（脚本即将结束）。 | 设置退出标志；当前请求处理器返回后，请求循环退出。 |
+| `isExitScheduled()` | 始终为 `false`。 | 在该线程调用过 `scheduleExit()` 后为 `true`。 |
+| `getExitReason()` | 始终为 `null`。 | 未安排退出时为 `null`；待退出时为 `'scheduled'`、`'max_memory'` 或 `'error'`。 |
 | `serve(callable)` | 抛出 `OxPHP\Server\Exception\InvalidServeContextException`。 | 进入请求循环。 |
 
 ## 示例
@@ -65,6 +71,35 @@ if ($worker->getRequestCount() === 1) {
     bootstrap();
 }
 ```
+
+### scheduleExit
+
+应用层主动触发 Worker 回收。当前请求正常完成后，循环检查 `isExitScheduled()` 并退出。监督进程会重新拉起新的 Worker，重新执行 Worker 文件的外层作用域。
+
+```php
+<?php
+$worker = OxPHP\Server\Worker::current();
+
+handleRequest();
+
+// 本地开发时让 bootstrap 在每次请求后重新加载。
+if (getenv('OXPHP_DEV') === '1') {
+    $worker->scheduleExit();
+}
+```
+
+`scheduleExit()` 是幂等的，且在非 Worker 模式下为 no-op。使用场景：
+
+- **开发期热重载** — 每次请求后退出，让外层 bootstrap 再次执行。
+- **基于 RSS 的回收** — `WORKER_MAX_MEMORY_MIB` 仅衡量 Zend 分配器。在涉及 curl、mysqli 等重型扩展的场景下，可在进程 RSS 超过你设定的阈值时触发回收：
+
+  ```php
+  if ($worker->getRss() > 256 * 1024 * 1024) {
+      $worker->scheduleExit();
+  }
+  ```
+
+- **协调式滚动重启** — 将该调用挂在哨兵文件或外部信号上，让外部编排系统能干净地腾空 Worker。
 
 ### Worker 入口点
 

@@ -1445,13 +1445,13 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
             }
         }
 
-        /* ── Check exit conditions (same as current) ────────────── */
+        /* ── Check exit conditions ───────────────────────────────── */
         if (consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
             ctx->exit_reason = 3;
             break;
         }
-        if (ctx->max_requests > 0 && ctx->requests_done >= ctx->max_requests) {
-            ctx->exit_reason = 1;
+        if (ctx->exit_scheduled) {
+            /* exit_reason was already set to 1 by oxphp_bridge_schedule_exit. */
             break;
         }
         if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
@@ -2478,6 +2478,42 @@ ZEND_METHOD(OxPHP_Server_Worker, getMaxMemoryBytes) {
 }
 /* }}} */
 
+/* {{{ OxPHP\Server\Worker::scheduleExit(): void
+ * Mark the worker for graceful exit after the current request completes.
+ * No-op outside worker mode (script is exiting anyway). Idempotent. */
+ZEND_METHOD(OxPHP_Server_Worker, scheduleExit) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!oxphp_bridge_is_worker_mode()) {
+        return;
+    }
+    oxphp_bridge_schedule_exit();
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::isExitScheduled(): bool
+ * True iff scheduleExit() has been called for the current worker.
+ * Always false in traditional mode. */
+ZEND_METHOD(OxPHP_Server_Worker, isExitScheduled) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(oxphp_bridge_is_exit_scheduled());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getExitReason(): ?string
+ * Returns null when no exit pending; otherwise one of
+ * 'scheduled' | 'max_memory' | 'error'. Always null in traditional mode. */
+ZEND_METHOD(OxPHP_Server_Worker, getExitReason) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    uint8_t r = oxphp_bridge_get_exit_reason();
+    switch (r) {
+        case 1: RETURN_STRING("scheduled");
+        case 2: RETURN_STRING("max_memory");
+        case 3: RETURN_STRING("error");
+        default: RETURN_NULL();
+    }
+}
+/* }}} */
+
 /* {{{ OxPHP\Server\Worker::serve(callable $handler): void
  * Enter the worker request-dispatch loop. Throws InvalidServeContextException
  * when called outside worker mode or re-entered on the same thread. */
@@ -2545,6 +2581,15 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMaxMemoryBytes, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_scheduleExit, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isExitScheduled, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getExitReason, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_serve, 0, 1, IS_VOID, 0)
     ZEND_ARG_TYPE_INFO(0, handler, IS_CALLABLE, 0)
 ZEND_END_ARG_INFO()
@@ -2568,6 +2613,12 @@ static zend_function_entry oxphp_worker_methods[] = {
     ZEND_ME(OxPHP_Server_Worker, getRss,             arginfo_oxphp_worker_getRss,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, getMaxMemoryBytes,  arginfo_oxphp_worker_getMaxMemoryBytes,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, scheduleExit,       arginfo_oxphp_worker_scheduleExit,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, isExitScheduled,    arginfo_oxphp_worker_isExitScheduled,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getExitReason,      arginfo_oxphp_worker_getExitReason,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, serve,              arginfo_oxphp_worker_serve,
             ZEND_ACC_PUBLIC)

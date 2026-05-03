@@ -22,8 +22,9 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_FILE` | *(unset)* | Path to the worker PHP script. Setting this enables worker mode |
-| `WORKER_MAX_REQUESTS` | `0` | Maximum requests a worker handles before recycling. `0` = unlimited |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum PHP memory per worker in MiB before recycling. `0` = unlimited |
+
+For application-driven recycling, call [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) from inside a request handler. The worker exits cleanly after the current request completes.
 
 ## Writing a Worker Script
 
@@ -73,18 +74,18 @@ The following state survives across requests within the same worker:
 
 Workers are automatically recycled (restarted with a fresh PHP process) when any of the following conditions are met:
 
-- **Max requests reached** — the worker has handled `WORKER_MAX_REQUESTS` requests
 - **Max memory exceeded** — the worker's PHP memory usage exceeds `WORKER_MAX_MEMORY_MIB` MiB
+- **Application requested exit** — the handler called [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Useful for app-controlled hot reload, file-mtime-based reload, or per-request bootstrap re-execution
 - **Consecutive errors** — the worker encounters 3 consecutive handler failures (fatal errors, timeouts, or unhandled exceptions). Note that `exit()`/`die()` calls are not counted as failures
 
-When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For max-requests and max-memory recycling, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
+When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
 ## Development Reloading
 
 Worker Mode persists bootstrap state (autoloader, DI container, DB connections) in memory, so `opcache.validate_timestamps=1` alone is not enough to pick up changes to code that ran during the outer scope. For development loops there are two options:
 
-- **Recycle every request.** Set `WORKER_MAX_REQUESTS=1` to re-execute the outer scope on every request. This trades the worker-mode performance win for FPM-style reload semantics — simplest and most reliable for active development.
-- **Keep the worker warm, reload request handlers.** Leave `WORKER_MAX_REQUESTS` at a higher value, enable `opcache.validate_timestamps=1`, and keep your bootstrap minimal. Code loaded inside the request callback will be refreshed by OPcache on the next request; code loaded once in the outer scope will not. See [OPcache and JIT → Development Settings](../php/opcache.md#development-settings) for the full list of caveats.
+- **Recycle every request.** Call `OxPHP\Server\Worker::current()->scheduleExit()` at the end of every handler invocation (gated on a `OXPHP_DEV` env flag, for example). The current request completes normally, then the worker exits and is respawned, re-executing the outer scope. This trades the worker-mode performance win for FPM-style reload semantics — simplest and most reliable for active development.
+- **Keep the worker warm, reload request handlers.** Skip `scheduleExit()` entirely, enable `opcache.validate_timestamps=1`, and keep your bootstrap minimal. Code loaded inside the request callback will be refreshed by OPcache on the next request; code loaded once in the outer scope will not. See [OPcache and JIT → Development Settings](../php/opcache.md#development-settings) for the full list of caveats.
 
 ## Troubleshooting
 
@@ -132,7 +133,6 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       - INDEX_FILE=index.php
       - WORKER_FILE=/var/www/html/worker.php
-      - WORKER_MAX_REQUESTS=10000
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
@@ -195,9 +195,9 @@ $kernel->shutdown();
 
 ## Best Practices
 
-- **Set both `WORKER_MAX_REQUESTS` and `WORKER_MAX_MEMORY_MIB`** to prevent unbounded resource growth. Start with values like `10000` requests and `128` MiB.
+- **Set `WORKER_MAX_MEMORY_MIB`** (e.g. `128`) so a leaking worker recycles automatically instead of consuming the host. Combine with `Worker::scheduleExit()` for application-driven recycling on top.
 - **Avoid storing per-request state in static properties or globals.** Since these persist across requests, leftover state from one request can leak into another.
-- **Test with `WORKER_MAX_REQUESTS=1` first**, then increase. This validates that your application handles the soft reset correctly before committing to long-lived workers.
+- **Validate the soft reset early.** Add `Worker::current()->scheduleExit()` to your handler under a development flag and exercise the application end-to-end — this catches state-leak bugs before you commit to long-lived workers.
 - **Handle database idle timeouts.** If your database driver disconnects after an idle period, catch the exception and reconnect, or use a connection pool that handles reconnection automatically.
 - **Keep the outer scope minimal.** Only bootstrap what truly needs to persist — autoloaders, configuration, and shared services. Defer request-specific setup to the callback.
 

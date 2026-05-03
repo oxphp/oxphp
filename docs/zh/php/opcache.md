@@ -75,7 +75,7 @@ opcache.jit=disable
 即使设置了 `validate_timestamps=1`，仍有几类变更需要重启容器（或回收 Worker）才能生效：
 
 - **预加载文件**（`opcache.preload`）在服务器启动时被链接进来，永远不会被重新验证。编辑 preload 文件后——重启容器。
-- **Worker 模式的 bootstrap 状态** ——在 [Worker 模式](../features/worker-mode.md) 中，自动加载器、DI 容器以及在外层作用域构建的所有对象都驻留在 Worker 内存中。OPcache 会重新编译已更改的类文件，但 Worker 不会重新执行其 bootstrap。在开发循环中，设置 `WORKER_MAX_REQUESTS=1` 以便每次请求后回收 Worker，这将重新运行外层作用域并加载所有变更。
+- **Worker 模式的 bootstrap 状态** ——在 [Worker 模式](../features/worker-mode.md) 中，自动加载器、DI 容器以及在外层作用域构建的所有对象都驻留在 Worker 内存中。OPcache 会重新编译已更改的类文件，但 Worker 不会重新执行其 bootstrap。在开发循环中，可在每次请求末尾调用 [`Worker::scheduleExit()`](worker-class.md#scheduleexit)（例如挂在 `OXPHP_DEV` 环境标记之下），让 Worker 回收并重新运行外层作用域以加载所有变更。
 - **框架级缓存** ——编译后的 Symfony 容器、Laravel 路由/配置/视图缓存、Composer 优化过的 classmap。它们是 `.php` 文件，OPcache 确实会重新验证，但其中的值仍指向过期的类路径或容器 ID。请运行框架的 `cache:clear` 命令——仅靠 OPcache 是不够的。
 - **非 PHP 文件** —— `.env`、`composer.json`、YAML/JSON 配置、在 OPcache 之外编译的模板。OPcache 只跟踪它自己编译过的文件；其他所有文件都需要重启。
 

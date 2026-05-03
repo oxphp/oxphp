@@ -52,8 +52,6 @@ pub struct Config {
     pub max_query_body: usize,
     /// Worker mode: PHP file that boots the application and calls oxphp_worker().
     pub worker_file: Option<PathBuf>,
-    /// Max requests before recycling a worker (0 = unlimited).
-    pub worker_max_requests: u64,
     /// Max memory (MB) before recycling a worker (0 = unlimited).
     pub worker_max_memory_mib: u64,
     /// Static file cache TTL in seconds. `None` = caching disabled.
@@ -176,10 +174,15 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
-        let worker_max_requests = std::env::var("WORKER_MAX_REQUESTS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+        // Deprecated since v0.5.0; removal in v0.6.0. Parsed-but-ignored so
+        // existing deployments keep booting while the warning prompts migration
+        // to WORKER_MAX_MEMORY_MIB or Worker::scheduleExit().
+        if std::env::var_os("WORKER_MAX_REQUESTS").is_some() {
+            tracing::warn!(
+                "WORKER_MAX_REQUESTS is deprecated and ignored — \
+                 use WORKER_MAX_MEMORY_MIB or Worker::scheduleExit()"
+            );
+        }
         let worker_max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -259,7 +262,6 @@ impl Config {
             access_log,
             max_query_body,
             worker_file,
-            worker_max_requests,
             worker_max_memory_mib,
             static_cache_ttl,
             static_cache_enabled,
@@ -304,7 +306,6 @@ impl Config {
             access_log: AccessLogLevel::Off,
             max_query_body: 512 * 1024,
             worker_file: None,
-            worker_max_requests: 0,
             worker_max_memory_mib: 0,
             static_cache_ttl: Some(2_592_000),
             static_cache_enabled: true,
@@ -356,7 +357,6 @@ impl Config {
             "max_query_body": self.max_query_body,
             "worker_mode": self.worker_file.is_some(),
             "worker_file": self.worker_file.as_ref().map(|p| p.display().to_string()),
-            "worker_max_requests": self.worker_max_requests,
             "worker_max_memory_mib": self.worker_max_memory_mib,
             "static_cache_ttl": self.static_cache_ttl,
             "static_cache_enabled": self.static_cache_enabled,

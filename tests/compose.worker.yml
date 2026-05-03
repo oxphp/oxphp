@@ -1,7 +1,7 @@
 # Worker mode: persistent PHP workers with a fixed entry file.
 # WORKER_FILE boots the application once; workers persist across requests
-# without php_request_shutdown between them. WORKER_MAX_REQUESTS=50 recycles
-# each worker after 50 requests to prevent memory leaks.
+# without php_request_shutdown between them. Workers recycle on memory
+# pressure (WORKER_MAX_MEMORY_MIB) or on explicit Worker::scheduleExit().
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.worker.yml up
@@ -24,7 +24,6 @@ services:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
       WORKER_FILE: /var/www/html/worker/worker_entry.php
-      WORKER_MAX_REQUESTS: 50
       # shared/test_channel_fiber_producer_consumer + shutdown_drain dispatch
       # producers/consumers via oxphp_async(); without async workers the pool
       # is disabled and they fatally throw OxPHP\Async\Exception.

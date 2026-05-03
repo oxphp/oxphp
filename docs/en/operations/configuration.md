@@ -50,10 +50,9 @@ In dynamic mode, OxPHP scales workers up when all are busy and scales down when 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_FILE` | *(unset)* | Path to the worker PHP script. Enables persistent worker mode when set |
-| `WORKER_MAX_REQUESTS` | `0` | Maximum requests per worker before recycling. `0` = unlimited |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory in MiB per worker before recycling. `0` = unlimited |
 
-When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are automatically recycled when they reach the request or memory limit.
+When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB`, or on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
 
 ## SAPI / PHP
 
@@ -196,7 +195,6 @@ LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
 WORKER_FILE=../worker.php
 PHP_WORKERS=8
-WORKER_MAX_REQUESTS=10000
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -246,7 +244,6 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode": false,
   "worker_file": null,
-  "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,
