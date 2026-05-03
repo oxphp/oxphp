@@ -1351,6 +1351,14 @@ PHP_FUNCTION(oxphp_worker)
 
             oxphp_soft_reset();
 
+            /* Increment counter at request START so getRequestCount() inside
+             * the handler observes the current request index (1-based). Also
+             * syncs ctx->requests_done on the fast path (was only synced on
+             * the event-loop path before — latent bug fix). */
+            oxphp_bridge_increment_requests_done();
+            sched.total_requests_done = oxphp_bridge_get_requests_done();
+            ctx->requests_done = sched.total_requests_done;
+
             /* Create or reuse a fiber for the request */
             oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, &fci, &fcc);
             if (!fiber) break;
@@ -1381,6 +1389,9 @@ PHP_FUNCTION(oxphp_worker)
 
             /* Sync scheduler-level counters */
             consecutive_errors = sched.consecutive_errors;
+            /* sched.total_requests_done is now mirrored from bridge state
+             * at request entry inside oxphp_scheduler_tick; sync ctx for
+             * the exit-condition check below. */
             ctx->requests_done = sched.total_requests_done;
 
             if (rc == 0) {
