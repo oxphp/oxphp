@@ -1399,8 +1399,7 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
              * the handler observes the current request index (1-based). Also
              * syncs ctx->requests_done on the fast path (was only synced on
              * the event-loop path before — latent bug fix). */
-            oxphp_bridge_increment_requests_done();
-            sched.total_requests_done = oxphp_bridge_get_requests_done();
+            sched.total_requests_done = oxphp_bridge_increment_requests_done();
             ctx->requests_done = sched.total_requests_done;
 
             /* Create or reuse a fiber for the request */

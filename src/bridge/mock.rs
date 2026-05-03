@@ -883,8 +883,12 @@ pub unsafe extern "C" fn oxphp_bridge_get_worker_start_time() -> f64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_bridge_increment_requests_done() {
-    REQUESTS_DONE.with(|c| c.set(c.get() + 1));
+pub unsafe extern "C" fn oxphp_bridge_increment_requests_done() -> u64 {
+    REQUESTS_DONE.with(|c| {
+        let v = c.get() + 1;
+        c.set(v);
+        v
+    })
 }
 
 #[no_mangle]

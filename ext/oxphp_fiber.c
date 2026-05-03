@@ -484,8 +484,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
         /* Increment counter at request START (mirror of fast path in
          * oxphp_sapi.c). Keeps sched->total_requests_done as a mirror of
          * bridge state, used by exit-condition checks downstream. */
-        oxphp_bridge_increment_requests_done();
-        sched->total_requests_done = oxphp_bridge_get_requests_done();
+        sched->total_requests_done = oxphp_bridge_increment_requests_done();
 
         /* Create or reuse fiber */
         oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(

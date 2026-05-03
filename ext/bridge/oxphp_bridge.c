@@ -1838,8 +1838,8 @@ uint64_t oxphp_bridge_get_requests_done(void) {
     return ctx.requests_done;
 }
 
-void oxphp_bridge_increment_requests_done(void) {
-    ctx.requests_done++;
+uint64_t oxphp_bridge_increment_requests_done(void) {
+    return ++ctx.requests_done;
 }
 
 uint64_t oxphp_bridge_get_memory_usage(void) {
