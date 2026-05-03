@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <inttypes.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -1846,23 +1847,24 @@ uint64_t oxphp_bridge_get_memory_usage(void) {
 
 uint64_t oxphp_bridge_get_rss_bytes(void) {
 #if defined(__linux__)
-    FILE *fp = fopen("/proc/self/status", "r");
+    /* /proc/self/statm is the machine-readable RSS source: ~30 bytes,
+     * 7 space-separated page counts. Field #2 is resident pages. */
+    FILE *fp = fopen("/proc/self/statm", "r");
     if (fp) {
-        char line[256];
-        uint64_t kb = 0;
-        while (fgets(line, sizeof(line), fp)) {
-            if (strncmp(line, "VmRSS:", 6) == 0) {
-                sscanf(line + 6, " %" SCNu64 " kB", &kb);
-                break;
-            }
-        }
+        unsigned long resident_pages = 0;
+        int rc = fscanf(fp, "%*lu %lu", &resident_pages);
         fclose(fp);
-        if (kb > 0) {
-            return kb * 1024ULL;
+        if (rc == 1 && resident_pages > 0) {
+            static long page_size = 0;  /* cache: never changes within a process */
+            if (page_size == 0) {
+                page_size = sysconf(_SC_PAGESIZE);
+                if (page_size <= 0) page_size = 4096;  /* defensive default */
+            }
+            return (uint64_t)resident_pages * (uint64_t)page_size;
         }
-        /* fall through: /proc readable but no VmRSS line, or value zero */
+        /* fall through: statm readable but parse failed or zero */
     }
-    /* Linux fallback when /proc/self/status is unavailable or unparseable
+    /* Linux fallback when /proc/self/statm is unavailable or unparseable
      * (restrictive seccomp, certain container runtimes). */
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
