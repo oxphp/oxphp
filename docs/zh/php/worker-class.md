@@ -14,7 +14,7 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 | 方法 | 说明 |
 |------|------|
 | `Worker::current(): self` | 返回当前 OS 线程的单例句柄。 |
-| `Worker::isWorkerMode(): bool` | 服务器运行在 Worker 模式（即设置了 `WORKER_FILE`）时返回 `true`。 |
+| `Worker::isWorkerMode(): bool` | 服务器运行在 Worker 模式（即 `WORKER_MODE_ENABLED=true`）时返回 `true`。 |
 | `getId(): int` | 当前 OS 线程的 Worker 数字标识符，范围为 `0..N-1`。 |
 | `getStartTime(): float` | 此 OS Worker 线程启动时的 Unix 时间戳（秒）。 |
 | `getRequestCount(): int` | 此 OS 线程已处理的请求数，从 1 开始计数。在两种模式下都会增长。 |
@@ -103,7 +103,7 @@ if (getenv('OXPHP_DEV') === '1') {
 
 ### Worker 入口点
 
-在 `WORKER_FILE` 脚本中，调用 `serve()` 进入请求循环。
+在 Worker 引导脚本中调用 `serve()` 进入请求循环。
 
 ```php
 <?php

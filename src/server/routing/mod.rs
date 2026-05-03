@@ -126,11 +126,22 @@ pub struct RouteConfig {
 }
 
 impl RouteConfig {
-    /// Create route config from server config.
+    /// Create route config.
+    ///
+    /// Router selection is driven by `(worker_mode_enabled, entry_file extension)`:
+    /// - worker mode → `TraditionalRouter`; the worker route fallback (set later
+    ///   via [`set_worker_route`]) catches every unmatched request,
+    /// - non-worker mode + `*.php` entry → `FrameworkRouter` (front controller),
+    /// - non-worker mode + non-`.php` entry → `SpaRouter` (static fallback),
+    /// - non-worker mode + no entry → `TraditionalRouter` (direct file mapping).
     ///
     /// Panics if the document root cannot be canonicalized, since symlink
     /// escape protection requires a valid, resolvable document root path.
-    pub fn new(config: &ServerConfig) -> Self {
+    pub fn new(
+        config: &ServerConfig,
+        entry_file: Option<&Path>,
+        worker_mode_enabled: bool,
+    ) -> Self {
         let canonical_root = std::fs::canonicalize(&config.document_root).unwrap_or_else(|e| {
             panic!(
                 "Fatal: cannot canonicalize document_root '{}': {}. \
@@ -142,19 +153,26 @@ impl RouteConfig {
 
         let document_root = Arc::new(config.document_root.clone());
 
-        let mode = match config.index_file.as_deref() {
-            None | Some("") => Mode::Traditional(TraditionalRouter::new(&document_root)),
-            Some(name) if name.ends_with(".php") => {
-                Mode::Framework(FrameworkRouter::new(&document_root, name))
+        let mode = if worker_mode_enabled {
+            Mode::Traditional(TraditionalRouter::new(&document_root))
+        } else {
+            match entry_file.and_then(|p| {
+                let ext = p.extension().and_then(|s| s.to_str())?;
+                let name = p.file_name().and_then(|s| s.to_str())?;
+                Some((ext.to_ascii_lowercase(), name))
+            }) {
+                None => Mode::Traditional(TraditionalRouter::new(&document_root)),
+                Some((ext, name)) if ext == "php" => {
+                    Mode::Framework(FrameworkRouter::new(&document_root, name))
+                }
+                Some((_, name)) => Mode::Spa(SpaRouter::new(&document_root, name)),
             }
-            Some(name) => Mode::Spa(SpaRouter::new(&document_root, name)),
         };
 
-        let php_deny =
-            crate::config::PhpDeny::from_env(&canonical_root, config.index_file.as_deref())
-                .unwrap_or_else(|e| {
-                    panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
-                });
+        let php_deny = crate::config::PhpDeny::from_env(&canonical_root, entry_file)
+            .unwrap_or_else(|e| {
+                panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
+            });
 
         Self {
             document_root,
@@ -183,9 +201,9 @@ impl RouteConfig {
         Arc::clone(&self.document_root)
     }
 
-    /// Set the worker file for worker mode routing. When set, all unmatched
-    /// requests fall back to this PHP file before returning NotFound.
-    pub fn set_worker_file(&mut self, path: PathBuf) {
+    /// Set the worker entry script for worker-mode routing. When set, all
+    /// unmatched requests fall back to this PHP file before returning NotFound.
+    pub fn set_worker_route(&mut self, path: PathBuf) {
         self.worker_route = Some(RouteResult::Execute(path, None, None));
     }
 

@@ -13,7 +13,8 @@ OxPHP настраивается исключительно через пере�
 |-----------|-------------|---------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Адрес и порт основного HTTP-сервера |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневая директория для обслуживания файлов и PHP-скриптов |
-| `INDEX_FILE` | *(не задано)* | Режим маршрутизации: не задано = Traditional, `*.php` = Framework, любое другое = SPA. См. [Маршрутизация](../features/routing.md) |
+| `ENTRY_FILE` | *(не задано)* | Единый канонический entry-скрипт. Не задано = Traditional, `*.php` = Framework, не-`.php` = статический фолбэк (SPA). При `WORKER_MODE_ENABLED=true` = бутстрап воркера. Резолвится относительно `DOCUMENT_ROOT` (относительные пути и `..` разрешены; абсолютные используются как есть). См. [Маршрутизация](../features/routing.md) |
+| `WORKER_MODE_ENABLED` | `false` | Включает режим постоянных воркеров. Требует, чтобы `ENTRY_FILE` указывал на `.php`-скрипт. Принимает `true`, `1`, `yes` |
 | `MAX_CONNECTIONS` | `10000` | Максимальное количество одновременных TCP-соединений |
 | `TOKIO_WORKERS` | CPU / 2 (мин. 1) | Потоки асинхронного ввода-вывода. `1` = однопоточный, `N > 1` = фиксированное число потоков, не задано = авто (CPU / 2, мин. 1) |
 
@@ -49,10 +50,21 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
-| `WORKER_FILE` | *(не задано)* | Путь к PHP-скрипту воркера. При задании активирует постоянный режим worker |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Максимальный объём памяти в МиБ на воркер до его перезапуска. `0` = без ограничений |
 
-При задании `WORKER_FILE` PHP-процессы остаются живыми между запросами, сохраняя состояние инициализации (автозагрузчики, соединения с базой данных) в памяти. Воркеры автоматически перезапускаются при превышении `WORKER_MAX_MEMORY_MIB` либо по запросу приложения через [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Старая переменная `WORKER_MAX_REQUESTS` объявлена устаревшей и игнорируется — не задавайте её или мигрируйте на `Worker::scheduleExit()`.
+Установите `WORKER_MODE_ENABLED=true` и укажите `ENTRY_FILE` на ваш скрипт начальной загрузки воркера (например, `ENTRY_FILE=worker.php` или `ENTRY_FILE=../worker.php`). PHP-процессы остаются живыми между запросами, сохраняя состояние инициализации (автозагрузчики, соединения с базой) в памяти. Воркеры автоматически перезапускаются при превышении `WORKER_MAX_MEMORY_MIB` либо по запросу приложения через [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Старая переменная `WORKER_MAX_REQUESTS` объявлена устаревшей и игнорируется — не задавайте её или мигрируйте на `Worker::scheduleExit()`.
+
+### Устаревшие: `INDEX_FILE` и `WORKER_FILE`
+
+Старые переменные `INDEX_FILE` и `WORKER_FILE` всё ещё парсятся для обратной совместимости. При установке они выводят `WARN` на старте и маппятся на новую модель:
+
+| Устаревшая | Современный эквивалент |
+|---|---|
+| `INDEX_FILE=index.php` | `ENTRY_FILE=index.php` |
+| `INDEX_FILE=index.html` | `ENTRY_FILE=index.html` |
+| `WORKER_FILE=/path/worker.php` | `WORKER_MODE_ENABLED=true ENTRY_FILE=/path/worker.php` |
+
+Если заданы и старые, и новые переменные — побеждают `ENTRY_FILE` / `WORKER_MODE_ENABLED`. Мигрируйте в удобном темпе; старые формы будут удалены в одном из будущих релизов.
 
 ## SAPI / PHP
 
@@ -81,7 +93,7 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 |------------|-------------|----------|
 | `FRAME_OPTIONS` | `DENY` | Защита от кликджекинга. `DENY` запрещает встраивание в фреймы, `SAMEORIGIN` разрешает встраивание с того же домена, `off` отключает (используйте, если управляете фреймами через собственный CSP). Устанавливает оба заголовка: `X-Frame-Options` и `Content-Security-Policy: frame-ancestors` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные сети обратных прокси (CIDR через запятую или `private`). Когда задано, OxPHP извлекает реальный IP клиента из `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) или `X-Forwarded-For` методом rightmost-non-trusted. Также обрабатывает `X-Forwarded-Proto` и `X-Forwarded-Host` для `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME` и `SERVER_PORT`. Не задано = функция отключена |
-| `PHP_DENY_DIRS` | *(не задано)* | Список glob-паттернов через запятую, `.php` файлы в которых не должны выполняться по прямому URI (например, `/uploads/**,/cache/**`). Работает только в режиме Traditional — при заданном `INDEX_FILE` игнорируется с предупреждением на старте. Сопоставление идёт до обращения к диску, поэтому запрещённые пути возвращают одинаковый ответ вне зависимости от наличия файла (нет existence oracle). См. [Deny-лист выполнения PHP](../security/php-deny-dirs.md) |
+| `PHP_DENY_DIRS` | *(не задано)* | Список glob-паттернов через запятую, `.php` файлы в которых не должны выполняться по прямому URI (например, `/uploads/**,/cache/**`). Работает только в режиме direct-mapping (без `ENTRY_FILE`) — при заданном `ENTRY_FILE` игнорируется с предупреждением на старте, поскольку front-controller, SPA и worker модели уже маршрутизируют каждый запрос через один доверенный скрипт. Сопоставление идёт до обращения к диску, поэтому запрещённые пути возвращают одинаковый ответ вне зависимости от наличия файла (нет existence oracle). См. [Deny-лист выполнения PHP](../security/php-deny-dirs.md) |
 | `PHP_DENY_FALLBACK` | `404` | Что возвращать при совпадении с `PHP_DENY_DIRS`. Либо HTTP-статус `400`–`599` (работает вместе с `ERROR_PAGES_DIR` для кастомного HTML), либо URI-путь с ведущим `/` к PHP-скрипту внутри `DOCUMENT_ROOT`. Скрипт получает `OXPHP_DENIED_PATH` и `OXPHP_DENIED_PATTERN` в `$_SERVER`. Валидируется при запуске: файл должен существовать, канонический путь — быть внутри `DOCUMENT_ROOT`, и сам скрипт не должен подпадать под `PHP_DENY_DIRS` (защита от зацикливания) |
 
 Специальное значение `private` раскрывается во все частные сети RFC-1918, loopback и link-local (IPv4 и IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
@@ -171,7 +183,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 PHP_WORKERS=8
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -193,7 +205,8 @@ TRUSTED_PROXIES=private
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-WORKER_FILE=../worker.php
+WORKER_MODE_ENABLED=true
+ENTRY_FILE=../worker.php
 PHP_WORKERS=8
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
@@ -209,7 +222,7 @@ LISTEN_ADDR=0.0.0.0:443
 TLS_CERT=/etc/ssl/oxphp/cert.pem
 TLS_KEY=/etc/ssl/oxphp/key.pem
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 ```
 
 ## Просмотр активной конфигурации
@@ -224,7 +237,7 @@ curl -s http://localhost:9090/config | jq .
 {
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
-  "index_file": "index.php",
+  "entry_file": "/var/www/html/public/index.php",
   "log_level": "warn",
   "executor_type": "sapi",
   "php_workers": "8",
@@ -242,8 +255,7 @@ curl -s http://localhost:9090/config | jq .
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
-  "worker_mode": false,
-  "worker_file": null,
+  "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,
@@ -272,7 +284,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## См. также
 
-- [Маршрутизация](../features/routing.md) — режимы маршрутизации и поведение `INDEX_FILE`
+- [Маршрутизация](../features/routing.md) — режимы маршрутизации и поведение `ENTRY_FILE`
 - [Проверки работоспособности](health-checks.md) — конечные точки внутреннего сервера
 - [Метрики](metrics.md) — справочник по метрикам в формате Prometheus
 - [Штатное завершение работы](graceful-shutdown.md) — влияние `DRAIN_TIMEOUT_SECONDS` на завершение

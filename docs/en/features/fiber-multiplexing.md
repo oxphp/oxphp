@@ -31,7 +31,7 @@ Fiber multiplexing activates automatically when worker mode is enabled. There ar
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WORKER_FILE` | *(unset)* | Path to the worker script. Setting this enables worker mode and fiber multiplexing |
+| `WORKER_MODE_ENABLED` | `false` | Set to `true` and point `ENTRY_FILE` at a `.php` bootstrap to enable worker mode and fiber multiplexing |
 | `PHP_WORKERS` | CPU / 2 (min 1) | Number of worker threads. Each thread runs its own independent scheduler with up to 256 concurrent fibers |
 
 The maximum number of concurrent fibers per worker thread is 256. With 4 worker threads, OxPHP can handle up to 1,024 in-flight requests simultaneously.
@@ -183,7 +183,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - PHP_WORKERS=4
       - ASYNC_WORKERS=8
 ```
@@ -229,7 +230,7 @@ ASYNC_QUEUE_CAPACITY=512
 
 Fiber multiplexing only works in worker mode. In traditional mode, `oxphp_sleep()` falls back to a blocking `usleep()`.
 
-**Fix:** Enable worker mode by setting `WORKER_FILE`.
+**Fix:** Enable worker mode by setting `WORKER_MODE_ENABLED=true`.
 
 ### High memory usage with many concurrent requests
 

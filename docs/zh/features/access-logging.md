@@ -136,7 +136,7 @@ services:
       - ./src:/var/www/html:ro
     environment:
       ACCESS_LOG: "all"
-      INDEX_FILE: "index.php"
+      ENTRY_FILE: "index.php"
       INTERNAL_ADDR: "0.0.0.0:9090"
 ```
 

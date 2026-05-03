@@ -13,7 +13,8 @@ OxPHP 完全通过环境变量进行配置。无需管理任何配置文件—�
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | 主 HTTP 服务器的地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件和 PHP 脚本的根目录 |
-| `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = Traditional，`*.php` = Framework，其他任何值 = SPA。详见[路由](../features/routing.md) |
+| `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = 直接文件映射。`*.php` = 前端控制器。非 `.php` = 静态回退（SPA）。当 `WORKER_MODE_ENABLED=true` 时 = Worker 引导脚本。相对路径基于 `DOCUMENT_ROOT` 解析（允许相对路径和 `..`，绝对路径按原样使用）。详见[路由](../features/routing.md) |
+| `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。要求 `ENTRY_FILE` 指向 `.php` 脚本。接受 `true`、`1`、`yes` |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数 |
 | `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N > 1` = 固定线程数，未设置 = 自动检测（CPU / 2，最少 1） |
 
@@ -49,10 +50,21 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本的路径。设置后启用持久化工作进程模式 |
 | `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前允许使用的最大内存（MiB）。`0` = 不限制 |
 
-当 `WORKER_FILE` 设置后，PHP 进程在多个请求间保持存活，将引导状态（自动加载器、数据库连接）保留在内存中。当达到 `WORKER_MAX_MEMORY_MIB` 时工作进程会被自动回收，应用层可通过 [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) 主动触发回收。早期版本的 `WORKER_MAX_REQUESTS` 已废弃并被忽略——请勿设置该变量，或迁移到 `Worker::scheduleExit()`。
+设置 `WORKER_MODE_ENABLED=true` 并将 `ENTRY_FILE` 指向您的 Worker 引导脚本（例如 `ENTRY_FILE=worker.php` 或 `ENTRY_FILE=../worker.php`）。PHP 进程将在多个请求间保持存活，将引导状态（自动加载器、数据库连接）保留在内存中。当达到 `WORKER_MAX_MEMORY_MIB` 时工作进程会被自动回收，应用层可通过 [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) 主动触发回收。早期版本的 `WORKER_MAX_REQUESTS` 已废弃并被忽略 —— 请勿设置该变量，或迁移到 `Worker::scheduleExit()`。
+
+### 已弃用：`INDEX_FILE` 与 `WORKER_FILE`
+
+旧的 `INDEX_FILE` 和 `WORKER_FILE` 仍会被解析以保持向后兼容。设置后会在启动时输出 `WARN` 日志，并映射到新模型：
+
+| 旧形式 | 当前等效形式 |
+|---|---|
+| `INDEX_FILE=index.php` | `ENTRY_FILE=index.php` |
+| `INDEX_FILE=index.html` | `ENTRY_FILE=index.html` |
+| `WORKER_FILE=/path/worker.php` | `WORKER_MODE_ENABLED=true ENTRY_FILE=/path/worker.php` |
+
+若同时设置了新旧变量，`ENTRY_FILE` / `WORKER_MODE_ENABLED` 优先；旧形式将在后续版本中移除。
 
 ## SAPI / PHP
 
@@ -81,7 +93,7 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 |------|--------|------|
 | `FRAME_OPTIONS` | `DENY` | 点击劫持防护。`DENY` 禁止所有框架嵌入，`SAMEORIGIN` 允许同源嵌入，`off` 关闭（适用于通过自定义 CSP 管理框架策略的场景）。同时设置 `X-Frame-Options` 和 `Content-Security-Policy: frame-ancestors` |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任的反向代理网络（逗号分隔 CIDR 或 `private`）。设置后，OxPHP 使用 rightmost-non-trusted 算法从 `Forwarded`（[RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)）或 `X-Forwarded-For` 中提取真实客户端 IP。同时处理 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 以设置 `$_SERVER['HTTPS']`、`REQUEST_SCHEME`、`SERVER_NAME` 和 `SERVER_PORT`。未设置 = 功能禁用 |
-| `PHP_DENY_DIRS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**`）。仅在传统模式下生效 —— 若同时设置了 `INDEX_FILE`，会在启动时发出警告并忽略。匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。参见 [PHP 执行拒绝名单](../security/php-deny-dirs.md) |
+| `PHP_DENY_DIRS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**`）。仅在直接文件映射模式（未设置 `ENTRY_FILE`）下生效 —— 若同时设置了 `ENTRY_FILE`，会在启动时发出警告并忽略，因为前端控制器、SPA 与 Worker 模式都已通过单一受信脚本路由所有请求。匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。参见 [PHP 执行拒绝名单](../security/php-deny-dirs.md) |
 | `PHP_DENY_FALLBACK` | `404` | 命中 `PHP_DENY_DIRS` 时返回什么。可以是 HTTP 状态码 `400`–`599`（与 `ERROR_PAGES_DIR` 配合可自定义 HTML），也可以是以 `/` 开头、指向 `DOCUMENT_ROOT` 内 PHP 回退脚本的 URI 路径。脚本在 `$_SERVER` 中接收 `OXPHP_DENIED_PATH` 与 `OXPHP_DENIED_PATTERN`。启动时严格校验：文件必须存在、规范化路径必须位于 `DOCUMENT_ROOT` 内，且脚本自身不得命中 `PHP_DENY_DIRS`（防止循环） |
 
 特殊值 `private` 展开为所有 RFC-1918 私有网络、回环和链路本地地址（IPv4 和 IPv6）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10`。
@@ -171,7 +183,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 PHP_WORKERS=8
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -193,7 +205,8 @@ STATIC_CACHE_TTL=30d
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-WORKER_FILE=../worker.php
+WORKER_MODE_ENABLED=true
+ENTRY_FILE=../worker.php
 PHP_WORKERS=8
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
@@ -209,7 +222,7 @@ LISTEN_ADDR=0.0.0.0:443
 TLS_CERT=/etc/ssl/oxphp/cert.pem
 TLS_KEY=/etc/ssl/oxphp/key.pem
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 ```
 
 ## 查看当前配置
@@ -224,7 +237,7 @@ curl -s http://localhost:9090/config | jq .
 {
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
-  "index_file": "index.php",
+  "entry_file": "/var/www/html/public/index.php",
   "log_level": "warn",
   "executor_type": "sapi",
   "php_workers": "8",
@@ -242,8 +255,7 @@ curl -s http://localhost:9090/config | jq .
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
-  "worker_mode": false,
-  "worker_file": null,
+  "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,
@@ -272,7 +284,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## 参见
 
-- [路由](../features/routing.md) — 路由模式与 `INDEX_FILE` 行为
+- [路由](../features/routing.md) — 路由模式与 `ENTRY_FILE` 行为
 - [健康检查](health-checks.md) — 内部服务器端点
 - [指标](metrics.md) — Prometheus 兼容指标参考
 - [优雅关闭](graceful-shutdown.md) — `DRAIN_TIMEOUT_SECONDS` 如何影响关闭流程

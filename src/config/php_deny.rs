@@ -64,10 +64,12 @@ pub struct PhpDeny {
 impl PhpDeny {
     /// Parse from environment. Returns `Ok(None)` when `PHP_DENY_DIRS` is unset
     /// or empty. Returns `Err` for malformed input. Emits a warn-and-disable
-    /// path when `index_file` is set (Framework/SPA modes already safe).
+    /// path when an `entry_file` is configured — front-controller, SPA, and
+    /// worker modes route every request through one trusted script, so
+    /// arbitrary `.php` files in denied dirs cannot be invoked directly.
     pub fn from_env(
         document_root: &Path,
-        index_file: Option<&str>,
+        entry_file: Option<&Path>,
     ) -> Result<Option<Self>, BoxError> {
         let raw = std::env::var("PHP_DENY_DIRS").unwrap_or_default();
         let raw = raw.trim();
@@ -75,9 +77,9 @@ impl PhpDeny {
             return Ok(None);
         }
 
-        if index_file.is_some_and(|s| !s.is_empty()) {
+        if entry_file.is_some() {
             tracing::warn!(
-                "PHP_DENY_DIRS is set but INDEX_FILE is also set — feature is Traditional-mode only, ignoring PHP_DENY_DIRS"
+                "PHP_DENY_DIRS is set but ENTRY_FILE is also set — feature is direct-mapping-only, ignoring PHP_DENY_DIRS"
             );
             return Ok(None);
         }
@@ -371,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn env_with_index_file_warns_and_disables() {
+    fn env_with_entry_file_warns_and_disables() {
         with_env(
             &[
                 ("PHP_DENY_DIRS", Some("/uploads/**")),
@@ -379,7 +381,8 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), Some("index.php")).unwrap();
+                let entry = Path::new("/var/www/html/public/index.php");
+                let deny = PhpDeny::from_env(dir.path(), Some(entry)).unwrap();
                 assert!(deny.is_none());
             },
         );

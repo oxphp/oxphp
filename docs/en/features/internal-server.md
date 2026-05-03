@@ -242,7 +242,7 @@ The server is bound to `127.0.0.1`, which is only accessible from inside the con
 
 ### Metrics not showing worker mode or async metrics
 
-Worker mode metrics appear only when `WORKER_FILE` is set. Async metrics appear only when `ASYNC_WORKERS > 0` and at least one task has been dispatched or rejected.
+Worker mode metrics appear only when worker mode is enabled (`WORKER_MODE_ENABLED=true`). Async metrics appear only when `ASYNC_WORKERS > 0` and at least one task has been dispatched or rejected.
 
 ## See Also
 

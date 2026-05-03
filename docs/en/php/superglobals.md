@@ -104,9 +104,9 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 
 | Routing mode | When set | Value |
 |---|---|---|
-| **Traditional** (`INDEX_FILE` unset) | Only when the URI contains `.php/` and the script prefix exists on disk | Tail after the script segment |
-| **Framework** (`INDEX_FILE=index.php`) | **Always** — every request is rewritten onto the front controller | Full original URI |
-| **SPA** (`INDEX_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
+| **Traditional** (`ENTRY_FILE` unset) | Only when the URI contains `.php/` and the script prefix exists on disk | Tail after the script segment |
+| **Framework** (`ENTRY_FILE=index.php`) | **Always** — every request is rewritten onto the front controller | Full original URI |
+| **SPA** (`ENTRY_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
 
 #### Traditional mode examples
 

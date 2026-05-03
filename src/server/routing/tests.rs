@@ -19,13 +19,10 @@ fn setup_test_dir() -> TempDir {
     dir
 }
 
-fn make_config(dir: &Path, index_file: Option<&str>) -> RouteConfig {
-    let config = ServerConfig::new(
-        "0.0.0.0:8080".to_string(),
-        dir.to_path_buf(),
-        index_file.map(|s| s.to_string()),
-    );
-    RouteConfig::new(&config)
+fn make_config(dir: &Path, entry_file: Option<&str>) -> RouteConfig {
+    let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.to_path_buf());
+    let entry_path = entry_file.map(|name| dir.join(name));
+    RouteConfig::new(&config, entry_path.as_deref(), false)
 }
 
 /// Test helper that mirrors the dot-path screen inside `resolve_request`:
@@ -1051,7 +1048,7 @@ mod php_deny_integration {
     fn setup(
         dir_layout: &[(&str, &[u8])],
         env: &[(&str, Option<&str>)],
-        index_file: Option<&str>,
+        entry_file: Option<&str>,
     ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
         // Hold the lock for the full setup so env mutations don't race other tests.
         // Guard is dropped on function exit — by then RouteConfig has captured
@@ -1080,12 +1077,12 @@ mod php_deny_integration {
         let cfg = ServerConfig {
             listen_addr: "127.0.0.1:0".to_string(),
             document_root: dir.path().to_path_buf(),
-            index_file: index_file.map(|s| s.to_string()),
             header_read_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(120),
         };
+        let entry_path = entry_file.map(|name| dir.path().join(name));
         let cache = Arc::new(FileCache::new(1024));
-        let rc = super::RouteConfig::new(&cfg);
+        let rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), false);
 
         // Restore env so other tests aren't polluted.
         for (k, prev_val) in prev {

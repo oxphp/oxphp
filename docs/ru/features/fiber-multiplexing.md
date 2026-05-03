@@ -31,7 +31,7 @@ OxPHP использует PHP Fibers для одновременной обра
 
 | Переменная | По умолчанию | Описание |
 |------------|-------------|----------|
-| `WORKER_FILE` | *(не задана)* | Путь к скрипту воркера. Установка включает worker mode и мультиплексирование файберов |
+| `WORKER_MODE_ENABLED` | `false` | Установите в `true` и укажите `ENTRY_FILE` на `.php`-бутстрап, чтобы включить режим воркера и fiber multiplexing |
 | `PHP_WORKERS` | CPU / 2 (мин. 1) | Количество потоков воркеров. Каждый поток запускает свой независимый планировщик с поддержкой до 256 одновременных файберов |
 
 Максимальное количество одновременных файберов на поток воркера — 256. При 4 потоках воркеров OxPHP может обрабатывать до 1 024 запросов одновременно.
@@ -179,7 +179,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - PHP_WORKERS=4
       - ASYNC_WORKERS=8
 ```
@@ -224,7 +225,7 @@ ASYNC_QUEUE_CAPACITY=512
 
 Мультиплексирование файберов работает только в worker mode. В традиционном режиме `oxphp_sleep()` использует блокирующий `usleep()`.
 
-**Исправление:** включите worker mode, установив `WORKER_FILE`.
+**Исправление:** включите режим воркера: `WORKER_MODE_ENABLED=true` и `ENTRY_FILE=` путь к PHP-скрипту.
 
 ### Высокое потребление памяти
 
@@ -251,4 +252,4 @@ fiber.stack_size = 512K
 - [Асинхронные промисы](async-promises.md) -- фоновый пул потоков для выгрузки блокирующего I/O
 - [SSE](sse.md) -- потоковая передача в реальном времени с кооперативным сном файберов
 - [PHP-функции](../php/functions.md) -- `oxphp_sleep()`, `oxphp_usleep()` и другие файбер-совместимые функции
-- [Справочник конфигурации](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `ASYNC_WORKERS`
+- [Справочник конфигурации](../operations/configuration.md) -- `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `ASYNC_WORKERS`

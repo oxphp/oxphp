@@ -128,7 +128,7 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
       - STATIC_CACHE_TTL=1y
 ```
 

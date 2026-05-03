@@ -106,7 +106,7 @@ services:
       - ./errors:/var/www/errors:ro
     environment:
       ERROR_PAGES_DIR: "/var/www/errors"
-      INDEX_FILE: "index.php"
+      ENTRY_FILE: "index.php"
 ```
 
 目录结构：

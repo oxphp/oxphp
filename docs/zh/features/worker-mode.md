@@ -9,20 +9,23 @@ Worker 模式运行持久化 PHP 进程，这些进程只启动一次并处理�
 
 ## 工作原理
 
-1. **设置 `WORKER_FILE`** 为您的引导脚本路径。这将为池中所有 PHP Worker 启用 Worker 模式。
+1. **设置 `WORKER_MODE_ENABLED=true`** 并将 **`ENTRY_FILE`** 指向您的引导脚本路径。这将为池中所有 PHP Worker 启用 Worker 模式。
 2. **PHP 启动并只运行一次外部作用域** — 自动加载器注册、配置加载、数据库连接以及任何其他初始化代码只执行一次。
 3. **调用 `oxphp_worker(callback)`** 进入请求循环。OxPHP 开始将传入的 HTTP 请求分发到您的回调函数。
 4. **请求之间**，超全局变量（`$_GET`、`$_POST`、`$_SERVER`、`$_COOKIE`、`$_FILES`、`php://input`）、输出缓冲区和响应头会自动重置。软重置会清理每次请求的状态，同时保留外部作用域中已引导的资源。
 5. **外部作用域持久化** — 在 `oxphp_worker()` 之前定义的变量、静态属性、数据库连接和自动加载器在该 Worker 处理的所有请求中保持可用。
 
-> **注意：** 设置 `WORKER_FILE` 还会更改路由行为。所有不匹配磁盘上静态文件的请求都会分发到 Worker，而不是返回 404。详情请参见[路由](routing.md)。
+> **注意：** Worker 模式还会更改路由行为。所有不匹配磁盘上静态文件的请求都会分发到 Worker，而不是返回 404。详情请参见[路由](routing.md)。
 
 ## 配置
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `WORKER_FILE` | *(未设置)* | Worker PHP 脚本的路径。设置此项将启用 Worker 模式 |
+| `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。接受 `true`、`1`、`yes`。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
+| `ENTRY_FILE` | *(未设置)* | Worker 引导脚本的路径。相对路径基于 `DOCUMENT_ROOT` 解析；允许 `..` 段和绝对路径（Worker 引导位于公开目录之外是受支持的部署方式） |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Worker 回收前每个 Worker 的最大 PHP 内存（MiB）。`0` = 无限制 |
+
+> **从 `WORKER_FILE` 迁移：** 旧变量仍会被解析（启动时输出 `WARN`），其行为等同于 `WORKER_MODE_ENABLED=true ENTRY_FILE=$WORKER_FILE`。新部署应使用上述显式组合；旧形式将在后续版本中移除。
 
 应用层主动回收可在请求处理器中调用 [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit)。当前请求正常完成后 Worker 会安全退出。
 
@@ -131,8 +134,8 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
-      - WORKER_FILE=/var/www/html/worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=/var/www/html/worker.php
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
@@ -202,7 +205,7 @@ $kernel->shutdown();
 
 ## 参见
 
-- [路由](routing.md) — `WORKER_FILE` 如何影响 URL 路由
+- [路由](routing.md) — Worker 模式如何融入 URL 路由
 - [提前响应](early-response.md) — 立即发送响应并继续后台处理
 - [PHP 函数](../php/functions.md) — `oxphp_worker()`、`oxphp_is_worker()` 及其他内置函数的完整参考
 - [配置参考](../operations/configuration.md) — 完整的环境变量列表

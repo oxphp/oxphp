@@ -250,7 +250,7 @@ services:
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
       - INTERNAL_ADDR=0.0.0.0:9090
       - LOG_LEVEL=info
       - ACCESS_LOG=error
@@ -280,7 +280,7 @@ services:
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
       - INTERNAL_ADDR=0.0.0.0:9090
       - LOG_LEVEL=debug
       - ACCESS_LOG=all

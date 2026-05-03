@@ -209,7 +209,7 @@ Expose a queue on the channel and run the worker inside the async pool:
 
 ```php
 <?php
-// worker.php (WORKER_FILE)
+// worker.php (worker bootstrap)
 $work = new OxPHP\Shared\Channel(256);
 
 $consumer = oxphp_async(function () use ($work) {

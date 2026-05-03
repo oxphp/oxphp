@@ -6,17 +6,15 @@ use std::time::Duration;
 pub struct ServerConfig {
     pub listen_addr: String,
     pub document_root: PathBuf,
-    pub index_file: Option<String>,
     pub header_read_timeout: Duration,
     pub request_timeout: Duration,
 }
 
 impl ServerConfig {
-    pub fn new(listen_addr: String, document_root: PathBuf, index_file: Option<String>) -> Self {
+    pub fn new(listen_addr: String, document_root: PathBuf) -> Self {
         Self {
             listen_addr,
             document_root,
-            index_file,
             header_read_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(120),
         }
@@ -27,7 +25,6 @@ impl ServerConfig {
         let document_root: PathBuf = std::env::var("DOCUMENT_ROOT")
             .unwrap_or_else(|_| "/var/www/html/public".to_string())
             .into();
-        let index_file = std::env::var("INDEX_FILE").ok();
 
         let header_read_timeout = Duration::from_secs(
             std::env::var("HEADER_TIMEOUT_SECONDS")
@@ -48,7 +45,6 @@ impl ServerConfig {
         Ok(Self {
             listen_addr,
             document_root,
-            index_file,
             header_read_timeout,
             request_timeout,
         })

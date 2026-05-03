@@ -50,8 +50,13 @@ pub struct Config {
     pub compression_level: i32,
     pub access_log: AccessLogLevel,
     pub max_query_body: usize,
-    /// Worker mode: PHP file that boots the application and calls oxphp_worker().
-    pub worker_file: Option<PathBuf>,
+    /// Canonical entry script. `None` = direct file mapping (legacy traditional).
+    /// `Some(*.php)` with `worker_mode_enabled=false` = front controller.
+    /// `Some(non-.php)` with `worker_mode_enabled=false` = static fallback (SPA).
+    /// `Some(*.php)` with `worker_mode_enabled=true` = worker bootstrap.
+    pub entry_file: Option<PathBuf>,
+    /// Explicit worker-mode toggle. When true, `entry_file` must be `Some(*.php)`.
+    pub worker_mode_enabled: bool,
     /// Max memory (MB) before recycling a worker (0 = unlimited).
     pub worker_max_memory_mib: u64,
     /// Static file cache TTL in seconds. `None` = caching disabled.
@@ -170,13 +175,10 @@ impl Config {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(512 * 1024);
 
-        let worker_file = std::env::var("WORKER_FILE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from);
-        // Deprecated since v0.5.0; removal in v0.6.0. Parsed-but-ignored so
-        // existing deployments keep booting while the warning prompts migration
-        // to WORKER_MAX_MEMORY_MIB or Worker::scheduleExit().
+        let (entry_file, worker_mode_enabled) = resolve_entry_and_mode(&server.document_root)?;
+
+        // Parsed-but-ignored deprecation. Drop in a future release once telemetry
+        // shows zero downstream usage.
         if std::env::var_os("WORKER_MAX_REQUESTS").is_some() {
             tracing::warn!(
                 "WORKER_MAX_REQUESTS is deprecated and ignored — \
@@ -261,7 +263,8 @@ impl Config {
             compression_level,
             access_log,
             max_query_body,
-            worker_file,
+            entry_file,
+            worker_mode_enabled,
             worker_max_memory_mib,
             static_cache_ttl,
             static_cache_enabled,
@@ -288,7 +291,6 @@ impl Config {
             server: ServerConfig {
                 listen_addr: "127.0.0.1:0".to_string(),
                 document_root: PathBuf::from("/var/www/html/public"),
-                index_file: None,
                 header_read_timeout: Duration::from_secs(5),
                 request_timeout: Duration::from_secs(120),
             },
@@ -305,7 +307,8 @@ impl Config {
             compression_level: 4,
             access_log: AccessLogLevel::Off,
             max_query_body: 512 * 1024,
-            worker_file: None,
+            entry_file: None,
+            worker_mode_enabled: false,
             worker_max_memory_mib: 0,
             static_cache_ttl: Some(2_592_000),
             static_cache_enabled: true,
@@ -337,7 +340,7 @@ impl Config {
         serde_json::json!({
             "listen_addr": self.server.listen_addr,
             "document_root": self.server.document_root.display().to_string(),
-            "index_file": self.server.index_file,
+            "entry_file": self.entry_file.as_ref().map(|p| p.display().to_string()),
             "log_level": self.log_level,
             "executor_type": self.executor_type,
             "php_workers": self.php_workers_display(),
@@ -355,8 +358,7 @@ impl Config {
             "compression_level": self.compression_level,
             "access_log": self.access_log.to_string(),
             "max_query_body": self.max_query_body,
-            "worker_mode": self.worker_file.is_some(),
-            "worker_file": self.worker_file.as_ref().map(|p| p.display().to_string()),
+            "worker_mode_enabled": self.worker_mode_enabled,
             "worker_max_memory_mib": self.worker_max_memory_mib,
             "static_cache_ttl": self.static_cache_ttl,
             "static_cache_enabled": self.static_cache_enabled,
@@ -372,17 +374,36 @@ impl Config {
         })
     }
 
-    /// Validate the current configuration against the filesystem.
+    /// Validate the current configuration against the filesystem and the
+    /// `WORKER_MODE_ENABLED`/`ENTRY_FILE` invariants.
     ///
-    /// Returns a list of problems (empty = OK). Only cheap checks are
-    /// performed: path existence and file/directory kind for `DOCUMENT_ROOT`,
-    /// `WORKER_FILE`, `TLS_CERT`, `TLS_KEY`, and `ERROR_PAGES_DIR`. All
-    /// problems are collected — the function never short-circuits.
+    /// Returns a list of problems (empty = OK). Path checks cover
+    /// `DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`.
+    /// Worker-mode invariants: an entry file is required, and it must be `.php`.
+    /// All problems are collected — the function never short-circuits.
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         check_dir("DOCUMENT_ROOT", &self.server.document_root, &mut errors);
-        if let Some(worker) = &self.worker_file {
-            check_file("WORKER_FILE", worker, &mut errors);
+        if let Some(entry) = &self.entry_file {
+            check_file("ENTRY_FILE", entry, &mut errors);
+        }
+        if self.worker_mode_enabled {
+            match &self.entry_file {
+                None => errors
+                    .push("WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set".to_string()),
+                Some(entry) => {
+                    let is_php = entry
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("php"));
+                    if !is_php {
+                        errors.push(format!(
+                            "WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE (got {})",
+                            entry.display()
+                        ));
+                    }
+                }
+            }
         }
         if let Some(cert) = &self.tls_cert {
             check_file("TLS_CERT", Path::new(cert), &mut errors);
@@ -395,6 +416,68 @@ impl Config {
         }
         errors
     }
+}
+
+/// Resolve `ENTRY_FILE` and `WORKER_MODE_ENABLED` from the environment, taking
+/// the deprecated `INDEX_FILE` / `WORKER_FILE` variables into account.
+///
+/// Precedence: `ENTRY_FILE` > `WORKER_FILE` > `INDEX_FILE`. Worker mode is
+/// enabled when `WORKER_MODE_ENABLED=true` *or* when the legacy `WORKER_FILE`
+/// is set. Old vars trigger `tracing::warn!` lines pointing at the new names.
+fn resolve_entry_and_mode(
+    document_root: &Path,
+) -> Result<(Option<PathBuf>, bool), crate::types::BoxError> {
+    let entry_file_env = std::env::var("ENTRY_FILE").ok().filter(|s| !s.is_empty());
+    let worker_mode_explicit = std::env::var("WORKER_MODE_ENABLED")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+
+    let legacy_worker_file = std::env::var("WORKER_FILE").ok().filter(|s| !s.is_empty());
+    let legacy_index_file = std::env::var("INDEX_FILE").ok().filter(|s| !s.is_empty());
+
+    if let Some(ref wf) = legacy_worker_file {
+        tracing::warn!(
+            "WORKER_FILE is deprecated — use WORKER_MODE_ENABLED=true and ENTRY_FILE={wf}"
+        );
+    }
+    if let Some(ref idx) = legacy_index_file {
+        tracing::warn!("INDEX_FILE is deprecated — use ENTRY_FILE={idx}");
+    }
+
+    let raw = entry_file_env
+        .or_else(|| legacy_worker_file.clone())
+        .or(legacy_index_file);
+
+    let entry_file = match raw {
+        Some(value) => Some(resolve_entry_file(&value, document_root)?),
+        None => None,
+    };
+
+    let worker_mode_enabled = worker_mode_explicit || legacy_worker_file.is_some();
+
+    Ok((entry_file, worker_mode_enabled))
+}
+
+/// Resolve a raw `ENTRY_FILE` value into an absolute, existence-checked path.
+///
+/// Relative paths (including `..`-relative) resolve against `document_root`.
+/// The result is canonicalised so symlinks collapse and the executor sees a
+/// stable path regardless of how `DOCUMENT_ROOT` was spelled.
+fn resolve_entry_file(
+    value: &str,
+    document_root: &Path,
+) -> Result<PathBuf, crate::types::BoxError> {
+    let path = Path::new(value);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        document_root.join(path)
+    };
+    candidate
+        .canonicalize()
+        .map_err(|e| -> crate::types::BoxError {
+            format!("ENTRY_FILE={value} cannot be resolved: {e}").into()
+        })
 }
 
 fn check_dir(label: &str, path: &Path, errors: &mut Vec<String>) {
@@ -517,5 +600,315 @@ mod tests {
             .map(|v: &str| !v.eq_ignore_ascii_case("off"))
             .unwrap_or(true);
         assert!(enabled);
+    }
+}
+
+#[cfg(test)]
+mod entry_file_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    // Process-global env vars are touched here — serialise.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for (k, v) in vars {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, prev_val) in prev {
+            match prev_val {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    fn make_root_with(files: &[&str]) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        for rel in files {
+            let p = dir.path().join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, b"<?php // test\n").unwrap();
+        }
+        dir
+    }
+
+    // ── resolve_entry_file ──
+
+    #[test]
+    fn resolve_entry_file_relative() {
+        let dir = make_root_with(&["index.php"]);
+        let resolved = resolve_entry_file("index.php", dir.path()).unwrap();
+        assert_eq!(
+            resolved,
+            dir.path().canonicalize().unwrap().join("index.php")
+        );
+    }
+
+    #[test]
+    fn resolve_entry_file_absolute() {
+        let dir = make_root_with(&["index.php"]);
+        let abs = dir.path().join("index.php");
+        let resolved = resolve_entry_file(abs.to_str().unwrap(), dir.path()).unwrap();
+        assert_eq!(resolved, abs.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_entry_file_dotdot_escape_allowed() {
+        // Worker bootstrap living outside the public document root is a
+        // first-class supported layout.
+        let outer = TempDir::new().unwrap();
+        std::fs::write(outer.path().join("worker.php"), b"<?php // worker\n").unwrap();
+        let public = outer.path().join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        let resolved = resolve_entry_file("../worker.php", &public).unwrap();
+        assert_eq!(
+            resolved,
+            outer.path().canonicalize().unwrap().join("worker.php")
+        );
+    }
+
+    #[test]
+    fn resolve_entry_file_missing_errors() {
+        let dir = TempDir::new().unwrap();
+        let err = resolve_entry_file("missing.php", dir.path()).unwrap_err();
+        assert!(err.to_string().contains("ENTRY_FILE=missing.php"));
+    }
+
+    // ── resolve_entry_and_mode (env-driven) ──
+
+    #[test]
+    fn env_new_entry_only_no_worker_mode() {
+        let dir = make_root_with(&["index.php"]);
+        with_env(
+            &[
+                ("ENTRY_FILE", Some("index.php")),
+                ("WORKER_MODE_ENABLED", None),
+                ("WORKER_FILE", None),
+                ("INDEX_FILE", None),
+            ],
+            || {
+                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                assert!(entry.is_some(), "entry_file should be set");
+                assert!(!worker, "worker mode should be off");
+            },
+        );
+    }
+
+    #[test]
+    fn env_new_worker_mode_with_entry() {
+        let dir = make_root_with(&["worker.php"]);
+        with_env(
+            &[
+                ("ENTRY_FILE", Some("worker.php")),
+                ("WORKER_MODE_ENABLED", Some("true")),
+                ("WORKER_FILE", None),
+                ("INDEX_FILE", None),
+            ],
+            || {
+                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                assert!(entry.is_some());
+                assert!(worker);
+            },
+        );
+    }
+
+    #[test]
+    fn env_worker_mode_accepts_yes_and_1() {
+        let dir = make_root_with(&["w.php"]);
+        for val in ["1", "yes", "TRUE", "Yes"] {
+            with_env(
+                &[
+                    ("ENTRY_FILE", Some("w.php")),
+                    ("WORKER_MODE_ENABLED", Some(val)),
+                    ("WORKER_FILE", None),
+                    ("INDEX_FILE", None),
+                ],
+                || {
+                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    assert!(
+                        worker,
+                        "WORKER_MODE_ENABLED={val:?} should enable worker mode"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn env_worker_mode_rejects_other_values() {
+        let dir = make_root_with(&["w.php"]);
+        for val in ["false", "0", "no", ""] {
+            with_env(
+                &[
+                    ("ENTRY_FILE", Some("w.php")),
+                    ("WORKER_MODE_ENABLED", Some(val)),
+                    ("WORKER_FILE", None),
+                    ("INDEX_FILE", None),
+                ],
+                || {
+                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    assert!(
+                        !worker,
+                        "WORKER_MODE_ENABLED={val:?} should disable worker mode"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn env_legacy_worker_file_implies_worker_mode() {
+        let dir = make_root_with(&["legacy_worker.php"]);
+        with_env(
+            &[
+                ("ENTRY_FILE", None),
+                ("WORKER_MODE_ENABLED", None),
+                ("WORKER_FILE", Some("legacy_worker.php")),
+                ("INDEX_FILE", None),
+            ],
+            || {
+                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                assert!(entry.is_some(), "WORKER_FILE should backfill entry_file");
+                assert!(worker, "WORKER_FILE should imply worker mode");
+            },
+        );
+    }
+
+    #[test]
+    fn env_legacy_index_file_maps_to_entry() {
+        let dir = make_root_with(&["index.php"]);
+        with_env(
+            &[
+                ("ENTRY_FILE", None),
+                ("WORKER_MODE_ENABLED", None),
+                ("WORKER_FILE", None),
+                ("INDEX_FILE", Some("index.php")),
+            ],
+            || {
+                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                assert!(entry.is_some());
+                assert!(!worker, "INDEX_FILE alone should not enable worker mode");
+            },
+        );
+    }
+
+    #[test]
+    fn env_new_wins_over_legacy() {
+        let dir = make_root_with(&["new.php", "legacy.php"]);
+        with_env(
+            &[
+                ("ENTRY_FILE", Some("new.php")),
+                ("WORKER_MODE_ENABLED", None),
+                ("WORKER_FILE", Some("legacy.php")),
+                ("INDEX_FILE", Some("legacy.php")),
+            ],
+            || {
+                let (entry, _worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                let entry = entry.expect("entry_file should be set");
+                assert!(
+                    entry.ends_with("new.php"),
+                    "ENTRY_FILE must win, got {}",
+                    entry.display()
+                );
+            },
+        );
+    }
+
+    // ── Config::validate matrix ──
+
+    fn cfg_with(entry: Option<PathBuf>, worker_mode: bool) -> Config {
+        let mut c = Config::test_minimal();
+        let dir = TempDir::new().unwrap();
+        c.server.document_root = dir.path().to_path_buf();
+        c.entry_file = entry;
+        c.worker_mode_enabled = worker_mode;
+        std::mem::forget(dir); // keep dir alive for the duration of validate()
+        c
+    }
+
+    #[test]
+    fn validate_worker_mode_without_entry_errors() {
+        let cfg = cfg_with(None, true);
+        let errors = cfg.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("WORKER_MODE_ENABLED=true requires ENTRY_FILE")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_worker_mode_with_non_php_entry_errors() {
+        let dir = make_root_with(&["index.html"]);
+        let cfg = cfg_with(Some(dir.path().join("index.html")), true);
+        let errors = cfg.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("requires a .php ENTRY_FILE")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_worker_mode_with_php_entry_ok() {
+        let dir = make_root_with(&["worker.php"]);
+        let cfg = cfg_with(Some(dir.path().join("worker.php")), true);
+        let errors = cfg.validate();
+        assert!(
+            errors.iter().all(|e| !e.contains("WORKER_MODE_ENABLED")),
+            "got worker-mode errors: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_traditional_no_entry_ok() {
+        let cfg = cfg_with(None, false);
+        let errors = cfg.validate();
+        assert!(
+            errors
+                .iter()
+                .all(|e| !e.contains("ENTRY_FILE") && !e.contains("WORKER_MODE_ENABLED")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_framework_php_entry_ok() {
+        let dir = make_root_with(&["index.php"]);
+        let cfg = cfg_with(Some(dir.path().join("index.php")), false);
+        let errors = cfg.validate();
+        assert!(
+            errors.iter().all(|e| !e.contains("WORKER_MODE_ENABLED")),
+            "got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_spa_html_entry_ok() {
+        let dir = make_root_with(&["index.html"]);
+        let cfg = cfg_with(Some(dir.path().join("index.html")), false);
+        let errors = cfg.validate();
+        assert!(
+            errors.iter().all(|e| !e.contains("WORKER_MODE_ENABLED")),
+            "got: {errors:?}"
+        );
     }
 }

@@ -255,7 +255,7 @@ curl -s http://localhost:9090/__ox_shared/graph?id=42 | jq
 `tests/soak/pool_soak.sh` — это ручной (не CI) harness для проверки истории стабильности Shared\Pool на часах или днях непрерывной нагрузки. Он:
 
 1. Поднимает dev-образ с динамическим масштабированием воркеров (`PHP_WORKERS=4:40` по умолчанию) и коротким `idleTimeout` пула, чтобы планировщик вытеснения срабатывал непрерывно.
-2. Загружает `tests/soak/workload.php` как `WORKER_FILE`, конструирующий 10 пулов × `maxSize=8` и обслуживающий acquire/release на каждом запросе.
+2. Загружает `tests/soak/workload.php` как бутстрап воркера, конструирующий 10 пулов × `maxSize=8` и обслуживающий acquire/release на каждом запросе.
 3. Прогоняет трафик через `wrk` в течение `SOAK_DURATION_MIN` минут (по умолчанию 1440 = 24ч).
 4. Скрейпит `/metrics` и RSS контейнера каждые 60 с в `tests/soak/out/<timestamp>/metrics.csv`.
 5. Записывает `verify.txt` в конце с pass/fail для пяти release-критериев (дрейф RSS в пределах ±5%, ноль stale-handle паник, ноль утёкших записей при shutdown, плавный рост idle-timeout вытеснений, ноль срабатываний детектора дедлоков).

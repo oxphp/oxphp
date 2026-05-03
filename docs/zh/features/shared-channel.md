@@ -209,7 +209,7 @@ oxphp_shared_channel_items_dropped_total{channel_id="<id>"} counter
 
 ```php
 <?php
-// worker.php (WORKER_FILE)
+// worker.php（Worker 引导）
 $work = new OxPHP\Shared\Channel(256);
 
 $consumer = oxphp_async(function () use ($work) {

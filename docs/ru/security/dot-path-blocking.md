@@ -33,7 +33,7 @@ OxPHP блокирует доступ к любому URL-пути, содерж
 |--------|-----------|
 | `/.well-known/security.txt` | Отдаётся как статический файл |
 | `/.well-known/acme-challenge/token` | Отдаётся как статический файл (Let's Encrypt) |
-| `/.well-known/openid-configuration` | Отдаётся если файл существует, иначе INDEX_FILE или 404 |
+| `/.well-known/openid-configuration` | Отдаётся если файл существует, иначе ENTRY_FILE или 404 |
 | `/.well-known` | 404 (голый путь) |
 | `/.well-known/` | 404 (листинг директории) |
 | `/.well-known/test.php` | 404 (выполнение PHP заблокировано) |

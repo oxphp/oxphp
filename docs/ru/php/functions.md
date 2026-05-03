@@ -250,7 +250,7 @@ foreach ($large_dataset as $row) {
 oxphp_is_worker(): bool
 ```
 
-Возвращает, работает ли сервер в режиме worker. Режим worker активируется, когда задана переменная `WORKER_FILE`.
+Возвращает, работает ли сервер в режиме worker. Режим воркера активируется, когда `WORKER_MODE_ENABLED=true`.
 
 **Возвращает:** `true` в режиме worker, `false` в традиционном режиме.
 
@@ -288,7 +288,7 @@ oxphp_worker(callable $handler): bool
 - Воркер превышает `WORKER_MAX_MEMORY_MIB`
 - Приложение вызвало [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 
-> **Примечание:** `oxphp_worker()` работает только при настроенном `WORKER_FILE`. В традиционном режиме функция выводит предупреждение в лог и возвращает `false`.
+> **Примечание:** `oxphp_worker()` работает только в режиме воркера (`WORKER_MODE_ENABLED=true`). В традиционном режиме функция выводит предупреждение в лог и возвращает `false`.
 
 **Пример:**
 
@@ -995,4 +995,4 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Ранний ответ](../features/early-response.md) — фоновая обработка с `oxphp_finish_request()`
 - [Суперглобальные переменные](superglobals.md) — как OxPHP заполняет `$_SERVER`, `$_GET`, `$_POST` и другие суперглобальные переменные
 - [Распределённая трассировка и APM](../features/distributed-tracing.md) — W3C Trace Context, экспорт OTel и SDK `oxphp_apm_*()`
-- [Справочник по конфигурации](../operations/configuration.md) — `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS` и другие переменные окружения
+- [Справочник по конфигурации](../operations/configuration.md) — `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS` и другие переменные окружения

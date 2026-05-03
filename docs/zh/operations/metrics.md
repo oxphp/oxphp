@@ -102,7 +102,7 @@ curl http://localhost:9090/metrics
 
 ## 工作进程模式指标
 
-这些指标仅在工作进程模式启用时（即设置了 `WORKER_FILE`）才会输出。
+这些指标仅在工作进程模式启用时（即 `WORKER_MODE_ENABLED=true`）才会输出。
 
 ### 全局计数器
 
