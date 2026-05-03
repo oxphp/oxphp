@@ -69,6 +69,15 @@ fn worker_mode_thread(
         bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mib);
     }
 
+    // Stash spawn time in bridge ctx for Worker::getStartTime().
+    let spawn_secs_for_bridge = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
+    unsafe {
+        bindings::oxphp_bridge_set_worker_start_time(spawn_secs_for_bridge);
+    }
+
     // 3. Store channel receiver, last_active, and metrics in thread-local
     sapi::set_worker_rx(request_rx);
     sapi::set_worker_last_active(last_active);
