@@ -3270,8 +3270,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
     oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
 
-    /* OxPHP\Server\InvalidServeContextException extends \RuntimeException */
-    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Server", "InvalidServeContextException", NULL);
+    /* OxPHP\Server\Exception\InvalidServeContextException extends \RuntimeException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Server\\Exception", "InvalidServeContextException", NULL);
     oxphp_invalid_serve_ctx_exc_ce = zend_register_internal_class_ex(&ce, spl_ce_RuntimeException);
 
     /* OxPHP\Server\Worker — final, non-cloneable. Methods added by subsequent

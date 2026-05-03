@@ -7,7 +7,7 @@ All notable changes to OxPHP are documented in this file.
 ### Added
 
 - New PHP class `OxPHP\Server\Worker` — unified runtime handle for worker introspection. Methods: `current`, `isWorkerMode`, `getId`, `getRequestCount`, `getStartTime`, `getMemoryUsage`, `getRss`, `getMaxMemoryBytes`, `serve`. Available in both traditional and worker modes. See `docs/en/php/worker-class.md`.
-- New PHP exception `OxPHP\Server\InvalidServeContextException`, thrown by `Worker::serve()` when called outside worker mode.
+- New PHP exception `OxPHP\Server\Exception\InvalidServeContextException`, thrown by `Worker::serve()` when called outside worker mode.
 
 ### Changed
 

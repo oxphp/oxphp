@@ -35,7 +35,7 @@ description: Справочник по классу OxPHP\Server\Worker — ед
 | `getMemoryUsage()` | Текущая память PHP на момент вызова. | Текущая память PHP на момент вызова. |
 | `getRss()` | Текущий RSS процесса. ~10 мкс на Linux, ~1 мкс на macOS. | Текущий RSS процесса. |
 | `getMaxMemoryBytes()` | `0` (лимит recycle не применяется). | Значение `WORKER_MAX_MEMORY_MIB` × 1 МиБ или `0`, если не задано. |
-| `serve(callable)` | Бросает `OxPHP\Server\InvalidServeContextException`. | Входит в цикл обработки запросов. |
+| `serve(callable)` | Бросает `OxPHP\Server\Exception\InvalidServeContextException`. | Входит в цикл обработки запросов. |
 
 ## Примеры
 

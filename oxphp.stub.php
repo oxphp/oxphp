@@ -1805,7 +1805,7 @@ namespace OxPHP\Server {
      * Provides introspection (id, request counter, memory, RSS) and the
      * worker entry point (serve). Available in both traditional and worker
      * modes; methods that have no meaning outside worker mode throw
-     * InvalidServeContextException.
+     * Exception\InvalidServeContextException.
      *
      * Stateless wrapper — every method reads from Rust thread-local state via
      * FFI at call time. No data is cached on the object. The class instance
@@ -1909,14 +1909,17 @@ namespace OxPHP\Server {
          * suspends on I/O via oxphp_async_*() / oxphp_sleep(), the loop
          * accepts new requests and resumes ready fibers cooperatively.
          *
-         * Traditional mode: throws InvalidServeContextException — there is
-         * no persistent loop to enter; the request has already been handed
-         * to the script.
+         * Traditional mode: throws Exception\InvalidServeContextException —
+         * there is no persistent loop to enter; the request has already been
+         * handed to the script.
          *
-         * @throws InvalidServeContextException When called outside worker mode
+         * @throws \OxPHP\Server\Exception\InvalidServeContextException When called outside worker mode
          */
         public function serve(callable $handler): void {}
     }
+}
+
+namespace OxPHP\Server\Exception {
 
     /**
      * Thrown when Worker::serve() is called outside worker mode.

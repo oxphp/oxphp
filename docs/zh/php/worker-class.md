@@ -35,7 +35,7 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 | `getMemoryUsage()` | 调用时的实时 PHP 内存。 | 调用时的实时 PHP 内存。 |
 | `getRss()` | 进程实时 RSS。Linux 上约 10 µs，macOS 上约 1 µs。 | 进程实时 RSS。 |
 | `getMaxMemoryBytes()` | `0`（不应用回收上限）。 | `WORKER_MAX_MEMORY_MIB` × 1 MiB 的值；未设置则为 `0`。 |
-| `serve(callable)` | 抛出 `OxPHP\Server\InvalidServeContextException`。 | 进入请求循环。 |
+| `serve(callable)` | 抛出 `OxPHP\Server\Exception\InvalidServeContextException`。 | 进入请求循环。 |
 
 ## 示例
 

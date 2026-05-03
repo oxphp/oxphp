@@ -10,7 +10,7 @@ if ($w->isWorkerMode()) {
 
 try {
     $w->serve(function () { /* never invoked */ });
-} catch (OxPHP\Server\InvalidServeContextException $e) {
+} catch (OxPHP\Server\Exception\InvalidServeContextException $e) {
     if (str_contains($e->getMessage(), 'worker mode')) {
         echo "OK threw as expected: " . $e->getMessage() . "\n";
         exit;

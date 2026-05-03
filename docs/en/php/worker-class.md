@@ -35,7 +35,7 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | `getMemoryUsage()` | Live PHP memory at the moment of the call. | Live PHP memory at the moment of the call. |
 | `getRss()` | Live process RSS. ~10 µs on Linux, ~1 µs on macOS. | Live process RSS. |
 | `getMaxMemoryBytes()` | `0` (no recycle cap applies). | Value of `WORKER_MAX_MEMORY_MIB` × 1 MiB, or `0` if unset. |
-| `serve(callable)` | Throws `OxPHP\Server\InvalidServeContextException`. | Enters the request loop. |
+| `serve(callable)` | Throws `OxPHP\Server\Exception\InvalidServeContextException`. | Enters the request loop. |
 
 ## Examples
 

@@ -1,5 +1,5 @@
 <?php
-foreach (['OxPHP\\Server\\Worker', 'OxPHP\\Server\\InvalidServeContextException'] as $fqn) {
+foreach (['OxPHP\\Server\\Worker', 'OxPHP\\Server\\Exception\\InvalidServeContextException'] as $fqn) {
     if (!class_exists($fqn)) {
         http_response_code(500);
         echo "FAIL: class $fqn does not exist\n";
@@ -14,7 +14,7 @@ if (!$wRefl->isFinal()) {
     exit;
 }
 
-$exRefl = new ReflectionClass('OxPHP\\Server\\InvalidServeContextException');
+$exRefl = new ReflectionClass('OxPHP\\Server\\Exception\\InvalidServeContextException');
 if (!$exRefl->isSubclassOf('RuntimeException')) {
     http_response_code(500);
     echo "FAIL: InvalidServeContextException does not extend RuntimeException\n";

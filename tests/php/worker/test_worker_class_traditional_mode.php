@@ -27,7 +27,7 @@ try {
     http_response_code(500);
     echo "FAIL: serve() did not throw in traditional\n";
     exit;
-} catch (OxPHP\Server\InvalidServeContextException $e) {
+} catch (OxPHP\Server\Exception\InvalidServeContextException $e) {
     /* expected */
 }
 
