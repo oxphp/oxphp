@@ -53,6 +53,14 @@ double oxphp_bridge_get_request_time(void) {
     return ctx.request_time;
 }
 
+void oxphp_bridge_set_worker_start_time(double time) {
+    ctx.worker_start_time = time;
+}
+
+double oxphp_bridge_get_worker_start_time(void) {
+    return ctx.worker_start_time;
+}
+
 void oxphp_bridge_set_stream_mode(bool mode) {
     ctx.stream_mode = mode;
 }

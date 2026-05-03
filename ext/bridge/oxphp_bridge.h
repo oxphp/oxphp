@@ -110,6 +110,13 @@ typedef struct {
 
     /** Whether this thread is an async worker (not a request worker). */
     int is_async_worker;
+
+    /** OS thread spawn time as unix seconds (float).
+     *  Set ONCE per thread by Rust at thread boot via
+     *  oxphp_bridge_set_worker_start_time(); preserved across all
+     *  per-request resets (oxphp_bridge_reset_request_ctx). Zero before
+     *  the setter is called (e.g. CLI without OxPHP host). */
+    double worker_start_time;
 } oxphp_ctx_t;
 
 /**
@@ -144,6 +151,12 @@ void oxphp_bridge_set_request_time(double time);
 
 /** Get request start time. */
 double oxphp_bridge_get_request_time(void);
+
+/** Set worker thread spawn time. Called once per thread at boot. */
+void oxphp_bridge_set_worker_start_time(double time);
+
+/** Get worker thread spawn time. */
+double oxphp_bridge_get_worker_start_time(void);
 
 /** Set streaming mode. */
 void oxphp_bridge_set_stream_mode(bool mode);
