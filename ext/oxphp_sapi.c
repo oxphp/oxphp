@@ -1314,6 +1314,10 @@ static void oxphp_soft_reset(void) {
      * This ensures the soft reset only touches PHP-level state. */
 }
 
+/* Shared loop body for Worker::serve() and oxphp_worker(). Caller has
+ * already parsed (fci, fcc) and verified worker mode. */
+static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
+
 /* {{{ oxphp_worker(callable $handler): bool
  * Enter worker mode loop with fiber-based request multiplexing.
  *
@@ -1333,20 +1337,28 @@ PHP_FUNCTION(oxphp_worker)
         Z_PARAM_FUNC(fci, fcc)
     ZEND_PARSE_PARAMETERS_END();
 
-    oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
-    if (!ctx->worker_mode) {
+    if (!oxphp_bridge_is_worker_mode()) {
         php_error_docref(NULL, E_WARNING, "oxphp_worker() only available in worker mode");
         RETURN_FALSE;
     }
 
+    oxphp_serve_loop(&fci, &fcc);
+    RETURN_TRUE;
+}
+/* }}} */
+
+static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
+{
+    oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
+
     /* Prevent handler closure from being GC'd during worker lifetime */
-    zend_fcc_addref(&fcc);
+    zend_fcc_addref(fcc);
 
     /* Initialize the fiber scheduler */
     oxphp_fiber_scheduler sched;
     oxphp_scheduler_init(&sched);
-    sched.shared_fci = &fci;
-    sched.shared_fcc = &fcc;
+    sched.shared_fci = fci;
+    sched.shared_fcc = fcc;
 
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
@@ -1373,7 +1385,7 @@ PHP_FUNCTION(oxphp_worker)
             ctx->requests_done = sched.total_requests_done;
 
             /* Create or reuse a fiber for the request */
-            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, &fci, &fcc);
+            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
             if (!fiber) break;
 
             if (fiber->started) {
@@ -1437,11 +1449,8 @@ PHP_FUNCTION(oxphp_worker)
 
     /* Cleanup: finalize any remaining fibers */
     oxphp_scheduler_destroy(&sched);
-    zend_fcc_dtor(&fcc);
-
-    RETURN_TRUE;
+    zend_fcc_dtor(fcc);
 }
-/* }}} */
 
 /* ─── Native plugin function dispatch ─────────────────────── */
 
