@@ -13,3 +13,5 @@ worker/test_worker_class_start_time_stable
 worker/test_worker_class_traditional_request_count
 worker/test_worker_class_memory
 worker/test_worker_class_max_memory
+worker/test_worker_class_serve_throws_in_traditional
+worker/test_worker_class_serve_nested_throws

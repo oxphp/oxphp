@@ -1342,7 +1342,21 @@ PHP_FUNCTION(oxphp_worker)
         RETURN_FALSE;
     }
 
+    /* Mirror Worker::serve()'s re-entry guard so nested calls from either
+     * entry point share the same per-thread flag. */
+    if (oxphp_serve_in_progress) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "oxphp_worker() is already running on this thread "
+            "(nested calls are not supported)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    oxphp_serve_in_progress = true;
     oxphp_serve_loop(&fci, &fcc);
+    oxphp_serve_in_progress = false;
     RETURN_TRUE;
 }
 /* }}} */
@@ -2460,6 +2474,43 @@ ZEND_METHOD(OxPHP_Server_Worker, getMaxMemoryBytes) {
 }
 /* }}} */
 
+/* {{{ OxPHP\Server\Worker::serve(callable $handler): void
+ * Enter the worker request-dispatch loop. Throws InvalidServeContextException
+ * when called outside worker mode or re-entered on the same thread. */
+ZEND_METHOD(OxPHP_Server_Worker, serve) {
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC(fci, fcc)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!oxphp_bridge_is_worker_mode()) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "Worker::serve() is only valid in worker mode "
+            "(set WORKER_MODE_ENABLED=true and ENTRY_FILE=...)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    if (oxphp_serve_in_progress) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "Worker::serve() is already running on this thread "
+            "(nested calls are not supported)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    oxphp_serve_in_progress = true;
+    oxphp_serve_loop(&fci, &fcc);
+    oxphp_serve_in_progress = false;
+}
+/* }}} */
+
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_worker_current, 0, 0,
     OxPHP\\Server\\Worker, 0)
 ZEND_END_ARG_INFO()
@@ -2485,6 +2536,10 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMaxMemoryBytes, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_serve, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, handler, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
 /* OxPHP\Server\Worker — methods added by subsequent tasks. Kept extensible
  * (file-scope, not static const) so additional method handlers can append
  * entries. */
@@ -2504,6 +2559,8 @@ static zend_function_entry oxphp_worker_methods[] = {
     ZEND_ME(OxPHP_Server_Worker, getRss,             arginfo_oxphp_worker_getRss,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, getMaxMemoryBytes,  arginfo_oxphp_worker_getMaxMemoryBytes,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, serve,              arginfo_oxphp_worker_serve,
             ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
