@@ -28,6 +28,18 @@ static zend_class_entry *oxphp_async_context_exc_ce = NULL;
 static zend_class_entry *oxphp_worker_idle_exc_ce = NULL;
 static zend_class_entry *oxphp_invalid_serve_ctx_exc_ce = NULL;
 
+/* OxPHP\Server\Worker class */
+static zend_class_entry *oxphp_worker_ce = NULL;
+static zend_object_handlers oxphp_worker_object_handlers;
+
+/* Per-thread cached singleton zval. Lazily allocated on first
+ * Worker::current() call; never explicitly freed (process lifetime,
+ * bounded leak ~32 bytes × N worker threads). */
+static __thread zval *oxphp_worker_singleton = NULL;
+
+/* Per-thread re-entry sentinel for Worker::serve(). */
+static __thread bool oxphp_serve_in_progress = false;
+
 /* HTTP Object API supporting classes */
 static zend_class_entry *oxphp_http_session_ce = NULL;
 static zend_class_entry *oxphp_http_attributes_ce = NULL;
@@ -2367,6 +2379,16 @@ static const zend_function_entry oxphp_http_request_iface_methods[] = {
     PHP_FE_END
 };
 
+/* OxPHP\Server\Worker — methods added by subsequent tasks. Kept extensible
+ * (file-scope, not static const) so additional method handlers can append
+ * entries. */
+static zend_function_entry oxphp_worker_methods[] = {
+    PHP_FE_END
+};
+
+/* Forward-declare clone-disallow handler for OxPHP\Server\Worker. */
+static zend_object *oxphp_worker_clone_object(zend_object *object);
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_http_request, 0, 0,
     OxPHP\\Http\\RequestInterface, 0)
@@ -2556,6 +2578,17 @@ static const zend_internal_arg_info *oxphp_build_method_arginfo(
     return info;
 }
 /* }}} */
+
+/* Clone-disallow handler for OxPHP\Server\Worker. */
+static zend_object *oxphp_worker_clone_object(zend_object *object) {
+    (void)object;
+    zend_throw_error(NULL, "Cloning OxPHP\\Server\\Worker is not allowed");
+    /* Engine's ZEND_CLONE opcode dereferences the return value
+     * unconditionally before checking for the thrown exception on the
+     * next opcode. Return a fresh empty object to satisfy the contract;
+     * it will be GC'd before any user code observes it. */
+    return zend_objects_new(oxphp_worker_ce);
+}
 
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
@@ -3051,6 +3084,20 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* OxPHP\Server\InvalidServeContextException extends \RuntimeException */
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Server", "InvalidServeContextException", NULL);
     oxphp_invalid_serve_ctx_exc_ce = zend_register_internal_class_ex(&ce, spl_ce_RuntimeException);
+
+    /* OxPHP\Server\Worker — final, non-cloneable. Methods added by subsequent
+     * tasks via the file-scope oxphp_worker_methods table. */
+    {
+        zend_class_entry tmp_worker_ce;
+        INIT_CLASS_ENTRY(tmp_worker_ce, "OxPHP\\Server\\Worker", oxphp_worker_methods);
+        oxphp_worker_ce = zend_register_internal_class(&tmp_worker_ce);
+        oxphp_worker_ce->ce_flags |= ZEND_ACC_FINAL;
+
+        memcpy(&oxphp_worker_object_handlers, zend_get_std_object_handlers(),
+               sizeof(zend_object_handlers));
+        oxphp_worker_object_handlers.clone_obj = oxphp_worker_clone_object;
+        oxphp_worker_ce->default_object_handlers = &oxphp_worker_object_handlers;
+    }
 
     /* ─── HTTP Interfaces (must register before classes) ───── */
     {
