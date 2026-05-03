@@ -900,6 +900,11 @@ pub unsafe extern "C" fn oxphp_bridge_get_rss_bytes() -> u64 {
     1024 * 1024
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_get_max_memory_bytes() -> u64 {
+    0
+}
+
 #[cfg(test)]
 mod worker_class_mock_tests {
     use super::*;

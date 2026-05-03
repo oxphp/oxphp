@@ -1870,6 +1870,10 @@ bool oxphp_bridge_get_handler_failed(void) {
     return ctx.handler_failed;
 }
 
+uint64_t oxphp_bridge_get_max_memory_bytes(void) {
+    return ctx.max_memory_bytes;
+}
+
 /* ── Bailout wrapper ── */
 
 void oxphp_bridge_bailout(void) {

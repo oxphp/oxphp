@@ -2404,6 +2404,53 @@ ZEND_METHOD(OxPHP_Server_Worker, isWorkerMode) {
 }
 /* }}} */
 
+/* {{{ OxPHP\Server\Worker::getId(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_worker_id());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getStartTime(): float */
+ZEND_METHOD(OxPHP_Server_Worker, getStartTime) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_DOUBLE(oxphp_bridge_get_worker_start_time());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getRequestCount(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getRequestCount) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Single source of truth: bridge counter, incremented at request
+     * start by Rust (both modes). 1-based per OS thread. */
+    RETURN_LONG((zend_long)oxphp_bridge_get_requests_done());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getMemoryUsage(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getMemoryUsage) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Live Zend allocator usage. Bridge's stored value is updated only
+     * post-request — mid-handler we want what the script is using right
+     * now, so call zend_memory_usage() directly. */
+    RETURN_LONG((zend_long)zend_memory_usage(0));
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getRss(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getRss) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_rss_bytes());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getMaxMemoryBytes(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getMaxMemoryBytes) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_max_memory_bytes());
+}
+/* }}} */
+
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_worker_current, 0, 0,
     OxPHP\\Server\\Worker, 0)
 ZEND_END_ARG_INFO()
@@ -2411,14 +2458,44 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isWorkerMode, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getId, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getStartTime, 0, 0, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRequestCount, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMemoryUsage, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRss, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMaxMemoryBytes, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
 /* OxPHP\Server\Worker — methods added by subsequent tasks. Kept extensible
  * (file-scope, not static const) so additional method handlers can append
  * entries. */
 static zend_function_entry oxphp_worker_methods[] = {
-    ZEND_ME(OxPHP_Server_Worker, current,       arginfo_oxphp_worker_current,
+    ZEND_ME(OxPHP_Server_Worker, current,            arginfo_oxphp_worker_current,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-    ZEND_ME(OxPHP_Server_Worker, isWorkerMode,  arginfo_oxphp_worker_isWorkerMode,
+    ZEND_ME(OxPHP_Server_Worker, isWorkerMode,       arginfo_oxphp_worker_isWorkerMode,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    ZEND_ME(OxPHP_Server_Worker, getId,              arginfo_oxphp_worker_getId,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getStartTime,       arginfo_oxphp_worker_getStartTime,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getRequestCount,    arginfo_oxphp_worker_getRequestCount,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getMemoryUsage,     arginfo_oxphp_worker_getMemoryUsage,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getRss,             arginfo_oxphp_worker_getRss,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getMaxMemoryBytes,  arginfo_oxphp_worker_getMaxMemoryBytes,
+            ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 

@@ -8,3 +8,8 @@ worker/test_output_buffer_reset
 worker/test_headers_reset
 worker/test_server_info_worker_mode
 worker/test_worker_class_current_singleton
+worker/test_worker_class_get_id
+worker/test_worker_class_start_time_stable
+worker/test_worker_class_traditional_request_count
+worker/test_worker_class_memory
+worker/test_worker_class_max_memory
