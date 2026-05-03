@@ -104,9 +104,9 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 
 | 路由模式 | 何时设置 | 值 |
 |---|---|---|
-| **Traditional**（未设置 `INDEX_FILE`） | 仅当 URI 包含 `.php/` 且脚本前缀在磁盘上存在时 | 脚本段之后的尾部 |
-| **Framework**（`INDEX_FILE=index.php`） | **始终** — 每个请求都被重写到前端控制器 | 完整的原始 URI |
-| **SPA**（`INDEX_FILE=index.html`） | 永不 — PHP 仅对精确的 `.php` 文件运行，无 PATH_INFO | — |
+| **Traditional**（未设置 `ENTRY_FILE`） | 仅当 URI 包含 `.php/` 且脚本前缀在磁盘上存在时 | 脚本段之后的尾部 |
+| **Framework**（`ENTRY_FILE=index.php`） | **始终** — 每个请求都被重写到前端控制器 | 完整的原始 URI |
+| **SPA**（`ENTRY_FILE=index.html`） | 永不 — PHP 仅对精确的 `.php` 文件运行，无 PATH_INFO | — |
 
 #### Traditional 模式示例
 

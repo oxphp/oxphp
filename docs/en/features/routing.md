@@ -26,11 +26,14 @@ The classification step is the key efficiency: the disk check for static assets 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `*.php` = Framework, anything else = SPA |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional. `*.php` = Framework. Non-`.php` = SPA. With `WORKER_MODE_ENABLED=true` = Worker. Resolved against `DOCUMENT_ROOT` |
+| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
+
+The legacy `INDEX_FILE` and `WORKER_FILE` variables are still parsed (with a startup `WARN`) and map onto the new model. See [Configuration → Deprecated](../operations/configuration.md#deprecated-index_file-and-worker_file).
 
 ## Traditional Mode
 
-Active when `INDEX_FILE` is **not set** (or empty). Equivalent nginx config:
+Active when `ENTRY_FILE` is **not set** (or empty) and `WORKER_MODE_ENABLED=false`. Equivalent nginx config:
 
 ```nginx
 location / {
@@ -48,7 +51,7 @@ location ~ \.php$ {
 3. **PATH_INFO split** — when the URI contains `.php/`, the script prefix is matched on disk and the remainder becomes `PATH_INFO` (e.g. `/api.php/users/42` → script `api.php`, `PATH_INFO=/users/42`)
 4. **`/index.php`** — root front-controller fallback
 5. **`/index.html`** — root static index fallback
-6. **`WORKER_FILE`** — if worker mode is configured
+6. **Worker fallback** — if `WORKER_MODE_ENABLED=true`, dispatch to the worker `ENTRY_FILE`
 7. **404**
 
 **Examples:**
@@ -66,7 +69,7 @@ PATH_INFO splitting is **always on** in Traditional mode. There is no env switch
 
 ## Framework Mode
 
-Active when `INDEX_FILE=index.php` (or any value ending in `.php`). Equivalent nginx config:
+Active when `ENTRY_FILE=index.php` (or any value ending in `.php`) and `WORKER_MODE_ENABLED=false`. Equivalent nginx config:
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
@@ -105,7 +108,7 @@ The front controller always receives the **original URI** in `PATH_INFO`, lettin
 
 ## SPA Mode
 
-Active when `INDEX_FILE=index.html` (or any non-`.php` value). Equivalent nginx config:
+Active when `ENTRY_FILE=index.html` (or any non-`.php` value) and `WORKER_MODE_ENABLED=false`. Equivalent nginx config:
 
 ```nginx
 location ~ \.php$ {
@@ -146,15 +149,17 @@ Two semantics worth highlighting:
 
 ## Worker Mode
 
-Worker mode activates automatically when `WORKER_FILE` is set. It plugs into all three routing modes as a fallback step that runs **before** the final 404:
+Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at a `.php` script. The router runs Traditional-style direct-mapping for static assets, then dispatches every unmatched request to the worker `ENTRY_FILE` instead of returning 404.
 
-| Mode | Where worker fits in |
+| Step | Behavior |
 |---|---|
-| Traditional | After `/index.html` fallback, before 404 |
-| Framework | When `index.php` is itself missing |
-| SPA | When `/index.html` is itself missing |
+| Static assets (`.css`, `.png`, …) | Served directly from disk if present, else hard 404 |
+| Anything else | Dispatched to the worker `ENTRY_FILE` |
 
-This means worker mode is orthogonal to routing: if your front controller goes missing, the worker takes over. Setting both `WORKER_FILE` and `INDEX_FILE=index.php` is fully supported.
+Startup-time validation rejects two combinations:
+
+- `WORKER_MODE_ENABLED=true` with no `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set`.
+- `WORKER_MODE_ENABLED=true` with a non-`.php` `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE`.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
 
@@ -203,7 +208,7 @@ In Framework mode, direct access to the front controller is now allowed (the rew
 
 ### `PATH_INFO` is empty in Framework mode
 
-Make sure `INDEX_FILE` ends in `.php`. If it doesn't, OxPHP picks SPA mode, which doesn't populate `PATH_INFO`. The variable is now set unconditionally in Framework mode — you no longer need any feature flag.
+Make sure `ENTRY_FILE` ends in `.php`. If it doesn't, OxPHP picks SPA mode, which doesn't populate `PATH_INFO`. The variable is now set unconditionally in Framework mode — you no longer need any feature flag.
 
 ### Symlink inside document root returns 404
 
@@ -221,7 +226,7 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
 ```
 
 ## See Also

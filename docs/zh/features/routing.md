@@ -26,11 +26,14 @@ OxPHP 使用三种模式之一处理传入的 HTTP 请求，通过单个环境�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 用于提供文件和 PHP 脚本的根目录 |
-| `INDEX_FILE` | *(未设置)* | 路由模式：未设置 = Traditional，`*.php` = Framework，其他任何值 = SPA |
+| `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional。`*.php` = Framework。非 `.php` = SPA。当 `WORKER_MODE_ENABLED=true` 时 = Worker。相对路径基于 `DOCUMENT_ROOT` 解析 |
+| `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
+
+旧的 `INDEX_FILE` 与 `WORKER_FILE` 仍会被解析（启动时输出 `WARN`）并映射到新模型。详见 [Configuration → 已弃用](../operations/configuration.md#已弃用index_file-与-worker_file)。
 
 ## 传统模式（Traditional）
 
-当 `INDEX_FILE` **未设置**（或为空）时生效。等效的 nginx 配置：
+当 `ENTRY_FILE` **未设置**（或为空）且 `WORKER_MODE_ENABLED=false` 时生效。等效的 nginx 配置：
 
 ```nginx
 location / {
@@ -48,7 +51,7 @@ location ~ \.php$ {
 3. **PATH_INFO 拆分** — 当 URI 包含 `.php/` 时，匹配磁盘上的脚本前缀，剩余部分成为 `PATH_INFO`（例如 `/api.php/users/42` → 脚本 `api.php`，`PATH_INFO=/users/42`）
 4. **`/index.php`** — 根前端控制器回退
 5. **`/index.html`** — 根静态索引回退
-6. **`WORKER_FILE`** — 如果配置了 Worker 模式
+6. **Worker 回退** — 如果 `WORKER_MODE_ENABLED=true`，分发到 Worker 的 `ENTRY_FILE`
 7. **404**
 
 **示例：**
@@ -66,7 +69,7 @@ PATH_INFO 拆分在 Traditional 模式下**始终启用**。没有环境变量�
 
 ## 框架模式（Framework）
 
-当 `INDEX_FILE=index.php`（或任何以 `.php` 结尾的值）时生效。等效的 nginx 配置：
+当 `ENTRY_FILE=index.php`（或任何以 `.php` 结尾的值）且 `WORKER_MODE_ENABLED=false` 时生效。等效的 nginx 配置：
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
@@ -105,7 +108,7 @@ location = /index.php {
 
 ## SPA 模式
 
-当 `INDEX_FILE=index.html`（或任何不以 `.php` 结尾的值）时生效。等效的 nginx 配置：
+当 `ENTRY_FILE=index.html`（或任何不以 `.php` 结尾的值）且 `WORKER_MODE_ENABLED=false` 时生效。等效的 nginx 配置：
 
 ```nginx
 location ~ \.php$ {
@@ -146,15 +149,17 @@ location / {
 
 ## Worker 模式
 
-当设置了 `WORKER_FILE` 时，Worker 模式会自动激活。它作为最终 404 **之前**的回退步骤插入到所有三种路由模式中：
+当 `WORKER_MODE_ENABLED=true` 且 `ENTRY_FILE` 指向 `.php` 脚本时，Worker 模式生效。路由器以直接文件映射方式处理静态资源，所有未匹配的请求会分发到 Worker 的 `ENTRY_FILE`，而不是返回 404。
 
-| 模式 | Worker 的位置 |
+| 步骤 | 行为 |
 |---|---|
-| Traditional | 在 `/index.html` 回退之后，404 之前 |
-| Framework | 当 `index.php` 自身缺失时 |
-| SPA | 当 `/index.html` 自身缺失时 |
+| 静态资源（`.css`、`.png`、…） | 若文件存在则直接从磁盘提供，否则硬 404 |
+| 其他所有请求 | 分发到 Worker 的 `ENTRY_FILE` |
 
-也就是说，Worker 模式与路由正交：如果您的前端控制器丢失，Worker 会接管。同时设置 `WORKER_FILE` 和 `INDEX_FILE=index.php` 完全受支持。
+启动时校验拒绝两种组合：
+
+- `WORKER_MODE_ENABLED=true` 且未设置 `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set`。
+- `WORKER_MODE_ENABLED=true` 且 `ENTRY_FILE` 不是 `.php` → `WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE`。
 
 详细配置请参见 [Worker 模式](worker-mode.md)。
 
@@ -203,7 +208,7 @@ docker exec <container> ls /var/www/html/public
 
 ### Framework 模式下 `PATH_INFO` 为空
 
-确保 `INDEX_FILE` 以 `.php` 结尾。否则 OxPHP 会选择 SPA 模式，而 SPA 模式不填充 `PATH_INFO`。在 Framework 模式下，该变量现在无条件设置——不再需要任何功能开关。
+确保 `ENTRY_FILE` 以 `.php` 结尾。否则 OxPHP 会选择 SPA 模式，而 SPA 模式不填充 `PATH_INFO`。在 Framework 模式下，该变量现在无条件设置 —— 不再需要任何功能开关。
 
 ### 文档根目录内的符号链接返回 404
 
@@ -221,7 +226,7 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
 ```
 
 ## 参见

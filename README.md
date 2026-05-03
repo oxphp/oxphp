@@ -304,7 +304,8 @@ All settings are via environment variables — no config files required.
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
-| `INDEX_FILE` | *(unset)* | Routing mode: empty = Traditional, `*.php` = Framework, anything else = SPA |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional, `*.php` = Framework, non-`.php` = SPA. Resolved against `DOCUMENT_ROOT` |
+| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
 | `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | HTTP server threads for handling connections; `0` = auto |
 | `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
 | `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool: `N` = fixed, `MIN:MAX` = dynamic, `0` = auto |
@@ -325,7 +326,6 @@ All settings are via environment variables — no config files required.
 | `COMPRESSION_LEVEL` | `4` | Brotli quality (0 = off, 1–11) |
 | `ACCESS_LOG` | *(off)* | Per-request JSON log: `all`, `error`, or unset |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
-| `WORKER_FILE` | *(unset)* | Path to worker PHP script; enables persistent worker mode |
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling. Application-driven recycling is available via `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
@@ -334,6 +334,8 @@ All settings are via environment variables — no config files required.
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
 | `PHP_DENY_DIRS` | *(unset)* | Glob patterns of directories where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_DIRS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
+
+> **Deprecated env vars** (still parsed, with a startup `WARN`): `INDEX_FILE` → use `ENTRY_FILE`. `WORKER_FILE` → use `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. The legacy forms will be removed in a future release.
 
 ### OpenTelemetry (`plugin-otel` feature)
 

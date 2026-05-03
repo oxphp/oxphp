@@ -102,7 +102,7 @@ High queue wait times indicate that all workers are busy and you should increase
 
 ## Worker Mode Metrics
 
-These metrics are only emitted when worker mode is active (`WORKER_FILE` is set).
+These metrics are only emitted when worker mode is active (`WORKER_MODE_ENABLED=true`).
 
 ### Global Counters
 

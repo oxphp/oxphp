@@ -255,7 +255,7 @@ The result visualises the chain so you can see where the inadvertent back-refere
 `tests/soak/pool_soak.sh` is a manual (non-CI) harness for verifying the Shared\Pool stability story over hours or days of continuous load. It:
 
 1. Boots the dev image with dynamic worker scaling (`PHP_WORKERS=4:40` by default) and a short pool `idleTimeout` so the eviction scheduler fires continuously.
-2. Loads `tests/soak/workload.php` as a `WORKER_FILE`, which constructs 10 pools × `maxSize=8` and serves acquire/release on every request.
+2. Loads `tests/soak/workload.php` as the worker bootstrap, which constructs 10 pools × `maxSize=8` and serves acquire/release on every request.
 3. Drives traffic with `wrk` for `SOAK_DURATION_MIN` minutes (default 1440 = 24h).
 4. Scrapes `/metrics` and the container's RSS every 60 s into `tests/soak/out/<timestamp>/metrics.csv`.
 5. Writes `verify.txt` at the end with pass/fail for the five release-exit criteria (RSS drift within ±5%, zero stale-handle panics, zero leaked entries at shutdown, idle-timeout evictions rising smoothly, zero deadlock-detector firings).

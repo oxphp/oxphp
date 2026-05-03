@@ -31,11 +31,15 @@ services:
       # Root directory for serving files and PHP scripts.
       # - DOCUMENT_ROOT=/var/www/html/public
 
-      # Front-controller file. Determines routing mode:
+      # Single canonical entry script. Determines routing mode:
       #   (unset)      — traditional: direct file mapping, / → index.php or index.html
       #   index.php    — framework: all requests → index.php, direct .php access blocked
       #   index.html   — SPA: missing files → index.html, .php still executes
-      # - INDEX_FILE=index.php
+      # Resolved against DOCUMENT_ROOT (relative paths and `..` allowed).
+      # - ENTRY_FILE=index.php
+
+      # Legacy: INDEX_FILE is still parsed but emits a startup WARN.
+      # Use ENTRY_FILE instead.
 
       # PHP executor backend.
       #   sapi  — execute PHP via custom SAPI (default, requires php feature)
@@ -132,12 +136,15 @@ services:
 
       # ── Worker Mode ────────────────────────────────────────────────
 
-      # PHP file that boots the application and calls oxphp_worker().
-      # When set, workers use persistent mode (no php_request_shutdown between requests).
-      # - WORKER_FILE=/var/www/html/worker.php
+      # Enable persistent worker mode. Requires ENTRY_FILE to point at a
+      # .php script that boots the application and calls oxphp_worker().
+      # Workers then use persistent mode (no php_request_shutdown between requests).
+      # - WORKER_MODE_ENABLED=true
+      # - ENTRY_FILE=/var/www/html/worker.php
 
-      # Max requests before recycling a worker (0 = unlimited).
-      # - WORKER_MAX_REQUESTS=0
+      # Legacy: WORKER_FILE is still parsed but emits a startup WARN. It maps
+      # onto WORKER_MODE_ENABLED=true ENTRY_FILE=$WORKER_FILE — use the
+      # explicit pair above instead.
 
       # Max memory (MB) before recycling a worker (0 = unlimited).
       # - WORKER_MAX_MEMORY_MIB=0

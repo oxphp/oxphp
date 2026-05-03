@@ -162,7 +162,7 @@ services:
       - ./src:/var/www/html
     environment:
       DOCUMENT_ROOT: "/var/www/html/public"
-      INDEX_FILE: "index.php"
+      ENTRY_FILE: "index.php"
       REQUEST_TIMEOUT_SECONDS: "0"
       PHP_WORKERS: "32"
 ```

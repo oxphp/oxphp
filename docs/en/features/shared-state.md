@@ -72,7 +72,7 @@ OxPHP 0.3 ships seven types. Pick by semantics, not by what feels familiar:
 
 ```php
 <?php
-// worker.php — loaded via WORKER_FILE, runs once per PHP worker
+// worker.php — entry script in worker mode, runs once per PHP worker
 require __DIR__ . '/vendor/autoload.php';
 
 $requests = new OxPHP\Shared\Counter();

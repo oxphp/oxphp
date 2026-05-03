@@ -33,7 +33,7 @@ OxPHP 拦截任何包含以 `.` 开头的路径段的 URL 请求，返回 404 No
 |------|------|
 | `/.well-known/security.txt` | 作为静态文件提供 |
 | `/.well-known/acme-challenge/token` | 作为静态文件提供（Let's Encrypt） |
-| `/.well-known/openid-configuration` | 若文件存在则提供，否则回退到 INDEX_FILE 或 404 |
+| `/.well-known/openid-configuration` | 若文件存在则提供，否则回退到 ENTRY_FILE 或 404 |
 | `/.well-known` | 404（裸路径） |
 | `/.well-known/` | 404（目录列表） |
 | `/.well-known/test.php` | 404（PHP 执行被阻止） |

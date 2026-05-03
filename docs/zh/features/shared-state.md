@@ -72,7 +72,7 @@ OxPHP 0.3 提供七种类型。请按语义而非熟悉度来选择：
 
 ```php
 <?php
-// worker.php —— 通过 WORKER_FILE 加载，每个 PHP 工作线程运行一次
+// worker.php —— Worker 模式入口脚本，每个 PHP 工作线程运行一次
 require __DIR__ . '/vendor/autoload.php';
 
 $requests = new OxPHP\Shared\Counter();

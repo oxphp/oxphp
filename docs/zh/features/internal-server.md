@@ -242,7 +242,7 @@ curl -s http://localhost:9090/health | jq '.plugins'
 
 ### 指标中未显示 Worker 模式或异步指标
 
-Worker 模式指标仅在设置了 `WORKER_FILE` 时出现。异步指标仅在 `ASYNC_WORKERS > 0` 且至少有一个任务被分发或拒绝时出现。
+Worker 模式指标仅在启用 Worker 模式时（`WORKER_MODE_ENABLED=true`）出现。异步指标仅在 `ASYNC_WORKERS > 0` 且至少有一个任务被分发或拒绝时出现。
 
 ## 参见
 

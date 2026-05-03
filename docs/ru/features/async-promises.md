@@ -180,7 +180,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - ASYNC_WORKERS=4
       - ASYNC_QUEUE_CAPACITY=256
 ```
@@ -233,9 +234,9 @@ $promise = oxphp_async(function () use ($userId, $userName) { ... });
 
 ### Await зависает в традиционном режиме
 
-В традиционном режиме (без `WORKER_FILE`) `oxphp_async_await()` блокирует поток воркера. Если все PHP-воркеры заблокированы в ожидании асинхронных результатов, сервер перестаёт обрабатывать запросы.
+В традиционном режиме `oxphp_async_await()` блокирует поток воркера. Если все PHP-воркеры заблокированы в ожидании асинхронных результатов, сервер перестаёт обрабатывать запросы.
 
-**Исправление:** Используйте worker mode (`WORKER_FILE`), чтобы `oxphp_async_await()` приостанавливал fiber вместо блокировки потока.
+**Исправление:** Используйте worker mode (`WORKER_MODE_ENABLED=true`), чтобы `oxphp_async_await()` приостанавливал fiber вместо блокировки потока.
 
 ### Тайм-аут async не завершает выполняемую задачу
 

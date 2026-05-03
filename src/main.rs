@@ -196,15 +196,30 @@ async fn async_main(
     #[cfg(feature = "php")]
     oxphp::php::sapi::register_fiber_callbacks();
 
-    let mode = if config.worker_file.is_some() {
-        "worker"
-    } else {
-        match config.server.index_file.as_deref() {
-            Some("index.php") => "framework",
-            Some("index.html") => "spa",
-            _ => "traditional",
-        }
+    let entry_extension = config
+        .entry_file
+        .as_ref()
+        .and_then(|p| p.extension().and_then(|s| s.to_str()))
+        .map(|s| s.to_ascii_lowercase());
+
+    let mode = match (config.worker_mode_enabled, entry_extension.as_deref()) {
+        (true, Some("php")) => "worker",
+        (false, Some("php")) => "framework",
+        (false, Some(_)) => "static-fallback",
+        (false, None) => "direct-mapping",
+        // (true, _) without a `.php` ENTRY_FILE is rejected by Config::validate
+        // before we get here.
+        _ => unreachable!("worker mode + non-php entry_file should be rejected by validate"),
     };
+
+    let entry_file_display = config.entry_file.as_ref().map(|p| p.display().to_string());
+    tracing::info!(
+        event = "mode_decided",
+        mode = mode,
+        entry = entry_file_display.as_deref(),
+        workers = config.worker_mode.worker_count(),
+        "OxPHP routing mode decided"
+    );
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -378,7 +393,8 @@ async fn async_main(
         tls_acceptor,
         config.compression_level,
         config.max_query_body,
-        config.worker_file.clone(),
+        config.entry_file.clone(),
+        config.worker_mode_enabled,
         config
             .static_cache_ttl
             .map(|ttl| format!("public, max-age={ttl}")),

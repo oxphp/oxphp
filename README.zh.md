@@ -303,7 +303,8 @@ flowchart LR
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | 监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
-| `INDEX_FILE` | *(未设置)* | 路由模式：空 = Traditional，`*.php` = Framework，其他任何值 = SPA |
+| `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional，`*.php` = Framework，非 `.php` = SPA。相对路径基于 `DOCUMENT_ROOT` 解析 |
+| `WORKER_MODE_ENABLED` | `false` | 启用持久化工作进程模式。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
 | `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 处理连接的 HTTP 服务器线程数；`0` = 自动 |
 | `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
 | `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
@@ -324,7 +325,6 @@ flowchart LR
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0 = 关闭，1-11） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
-| `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本路径；设置后启用持久化工作进程模式 |
 | `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）。应用层主动回收请使用 `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | 填充 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`；设为 `false` 时仅使用 `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
@@ -333,6 +333,8 @@ flowchart LR
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
 | `PHP_DENY_DIRS` | *（未设置）* | 禁止执行 PHP 的目录 glob 模式。仅限传统模式。示例：`/uploads/**,/cache/**` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP 状态码（400–599）或指向 PHP 回退脚本的路径。命中 `PHP_DENY_DIRS` 时返回该状态码（可与 `ERROR_PAGES_DIR` 中的自定义 HTML 配合），或在 `$_SERVER` 中携带 `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` 执行回退脚本 |
+
+> **已弃用的环境变量**（仍会被解析，启动时输出 `WARN`）：`INDEX_FILE` → 请使用 `ENTRY_FILE`。`WORKER_FILE` → 请使用 `WORKER_MODE_ENABLED=true ENTRY_FILE=...`。旧形式将在后续版本中移除。
 
 ### OpenTelemetry（`plugin-otel` 特性）
 

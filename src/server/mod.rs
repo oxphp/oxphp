@@ -65,14 +65,17 @@ impl Server {
         tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
         compression_level: i32,
         max_query_body: usize,
-        worker_file: Option<PathBuf>,
+        entry_file: Option<PathBuf>,
+        worker_mode_enabled: bool,
         static_cache_control: Option<String>,
         static_cache_enabled: bool,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
-        let mut route_config = RouteConfig::new(config);
-        if let Some(wf) = worker_file {
-            route_config.set_worker_file(wf);
+        let mut route_config = RouteConfig::new(config, entry_file.as_deref(), worker_mode_enabled);
+        if worker_mode_enabled {
+            if let Some(entry) = entry_file {
+                route_config.set_worker_route(entry);
+            }
         }
         let file_cache = Arc::new(FileCache::with_revalidation(200, !static_cache_enabled));
 

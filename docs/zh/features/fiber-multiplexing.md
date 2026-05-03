@@ -31,7 +31,7 @@ Worker 线程
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `WORKER_FILE` | *(未设置)* | Worker 脚本的路径。设置此项将启用 Worker 模式和 fiber 多路复用 |
+| `WORKER_MODE_ENABLED` | `false` | 设为 `true` 并将 `ENTRY_FILE` 指向 `.php` 引导脚本，以启用 Worker 模式和 fiber 多路复用 |
 | `PHP_WORKERS` | CPU / 2（最少 1） | Worker 线程数。每个线程运行其独立的调度器，最多支持 256 个并发 fiber |
 
 每个 Worker 线程的最大并发 fiber 数为 256。使用 4 个 Worker 线程时，OxPHP 最多可以同时处理 1,024 个正在处理中的请求。
@@ -183,7 +183,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - PHP_WORKERS=4
       - ASYNC_WORKERS=8
 ```
@@ -229,7 +230,7 @@ ASYNC_QUEUE_CAPACITY=512
 
 Fiber 多路复用仅在 Worker 模式下工作。在传统模式下，`oxphp_sleep()` 回退到阻塞式 `usleep()`。
 
-**修复：** 通过设置 `WORKER_FILE` 启用 Worker 模式。
+**修复：** 启用 Worker 模式（`WORKER_MODE_ENABLED=true`）。
 
 ### 并发请求多时内存使用量高
 
@@ -256,4 +257,4 @@ fiber.stack_size = 512K
 - [异步 Promise](async-promises.md) — 用于卸载阻塞 I/O 的后台线程池
 - [SSE](sse.md) — 结合基于 fiber 的协作式睡眠的实时流式传输
 - [PHP 函数](../php/functions.md) — `oxphp_sleep()`、`oxphp_usleep()` 及其他感知 fiber 的函数
-- [配置参考](../operations/configuration.md) — `WORKER_FILE`、`PHP_WORKERS`、`ASYNC_WORKERS`
+- [配置参考](../operations/configuration.md) — `WORKER_MODE_ENABLED`、`ENTRY_FILE`、`PHP_WORKERS`、`ASYNC_WORKERS`

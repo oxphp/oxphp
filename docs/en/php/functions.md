@@ -250,7 +250,7 @@ foreach ($large_dataset as $row) {
 oxphp_is_worker(): bool
 ```
 
-Returns whether the server is running in worker mode. Worker mode activates when `WORKER_FILE` is set.
+Returns whether the server is running in worker mode. Worker mode activates when `WORKER_MODE_ENABLED=true`.
 
 **Returns:** `true` if running in worker mode, `false` in traditional mode.
 
@@ -288,7 +288,7 @@ The worker loop exits when any of the following conditions are met:
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 
-> **Note:** `oxphp_worker()` only works when `WORKER_FILE` is configured. In traditional mode it logs a warning and returns `false`.
+> **Note:** `oxphp_worker()` only works in worker mode (`WORKER_MODE_ENABLED=true`). In traditional mode it logs a warning and returns `false`.
 
 **Example:**
 

@@ -26,11 +26,14 @@ OxPHP направляет входящие HTTP-запросы в одном и
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневой каталог для обслуживания файлов и PHP-скриптов |
-| `INDEX_FILE` | *(не задана)* | Режим маршрутизации: не задана = Traditional, `*.php` = Framework, любое другое = SPA |
+| `ENTRY_FILE` | *(не задано)* | Единый канонический entry-скрипт. Не задано = Traditional. `*.php` = Framework. Не-`.php` = SPA. При `WORKER_MODE_ENABLED=true` = Worker. Резолвится относительно `DOCUMENT_ROOT` |
+| `WORKER_MODE_ENABLED` | `false` | Включает режим постоянных воркеров. Требует, чтобы `ENTRY_FILE` указывал на `.php`-скрипт |
+
+Старые `INDEX_FILE` и `WORKER_FILE` всё ещё парсятся (со startup `WARN`) и маппятся на новую модель. См. [Configuration → Устаревшие](../operations/configuration.md#устаревшие-index_file-и-worker_file).
 
 ## Традиционный режим (Traditional)
 
-Активен, когда `INDEX_FILE` **не задана** (или пуста). Эквивалент в nginx:
+Активен, когда `ENTRY_FILE` **не задано** (или пусто) и `WORKER_MODE_ENABLED=false`. Эквивалент в nginx:
 
 ```nginx
 location / {
@@ -48,7 +51,7 @@ location ~ \.php$ {
 3. **PATH_INFO split** — когда URI содержит `.php/`, префикс скрипта матчится на диске, а остаток становится `PATH_INFO` (например, `/api.php/users/42` → скрипт `api.php`, `PATH_INFO=/users/42`)
 4. **`/index.php`** — корневой фронт-контроллер как фолбэк
 5. **`/index.html`** — корневой статический индекс как фолбэк
-6. **`WORKER_FILE`** — если настроен режим воркера
+6. **Worker fallback** — если `WORKER_MODE_ENABLED=true`, диспатч в `ENTRY_FILE` воркера
 7. **404**
 
 **Примеры:**
@@ -66,7 +69,7 @@ PATH_INFO splitting **всегда включён** в Traditional mode. Пер�
 
 ## Режим фреймворка (Framework)
 
-Активен при `INDEX_FILE=index.php` (или любом значении, оканчивающемся на `.php`). Эквивалент в nginx:
+Активен при `ENTRY_FILE=index.php` (или любом значении, оканчивающемся на `.php`) и `WORKER_MODE_ENABLED=false`. Эквивалент в nginx:
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
@@ -105,7 +108,7 @@ location = /index.php {
 
 ## Режим SPA
 
-Активен при `INDEX_FILE=index.html` (или любом значении, не оканчивающемся на `.php`). Эквивалент в nginx:
+Активен при `ENTRY_FILE=index.html` (или любом не-`.php` значении) и `WORKER_MODE_ENABLED=false`. Эквивалент в nginx:
 
 ```nginx
 location ~ \.php$ {
@@ -146,15 +149,17 @@ location / {
 
 ## Режим воркера
 
-Режим воркера активируется автоматически при установке `WORKER_FILE`. Он встраивается во все три режима маршрутизации как шаг фолбэка, выполняющийся **перед** финальным 404:
+Режим воркера активируется при `WORKER_MODE_ENABLED=true` и `ENTRY_FILE`, указывающем на `.php`-скрипт. Роутер обслуживает статику в стиле direct-mapping, а все остальные запросы диспатчит в `ENTRY_FILE` воркера вместо возврата 404.
 
-| Режим | Где встаёт воркер |
+| Шаг | Поведение |
 |---|---|
-| Traditional | После фолбэка на `/index.html`, перед 404 |
-| Framework | Когда сам `index.php` отсутствует |
-| SPA | Когда сам `/index.html` отсутствует |
+| Статика (`.css`, `.png`, …) | Отдаётся напрямую с диска, если есть; иначе жёсткий 404 |
+| Всё остальное | Диспатчится в `ENTRY_FILE` воркера |
 
-То есть режим воркера ортогонален маршрутизации: если ваш фронт-контроллер исчез, воркер берёт работу на себя. Установка одновременно `WORKER_FILE` и `INDEX_FILE=index.php` полностью поддерживается.
+Стартовая валидация отклоняет два сочетания:
+
+- `WORKER_MODE_ENABLED=true` без `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set`.
+- `WORKER_MODE_ENABLED=true` с не-`.php` `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE`.
 
 Подробности конфигурации см. в [Режим воркера](worker-mode.md).
 
@@ -203,7 +208,7 @@ docker exec <container> ls /var/www/html/public
 
 ### `PATH_INFO` пустой в Framework mode
 
-Убедитесь, что `INDEX_FILE` оканчивается на `.php`. Иначе OxPHP выберет SPA mode, который не заполняет `PATH_INFO`. В Framework mode переменная теперь устанавливается безусловно — никаких feature flags больше не нужно.
+Убедитесь, что `ENTRY_FILE` оканчивается на `.php`. Иначе OxPHP выберет SPA mode, который не заполняет `PATH_INFO`. В Framework mode переменная теперь устанавливается безусловно — никаких feature flags больше не нужно.
 
 ### Символическая ссылка внутри корневого каталога возвращает 404
 
@@ -221,7 +226,7 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
+      - ENTRY_FILE=index.php
 ```
 
 ## См. также

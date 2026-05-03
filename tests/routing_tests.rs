@@ -7,21 +7,19 @@ use tokio::time::Duration;
 use oxphp::events::EventDispatcher;
 
 /// Start the server on a random port and return the bound address.
-async fn start_server(document_root: &std::path::Path, index_file: Option<&str>) -> SocketAddr {
-    start_server_with_options(document_root, index_file, None).await
+async fn start_server(document_root: &std::path::Path, entry_file: Option<&str>) -> SocketAddr {
+    start_server_with_options(document_root, entry_file, None).await
 }
 
 /// Start the server with optional rate limiter and return the bound address.
 async fn start_server_with_options(
     document_root: &std::path::Path,
-    index_file: Option<&str>,
+    entry_file: Option<&str>,
     rate_limiter: Option<Arc<oxphp::server::rate_limit::RateLimiter>>,
 ) -> SocketAddr {
-    let config = oxphp::config::ServerConfig::new(
-        "127.0.0.1:0".to_string(),
-        document_root.to_path_buf(),
-        index_file.map(String::from),
-    );
+    let config =
+        oxphp::config::ServerConfig::new("127.0.0.1:0".to_string(), document_root.to_path_buf());
+    let entry_path = entry_file.map(|name| document_root.join(name));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
@@ -58,7 +56,8 @@ async fn start_server_with_options(
         None,
         0,                                                   // compression disabled in tests
         512 * 1024,                                          // max_query_body: 512 KB
-        None,                                                // no worker mode
+        entry_path,                                          // entry_file
+        false,                                               // worker_mode_enabled
         Some("public, max-age=86400".to_string()),           // static_cache_control
         true,                                                // static_cache_enabled
         Arc::new(std::sync::atomic::AtomicBool::new(false)), // shutdown flag

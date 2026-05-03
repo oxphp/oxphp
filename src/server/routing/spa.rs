@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::{ResolveCtx, RouteResult};
 
-/// SPA routing — `INDEX_FILE="index.html"` (single-page application).
+/// SPA routing — non-`.php` `ENTRY_FILE` (e.g. `index.html`) for a single-page application.
 ///
 /// Nginx equivalent:
 /// ```nginx

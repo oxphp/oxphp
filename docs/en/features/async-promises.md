@@ -180,7 +180,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - ASYNC_WORKERS=4
       - ASYNC_QUEUE_CAPACITY=256
 ```
@@ -228,9 +229,9 @@ $promise = oxphp_async(function () use ($userId, $userName) { ... });
 
 ### Await hangs in traditional mode
 
-In traditional mode (no `WORKER_FILE`), `oxphp_async_await()` blocks the worker thread. If all PHP workers are blocked waiting for async results, the server stops processing requests.
+In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP workers are blocked waiting for async results, the server stops processing requests.
 
-**Fix:** Use worker mode (`WORKER_FILE`) so that `oxphp_async_await()` suspends the fiber instead of blocking the thread.
+**Fix:** Enable worker mode (`WORKER_MODE_ENABLED=true`) so that `oxphp_async_await()` suspends the fiber instead of blocking the thread.
 
 ### Async timeout does not kill the running task
 

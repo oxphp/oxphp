@@ -33,7 +33,7 @@ Percent-encoded bypasses are caught — `/%2egit/HEAD` decodes to `/.git/HEAD` a
 |---------|--------|
 | `/.well-known/security.txt` | Served as a static file |
 | `/.well-known/acme-challenge/token` | Served as a static file (Let's Encrypt) |
-| `/.well-known/openid-configuration` | Served if file exists, otherwise INDEX_FILE fallback or 404 |
+| `/.well-known/openid-configuration` | Served if file exists, otherwise ENTRY_FILE fallback or 404 |
 | `/.well-known` | 404 (bare path) |
 | `/.well-known/` | 404 (directory listing) |
 | `/.well-known/test.php` | 404 (PHP execution blocked) |

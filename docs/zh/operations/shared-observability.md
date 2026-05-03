@@ -255,7 +255,7 @@ curl -s http://localhost:9090/__ox_shared/graph?id=42 | jq
 `tests/soak/pool_soak.sh` 是手动（非 CI）装置，用于在数小时或数天的持续负载下验证 Shared\Pool 的稳定性。它：
 
 1. 以动态工作线程伸缩（默认 `PHP_WORKERS=4:40`）和较短的池 `idleTimeout` 启动开发镜像，从而让驱逐调度器不停触发。
-2. 加载 `tests/soak/workload.php` 作为 `WORKER_FILE`，构建 10 个池 × `maxSize=8`，并对每次请求执行 acquire/release。
+2. 加载 `tests/soak/workload.php` 作为 Worker 引导脚本，构建 10 个池 × `maxSize=8`，并对每次请求执行 acquire/release。
 3. 用 `wrk` 持续 `SOAK_DURATION_MIN` 分钟（默认 1440 = 24 小时）施加流量。
 4. 每 60 秒抓取 `/metrics` 和容器 RSS，写入 `tests/soak/out/<timestamp>/metrics.csv`。
 5. 在结束时写出 `verify.txt`，对五条发布退出准则给出通过/失败（RSS 漂移在 ±5% 内、零 stale-handle panic、关停时零泄漏条目、空闲超时驱逐平稳上升、零死锁检测器触发）。

@@ -250,7 +250,7 @@ foreach ($large_dataset as $row) {
 oxphp_is_worker(): bool
 ```
 
-返回服务器是否以 Worker 模式运行。当设置了 `WORKER_FILE` 时，Worker 模式将被激活。
+返回服务器是否以 Worker 模式运行。Worker 模式在 `WORKER_MODE_ENABLED=true` 时激活。
 
 **返回值：** Worker 模式下返回 `true`，传统模式下返回 `false`。
 
@@ -288,7 +288,7 @@ oxphp_worker(callable $handler): bool
 - Worker 超出 `WORKER_MAX_MEMORY_MIB` 限制
 - 应用层调用了 [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 
-> **注意：** `oxphp_worker()` 仅在配置了 `WORKER_FILE` 时有效。在传统模式下，它会记录警告并返回 `false`。
+> **注意：** `oxphp_worker()` 仅在 Worker 模式（`WORKER_MODE_ENABLED=true`）下生效。在传统模式下，它会记录警告并返回 `false`。
 
 **示例：**
 
@@ -992,4 +992,4 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [提前响应](../features/early-response.md) -- 使用 `oxphp_finish_request()` 进行后台处理
 - [超全局变量](superglobals.md) -- OxPHP 如何填充 `$_SERVER`、`$_GET`、`$_POST` 及其他超全局变量
 - [分布式追踪与 APM](../features/distributed-tracing.md) -- W3C Trace Context、OTel 导出和 `oxphp_apm_*()` SDK
-- [配置参考](../operations/configuration.md) -- `WORKER_FILE`、`PHP_WORKERS`、`REQUEST_TIMEOUT_SECONDS` 及其他环境变量
+- [配置参考](../operations/configuration.md) -- `WORKER_MODE_ENABLED`、`ENTRY_FILE`、`PHP_WORKERS`、`REQUEST_TIMEOUT_SECONDS` 及其他环境变量

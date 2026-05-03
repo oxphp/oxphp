@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{ResolveCtx, RouteResult};
 
-/// Traditional routing — `INDEX_FILE=""`.
+/// Traditional routing — `ENTRY_FILE` unset (direct file mapping).
 ///
 /// Nginx equivalent:
 /// ```nginx

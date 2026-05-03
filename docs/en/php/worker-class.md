@@ -14,7 +14,7 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | Method | Description |
 |--------|-------------|
 | `Worker::current(): self` | Returns the singleton handle for the current OS thread. |
-| `Worker::isWorkerMode(): bool` | Returns `true` if the server is running in worker mode (i.e. `WORKER_FILE` is set). |
+| `Worker::isWorkerMode(): bool` | Returns `true` if the server is running in worker mode (i.e. `WORKER_MODE_ENABLED=true`). |
 | `getId(): int` | Numeric worker identifier in the range `0..N-1` for the current OS thread. |
 | `getStartTime(): float` | Unix timestamp (seconds) when this OS worker thread was spawned. |
 | `getRequestCount(): int` | 1-based count of requests handled by this OS thread. Increases in both modes. |
@@ -103,7 +103,7 @@ if (getenv('OXPHP_DEV') === '1') {
 
 ### Worker entry point
 
-In a `WORKER_FILE` script, call `serve()` to enter the request loop.
+In a worker bootstrap script, call `serve()` to enter the request loop.
 
 ```php
 <?php

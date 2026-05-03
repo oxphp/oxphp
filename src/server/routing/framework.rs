@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::{ResolveCtx, RouteResult};
 
-/// Framework routing — `INDEX_FILE="index.php"` (single front controller).
+/// Framework routing — `*.php` `ENTRY_FILE` (single front controller).
 ///
 /// Nginx equivalent:
 /// ```nginx

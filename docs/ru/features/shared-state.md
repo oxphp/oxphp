@@ -72,7 +72,7 @@ OxPHP 0.3 поставляется с семью типами. Выбирайт�
 
 ```php
 <?php
-// worker.php — загружается через WORKER_FILE, выполняется один раз на PHP-воркер
+// worker.php — entry script in worker mode, выполняется один раз на PHP-воркер
 require __DIR__ . '/vendor/autoload.php';
 
 $requests = new OxPHP\Shared\Counter();

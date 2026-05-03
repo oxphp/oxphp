@@ -303,7 +303,8 @@ flowchart LR
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Адрес и порт для прослушивания |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Путь в файловой системе для раздачи файлов |
-| `INDEX_FILE` | *(не задано)* | Режим маршрутизации: пусто = Traditional, `*.php` = Framework, любое другое = SPA |
+| `ENTRY_FILE` | *(не задано)* | Единый канонический entry-скрипт. Не задано = Traditional, `*.php` = Framework, не-`.php` = SPA. Резолвится относительно `DOCUMENT_ROOT` |
+| `WORKER_MODE_ENABLED` | `false` | Включает режим постоянных воркеров. Требует, чтобы `ENTRY_FILE` указывал на `.php`-скрипт |
 | `TOKIO_WORKERS` | `0` (CPU / 2, мин. 1) | Потоки HTTP-сервера для обработки соединений; `0` = авто |
 | `EXECUTOR` | `sapi` | Исполнитель PHP: `sapi` (настоящий PHP) или `stub` (режим тестирования) |
 | `PHP_WORKERS` | `0` (CPU / 2, мин. 1) | Пул воркеров: `N` = фиксированный, `MIN:MAX` = динамический, `0` = авто |
@@ -324,7 +325,6 @@ flowchart LR
 | `COMPRESSION_LEVEL` | `4` | Уровень качества Brotli (0 = выкл., 1–11) |
 | `ACCESS_LOG` | *(выкл.)* | JSON-журнал доступа: `all`, `error` или не задано |
 | `MAX_CONNECTIONS` | `10000` | Максимальное количество одновременных соединений |
-| `WORKER_FILE` | *(не задано)* | Путь к PHP-скрипту воркера; включает режим постоянных воркеров |
 | `WORKER_MAX_MEMORY_MIB` | `0` (без ограничений) | Макс. память (МиБ) на воркер до рециклизации. Прикладной перезапуск доступен через `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | Заполнять `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; установите `false`, чтобы использовать только `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (отключено) | Выделенные потоки асинхронных воркеров для `oxphp_async()` |
@@ -333,6 +333,8 @@ flowchart LR
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
 | `PHP_DENY_DIRS` | *(не задано)* | Glob-паттерны директорий, в которых выполнение PHP запрещено. Только режим Traditional. Пример: `/uploads/**,/cache/**` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP-код (400–599) или путь к PHP-скрипту-фолбэку. При совпадении с `PHP_DENY_DIRS` возвращается статус (с опциональным кастомным HTML из `ERROR_PAGES_DIR`) либо выполняется фолбэк-скрипт с `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` в `$_SERVER` |
+
+> **Устаревшие переменные** (всё ещё парсятся, со startup `WARN`): `INDEX_FILE` → используйте `ENTRY_FILE`. `WORKER_FILE` → используйте `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. Старые формы будут удалены в одном из будущих релизов.
 
 ### OpenTelemetry (feature `plugin-otel`)
 

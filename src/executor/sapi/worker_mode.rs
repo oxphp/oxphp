@@ -17,7 +17,7 @@ use super::pool::WorkerRequest;
 /// Configuration for worker mode threads.
 /// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.
 pub(super) struct WorkerModeConfig {
-    pub worker_file: std::path::PathBuf,
+    pub entry_file: std::path::PathBuf,
     pub document_root: std::path::PathBuf,
     pub max_memory_mib: u64,
 }
@@ -91,7 +91,7 @@ fn worker_mode_thread(
     stats.spawn_time_ms.store(spawn_ms, Ordering::Relaxed);
     stats.active.store(true, Ordering::Relaxed);
 
-    tracing::info!(worker = %thread_name, file = %config.worker_file.display(), "Worker mode thread started");
+    tracing::info!(worker = %thread_name, file = %config.entry_file.display(), "Worker mode thread started");
 
     // 4. Single php_request_startup for the entire worker lifetime.
     //    Do NOT call oxphp_bridge_init_ctx() again — it would wipe worker_mode.
@@ -113,7 +113,7 @@ fn worker_mode_thread(
     // Populate $_SERVER with boot-phase values so the worker script
     // can access SCRIPT_FILENAME, DOCUMENT_ROOT, etc. during bootstrap.
     // Without this, frameworks like Symfony abort early on empty $_SERVER.
-    sapi::set_boot_server_vars(&config.worker_file, &config.document_root);
+    sapi::set_boot_server_vars(&config.entry_file, &config.document_root);
 
     if unsafe { bindings::php_request_startup() } != 0 {
         tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
@@ -124,7 +124,7 @@ fn worker_mode_thread(
     //    The loop blocks on recv() inside worker_wait_callback.
     //    Returns when shutdown or limits reached.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let script_path_str = config.worker_file.to_str().unwrap_or("");
+        let script_path_str = config.entry_file.to_str().unwrap_or("");
         let script_path = CString::new(script_path_str).unwrap_or_default();
 
         let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
@@ -141,7 +141,7 @@ fn worker_mode_thread(
         if script_ok == 0 {
             tracing::warn!(
                 worker = %thread_name,
-                path = %config.worker_file.display(),
+                path = %config.entry_file.display(),
                 "Worker script aborted via zend_bailout"
             );
         }

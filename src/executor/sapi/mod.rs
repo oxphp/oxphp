@@ -46,15 +46,20 @@ fn php_startup() {
     }
 }
 
-/// Build the spawn strategy once based on `WORKER_FILE` presence.
+/// Build the spawn strategy once based on `WORKER_MODE_ENABLED`.
 ///
 /// Side effects (worker-mode branch only):
 /// - registers `oxphp_bridge_set_worker_callbacks`,
 /// - creates `WorkerMetrics` and publishes it via `metrics.set_worker_metrics`.
 fn build_spawn_strategy(config: &Config, metrics: &Metrics) -> SpawnStrategy {
-    if let Some(ref worker_file) = config.worker_file {
+    if config.worker_mode_enabled {
+        // Validated at startup: worker mode requires a `.php` entry file.
+        let entry_file = config
+            .entry_file
+            .as_ref()
+            .expect("WORKER_MODE_ENABLED=true requires ENTRY_FILE — should have been caught by Config::validate");
         let wmc = Arc::new(WorkerModeConfig {
-            worker_file: worker_file.clone(),
+            entry_file: entry_file.clone(),
             document_root: config.server.document_root.clone(),
             max_memory_mib: config.worker_max_memory_mib,
         });
@@ -96,7 +101,7 @@ fn log_startup(
             workers = initial_count,
             queue_capacity,
             idle_timeout_seconds,
-            worker_file = %config.worker_file.display(),
+            entry_file = %config.entry_file.display(),
             "PHP worker pool started (worker mode)"
         );
     } else {

@@ -9,20 +9,23 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 
 ## How It Works
 
-1. **Set `WORKER_FILE`** to the path of your bootstrap script. This enables worker mode for all PHP workers in the pool.
+1. **Set `WORKER_MODE_ENABLED=true`** and point **`ENTRY_FILE`** at your bootstrap script. This enables worker mode for all PHP workers in the pool.
 2. **PHP starts and runs the outer scope once** — autoloader registration, configuration loading, database connections, and any other initialization code execute a single time.
 3. **Call `oxphp_worker(callback)`** to enter the request loop. OxPHP begins dispatching incoming HTTP requests to your callback.
 4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `php://input`), output buffers, and response headers are reset automatically. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope.
 5. **Outer scope persists** — variables defined before `oxphp_worker()`, static properties, database connections, and autoloaders remain available across all requests handled by that worker.
 
-> **Note:** Setting `WORKER_FILE` also changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.
+> **Note:** Worker mode changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WORKER_FILE` | *(unset)* | Path to the worker PHP script. Setting this enables worker mode |
+| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Accepts `true`, `1`, `yes`. Requires `ENTRY_FILE` to point at a `.php` script |
+| `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout) |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum PHP memory per worker in MiB before recycling. `0` = unlimited |
+
+> **Migrating from `WORKER_FILE`:** the legacy variable is still parsed (with a startup `WARN`) and behaves as `WORKER_MODE_ENABLED=true ENTRY_FILE=$WORKER_FILE`. New deployments should use the explicit pair; the legacy form will be removed in a future release.
 
 For application-driven recycling, call [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) from inside a request handler. The worker exits cleanly after the current request completes.
 
@@ -131,8 +134,8 @@ services:
       - ./src:/var/www/html
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - INDEX_FILE=index.php
-      - WORKER_FILE=/var/www/html/worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=/var/www/html/worker.php
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
@@ -203,7 +206,7 @@ $kernel->shutdown();
 
 ## See Also
 
-- [Routing](routing.md) — how `WORKER_FILE` affects URL routing
+- [Routing](routing.md) — how worker mode plugs into URL routing
 - [Early Response](early-response.md) — send the response immediately and continue background processing
 - [PHP Functions](../php/functions.md) — full reference for `oxphp_worker()`, `oxphp_is_worker()`, and other built-in functions
 - [Configuration Reference](../operations/configuration.md) — complete list of environment variables

@@ -117,7 +117,7 @@ OxPHP supports two PHP execution models:
 
 Worker mode eliminates per-request startup overhead, which can reduce response times significantly for framework-based applications (Laravel, Symfony, etc.) where bootstrapping is expensive.
 
-To enable worker mode, set `WORKER_FILE` to a PHP script that calls `oxphp_worker()`:
+To enable worker mode, set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at a PHP script that calls `oxphp_worker()`:
 
 ```php
 <?php

@@ -13,7 +13,8 @@ OxPHP is configured entirely through environment variables. There are no configu
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port for the main HTTP server |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `INDEX_FILE` | *(unset)* | Routing mode: unset = Traditional, `*.php` = Framework, anything else = SPA. See [Routing](../features/routing.md) |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
+| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Accepts `true`, `1`, `yes` |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
@@ -49,10 +50,21 @@ In dynamic mode, OxPHP scales workers up when all are busy and scales down when 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WORKER_FILE` | *(unset)* | Path to the worker PHP script. Enables persistent worker mode when set |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory in MiB per worker before recycling. `0` = unlimited |
 
-When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB`, or on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
+Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP processes then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB`, or on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
+
+### Deprecated: `INDEX_FILE` and `WORKER_FILE`
+
+The legacy `INDEX_FILE` and `WORKER_FILE` variables are still parsed for backwards compatibility. When set, they emit a `WARN` log line at startup and map onto the new model:
+
+| Legacy | Equivalent today |
+|---|---|
+| `INDEX_FILE=index.php` | `ENTRY_FILE=index.php` |
+| `INDEX_FILE=index.html` | `ENTRY_FILE=index.html` |
+| `WORKER_FILE=/path/worker.php` | `WORKER_MODE_ENABLED=true ENTRY_FILE=/path/worker.php` |
+
+If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate at your convenience; the deprecated forms will be removed in a future release.
 
 ## SAPI / PHP
 
@@ -81,7 +93,7 @@ When `WORKER_FILE` is set, PHP processes stay alive across requests, keeping boo
 |----------|---------|-------------|
 | `FRAME_OPTIONS` | `DENY` | Clickjacking protection. `DENY` blocks all framing, `SAMEORIGIN` allows same-origin framing, `off` disables (use when managing framing via your own CSP). Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
-| `PHP_DENY_DIRS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**`). Traditional mode only — ignored with a startup warning when `INDEX_FILE` is set. Matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). See [PHP Execution Deny-List](../security/php-deny-dirs.md) |
+| `PHP_DENY_DIRS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**`). Direct-mapping (no `ENTRY_FILE`) only — ignored with a startup warning when `ENTRY_FILE` is set, since front-controller, SPA, and worker modes already route every request through one trusted script. Matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). See [PHP Execution Deny-List](../security/php-deny-dirs.md) |
 | `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_DIRS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_DIRS` (loop prevention) |
 
 The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
@@ -171,7 +183,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 PHP_WORKERS=8
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -193,7 +205,8 @@ STATIC_CACHE_TTL=30d
 ```bash
 LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
-WORKER_FILE=../worker.php
+WORKER_MODE_ENABLED=true
+ENTRY_FILE=../worker.php
 PHP_WORKERS=8
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
@@ -209,7 +222,7 @@ LISTEN_ADDR=0.0.0.0:443
 TLS_CERT=/etc/ssl/oxphp/cert.pem
 TLS_KEY=/etc/ssl/oxphp/key.pem
 DOCUMENT_ROOT=/var/www/html/public
-INDEX_FILE=index.php
+ENTRY_FILE=index.php
 ```
 
 ## Inspecting Active Configuration
@@ -224,7 +237,7 @@ curl -s http://localhost:9090/config | jq .
 {
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
-  "index_file": "index.php",
+  "entry_file": "/var/www/html/public/index.php",
   "log_level": "warn",
   "executor_type": "sapi",
   "php_workers": "8",
@@ -242,8 +255,7 @@ curl -s http://localhost:9090/config | jq .
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
-  "worker_mode": false,
-  "worker_file": null,
+  "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,
@@ -272,7 +284,7 @@ curl -s http://localhost:9090/config | jq .
 
 ## See Also
 
-- [Routing](../features/routing.md) — routing modes and `INDEX_FILE` behavior
+- [Routing](../features/routing.md) — routing modes and `ENTRY_FILE` behavior
 - [Health Checks](health-checks.md) — internal server endpoints
 - [Metrics](metrics.md) — Prometheus-compatible metrics reference
 - [Graceful Shutdown](graceful-shutdown.md) — how `DRAIN_TIMEOUT_SECONDS` affects shutdown

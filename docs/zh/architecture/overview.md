@@ -117,7 +117,7 @@ OxPHP 支持两种 PHP 执行模型：
 
 工作进程模式消除了每次请求的启动开销，对于引导成本较高的基于框架的应用（Laravel、Symfony 等）可以显著减少响应时间。
 
-要启用工作进程模式，将 `WORKER_FILE` 设置为一个调用 `oxphp_worker()` 的 PHP 脚本：
+要启用工作进程模式，设置 `WORKER_MODE_ENABLED=true` 并将 `ENTRY_FILE` 指向一个调用 `oxphp_worker()` 的 PHP 脚本：
 
 ```php
 <?php

@@ -180,7 +180,8 @@ services:
       - "80:80"
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
-      - WORKER_FILE=worker.php
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=worker.php
       - ASYNC_WORKERS=4
       - ASYNC_QUEUE_CAPACITY=256
 ```
@@ -228,9 +229,9 @@ $promise = oxphp_async(function () use ($userId, $userName) { ... });
 
 ### 传统模式下等待挂起
 
-在传统模式（无 `WORKER_FILE`）下，`oxphp_async_await()` 会阻塞 Worker 线程。如果所有 PHP Worker 都在等待异步结果，服务器将停止处理请求。
+在传统模式下，`oxphp_async_await()` 会阻塞 Worker 线程。如果所有 PHP Worker 都在等待异步结果，服务器将停止处理请求。
 
-**修复：** 使用 Worker 模式（`WORKER_FILE`），使 `oxphp_async_await()` 挂起 fiber 而不是阻塞线程。
+**修复：** 使用 Worker 模式（`WORKER_MODE_ENABLED=true`），使 `oxphp_async_await()` 挂起 fiber 而不是阻塞线程。
 
 ### 异步超时不会终止正在运行的任务
 

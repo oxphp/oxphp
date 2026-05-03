@@ -21,7 +21,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 
 [日志](features/access-logging.md)是结构化 JSON：每一行都包含方法、路径、状态码、响应时间和[请求 ID](features/request-ids.md)。在 Loki、Elasticsearch 或任何其他工具中都可以轻松解析，无需额外的 grok 模式。
 
-如果想尝试 [Worker 模式](features/worker-mode.md)——即 PHP 进程不在每次请求时重建——只需一个环境变量 `WORKER_FILE=worker.php`。框架初始化一次，随后处理数千个请求而无需重新加载。要切换回经典模式，只需删除该变量。
+如果想尝试 [Worker 模式](features/worker-mode.md)——即 PHP 进程不在每次请求时重建——只需设置 `WORKER_MODE_ENABLED=true` 并将 `ENTRY_FILE=worker.php`。框架初始化一次，随后处理数千个请求而无需重新加载。要切换回经典模式，只需删除这两个变量。
 
 此外，OxPHP 还包含通常需要单独工具或第三方库才能实现的功能：
 
