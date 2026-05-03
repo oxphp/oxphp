@@ -1845,7 +1845,7 @@ uint64_t oxphp_bridge_get_memory_usage(void) {
 }
 
 uint64_t oxphp_bridge_get_rss_bytes(void) {
-#ifdef __linux__
+#if defined(__linux__)
     FILE *fp = fopen("/proc/self/status", "r");
     if (fp) {
         char line[256];
@@ -1867,11 +1867,22 @@ uint64_t oxphp_bridge_get_rss_bytes(void) {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
     return (uint64_t)ru.ru_maxrss * 1024ULL;  /* Linux: ru_maxrss in KiB */
-#else
+#elif defined(__APPLE__) && defined(__MACH__)
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
     /* Darwin: ru_maxrss is bytes. */
     return (uint64_t)ru.ru_maxrss;
+#else
+    /* Unsupported OS — log once per process, then return 0 on every call.
+     * Callers (Worker::getRss()) treat 0 as "no info available". */
+    static bool warned = false;
+    if (!warned) {
+        fprintf(stderr,
+                "oxphp_bridge_get_rss_bytes: not supported on this OS — "
+                "returning 0\n");
+        warned = true;
+    }
+    return 0;
 #endif
 }
 
