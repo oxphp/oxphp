@@ -26,6 +26,7 @@ static zend_class_entry *oxphp_http_request_ce = NULL;
 static zend_class_entry *oxphp_no_active_request_ce = NULL;
 static zend_class_entry *oxphp_async_context_exc_ce = NULL;
 static zend_class_entry *oxphp_worker_idle_exc_ce = NULL;
+static zend_class_entry *oxphp_invalid_serve_ctx_exc_ce = NULL;
 
 /* HTTP Object API supporting classes */
 static zend_class_entry *oxphp_http_session_ce = NULL;
@@ -3046,6 +3047,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* OxPHP\Http\Exception\WorkerIdleException extends NoActiveRequestException */
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
     oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
+
+    /* OxPHP\Server\InvalidServeContextException extends \RuntimeException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Server", "InvalidServeContextException", NULL);
+    oxphp_invalid_serve_ctx_exc_ce = zend_register_internal_class_ex(&ce, spl_ce_RuntimeException);
 
     /* ─── HTTP Interfaces (must register before classes) ───── */
     {
