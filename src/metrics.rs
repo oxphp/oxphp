@@ -41,7 +41,7 @@ const DURATION_BUCKET_BOUNDS: [u64; 9] =
 pub struct WorkerMetrics {
     pub requests_handled_total: AtomicU64,
     pub recycles_total: AtomicU64,
-    pub recycles_max_requests: AtomicU64,
+    pub recycles_scheduled: AtomicU64,
     pub recycles_max_memory: AtomicU64,
     pub recycles_error: AtomicU64,
     pub soft_resets_total: AtomicU64,
@@ -61,7 +61,7 @@ impl WorkerMetrics {
         Self {
             requests_handled_total: AtomicU64::new(0),
             recycles_total: AtomicU64::new(0),
-            recycles_max_requests: AtomicU64::new(0),
+            recycles_scheduled: AtomicU64::new(0),
             recycles_max_memory: AtomicU64::new(0),
             recycles_error: AtomicU64::new(0),
             soft_resets_total: AtomicU64::new(0),
@@ -98,7 +98,7 @@ impl WorkerMetrics {
         self.recycles_total.fetch_add(1, Ordering::Relaxed);
         match exit_reason {
             1 => {
-                self.recycles_max_requests.fetch_add(1, Ordering::Relaxed);
+                self.recycles_scheduled.fetch_add(1, Ordering::Relaxed);
             }
             2 => {
                 self.recycles_max_memory.fetch_add(1, Ordering::Relaxed);
@@ -797,13 +797,13 @@ impl Metrics {
                 "# HELP oxphp_worker_recycles_by_reason_total Worker recycles by reason."
             );
             let _ = writeln!(out, "# TYPE oxphp_worker_recycles_by_reason_total counter");
-            let max_req = wm.recycles_max_requests.load(Ordering::Relaxed);
+            let scheduled = wm.recycles_scheduled.load(Ordering::Relaxed);
             let max_mem = wm.recycles_max_memory.load(Ordering::Relaxed);
             let error = wm.recycles_error.load(Ordering::Relaxed);
-            if max_req > 0 {
+            if scheduled > 0 {
                 let _ = writeln!(
                     out,
-                    "oxphp_worker_recycles_by_reason_total{{reason=\"max_requests\"}} {max_req}"
+                    "oxphp_worker_recycles_by_reason_total{{reason=\"scheduled\"}} {scheduled}"
                 );
             }
             if max_mem > 0 {
@@ -1065,13 +1065,13 @@ mod tests {
     #[test]
     fn test_worker_metrics_recycle() {
         let wm = WorkerMetrics::new(2);
-        wm.record_recycle(1); // max_requests
+        wm.record_recycle(1); // scheduled
         wm.record_recycle(2); // max_memory
         wm.record_recycle(3); // error
         wm.record_recycle(0); // shutdown — not counted as reason
 
         assert_eq!(wm.recycles_total.load(Ordering::Relaxed), 4);
-        assert_eq!(wm.recycles_max_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(wm.recycles_scheduled.load(Ordering::Relaxed), 1);
         assert_eq!(wm.recycles_max_memory.load(Ordering::Relaxed), 1);
         assert_eq!(wm.recycles_error.load(Ordering::Relaxed), 1);
     }
@@ -1122,7 +1122,7 @@ mod tests {
         // Simulate some activity
         wm.requests_handled_total.fetch_add(10, Ordering::Relaxed);
         wm.recycles_total.fetch_add(1, Ordering::Relaxed);
-        wm.recycles_max_requests.fetch_add(1, Ordering::Relaxed);
+        wm.recycles_scheduled.fetch_add(1, Ordering::Relaxed);
         wm.soft_resets_total.fetch_add(10, Ordering::Relaxed);
         wm.slots[0].active.store(true, Ordering::Relaxed);
         wm.slots[0].memory_bytes.store(1_048_576, Ordering::Relaxed);
@@ -1138,7 +1138,7 @@ mod tests {
         assert!(output.contains("oxphp_worker_mode_enabled 1"));
         assert!(output.contains("oxphp_worker_requests_handled_total 10"));
         assert!(output.contains("oxphp_worker_recycles_total 1"));
-        assert!(output.contains("oxphp_worker_recycles_by_reason_total{reason=\"max_requests\"} 1"));
+        assert!(output.contains("oxphp_worker_recycles_by_reason_total{reason=\"scheduled\"} 1"));
         assert!(output.contains("oxphp_worker_soft_resets_total 10"));
         assert!(output.contains("oxphp_worker_memory_bytes{worker=\"0\"} 1048576"));
         assert!(output.contains("oxphp_worker_requests_count{worker=\"0\"} 5"));

@@ -21,6 +21,9 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | `getMemoryUsage(): int` | Live PHP memory usage in bytes (`zend_memory_usage(0)`). |
 | `getRss(): int` | Process resident set size in bytes. Uncached — call at most once per request. |
 | `getMaxMemoryBytes(): int` | Configured memory cap in bytes. `0` means unlimited. |
+| `scheduleExit(): void` | Marks the worker for graceful exit after the current request completes. No-op in traditional mode. |
+| `isExitScheduled(): bool` | Returns `true` if `scheduleExit()` has been called for the current worker. Always `false` in traditional mode. |
+| `getExitReason(): ?string` | Pending exit reason: `'scheduled'`, `'max_memory'`, `'error'`, or `null` when no exit is pending. Always `null` in traditional mode. |
 | `serve(callable $h): void` | Enters the request loop. Throws `InvalidServeContextException` outside worker mode. |
 
 ## Mode matrix
@@ -35,6 +38,9 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | `getMemoryUsage()` | Live PHP memory at the moment of the call. | Live PHP memory at the moment of the call. |
 | `getRss()` | Live process RSS. | Live process RSS. |
 | `getMaxMemoryBytes()` | `0` (no recycle cap applies). | Value of `WORKER_MAX_MEMORY_MIB` × 1 MiB, or `0` if unset. |
+| `scheduleExit()` | No-op (the script is exiting anyway). | Sets the exit flag; the request loop stops after the current handler returns. |
+| `isExitScheduled()` | Always `false`. | `true` after `scheduleExit()` has been called on this thread. |
+| `getExitReason()` | Always `null`. | `null` until an exit is pending; then one of `'scheduled'`, `'max_memory'`, `'error'`. |
 | `serve(callable)` | Throws `OxPHP\Server\Exception\InvalidServeContextException`. | Enters the request loop. |
 
 ## Examples
@@ -65,6 +71,35 @@ if ($worker->getRequestCount() === 1) {
     bootstrap();
 }
 ```
+
+### scheduleExit
+
+Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor respawns a fresh worker, re-running the outer scope of the worker file.
+
+```php
+<?php
+$worker = OxPHP\Server\Worker::current();
+
+handleRequest();
+
+// Reload bootstrap on every request when developing locally.
+if (getenv('OXPHP_DEV') === '1') {
+    $worker->scheduleExit();
+}
+```
+
+`scheduleExit()` is idempotent and a no-op outside worker mode. Use cases:
+
+- **Hot reload during development** — exit after every request so the outer-scope bootstrap re-runs.
+- **RSS-based recycling** — `WORKER_MAX_MEMORY_MIB` measures only the Zend allocator. With extension-heavy stacks (curl, mysqli) you can additionally recycle when the process RSS crosses your own threshold:
+
+  ```php
+  if ($worker->getRss() > 256 * 1024 * 1024) {
+      $worker->scheduleExit();
+  }
+  ```
+
+- **Coordinated rolling restarts** — gate the call on a sentinel file or signal so an external orchestrator can drain workers cleanly.
 
 ### Worker entry point
 

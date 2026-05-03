@@ -50,10 +50,9 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `WORKER_FILE` | *(未设置)* | 工作进程 PHP 脚本的路径。设置后启用持久化工作进程模式 |
-| `WORKER_MAX_REQUESTS` | `0` | 工作进程回收前处理的最大请求数。`0` = 不限制 |
 | `WORKER_MAX_MEMORY_MIB` | `0` | 工作进程回收前允许使用的最大内存（MiB）。`0` = 不限制 |
 
-当 `WORKER_FILE` 设置后，PHP 进程在多个请求间保持存活，将引导状态（自动加载器、数据库连接）保留在内存中。工作进程在达到请求数或内存限制时会被自动回收。
+当 `WORKER_FILE` 设置后，PHP 进程在多个请求间保持存活，将引导状态（自动加载器、数据库连接）保留在内存中。当达到 `WORKER_MAX_MEMORY_MIB` 时工作进程会被自动回收，应用层可通过 [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) 主动触发回收。早期版本的 `WORKER_MAX_REQUESTS` 已废弃并被忽略——请勿设置该变量，或迁移到 `Worker::scheduleExit()`。
 
 ## SAPI / PHP
 
@@ -196,7 +195,6 @@ LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
 WORKER_FILE=../worker.php
 PHP_WORKERS=8
-WORKER_MAX_REQUESTS=10000
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -246,7 +244,6 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode": false,
   "worker_file": null,
-  "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,

@@ -129,7 +129,6 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode": false,
   "worker_file": null,
-  "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,

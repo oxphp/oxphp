@@ -307,7 +307,9 @@ extern "C" {
         wait_fn: Option<unsafe extern "C" fn() -> c_int>,
         send_fn: Option<unsafe extern "C" fn() -> c_int>,
     );
-    pub fn oxphp_bridge_set_worker_mode(max_requests: u64, max_memory_mib: u64);
+    pub fn oxphp_bridge_set_worker_mode(max_memory_mib: u64);
+    pub fn oxphp_bridge_schedule_exit();
+    pub fn oxphp_bridge_is_exit_scheduled() -> bool;
     pub fn oxphp_bridge_set_worker_start_time(time: f64);
     pub fn oxphp_bridge_get_worker_start_time() -> f64;
     pub fn oxphp_bridge_is_worker_mode() -> bool;

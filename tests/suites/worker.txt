@@ -20,3 +20,5 @@ worker/test_worker_class_exists
 worker/test_worker_class_legacy_aliases
 worker/test_worker_class_traditional_mode
 worker/test_worker_class_worker_mode_basic
+worker/test_worker_class_exit_reason
+worker/test_worker_class_schedule_exit

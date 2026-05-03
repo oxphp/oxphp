@@ -19,7 +19,6 @@ use super::pool::WorkerRequest;
 pub(super) struct WorkerModeConfig {
     pub worker_file: std::path::PathBuf,
     pub document_root: std::path::PathBuf,
-    pub max_requests: u64,
     pub max_memory_mib: u64,
 }
 
@@ -66,7 +65,7 @@ fn worker_mode_thread(
 
     // 2. Set worker mode TLS flags
     unsafe {
-        bindings::oxphp_bridge_set_worker_mode(config.max_requests, config.max_memory_mib);
+        bindings::oxphp_bridge_set_worker_mode(config.max_memory_mib);
     }
 
     // Stash spawn time in bridge ctx for Worker::getStartTime().

@@ -22,8 +22,9 @@ Worker 模式运行持久化 PHP 进程，这些进程只启动一次并处理�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `WORKER_FILE` | *(未设置)* | Worker PHP 脚本的路径。设置此项将启用 Worker 模式 |
-| `WORKER_MAX_REQUESTS` | `0` | Worker 在回收之前处理的最大请求数。`0` = 无限制 |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Worker 回收前每个 Worker 的最大 PHP 内存（MiB）。`0` = 无限制 |
+
+应用层主动回收可在请求处理器中调用 [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit)。当前请求正常完成后 Worker 会安全退出。
 
 ## 编写 Worker 脚本
 
@@ -73,18 +74,18 @@ OxPHP 在请求之间执行软重置。以下状态会自动清理：
 
 当满足以下任一条件时，Worker 会自动回收（以全新 PHP 进程重启）：
 
-- **达到最大请求数** — Worker 已处理 `WORKER_MAX_REQUESTS` 次请求
 - **超出最大内存** — Worker 的 PHP 内存使用量超过 `WORKER_MAX_MEMORY_MIB` MiB
+- **应用主动请求退出** — 处理器调用了 [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit)。适用于应用控制的热重载、基于文件 mtime 的重载，或对每个请求重新执行 bootstrap
 - **连续错误** — Worker 遇到 3 次连续的处理器失败（致命错误、超时或未处理的异常）。注意 `exit()`/`die()` 调用不计为失败
 
-当 Worker 被回收时，PHP 进程终止，新进程启动，重新执行 Worker 脚本的外部作用域。对于最大请求数和最大内存回收，当前请求会正常完成后 Worker 才退出。对于基于错误的回收，Worker 在失败的请求之后退出。
+当 Worker 被回收时，PHP 进程终止，新进程启动，重新执行 Worker 脚本的外部作用域。对于内存回收和 `scheduleExit()` 触发的回收，当前请求会正常完成后 Worker 才退出。对于基于错误的回收，Worker 在失败的请求之后退出。
 
 ## 开发模式下的代码热重载
 
 Worker 模式将 bootstrap 状态（自动加载器、DI 容器、数据库连接）保留在内存中，因此仅靠 `opcache.validate_timestamps=1` 不足以加载在外层作用域中执行过的代码的变更。开发循环中有两种选择：
 
-- **每次请求都回收 Worker。** 设置 `WORKER_MAX_REQUESTS=1`，每次请求都会重新执行外层作用域。你会失去 worker 模式的性能优势，但会获得 FPM 风格的重载语义——是积极开发中最简单、最可靠的方式。
-- **保持 Worker 热态，仅刷新请求处理器。** 将 `WORKER_MAX_REQUESTS` 设为较大值，启用 `opcache.validate_timestamps=1`，并保持 bootstrap 最小化。在请求回调内加载的代码会在下次请求时被 OPcache 刷新；在外层作用域仅加载一次的代码则不会。完整的注意事项清单请参阅 [OPcache 与 JIT → 开发环境配置](../php/opcache.md#开发环境配置)。
+- **每次请求都回收 Worker。** 在每次处理器执行的末尾调用 `OxPHP\Server\Worker::current()->scheduleExit()`（例如可基于 `OXPHP_DEV` 环境标记开关）。当前请求会正常完成，然后 Worker 退出并重新启动，外层作用域会重新执行。你会失去 worker 模式的性能优势，但会获得 FPM 风格的重载语义——是积极开发中最简单、最可靠的方式。
+- **保持 Worker 热态，仅刷新请求处理器。** 不调用 `scheduleExit()`，启用 `opcache.validate_timestamps=1`，并保持 bootstrap 最小化。在请求回调内加载的代码会在下次请求时被 OPcache 刷新；在外层作用域仅加载一次的代码则不会。完整的注意事项清单请参阅 [OPcache 与 JIT → 开发环境配置](../php/opcache.md#开发环境配置)。
 
 ## 故障排除
 
@@ -132,7 +133,6 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       - INDEX_FILE=index.php
       - WORKER_FILE=/var/www/html/worker.php
-      - WORKER_MAX_REQUESTS=10000
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
@@ -194,9 +194,9 @@ $kernel->shutdown();
 
 ## 最佳实践
 
-- **同时设置 `WORKER_MAX_REQUESTS` 和 `WORKER_MAX_MEMORY_MIB`** 以防止资源无限增长。从 `10000` 次请求和 `128` MiB 开始。
+- **设置 `WORKER_MAX_MEMORY_MIB`**（例如 `128`），让出现内存泄漏的 Worker 自动回收，而不是耗尽宿主机内存。在应用层面再叠加 `Worker::scheduleExit()` 实现主动回收。
 - **避免在静态属性或全局变量中存储每次请求的状态。** 由于这些会跨请求持久化，某次请求遗留的状态可能泄露到另一次请求中。
-- **先用 `WORKER_MAX_REQUESTS=1` 进行测试**，再逐步增加。这可以在提交长寿命 Worker 之前验证您的应用能正确处理软重置。
+- **尽早验证软重置。** 在开发标记下让处理器调用 `Worker::current()->scheduleExit()` 并端到端运行应用——这样能在切换到长寿命 Worker 之前发现状态泄漏类的 bug。
 - **处理数据库空闲超时。** 如果您的数据库驱动在空闲一段时间后断开连接，请捕获异常并重连，或使用能自动处理重连的连接池。
 - **保持外部作用域简洁。** 只引导真正需要持久化的内容——自动加载器、配置和共享服务。将请求特定的设置推迟到回调函数中。
 

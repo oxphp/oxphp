@@ -50,10 +50,9 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
 | `WORKER_FILE` | *(не задано)* | Путь к PHP-скрипту воркера. При задании активирует постоянный режим worker |
-| `WORKER_MAX_REQUESTS` | `0` | Максимальное количество запросов на воркер до его перезапуска. `0` = без ограничений |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Максимальный объём памяти в МиБ на воркер до его перезапуска. `0` = без ограничений |
 
-При задании `WORKER_FILE` PHP-процессы остаются живыми между запросами, сохраняя состояние инициализации (автозагрузчики, соединения с базой данных) в памяти. Воркеры автоматически перезапускаются при достижении лимита запросов или памяти.
+При задании `WORKER_FILE` PHP-процессы остаются живыми между запросами, сохраняя состояние инициализации (автозагрузчики, соединения с базой данных) в памяти. Воркеры автоматически перезапускаются при превышении `WORKER_MAX_MEMORY_MIB` либо по запросу приложения через [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Старая переменная `WORKER_MAX_REQUESTS` объявлена устаревшей и игнорируется — не задавайте её или мигрируйте на `Worker::scheduleExit()`.
 
 ## SAPI / PHP
 
@@ -196,7 +195,6 @@ LISTEN_ADDR=0.0.0.0:80
 DOCUMENT_ROOT=/var/www/html/public
 WORKER_FILE=../worker.php
 PHP_WORKERS=8
-WORKER_MAX_REQUESTS=10000
 WORKER_MAX_MEMORY_MIB=128
 QUEUE_CAPACITY=1024
 LOG_LEVEL=warn
@@ -246,7 +244,6 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode": false,
   "worker_file": null,
-  "worker_max_requests": 0,
   "worker_max_memory_mib": 0,
   "static_cache_ttl": 2592000,
   "static_cache_enabled": true,

@@ -285,8 +285,8 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
 - The handler raises 3 consecutive uncaught exceptions or fatal errors
-- The worker reaches `WORKER_MAX_REQUESTS`
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
+- The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 
 > **Note:** `oxphp_worker()` only works when `WORKER_FILE` is configured. In traditional mode it logs a warning and returns `false`.
 
