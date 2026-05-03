@@ -1355,7 +1355,12 @@ PHP_FUNCTION(oxphp_worker)
     }
 
     oxphp_serve_in_progress = true;
-    oxphp_serve_loop(&fci, &fcc);
+    zend_try {
+        oxphp_serve_loop(&fci, &fcc);
+    } zend_catch {
+        oxphp_serve_in_progress = false;
+        zend_bailout();
+    } zend_end_try();
     oxphp_serve_in_progress = false;
     RETURN_TRUE;
 }
@@ -2506,7 +2511,12 @@ ZEND_METHOD(OxPHP_Server_Worker, serve) {
     }
 
     oxphp_serve_in_progress = true;
-    oxphp_serve_loop(&fci, &fcc);
+    zend_try {
+        oxphp_serve_loop(&fci, &fcc);
+    } zend_catch {
+        oxphp_serve_in_progress = false;
+        zend_bailout();
+    } zend_end_try();
     oxphp_serve_in_progress = false;
 }
 /* }}} */

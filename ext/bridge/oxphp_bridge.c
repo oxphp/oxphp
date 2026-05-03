@@ -1847,17 +1847,26 @@ uint64_t oxphp_bridge_get_memory_usage(void) {
 uint64_t oxphp_bridge_get_rss_bytes(void) {
 #ifdef __linux__
     FILE *fp = fopen("/proc/self/status", "r");
-    if (!fp) return 0;
-    char line[256];
-    uint64_t kb = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) {
-            sscanf(line + 6, " %" SCNu64 " kB", &kb);
-            break;
+    if (fp) {
+        char line[256];
+        uint64_t kb = 0;
+        while (fgets(line, sizeof(line), fp)) {
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                sscanf(line + 6, " %" SCNu64 " kB", &kb);
+                break;
+            }
         }
+        fclose(fp);
+        if (kb > 0) {
+            return kb * 1024ULL;
+        }
+        /* fall through: /proc readable but no VmRSS line, or value zero */
     }
-    fclose(fp);
-    return kb * 1024ULL;
+    /* Linux fallback when /proc/self/status is unavailable or unparseable
+     * (restrictive seccomp, certain container runtimes). */
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    return (uint64_t)ru.ru_maxrss * 1024ULL;  /* Linux: ru_maxrss in KiB */
 #else
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
