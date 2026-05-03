@@ -62,6 +62,12 @@ fn worker_thread(
         // Initialize bridge TLS context and set the worker ID (once per thread).
         bindings::oxphp_bridge_init_ctx();
         bindings::oxphp_bridge_set_worker_id(worker_id as i32);
+        // Stash spawn time in bridge ctx for Worker::getStartTime().
+        let spawn_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        bindings::oxphp_bridge_set_worker_start_time(spawn_secs);
     }
 
     // Register this thread as a live Shared\Pool worker so cross-thread
@@ -244,6 +250,13 @@ fn execute_request(
     response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
 ) -> Option<ScriptResponse> {
     let start = Instant::now();
+
+    unsafe {
+        // Bump the per-thread counter at request START so that
+        // Worker::getRequestCount() inside the handler observes the current
+        // request's index (1-based), independently of routing mode.
+        bindings::oxphp_bridge_increment_requests_done();
+    }
 
     sapi::clear_buffers();
     // Bridge ctx is `__thread` and persists across requests on the same PHP
