@@ -8,6 +8,7 @@
 #include <inttypes.h>
 #include <sys/resource.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -1845,26 +1846,45 @@ uint64_t oxphp_bridge_get_memory_usage(void) {
     return ctx.current_memory_bytes;
 }
 
+/* Per-thread cached fd for /proc/self/statm. -1 = not opened, -2 = unavailable
+ * (open failed once, don't retry). Never closed: lives until thread exits, at
+ * which point process exit closes it. */
+static __thread int rss_statm_fd = -1;
+
 uint64_t oxphp_bridge_get_rss_bytes(void) {
 #if defined(__linux__)
-    /* /proc/self/statm is the machine-readable RSS source: ~30 bytes,
-     * 7 space-separated page counts. Field #2 is resident pages. */
-    FILE *fp = fopen("/proc/self/statm", "r");
-    if (fp) {
-        unsigned long resident_pages = 0;
-        int rc = fscanf(fp, "%*lu %lu", &resident_pages);
-        fclose(fp);
-        if (rc == 1 && resident_pages > 0) {
-            static long page_size = 0;  /* cache: never changes within a process */
-            if (page_size == 0) {
-                page_size = sysconf(_SC_PAGESIZE);
-                if (page_size <= 0) page_size = 4096;  /* defensive default */
-            }
-            return (uint64_t)resident_pages * (uint64_t)page_size;
-        }
-        /* fall through: statm readable but parse failed or zero */
+    static long page_size = 0;  /* never changes within a process */
+    if (page_size == 0) {
+        page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) page_size = 4096;  /* defensive default */
     }
-    /* Linux fallback when /proc/self/statm is unavailable or unparseable
+
+    if (rss_statm_fd == -1) {
+        rss_statm_fd = open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
+        if (rss_statm_fd < 0) rss_statm_fd = -2;  /* permanently unavailable */
+    }
+
+    if (rss_statm_fd >= 0) {
+        /* /proc/self/statm is ~30 bytes, 7 space-separated page counts.
+         * Field #2 is resident pages. */
+        char buf[64];
+        if (lseek(rss_statm_fd, 0, SEEK_SET) == 0) {
+            ssize_t n = read(rss_statm_fd, buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                const char *p = strchr(buf, ' ');
+                if (p) {
+                    unsigned long resident_pages = strtoul(p + 1, NULL, 10);
+                    if (resident_pages > 0) {
+                        return (uint64_t)resident_pages * (uint64_t)page_size;
+                    }
+                }
+            }
+        }
+        /* read/parse failed — fall through to getrusage */
+    }
+
+    /* Fallback when /proc/self/statm is unavailable or unparseable
      * (restrictive seccomp, certain container runtimes). */
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;

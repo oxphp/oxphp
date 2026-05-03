@@ -1880,9 +1880,10 @@ namespace OxPHP\Server {
         /**
          * Process RSS in bytes.
          *
-         * Reads /proc/self/statm (Linux, ~3μs syscall) or getrusage
-         * (macOS, ~1μs). Not cached — every call hits the OS. For repeated
-         * checks within a handler, store the result in a local variable.
+         * Reads /proc/self/statm (Linux) or getrusage(RUSAGE_SELF) (macOS).
+         * Not cached — every call hits the OS. Cheap but not free; for
+         * repeated checks within a handler, store the result in a local
+         * variable.
          *
          * Use case: RSS-based recycle policy when extension-internal
          * allocations are not visible to getMemoryUsage().
