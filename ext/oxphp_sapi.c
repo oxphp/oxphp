@@ -2379,10 +2379,46 @@ static const zend_function_entry oxphp_http_request_iface_methods[] = {
     PHP_FE_END
 };
 
+/* ─── OxPHP\Server\Worker — ZEND_METHOD implementations ─────── */
+
+/* {{{ OxPHP\Server\Worker::current(): OxPHP\Server\Worker
+ * Per-thread cached singleton, lazily allocated on first call. */
+ZEND_METHOD(OxPHP_Server_Worker, current) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    if (oxphp_worker_singleton == NULL) {
+        oxphp_worker_singleton = (zval *)pemalloc(sizeof(zval), 1);
+        object_init_ex(oxphp_worker_singleton, oxphp_worker_ce);
+    }
+
+    /* Return a copy of the cached zval; bump refcount so the caller's
+     * eventual zval_ptr_dtor doesn't free our singleton. */
+    ZVAL_COPY(return_value, oxphp_worker_singleton);
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::isWorkerMode(): bool */
+ZEND_METHOD(OxPHP_Server_Worker, isWorkerMode) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(oxphp_bridge_is_worker_mode());
+}
+/* }}} */
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_worker_current, 0, 0,
+    OxPHP\\Server\\Worker, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isWorkerMode, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 /* OxPHP\Server\Worker — methods added by subsequent tasks. Kept extensible
  * (file-scope, not static const) so additional method handlers can append
  * entries. */
 static zend_function_entry oxphp_worker_methods[] = {
+    ZEND_ME(OxPHP_Server_Worker, current,       arginfo_oxphp_worker_current,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    ZEND_ME(OxPHP_Server_Worker, isWorkerMode,  arginfo_oxphp_worker_isWorkerMode,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     PHP_FE_END
 };
 
