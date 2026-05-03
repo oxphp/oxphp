@@ -33,7 +33,7 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 | `getStartTime()` | OS 线程启动时间（通常是服务器启动时间）。 | OS 线程启动时间。 |
 | `getRequestCount()` | 从 1 开始，复用同一 OS 线程时跨请求递增（`1, 2, 3, …`）。 | 从 1 开始，每次 Worker 处理请求时递增。 |
 | `getMemoryUsage()` | 调用时的实时 PHP 内存。 | 调用时的实时 PHP 内存。 |
-| `getRss()` | 进程实时 RSS。Linux 上约 10 µs，macOS 上约 1 µs。 | 进程实时 RSS。 |
+| `getRss()` | 进程实时 RSS。Linux 上约 3 µs，macOS 上约 1 µs。 | 进程实时 RSS。 |
 | `getMaxMemoryBytes()` | `0`（不应用回收上限）。 | `WORKER_MAX_MEMORY_MIB` × 1 MiB 的值；未设置则为 `0`。 |
 | `serve(callable)` | 抛出 `OxPHP\Server\Exception\InvalidServeContextException`。 | 进入请求循环。 |
 
@@ -105,7 +105,7 @@ $metrics->gauge('php_worker_rss_bytes', $rss, [
 
 ## 注意事项
 
-- **`getRss()` 不缓存。** 每次调用都会执行系统调用（Linux 上读取 `/proc/self/statm`，macOS 上调用 `task_info`）。Linux 上的开销约为 10 µs，macOS 上约为 1 µs。每次请求最多调用一次——通常在指标处理器内部，而不是每行日志都调用。
+- **`getRss()` 不缓存。** 每次调用都会执行系统调用（Linux 上读取 `/proc/self/statm`，macOS 上调用 `getrusage(RUSAGE_SELF)`）。Linux 上的开销约为 3 µs，macOS 上约为 1 µs。每次请求最多调用一次——通常在指标处理器内部，而不是每行日志都调用。
 - **禁止克隆。** `clone $worker` 会抛出 `\Error("Cloning OxPHP\\Server\\Worker is not allowed")`。Worker 句柄代表 OS 线程身份；克隆会造成同一线程存在第二个句柄的错觉。
 - **在 OxPHP 宿主之外**（例如，链接到 SAPI 的扩展被加载到 PHP CLI 中时），`Worker::current()` 仍会返回一个实例，但所有访问器都返回零状态值：`getId()` 为 `0`，`getStartTime()` 为进程启动时间，`getRequestCount()` 为 `0`，`getRss()` 为实时 RSS，而 `serve()` 抛出 `InvalidServeContextException`。
 

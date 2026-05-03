@@ -1880,7 +1880,7 @@ namespace OxPHP\Server {
         /**
          * Process RSS in bytes.
          *
-         * Reads /proc/self/status (Linux, ~10μs syscall) or getrusage
+         * Reads /proc/self/statm (Linux, ~3μs syscall) or getrusage
          * (macOS, ~1μs). Not cached — every call hits the OS. For repeated
          * checks within a handler, store the result in a local variable.
          *

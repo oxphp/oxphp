@@ -33,7 +33,7 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | `getStartTime()` | Time the OS thread was spawned (typically server start). | Time the OS thread was spawned. |
 | `getRequestCount()` | 1-based, increments across requests reusing the same OS thread (`1, 2, 3, …`). | 1-based, increments per request handled by the worker. |
 | `getMemoryUsage()` | Live PHP memory at the moment of the call. | Live PHP memory at the moment of the call. |
-| `getRss()` | Live process RSS. ~10 µs on Linux, ~1 µs on macOS. | Live process RSS. |
+| `getRss()` | Live process RSS. ~3 µs on Linux, ~1 µs on macOS. | Live process RSS. |
 | `getMaxMemoryBytes()` | `0` (no recycle cap applies). | Value of `WORKER_MAX_MEMORY_MIB` × 1 MiB, or `0` if unset. |
 | `serve(callable)` | Throws `OxPHP\Server\Exception\InvalidServeContextException`. | Enters the request loop. |
 
@@ -105,7 +105,7 @@ The legacy free functions remain available and route through the same internal s
 
 ## Caveats
 
-- **`getRss()` is uncached.** Each call performs a syscall (`/proc/self/statm` read on Linux, `task_info` on macOS). Cost is on the order of ~10 µs on Linux and ~1 µs on macOS. Call it at most once per request — typically inside a metrics handler, not on every log line.
+- **`getRss()` is uncached.** Each call performs a syscall (`/proc/self/statm` read on Linux, `getrusage(RUSAGE_SELF)` on macOS). Cost is on the order of ~3 µs on Linux and ~1 µs on macOS. Call it at most once per request — typically inside a metrics handler, not on every log line.
 - **Cloning is forbidden.** `clone $worker` throws `\Error("Cloning OxPHP\\Server\\Worker is not allowed")`. The worker handle represents OS-thread identity; cloning it would create the misleading impression of a second handle for the same thread.
 - **Outside an OxPHP host** (e.g. when an extension that links the SAPI is loaded into PHP CLI), `Worker::current()` still returns an instance, but every accessor returns its zero-state value: `getId()` is `0`, `getStartTime()` is the process start time, `getRequestCount()` is `0`, `getRss()` is the live RSS, and `serve()` throws `InvalidServeContextException`.
 
