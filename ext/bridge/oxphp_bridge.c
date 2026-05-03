@@ -1,9 +1,12 @@
 #include "oxphp_bridge.h"
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <inttypes.h>
+#include <sys/resource.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -1833,6 +1836,28 @@ uint64_t oxphp_bridge_get_requests_done(void) {
 
 uint64_t oxphp_bridge_get_memory_usage(void) {
     return ctx.current_memory_bytes;
+}
+
+uint64_t oxphp_bridge_get_rss_bytes(void) {
+#ifdef __linux__
+    FILE *fp = fopen("/proc/self/status", "r");
+    if (!fp) return 0;
+    char line[256];
+    uint64_t kb = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, "VmRSS:", 6) == 0) {
+            sscanf(line + 6, " %" SCNu64 " kB", &kb);
+            break;
+        }
+    }
+    fclose(fp);
+    return kb * 1024ULL;
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    /* Darwin: ru_maxrss is bytes. */
+    return (uint64_t)ru.ru_maxrss;
+#endif
 }
 
 bool oxphp_bridge_get_handler_failed(void) {

@@ -998,6 +998,12 @@ uint64_t oxphp_bridge_get_requests_done(void);
 /** Get the current PHP memory usage (set after each request). */
 uint64_t oxphp_bridge_get_memory_usage(void);
 
+/** Process resident set size (RSS) in bytes.
+ *  Linux: parses /proc/self/status VmRSS line (KiB → bytes).
+ *  macOS / other: getrusage(RUSAGE_SELF, &ru).ru_maxrss (bytes on Darwin).
+ *  Returns 0 on failure (rare; restrictive sandbox kernels). */
+uint64_t oxphp_bridge_get_rss_bytes(void);
+
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);
 
