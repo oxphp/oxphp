@@ -308,6 +308,8 @@ extern "C" {
         send_fn: Option<unsafe extern "C" fn() -> c_int>,
     );
     pub fn oxphp_bridge_set_worker_mode(max_requests: u64, max_memory_mib: u64);
+    pub fn oxphp_bridge_set_worker_start_time(time: f64);
+    pub fn oxphp_bridge_get_worker_start_time() -> f64;
     pub fn oxphp_bridge_is_worker_mode() -> bool;
     pub fn oxphp_bridge_reset_request_ctx();
     pub fn oxphp_bridge_worker_wait() -> c_int;
@@ -316,6 +318,8 @@ extern "C" {
     // ─── Worker mode metrics ─────────────────────────────
     pub fn oxphp_bridge_get_exit_reason() -> u8;
     pub fn oxphp_bridge_get_requests_done() -> u64;
+    pub fn oxphp_bridge_increment_requests_done();
+    pub fn oxphp_bridge_get_rss_bytes() -> u64;
     pub fn oxphp_bridge_get_memory_usage() -> u64;
     pub fn oxphp_bridge_get_handler_failed() -> bool;
 
