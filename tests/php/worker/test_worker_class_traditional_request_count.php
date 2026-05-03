@@ -6,7 +6,7 @@ if (!is_int($count) || $count < 1) {
     echo "FAIL: getRequestCount() = " . var_export($count, true) . ", expected int >= 1\n";
     exit;
 }
-echo json_encode([
+echo "OK " . json_encode([
     'worker_id' => $worker->getId(),
     'request_count' => $count,
 ]) . "\n";
