@@ -1792,3 +1792,143 @@ namespace OxPHP\Apm {
         public function after(\OxPHP\Decorator\Context $ctx): void {}
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  OxPHP\Server — Worker runtime handle
+// ═══════════════════════════════════════════════════════════════
+
+namespace OxPHP\Server {
+
+    /**
+     * Unified PHP-side handle for the OxPHP worker runtime.
+     *
+     * Provides introspection (id, request counter, memory, RSS) and the
+     * worker entry point (serve). Available in both traditional and worker
+     * modes; methods that have no meaning outside worker mode throw
+     * Exception\InvalidServeContextException.
+     *
+     * Stateless wrapper — every method reads from Rust thread-local state via
+     * FFI at call time. No data is cached on the object. The class instance
+     * itself is a per-thread singleton: Worker::current() returns the same
+     * object throughout the worker thread's lifetime.
+     */
+    final class Worker
+    {
+        // ── Factory & mode predicate ──
+
+        /**
+         * Returns the per-thread Worker singleton.
+         *
+         * The same instance is returned for every call within a given OS
+         * thread. Identity holds across requests in worker mode and across
+         * the single request in traditional mode.
+         */
+        public static function current(): self {}
+
+        /**
+         * Whether this thread is running in worker mode.
+         *
+         * true  — long-lived PHP process, one bootstrap, many requests
+         *         dispatched through serve().
+         * false — traditional per-request lifecycle (php_request_startup /
+         *         shutdown around each request).
+         */
+        public static function isWorkerMode(): bool {}
+
+        // ── Identity & lifecycle ──
+
+        /**
+         * Worker thread index, 0..N-1 where N is the configured pool size
+         * (PHP_WORKERS). Stable for the lifetime of the thread.
+         */
+        public function getId(): int {}
+
+        /**
+         * Unix timestamp (float, sub-second precision) when this OS thread
+         * was spawned. Same value across every request handled by the
+         * thread, in both modes.
+         *
+         * For per-request start time, use OxPHP\Http\RequestInterface::startTime().
+         */
+        public function getStartTime(): float {}
+
+        // ── Request counter ──
+
+        /**
+         * Number of requests this OS thread has started, counted at the
+         * start of each request before the handler body runs (1-based).
+         *
+         * Both modes: 1 inside the first request handled by this thread,
+         * 2 inside the second, etc. The counter is bound to the OS thread,
+         * not to the PHP request lifecycle — it survives across
+         * php_request_shutdown / php_request_startup boundaries in
+         * traditional mode just as it survives across handler invocations
+         * in worker mode.
+         */
+        public function getRequestCount(): int {}
+
+        // ── Memory observability ──
+
+        /**
+         * Current Zend allocator usage in bytes (zend_memory_usage(0)).
+         *
+         * Worker mode: cumulative across requests until the next gc cycle.
+         * Traditional mode: scoped to the current request.
+         */
+        public function getMemoryUsage(): int {}
+
+        /**
+         * Process RSS in bytes.
+         *
+         * Reads /proc/self/statm (Linux) or getrusage(RUSAGE_SELF) (macOS).
+         * Not cached — every call hits the OS. Cheap but not free; for
+         * repeated checks within a handler, store the result in a local
+         * variable.
+         *
+         * Use case: RSS-based recycle policy when extension-internal
+         * allocations are not visible to getMemoryUsage().
+         */
+        public function getRss(): int {}
+
+        /**
+         * Configured worker memory cap in bytes (WORKER_MAX_MEMORY_MIB × 1MB).
+         * Returns 0 when no cap is configured.
+         *
+         * The cap is enforced by the worker loop in worker mode. In
+         * traditional mode the value is reported for symmetry but not
+         * enforced (PHP's per-request memory_limit applies instead).
+         */
+        public function getMaxMemoryBytes(): int {}
+
+        // ── Worker entry point ──
+
+        /**
+         * Enter the worker request-dispatch loop.
+         *
+         * Worker mode: the handler is invoked once per incoming request.
+         * The loop multiplexes requests across PHP fibers — when a handler
+         * suspends on I/O via oxphp_async_*() / oxphp_sleep(), the loop
+         * accepts new requests and resumes ready fibers cooperatively.
+         *
+         * Traditional mode: throws Exception\InvalidServeContextException —
+         * there is no persistent loop to enter; the request has already been
+         * handed to the script.
+         *
+         * @throws \OxPHP\Server\Exception\InvalidServeContextException When called outside worker mode
+         */
+        public function serve(callable $handler): void {}
+    }
+}
+
+namespace OxPHP\Server\Exception {
+
+    /**
+     * Thrown when Worker::serve() is called outside worker mode.
+     *
+     * In traditional mode there is no persistent process to host a loop —
+     * each request runs the script once and exits. The application should
+     * either enable worker mode (WORKER_MODE_ENABLED=true) or stop calling
+     * serve() in traditional contexts.
+     */
+    final class InvalidServeContextException extends \RuntimeException {}
+}

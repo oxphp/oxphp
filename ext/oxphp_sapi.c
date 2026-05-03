@@ -26,6 +26,19 @@ static zend_class_entry *oxphp_http_request_ce = NULL;
 static zend_class_entry *oxphp_no_active_request_ce = NULL;
 static zend_class_entry *oxphp_async_context_exc_ce = NULL;
 static zend_class_entry *oxphp_worker_idle_exc_ce = NULL;
+static zend_class_entry *oxphp_invalid_serve_ctx_exc_ce = NULL;
+
+/* OxPHP\Server\Worker class */
+static zend_class_entry *oxphp_worker_ce = NULL;
+static zend_object_handlers oxphp_worker_object_handlers;
+
+/* Per-thread cached singleton zval. Lazily allocated on first
+ * Worker::current() call; never explicitly freed (process lifetime,
+ * bounded leak ~32 bytes × N worker threads). */
+static __thread zval *oxphp_worker_singleton = NULL;
+
+/* Per-thread re-entry sentinel for Worker::serve(). */
+static __thread bool oxphp_serve_in_progress = false;
 
 /* HTTP Object API supporting classes */
 static zend_class_entry *oxphp_http_session_ce = NULL;
@@ -1301,6 +1314,10 @@ static void oxphp_soft_reset(void) {
      * This ensures the soft reset only touches PHP-level state. */
 }
 
+/* Shared loop body for Worker::serve() and oxphp_worker(). Caller has
+ * already parsed (fci, fcc) and verified worker mode. */
+static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
+
 /* {{{ oxphp_worker(callable $handler): bool
  * Enter worker mode loop with fiber-based request multiplexing.
  *
@@ -1320,20 +1337,47 @@ PHP_FUNCTION(oxphp_worker)
         Z_PARAM_FUNC(fci, fcc)
     ZEND_PARSE_PARAMETERS_END();
 
-    oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
-    if (!ctx->worker_mode) {
+    if (!oxphp_bridge_is_worker_mode()) {
         php_error_docref(NULL, E_WARNING, "oxphp_worker() only available in worker mode");
         RETURN_FALSE;
     }
 
+    /* Mirror Worker::serve()'s re-entry guard so nested calls from either
+     * entry point share the same per-thread flag. */
+    if (oxphp_serve_in_progress) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "oxphp_worker() is already running on this thread "
+            "(nested calls are not supported)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    oxphp_serve_in_progress = true;
+    zend_try {
+        oxphp_serve_loop(&fci, &fcc);
+    } zend_catch {
+        oxphp_serve_in_progress = false;
+        zend_bailout();
+    } zend_end_try();
+    oxphp_serve_in_progress = false;
+    RETURN_TRUE;
+}
+/* }}} */
+
+static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
+{
+    oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
+
     /* Prevent handler closure from being GC'd during worker lifetime */
-    zend_fcc_addref(&fcc);
+    zend_fcc_addref(fcc);
 
     /* Initialize the fiber scheduler */
     oxphp_fiber_scheduler sched;
     oxphp_scheduler_init(&sched);
-    sched.shared_fci = &fci;
-    sched.shared_fcc = &fcc;
+    sched.shared_fci = fci;
+    sched.shared_fcc = fcc;
 
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
@@ -1351,8 +1395,15 @@ PHP_FUNCTION(oxphp_worker)
 
             oxphp_soft_reset();
 
+            /* Increment counter at request START so getRequestCount() inside
+             * the handler observes the current request index (1-based). Also
+             * syncs ctx->requests_done on the fast path (was only synced on
+             * the event-loop path before — latent bug fix). */
+            sched.total_requests_done = oxphp_bridge_increment_requests_done();
+            ctx->requests_done = sched.total_requests_done;
+
             /* Create or reuse a fiber for the request */
-            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, &fci, &fcc);
+            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
             if (!fiber) break;
 
             if (fiber->started) {
@@ -1381,6 +1432,9 @@ PHP_FUNCTION(oxphp_worker)
 
             /* Sync scheduler-level counters */
             consecutive_errors = sched.consecutive_errors;
+            /* sched.total_requests_done is now mirrored from bridge state
+             * at request entry inside oxphp_scheduler_tick; sync ctx for
+             * the exit-condition check below. */
             ctx->requests_done = sched.total_requests_done;
 
             if (rc == 0) {
@@ -1413,11 +1467,8 @@ PHP_FUNCTION(oxphp_worker)
 
     /* Cleanup: finalize any remaining fibers */
     oxphp_scheduler_destroy(&sched);
-    zend_fcc_dtor(&fcc);
-
-    RETURN_TRUE;
+    zend_fcc_dtor(fcc);
 }
-/* }}} */
 
 /* ─── Native plugin function dispatch ─────────────────────── */
 
@@ -2355,6 +2406,177 @@ static const zend_function_entry oxphp_http_request_iface_methods[] = {
     PHP_FE_END
 };
 
+/* ─── OxPHP\Server\Worker — ZEND_METHOD implementations ─────── */
+
+/* {{{ OxPHP\Server\Worker::current(): OxPHP\Server\Worker
+ * Per-thread cached singleton, lazily allocated on first call. */
+ZEND_METHOD(OxPHP_Server_Worker, current) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    if (oxphp_worker_singleton == NULL) {
+        oxphp_worker_singleton = (zval *)pemalloc(sizeof(zval), 1);
+        object_init_ex(oxphp_worker_singleton, oxphp_worker_ce);
+    }
+
+    /* Return a copy of the cached zval; bump refcount so the caller's
+     * eventual zval_ptr_dtor doesn't free our singleton. */
+    ZVAL_COPY(return_value, oxphp_worker_singleton);
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::isWorkerMode(): bool */
+ZEND_METHOD(OxPHP_Server_Worker, isWorkerMode) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(oxphp_bridge_is_worker_mode());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getId(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_worker_id());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getStartTime(): float */
+ZEND_METHOD(OxPHP_Server_Worker, getStartTime) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_DOUBLE(oxphp_bridge_get_worker_start_time());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getRequestCount(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getRequestCount) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Single source of truth: bridge counter, incremented at request
+     * start by Rust (both modes). 1-based per OS thread. */
+    RETURN_LONG((zend_long)oxphp_bridge_get_requests_done());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getMemoryUsage(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getMemoryUsage) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    /* Live Zend allocator usage. Bridge's stored value is updated only
+     * post-request — mid-handler we want what the script is using right
+     * now, so call zend_memory_usage() directly. */
+    RETURN_LONG((zend_long)zend_memory_usage(0));
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getRss(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getRss) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_rss_bytes());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::getMaxMemoryBytes(): int */
+ZEND_METHOD(OxPHP_Server_Worker, getMaxMemoryBytes) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_LONG((zend_long)oxphp_bridge_get_max_memory_bytes());
+}
+/* }}} */
+
+/* {{{ OxPHP\Server\Worker::serve(callable $handler): void
+ * Enter the worker request-dispatch loop. Throws InvalidServeContextException
+ * when called outside worker mode or re-entered on the same thread. */
+ZEND_METHOD(OxPHP_Server_Worker, serve) {
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_FUNC(fci, fcc)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!oxphp_bridge_is_worker_mode()) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "Worker::serve() is only valid in worker mode "
+            "(set WORKER_MODE_ENABLED=true and ENTRY_FILE=...)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    if (oxphp_serve_in_progress) {
+        zend_throw_exception(
+            oxphp_invalid_serve_ctx_exc_ce,
+            "Worker::serve() is already running on this thread "
+            "(nested calls are not supported)",
+            0
+        );
+        RETURN_THROWS();
+    }
+
+    oxphp_serve_in_progress = true;
+    zend_try {
+        oxphp_serve_loop(&fci, &fcc);
+    } zend_catch {
+        oxphp_serve_in_progress = false;
+        zend_bailout();
+    } zend_end_try();
+    oxphp_serve_in_progress = false;
+}
+/* }}} */
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_worker_current, 0, 0,
+    OxPHP\\Server\\Worker, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isWorkerMode, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getId, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getStartTime, 0, 0, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRequestCount, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMemoryUsage, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRss, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMaxMemoryBytes, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_serve, 0, 1, IS_VOID, 0)
+    ZEND_ARG_TYPE_INFO(0, handler, IS_CALLABLE, 0)
+ZEND_END_ARG_INFO()
+
+/* OxPHP\Server\Worker — methods added by subsequent tasks. Kept extensible
+ * (file-scope, not static const) so additional method handlers can append
+ * entries. */
+static zend_function_entry oxphp_worker_methods[] = {
+    ZEND_ME(OxPHP_Server_Worker, current,            arginfo_oxphp_worker_current,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    ZEND_ME(OxPHP_Server_Worker, isWorkerMode,       arginfo_oxphp_worker_isWorkerMode,
+            ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
+    ZEND_ME(OxPHP_Server_Worker, getId,              arginfo_oxphp_worker_getId,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getStartTime,       arginfo_oxphp_worker_getStartTime,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getRequestCount,    arginfo_oxphp_worker_getRequestCount,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getMemoryUsage,     arginfo_oxphp_worker_getMemoryUsage,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getRss,             arginfo_oxphp_worker_getRss,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, getMaxMemoryBytes,  arginfo_oxphp_worker_getMaxMemoryBytes,
+            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Server_Worker, serve,              arginfo_oxphp_worker_serve,
+            ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
+/* Forward-declare clone-disallow handler for OxPHP\Server\Worker. */
+static zend_object *oxphp_worker_clone_object(zend_object *object);
+
 /* {{{ arginfo */
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_oxphp_http_request, 0, 0,
     OxPHP\\Http\\RequestInterface, 0)
@@ -2544,6 +2766,17 @@ static const zend_internal_arg_info *oxphp_build_method_arginfo(
     return info;
 }
 /* }}} */
+
+/* Clone-disallow handler for OxPHP\Server\Worker. */
+static zend_object *oxphp_worker_clone_object(zend_object *object) {
+    (void)object;
+    zend_throw_error(NULL, "Cloning OxPHP\\Server\\Worker is not allowed");
+    /* Engine's ZEND_CLONE opcode dereferences the return value
+     * unconditionally before checking for the thrown exception on the
+     * next opcode. Return a fresh empty object to satisfy the contract;
+     * it will be GC'd before any user code observes it. */
+    return zend_objects_new(oxphp_worker_ce);
+}
 
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
@@ -3035,6 +3268,24 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* OxPHP\Http\Exception\WorkerIdleException extends NoActiveRequestException */
     INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Http\\Exception", "WorkerIdleException", NULL);
     oxphp_worker_idle_exc_ce = zend_register_internal_class_ex(&ce, oxphp_no_active_request_ce);
+
+    /* OxPHP\Server\Exception\InvalidServeContextException extends \RuntimeException */
+    INIT_NS_CLASS_ENTRY(ce, "OxPHP\\Server\\Exception", "InvalidServeContextException", NULL);
+    oxphp_invalid_serve_ctx_exc_ce = zend_register_internal_class_ex(&ce, spl_ce_RuntimeException);
+
+    /* OxPHP\Server\Worker — final, non-cloneable. Methods added by subsequent
+     * tasks via the file-scope oxphp_worker_methods table. */
+    {
+        zend_class_entry tmp_worker_ce;
+        INIT_CLASS_ENTRY(tmp_worker_ce, "OxPHP\\Server\\Worker", oxphp_worker_methods);
+        oxphp_worker_ce = zend_register_internal_class(&tmp_worker_ce);
+        oxphp_worker_ce->ce_flags |= ZEND_ACC_FINAL;
+
+        memcpy(&oxphp_worker_object_handlers, zend_get_std_object_handlers(),
+               sizeof(zend_object_handlers));
+        oxphp_worker_object_handlers.clone_obj = oxphp_worker_clone_object;
+        oxphp_worker_ce->default_object_handlers = &oxphp_worker_object_handlers;
+    }
 
     /* ─── HTTP Interfaces (must register before classes) ───── */
     {

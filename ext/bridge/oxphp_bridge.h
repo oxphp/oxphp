@@ -110,6 +110,13 @@ typedef struct {
 
     /** Whether this thread is an async worker (not a request worker). */
     int is_async_worker;
+
+    /** OS thread spawn time as unix seconds (float).
+     *  Set ONCE per thread by Rust at thread boot via
+     *  oxphp_bridge_set_worker_start_time(); preserved across all
+     *  per-request resets (oxphp_bridge_reset_request_ctx). Zero before
+     *  the setter is called (e.g. CLI without OxPHP host). */
+    double worker_start_time;
 } oxphp_ctx_t;
 
 /**
@@ -144,6 +151,12 @@ void oxphp_bridge_set_request_time(double time);
 
 /** Get request start time. */
 double oxphp_bridge_get_request_time(void);
+
+/** Set worker thread spawn time. Called once per thread at boot. */
+void oxphp_bridge_set_worker_start_time(double time);
+
+/** Get worker thread spawn time. */
+double oxphp_bridge_get_worker_start_time(void);
 
 /** Set streaming mode. */
 void oxphp_bridge_set_stream_mode(bool mode);
@@ -982,8 +995,23 @@ uint8_t oxphp_bridge_get_exit_reason(void);
 /** Get the number of requests completed by this worker. */
 uint64_t oxphp_bridge_get_requests_done(void);
 
+/** Increment requests_done by 1 and return the new value. Called from Rust
+ *  at the start of each request handling — both traditional mode
+ *  (per-request in execute_request) and worker mode (per-handler-dispatch
+ *  in scheduler). Thread-local; survives per-request resets. */
+uint64_t oxphp_bridge_increment_requests_done(void);
+
 /** Get the current PHP memory usage (set after each request). */
 uint64_t oxphp_bridge_get_memory_usage(void);
+
+/** Process resident set size (RSS) in bytes.
+ *  Linux: parses /proc/self/status VmRSS line (KiB → bytes).
+ *  macOS / other: getrusage(RUSAGE_SELF, &ru).ru_maxrss (bytes on Darwin).
+ *  Returns 0 on failure (rare; restrictive sandbox kernels). */
+uint64_t oxphp_bridge_get_rss_bytes(void);
+
+/** Configured per-worker memory cap in bytes (0 = unlimited). */
+uint64_t oxphp_bridge_get_max_memory_bytes(void);
 
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);

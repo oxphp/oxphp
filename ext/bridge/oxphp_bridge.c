@@ -1,9 +1,14 @@
 #include "oxphp_bridge.h"
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
 #include <pthread.h>
+#include <inttypes.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /**
  * Thread-local context — one per OS thread.
@@ -51,6 +56,14 @@ void oxphp_bridge_set_request_time(double time) {
 
 double oxphp_bridge_get_request_time(void) {
     return ctx.request_time;
+}
+
+void oxphp_bridge_set_worker_start_time(double time) {
+    ctx.worker_start_time = time;
+}
+
+double oxphp_bridge_get_worker_start_time(void) {
+    return ctx.worker_start_time;
 }
 
 void oxphp_bridge_set_stream_mode(bool mode) {
@@ -1760,8 +1773,10 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.stream_mode = false;
     ctx.headers_sent = false;
     ctx.finished = false;
-    /* Note: requests_done is NOT incremented here — the caller (oxphp_worker loop)
-     * increments it explicitly after send_response, keeping the side effect visible. */
+    /* Note: requests_done and worker_start_time are deliberately NOT
+     * touched here — they are thread-persistent and only mutated by
+     * oxphp_bridge_increment_requests_done() / set_worker_start_time(),
+     * called from Rust at request start / thread boot respectively. */
 }
 
 int oxphp_bridge_worker_wait(void) {
@@ -1823,12 +1838,82 @@ uint64_t oxphp_bridge_get_requests_done(void) {
     return ctx.requests_done;
 }
 
+uint64_t oxphp_bridge_increment_requests_done(void) {
+    return ++ctx.requests_done;
+}
+
 uint64_t oxphp_bridge_get_memory_usage(void) {
     return ctx.current_memory_bytes;
 }
 
+/* Per-thread cached fd for /proc/self/statm. -1 = not opened, -2 = unavailable
+ * (open failed once, don't retry). Never closed: lives until thread exits, at
+ * which point process exit closes it. */
+static __thread int rss_statm_fd = -1;
+
+uint64_t oxphp_bridge_get_rss_bytes(void) {
+#if defined(__linux__)
+    static long page_size = 0;  /* never changes within a process */
+    if (page_size == 0) {
+        page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) page_size = 4096;  /* defensive default */
+    }
+
+    if (rss_statm_fd == -1) {
+        rss_statm_fd = open("/proc/self/statm", O_RDONLY | O_CLOEXEC);
+        if (rss_statm_fd < 0) rss_statm_fd = -2;  /* permanently unavailable */
+    }
+
+    if (rss_statm_fd >= 0) {
+        /* /proc/self/statm is ~30 bytes, 7 space-separated page counts.
+         * Field #2 is resident pages. */
+        char buf[64];
+        if (lseek(rss_statm_fd, 0, SEEK_SET) == 0) {
+            ssize_t n = read(rss_statm_fd, buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                const char *p = strchr(buf, ' ');
+                if (p) {
+                    unsigned long resident_pages = strtoul(p + 1, NULL, 10);
+                    if (resident_pages > 0) {
+                        return (uint64_t)resident_pages * (uint64_t)page_size;
+                    }
+                }
+            }
+        }
+        /* read/parse failed — fall through to getrusage */
+    }
+
+    /* Fallback when /proc/self/statm is unavailable or unparseable
+     * (restrictive seccomp, certain container runtimes). */
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    return (uint64_t)ru.ru_maxrss * 1024ULL;  /* Linux: ru_maxrss in KiB */
+#elif defined(__APPLE__) && defined(__MACH__)
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+    /* Darwin: ru_maxrss is bytes. */
+    return (uint64_t)ru.ru_maxrss;
+#else
+    /* Unsupported OS — log once per process, then return 0 on every call.
+     * Callers (Worker::getRss()) treat 0 as "no info available". */
+    static bool warned = false;
+    if (!warned) {
+        fprintf(stderr,
+                "oxphp_bridge_get_rss_bytes: not supported on this OS — "
+                "returning 0\n");
+        warned = true;
+    }
+    return 0;
+#endif
+}
+
 bool oxphp_bridge_get_handler_failed(void) {
     return ctx.handler_failed;
+}
+
+uint64_t oxphp_bridge_get_max_memory_bytes(void) {
+    return ctx.max_memory_bytes;
 }
 
 /* ── Bailout wrapper ── */

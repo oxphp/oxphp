@@ -430,7 +430,10 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     } else {
         sched->consecutive_errors = 0;
     }
-    sched->total_requests_done++;
+    /* Increment moved to request-start path (oxphp_scheduler_create_fiber
+     * for the fast path; oxphp_scheduler_tick's new-request branch for
+     * the event-loop path) so PHP-side getRequestCount() observes the
+     * current request's index, not the previous count. */
 
     /* Send the HTTP response via Rust (same as worker_send_callback) */
     oxphp_bridge_worker_send_response();
@@ -477,6 +480,11 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * (fresh superglobals, clean SAPI headers) without touching global OB. */
         oxphp_bridge_prepare_request();
         oxphp_fiber_init_request_state();
+
+        /* Increment counter at request START (mirror of fast path in
+         * oxphp_sapi.c). Keeps sched->total_requests_done as a mirror of
+         * bridge state, used by exit-condition checks downstream. */
+        sched->total_requests_done = oxphp_bridge_increment_requests_done();
 
         /* Create or reuse fiber */
         oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(

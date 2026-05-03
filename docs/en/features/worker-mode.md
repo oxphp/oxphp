@@ -136,15 +136,32 @@ services:
       - WORKER_MAX_MEMORY_MIB=128
 ```
 
+## PHP API
+
+Worker introspection and the worker entry point are exposed through the
+[`OxPHP\Server\Worker`](../php/worker-class.md) class.
+
+```php
+<?php
+$worker = OxPHP\Server\Worker::current();
+$worker->serve(function () {
+    handleRequest();
+});
+```
+
+**Legacy free functions** (`oxphp_is_worker`, `oxphp_worker_id`, `oxphp_worker`)
+remain available and route through the same internal state. New code should
+prefer the class API.
+
 ## PHP Examples
 
 ### Detecting Worker Mode
 
-Use `oxphp_is_worker()` to check whether the current process is running in worker mode. This is useful for writing code that works in both traditional and worker mode.
+Use `OxPHP\Server\Worker::isWorkerMode()` to check whether the current process is running in worker mode. This is useful for writing code that works in both traditional and worker mode.
 
 ```php
 <?php
-if (oxphp_is_worker()) {
+if (OxPHP\Server\Worker::isWorkerMode()) {
     // Reuse a persistent connection
     $redis = new Redis();
     $redis->pconnect('redis', 6379);

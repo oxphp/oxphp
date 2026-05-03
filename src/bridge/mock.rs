@@ -857,3 +857,84 @@ pub unsafe fn oxphp_shared_pool_handle_read(
     -1
 }
 pub unsafe fn oxphp_shared_pool_handle_clear(_handle_zv: *mut c_void) {}
+
+// ── Worker class accessors (mock state) ──
+//
+// Mirror the C accessors declared in `src/php/bindings/common.rs`. These are
+// real `extern "C"` exports (gated to host builds only — see
+// `src/bridge/mod.rs`) so tests can call them through the FFI boundary if
+// desired and so the symbols satisfy any host code that links against them.
+
+use std::cell::Cell;
+
+thread_local! {
+    static WORKER_START_TIME: Cell<f64> = const { Cell::new(0.0) };
+    static REQUESTS_DONE: Cell<u64> = const { Cell::new(0) };
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_set_worker_start_time(t: f64) {
+    WORKER_START_TIME.with(|c| c.set(t));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_get_worker_start_time() -> f64 {
+    WORKER_START_TIME.with(|c| c.get())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_increment_requests_done() -> u64 {
+    REQUESTS_DONE.with(|c| {
+        let v = c.get() + 1;
+        c.set(v);
+        v
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_get_requests_done() -> u64 {
+    REQUESTS_DONE.with(|c| c.get())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_get_rss_bytes() -> u64 {
+    /* Mock returns a plausible non-zero value for tests that just assert > 0.
+     * Tests that check exact bytes must run under Docker against the real
+     * accessor. */
+    1024 * 1024
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_bridge_get_max_memory_bytes() -> u64 {
+    0
+}
+
+#[cfg(test)]
+mod worker_class_mock_tests {
+    use super::*;
+
+    #[test]
+    fn worker_start_time_round_trip() {
+        unsafe {
+            oxphp_bridge_set_worker_start_time(123.456);
+        }
+        let v = unsafe { oxphp_bridge_get_worker_start_time() };
+        assert!((v - 123.456).abs() < 1e-9);
+    }
+
+    #[test]
+    fn increment_requests_done_is_monotonic() {
+        REQUESTS_DONE.with(|c| c.set(0));
+        unsafe {
+            oxphp_bridge_increment_requests_done();
+            oxphp_bridge_increment_requests_done();
+            oxphp_bridge_increment_requests_done();
+        }
+        assert_eq!(unsafe { oxphp_bridge_get_requests_done() }, 3);
+    }
+
+    #[test]
+    fn get_rss_bytes_is_nonzero() {
+        assert!(unsafe { oxphp_bridge_get_rss_bytes() } > 0);
+    }
+}
