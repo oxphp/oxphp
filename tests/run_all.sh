@@ -83,10 +83,15 @@ START_TIME=$(date +%s)
 log_info "Profiles: ${profiles[*]}"
 log_info "Output: $OUTPUT"
 
-# ── Build (once — all profiles share the same image) ─────────
+# ── Build (each profile owns a tests-oxphp-<profile> image) ──
+# Layer cache makes the second-onward builds near-instant; without
+# this loop, profiles whose image already exists locally reuse a
+# stale build (e.g. from a prior commit) and miss new symbols.
 if [ -z "$NO_BUILD" ]; then
-    log_info "Building Docker image..."
-    eval "$(compose_cmd "${profiles[0]}") build --quiet" 2>/dev/null || true
+    log_info "Building Docker images for ${#profiles[@]} profile(s)..."
+    for p in "${profiles[@]}"; do
+        eval "$(compose_cmd "$p") build --quiet" 2>/dev/null || true
+    done
     log_ok "Build complete"
 fi
 
