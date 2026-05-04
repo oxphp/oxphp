@@ -286,7 +286,7 @@ impl Plugin for ProfilerPlugin {
     }
 
     fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        self.config = ProfilerConfig::from_ctx(ctx);
+        self.config = ProfilerConfig::from_ctx(ctx)?;
         self.enabled = self.config.enabled;
 
         // Register the OxPHP\Profile\* PHP SDK unconditionally — per spec §6,
@@ -553,7 +553,9 @@ mod tests {
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
 
-    fn init_profiler_plugin(plugin: &mut ProfilerPlugin) -> HashMap<String, serde_json::Value> {
+    fn try_init_profiler_plugin(
+        plugin: &mut ProfilerPlugin,
+    ) -> Result<HashMap<String, serde_json::Value>, crate::plugin::PluginError> {
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -587,21 +589,74 @@ mod tests {
             &mut php_functions,
             &mut core_flags,
         );
-        plugin.init(&mut ctx).unwrap();
+        let result = plugin.init(&mut ctx);
         drop(ctx);
-        config_values
+        result.map(|()| config_values)
+    }
+
+    fn init_profiler_plugin(plugin: &mut ProfilerPlugin) -> HashMap<String, serde_json::Value> {
+        try_init_profiler_plugin(plugin).unwrap()
+    }
+
+    /// Serialises every test that reads or writes `PROFILER_*` env vars.
+    /// `cargo test` runs tests in parallel, and the strict bool parser now
+    /// rejects garbage values (e.g. `PROFILER_INTERNAL=ture`) — without this
+    /// lock a test that *sets* a bad value would make every other concurrent
+    /// `init_profiler_plugin` panic on `unwrap()`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Bool env vars the profiler config reads. These are the only ones
+    /// that can reject and abort `init`, so we clear them on entry and
+    /// restore them on exit to keep tests hermetic.
+    const BOOL_VARS: &[&str] = &[
+        "PROFILER_ENABLED",
+        "PROFILER_INTERNAL",
+        "PROFILER_EXPORT_XHGUI",
+    ];
+
+    /// Run `f` with the given env-var overrides applied, holding `ENV_LOCK`
+    /// for the entire duration. All [`BOOL_VARS`] that aren't explicitly
+    /// listed in `overrides` are cleared, so a leaked value from another
+    /// test or the host environment cannot bleed in.
+    fn with_env<F, R>(overrides: &[(&str, &str)], f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev: Vec<(String, Option<String>)> = BOOL_VARS
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for k in BOOL_VARS {
+            std::env::remove_var(k);
+        }
+        for (k, v) in overrides {
+            std::env::set_var(k, v);
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        for (k, prev_val) in prev {
+            match prev_val {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+        match result {
+            Ok(r) => r,
+            Err(e) => std::panic::resume_unwind(e),
+        }
     }
 
     #[test]
     fn test_profiler_plugin_disabled_by_default() {
-        std::env::remove_var("PROFILER_ENABLED");
-        let mut plugin = ProfilerPlugin::new();
-        let config = init_profiler_plugin(&mut plugin);
-        assert_eq!(plugin.name(), "profiler");
-        assert_eq!(plugin.version(), "0.1.0");
-        assert!(!plugin.enabled);
-        assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
-        assert_eq!(plugin.health(), PluginHealth::Ok);
+        with_env(&[], || {
+            let mut plugin = ProfilerPlugin::new();
+            let config = init_profiler_plugin(&mut plugin);
+            assert_eq!(plugin.name(), "profiler");
+            assert_eq!(plugin.version(), "0.1.0");
+            assert!(!plugin.enabled);
+            assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
+            assert_eq!(plugin.health(), PluginHealth::Ok);
+        });
     }
 
     #[test]
@@ -617,5 +672,34 @@ mod tests {
     fn test_profiler_plugin_shutdown_disabled() {
         let mut plugin = ProfilerPlugin::new();
         plugin.shutdown();
+    }
+
+    #[test]
+    fn test_profiler_validates_other_bools_when_disabled() {
+        // PROFILER_ENABLED=false used to skip parsing of every other bool —
+        // a typo like PROFILER_INTERNAL=ture would only surface in prod the
+        // day someone flipped PROFILER_ENABLED=true. With the unified policy
+        // the typo must fail at startup regardless of `enabled`.
+        let err = with_env(
+            &[
+                ("PROFILER_ENABLED", "false"),
+                ("PROFILER_INTERNAL", "ture"),
+            ],
+            || {
+                let mut plugin = ProfilerPlugin::new();
+                try_init_profiler_plugin(&mut plugin)
+                    .expect_err("PROFILER_INTERNAL=ture must fail even when disabled")
+            },
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PROFILER_INTERNAL"),
+            "error should name the offending var, got: {msg}"
+        );
+        assert!(
+            msg.contains("ture"),
+            "error should echo the value, got: {msg}"
+        );
     }
 }

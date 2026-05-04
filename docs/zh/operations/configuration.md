@@ -7,6 +7,17 @@ description: OxPHP 完整的环境变量参考。每项配置、默认值及其�
 
 OxPHP 完全通过环境变量进行配置。无需管理任何配置文件——每项配置都有合理的默认值，因此无需任何配置即可开箱即用。
 
+### 布尔值
+
+标记为布尔类型的变量只接受固定的规范集合（大小写不敏感、自动去除首尾空白）：
+
+- 真值：`on`、`true`、`1`、`yes`
+- 假值：`off`、`false`、`0`、`no`
+
+规范集合之外的非空取值——例如 `ture` 之类的拼写错误——都会在启动时报错并指出变量名。这样可以在流量进入之前就发现配置错误，而不是悄悄把开关拨到错误的方向。
+
+未设置的变量或空赋值（`FOO=`）会回退到文档中规定的默认值。空值被刻意视同未设置：Docker Compose / Kubernetes 中 `FOO=${FOO}` 这样的替换在宿主变量缺失时会得到 `FOO=`，此时不应让服务器拒绝启动。
+
 ## 服务器
 
 | 变量 | 默认值 | 描述 |
@@ -14,7 +25,7 @@ OxPHP 完全通过环境变量进行配置。无需管理任何配置文件—�
 | `LISTEN_ADDR` | `0.0.0.0:80` | 主 HTTP 服务器的地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 提供文件和 PHP 脚本的根目录 |
 | `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = 直接文件映射。`*.php` = 前端控制器。非 `.php` = 静态回退（SPA）。当 `WORKER_MODE_ENABLED=true` 时 = Worker 引导脚本。相对路径基于 `DOCUMENT_ROOT` 解析（允许相对路径和 `..`，绝对路径按原样使用）。详见[路由](../features/routing.md) |
-| `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。要求 `ENTRY_FILE` 指向 `.php` 脚本。接受 `true`、`1`、`yes` |
+| `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。要求 `ENTRY_FILE` 指向 `.php` 脚本。布尔——参见[布尔值](#布尔值) |
 | `MAX_CONNECTIONS` | `10000` | 最大并发 TCP 连接数 |
 | `TOKIO_WORKERS` | CPU / 2（最少 1） | 异步 I/O 线程数。`1` = 单线程，`N > 1` = 固定线程数，未设置 = 自动检测（CPU / 2，最少 1） |
 
@@ -70,7 +81,7 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `SUPERGLOBALS_ENABLED` | `true` | 在脚本执行前填充 PHP 超全局变量（`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`、`php://input`）。设置为 `false` 或 `0` 可跳过填充——此时请求数据仅可通过对象 API（`oxphp_http_request()`）获取。适用于直接使用对象 API 且希望避免每次请求都构建超全局变量开销的应用 |
+| `SUPERGLOBALS_ENABLED` | `true` | 在脚本执行前填充 PHP 超全局变量（`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`、`php://input`）。设置为[假值](#布尔值)可跳过填充——此时请求数据仅可通过对象 API（`oxphp_http_request()`）获取。适用于直接使用对象 API 且希望避免每次请求都构建超全局变量开销的应用 |
 
 ## 超时
 
@@ -110,7 +121,7 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | 静态文件的 `Cache-Control: max-age`。接受以下格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`），或 `off` 禁用缓存头。替代已弃用的 `STATIC_CACHE_TTL`。 |
-| `STATIC_REVALIDATE` | `off` | 设为 `on` 启用内存内容缓存的 mtime 重新验证。每次缓存命中时检查文件修改时间，自动清除过期条目。替代已弃用的 `STATIC_CACHE`（其中 `off` 含义相反）。 |
+| `STATIC_REVALIDATE` | `off` | 布尔——参见[布尔值](#布尔值)。设为真值启用内存内容缓存的 mtime 重新验证：每次缓存命中时检查文件修改时间，自动清除过期条目。替代已弃用的 `STATIC_CACHE`（其中 `off` 含义相反）。 |
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0–11）。`0` 禁用压缩 |
 
 ## 日志
@@ -129,7 +140,7 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址（`/health`、`/metrics`、`/config`）。未设置时不启动内部服务器 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 包含自定义错误页面的目录，文件名格式为 `{status}.html`（如 `404.html`、`503.html`） |
 | `MAX_QUERY_BODY` | `524288` | 内部查询端点的最大请求体大小（字节，512 KiB） |
-| `TRACE_CONTEXT` | `false` | 启用 W3C Trace Context 传播（`true` 或 `1`）。读取 `traceparent`/`tracestate` 头部并通过 `$_SERVER` 转发给 PHP |
+| `TRACE_CONTEXT` | `false` | 布尔——参见[布尔值](#布尔值)。当为真值时启用 W3C Trace Context 传播：读取 `traceparent`/`tracestate` 头部并通过 `$_SERVER` 转发给 PHP |
 
 ## OpenTelemetry
 

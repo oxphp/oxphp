@@ -194,11 +194,9 @@ impl Plugin for OtelPlugin {
     }
 
     fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        self.enabled = ctx
-            .config("ENABLED")
-            .or_else(|| ctx.config("OTEL_ENABLED"))
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let raw = ctx.config("ENABLED").or_else(|| ctx.config("OTEL_ENABLED"));
+        self.enabled = crate::config::parse_bool_opt("OTEL_ENABLED", raw.as_deref(), false)
+            .map_err(|e| PluginError::Config(e.to_string()))?;
 
         if !self.enabled {
             tracing::info!(

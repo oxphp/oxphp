@@ -1,3 +1,4 @@
+mod env_bool;
 mod php_deny;
 mod proxy;
 mod server;
@@ -6,6 +7,9 @@ mod workers;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[allow(unused_imports)] // consumed by feature-gated plugins
+pub(crate) use env_bool::parse_bool_opt;
+pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
 pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny};
 pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
@@ -90,23 +94,32 @@ pub struct Config {
     pub trusted_proxies: Option<TrustedProxyConfig>,
 }
 
-/// Parse a duration string like "30s", "5m", "2h", "30d", "1w", "1y", "3600", or "off".
-/// Bare numbers (e.g. "3600") are treated as seconds.
-/// Returns `None` for "off" or invalid input.
-pub fn parse_duration(s: &str) -> Option<u64> {
+/// Parse a duration string like `"30s"`, `"5m"`, `"2h"`, `"30d"`, `"1w"`,
+/// `"1y"`, `"3600"`, or `"off"`. Bare numbers are treated as seconds.
+///
+/// Returns `Ok(None)` for the literal `"off"` (caller chooses whether that
+/// disables a header / TTL / etc.), `Ok(Some(n))` for a valid duration, and
+/// `Err(_)` for empty input or an unrecognised value. Callers should filter
+/// empty values at the env layer (`FOO=`) before calling, mirroring the bool
+/// parser's policy.
+pub fn parse_duration(s: &str) -> Result<Option<u64>, String> {
     let s = s.trim();
     if s.eq_ignore_ascii_case("off") {
-        return None;
+        return Ok(None);
     }
     if s.is_empty() {
-        return None;
+        return Err("expected a duration like 30s, 5m, 2h, 30d, 1w, 1y, a bare number of seconds, or off — got empty string".to_string());
     }
     // Bare number = seconds
     if let Ok(secs) = s.parse::<u64>() {
-        return Some(secs);
+        return Ok(Some(secs));
     }
     let (num_str, suffix) = s.split_at(s.len() - 1);
-    let num: u64 = num_str.parse().ok()?;
+    let num: u64 = num_str.parse().map_err(|_| {
+        format!(
+            "expected a duration like 30s, 5m, 2h, 30d, 1w, 1y, a bare number of seconds, or off — got {s:?}"
+        )
+    })?;
     let multiplier = match suffix {
         "s" => 1,
         "m" => 60,
@@ -114,39 +127,52 @@ pub fn parse_duration(s: &str) -> Option<u64> {
         "d" => 86_400,
         "w" => 604_800,
         "y" => 31_536_000,
-        _ => return None,
+        _ => {
+            return Err(format!(
+                "unknown duration suffix {suffix:?} in {s:?} — expected s/m/h/d/w/y"
+            ))
+        }
     };
-    Some(num.saturating_mul(multiplier))
-}
-
-/// Parse a boolean-ish env value. Returns `true` for `on`, `true`, or `1`
-/// (case-insensitive, trimmed). Everything else — including empty, `off`,
-/// `false`, `0`, and arbitrary garbage — returns `false`.
-fn parse_bool_truthy(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1")
+    Ok(Some(num.saturating_mul(multiplier)))
 }
 
 /// Resolve `static_max_age` from new and legacy env values.
 /// `new` is `STATIC_MAX_AGE`, `legacy` is the deprecated `STATIC_CACHE_TTL`.
-/// New value wins. When both are unset, defaults to 30 days.
-fn resolve_static_max_age(new: Option<&str>, legacy: Option<&str>) -> Option<u64> {
-    match new.or(legacy) {
-        Some(val) => parse_duration(val),
-        None => Some(2_592_000),
+/// Both are expected to be non-empty (callers strip empty/unset upstream).
+/// New value wins. When both are unset, defaults to 30 days. Garbage values
+/// surface as a startup error tagged with the variable that supplied them.
+fn resolve_static_max_age(
+    new: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<Option<u64>, crate::types::BoxError> {
+    if let Some(val) = new {
+        return parse_duration(val)
+            .map_err(|e| -> crate::types::BoxError { format!("STATIC_MAX_AGE: {e}").into() });
     }
+    if let Some(val) = legacy {
+        return parse_duration(val)
+            .map_err(|e| -> crate::types::BoxError { format!("STATIC_CACHE_TTL: {e}").into() });
+    }
+    Ok(Some(2_592_000))
 }
 
 /// Resolve `static_revalidate` from new and legacy env values.
-/// `new` is `STATIC_REVALIDATE` (booleanish: `on`/`true`/`1` → true).
-/// `legacy` is the deprecated `STATIC_CACHE` where the value `off` historically
-/// meant "enable mtime revalidation". New value wins; default is `false`.
-fn resolve_static_revalidate(new: Option<&str>, legacy: Option<&str>) -> bool {
+/// `new` is `STATIC_REVALIDATE` (strictly parsed boolean — invalid values are
+/// rejected with a startup error). `legacy` is the deprecated `STATIC_CACHE`
+/// where the value `off` historically meant "enable mtime revalidation"
+/// (kept lenient on purpose, since it is a compatibility shim). New value
+/// wins; default is `false`.
+fn resolve_static_revalidate(
+    new: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<bool, crate::types::BoxError> {
     if let Some(val) = new {
-        return parse_bool_truthy(val);
+        return parse_bool_strict(val)
+            .map_err(|e| -> crate::types::BoxError { format!("STATIC_REVALIDATE: {e}").into() });
     }
     match legacy {
-        Some(val) => val.eq_ignore_ascii_case("off"),
-        None => false,
+        Some(val) => Ok(val.eq_ignore_ascii_case("off")),
+        None => Ok(false),
     }
 }
 
@@ -221,10 +247,16 @@ impl Config {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let new_max_age = std::env::var("STATIC_MAX_AGE").ok();
-        let new_revalidate = std::env::var("STATIC_REVALIDATE").ok();
-        let legacy_ttl = std::env::var("STATIC_CACHE_TTL").ok();
-        let legacy_cache = std::env::var("STATIC_CACHE").ok();
+        // Empty values (`FOO=`) collapse to "unset" — same policy as the
+        // bool parser, so Docker Compose substitutions like `FOO=${FOO}`
+        // with a missing host var fall back to defaults instead of erroring.
+        let strip_empty = |s: String| (!s.trim().is_empty()).then_some(s);
+        let new_max_age = std::env::var("STATIC_MAX_AGE").ok().and_then(strip_empty);
+        let new_revalidate = std::env::var("STATIC_REVALIDATE")
+            .ok()
+            .and_then(strip_empty);
+        let legacy_ttl = std::env::var("STATIC_CACHE_TTL").ok().and_then(strip_empty);
+        let legacy_cache = std::env::var("STATIC_CACHE").ok().and_then(strip_empty);
 
         if legacy_ttl.is_some() {
             tracing::warn!("STATIC_CACHE_TTL is deprecated, use STATIC_MAX_AGE instead");
@@ -243,9 +275,9 @@ impl Config {
             }
         }
 
-        let static_max_age = resolve_static_max_age(new_max_age.as_deref(), legacy_ttl.as_deref());
+        let static_max_age = resolve_static_max_age(new_max_age.as_deref(), legacy_ttl.as_deref())?;
         let static_revalidate =
-            resolve_static_revalidate(new_revalidate.as_deref(), legacy_cache.as_deref());
+            resolve_static_revalidate(new_revalidate.as_deref(), legacy_cache.as_deref())?;
 
         let async_workers: usize = std::env::var("ASYNC_WORKERS")
             .ok()
@@ -256,13 +288,8 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
 
-        let trace_context = std::env::var("TRACE_CONTEXT")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-
-        let superglobals_enabled = std::env::var("SUPERGLOBALS_ENABLED")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
+        let trace_context = parse_env_bool("TRACE_CONTEXT", false)?;
+        let superglobals_enabled = parse_env_bool("SUPERGLOBALS_ENABLED", true)?;
 
         let cpu = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -476,9 +503,7 @@ fn resolve_entry_and_mode(
     document_root: &Path,
 ) -> Result<(Option<PathBuf>, bool), crate::types::BoxError> {
     let entry_file_env = std::env::var("ENTRY_FILE").ok().filter(|s| !s.is_empty());
-    let worker_mode_explicit = std::env::var("WORKER_MODE_ENABLED")
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false);
+    let worker_mode_explicit = parse_env_bool("WORKER_MODE_ENABLED", false)?;
 
     let legacy_worker_file = std::env::var("WORKER_FILE").ok().filter(|s| !s.is_empty());
     let legacy_index_file = std::env::var("INDEX_FILE").ok().filter(|s| !s.is_empty());
@@ -556,159 +581,161 @@ mod tests {
 
     #[test]
     fn test_parse_duration_seconds() {
-        assert_eq!(parse_duration("30s"), Some(30));
-        assert_eq!(parse_duration("0s"), Some(0));
-        assert_eq!(parse_duration("1s"), Some(1));
+        assert_eq!(parse_duration("30s"), Ok(Some(30)));
+        assert_eq!(parse_duration("0s"), Ok(Some(0)));
+        assert_eq!(parse_duration("1s"), Ok(Some(1)));
     }
 
     #[test]
     fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration("5m"), Some(300));
-        assert_eq!(parse_duration("1m"), Some(60));
+        assert_eq!(parse_duration("5m"), Ok(Some(300)));
+        assert_eq!(parse_duration("1m"), Ok(Some(60)));
     }
 
     #[test]
     fn test_parse_duration_hours() {
-        assert_eq!(parse_duration("1h"), Some(3600));
-        assert_eq!(parse_duration("24h"), Some(86400));
+        assert_eq!(parse_duration("1h"), Ok(Some(3600)));
+        assert_eq!(parse_duration("24h"), Ok(Some(86400)));
     }
 
     #[test]
     fn test_parse_duration_days() {
-        assert_eq!(parse_duration("30d"), Some(2_592_000));
-        assert_eq!(parse_duration("1d"), Some(86400));
+        assert_eq!(parse_duration("30d"), Ok(Some(2_592_000)));
+        assert_eq!(parse_duration("1d"), Ok(Some(86400)));
     }
 
     #[test]
     fn test_parse_duration_weeks() {
-        assert_eq!(parse_duration("1w"), Some(604_800));
-        assert_eq!(parse_duration("2w"), Some(1_209_600));
+        assert_eq!(parse_duration("1w"), Ok(Some(604_800)));
+        assert_eq!(parse_duration("2w"), Ok(Some(1_209_600)));
     }
 
     #[test]
     fn test_parse_duration_years() {
-        assert_eq!(parse_duration("1y"), Some(31_536_000));
+        assert_eq!(parse_duration("1y"), Ok(Some(31_536_000)));
     }
 
     #[test]
     fn test_parse_duration_off() {
-        assert_eq!(parse_duration("off"), None);
-        assert_eq!(parse_duration("OFF"), None);
-        assert_eq!(parse_duration("Off"), None);
+        assert_eq!(parse_duration("off"), Ok(None));
+        assert_eq!(parse_duration("OFF"), Ok(None));
+        assert_eq!(parse_duration("Off"), Ok(None));
     }
 
     #[test]
     fn test_parse_duration_bare_number() {
-        assert_eq!(parse_duration("3600"), Some(3600));
-        assert_eq!(parse_duration("0"), Some(0));
-        assert_eq!(parse_duration("30"), Some(30));
+        assert_eq!(parse_duration("3600"), Ok(Some(3600)));
+        assert_eq!(parse_duration("0"), Ok(Some(0)));
+        assert_eq!(parse_duration("30"), Ok(Some(30)));
     }
 
     #[test]
-    fn test_parse_duration_invalid() {
-        assert_eq!(parse_duration(""), None);
-        assert_eq!(parse_duration("abc"), None);
-        assert_eq!(parse_duration("30x"), None);
+    fn test_parse_duration_invalid_errors() {
+        for val in ["", "   ", "abc", "30x", "30y5", "-30s"] {
+            let res = parse_duration(val);
+            assert!(res.is_err(), "{val:?} should be rejected, got {res:?}");
+        }
     }
 
     #[test]
-    fn test_parse_duration_whitespace() {
-        assert_eq!(parse_duration("  30s  "), Some(30));
-        assert_eq!(parse_duration(" off "), None);
-    }
-
-    #[test]
-    fn test_parse_bool_truthy_accepts_on_true_one() {
-        assert!(parse_bool_truthy("on"));
-        assert!(parse_bool_truthy("true"));
-        assert!(parse_bool_truthy("1"));
-    }
-
-    #[test]
-    fn test_parse_bool_truthy_case_insensitive() {
-        assert!(parse_bool_truthy("ON"));
-        assert!(parse_bool_truthy("On"));
-        assert!(parse_bool_truthy("TRUE"));
-        assert!(parse_bool_truthy("True"));
-    }
-
-    #[test]
-    fn test_parse_bool_truthy_trims_whitespace() {
-        assert!(parse_bool_truthy("  on  "));
-        assert!(parse_bool_truthy("\ttrue\n"));
-    }
-
-    #[test]
-    fn test_parse_bool_truthy_falsey_values() {
-        assert!(!parse_bool_truthy("off"));
-        assert!(!parse_bool_truthy("false"));
-        assert!(!parse_bool_truthy("0"));
-        assert!(!parse_bool_truthy(""));
-        assert!(!parse_bool_truthy("garbage"));
-        assert!(!parse_bool_truthy("yes"));
+    fn test_parse_duration_whitespace_trimmed() {
+        assert_eq!(parse_duration("  30s  "), Ok(Some(30)));
+        assert_eq!(parse_duration(" off "), Ok(None));
     }
 
     #[test]
     fn test_resolve_static_max_age_uses_new_when_set() {
-        assert_eq!(resolve_static_max_age(Some("1h"), None), Some(3600));
+        assert_eq!(
+            resolve_static_max_age(Some("1h"), None).unwrap(),
+            Some(3600)
+        );
     }
 
     #[test]
     fn test_resolve_static_max_age_falls_back_to_legacy() {
-        assert_eq!(resolve_static_max_age(None, Some("1d")), Some(86_400));
+        assert_eq!(
+            resolve_static_max_age(None, Some("1d")).unwrap(),
+            Some(86_400)
+        );
     }
 
     #[test]
     fn test_resolve_static_max_age_new_wins_over_legacy() {
-        assert_eq!(resolve_static_max_age(Some("1h"), Some("2h")), Some(3600));
+        assert_eq!(
+            resolve_static_max_age(Some("1h"), Some("2h")).unwrap(),
+            Some(3600)
+        );
     }
 
     #[test]
     fn test_resolve_static_max_age_default_is_30d() {
-        assert_eq!(resolve_static_max_age(None, None), Some(2_592_000));
+        assert_eq!(resolve_static_max_age(None, None).unwrap(), Some(2_592_000));
     }
 
     #[test]
     fn test_resolve_static_max_age_off_disables_header() {
-        assert_eq!(resolve_static_max_age(Some("off"), None), None);
-        assert_eq!(resolve_static_max_age(None, Some("off")), None);
+        assert_eq!(resolve_static_max_age(Some("off"), None).unwrap(), None);
+        assert_eq!(resolve_static_max_age(None, Some("off")).unwrap(), None);
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_garbage_errors_with_var_name() {
+        let err = resolve_static_max_age(Some("garbage"), None).unwrap_err();
+        assert!(err.to_string().contains("STATIC_MAX_AGE"));
+        let err = resolve_static_max_age(None, Some("garbage")).unwrap_err();
+        assert!(err.to_string().contains("STATIC_CACHE_TTL"));
     }
 
     #[test]
     fn test_resolve_static_revalidate_new_on() {
-        assert!(resolve_static_revalidate(Some("on"), None));
-        assert!(resolve_static_revalidate(Some("true"), None));
-        assert!(resolve_static_revalidate(Some("1"), None));
+        assert!(resolve_static_revalidate(Some("on"), None).unwrap());
+        assert!(resolve_static_revalidate(Some("true"), None).unwrap());
+        assert!(resolve_static_revalidate(Some("1"), None).unwrap());
+        assert!(resolve_static_revalidate(Some("yes"), None).unwrap());
     }
 
     #[test]
     fn test_resolve_static_revalidate_new_off() {
-        assert!(!resolve_static_revalidate(Some("off"), None));
-        assert!(!resolve_static_revalidate(Some(""), None));
-        assert!(!resolve_static_revalidate(Some("garbage"), None));
+        assert!(!resolve_static_revalidate(Some("off"), None).unwrap());
+        assert!(!resolve_static_revalidate(Some("false"), None).unwrap());
+        assert!(!resolve_static_revalidate(Some("0"), None).unwrap());
+        assert!(!resolve_static_revalidate(Some("no"), None).unwrap());
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_new_garbage_errors() {
+        let err = resolve_static_revalidate(Some("garbage"), None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("STATIC_REVALIDATE"), "msg: {msg}");
+        assert!(msg.contains("garbage"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_new_empty_errors() {
+        assert!(resolve_static_revalidate(Some(""), None).is_err());
     }
 
     #[test]
     fn test_resolve_static_revalidate_legacy_off_means_revalidate() {
-        assert!(resolve_static_revalidate(None, Some("off")));
-        assert!(resolve_static_revalidate(None, Some("OFF")));
+        assert!(resolve_static_revalidate(None, Some("off")).unwrap());
+        assert!(resolve_static_revalidate(None, Some("OFF")).unwrap());
     }
 
     #[test]
     fn test_resolve_static_revalidate_legacy_other_values_no_revalidate() {
-        assert!(!resolve_static_revalidate(None, Some("on")));
-        assert!(!resolve_static_revalidate(None, Some("")));
+        assert!(!resolve_static_revalidate(None, Some("on")).unwrap());
+        assert!(!resolve_static_revalidate(None, Some("")).unwrap());
     }
 
     #[test]
     fn test_resolve_static_revalidate_new_wins_over_legacy() {
-        assert!(!resolve_static_revalidate(Some("off"), Some("off")));
-        assert!(resolve_static_revalidate(Some("on"), Some("anything")));
+        assert!(!resolve_static_revalidate(Some("off"), Some("off")).unwrap());
+        assert!(resolve_static_revalidate(Some("on"), Some("anything")).unwrap());
     }
 
     #[test]
     fn test_resolve_static_revalidate_default_is_false() {
-        assert!(!resolve_static_revalidate(None, None));
+        assert!(!resolve_static_revalidate(None, None).unwrap());
     }
 }
 
@@ -860,9 +887,9 @@ mod entry_file_tests {
     }
 
     #[test]
-    fn env_worker_mode_rejects_other_values() {
+    fn env_worker_mode_explicit_falsy_disables() {
         let dir = make_root_with(&["w.php"]);
-        for val in ["false", "0", "no", ""] {
+        for val in ["false", "0", "no", "off", "FALSE"] {
             with_env(
                 &[
                     ("ENTRY_FILE", Some("w.php")),
@@ -875,6 +902,57 @@ mod entry_file_tests {
                     assert!(
                         !worker,
                         "WORKER_MODE_ENABLED={val:?} should disable worker mode"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn env_worker_mode_rejects_garbage() {
+        let dir = make_root_with(&["w.php"]);
+        for val in ["ture", "garbage", "2"] {
+            with_env(
+                &[
+                    ("ENTRY_FILE", Some("w.php")),
+                    ("WORKER_MODE_ENABLED", Some(val)),
+                    ("WORKER_FILE", None),
+                    ("INDEX_FILE", None),
+                ],
+                || {
+                    let res = resolve_entry_and_mode(dir.path());
+                    let err = res
+                        .err()
+                        .unwrap_or_else(|| panic!("WORKER_MODE_ENABLED={val:?} should error"));
+                    let msg = err.to_string();
+                    assert!(
+                        msg.contains("WORKER_MODE_ENABLED"),
+                        "error should mention var name, got: {msg}"
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn env_worker_mode_empty_uses_default() {
+        // `FOO=` (empty) is treated as unset — Docker Compose substitution
+        // `WORKER_MODE_ENABLED=${WORKER_MODE_ENABLED}` with the host var
+        // missing must not refuse to start.
+        let dir = make_root_with(&["w.php"]);
+        for val in ["", "   "] {
+            with_env(
+                &[
+                    ("ENTRY_FILE", Some("w.php")),
+                    ("WORKER_MODE_ENABLED", Some(val)),
+                    ("WORKER_FILE", None),
+                    ("INDEX_FILE", None),
+                ],
+                || {
+                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    assert!(
+                        !worker,
+                        "WORKER_MODE_ENABLED={val:?} should fall back to default (false)"
                     );
                 },
             );

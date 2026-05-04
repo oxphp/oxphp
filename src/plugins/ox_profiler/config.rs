@@ -7,7 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::plugin::PluginContext;
+use crate::config::{parse_bool_opt, parse_bool_strict};
+use crate::plugin::{PluginContext, PluginError};
 
 /// Profiler plugin configuration. Populated once at `ProfilerPlugin::init` via
 /// [`ProfilerConfig::from_ctx`]. Immutable afterwards.
@@ -51,11 +52,14 @@ impl Default for ProfilerConfig {
 }
 
 impl ProfilerConfig {
-    pub fn from_ctx(ctx: &PluginContext) -> Self {
-        let enabled = parse_bool(ctx.config("ENABLED").as_deref(), false);
-        if !enabled {
-            return Self::default();
-        }
+    /// Parse `PROFILER_*` config from the plugin context.
+    ///
+    /// Every field is parsed unconditionally — even when `enabled=false` —
+    /// so a typo like `PROFILER_INTERNAL=ture` surfaces at startup instead
+    /// of waiting until the operator flips `PROFILER_ENABLED=true` in prod.
+    pub fn from_ctx(ctx: &PluginContext) -> Result<Self, PluginError> {
+        let enabled = parse_bool_opt("PROFILER_ENABLED", ctx.config("ENABLED").as_deref(), false)
+            .map_err(|e| PluginError::Config(e.to_string()))?;
 
         let auth_token = ctx.config("AUTH_TOKEN").and_then(|v| {
             if v.is_empty() {
@@ -66,7 +70,12 @@ impl ProfilerConfig {
         });
 
         let sample_rate = parse_f64(ctx.config("SAMPLE_RATE").as_deref(), 0.0).clamp(0.0, 1.0);
-        let internal = parse_bool(ctx.config("INTERNAL").as_deref(), false);
+        let internal = parse_bool_opt(
+            "PROFILER_INTERNAL",
+            ctx.config("INTERNAL").as_deref(),
+            false,
+        )
+        .map_err(|e| PluginError::Config(e.to_string()))?;
         let max_spans = parse_u32(ctx.config("MAX_SPANS").as_deref(), 50_000);
         let max_depth =
             parse_u32(ctx.config("MAX_DEPTH").as_deref(), 256).min(u16::MAX as u32) as u16;
@@ -106,17 +115,18 @@ impl ProfilerConfig {
             }
         });
 
+        // Tri-state: explicit truthy/falsy wins, unset/empty falls through to
+        // URL-based auto-detection. Garbage values surface as a startup error.
         let export_xhgui = match ctx.config("EXPORT_XHGUI").as_deref() {
-            Some("true") | Some("1") => true,
-            Some("false") | Some("0") => false,
-            // Auto-detect: if URL contains "xhgui" or ends with "/run/import".
-            _ => export_url
+            None | Some("") => export_url
                 .as_deref()
                 .map(|u| u.contains("xhgui") || u.ends_with("/run/import"))
                 .unwrap_or(false),
+            Some(v) => parse_bool_strict(v)
+                .map_err(|e| PluginError::Config(format!("PROFILER_EXPORT_XHGUI: {e}")))?,
         };
 
-        Self {
+        Ok(Self {
             enabled,
             auth_token,
             sample_rate,
@@ -131,15 +141,7 @@ impl ProfilerConfig {
             export_format,
             export_auth_token,
             export_xhgui,
-        }
-    }
-}
-
-fn parse_bool(s: Option<&str>, default: bool) -> bool {
-    match s {
-        Some("true") | Some("1") => true,
-        Some("false") | Some("0") => false,
-        _ => default,
+        })
     }
 }
 
@@ -165,16 +167,6 @@ mod tests {
         assert_eq!(cfg.max_depth, 256);
         assert_eq!(cfg.output_formats, vec!["xhprof", "speedscope"]);
         assert_eq!(cfg.retention_count, 100);
-    }
-
-    #[test]
-    fn test_parse_bool_helper() {
-        assert!(parse_bool(Some("true"), false));
-        assert!(parse_bool(Some("1"), false));
-        assert!(!parse_bool(Some("false"), true));
-        assert!(!parse_bool(Some("0"), true));
-        assert!(!parse_bool(Some("maybe"), false));
-        assert!(parse_bool(None, true));
     }
 
     #[test]

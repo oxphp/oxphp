@@ -7,6 +7,17 @@ description: Complete environment variable reference for OxPHP. Every setting, i
 
 OxPHP is configured entirely through environment variables. There are no configuration files to manage — every setting has a sensible default, so a zero-configuration deployment works out of the box.
 
+### Boolean values
+
+Variables marked as boolean accept a fixed canonical set, case-insensitive and trimmed:
+
+- truthy: `on`, `true`, `1`, `yes`
+- falsy: `off`, `false`, `0`, `no`
+
+Any non-empty value outside that set — typos like `ture` — fails fast at startup with an error naming the variable. This catches misconfiguration before traffic instead of silently flipping a flag the wrong way.
+
+An unset variable or empty assignment (`FOO=`) falls back to the documented default. Empty is treated as unset on purpose: Docker Compose / Kubernetes substitution like `FOO=${FOO}` produces `FOO=` when the host variable is missing, and that should not refuse to start the server.
+
 ## Server
 
 | Variable | Default | Description |
@@ -14,7 +25,7 @@ OxPHP is configured entirely through environment variables. There are no configu
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port for the main HTTP server |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
-| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Accepts `true`, `1`, `yes` |
+| `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
@@ -70,7 +81,7 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SUPERGLOBALS_ENABLED` | `true` | Populate PHP superglobals (`$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`, `php://input`) before script execution. Set to `false` or `0` to skip population — request data is then only available through the object API (`oxphp_http_request()`). Useful for applications that consume the object API directly and want to avoid the cost of building superglobals on every request |
+| `SUPERGLOBALS_ENABLED` | `true` | Populate PHP superglobals (`$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`, `php://input`) before script execution. Set to a [falsy value](#boolean-values) to skip population — request data is then only available through the object API (`oxphp_http_request()`). Useful for applications that consume the object API directly and want to avoid the cost of building superglobals on every request |
 
 ## Timeouts
 
@@ -110,7 +121,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache. When on, each cache hit checks the file's modification time and evicts stale entries automatically. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: each cache hit checks the file's modification time and evicts stale entries automatically. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
 
 ## Logging
@@ -129,7 +140,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | `INTERNAL_ADDR` | *(unset)* | Address for the internal server (`/health`, `/metrics`, `/config`). Internal server is not started when unset |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory containing custom error pages named `{status}.html` (e.g., `404.html`, `503.html`) |
 | `MAX_QUERY_BODY` | `524288` | Maximum request body size in bytes for internal query endpoints (512 KiB) |
-| `TRACE_CONTEXT` | `false` | Enable W3C Trace Context propagation (`true` or `1`). Reads `traceparent`/`tracestate` headers and forwards them to PHP via `$_SERVER` |
+| `TRACE_CONTEXT` | `false` | Boolean — see [Boolean values](#boolean-values). When truthy, enables W3C Trace Context propagation: reads `traceparent`/`tracestate` headers and forwards them to PHP via `$_SERVER` |
 
 ## OpenTelemetry
 
