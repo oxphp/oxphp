@@ -320,8 +320,8 @@ flowchart LR
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
-| `STATIC_CACHE_TTL` | `30d` | 静态文件缓存 TTL（`30s`、`5m`、`2h`、`30d`、`1y`、`off`） |
-| `STATIC_CACHE` | *(开启)* | 设为 `off` 启用内存内容缓存的 mtime 重新验证 |
+| `STATIC_MAX_AGE` | `30d` | 静态文件的 `Cache-Control: max-age`（`30s`、`5m`、`2h`、`30d`、`1y`、`off`）。替代已弃用的 `STATIC_CACHE_TTL`。 |
+| `STATIC_REVALIDATE` | `off` | 设为 `on` 启用内存内容缓存的 mtime 重新验证。替代已弃用的 `STATIC_CACHE`（其 `off` 表示同样含义）。 |
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0 = 关闭，1-11） |
 | `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
 | `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |

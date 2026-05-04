@@ -109,8 +109,8 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `STATIC_CACHE_TTL` | `30d` | 静态文件的缓存 TTL。接受以下格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`），或 `off` 禁用缓存 |
-| `STATIC_CACHE` | *(开启)* | 设为 `off` 启用内存内容缓存的 mtime 重新验证。每次缓存命中时检查文件修改时间，自动清除过期条目 |
+| `STATIC_MAX_AGE` | `30d` | 静态文件的 `Cache-Control: max-age`。接受以下格式：`30s`、`5m`、`2h`、`30d`、`1w`、`1y`、纯秒数（`3600`），或 `off` 禁用缓存头。替代已弃用的 `STATIC_CACHE_TTL`。 |
+| `STATIC_REVALIDATE` | `off` | 设为 `on` 启用内存内容缓存的 mtime 重新验证。每次缓存命中时检查文件修改时间，自动清除过期条目。替代已弃用的 `STATIC_CACHE`（其中 `off` 含义相反）。 |
 | `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0–11）。`0` 禁用压缩 |
 
 ## 日志
@@ -197,7 +197,7 @@ HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_LEVEL=4
-STATIC_CACHE_TTL=30d
+STATIC_MAX_AGE=30d
 ```
 
 ### 生产环境（工作进程模式）
@@ -257,8 +257,8 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
-  "static_cache_ttl": 2592000,
-  "static_cache_enabled": true,
+  "static_max_age": 2592000,
+  "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,

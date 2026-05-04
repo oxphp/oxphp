@@ -59,13 +59,13 @@ pub struct Config {
     pub worker_mode_enabled: bool,
     /// Max memory (MB) before recycling a worker (0 = unlimited).
     pub worker_max_memory_mib: u64,
-    /// Static file cache TTL in seconds. `None` = caching disabled.
-    pub static_cache_ttl: Option<u64>,
-    /// Whether cached content is served without mtime revalidation.
-    /// When `true` (default), cached entries are returned immediately.
-    /// When `false` (`STATIC_CACHE=off`), each hit performs a `stat()` check
-    /// and evicts stale entries before serving.
-    pub static_cache_enabled: bool,
+    /// Static file `Cache-Control: max-age` value, in seconds.
+    /// `None` = no `Cache-Control` header sent.
+    pub static_max_age: Option<u64>,
+    /// Whether the in-memory file cache performs `stat()` revalidation on hit.
+    /// `true` = check mtime each time and evict stale entries (development).
+    /// `false` (default) = trust cache contents without revalidation (production).
+    pub static_revalidate: bool,
     /// Number of dedicated async worker threads. 0 = async pool disabled.
     pub async_workers: usize,
     /// Bounded channel capacity for pending async tasks. 0 = auto (async_workers * 64).
@@ -117,6 +117,37 @@ pub fn parse_duration(s: &str) -> Option<u64> {
         _ => return None,
     };
     Some(num.saturating_mul(multiplier))
+}
+
+/// Parse a boolean-ish env value. Returns `true` for `on`, `true`, or `1`
+/// (case-insensitive, trimmed). Everything else — including empty, `off`,
+/// `false`, `0`, and arbitrary garbage — returns `false`.
+fn parse_bool_truthy(s: &str) -> bool {
+    matches!(s.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1")
+}
+
+/// Resolve `static_max_age` from new and legacy env values.
+/// `new` is `STATIC_MAX_AGE`, `legacy` is the deprecated `STATIC_CACHE_TTL`.
+/// New value wins. When both are unset, defaults to 30 days.
+fn resolve_static_max_age(new: Option<&str>, legacy: Option<&str>) -> Option<u64> {
+    match new.or(legacy) {
+        Some(val) => parse_duration(val),
+        None => Some(2_592_000),
+    }
+}
+
+/// Resolve `static_revalidate` from new and legacy env values.
+/// `new` is `STATIC_REVALIDATE` (booleanish: `on`/`true`/`1` → true).
+/// `legacy` is the deprecated `STATIC_CACHE` where the value `off` historically
+/// meant "enable mtime revalidation". New value wins; default is `false`.
+fn resolve_static_revalidate(new: Option<&str>, legacy: Option<&str>) -> bool {
+    if let Some(val) = new {
+        return parse_bool_truthy(val);
+    }
+    match legacy {
+        Some(val) => val.eq_ignore_ascii_case("off"),
+        None => false,
+    }
 }
 
 impl Config {
@@ -190,14 +221,31 @@ impl Config {
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let static_cache_ttl = match std::env::var("STATIC_CACHE_TTL") {
-            Ok(val) => parse_duration(&val),
-            Err(_) => Some(2_592_000), // 30 days
-        };
+        let new_max_age = std::env::var("STATIC_MAX_AGE").ok();
+        let new_revalidate = std::env::var("STATIC_REVALIDATE").ok();
+        let legacy_ttl = std::env::var("STATIC_CACHE_TTL").ok();
+        let legacy_cache = std::env::var("STATIC_CACHE").ok();
 
-        let static_cache_enabled = std::env::var("STATIC_CACHE")
-            .map(|v| !v.eq_ignore_ascii_case("off"))
-            .unwrap_or(true);
+        if legacy_ttl.is_some() {
+            tracing::warn!("STATIC_CACHE_TTL is deprecated, use STATIC_MAX_AGE instead");
+            if new_max_age.is_some() {
+                tracing::warn!(
+                    "both STATIC_CACHE_TTL and STATIC_MAX_AGE set; STATIC_MAX_AGE takes precedence"
+                );
+            }
+        }
+        if legacy_cache.is_some() {
+            tracing::warn!("STATIC_CACHE is deprecated, use STATIC_REVALIDATE instead");
+            if new_revalidate.is_some() {
+                tracing::warn!(
+                    "both STATIC_CACHE and STATIC_REVALIDATE set; STATIC_REVALIDATE takes precedence"
+                );
+            }
+        }
+
+        let static_max_age = resolve_static_max_age(new_max_age.as_deref(), legacy_ttl.as_deref());
+        let static_revalidate =
+            resolve_static_revalidate(new_revalidate.as_deref(), legacy_cache.as_deref());
 
         let async_workers: usize = std::env::var("ASYNC_WORKERS")
             .ok()
@@ -266,8 +314,8 @@ impl Config {
             entry_file,
             worker_mode_enabled,
             worker_max_memory_mib,
-            static_cache_ttl,
-            static_cache_enabled,
+            static_max_age,
+            static_revalidate,
             async_workers,
             async_queue_capacity,
             trace_context,
@@ -310,8 +358,8 @@ impl Config {
             entry_file: None,
             worker_mode_enabled: false,
             worker_max_memory_mib: 0,
-            static_cache_ttl: Some(2_592_000),
-            static_cache_enabled: true,
+            static_max_age: Some(2_592_000),
+            static_revalidate: false,
             async_workers: 0,
             async_queue_capacity: 0,
             trace_context: false,
@@ -360,8 +408,8 @@ impl Config {
             "max_query_body": self.max_query_body,
             "worker_mode_enabled": self.worker_mode_enabled,
             "worker_max_memory_mib": self.worker_max_memory_mib,
-            "static_cache_ttl": self.static_cache_ttl,
-            "static_cache_enabled": self.static_cache_enabled,
+            "static_max_age": self.static_max_age,
+            "static_revalidate": self.static_revalidate,
             "async_workers": self.async_workers,
             "async_queue_capacity": if self.async_queue_capacity > 0 {
                 self.async_queue_capacity
@@ -570,36 +618,97 @@ mod tests {
     }
 
     #[test]
-    fn test_static_cache_parse_off() {
-        let enabled = Some("off")
-            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
-            .unwrap_or(true);
-        assert!(!enabled);
+    fn test_parse_bool_truthy_accepts_on_true_one() {
+        assert!(parse_bool_truthy("on"));
+        assert!(parse_bool_truthy("true"));
+        assert!(parse_bool_truthy("1"));
     }
 
     #[test]
-    fn test_static_cache_parse_off_uppercase() {
-        let enabled = Some("OFF")
-            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
-            .unwrap_or(true);
-        assert!(!enabled);
+    fn test_parse_bool_truthy_case_insensitive() {
+        assert!(parse_bool_truthy("ON"));
+        assert!(parse_bool_truthy("On"));
+        assert!(parse_bool_truthy("TRUE"));
+        assert!(parse_bool_truthy("True"));
     }
 
     #[test]
-    fn test_static_cache_parse_default() {
-        let enabled: Option<&str> = None;
-        let result = enabled
-            .map(|v| !v.eq_ignore_ascii_case("off"))
-            .unwrap_or(true);
-        assert!(result);
+    fn test_parse_bool_truthy_trims_whitespace() {
+        assert!(parse_bool_truthy("  on  "));
+        assert!(parse_bool_truthy("\ttrue\n"));
     }
 
     #[test]
-    fn test_static_cache_parse_on() {
-        let enabled = Some("on")
-            .map(|v: &str| !v.eq_ignore_ascii_case("off"))
-            .unwrap_or(true);
-        assert!(enabled);
+    fn test_parse_bool_truthy_falsey_values() {
+        assert!(!parse_bool_truthy("off"));
+        assert!(!parse_bool_truthy("false"));
+        assert!(!parse_bool_truthy("0"));
+        assert!(!parse_bool_truthy(""));
+        assert!(!parse_bool_truthy("garbage"));
+        assert!(!parse_bool_truthy("yes"));
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_uses_new_when_set() {
+        assert_eq!(resolve_static_max_age(Some("1h"), None), Some(3600));
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_falls_back_to_legacy() {
+        assert_eq!(resolve_static_max_age(None, Some("1d")), Some(86_400));
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_new_wins_over_legacy() {
+        assert_eq!(resolve_static_max_age(Some("1h"), Some("2h")), Some(3600));
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_default_is_30d() {
+        assert_eq!(resolve_static_max_age(None, None), Some(2_592_000));
+    }
+
+    #[test]
+    fn test_resolve_static_max_age_off_disables_header() {
+        assert_eq!(resolve_static_max_age(Some("off"), None), None);
+        assert_eq!(resolve_static_max_age(None, Some("off")), None);
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_new_on() {
+        assert!(resolve_static_revalidate(Some("on"), None));
+        assert!(resolve_static_revalidate(Some("true"), None));
+        assert!(resolve_static_revalidate(Some("1"), None));
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_new_off() {
+        assert!(!resolve_static_revalidate(Some("off"), None));
+        assert!(!resolve_static_revalidate(Some(""), None));
+        assert!(!resolve_static_revalidate(Some("garbage"), None));
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_legacy_off_means_revalidate() {
+        assert!(resolve_static_revalidate(None, Some("off")));
+        assert!(resolve_static_revalidate(None, Some("OFF")));
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_legacy_other_values_no_revalidate() {
+        assert!(!resolve_static_revalidate(None, Some("on")));
+        assert!(!resolve_static_revalidate(None, Some("")));
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_new_wins_over_legacy() {
+        assert!(!resolve_static_revalidate(Some("off"), Some("off")));
+        assert!(resolve_static_revalidate(Some("on"), Some("anything")));
+    }
+
+    #[test]
+    fn test_resolve_static_revalidate_default_is_false() {
+        assert!(!resolve_static_revalidate(None, None));
     }
 }
 

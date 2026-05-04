@@ -21,8 +21,8 @@ OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `STATIC_CACHE_TTL` | `30d` | 静态文件的 Cache-Control max-age。接受 `30s`、`5m`、`2h`、`30d`、`1w`、`1y`，纯秒数（如 `3600`），或 `off`（完全禁用缓存头） |
-| `STATIC_CACHE` | *(开启)* | 设为 `off` 启用内存内容缓存的 mtime 重新验证 |
+| `STATIC_MAX_AGE` | `30d` | 静态文件的 `Cache-Control: max-age`。接受 `30s`、`5m`、`2h`、`30d`、`1w`、`1y`，纯秒数（如 `3600`），或 `off`（完全禁用缓存头）。替代已弃用的 `STATIC_CACHE_TTL`。 |
+| `STATIC_REVALIDATE` | `off` | 设为 `on` 启用内存内容缓存的 mtime 重新验证。替代已弃用的 `STATIC_CACHE`（其中 `off` 含义相反）。 |
 
 ## MIME 检测
 
@@ -49,21 +49,21 @@ OxPHP 使用内存缓存来减少频繁请求文件的磁盘 I/O：
 
 ### 内容重新验证
 
-设置 `STATIC_CACHE=off` 可启用基于 mtime 的重新验证。在此模式下，每次缓存命中都会执行一次 `stat()` 系统调用（约 1–2 μs）来检查文件的修改时间。如果磁盘上的文件已更改，过期条目将被自动清除并重新读取文件。这非常适合开发环境——无需重启服务器即可立即看到文件更改。
+设置 `STATIC_REVALIDATE=on` 可启用基于 mtime 的重新验证。在此模式下，每次缓存命中都会执行一次 `stat()` 系统调用来检查文件的修改时间。如果磁盘上的文件已更改，过期条目将被自动清除并重新读取文件。**仅在开发环境中启用此选项** —— 无需重启服务器即可立即看到文件更改。生产环境请保持关闭。
 
-在生产环境中，保持 `STATIC_CACHE` 为默认值（不设置），以获得零额外系统调用开销的最大吞吐量。
+在生产环境中，保持 `STATIC_REVALIDATE` 为默认值（不设置，即 `off`），以获得零额外系统调用开销的最大吞吐量。
 
 ## HTTP 缓存
 
 ### Cache-Control
 
-当设置了 `STATIC_CACHE_TTL` 时（默认为 `30d`），每个静态文件响应都包含 `Cache-Control` 头：
+当设置了 `STATIC_MAX_AGE` 时（默认为 `30d`），每个静态文件响应都包含 `Cache-Control` 头：
 
 ```http
 Cache-Control: public, max-age=2592000
 ```
 
-`max-age` 值是 TTL 转换为秒数后的结果。设置 `STATIC_CACHE_TTL=off` 可完全省略此头。
+`max-age` 值是 TTL 转换为秒数后的结果。设置 `STATIC_MAX_AGE=off` 可完全省略此头。
 
 ### ETag 和 Last-Modified
 
@@ -89,20 +89,20 @@ OxPHP 评估条件请求头，以避免发送未更改的文件内容：
 
 | 变量 | 控制对象 | `off` 的效果 |
 |------|---------|-------------|
-| `STATIC_CACHE_TTL=off` | **浏览器缓存**（HTTP 头） | 不发送 `Cache-Control`、`ETag`、`Last-Modified` 头 |
-| `STATIC_CACHE=off` | **服务器内存缓存** | 每次命中时验证文件 mtime；自动清除过期条目 |
+| `STATIC_MAX_AGE=off` | **浏览器缓存**（HTTP 头） | 不发送 `Cache-Control`、`ETag`、`Last-Modified` 头 |
+| `STATIC_REVALIDATE=on` | **服务器内存缓存** | 每次命中时验证文件 mtime；自动清除过期条目 |
 
-在开发环境中，设置 `STATIC_CACHE=off` 让服务器始终提供最新内容。可选地同时设置 `STATIC_CACHE_TTL=off` 以完全阻止浏览器缓存。
+在开发环境中，设置 `STATIC_REVALIDATE=on` 让服务器始终提供最新内容。可选地同时设置 `STATIC_MAX_AGE=off` 以完全阻止浏览器缓存。
 
 ## 故障排除
 
 ### 服务器提供过期文件
 
-默认情况下，内存内容缓存不会检查磁盘上的文件是否已更改。设置 `STATIC_CACHE=off` 启用 mtime 重新验证——服务器将以极低开销（每请求约 1–2 μs）自动检测文件更改。
+默认情况下，内存内容缓存不会检查磁盘上的文件是否已更改。在开发环境中设置 `STATIC_REVALIDATE=on` 启用 mtime 重新验证——服务器将自动检测文件更改。
 
 ### 浏览器一直提供过期文件
 
-如果服务器返回了最新内容但浏览器仍显示旧版本，问题在于浏览器自身的缓存。设置 `STATIC_CACHE_TTL=off` 停止发送缓存头，或使用浏览器的强制刷新（Shift+F5 或 Cmd+Shift+R）。
+如果服务器返回了最新内容但浏览器仍显示旧版本，问题在于浏览器自身的缓存。设置 `STATIC_MAX_AGE=off` 停止发送缓存头，或使用浏览器的强制刷新（Shift+F5 或 Cmd+Shift+R）。
 
 ### 文件以 `application/octet-stream` 提供
 
@@ -114,7 +114,7 @@ OxPHP 使用文件扩展名来确定 MIME 类型。如果扩展名缺失或无�
 
 ### 预期 200 响应却收到 304
 
-304 表示客户端已拥有当前版本，这是正常行为。如果在开发时需要强制获取新响应，请设置 `STATIC_CACHE_TTL=off` 停止发送 `ETag` 和 `Last-Modified` 头。
+304 表示客户端已拥有当前版本，这是正常行为。如果在开发时需要强制获取新响应，请设置 `STATIC_MAX_AGE=off` 停止发送 `ETag` 和 `Last-Modified` 头。
 
 ## Docker 示例
 
@@ -129,13 +129,13 @@ services:
     environment:
       - DOCUMENT_ROOT=/var/www/html/public
       - ENTRY_FILE=index.php
-      - STATIC_CACHE_TTL=1y
+      - STATIC_MAX_AGE=1y
 ```
 
 ## 最佳实践
 
-- **在生产环境中使用带缓存破坏文件名的长 TTL**（如 `app.a1b2c3.js`）。设置 `STATIC_CACHE_TTL=1y` 以最大化浏览器和 CDN 缓存。
-- **在开发环境中设置 `STATIC_CACHE=off`**，让服务器自动检测文件更改。可选地同时设置 `STATIC_CACHE_TTL=off` 以禁用浏览器缓存。
+- **在生产环境中使用带缓存破坏文件名的长 TTL**（如 `app.a1b2c3.js`）。设置 `STATIC_MAX_AGE=1y` 以最大化浏览器和 CDN 缓存。
+- **在开发环境中设置 `STATIC_REVALIDATE=on`**，让服务器自动检测文件更改。可选地同时设置 `STATIC_MAX_AGE=off` 以禁用浏览器缓存。
 - **在 OxPHP 前面放置 CDN** 以应对高流量站点。`ETag`、`Last-Modified` 和 `Cache-Control` 头与所有主流 CDN 提供商兼容。
 - **让构建工具处理静态资源哈希。** Vite 和 Laravel Mix 等框架会自动生成带哈希的文件名，使长缓存 TTL 变得安全。
 

@@ -381,8 +381,14 @@ async fn async_main(
         tracing::info!("Brotli compression disabled");
     }
 
-    if !config.static_cache_enabled {
-        tracing::info!("Static file content cache: mtime revalidation (STATIC_CACHE=off)");
+    if config.static_revalidate {
+        tracing::info!(
+            "Static file content cache: mtime revalidation enabled (STATIC_REVALIDATE=on)"
+        );
+    }
+
+    if config.static_max_age.is_none() {
+        tracing::info!("Cache-Control header for static files disabled (STATIC_MAX_AGE=off)");
     }
 
     let server = Arc::new(server::Server::new(
@@ -396,9 +402,9 @@ async fn async_main(
         config.entry_file.clone(),
         config.worker_mode_enabled,
         config
-            .static_cache_ttl
-            .map(|ttl| format!("public, max-age={ttl}")),
-        config.static_cache_enabled,
+            .static_max_age
+            .map(|secs| format!("public, max-age={secs}")),
+        config.static_revalidate,
         Arc::clone(&shutdown_flag),
     ));
     let semaphore = Arc::new(Semaphore::new(config.max_connections));

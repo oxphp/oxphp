@@ -68,7 +68,7 @@ impl Server {
         entry_file: Option<PathBuf>,
         worker_mode_enabled: bool,
         static_cache_control: Option<String>,
-        static_cache_enabled: bool,
+        static_revalidate: bool,
         shutdown: Arc<AtomicBool>,
     ) -> Self {
         let mut route_config = RouteConfig::new(config, entry_file.as_deref(), worker_mode_enabled);
@@ -77,7 +77,7 @@ impl Server {
                 route_config.set_worker_route(entry);
             }
         }
-        let file_cache = Arc::new(FileCache::with_revalidation(200, !static_cache_enabled));
+        let file_cache = Arc::new(FileCache::with_revalidation(200, static_revalidate));
 
         // Pre-build the HTTP connection builder once — reused for every connection
         let mut http_builder = Builder::new(hyper_util::rt::TokioExecutor::new());
