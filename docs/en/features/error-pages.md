@@ -86,7 +86,7 @@ OxPHP stops if the `ERROR_PAGES_DIR` directory does not exist or a file cannot b
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.3.0
+  ghcr.io/oxphp/oxphp:0.5.0
 ```
 
 ### A 429 response still shows the default body
@@ -98,7 +98,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.3.0
+    image: ghcr.io/oxphp/oxphp:0.5.0
     ports:
       - "8080:8080"
     volumes:

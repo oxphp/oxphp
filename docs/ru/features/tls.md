@@ -119,7 +119,7 @@ OxPHP прослушивает один порт. Для одновременн�
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.3.0
+    image: ghcr.io/oxphp/oxphp:0.5.0
     ports:
       - "443:443"
     environment:

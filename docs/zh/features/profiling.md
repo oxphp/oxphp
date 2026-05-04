@@ -19,7 +19,7 @@ OxPHP 内置按请求粒度的性能分析器。与 xdebug 或独立扩展不同
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.3.0
+    image: ghcr.io/oxphp/oxphp:0.5.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"

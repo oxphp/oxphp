@@ -4,10 +4,9 @@ services:
       context: .
       args:
         # PHP minor version. Maps to upstream php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}.
-        # Override with: PHP_VERSION=8.5 docker compose build (NB: PHP 8.5 is
-        # currently broken — oxphp's Rust FFI bindings need updating for the
-        # 8.5 ABI; tracked as a follow-up).
-        PHP_VERSION: "8.4"
+        # Both 8.4 and 8.5 are supported; build.rs picks the matching ABI bindings via
+        # `php-config --vernum`. Override with: PHP_VERSION=8.4 docker compose build.
+        PHP_VERSION: "8.5"
         # Alpine base version. Override with: ALPINE_VERSION=3.23 docker compose build
         ALPINE_VERSION: "3.23"
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
