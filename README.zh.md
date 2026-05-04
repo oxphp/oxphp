@@ -336,6 +336,8 @@ flowchart LR
 
 > **已弃用的环境变量**（仍会被解析，启动时输出 `WARN`）：`INDEX_FILE` → 请使用 `ENTRY_FILE`。`WORKER_FILE` → 请使用 `WORKER_MODE_ENABLED=true ENTRY_FILE=...`。旧形式将在后续版本中移除。
 
+> **布尔值**（大小写不敏感，自动去除首尾空白）：真值 = `on` / `true` / `1` / `yes`；假值 = `off` / `false` / `0` / `no`。规范集合之外的非空取值——例如 `ture` 之类的拼写错误——都会在启动时报错并指出变量名。未设置的变量或空赋值（`FOO=`）会回退到默认值，这样 Docker Compose / Kubernetes 中 `FOO=${FOO}` 这样的替换在宿主变量缺失时也能正常工作。
+
 ### OpenTelemetry（`plugin-otel` 特性）
 
 | 变量 | 默认值 | 描述 |

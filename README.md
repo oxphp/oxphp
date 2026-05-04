@@ -337,6 +337,8 @@ All settings are via environment variables — no config files required.
 
 > **Deprecated env vars** (still parsed, with a startup `WARN`): `INDEX_FILE` → use `ENTRY_FILE`. `WORKER_FILE` → use `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. The legacy forms will be removed in a future release.
 
+> **Boolean values** (case-insensitive, trimmed): truthy = `on` / `true` / `1` / `yes`; falsy = `off` / `false` / `0` / `no`. Any non-empty value outside that set — typos like `ture` — fails fast at startup with an error naming the variable. An unset variable or empty assignment (`FOO=`) falls back to the default, so Docker Compose / Kubernetes substitutions like `FOO=${FOO}` work cleanly when the host variable is missing.
+
 ### OpenTelemetry (`plugin-otel` feature)
 
 | Variable | Default | Description |

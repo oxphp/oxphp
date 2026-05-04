@@ -67,7 +67,7 @@ impl Plugin for SharedPlugin {
         // Cross-thread fcc invocation probe (temporary spike).
         pool_spike::register_functions(ctx)?;
 
-        let cfg = config::SharedConfig::from_ctx(ctx);
+        let cfg = config::SharedConfig::from_ctx(ctx)?;
 
         // Initialise the process-global registry with config.
         registry::init_registry(cfg.clone());

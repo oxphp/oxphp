@@ -299,11 +299,19 @@ impl Plugin for ApmPlugin {
     }
 
     fn init(&mut self, ctx: &mut PluginContext) -> Result<(), PluginError> {
-        self.enabled = ctx
+        let enabled_raw = ctx
             .config("ENABLED")
-            .or_else(|| ctx.config("OTEL_APM_ENABLED"))
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .or_else(|| ctx.config("OTEL_APM_ENABLED"));
+        self.enabled =
+            crate::config::parse_bool_opt("OTEL_APM_ENABLED", enabled_raw.as_deref(), false)
+                .map_err(|e| PluginError::Config(e.to_string()))?;
+        let db_capture_raw = ctx.config("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED");
+        let db_capture_params = crate::config::parse_bool_opt(
+            "OTEL_APM_DB_CAPTURE_PARAMS_ENABLED",
+            db_capture_raw.as_deref(),
+            false,
+        )
+        .map_err(|e| PluginError::Config(e.to_string()))?;
 
         if !self.enabled {
             tracing::info!(
@@ -337,10 +345,7 @@ impl Plugin for ApmPlugin {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
 
-        self.config.db_capture_params = ctx
-            .config("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        self.config.db_capture_params = db_capture_params;
 
         // Expose config
         ctx.expose_config("enabled", true);
