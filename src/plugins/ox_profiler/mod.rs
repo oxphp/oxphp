@@ -681,10 +681,7 @@ mod tests {
         // day someone flipped PROFILER_ENABLED=true. With the unified policy
         // the typo must fail at startup regardless of `enabled`.
         let err = with_env(
-            &[
-                ("PROFILER_ENABLED", "false"),
-                ("PROFILER_INTERNAL", "ture"),
-            ],
+            &[("PROFILER_ENABLED", "false"), ("PROFILER_INTERNAL", "ture")],
             || {
                 let mut plugin = ProfilerPlugin::new();
                 try_init_profiler_plugin(&mut plugin)

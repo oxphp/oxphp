@@ -154,6 +154,9 @@ mod tests {
     /// Locks env-mutating tests so they don't race with each other.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    // Mirrors PluginContext::new — keeping the wide arg list keeps the test
+    // scaffolding obvious instead of hiding bookkeeping behind a builder.
+    #[allow(clippy::too_many_arguments)]
     fn build_ctx<'a>(
         dispatcher: &'a mut crate::events::EventDispatcher,
         services: &'a mut std::collections::HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
