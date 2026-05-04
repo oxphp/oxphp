@@ -26,7 +26,7 @@ OxPHP направляет входящие HTTP-запросы в одном и
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Корневой каталог для обслуживания файлов и PHP-скриптов |
-| `ENTRY_FILE` | *(не задано)* | Единый канонический entry-скрипт. Не задано = Traditional. `*.php` = Framework. Не-`.php` = SPA. При `WORKER_MODE_ENABLED=true` = Worker. Резолвится относительно `DOCUMENT_ROOT` |
+| `ENTRY_FILE` | *(не задано)* | Единый канонический entry-скрипт. Не задано = Traditional. `*.php` = Framework. Не-`.php` = SPA. При `WORKER_MODE_ENABLED=true` = Worker. Принимает абсолютный путь или относительный к `DOCUMENT_ROOT` (`..` разрешён); итоговый путь должен существовать |
 | `WORKER_MODE_ENABLED` | `false` | Включает режим постоянных воркеров. Требует, чтобы `ENTRY_FILE` указывал на `.php`-скрипт |
 
 Старые `INDEX_FILE` и `WORKER_FILE` всё ещё парсятся (со startup `WARN`) и маппятся на новую модель. См. [Configuration → Устаревшие](../operations/configuration.md#устаревшие-index_file-и-worker_file).

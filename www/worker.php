@@ -2,11 +2,11 @@
 /**
  * OxPHP Worker Mode Demo
  *
- * This file is loaded via WORKER_FILE env var. The application boots once,
- * then oxphp_worker() loops internally — the handler is called for each HTTP
- * request with fresh $_GET, $_POST, $_SERVER, etc.
+ * This file is loaded as the entry script when WORKER_MODE_ENABLED=true. The
+ * application boots once, then oxphp_worker() loops internally — the handler
+ * is called for each HTTP request with fresh $_GET, $_POST, $_SERVER, etc.
  *
- * Usage: WORKER_FILE=/var/www/html/worker.php
+ * Usage: WORKER_MODE_ENABLED=true ENTRY_FILE=/var/www/html/worker.php
  */
 
 // ── Application bootstrap (runs once per worker thread) ──────────

@@ -166,7 +166,7 @@ oxphp_worker(function () {
             ['name' => '$handler', 'type' => 'callable', 'desc' => 'Callback invoked once per HTTP request. Receives no arguments.'],
         ],
         'return'  => 'bool — <code>true</code> on graceful shutdown, <code>false</code> if worker mode is not enabled.',
-        'desc'    => 'Enters the persistent worker mode loop. Calls the handler for each HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers) without destroying the PHP heap, so bootstrap state (autoloaders, DB connections) persists. Workers are recycled based on <code>WORKER_MAX_REQUESTS</code> and <code>WORKER_MAX_MEMORY_MIB</code> limits. Only available when <code>WORKER_FILE</code> is set.',
+        'desc'    => 'Enters the persistent worker mode loop. Calls the handler for each HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers) without destroying the PHP heap, so bootstrap state (autoloaders, DB connections) persists. Workers are recycled when they exceed <code>WORKER_MAX_MEMORY_MIB</code>, or on demand via <code>Worker::scheduleExit()</code>. Only available when <code>WORKER_MODE_ENABLED=true</code> with <code>ENTRY_FILE</code> set.',
         'example' => '// worker.php — persistent worker entry point
 require __DIR__ . "/vendor/autoload.php";
 $db = new PDO("mysql:host=localhost;dbname=app", "root", "");

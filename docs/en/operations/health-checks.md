@@ -109,7 +109,7 @@ curl -s http://localhost:9090/config | jq .
 {
   "listen_addr": "0.0.0.0:80",
   "document_root": "/var/www/html/public",
-  "index_file": "index.php",
+  "entry_file": "/var/www/html/public/index.php",
   "log_level": "info",
   "executor_type": "sapi",
   "php_workers": "8",
@@ -127,8 +127,7 @@ curl -s http://localhost:9090/config | jq .
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
-  "worker_mode": false,
-  "worker_file": null,
+  "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
   "static_max_age": 2592000,
   "static_revalidate": false,

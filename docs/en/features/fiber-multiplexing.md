@@ -257,4 +257,4 @@ fiber.stack_size = 512K
 - [Async Promises](async-promises.md) -- background thread pool for offloading blocking I/O
 - [SSE](sse.md) -- real-time streaming combined with fiber-based cooperative sleep
 - [PHP Functions](../php/functions.md) -- `oxphp_sleep()`, `oxphp_usleep()`, and other fiber-aware functions
-- [Configuration Reference](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `ASYNC_WORKERS`
+- [Configuration Reference](../operations/configuration.md) -- `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `ASYNC_WORKERS`

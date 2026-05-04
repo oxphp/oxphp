@@ -992,4 +992,4 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`
 - [Superglobals](superglobals.md) -- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
 - [Distributed Tracing & APM](../features/distributed-tracing.md) -- W3C Trace Context, OTel export, and the `oxphp_apm_*()` SDK
-- [Configuration Reference](../operations/configuration.md) -- `WORKER_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars
+- [Configuration Reference](../operations/configuration.md) -- `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars
