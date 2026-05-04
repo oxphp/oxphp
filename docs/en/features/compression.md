@@ -111,7 +111,7 @@ If your build pipeline generates `.br` files and sets the `Content-Encoding: br`
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.3.0
+    image: ghcr.io/oxphp/oxphp:0.5.0
     ports:
       - "8080:80"
     volumes:

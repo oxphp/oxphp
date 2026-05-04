@@ -10,7 +10,7 @@ description: Запустите OxPHP менее чем за 5 минут. Со�
 Если у вас уже есть PHP-проект с директорией `public/`:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.3.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.5.0
 ```
 
 Откройте `http://localhost/` — ваше приложение работает.
@@ -18,7 +18,7 @@ docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.3.0
 Для включения внутреннего сервера (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.3.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.5.0
 ```
 
 ---
@@ -36,7 +36,7 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Создайте Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.3.0
+FROM ghcr.io/oxphp/oxphp:0.5.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```

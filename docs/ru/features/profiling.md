@@ -22,7 +22,7 @@ PHP и не прибавляет значимых накладных расхо�
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.3.0
+    image: ghcr.io/oxphp/oxphp:0.5.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
