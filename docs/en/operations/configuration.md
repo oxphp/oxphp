@@ -109,8 +109,8 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STATIC_CACHE_TTL` | `30d` | Cache TTL for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable |
-| `STATIC_CACHE` | *(on)* | Set to `off` to enable mtime revalidation on the in-memory content cache. When off, each cache hit checks the file's modification time and evicts stale entries automatically |
+| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
+| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache. When on, each cache hit checks the file's modification time and evicts stale entries automatically. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
 
 ## Logging
@@ -197,7 +197,7 @@ HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_LEVEL=4
-STATIC_CACHE_TTL=30d
+STATIC_MAX_AGE=30d
 ```
 
 ### Production (Worker Mode)
@@ -257,8 +257,8 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
-  "static_cache_ttl": 2592000,
-  "static_cache_enabled": true,
+  "static_max_age": 2592000,
+  "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,

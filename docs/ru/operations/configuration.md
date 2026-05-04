@@ -109,8 +109,8 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
-| `STATIC_CACHE_TTL` | `30d` | TTL кэша для статических файлов. Допустимые форматы: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, число секунд (`3600`) или `off` для отключения |
-| `STATIC_CACHE` | *(вкл.)* | `off` — включает проверку mtime для кэша контента в памяти. При каждом обращении к кэшу проверяется время модификации файла, устаревшие записи удаляются автоматически |
+| `STATIC_MAX_AGE` | `30d` | Значение `Cache-Control: max-age` для статических файлов. Допустимые форматы: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, число секунд (`3600`) или `off` для отключения заголовка. Заменяет устаревшую `STATIC_CACHE_TTL`. |
+| `STATIC_REVALIDATE` | `off` | `on` — включает проверку mtime для кэша контента в памяти. При каждом обращении к кэшу проверяется время модификации файла, устаревшие записи удаляются автоматически. Заменяет устаревшую `STATIC_CACHE` (где значение `off` имело обратный смысл). |
 | `COMPRESSION_LEVEL` | `4` | Качество Brotli-сжатия (0–11). `0` отключает сжатие |
 
 ## Логирование
@@ -196,7 +196,7 @@ HEADER_TIMEOUT_SECONDS=5
 REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_LEVEL=4
-STATIC_CACHE_TTL=30d
+STATIC_MAX_AGE=30d
 TRUSTED_PROXIES=private
 ```
 
@@ -257,8 +257,8 @@ curl -s http://localhost:9090/config | jq .
   "max_query_body": 524288,
   "worker_mode_enabled": false,
   "worker_max_memory_mib": 0,
-  "static_cache_ttl": 2592000,
-  "static_cache_enabled": true,
+  "static_max_age": 2592000,
+  "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
   "trace_context": true,

@@ -59,7 +59,7 @@ async fn start_server_with_options(
         entry_path,                                          // entry_file
         false,                                               // worker_mode_enabled
         Some("public, max-age=86400".to_string()),           // static_cache_control
-        true,                                                // static_cache_enabled
+        false,                                               // static_revalidate
         Arc::new(std::sync::atomic::AtomicBool::new(false)), // shutdown flag
     ));
 
