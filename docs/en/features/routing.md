@@ -26,7 +26,7 @@ The classification step is the key efficiency: the disk check for static assets 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional. `*.php` = Framework. Non-`.php` = SPA. With `WORKER_MODE_ENABLED=true` = Worker. Resolved against `DOCUMENT_ROOT` |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional. `*.php` = Framework. Non-`.php` = SPA. With `WORKER_MODE_ENABLED=true` = Worker. Accepts an absolute path or one relative to `DOCUMENT_ROOT` (`..` allowed); the resolved path must exist |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
 
 The legacy `INDEX_FILE` and `WORKER_FILE` variables are still parsed (with a startup `WARN`) and map onto the new model. See [Configuration → Deprecated](../operations/configuration.md#deprecated-index_file-and-worker_file).

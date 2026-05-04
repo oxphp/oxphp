@@ -2,7 +2,7 @@
 /**
  * OxPHP Demo Application — Front Controller
  *
- * Routing mode: Framework (INDEX_FILE=index.php)
+ * Routing mode: Framework (ENTRY_FILE=index.php)
  * All application code lives in ../app/ — outside DOCUMENT_ROOT.
  */
 

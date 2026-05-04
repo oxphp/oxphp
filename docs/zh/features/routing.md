@@ -26,7 +26,7 @@ OxPHP 使用三种模式之一处理传入的 HTTP 请求，通过单个环境�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 用于提供文件和 PHP 脚本的根目录 |
-| `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional。`*.php` = Framework。非 `.php` = SPA。当 `WORKER_MODE_ENABLED=true` 时 = Worker。相对路径基于 `DOCUMENT_ROOT` 解析 |
+| `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional。`*.php` = Framework。非 `.php` = SPA。当 `WORKER_MODE_ENABLED=true` 时 = Worker。接受绝对路径或基于 `DOCUMENT_ROOT` 的相对路径（允许 `..`）；解析后的路径必须存在 |
 | `WORKER_MODE_ENABLED` | `false` | 启用持久化 Worker 模式。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
 
 旧的 `INDEX_FILE` 与 `WORKER_FILE` 仍会被解析（启动时输出 `WARN`）并映射到新模型。详见 [Configuration → 已弃用](../operations/configuration.md#已弃用index_file-与-worker_file)。
