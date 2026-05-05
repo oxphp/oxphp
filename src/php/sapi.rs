@@ -386,6 +386,9 @@ pub fn send_streaming_headers() -> bool {
 }
 
 /// Drain the output buffer and send it as a chunk via STREAM_TX.
+/// If `blocking_send` errors (receiver dropped → client disconnected),
+/// mark cancellation + `PG(connection_status) |= PHP_CONNECTION_ABORTED`
+/// so the next deadline check bails out and `connection_aborted()` returns true.
 fn flush_stream_chunk() {
     STREAM_TX.with(|slot| {
         if let Some(tx) = slot.borrow().as_ref() {
@@ -397,8 +400,17 @@ fn flush_stream_chunk() {
                 Some(Bytes::from(std::mem::take(&mut resp.output)))
             });
             if let Some(chunk) = data {
-                // blocking_send: blocks if channel full (backpressure)
-                let _ = tx.blocking_send(chunk);
+                // blocking_send: blocks if channel full (backpressure).
+                // Err means the receiver was dropped — client gone.
+                if tx.blocking_send(chunk).is_err() {
+                    unsafe {
+                        if !bindings::oxphp_bridge_is_cancelled() {
+                            tracing::warn!("Stream client disconnected during flush");
+                            bindings::oxphp_bridge_set_cancelled(true);
+                            bindings::oxphp_bridge_mark_connection_aborted();
+                        }
+                    }
+                }
             }
         }
     });
@@ -1024,20 +1036,27 @@ unsafe extern "C" fn oxphp_deactivate() -> c_int {
 // ─── Output Capture ─────────────────────────────────────────
 
 /// Check if the Tokio receiver was dropped (client disconnected / timeout fired).
-/// Sets the bridge cancellation flag so the C-level deadline check triggers bailout.
-/// Only logs once per request — subsequent calls are silent.
+/// Sets the bridge cancellation flag so the C-level deadline check triggers bailout,
+/// and marks `PG(connection_status) |= PHP_CONNECTION_ABORTED` so portable PHP
+/// code using `connection_aborted()` can break out of streaming loops cleanly
+/// before the next flush bailout. Only logs once per request.
+///
+/// Probes both channels:
+/// - `EARLY_TX`: present until `send_streaming_headers()` consumes it (covers
+///   pre-stream and non-streaming requests).
+/// - `STREAM_TX`: present after streaming starts (covers SSE / chunked output).
 unsafe fn check_client_disconnected() {
     if bindings::oxphp_bridge_is_cancelled() {
         return; // already flagged, don't log again
     }
-    EARLY_TX.with(|slot| {
-        if let Some((_, tx)) = slot.borrow().as_ref() {
-            if tx.is_closed() {
-                tracing::warn!("Client disconnected, requesting PHP cancellation");
-                bindings::oxphp_bridge_set_cancelled(true);
-            }
-        }
-    });
+    let disconnected = EARLY_TX
+        .with(|slot| slot.borrow().as_ref().is_some_and(|(_, tx)| tx.is_closed()))
+        || STREAM_TX.with(|slot| slot.borrow().as_ref().is_some_and(|tx| tx.is_closed()));
+    if disconnected {
+        tracing::warn!("Client disconnected, requesting PHP cancellation");
+        bindings::oxphp_bridge_set_cancelled(true);
+        bindings::oxphp_bridge_mark_connection_aborted();
+    }
 }
 
 unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> usize {

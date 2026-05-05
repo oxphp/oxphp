@@ -13,7 +13,7 @@ OxPHP streams real-time data to clients using the Server-Sent Events protocol wi
 2. The first call to `oxphp_stream_flush()` sends the HTTP headers to the client and enters streaming mode. The client connection remains open.
 3. Each subsequent call to `oxphp_stream_flush()` flushes buffered output as a new chunk, delivering it to the client immediately.
 4. OxPHP maintains an internal buffer of up to 64 chunks between the PHP worker and the client. When the buffer is full — because a slow client has not consumed earlier chunks — `oxphp_stream_flush()` blocks until space becomes available. This prevents unbounded memory growth.
-5. When the PHP script finishes, OxPHP closes the connection gracefully. If the client disconnects mid-stream, subsequent flush calls complete without error but the chunks are discarded.
+5. When the PHP script finishes, OxPHP closes the connection gracefully. If the client disconnects mid-stream, OxPHP detects the closed channel on the next flush, sets PHP's `connection_aborted()` flag to `true`, and arms a graceful bailout — portable loops that check `connection_aborted()` exit cleanly through their normal termination path, while loops that don't check it are still terminated by an implicit bailout on the following flush.
 
 > **Note:** Keep event payloads small to maintain smooth throughput. Large payloads can fill the 64-chunk buffer quickly, causing PHP to block on each flush.
 
@@ -58,6 +58,30 @@ if (!oxphp_is_streaming()) {
 echo "data: {\"status\": \"connected\"}\n\n";
 oxphp_stream_flush();
 ```
+
+### Detecting client disconnects
+
+Long-lived SSE loops should check `connection_aborted()` to break out cleanly when the client closes the connection. This matches the standard PHP / php-fpm idiom and lets the script run any cleanup logic (closing database handles, releasing locks, finishing `finally` blocks) before exiting:
+
+```php
+<?php
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache');
+
+$db = new PDO(/* ... */);
+
+try {
+    while (!connection_aborted()) {
+        echo "data: " . json_encode(['ts' => time()]) . "\n\n";
+        oxphp_stream_flush();
+        sleep(1);
+    }
+} finally {
+    $db = null; // runs on normal exit AND on connection_aborted exit
+}
+```
+
+If the script never checks `connection_aborted()`, OxPHP still terminates it via an implicit bailout on the next flush after the client disconnects — but `finally` blocks following code paths that bypass the flush call may not run. Prefer the explicit check for code that holds external resources.
 
 ### Using native flush()
 

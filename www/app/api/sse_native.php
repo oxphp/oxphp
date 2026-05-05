@@ -25,6 +25,12 @@ while (ob_get_level()) {
 }
 
 for ($i = 0; $i < $count; $i++) {
+    // Portable disconnect check: works on php-fpm, OxPHP, and any SAPI
+    // that updates PG(connection_status) when the client closes the socket.
+    if (connection_aborted()) {
+        break;
+    }
+
     $data = json_encode([
         'counter' => $i + 1,
         'total'   => $count,

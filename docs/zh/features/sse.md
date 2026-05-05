@@ -13,7 +13,7 @@ OxPHP 使用服务器推送事件协议向客户端流式传输实时数据，�
 2. 首次调用 `oxphp_stream_flush()` 时，将 HTTP 请求头发送给客户端并进入流式模式，客户端连接保持打开状态。
 3. 后续每次调用 `oxphp_stream_flush()` 都会将缓冲的输出作为新的数据块刷新，立即传递给客户端。
 4. OxPHP 在 PHP Worker 和客户端之间维护最多 64 个数据块的内部缓冲区。当缓冲区已满（因为慢速客户端尚未消费早期数据块）时，`oxphp_stream_flush()` 会阻塞，直到有空间为止。这可防止内存无限增长。
-5. PHP 脚本执行完毕后，OxPHP 优雅地关闭连接。如果客户端在流传输过程中断开，后续的 flush 调用会正常完成，但数据块会被丢弃。
+5. PHP 脚本执行完毕后，OxPHP 优雅地关闭连接。如果客户端在流传输过程中断开，OxPHP 会在下一次 flush 时检测到通道已关闭，将 PHP 的 `connection_aborted()` 标志设为 `true`，并触发优雅的 bailout——检查 `connection_aborted()` 的可移植循环会通过常规终止路径干净退出；不检查的循环则会在下一次 flush 时被隐式 bailout 终止。
 
 > **注意：** 保持事件载荷小巧以维持流畅的吞吐量。大载荷会迅速填满 64 个数据块的缓冲区，导致 PHP 在每次 flush 时阻塞。
 
@@ -58,6 +58,30 @@ if (!oxphp_is_streaming()) {
 echo "data: {\"status\": \"connected\"}\n\n";
 oxphp_stream_flush();
 ```
+
+### 检测客户端断开
+
+长连接的 SSE 循环应检查 `connection_aborted()`，以便在客户端关闭连接时干净退出。这与标准 PHP / php-fpm 的惯用法一致，让脚本能够在退出前执行清理逻辑（关闭数据库连接、释放锁、执行 `finally` 块）：
+
+```php
+<?php
+header('Content-Type: text/event-stream');
+header('Cache-Control: no-cache');
+
+$db = new PDO(/* ... */);
+
+try {
+    while (!connection_aborted()) {
+        echo "data: " . json_encode(['ts' => time()]) . "\n\n";
+        oxphp_stream_flush();
+        sleep(1);
+    }
+} finally {
+    $db = null; // 正常退出和 connection_aborted 退出时都会执行
+}
+```
+
+如果脚本从不检查 `connection_aborted()`，OxPHP 仍会在客户端断开后通过下一次 flush 上的隐式 bailout 终止它——但绕过 flush 调用的代码路径上的 `finally` 块可能不会运行。对于持有外部资源的代码，请优先使用显式检查。
 
 ### 使用原生 flush()
 

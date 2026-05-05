@@ -1830,6 +1830,10 @@ bool oxphp_bridge_is_cancelled(void) {
     return ctx.cancelled;
 }
 
+void oxphp_bridge_mark_connection_aborted(void) {
+    PG(connection_status) |= PHP_CONNECTION_ABORTED;
+}
+
 void oxphp_bridge_schedule_exit(void) {
     ctx.exit_scheduled = true;
     ctx.exit_reason = 1;  /* 'scheduled' */

@@ -193,6 +193,7 @@ extern "C" {
     pub fn oxphp_bridge_is_deadline_expired() -> bool;
     pub fn oxphp_bridge_set_cancelled(cancelled: bool);
     pub fn oxphp_bridge_is_cancelled() -> bool;
+    pub fn oxphp_bridge_mark_connection_aborted();
 
     // ─── Profiler observer ──────────────
     // Defined in ext/bridge/oxphp_bridge.c. Safe Rust wrappers
