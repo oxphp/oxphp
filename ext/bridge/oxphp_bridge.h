@@ -985,6 +985,12 @@ void oxphp_bridge_set_cancelled(bool cancelled);
 /** Check if cancellation was requested. */
 bool oxphp_bridge_is_cancelled(void);
 
+/** Mark PG(connection_status) with PHP_CONNECTION_ABORTED so that PHP's
+ *  connection_aborted() returns true. Called from Rust when the client
+ *  closes the connection mid-request (early-response oneshot or streaming
+ *  channel dropped). */
+void oxphp_bridge_mark_connection_aborted(void);
+
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
 
