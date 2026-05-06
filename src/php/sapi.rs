@@ -2164,6 +2164,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             reset_profiler_bridge_if_dirty();
             record_worker_request_metrics();
             clear_buffers();
+            bindings::oxphp_bridge_set_request_time(0.0);
             return 0;
         }
     }
@@ -2174,6 +2175,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         reset_profiler_bridge_if_dirty();
         record_worker_request_metrics();
         clear_buffers();
+        bindings::oxphp_bridge_set_request_time(0.0);
         return 0;
     }
 
@@ -2242,6 +2244,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Clean up for next request
     clear_buffers();
+
+    bindings::oxphp_bridge_set_request_time(0.0);
 
     0
 }
