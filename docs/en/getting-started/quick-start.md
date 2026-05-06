@@ -41,7 +41,7 @@ FROM ghcr.io/oxphp/oxphp:0.5.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.4 by default; opt into 8.5 by pulling `:0.3.0-php8.5` or any `*-php8.5*` tag), the OxPHP PHP extension, and all runtime dependencies.
+The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.5.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
 > **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`Dockerfile.best.example`](../../../Dockerfile.best.example) in the repository root — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
@@ -107,7 +107,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: oxphp</p>
-<p>Version: 0.3.0</p>
+<p>Version: 0.5.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
