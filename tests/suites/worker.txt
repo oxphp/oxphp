@@ -2,6 +2,7 @@
 # description: Worker mode (persistent PHP)
 
 worker/test_worker_mode_active
+worker/test_boot_request_time_zero
 worker/test_state_persists
 worker/test_superglobals_reset
 worker/test_output_buffer_reset
