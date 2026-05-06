@@ -5,7 +5,7 @@ description: 通过 Docker 镜像安装 OxPHP 或从源码构建，涵盖前置�
 
 # 安装
 
-OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 或 8.5 ZTS、OxPHP 扩展以及所有运行时依赖。默认的 `:0.3.0` 和 `:latest` 标签随附 PHP 8.4；如需 PHP 8.5，请使用 `:0.3.0-php8.5`、`:php8.5` 或任意 `*-php8.5*` 标签变体。
+OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 或 8.5 ZTS、OxPHP 扩展以及所有运行时依赖。默认的 `:0.5.0` 和 `:latest` 标签随附 PHP 8.5；如需 PHP 8.4，请使用 `:0.5.0-php8.4`、`:php8.4` 或任意 `*-php8.4*` 标签变体。
 
 ## Docker（推荐）
 

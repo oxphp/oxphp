@@ -518,7 +518,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.3.0",
+  "oxphp_version": "0.5.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```

@@ -41,7 +41,7 @@ FROM ghcr.io/oxphp/oxphp:0.5.0
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-官方镜像包含服务器二进制文件、PHP 8.4 或 8.5 ZTS（默认 8.4；如需 8.5，请拉取 `:0.3.0-php8.5` 或任意 `*-php8.5*` 标签）、OxPHP PHP 扩展及所有运行时依赖。
+官方镜像包含服务器二进制文件、PHP 8.4 或 8.5 ZTS（默认 8.5；如需 8.4，请拉取 `:0.5.0-php8.4` 或任意 `*-php8.4*` 标签）、OxPHP PHP 扩展及所有运行时依赖。
 
 > **提示：** 如果你的应用需要自定义 PHP 扩展（pdo_pgsql、intl、xdebug 等），请参阅仓库根目录下的 [`Dockerfile.best.example`](../../../Dockerfile.best.example) —— 一个开箱即用的多阶段 Dockerfile，包含独立的 `dev` 和 `prod` 构建目标。
 
@@ -107,7 +107,7 @@ curl http://localhost/
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: oxphp</p>
-<p>Version: 0.3.0</p>
+<p>Version: 0.5.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
