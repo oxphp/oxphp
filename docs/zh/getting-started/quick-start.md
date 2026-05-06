@@ -43,7 +43,7 @@ COPY --chown=www-data:www-data . /var/www/html
 
 官方镜像包含服务器二进制文件、PHP 8.4 或 8.5 ZTS（默认 8.5；如需 8.4，请拉取 `:0.5.0-php8.4` 或任意 `*-php8.4*` 标签）、OxPHP PHP 扩展及所有运行时依赖。
 
-> **提示：** 如果你的应用需要自定义 PHP 扩展（pdo_pgsql、intl、xdebug 等），请参阅仓库根目录下的 [`Dockerfile.best.example`](../../../Dockerfile.best.example) —— 一个开箱即用的多阶段 Dockerfile，包含独立的 `dev` 和 `prod` 构建目标。
+> **提示：** 如果你的应用需要自定义 PHP 扩展（pdo_pgsql、intl、xdebug 等），请参阅仓库中的 [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) —— 一个开箱即用的多阶段 Dockerfile，包含独立的 `dev` 和 `prod` 构建目标。
 
 ### 3. 添加 compose.yaml
 

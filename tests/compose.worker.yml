@@ -9,7 +9,7 @@ services:
   oxphp-worker:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/dev/Dockerfile
     ports:
       - "80"
     networks: [test-net]

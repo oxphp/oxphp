@@ -44,7 +44,7 @@ services:
   oxphp-xhgui:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/dev/Dockerfile
       args:
         CARGO_FEATURES: "plugin-apm,plugin-async,plugin-profiler"
     ports:

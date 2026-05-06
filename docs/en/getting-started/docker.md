@@ -23,7 +23,7 @@ This copies your application into the container. The default `DOCUMENT_ROOT` is 
 
 For real-world applications, use a multi-stage Dockerfile with separate `dev` and `prod` targets. The `dev` target includes PHP CLI, Composer, and Xdebug. The `prod` target builds on the minimal OxPHP image with only what's needed in production.
 
-> **Tip:** A ready-to-use version of this Dockerfile is available at [`Dockerfile.best.example`](../../../Dockerfile.best.example) in the repository root. Copy it into your project and adjust the extensions to match your needs.
+> **Tip:** A ready-to-use version of this Dockerfile is available at [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository. Copy it into your project and adjust the extensions to match your needs.
 
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
@@ -185,7 +185,7 @@ The container starts as root. In production, drop privileges at the orchestrator
 
 For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.5.0 AS prod` — simple, portable, and recommended as a starting point.
 
-`Dockerfile.best.example` in the repository root goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
+`examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
 Note: the walkthrough above still shows explicit `USER root` / `USER www-data` toggles for defense-in-depth — with v0.3.0 they are optional since the base image no longer sets `USER`.
 

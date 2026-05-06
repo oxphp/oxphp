@@ -7,7 +7,7 @@ services:
   oxphp-profiler:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/dev/Dockerfile
       args:
         # plugin-profiler is part of Cargo's default feature set, so an
         # empty CARGO_FEATURES would already include it. Listed explicitly

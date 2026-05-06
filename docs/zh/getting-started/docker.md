@@ -23,7 +23,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 
 对于实际生产应用，建议使用带有独立 `dev` 和 `prod` 目标的多阶段 Dockerfile。`dev` 目标包含 PHP CLI、Composer 和 Xdebug，`prod` 目标基于最小化 OxPHP 镜像，仅包含生产所需的内容。
 
-> **提示：** 仓库根目录下的 [`Dockerfile.best.example`](../../../Dockerfile.best.example) 提供了该 Dockerfile 的可直接使用版本。将其复制到你的项目中，按需调整扩展即可。
+> **提示：** 仓库中的 [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) 提供了该 Dockerfile 的可直接使用版本。将其复制到你的项目中，按需调整扩展即可。
 
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
@@ -185,7 +185,7 @@ CMD ["oxphp"]
 
 为获得最小的最终镜像，请在独立的构建阶段编译扩展，仅将编译好的 `.so` 文件复制到运行时阶段。上方的 [多阶段 Dockerfile](#多阶段-dockerfile) 使用 `FROM ghcr.io/oxphp/oxphp:0.5.0 AS prod` —— 简单、可移植，推荐作为起点。
 
-仓库根目录下的 `Dockerfile.best.example` 走得更远：其 `prod` 目标基于纯净 `alpine`，通过显式 `apk` 依赖清单，只把 `oxphp` 二进制、`libphp.so`、编译好的 PHP 扩展以及必要的共享库复制进镜像。基础镜像从 ~188 MB 降到 ~76 MB（约 60%，不含应用代码），代价是需要在 PHP/Alpine 升级时维护 `apk` 清单。同一文件还提供 `prod-cli` 目标 —— 用于 `php artisan migrate`、Composer 以及其他不应留在 serving 路径上的短期维护命令。
+仓库中的 `examples/dockerfile/Dockerfile` 走得更远：其 `prod` 目标基于纯净 `alpine`，通过显式 `apk` 依赖清单，只把 `oxphp` 二进制、`libphp.so`、编译好的 PHP 扩展以及必要的共享库复制进镜像。基础镜像从 ~188 MB 降到 ~76 MB（约 60%，不含应用代码），代价是需要在 PHP/Alpine 升级时维护 `apk` 清单。同一文件还提供 `prod-cli` 目标 —— 用于 `php artisan migrate`、Composer 以及其他不应留在 serving 路径上的短期维护命令。
 
 注意：上方的说明中仍保留显式的 `USER root` / `USER www-data` 切换以实现纵深防御 —— 在 v0.3.0 中这些切换是可选的，因为基础镜像不再设置 `USER`。
 

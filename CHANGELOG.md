@@ -4,6 +4,14 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Repository Dockerfile layout reorganized to separate "how the official image is built" from "how to use the image in your project":
+  - `Dockerfile` → `docker/dev/Dockerfile` (used by `compose.yml`).
+  - `Dockerfile.alpine-release` → `docker/release/alpine/Dockerfile` (used by CI to publish `ghcr.io/oxphp/oxphp`). The `alpine/` subdirectory leaves room for future `docker/release/debian/`, `docker/release/distroless/` variants.
+  - `Dockerfile.best.example` → `examples/dockerfile/Dockerfile` (copy-and-adapt template for downstream users; also adds a sibling `README.md`).
+  No `Dockerfile*` remains in the repo root, so a stray `docker build .` no longer accidentally kicks off the dev build. Update any tooling that referenced the old paths.
+
 ### Fixed
 
 - SSE / streaming: `connection_aborted()` now correctly returns `true` after the client disconnects mid-stream, matching standard PHP / php-fpm semantics. Previously the flag stayed `false` for streaming responses, so portable loops like `while (!connection_aborted()) { echo ...; flush(); }` could only terminate via implicit bailout instead of breaking out cleanly through their `finally` blocks. Mid-stream disconnects are now also detected on the next flush via the streaming channel — previously only the early-response oneshot was probed, which had already been consumed when streaming started, so disconnect detection was effectively disabled for the lifetime of the stream.

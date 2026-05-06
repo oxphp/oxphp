@@ -87,7 +87,7 @@ jobs:
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
           echo "Resolved PHP patch: $PATCH"
 
-      - name: Build image from Dockerfile.alpine-release
+      - name: Build image from docker/release/alpine/Dockerfile
         env:
           PHP_MINOR: ${{ matrix.php }}
           ALPINE_VER: ${{ matrix.alpine }}
@@ -96,7 +96,7 @@ jobs:
         run: |
           docker buildx build \
             --platform "linux/${ARCH}" \
-            --file Dockerfile.alpine-release \
+            --file docker/release/alpine/Dockerfile \
             --build-arg "PHP_VERSION=${PHP_MINOR}" \
             --build-arg "ALPINE_VERSION=${ALPINE_VER}" \
             --build-arg "OXPHP_VERSION=${VERSION}" \
