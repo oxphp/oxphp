@@ -180,8 +180,17 @@ fn worker_mode_thread(
     }
     stats.active.store(false, Ordering::Relaxed);
 
-    // 6. Single php_request_shutdown for the entire worker lifetime
+    // 6. Single php_request_shutdown for the entire worker lifetime.
+    //    RSHUTDOWN handlers (OPcache et al.) may consult
+    //    sapi_get_request_time(); reseat ctx.request_time to a valid
+    //    value first since the worker_send_callback / boot-reset paths
+    //    leave it at 0.0 between requests.
+    let shutdown_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     unsafe {
+        bindings::oxphp_bridge_set_request_time(shutdown_secs);
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
     sapi::clear_request_data();
