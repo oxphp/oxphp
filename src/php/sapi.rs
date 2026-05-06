@@ -2164,6 +2164,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             reset_profiler_bridge_if_dirty();
             record_worker_request_metrics();
             clear_buffers();
+            bindings::oxphp_bridge_set_request_time(0.0);
             return 0;
         }
     }
@@ -2174,6 +2175,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         reset_profiler_bridge_if_dirty();
         record_worker_request_metrics();
         clear_buffers();
+        bindings::oxphp_bridge_set_request_time(0.0);
         return 0;
     }
 
@@ -2242,6 +2244,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Clean up for next request
     clear_buffers();
+
+    bindings::oxphp_bridge_set_request_time(0.0);
 
     0
 }
@@ -3335,13 +3339,11 @@ unsafe extern "C" fn req_port_cb() -> u16 {
 }
 
 unsafe extern "C" fn req_start_time_cb() -> f64 {
-    REQUEST_DATA.with(|rd| {
-        let data = rd.borrow();
-        if !data.active {
-            return 0.0;
-        }
-        unsafe { bindings::oxphp_bridge_get_request_time() }
-    })
+    // ctx.request_time is the single source of truth: 0.0 outside an
+    // active request (enforced by worker_send_callback,
+    // RequestDataGuard::drop and the worker boot reset), now() during
+    // request handling. No REQUEST_DATA borrow needed.
+    bindings::oxphp_bridge_get_request_time()
 }
 
 unsafe extern "C" fn req_is_secure_cb() -> c_int {

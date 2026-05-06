@@ -120,6 +120,15 @@ fn worker_mode_thread(
         return;
     }
 
+    // OPcache RINIT consumed request_time during php_request_startup. The
+    // worker boot phase that follows (until oxphp_worker() enters its
+    // receive loop) does NOT correspond to any HTTP request, so reset the
+    // bridge field to 0.0. Each real request will set it back to now()
+    // via setup_request_tls() in src/php/sapi.rs.
+    unsafe {
+        bindings::oxphp_bridge_set_request_time(0.0);
+    }
+
     // 5. Execute worker file — this enters oxphp_worker() loop.
     //    The loop blocks on recv() inside worker_wait_callback.
     //    Returns when shutdown or limits reached.
@@ -171,8 +180,17 @@ fn worker_mode_thread(
     }
     stats.active.store(false, Ordering::Relaxed);
 
-    // 6. Single php_request_shutdown for the entire worker lifetime
+    // 6. Single php_request_shutdown for the entire worker lifetime.
+    //    RSHUTDOWN handlers (OPcache et al.) may consult
+    //    sapi_get_request_time(); reseat ctx.request_time to a valid
+    //    value first since the worker_send_callback / boot-reset paths
+    //    leave it at 0.0 between requests.
+    let shutdown_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64();
     unsafe {
+        bindings::oxphp_bridge_set_request_time(shutdown_secs);
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
     sapi::clear_request_data();

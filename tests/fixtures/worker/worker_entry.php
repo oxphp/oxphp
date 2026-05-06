@@ -2,7 +2,17 @@
 static $requestCount = 0;
 static $previousHeaders = [];
 
-oxphp_worker(function () use (&$requestCount, &$previousHeaders) {
+// Captured during the worker boot phase (before oxphp_worker enters its
+// receive loop). With the request_time consistency fix these values must
+// both be exactly 0.0 because no request is being processed yet. Passed
+// into the closure so included test files can assert on them directly
+// (PHP `include` runs in the includer's scope).
+$bootInfo = [
+    'request_time'       => oxphp_server_info()['request_time'],
+    'request_start_time' => oxphp_http_request()->startTime(true),
+];
+
+oxphp_worker(function () use (&$requestCount, &$previousHeaders, $bootInfo) {
     $requestCount++;
 
     // If the request targets a test PHP file, include it directly inside

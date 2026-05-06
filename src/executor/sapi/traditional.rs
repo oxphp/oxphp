@@ -239,6 +239,14 @@ struct RequestDataGuard;
 impl Drop for RequestDataGuard {
     fn drop(&mut self) {
         sapi::clear_request_data();
+        // Match worker_send_callback semantics: ctx.request_time is 0.0
+        // between requests. Each new request restores it via
+        // bindings::oxphp_bridge_set_request_time(now) before
+        // php_request_startup. Drop runs after php_request_shutdown so
+        // RSHUTDOWN handlers still see a real timestamp.
+        unsafe {
+            bindings::oxphp_bridge_set_request_time(0.0);
+        }
     }
 }
 
