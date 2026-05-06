@@ -9,7 +9,7 @@ services:
   oxphp-overflow:
     build:
       context: ..
-      dockerfile: Dockerfile
+      dockerfile: docker/dev/Dockerfile
     ports:
       - "80"
     networks: [test-net]

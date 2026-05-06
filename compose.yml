@@ -2,6 +2,7 @@ services:
   oxphp:
     build:
       context: .
+      dockerfile: docker/dev/Dockerfile
       args:
         # PHP minor version. Maps to upstream php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}.
         # Both 8.4 and 8.5 are supported; build.rs picks the matching ABI bindings via

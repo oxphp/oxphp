@@ -172,7 +172,7 @@ jobs:
           fi
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
 
-      - name: Build image from Dockerfile.alpine-release (cache key includes base digest)
+      - name: Build image from docker/release/alpine/Dockerfile (cache key includes base digest)
         if: steps.decide.outputs.skip != 'true'
         env:
           PHP_MINOR: ${{ matrix.php }}
@@ -183,7 +183,7 @@ jobs:
         run: |
           docker buildx build \
             --platform "linux/${ARCH}" \
-            --file Dockerfile.alpine-release \
+            --file docker/release/alpine/Dockerfile \
             --build-arg "PHP_VERSION=${PHP_MINOR}" \
             --build-arg "ALPINE_VERSION=${ALPINE_VER}" \
             --build-arg "OXPHP_VERSION=${OXPHP_VER}" \

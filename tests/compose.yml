@@ -8,7 +8,7 @@ networks:
 x-oxphp-base: &oxphp-base
   build:
     context: ..
-    dockerfile: Dockerfile
+    dockerfile: docker/dev/Dockerfile
   networks: [test-net]
   restart: "no"
   healthcheck:

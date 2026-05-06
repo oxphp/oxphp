@@ -61,7 +61,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.alpine-release
+          file: docker/release/alpine/Dockerfile
           platforms: linux/${{ matrix.arch }}
           load: true
           push: false
@@ -130,8 +130,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # `:nightly` resolves to the current default PHP minor. Bump
-      # alongside the Dockerfile `ARG PHP_VERSION` default when
-      # promoting a new minor.
+      # alongside the `ARG PHP_VERSION` default in
+      # docker/release/alpine/Dockerfile when promoting a new minor.
       - name: Alias nightly -> php8.4-nightly
         run: |
           docker buildx imagetools create \
