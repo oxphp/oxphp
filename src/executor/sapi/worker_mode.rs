@@ -120,6 +120,15 @@ fn worker_mode_thread(
         return;
     }
 
+    // OPcache RINIT consumed request_time during php_request_startup. The
+    // worker boot phase that follows (until oxphp_worker() enters its
+    // receive loop) does NOT correspond to any HTTP request, so reset the
+    // bridge field to 0.0. Each real request will set it back to now()
+    // via setup_request_tls() in src/php/sapi.rs.
+    unsafe {
+        bindings::oxphp_bridge_set_request_time(0.0);
+    }
+
     // 5. Execute worker file — this enters oxphp_worker() loop.
     //    The loop blocks on recv() inside worker_wait_callback.
     //    Returns when shutdown or limits reached.
