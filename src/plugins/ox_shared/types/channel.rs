@@ -3086,7 +3086,7 @@ mod tests {
         let mut out_len: usize = 99;
         let mut state: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(ch.id(), 0, &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_recv_blocking(ch.id(), -1, &mut out_buf, &mut out_len, &mut state)
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 2);
