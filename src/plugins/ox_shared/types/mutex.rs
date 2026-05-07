@@ -485,7 +485,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .magic(MagicMethod::Clone)
         .handler(|_call| {
             Err(PhpError::Exception {
-                class: "OxPHP\\Shared\\Exception".into(),
+                class: "OxPHP\\Shared\\SharedException".into(),
                 message: "Shared instances cannot be cloned. Use cross-thread \
                           transfer via oxphp_async(fn() use (\\$this) {...})."
                     .into(),
@@ -647,7 +647,7 @@ fn mutex_rc_to_phperr(rc: c_int) -> PhpError {
         -7 => "OxPHP\\Shared\\TimeoutException",
         -8 => "OxPHP\\Shared\\DeadlockException",
         -10 => "OxPHP\\Shared\\UninitializedException",
-        _ => "OxPHP\\Shared\\Exception",
+        _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
         class: class.to_string(),

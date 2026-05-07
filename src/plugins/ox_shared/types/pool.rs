@@ -1389,7 +1389,7 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\TimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
-        _ => "OxPHP\\Shared\\Exception",
+        _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
         class: class.to_string(),
@@ -1400,7 +1400,7 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
 
 fn throw_clone_forbidden() -> PhpError {
     PhpError::Exception {
-        class: "OxPHP\\Shared\\Exception".to_string(),
+        class: "OxPHP\\Shared\\SharedException".to_string(),
         message: "Shared instances cannot be cloned. Use cross-thread \
                   transfer via oxphp_async(fn() use ($this) {...}) for \
                   sharing, or explicitly create a new instance for an \
@@ -1438,7 +1438,7 @@ fn handle_get(call: &mut NativeCall) -> Result<(), PhpError> {
     let storage = call.storage::<PoolHandleStorage>()?;
     if storage.slot_zv_ptr.is_null() {
         return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\Exception".to_string(),
+            class: "OxPHP\\Shared\\SharedException".to_string(),
             message: "Shared\\Pool\\Handle::get(): handle already released".to_string(),
             code: 0,
         });
@@ -1608,7 +1608,7 @@ fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
         // we don't leak it, then surface the error.
         let _ = unsafe { oxphp_shared_pool_release(id, slot_heap, owner) };
         return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\Exception".to_string(),
+            class: "OxPHP\\Shared\\SharedException".to_string(),
             message: "Shared\\Pool::acquire: could not allocate Handle wrapper \
                       (class OxPHP\\Shared\\Pool\\Handle not registered?)"
                 .to_string(),
