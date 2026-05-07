@@ -402,7 +402,7 @@ impl ChannelInner {
     /// - `Wait::Try` — drain via `try_send` only; stop on first non-Ok.
     /// - `Wait::Bounded(d)` — amortise the budget across the batch;
     ///   each item gets the remaining time up to the deadline.
-    pub(crate) fn send_many(&self, payloads: Vec<Payload>, wait: Wait) -> u64 {
+    pub fn send_many(&self, payloads: Vec<Payload>, wait: Wait) -> u64 {
         if matches!(wait, Wait::Try) {
             let mut sent = 0u64;
             for p in payloads {
@@ -449,7 +449,7 @@ impl ChannelInner {
     /// * `max > 0, Wait::Bounded(d)` — block up to `d` collecting
     ///   as many as possible, up to `max`. Returns whatever was
     ///   collected by the deadline (possibly empty).
-    pub(crate) fn recv_many(&self, max: usize, wait: Wait) -> Vec<Payload> {
+    pub fn recv_many(&self, max: usize, wait: Wait) -> Vec<Payload> {
         // Small initial capacity to keep the common "drain a few" path
         // from over-allocating, with a sane upper bound for large
         // requested caps.

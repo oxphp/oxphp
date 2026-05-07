@@ -74,7 +74,6 @@ fn bench_pool_uncontested_cycle(c: &mut Criterion) {
             std::ptr::null_mut(),
             1,
             Duration::from_secs(300),
-            Duration::from_secs(5),
         ));
     let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
     {
@@ -89,7 +88,7 @@ fn bench_pool_uncontested_cycle(c: &mut Criterion) {
         b.iter(|| {
             let mut slot: *mut c_void = std::ptr::null_mut();
             let mut owner: u64 = 0;
-            let rc = unsafe { oxphp_shared_pool_acquire(id, 0.0, &mut slot, &mut owner) };
+            let rc = unsafe { oxphp_shared_pool_acquire(id, 0, &mut slot, &mut owner) };
             assert_eq!(rc, 0);
             let rc = unsafe { oxphp_shared_pool_release(id, slot, owner) };
             assert_eq!(rc, 0);
