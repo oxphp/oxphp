@@ -239,7 +239,7 @@ impl ChannelInner {
     /// dropped, not a user-level close flag. A 20ms poll keeps the
     /// test guarantees ("wakes promptly on close") within bounds
     /// without pulling in an extra sync primitive.
-    pub(crate) fn send_blocking(&self, payload: Payload, wait: Wait) -> Result<(), SharedError> {
+    pub fn send_blocking(&self, payload: Payload, wait: Wait) -> Result<(), SharedError> {
         // Fast path: attempt a non-blocking send (which already does
         // bookkeeping + notify on success). NO guard here — a fast-path
         // success never blocked, so the `senders_blocked` gauge must not
@@ -308,7 +308,7 @@ impl ChannelInner {
     /// The `rx` lock is held only across each poll quantum — never
     /// across the full caller-supplied timeout — so concurrent
     /// receivers serialize but make progress.
-    pub(crate) fn recv_blocking(&self, wait: Wait) -> Result<Option<Payload>, SharedError> {
+    pub fn recv_blocking(&self, wait: Wait) -> Result<Option<Payload>, SharedError> {
         // Fast path: try once under a tight lock scope. NO guard here —
         // a fast-path hit (or a closed+empty miss) never blocked, so
         // the `receivers_blocked` gauge must not transiently tick.

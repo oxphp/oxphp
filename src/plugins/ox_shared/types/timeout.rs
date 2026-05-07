@@ -18,7 +18,7 @@ use crate::plugin::PhpError;
 
 /// Decoded timeout instruction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Wait {
+pub enum Wait {
     /// Wait indefinitely (wire: any negative value).
     Forever,
     /// Non-blocking try (wire: 0).
