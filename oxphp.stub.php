@@ -126,6 +126,9 @@ function oxphp_finish_request(): bool {}
  * if (oxphp_is_worker()) {
  *     // persistent connections, shared state, etc.
  * }
+ *
+ * @see \OxPHP\Server\Worker::isWorkerMode() Object-oriented equivalent; both
+ *      return the same value (delegate to the same underlying check).
  */
 function oxphp_is_worker(): bool {}
 
@@ -248,6 +251,12 @@ function oxphp_usleep(int $microseconds): void {}
  *     $app->handle();  // called per request
  * });
  * $app->terminate();  // graceful shutdown
+ *
+ * @see \OxPHP\Server\Worker::serve() Object-oriented equivalent. Both share
+ *      the same dispatch loop and per-thread re-entry guard, but differ at
+ *      the boundary: oxphp_worker() emits E_WARNING and returns false when
+ *      called outside worker mode, whereas Worker::serve() throws
+ *      InvalidServeContextException and returns void.
  */
 function oxphp_worker(callable $handler): bool {}
 
@@ -1832,6 +1841,9 @@ namespace OxPHP\Server {
          *         dispatched through serve().
          * false — traditional per-request lifecycle (php_request_startup /
          *         shutdown around each request).
+         *
+         * @see \oxphp_is_worker() Procedural equivalent; both return the same
+         *      value (delegate to the same underlying check).
          */
         public static function isWorkerMode(): bool {}
 
@@ -1915,6 +1927,12 @@ namespace OxPHP\Server {
          * handed to the script.
          *
          * @throws \OxPHP\Server\Exception\InvalidServeContextException When called outside worker mode
+         *
+         * @see \oxphp_worker() Procedural equivalent. Both share the same
+         *      dispatch loop and per-thread re-entry guard, but differ at the
+         *      boundary: serve() throws InvalidServeContextException outside
+         *      worker mode, whereas oxphp_worker() emits E_WARNING and
+         *      returns false.
          */
         public function serve(callable $handler): void {}
     }
