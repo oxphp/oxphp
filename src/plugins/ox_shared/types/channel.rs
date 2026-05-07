@@ -1628,15 +1628,6 @@ pub fn register_class(
                 //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
                 //   - Cancelled    → Async\Exception               (fiber_rc == -1)
                 //   - Closed       → ClosedException propagated    (fiber_rc == -1)
-                if matches!(parse_timeout(timeout_ms), Wait::Try) {
-                    // try_send already ran above and found the channel full.
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                    return Err(PhpError::Exception {
-                        class: "OxPHP\\Shared\\TimeoutException".into(),
-                        message: "send timed out".into(),
-                        code: 0,
-                    });
-                }
                 let deadline = match parse_timeout(timeout_ms) {
                     Wait::Forever | Wait::Try => None,
                     Wait::Bounded(d) => Some(std::time::Instant::now() + d),
@@ -1664,7 +1655,19 @@ pub fn register_class(
                         return Err(map_channel_rc(rc));
                     }
 
-                    // Channel full → park.
+                    // Channel full → check for non-blocking semantics first.
+                    if matches!(parse_timeout(timeout_ms), Wait::Try) {
+                        // One try_send already ran above and found the channel
+                        // full. Non-blocking: bail with TimeoutException.
+                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                        return Err(PhpError::Exception {
+                            class: "OxPHP\\Shared\\TimeoutException".into(),
+                            message: "send timed out".into(),
+                            code: 0,
+                        });
+                    }
+
+                    // Park until a slot frees.
                     let remaining_ms: u64 = if let Some(d) = deadline {
                         let r = d.saturating_duration_since(std::time::Instant::now());
                         if r.is_zero() {
@@ -1877,13 +1880,63 @@ pub fn register_class(
             let in_fiber = false;
 
             if in_fiber {
-                // Fiber path: register recv-waiter, suspend, handle resolve.
-                if matches!(parse_timeout(timeout_ms), Wait::Try) {
-                    // Non-blocking semantics: channel was empty (no item
-                    // available now) — return null per recv spec.
-                    call.ret_null();
-                    return Ok(());
+                // Fiber path: try_recv once first, then register recv-waiter
+                // and suspend via fiber_await if the channel is empty.
+                // This matches the blocking-path FFI which always attempts
+                // once before returning Timeout, so recv($v, 0.0) on a
+                // non-empty channel succeeds rather than spuriously returning null.
+                let mut out_buf: *mut u8 = std::ptr::null_mut();
+                let mut out_len: usize = 0;
+                let mut state: c_int = 0;
+                let try_rc = unsafe {
+                    oxphp_shared_channel_try_recv(id, &mut out_buf, &mut out_len, &mut state)
+                };
+                super::counter::counter_rc_to_result(try_rc)?;
+                match state {
+                    0 => {
+                        // Got an item — deserialize directly into retval.
+                        let retval = call.retval_ptr();
+                        let des_rc = unsafe {
+                            bridge_ffi::oxphp_portable_deserialize(
+                                out_buf,
+                                out_len,
+                                1,
+                                retval as *mut _,
+                            )
+                        };
+                        if !out_buf.is_null() {
+                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                        }
+                        if des_rc != 0 {
+                            return Err(PhpError::Custom(format!(
+                                "recv: deserialize failed rc={des_rc}"
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    2 => {
+                        // Closed + empty — return null per recv spec.
+                        if !out_buf.is_null() {
+                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                        }
+                        call.ret_null();
+                        return Ok(());
+                    }
+                    _ => {
+                        // state == 1: WouldBlockEmpty. Check for non-blocking
+                        // semantics before parking.
+                        if !out_buf.is_null() {
+                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                        }
+                        if matches!(parse_timeout(timeout_ms), Wait::Try) {
+                            // One try_recv already ran and found the channel
+                            // empty. Non-blocking: return null per recv spec.
+                            call.ret_null();
+                            return Ok(());
+                        }
+                    }
                 }
+
                 let mut promise_id: i64 = 0;
                 // See note on send-side for the cfg gating rationale.
                 // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
@@ -3108,6 +3161,68 @@ mod tests {
         let second = [2u8];
         let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), second.as_ptr(), 1, 0) };
         assert_eq!(rc, SharedError::Timeout.code());
+    }
+
+    // Verify the symmetric success paths: Wait::Try (timeout_ms == 0) on a
+    // non-full channel must succeed, and on a non-empty channel must return
+    // the item. These guard the fix for the fiber-path bug where the bail ran
+    // BEFORE any try_send/try_recv attempt, causing spurious Timeout/null on
+    // channels that had capacity or items available.
+    #[test]
+    fn send_blocking_try_succeeds_when_not_full() {
+        let ch = ChannelInner::new(2);
+        // Channel is empty — Wait::Try must succeed, not timeout.
+        let res = ch.send_blocking(vec![0xAA], Wait::Try);
+        assert!(res.is_ok(), "expected Ok, got {res:?}");
+        assert_eq!(ch.pending(), 1);
+    }
+
+    #[test]
+    fn recv_blocking_try_succeeds_when_not_empty() {
+        let ch = ChannelInner::new(2);
+        ch.try_send(vec![0xBB]).unwrap();
+        // Channel has an item — Wait::Try must return it, not Timeout.
+        let res = ch.recv_blocking(Wait::Try);
+        assert!(
+            matches!(res, Ok(Some(_))),
+            "expected Ok(Some(_)), got {res:?}"
+        );
+        if let Ok(Some(payload)) = res {
+            assert_eq!(payload, vec![0xBB]);
+        }
+    }
+
+    #[test]
+    fn ffi_send_blocking_try_succeeds_when_not_full() {
+        let ch = TestChannel::new(4);
+        let payload = [0xCCu8];
+        // timeout_ms == 0 → Wait::Try; channel has vacancy → must succeed.
+        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), payload.as_ptr(), 1, 0) };
+        assert_eq!(rc, 0, "expected 0 (success), got {rc}");
+    }
+
+    #[test]
+    fn ffi_recv_blocking_try_succeeds_when_not_empty() {
+        let ch = TestChannel::new(4);
+        let payload = [0xDDu8];
+        let mut success: c_int = 0;
+        let _ =
+            unsafe { oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), 1, &mut success) };
+        assert_eq!(success, 1);
+
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut state: c_int = 1;
+        // timeout_ms == 0 → Wait::Try; channel has an item → must return it.
+        let rc = unsafe {
+            oxphp_shared_channel_recv_blocking(ch.id(), 0, &mut out_buf, &mut out_len, &mut state)
+        };
+        assert_eq!(rc, 0, "expected 0, got {rc}");
+        assert_eq!(state, 0, "expected state=0 (item), got {state}");
+        assert_eq!(out_len, 1);
+        let slice = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
+        assert_eq!(slice, &[0xDDu8]);
+        unsafe { free_out(out_buf) };
     }
 
     // ─── batched send_many / recv_many ───────────────────────
