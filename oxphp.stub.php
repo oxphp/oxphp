@@ -933,6 +933,23 @@ namespace OxPHP\Decorator {
 namespace OxPHP\Shared {
 
     /**
+     * # Timeout convention (Shared\*)
+     *
+     * Every wait method in `OxPHP\Shared\` accepts `?float $timeout = null`:
+     *
+     *  * `null`           — wait forever.
+     *  * `0.0`            — try (immediate, do not block).
+     *  * positive         — seconds to wait.
+     *  * `INF`            — forever.
+     *  * `NaN` / negative — `OxPHP\Shared\TypeException`.
+     *
+     * Blocking methods on Mutex, Pool, and `Channel::send` / `sendMany` raise
+     * `OxPHP\Shared\TimeoutException` on deadline expiry. `Channel::recv` and
+     * `recvMany` instead return `null` / a partial array on timeout — recv
+     * is intentionally asymmetric with send.
+     */
+
+    /**
      * Marker interface implemented by every Shared\* type.
      *
      * Values that implement Shareable may be stored inside container
@@ -1078,11 +1095,8 @@ namespace OxPHP\Shared {
      */
     final class Mutex implements Shareable
     {
-        /**
-         * @param mixed      $initial        Starting value.
-         * @param float|null $defaultTimeout Default `with()` timeout in seconds (null = wait forever).
-         */
-        public function __construct(mixed $initial = null, ?float $defaultTimeout = null) {}
+        /** @param mixed $initial Starting value. */
+        public function __construct(mixed $initial = null) {}
 
         /** Whether the mutex is in a poisoned state. */
         public function isPoisoned(): bool {}
@@ -1094,12 +1108,12 @@ namespace OxPHP\Shared {
          * Acquire the lock, invoke `$fn` with the stored value (mutable by
          * reference), and release. Returns `$fn`'s return value.
          *
-         * @param float $timeout Seconds to wait; 0.0 = use the constructor default.
+         * See the namespace-level timeout convention for `$timeout` semantics.
          *
          * @throws TimeoutException  On timeout.
          * @throws PoisonedException If the mutex was poisoned.
          */
-        public function with(callable $fn, float $timeout = 0.0): mixed {}
+        public function with(callable $fn, ?float $timeout = null): mixed {}
 
         /**
          * Non-blocking variant of `with()`. Returns null without invoking
@@ -1134,28 +1148,33 @@ namespace OxPHP\Shared {
         public function trySend(mixed $value): bool {}
 
         /**
-         * Blocking send. Waits up to `$timeout` seconds (0.0 = forever).
+         * Blocking send. See the namespace-level timeout convention for
+         * `$timeout` semantics.
          *
          * @throws TimeoutException On timeout.
          * @throws ClosedException  If the channel was closed.
          */
-        public function send(mixed $value, float $timeout = 0.0): bool {}
+        public function send(mixed $value, ?float $timeout = null): bool {}
 
         /**
-         * Non-blocking receive. Returns null if the channel is empty.
-         * Use `pending()` to distinguish an empty channel from a `null` value.
+         * Non-blocking receive. Returns null if the channel is empty (open),
+         * or throws ClosedException if the channel is closed and drained.
+         * Use `pending()` to distinguish an empty channel from a stored `null` value.
          *
          * @throws ClosedException If the channel was closed and drained.
          */
-        public function tryRecv(float $timeout = 0.0): mixed {}
+        public function tryRecv(): mixed {}
 
         /**
-         * Blocking receive. Waits up to `$timeout` seconds (0.0 = forever).
+         * Blocking receive. See the namespace-level timeout convention for
+         * `$timeout` semantics.
          *
-         * @throws TimeoutException On timeout.
-         * @throws ClosedException  If the channel was closed and drained.
+         * Returns null on timeout (asymmetric with send, which throws
+         * TimeoutException). Does not throw TimeoutException.
+         *
+         * @throws ClosedException If the channel was closed and drained.
          */
-        public function recv(float $timeout = 0.0): mixed {}
+        public function recv(?float $timeout = null): mixed {}
 
         /** Close the channel. Subsequent sends fail; pending recvs drain remaining values then throw. */
         public function close(): bool {}
@@ -1169,16 +1188,24 @@ namespace OxPHP\Shared {
         /**
          * Batched send. Returns the number of values actually accepted
          * before the channel became full / closed or the timeout expired.
+         *
+         * See the namespace-level timeout convention for `$timeout` semantics.
+         *
+         * @throws TimeoutException On timeout.
          */
-        public function sendMany(array $values, float $timeout = 0.0): int {}
+        public function sendMany(array $values, ?float $timeout = null): int {}
 
         /**
          * Batched receive. Drains up to `$max` values, blocking only for
-         * the first one up to `$timeout` seconds.
+         * the first one up to `$timeout` seconds. Returns a partial array
+         * (possibly empty) on timeout — does not throw TimeoutException
+         * (asymmetric with send).
+         *
+         * See the namespace-level timeout convention for `$timeout` semantics.
          *
          * @return array<int, mixed>
          */
-        public function recvMany(int $max, float $timeout = 0.0): array {}
+        public function recvMany(int $max, ?float $timeout = null): array {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1303,28 +1330,26 @@ namespace OxPHP\Shared {
     final class Pool implements Shareable
     {
         /**
-         * @param callable      $factory               Called to create a pooled resource. Receives no arguments.
-         * @param callable|null $destroy               Called with the resource on eviction/shutdown.
-         * @param int           $maxSize               Hard budget of live slots (default 32).
-         * @param float         $idleTimeout           Seconds of inactivity before a slot is evicted (default 300).
-         * @param float|null    $defaultAcquireTimeout Default acquire timeout; null uses 5.0s.
+         * @param callable      $factory     Called to create a pooled resource. Receives no arguments.
+         * @param callable|null $destroy     Called with the resource on eviction/shutdown.
+         * @param int           $maxSize     Hard budget of live slots (default 32).
+         * @param float         $idleTimeout Seconds of inactivity before a slot is evicted (default 300).
          */
         public function __construct(
             callable $factory,
             ?callable $destroy = null,
             int $maxSize = 32,
             float $idleTimeout = 300.0,
-            ?float $defaultAcquireTimeout = 5.0,
         ) {}
 
         /**
          * Acquire a slot. Returns a Handle scoped to the current thread.
          *
-         * @param float $timeout Seconds to wait; 0.0 = use the constructor default.
+         * See the namespace-level timeout convention for `$timeout` semantics.
          *
          * @throws TimeoutException If the pool is saturated.
          */
-        public function acquire(float $timeout = 0.0): Pool\Handle {}
+        public function acquire(?float $timeout = null): Pool\Handle {}
 
         /** Release a handle back to the pool. Idempotent once per handle. */
         public function release(Pool\Handle $handle): void {}
@@ -1334,9 +1359,11 @@ namespace OxPHP\Shared {
          * the pooled value and returns whatever it returns, releasing even
          * on exception.
          *
+         * See the namespace-level timeout convention for `$timeout` semantics.
+         *
          * @throws TimeoutException If the pool is saturated.
          */
-        public function with(callable $body, float $timeout = 0.0): mixed {}
+        public function with(callable $body, ?float $timeout = null): mixed {}
 
         /** Force-evict idle slots now. Returns the number of slots evicted. */
         public function evict(): int {}

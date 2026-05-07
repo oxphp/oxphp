@@ -7,3 +7,4 @@ pub mod map;
 pub mod mutex;
 pub mod once;
 pub mod pool;
+pub mod timeout;

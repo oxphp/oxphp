@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
+
 use parking_lot::Mutex;
 
 use crate::bridge::types::ValType;
@@ -23,15 +25,13 @@ use crate::plugins::ox_shared::value::{portbuf_to_sv, sv_to_portbuf, SharedValue
 pub struct MutexInner {
     pub(crate) state: Mutex<SharedValue>,
     poisoned: AtomicBool,
-    default_timeout: Duration,
 }
 
 impl MutexInner {
-    pub fn new(initial: SharedValue, default_timeout: Duration) -> Self {
+    pub fn new(initial: SharedValue) -> Self {
         Self {
             state: Mutex::new(initial),
             poisoned: AtomicBool::new(false),
-            default_timeout,
         }
     }
 
@@ -45,10 +45,6 @@ impl MutexInner {
 
     pub fn clear_poison(&self) {
         self.poisoned.store(false, Ordering::Release);
-    }
-
-    pub fn default_timeout(&self) -> Duration {
-        self.default_timeout
     }
 
     /// Snapshot the current state — non-blocking; returns Null if contended.
@@ -98,7 +94,6 @@ impl SharedInnerMutexExt for dyn SharedInner {
 pub unsafe extern "C" fn oxphp_shared_mutex_create(
     initial_buf: *const u8,
     initial_len: usize,
-    default_timeout_ms: u64,
     out_id: *mut u64,
 ) -> c_int {
     if out_id.is_null() {
@@ -113,11 +108,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_create(
             portbuf_to_sv(bytes)?
         };
         let reg = registry();
-        let timeout = Duration::from_millis(default_timeout_ms);
-        let id = reg.insert(
-            SharedType::Mutex,
-            Arc::new(MutexInner::new(initial, timeout)),
-        )?;
+        let id = reg.insert(SharedType::Mutex, Arc::new(MutexInner::new(initial)))?;
         unsafe { *out_id = id };
         Ok(())
     })
@@ -161,15 +152,17 @@ use crate::plugins::ox_shared::reentrancy::{push_held, MutexPopGuard};
 /// from portbuf bytes; mutations persist if the closure returns
 /// normally.
 ///
+/// `timeout_ms` follows the wire convention: `-1` = forever, `0` = try,
+/// `>0` = milliseconds. See `timeout::parse_timeout`.
+///
 /// # Safety
 /// `callable` must be a valid PHP zval*. `out_ret_buf`/`out_ret_len`
-/// must be valid for writes. `timeout_ms == 0` means use the mutex's
-/// default timeout.
+/// must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_mutex_with(
     id: u64,
     callable: *mut std::ffi::c_void,
-    timeout_ms: u64,
+    timeout_ms: i64,
     out_ret_buf: *mut *mut u8,
     out_ret_len: *mut usize,
 ) -> c_int {
@@ -209,13 +202,36 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
             return Err(SharedError::Deadlock);
         }
 
-        let timeout = if timeout_ms == 0 {
-            inner.default_timeout()
-        } else {
-            Duration::from_millis(timeout_ms)
+        let acquired = match parse_timeout(timeout_ms) {
+            Wait::Forever => {
+                // Block until acquired, poisoned, or cycle-broken. Poll with a
+                // 100ms quantum so poison + cycle-break signals can progress.
+                // The `waiter` guard is held alive across iterations — its Drop
+                // only fires on early-return error paths or when promoted via
+                // `promote_to_holder` after acquisition.
+                loop {
+                    if let Some(g) = inner.state.try_lock_for(Duration::from_millis(100)) {
+                        break Some(g);
+                    }
+                    if inner.poisoned.load(Ordering::Acquire) {
+                        set_last_error("Mutex::with: poisoned during wait");
+                        drop(waiter);
+                        return Err(SharedError::Poisoned);
+                    }
+                    // Mirror the bounded path's None-branch cycle detection: a
+                    // break signal targeted at this thread must abort the wait.
+                    if crate::plugins::ox_shared::deadlock::consume_break_signal().is_some() {
+                        set_last_error("Mutex::with: wait-for cycle detected during forever wait");
+                        drop(waiter);
+                        return Err(SharedError::Deadlock);
+                    }
+                }
+            }
+            Wait::Try => inner.state.try_lock(),
+            Wait::Bounded(d) => inner.state.try_lock_for(d),
         };
 
-        let (mut guard, _holder_guard) = match inner.state.try_lock_for(timeout) {
+        let (mut guard, _holder_guard) = match acquired {
             Some(g) => {
                 let hg = waiter.promote_to_holder();
                 (g, hg)
@@ -226,7 +242,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                     set_last_error("Mutex::with: wait-for cycle detected during timeout");
                     return Err(SharedError::Deadlock);
                 }
-                set_last_error(format!("mutex acquire timed out after {timeout:?}"));
+                set_last_error(format!("mutex acquire timed out (timeout_ms={timeout_ms})"));
                 return Err(SharedError::Timeout);
             }
         };
@@ -478,7 +494,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         .method("__construct")
         .optional_param("initial", PhpType::Mixed, PhpValue::Null)
-        .optional_param("defaultTimeout", PhpType::Float, PhpValue::Null)
         .handler(|call| {
             // Extract initial as SharedValue via ValType dispatch.
             let initial_sv = match call.arg_type(0).unwrap_or(ValType::Null) {
@@ -492,30 +507,9 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 _ => SharedValue::Null,
             };
 
-            // defaultTimeout: Null → 30s; positive → that value in ms.
-            let default_ms: u64 =
-                if call.argc() > 1 && matches!(call.arg_type(1), Ok(ValType::Double)) {
-                    let f = call.arg_double(1).unwrap_or(0.0);
-                    if f > 0.0 {
-                        (f * 1000.0) as u64
-                    } else if f < 0.0 {
-                        return Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\TypeException".into(),
-                            message: "defaultTimeout must be positive".into(),
-                            code: 0,
-                        });
-                    } else {
-                        30_000
-                    }
-                } else {
-                    30_000
-                };
-
             let bytes = sv_to_portbuf(&initial_sv);
             let mut out_id: u64 = 0;
-            let rc = unsafe {
-                oxphp_shared_mutex_create(bytes.as_ptr(), bytes.len(), default_ms, &mut out_id)
-            };
+            let rc = unsafe { oxphp_shared_mutex_create(bytes.as_ptr(), bytes.len(), &mut out_id) };
             super::counter::counter_rc_to_result(rc)?;
 
             let h = call.storage_mut::<SharedHandle>()?;
@@ -542,27 +536,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         .method("with")
         .param("fn", PhpType::Callable)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
         .handler(|call| {
             use crate::bridge::ffi;
 
             let id = call.storage::<SharedHandle>()?.shared_id;
             let callable_zv = unsafe { call.raw_arg_ptr(0) };
-            let timeout_ms: u64 =
-                if call.argc() > 1 && matches!(call.arg_type(1), Ok(ValType::Double)) {
-                    let f = call.arg_double(1).unwrap_or(0.0);
-                    if f < 0.0 {
-                        return Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\TypeException".into(),
-                            message: "timeout must be non-negative".into(),
-                            code: 0,
-                        });
-                    }
-                    (f * 1000.0) as u64
-                } else {
-                    0
-                };
+            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             let mut ret_buf: *mut u8 = std::ptr::null_mut();
             let mut ret_len: usize = 0;
@@ -715,7 +696,7 @@ mod tests {
 
     #[test]
     fn poison_round_trip() {
-        let m = MutexInner::new(SharedValue::Long(10), Duration::from_secs(30));
+        let m = MutexInner::new(SharedValue::Long(10));
         assert!(!m.is_poisoned());
         m.mark_poisoned();
         assert!(m.is_poisoned());
@@ -725,16 +706,10 @@ mod tests {
 
     #[test]
     fn snapshot_returns_value() {
-        let m = MutexInner::new(SharedValue::Long(42), Duration::from_secs(30));
+        let m = MutexInner::new(SharedValue::Long(42));
         match m.try_snapshot() {
             SharedValue::Long(42) => {}
             other => panic!("wrong snapshot: {other:?}"),
         }
-    }
-
-    #[test]
-    fn default_timeout_stored() {
-        let m = MutexInner::new(SharedValue::Null, Duration::from_secs(5));
-        assert_eq!(m.default_timeout(), Duration::from_secs(5));
     }
 }

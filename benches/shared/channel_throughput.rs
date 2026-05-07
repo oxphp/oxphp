@@ -12,8 +12,8 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use oxphp::plugins::ox_shared::types::channel::ChannelInner;
+use oxphp::plugins::ox_shared::types::timeout::Wait;
 use std::sync::Arc;
-use std::time::Duration;
 
 fn bench_recv_single_vs_batched(c: &mut Criterion) {
     let ch = Arc::new(ChannelInner::new(1_000));
@@ -33,18 +33,16 @@ fn bench_recv_single_vs_batched(c: &mut Criterion) {
         });
     });
 
-    // Single recv_many(10, 0) call. timeout=0 → wait indefinitely; the
-    // buffer is already topped up to 10 so no actual blocking happens.
+    // Single recv_many(10, Forever) call. The buffer is already topped
+    // up to 10 so no actual blocking happens — Wait::Forever just means
+    // "no deadline", and recv_many returns as soon as the 10th item is
+    // received.
     group.bench_function("batched_recv_many", |b| {
         b.iter(|| {
             for i in 0..10u8 {
                 let _ = ch.try_send(vec![i]);
             }
-            // Duration::ZERO == "max==0 drain" path semantics only when
-            // max==0; here max==10 and timeout==0 is "indefinite" per
-            // the API contract. Because the buffer is already full, the
-            // call returns as soon as the 10th item is received.
-            let _ = ch.recv_many(10, Duration::ZERO);
+            let _ = ch.recv_many(10, Wait::Forever);
         });
     });
 

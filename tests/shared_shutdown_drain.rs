@@ -10,6 +10,7 @@ use std::time::Duration;
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::{self, SharedType};
 use oxphp::plugins::ox_shared::types::channel::ChannelInner;
+use oxphp::plugins::ox_shared::types::timeout::Wait;
 
 // Helper: ensure the process-global registry is initialised. Multiple
 // tests in this integration binary share it (OnceLock), so we call
@@ -50,7 +51,7 @@ fn blocked_recv_wakes_on_drain_with_none() {
     let handle = std::thread::spawn(move || {
         // Block for up to 5 seconds; drain should fire within the
         // receiver's POLL_QUANTUM (~20ms).
-        ch_for_thread.recv_blocking(Duration::from_secs(5))
+        ch_for_thread.recv_blocking(Wait::Bounded(Duration::from_secs(5)))
     });
 
     // Let the receiver arm (enter its poll loop).
@@ -95,7 +96,7 @@ fn blocked_send_wakes_on_drain_with_closed() {
     let ch_for_thread = ch_inner.clone();
     let handle = std::thread::spawn(move || {
         // Will block because the channel is full.
-        ch_for_thread.send_blocking(vec![2], Duration::from_secs(5))
+        ch_for_thread.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(5)))
     });
 
     std::thread::sleep(Duration::from_millis(50));

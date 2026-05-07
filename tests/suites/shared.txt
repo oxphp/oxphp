@@ -7,6 +7,7 @@ shared/test_channel_try_send_full
 shared/test_channel_try_recv_empty
 shared/test_channel_send_timeout
 shared/test_channel_recv_timeout
+shared/test_channel_timeout_contract
 shared/test_channel_close_send
 shared/test_channel_close_recv_drain
 shared/test_channel_send_many
@@ -28,7 +29,8 @@ shared/test_pool_destroy
 shared/test_pool_factory_throw
 shared/test_pool_factory_non_object
 shared/test_pool_multiple_instances
-shared/test_pool_default_timeout
 shared/test_pool_idle_eviction
+shared/test_mutex_timeout_contract
+shared/test_pool_timeout_contract
 shared/test_pool_perf
 shared/test_pool_observability
