@@ -37,6 +37,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 
 use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 
 /// Stable per-thread identifier used as the idle-deque key and as the
@@ -105,7 +106,6 @@ unsafe impl Send for PoolSlot {}
 pub struct PoolInner {
     max_size: usize,
     idle_timeout: Duration,
-    default_acquire_timeout: Duration,
 
     /// Per-thread idle deques. Only the owning thread reads/writes
     /// its own deque (strict strategy — no cross-thread steal). A
@@ -191,13 +191,11 @@ impl PoolInner {
         destroy_fcc: *mut c_void,
         max_size: usize,
         idle_timeout: Duration,
-        default_acquire_timeout: Duration,
     ) -> Self {
         debug_assert!(max_size > 0, "PoolInner::new: max_size must be > 0");
         Self {
             max_size,
             idle_timeout,
-            default_acquire_timeout,
             idle: DashMap::new(),
             size: AtomicU64::new(0),
             in_flight: DashMap::new(),
@@ -240,10 +238,6 @@ impl PoolInner {
 
     pub fn idle_timeout(&self) -> Duration {
         self.idle_timeout
-    }
-
-    pub fn default_acquire_timeout(&self) -> Duration {
-        self.default_acquire_timeout
     }
 
     /// Opaque factory handle. Invoked via `zend_call_known_function`.
@@ -869,8 +863,7 @@ fn lookup_pool(
 /// and stored opaquely on the PoolInner. `destroy_callable_zval` may
 /// be null.
 ///
-/// Timeouts ≤ 0 fall back to the v1 hard-coded defaults: `idle_timeout_s`
-/// defaults to 300 seconds, `default_acquire_timeout_s` defaults to 5.
+/// `idle_timeout_s` ≤ 0 falls back to 300 seconds.
 ///
 /// # Safety
 /// `factory_callable_zval` must be a valid PHP callable zval; the
@@ -882,7 +875,6 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
     destroy_callable_zval: *mut std::ffi::c_void,
     max_size: u64,
     idle_timeout_s: f64,
-    default_acquire_timeout_s: f64,
     out_id: *mut u64,
 ) -> c_int {
     if out_id.is_null() {
@@ -921,18 +913,12 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
         } else {
             Duration::from_secs(300)
         };
-        let default_acquire = if default_acquire_timeout_s > 0.0 {
-            Duration::from_secs_f64(default_acquire_timeout_s)
-        } else {
-            Duration::from_secs(5)
-        };
 
         let inner: Arc<dyn SharedInner> = Arc::new(PoolInner::new(
             factory_fcc,
             destroy_fcc,
             max_size as usize,
             idle_timeout,
-            default_acquire,
         ));
         let reg = registry();
         let id = reg.insert(SharedType::Pool, Arc::clone(&inner))?;
@@ -956,14 +942,14 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
 ///    refund + propagate on throw.
 /// 3. Budget full → `wait_for_release` up to the deadline, then loop.
 ///
-/// `timeout_s ≤ 0` falls back to the pool's `default_acquire_timeout`.
+/// `timeout_ms`: -1 = wait forever, 0 = try only, >0 = milliseconds.
 ///
 /// # Safety
 /// `out_slot_zv_heap` and `out_owner_tid` must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_acquire(
     id: u64,
-    timeout_s: f64,
+    timeout_ms: i64,
     out_slot_zv_heap: *mut *mut std::ffi::c_void,
     out_owner_tid: *mut u64,
 ) -> c_int {
@@ -983,16 +969,19 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
             .as_any_pool()
             .ok_or(crate::plugins::ox_shared::error::SharedError::Type)?;
 
-        let timeout = if timeout_s > 0.0 {
-            Duration::from_secs_f64(timeout_s)
-        } else {
-            pool.default_acquire_timeout()
-        };
         let call_start = Instant::now();
-        let deadline = call_start.checked_add(timeout).unwrap_or_else(|| {
-            // Saturating fallback for pathologically-large timeouts.
-            call_start + Duration::from_secs(86_400)
-        });
+        let (deadline_opt, try_only) = match parse_timeout(timeout_ms) {
+            Wait::Forever => (None, false),
+            Wait::Try => (Some(call_start), true),
+            Wait::Bounded(d) => (
+                Some(
+                    call_start
+                        .checked_add(d)
+                        .unwrap_or_else(|| call_start + Duration::from_secs(86_400)),
+                ),
+                false,
+            ),
+        };
 
         // Wrapped loop so every exit path records the acquire result
         // + wait-histogram observation at one place. The histogram
@@ -1057,12 +1046,25 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                 return Err(err);
             }
 
-            // 3. Budget full — wait for a release.
-            let now = Instant::now();
-            if now >= deadline {
+            // 3. Budget full — check try-only or compute remaining wait.
+            if try_only {
                 break 'acquire Err(crate::plugins::ox_shared::error::SharedError::Timeout);
             }
-            let remaining = deadline.saturating_duration_since(now);
+
+            let remaining = match deadline_opt {
+                None => {
+                    // Wait::Forever: poll with a 50ms quantum so close-
+                    // detection can progress without a busy-spin.
+                    Duration::from_millis(50)
+                }
+                Some(t) => {
+                    let now = Instant::now();
+                    if now >= t {
+                        break 'acquire Err(crate::plugins::ox_shared::error::SharedError::Timeout);
+                    }
+                    t - now
+                }
+            };
             pool.wait_for_release(remaining);
             // Loop back; the top-of-loop `is_closed` check converts
             // a close-during-wait wake-up into a `Closed` result.
@@ -1134,12 +1136,14 @@ pub unsafe extern "C" fn oxphp_shared_pool_release(
 /// via `ZVAL_COPY`. On body throw the FFI leaves `EG(exception)` set
 /// and returns `Generic`, but the slot still returns to the pool.
 ///
+/// `timeout_ms`: -1 = wait forever, 0 = try only, >0 = milliseconds.
+///
 /// # Safety
 /// `body_callable_zv` and `user_out_zv` must be valid PHP zvals.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_with(
     id: u64,
-    timeout_s: f64,
+    timeout_ms: i64,
     body_callable_zv: *mut std::ffi::c_void,
     user_out_zv: *mut std::ffi::c_void,
 ) -> c_int {
@@ -1151,7 +1155,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
     // Step 1: acquire. Bubble errors directly.
     let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_s, &mut slot_heap, &mut owner) };
+    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_ms, &mut slot_heap, &mut owner) };
     if rc != 0 {
         return rc;
     }
@@ -1556,11 +1560,6 @@ fn pool_construct(call: &mut NativeCall) -> Result<(), PhpError> {
     } else {
         300.0
     };
-    let default_acquire_s = if call.argc() > 4 {
-        call.arg_double(4).unwrap_or(5.0)
-    } else {
-        5.0
-    };
 
     let mut out_id: u64 = 0;
     let rc = unsafe {
@@ -1569,7 +1568,6 @@ fn pool_construct(call: &mut NativeCall) -> Result<(), PhpError> {
             destroy_zv,
             max_size as u64,
             idle_timeout_s,
-            default_acquire_s,
             &mut out_id,
         )
     };
@@ -1597,15 +1595,16 @@ fn pool_get_id(call: &NativeCall) -> Result<u64, PhpError> {
 
 fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
     let id = pool_get_id(call)?;
-    let timeout_s = if call.argc() > 0 {
-        call.arg_double(0).unwrap_or(0.0)
+    let timeout_ms: i64 = if call.argc() > 0 {
+        let s = call.arg_double(0).unwrap_or(0.0);
+        (s * 1000.0).round() as i64
     } else {
-        0.0
+        0
     };
 
     let mut slot_heap: *mut c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_s, &mut slot_heap, &mut owner) };
+    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_ms, &mut slot_heap, &mut owner) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::acquire"));
     }
@@ -1677,12 +1676,13 @@ fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
 fn pool_with(call: &mut NativeCall) -> Result<(), PhpError> {
     let id = pool_get_id(call)?;
     let body_zv = unsafe { call.raw_arg_ptr(0) };
-    let timeout_s = if call.argc() > 1 {
-        call.arg_double(1).unwrap_or(0.0)
+    let timeout_ms: i64 = if call.argc() > 1 {
+        let s = call.arg_double(1).unwrap_or(0.0);
+        (s * 1000.0).round() as i64
     } else {
-        0.0
+        0
     };
-    let rc = unsafe { oxphp_shared_pool_with(id, timeout_s, body_zv, call.retval_ptr()) };
+    let rc = unsafe { oxphp_shared_pool_with(id, timeout_ms, body_zv, call.retval_ptr()) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::with"));
     }
@@ -1774,7 +1774,6 @@ mod tests {
             std::ptr::null_mut(),
             max,
             Duration::from_secs(300),
-            Duration::from_secs(5),
         ))
     }
 
@@ -1786,7 +1785,6 @@ mod tests {
             std::ptr::null_mut(),
             max,
             idle_timeout,
-            Duration::from_secs(5),
         ))
     }
 
@@ -2654,7 +2652,6 @@ mod tests {
             std::ptr::null_mut(),
             max,
             Duration::from_secs(300),
-            Duration::from_secs(5),
         ));
         let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
         (*inner).as_any_pool().expect("just inserted").bind_id(id);
@@ -2666,14 +2663,7 @@ mod tests {
         ensure_registry();
         let mut id: u64 = 0;
         let rc = unsafe {
-            oxphp_shared_pool_create(
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                8,
-                60.0,
-                5.0,
-                &mut id,
-            )
+            oxphp_shared_pool_create(std::ptr::null_mut(), std::ptr::null_mut(), 8, 60.0, &mut id)
         };
         assert_eq!(rc, SharedError::Type.code());
         assert_eq!(id, 0);
@@ -2687,9 +2677,8 @@ mod tests {
         #[allow(clippy::manual_dangling_ptr)]
         let sentinel = 0x1 as *mut std::ffi::c_void;
         let mut id: u64 = 0;
-        let rc = unsafe {
-            oxphp_shared_pool_create(sentinel, std::ptr::null_mut(), 0, 60.0, 5.0, &mut id)
-        };
+        let rc =
+            unsafe { oxphp_shared_pool_create(sentinel, std::ptr::null_mut(), 0, 60.0, &mut id) };
         assert_eq!(rc, SharedError::Type.code());
         assert_eq!(id, 0);
     }
@@ -2768,7 +2757,7 @@ mod tests {
 
         let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut owner: u64 = 0;
-        let rc = unsafe { oxphp_shared_pool_acquire(id, 0.1, &mut slot_heap, &mut owner) };
+        let rc = unsafe { oxphp_shared_pool_acquire(id, 100, &mut slot_heap, &mut owner) };
         assert_eq!(rc, SharedError::Closed.code());
         assert!(slot_heap.is_null());
     }
@@ -2786,7 +2775,7 @@ mod tests {
 
         let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut owner: u64 = 0;
-        let rc = unsafe { oxphp_shared_pool_acquire(id, 1.0, &mut slot_heap, &mut owner) };
+        let rc = unsafe { oxphp_shared_pool_acquire(id, 1000, &mut slot_heap, &mut owner) };
         assert_eq!(rc, 0);
         assert_eq!(slot_heap, sentinel);
         assert_eq!(owner, current_thread_key());
@@ -2805,7 +2794,7 @@ mod tests {
         let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut owner: u64 = 0;
         assert_eq!(
-            unsafe { oxphp_shared_pool_acquire(id, 1.0, &mut slot_heap, &mut owner) },
+            unsafe { oxphp_shared_pool_acquire(id, 1000, &mut slot_heap, &mut owner) },
             0
         );
         assert_eq!(pool.idle_count(), 0);
@@ -2855,7 +2844,7 @@ mod tests {
         let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut owner: u64 = 0;
         let start = Instant::now();
-        let rc = unsafe { oxphp_shared_pool_acquire(id, 0.05, &mut slot_heap, &mut owner) };
+        let rc = unsafe { oxphp_shared_pool_acquire(id, 50, &mut slot_heap, &mut owner) };
         let elapsed = start.elapsed();
         assert_eq!(rc, SharedError::Timeout.code());
         assert!(
@@ -2890,7 +2879,7 @@ mod tests {
         for _ in 0..ITERS {
             let mut slot: *mut std::ffi::c_void = std::ptr::null_mut();
             let mut owner: u64 = 0;
-            let rc = unsafe { oxphp_shared_pool_acquire(id, 0.0, &mut slot, &mut owner) };
+            let rc = unsafe { oxphp_shared_pool_acquire(id, 0, &mut slot, &mut owner) };
             assert_eq!(rc, 0);
             let rc = unsafe { oxphp_shared_pool_release(id, slot, owner) };
             assert_eq!(rc, 0);

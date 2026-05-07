@@ -807,7 +807,6 @@ mod tests {
                 std::ptr::null_mut(),
                 4,
                 Duration::from_secs(300),
-                Duration::from_secs(5),
             ));
         let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
         let pool = (*inner).as_any_pool().unwrap();
@@ -874,7 +873,6 @@ mod tests {
                 std::ptr::null_mut(),
                 4,
                 Duration::from_secs(300),
-                Duration::from_secs(5),
             ));
         let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
         let pool = (*inner).as_any_pool().unwrap();
