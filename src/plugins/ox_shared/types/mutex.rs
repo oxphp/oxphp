@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 
 use parking_lot::Mutex;
 
@@ -494,7 +494,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         .method("__construct")
         .optional_param("initial", PhpType::Mixed, PhpValue::Null)
-        .optional_param("defaultTimeout", PhpType::Float, PhpValue::Null)
         .handler(|call| {
             // Extract initial as SharedValue via ValType dispatch.
             let initial_sv = match call.arg_type(0).unwrap_or(ValType::Null) {
@@ -537,27 +536,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         .method("with")
         .param("fn", PhpType::Callable)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
         .handler(|call| {
             use crate::bridge::ffi;
 
             let id = call.storage::<SharedHandle>()?.shared_id;
             let callable_zv = unsafe { call.raw_arg_ptr(0) };
-            let timeout_ms: i64 =
-                if call.argc() > 1 && matches!(call.arg_type(1), Ok(ValType::Double)) {
-                    let f = call.arg_double(1).unwrap_or(0.0);
-                    if f < 0.0 {
-                        return Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\TypeException".into(),
-                            message: "timeout must be non-negative".into(),
-                            code: 0,
-                        });
-                    }
-                    (f * 1000.0) as i64
-                } else {
-                    0
-                };
+            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             let mut ret_buf: *mut u8 = std::ptr::null_mut();
             let mut ret_len: usize = 0;
