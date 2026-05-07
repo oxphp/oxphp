@@ -11,9 +11,9 @@ $p = oxphp_async(function(): void {
 });
 
 $t->assertThrows(
-    'await throws OxPHP\\Async\\Exception',
+    'await throws OxPHP\\Async\\AsyncException',
     function() use ($p) { oxphp_async_await($p); },
-    \OxPHP\Async\Exception::class
+    \OxPHP\Async\AsyncException::class
 );
 
 $t->done();

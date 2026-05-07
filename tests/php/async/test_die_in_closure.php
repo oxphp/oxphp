@@ -11,9 +11,9 @@ $p = oxphp_async(function(): void {
 });
 
 $t->assertThrows(
-    'die() in closure throws OxPHP\\Async\\Exception',
+    'die() in closure throws OxPHP\\Async\\AsyncException',
     function() use ($p) { oxphp_async_await($p); },
-    \OxPHP\Async\Exception::class
+    \OxPHP\Async\AsyncException::class
 );
 
 // Prove the pool recovered by dispatching and awaiting another task
