@@ -1626,7 +1626,7 @@ pub fn register_class(
                 // Fiber path: try_send → on full, register send-waiter and
                 // suspend via fiber_await. Waker resolves with:
                 //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
-                //   - Cancelled    → Async\Exception               (fiber_rc == -1)
+                //   - Cancelled    → Async\AsyncException          (fiber_rc == -1)
                 //   - Closed       → ClosedException propagated    (fiber_rc == -1)
                 let deadline = match parse_timeout(timeout_ms) {
                     Wait::Forever => None,
@@ -1957,7 +1957,7 @@ pub fn register_class(
                     // 0 = waker resolved with Value → retval written by
                     // await_dispatch_callback. Done.
                     0 => Ok(()),
-                    // -1 = exception pending. Cancelled (Async\Exception)
+                    // -1 = exception pending. Cancelled (Async\AsyncException)
                     // translates to null per spec; other exceptions propagate.
                     -1 => {
                         let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
