@@ -60,7 +60,7 @@ pub(crate) fn read_timeout_arg(call: &NativeCall, idx: u32) -> Result<i64, PhpEr
 
     let secs: f64 = match t {
         ValType::Null => return Ok(-1),
-        ValType::Long => call.arg_long(idx).unwrap_or(0) as f64,
+        ValType::Long => call.arg_long(idx)? as f64,
         ValType::Double => call.arg_double(idx)?,
         _ => return Err(type_exception("$timeout must be float|int|null")),
     };
@@ -85,7 +85,6 @@ pub(crate) fn read_timeout_arg(call: &NativeCall, idx: u32) -> Result<i64, PhpEr
     Ok(timeout_ms)
 }
 
-#[allow(dead_code)]
 fn type_exception(msg: &str) -> PhpError {
     PhpError::Exception {
         class: "OxPHP\\Shared\\TypeException".into(),
