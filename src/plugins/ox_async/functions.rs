@@ -16,7 +16,7 @@ use crate::plugin::{PhpError, PluginContext, PluginError};
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DISABLED_MSG: &str = "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable.";
-const EXCEPTION_CLASS: &str = "OxPHP\\Async\\Exception";
+const EXCEPTION_CLASS: &str = "OxPHP\\Async\\AsyncException";
 const TIMEOUT_CLASS: &str = "OxPHP\\Async\\TimeoutException";
 
 // ─── Error helpers ───────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ fn timeout_err(message: impl Into<String>) -> PhpError {
 
 /// Read the async exception stored in bridge TLS (set by worker thread on failure).
 /// Returns a `PhpError::Exception` wrapping the original exception details inside
-/// an `OxPHP\Async\Exception` — matching the old C behavior:
+/// an `OxPHP\Async\AsyncException` — matching the old C behavior:
 /// `"Async task failed: [OriginalClass] original message"`.
 fn read_bridge_exception() -> PhpError {
     unsafe {
@@ -647,7 +647,7 @@ mod tests {
             DISABLED_MSG,
             "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
         );
-        assert_eq!(EXCEPTION_CLASS, "OxPHP\\Async\\Exception");
+        assert_eq!(EXCEPTION_CLASS, "OxPHP\\Async\\AsyncException");
         assert_eq!(TIMEOUT_CLASS, "OxPHP\\Async\\TimeoutException");
     }
 
