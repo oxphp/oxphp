@@ -1262,7 +1262,7 @@ namespace OxPHP\Shared {
         public function keys(): array {}
 
         /** Configured per-instance cap, or null if unlimited. */
-        public function maxEntries(): mixed {}
+        public function maxEntries(): ?int {}
 
         /**
          * Set `$value` iff the key was absent. Returns true on insert,

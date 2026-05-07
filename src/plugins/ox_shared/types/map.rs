@@ -1700,7 +1700,11 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         // ── __construct(?int $maxEntries = null) ───────────────────────
         .method("__construct")
-        .optional_param("maxEntries", PhpType::Mixed, PhpValue::Null)
+        .optional_param(
+            "maxEntries",
+            PhpType::Nullable(Box::new(PhpType::Int)),
+            PhpValue::Null,
+        )
         .handler(|call| {
             let max_entries: i64 = if call.argc() > 0 && !call.arg_is_null(0).unwrap_or(true) {
                 let n = call.arg_long(0).unwrap_or(-1);
@@ -1854,7 +1858,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         // ── maxEntries(): ?int ─────────────────────────────────────────
         .method("maxEntries")
-        .returns(PhpType::Mixed)
+        .returns(PhpType::Nullable(Box::new(PhpType::Int)))
         .handler(|call| {
             let id = call.storage::<SharedHandle>()?.shared_id;
             let reg = crate::plugins::ox_shared::registry::registry();
