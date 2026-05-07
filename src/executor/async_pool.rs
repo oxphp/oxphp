@@ -175,7 +175,7 @@ fn async_worker_thread(
                 success: false,
                 serialized_value: std::ptr::null_mut(),
                 serialized_value_len: 0,
-                exception_class: Some("OxPHP\\Async\\Exception".into()),
+                exception_class: Some("OxPHP\\Async\\AsyncException".into()),
                 exception_message: Some("Task cancelled before execution".into()),
                 exception_trace: None,
             });
