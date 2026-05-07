@@ -17,7 +17,7 @@ use tokio::sync::Notify;
 use crate::plugins::ox_async::synthetic::{self, PromisePayload};
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
 use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::SharedValue;
 
 /// Serialized zval payload (portbuf bytes). Opaque at this layer —
@@ -1586,22 +1586,13 @@ pub fn register_class(
             call.ret_bool(success != 0);
             Ok(())
         })
-        // ── send(value, timeout=0.0): void ──────────────────────────
+        // ── send(value, timeout=null): void ─────────────────────────
         .method("send")
         .param("value", PhpType::Mixed)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .handler(|call| {
             let id = call.storage::<SharedHandle>()?.shared_id;
-            let timeout_s = if call.argc() > 1 {
-                call.arg_double(1).unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let timeout_ms: u64 = if timeout_s <= 0.0 {
-                0
-            } else {
-                (timeout_s * 1000.0) as u64
-            };
+            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             // Serialize value → portbuf once; reuse across retry loop on fiber path.
             let arg_ptr = unsafe { call.raw_arg_ptr(0) };
@@ -1637,10 +1628,18 @@ pub fn register_class(
                 //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
                 //   - Cancelled    → Async\Exception               (fiber_rc == -1)
                 //   - Closed       → ClosedException propagated    (fiber_rc == -1)
-                let deadline = if timeout_s > 0.0 {
-                    Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(timeout_s))
-                } else {
-                    None
+                if matches!(parse_timeout(timeout_ms), Wait::Try) {
+                    // try_send already ran above and found the channel full.
+                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\TimeoutException".into(),
+                        message: "send timed out".into(),
+                        code: 0,
+                    });
+                }
+                let deadline = match parse_timeout(timeout_ms) {
+                    Wait::Forever | Wait::Try => None,
+                    Wait::Bounded(d) => Some(std::time::Instant::now() + d),
                 };
 
                 loop {
@@ -1774,10 +1773,7 @@ pub fn register_class(
                 }
             } else {
                 // Non-fiber path: thread-block via send_blocking.
-                // TODO(Task 3): convert the send handler to use read_timeout_arg
-                // so timeout_ms carries the i64 wire value directly.
-                let rc =
-                    unsafe { oxphp_shared_channel_send_blocking(id, buf, len, timeout_ms as i64) };
+                let rc = unsafe { oxphp_shared_channel_send_blocking(id, buf, len, timeout_ms) };
                 unsafe { bridge_ffi::oxphp_portable_free(buf) };
 
                 if rc == SharedError::Closed.code() {
@@ -1862,22 +1858,13 @@ pub fn register_class(
                 }
             }
         })
-        // ── recv(timeout=0.0): mixed ────────────────────────────────
+        // ── recv(timeout=null): mixed ───────────────────────────────
         .method("recv")
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
         .handler(|call| {
             let id = call.storage::<SharedHandle>()?.shared_id;
-            let timeout_s = if call.argc() > 0 {
-                call.arg_double(0).unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let timeout_ms: u64 = if timeout_s <= 0.0 {
-                0
-            } else {
-                (timeout_s * 1000.0) as u64
-            };
+            let timeout_ms: i64 = read_timeout_arg(call, 0)?;
 
             // The fiber-suspend path uses synthetic-promise FFI that is
             // gated behind `feature = "php"` (PROMISE_MAP lives on PHP
@@ -1891,9 +1878,18 @@ pub fn register_class(
 
             if in_fiber {
                 // Fiber path: register recv-waiter, suspend, handle resolve.
+                if matches!(parse_timeout(timeout_ms), Wait::Try) {
+                    // Non-blocking semantics: channel was empty (no item
+                    // available now) — return null per recv spec.
+                    call.ret_null();
+                    return Ok(());
+                }
                 let mut promise_id: i64 = 0;
                 // See note on send-side for the cfg gating rationale.
-                let reg_rc = unsafe { recv_fiber_register_shim(id, timeout_ms, &mut promise_id) };
+                // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
+                let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
+                let reg_rc =
+                    unsafe { recv_fiber_register_shim(id, fiber_timeout_ms, &mut promise_id) };
                 super::counter::counter_rc_to_result(reg_rc)?;
 
                 let retval = call.retval_ptr();
@@ -1962,15 +1958,13 @@ pub fn register_class(
                 }
             } else {
                 // Thread-block path.
-                // TODO(Task 3): convert the recv handler to use read_timeout_arg
-                // so timeout_ms carries the i64 wire value directly.
                 let mut out_buf: *mut u8 = std::ptr::null_mut();
                 let mut out_len: usize = 0;
                 let mut state: c_int = 0;
                 let rc = unsafe {
                     oxphp_shared_channel_recv_blocking(
                         id,
-                        timeout_ms as i64,
+                        timeout_ms,
                         &mut out_buf,
                         &mut out_len,
                         &mut state,
@@ -2055,7 +2049,7 @@ pub fn register_class(
             call.ret_long(out as i64);
             Ok(())
         })
-        // ── sendMany(values, timeout=0.0): int ─────────────────────
+        // ── sendMany(values, timeout=null): int ────────────────────
         //
         // Serializes each array element to its own portbuf via the C
         // helper `oxphp_iter_array_to_portbufs`, then deposits them
@@ -2065,20 +2059,11 @@ pub fn register_class(
         // closed/timeout are NOT raised as exceptions.
         .method("sendMany")
         .param("values", PhpType::Array)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Int)
         .handler(|call| {
             let id = call.storage::<SharedHandle>()?.shared_id;
-            let timeout_s = if call.argc() > 1 {
-                call.arg_double(1).unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let timeout_ms: u64 = if timeout_s <= 0.0 {
-                0
-            } else {
-                (timeout_s * 1000.0) as u64
-            };
+            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             // Fast path: empty array → 0 sent, no FFI round-trip.
             let count = call.arg_array_count(0).unwrap_or(0);
@@ -2126,9 +2111,8 @@ pub fn register_class(
             }
 
             let mut sent: u64 = 0;
-            // TODO(Task 3): convert sendMany handler to use read_timeout_arg.
             let rc = unsafe {
-                oxphp_shared_channel_send_many(id, concat, offsets, n, timeout_ms as i64, &mut sent)
+                oxphp_shared_channel_send_many(id, concat, offsets, n, timeout_ms, &mut sent)
             };
             unsafe {
                 if !concat.is_null() {
@@ -2142,43 +2126,31 @@ pub fn register_class(
             call.ret_long(sent as i64);
             Ok(())
         })
-        // ── recvMany(max, timeout=0.0): array ──────────────────────
+        // ── recvMany(max, timeout=null): array ─────────────────────
         //
-        // `max == 0`         → drain all currently-buffered items at once.
-        // `timeout > 0`      → block up to that many seconds collecting at most `max`.
-        // `timeout == 0.0`   → drain whatever is immediately available, return at once.
-        // TODO(Task 3): once read_timeout_arg lands, omitting `$timeout` (PHP `null`)
-        // will map to Wait::Forever, restoring the "block until max collected or
-        // channel closes" behavior.
+        // `max == 0`    → drain all currently-buffered items at once.
+        // `timeout > 0` → block up to that many seconds collecting at most `max`.
+        // `timeout null`→ block until `max` collected or channel closes (forever).
+        // `timeout 0.0` → drain whatever is immediately available, return at once.
         .method("recvMany")
         .param("max", PhpType::Int)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Array)
         .handler(|call| {
             let id = call.storage::<SharedHandle>()?.shared_id;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
-            let timeout_s = if call.argc() > 1 {
-                call.arg_double(1).unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let timeout_ms: u64 = if timeout_s <= 0.0 {
-                0
-            } else {
-                (timeout_s * 1000.0) as u64
-            };
+            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             let mut concat: *mut u8 = std::ptr::null_mut();
             let mut concat_len: usize = 0;
             let mut offsets: *mut usize = std::ptr::null_mut();
             let mut n: u64 = 0;
-            // TODO(Task 3): convert recvMany handler to use read_timeout_arg.
             let rc = unsafe {
                 oxphp_shared_channel_recv_many(
                     id,
                     max,
-                    timeout_ms as i64,
+                    timeout_ms,
                     &mut concat,
                     &mut concat_len,
                     &mut offsets,
