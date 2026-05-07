@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 use crate::plugins::ox_async::synthetic::{self, PromisePayload};
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
 use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
 use crate::plugins::ox_shared::value::SharedValue;
 
 /// Serialized zval payload (portbuf bytes). Opaque at this layer —
@@ -228,15 +229,17 @@ impl ChannelInner {
     /// first; on `Full` enters a bounded-poll wait loop so `close()`
     /// can wake us promptly.
     ///
-    /// `timeout == Duration::ZERO` means "wait indefinitely" — the
-    /// loop continues until delivery or close.
+    /// `wait` controls the blocking behaviour:
+    /// - `Wait::Forever` — loop until delivery or close.
+    /// - `Wait::Try` — return `Err(Timeout)` immediately if full.
+    /// - `Wait::Bounded(d)` — wait up to `d` before returning `Err(Timeout)`.
     ///
     /// Note: the poll quantum exists because crossbeam's
     /// `send_timeout` only observes disconnect when all receivers are
     /// dropped, not a user-level close flag. A 20ms poll keeps the
     /// test guarantees ("wakes promptly on close") within bounds
     /// without pulling in an extra sync primitive.
-    pub fn send_blocking(&self, payload: Payload, timeout: Duration) -> Result<(), SharedError> {
+    pub(crate) fn send_blocking(&self, payload: Payload, wait: Wait) -> Result<(), SharedError> {
         // Fast path: attempt a non-blocking send (which already does
         // bookkeeping + notify on success). NO guard here — a fast-path
         // success never blocked, so the `senders_blocked` gauge must not
@@ -247,16 +250,21 @@ impl ChannelInner {
             Err(TrySendErr::Full(p)) => p,
         };
 
+        // Wait::Try means non-blocking only — don't enter the slow path.
+        if matches!(wait, Wait::Try) {
+            return Err(SharedError::Timeout);
+        }
+
         // Genuinely going to block — arm the gauge now, so it covers
         // only the actually-blocking span.
         let _guard = SendersBlockedGuard::new(&self.senders_blocked);
 
         // Slow path: poll `send_timeout` in small quanta so `close()`
         // from another thread wakes us within POLL_QUANTUM.
-        let deadline = if timeout.is_zero() {
-            None
-        } else {
-            Some(std::time::Instant::now() + timeout)
+        let deadline = match wait {
+            Wait::Forever => None,
+            Wait::Try => unreachable!(),
+            Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         let mut payload = payload;
         loop {
@@ -292,10 +300,15 @@ impl ChannelInner {
     /// Thread-blocking receive. Returns `Ok(Some(p))` on delivery,
     /// `Ok(None)` on closed+drained, `Err(Timeout)` otherwise.
     ///
+    /// `wait` controls the blocking behaviour:
+    /// - `Wait::Forever` — loop until delivery or close.
+    /// - `Wait::Try` — return `Err(Timeout)` immediately if empty (and open).
+    /// - `Wait::Bounded(d)` — wait up to `d` before returning `Err(Timeout)`.
+    ///
     /// The `rx` lock is held only across each poll quantum — never
     /// across the full caller-supplied timeout — so concurrent
     /// receivers serialize but make progress.
-    pub fn recv_blocking(&self, timeout: Duration) -> Result<Option<Payload>, SharedError> {
+    pub(crate) fn recv_blocking(&self, wait: Wait) -> Result<Option<Payload>, SharedError> {
         // Fast path: try once under a tight lock scope. NO guard here —
         // a fast-path hit (or a closed+empty miss) never blocked, so
         // the `receivers_blocked` gauge must not transiently tick.
@@ -319,16 +332,21 @@ impl ChannelInner {
             // rx dropped here.
         }
 
+        // Wait::Try means non-blocking only — don't enter the slow path.
+        if matches!(wait, Wait::Try) {
+            return Err(SharedError::Timeout);
+        }
+
         // Genuinely going to block — arm the gauge now, so it covers
         // only the actually-blocking span.
         let _guard = ReceiversBlockedGuard::new(&self.receivers_blocked);
 
         // Slow path: poll `recv_timeout` in quanta so `close()` can
         // wake us within POLL_QUANTUM.
-        let deadline = if timeout.is_zero() {
-            None
-        } else {
-            Some(std::time::Instant::now() + timeout)
+        let deadline = match wait {
+            Wait::Forever => None,
+            Wait::Try => unreachable!(),
+            Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         loop {
             if self.is_closed() {
@@ -379,29 +397,41 @@ impl ChannelInner {
     /// raising — matches the spec's "returns how many were actually
     /// sent before full/closed/timeout" semantics.
     ///
-    /// `timeout == Duration::ZERO` means "wait indefinitely per-item",
-    /// same convention as `send_blocking`. When `timeout > 0` the
-    /// caller deadline is amortised across the batch: each iteration
-    /// passes the remaining budget to `send_blocking`.
-    pub fn send_many(&self, payloads: Vec<Payload>, timeout: Duration) -> u64 {
-        let deadline = if timeout.is_zero() {
-            None
-        } else {
-            Some(std::time::Instant::now() + timeout)
+    /// `wait` controls blocking behaviour per-item:
+    /// - `Wait::Forever` — block indefinitely per-item.
+    /// - `Wait::Try` — drain via `try_send` only; stop on first non-Ok.
+    /// - `Wait::Bounded(d)` — amortise the budget across the batch;
+    ///   each item gets the remaining time up to the deadline.
+    pub(crate) fn send_many(&self, payloads: Vec<Payload>, wait: Wait) -> u64 {
+        if matches!(wait, Wait::Try) {
+            let mut sent = 0u64;
+            for p in payloads {
+                match self.try_send(p) {
+                    Ok(()) => sent += 1,
+                    Err(_) => break,
+                }
+            }
+            return sent;
+        }
+
+        let deadline = match wait {
+            Wait::Forever => None,
+            Wait::Try => unreachable!(),
+            Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         let mut sent = 0u64;
         for p in payloads {
-            let remaining = match deadline {
+            let item_wait = match deadline {
                 Some(d) => {
                     let r = d.saturating_duration_since(std::time::Instant::now());
                     if r.is_zero() {
                         break;
                     }
-                    r
+                    Wait::Bounded(r)
                 }
-                None => Duration::ZERO, // indefinite
+                None => Wait::Forever,
             };
-            match self.send_blocking(p, remaining) {
+            match self.send_blocking(p, item_wait) {
                 Ok(()) => sent += 1,
                 Err(_) => break, // timeout or closed — stop, do not raise.
             }
@@ -413,13 +443,13 @@ impl ChannelInner {
     ///
     /// * `max == 0` — drain whatever is currently buffered without
     ///   waiting; returns the drained items (possibly empty).
-    /// * `max > 0, timeout == Duration::ZERO` — block indefinitely
-    ///   until either `max` items are collected or the channel is
-    ///   closed+empty.
-    /// * `max > 0, timeout > 0` — block up to `timeout` collecting
+    /// * `max > 0, Wait::Forever` — block indefinitely until either
+    ///   `max` items are collected or the channel is closed+empty.
+    /// * `max > 0, Wait::Try` — drain immediately available items only.
+    /// * `max > 0, Wait::Bounded(d)` — block up to `d` collecting
     ///   as many as possible, up to `max`. Returns whatever was
     ///   collected by the deadline (possibly empty).
-    pub fn recv_many(&self, max: usize, timeout: Duration) -> Vec<Payload> {
+    pub(crate) fn recv_many(&self, max: usize, wait: Wait) -> Vec<Payload> {
         // Small initial capacity to keep the common "drain a few" path
         // from over-allocating, with a sane upper bound for large
         // requested caps.
@@ -433,23 +463,33 @@ impl ChannelInner {
             }
             return out;
         }
-        let deadline = if timeout.is_zero() {
-            None
-        } else {
-            Some(std::time::Instant::now() + timeout)
+        if matches!(wait, Wait::Try) {
+            // Non-blocking drain: collect only what's immediately available.
+            while out.len() < max {
+                match self.try_recv() {
+                    Ok(Some(p)) => out.push(p),
+                    _ => break,
+                }
+            }
+            return out;
+        }
+        let deadline = match wait {
+            Wait::Forever => None,
+            Wait::Try => unreachable!(),
+            Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         while out.len() < max {
-            let remaining = match deadline {
+            let item_wait = match deadline {
                 Some(d) => {
                     let r = d.saturating_duration_since(std::time::Instant::now());
                     if r.is_zero() {
                         break;
                     }
-                    r
+                    Wait::Bounded(r)
                 }
-                None => Duration::ZERO, // indefinite
+                None => Wait::Forever,
             };
-            match self.recv_blocking(remaining) {
+            match self.recv_blocking(item_wait) {
                 Ok(Some(p)) => out.push(p),
                 Ok(None) => break, // closed + empty
                 Err(_) => break,   // timeout
@@ -911,11 +951,11 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
     })
 }
 
-/// Thread-blocking send with bounded wait. `timeout_ms == 0` means
-/// wait indefinitely — the PHP wrapper passes `timeout <= 0.0` through
-/// as 0 per the spec's "indefinite" convention. Returns `0` on success,
+/// Thread-blocking send with bounded wait. `timeout_ms` follows the wire
+/// convention: `-1` = forever, `0` = try (non-blocking), `>0` = milliseconds.
+/// See `timeout::parse_timeout`. Returns `0` on success,
 /// `-6` (`SharedError::Closed`) on close, `-7` (`SharedError::Timeout`)
-/// on deadline.
+/// on deadline or when `timeout_ms == 0` and the channel is full.
 ///
 /// # Safety
 /// `buf` must be valid for reads of `len` bytes (null permitted when
@@ -925,7 +965,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
     id: u64,
     buf: *const u8,
     len: usize,
-    timeout_ms: u64,
+    timeout_ms: i64,
 ) -> c_int {
     if len > 0 && buf.is_null() {
         set_last_error("buf null with non-zero len");
@@ -942,7 +982,8 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
             unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
         };
 
-        let res = ch.send_blocking(payload, Duration::from_millis(timeout_ms));
+        let wait = parse_timeout(timeout_ms);
+        let res = ch.send_blocking(payload, wait);
         match res {
             Ok(()) => {
                 reg.record_op(id);
@@ -961,7 +1002,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
     })
 }
 
-/// Thread-blocking recv. `timeout_ms == 0` → wait indefinitely.
+/// Thread-blocking recv. `timeout_ms` follows the wire convention:
+/// `-1` = forever, `0` = try (non-blocking), `>0` = milliseconds.
+/// See `timeout::parse_timeout`.
 ///
 /// State semantics:
 ///   * `*out_state = 0` — got an item. `*out_buf`/`*out_len` set.
@@ -976,7 +1019,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
     id: u64,
-    timeout_ms: u64,
+    timeout_ms: i64,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
     out_state: *mut c_int,
@@ -995,7 +1038,8 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         let entry = reg.lookup(id)?;
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        match ch.recv_blocking(Duration::from_millis(timeout_ms)) {
+        let wait = parse_timeout(timeout_ms);
+        match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload)? };
                 reg.record_op(id);
@@ -1083,10 +1127,11 @@ pub unsafe extern "C" fn oxphp_shared_channel_pending(id: u64, out: *mut u64) ->
 /// and the i-th payload occupies bytes `[offsets[i] .. offsets[i+1])`.
 ///
 /// Behaviour mirrors the `send_many` Rust API: best-effort send up to
-/// `timeout_ms` (0 = indefinite); stops on first error and returns the
-/// count actually sent via `*out_sent`. Closed/timeout are NOT signalled
-/// as errors — the caller inspects `*out_sent` to distinguish partial
-/// vs full completion.
+/// `timeout_ms` (`-1` = forever, `0` = try, `>0` = ms); stops on first
+/// error and returns the count actually sent via `*out_sent`.
+/// Closed/timeout are NOT signalled as errors — the caller inspects
+/// `*out_sent` to distinguish partial vs full completion.
+/// See `timeout::parse_timeout`.
 ///
 /// # Safety
 /// `payloads_concat` must be valid for reads of `offsets[n]` bytes (may
@@ -1098,7 +1143,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
     payloads_concat: *const u8,
     offsets: *const usize,
     n: usize,
-    timeout_ms: u64,
+    timeout_ms: i64,
     out_sent: *mut u64,
 ) -> c_int {
     if out_sent.is_null() {
@@ -1145,7 +1190,8 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
             payloads.push(payload);
         }
 
-        let sent = ch.send_many(payloads, Duration::from_millis(timeout_ms));
+        let wait = parse_timeout(timeout_ms);
+        let sent = ch.send_many(payloads, wait);
         reg.record_op(id);
         unsafe { *out_sent = sent };
         Ok(())
@@ -1153,7 +1199,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
 }
 
 /// Batched recv. Collects up to `max` payloads per the `recv_many`
-/// Rust API. On success writes:
+/// Rust API. `timeout_ms` follows the wire convention: `-1` = forever,
+/// `0` = try (non-blocking), `>0` = milliseconds. See `timeout::parse_timeout`.
+/// On success writes:
 ///   * `*out_concat` — libc::malloc'd buffer with all payloads
 ///     concatenated (null when n == 0 or total length == 0).
 ///   * `*out_concat_len` — total length in bytes.
@@ -1171,7 +1219,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
 pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
     id: u64,
     max: u64,
-    timeout_ms: u64,
+    timeout_ms: i64,
     out_concat: *mut *mut u8,
     out_concat_len: *mut usize,
     out_offsets: *mut *mut usize,
@@ -1193,7 +1241,8 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
         let entry = reg.lookup(id)?;
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        let items = ch.recv_many(max as usize, Duration::from_millis(timeout_ms));
+        let wait = parse_timeout(timeout_ms);
+        let items = ch.recv_many(max as usize, wait);
         reg.record_op(id);
 
         let n = items.len();
@@ -1725,7 +1774,10 @@ pub fn register_class(
                 }
             } else {
                 // Non-fiber path: thread-block via send_blocking.
-                let rc = unsafe { oxphp_shared_channel_send_blocking(id, buf, len, timeout_ms) };
+                // TODO(Task 3): convert the send handler to use read_timeout_arg
+                // so timeout_ms carries the i64 wire value directly.
+                let rc =
+                    unsafe { oxphp_shared_channel_send_blocking(id, buf, len, timeout_ms as i64) };
                 unsafe { bridge_ffi::oxphp_portable_free(buf) };
 
                 if rc == SharedError::Closed.code() {
@@ -1910,13 +1962,15 @@ pub fn register_class(
                 }
             } else {
                 // Thread-block path.
+                // TODO(Task 3): convert the recv handler to use read_timeout_arg
+                // so timeout_ms carries the i64 wire value directly.
                 let mut out_buf: *mut u8 = std::ptr::null_mut();
                 let mut out_len: usize = 0;
                 let mut state: c_int = 0;
                 let rc = unsafe {
                     oxphp_shared_channel_recv_blocking(
                         id,
-                        timeout_ms,
+                        timeout_ms as i64,
                         &mut out_buf,
                         &mut out_len,
                         &mut state,
@@ -2072,8 +2126,9 @@ pub fn register_class(
             }
 
             let mut sent: u64 = 0;
+            // TODO(Task 3): convert sendMany handler to use read_timeout_arg.
             let rc = unsafe {
-                oxphp_shared_channel_send_many(id, concat, offsets, n, timeout_ms, &mut sent)
+                oxphp_shared_channel_send_many(id, concat, offsets, n, timeout_ms as i64, &mut sent)
             };
             unsafe {
                 if !concat.is_null() {
@@ -2117,11 +2172,12 @@ pub fn register_class(
             let mut concat_len: usize = 0;
             let mut offsets: *mut usize = std::ptr::null_mut();
             let mut n: u64 = 0;
+            // TODO(Task 3): convert recvMany handler to use read_timeout_arg.
             let rc = unsafe {
                 oxphp_shared_channel_recv_many(
                     id,
                     max,
-                    timeout_ms,
+                    timeout_ms as i64,
                     &mut concat,
                     &mut concat_len,
                     &mut offsets,
@@ -2367,7 +2423,7 @@ mod tests {
     #[test]
     fn send_blocking_fast_path() {
         let ch = ChannelInner::new(4);
-        ch.send_blocking(vec![1], Duration::from_millis(100))
+        ch.send_blocking(vec![1], Wait::Bounded(Duration::from_millis(100)))
             .expect("send ok");
         assert_eq!(ch.pending(), 1);
     }
@@ -2378,7 +2434,9 @@ mod tests {
         ch.try_send(vec![1]).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Duration::from_secs(2)))
+            std::thread::spawn(move || {
+                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+            })
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
@@ -2393,7 +2451,7 @@ mod tests {
     fn send_blocking_timeout_returns_timeout() {
         let ch = ChannelInner::new(1);
         ch.try_send(vec![1]).unwrap();
-        let res = ch.send_blocking(vec![2], Duration::from_millis(50));
+        let res = ch.send_blocking(vec![2], Wait::Bounded(Duration::from_millis(50)));
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
     }
 
@@ -2401,7 +2459,7 @@ mod tests {
     fn send_blocking_on_closed_returns_closed() {
         let ch = ChannelInner::new(4);
         ch.close();
-        let res = ch.send_blocking(vec![1], Duration::ZERO);
+        let res = ch.send_blocking(vec![1], Wait::Forever);
         assert!(matches!(res, Err(SharedError::Closed)), "got {res:?}");
     }
 
@@ -2411,7 +2469,9 @@ mod tests {
         ch.try_send(vec![1]).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Duration::from_secs(5)))
+            std::thread::spawn(move || {
+                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(5)))
+            })
         };
         // Let the blocker arm.
         std::thread::sleep(Duration::from_millis(50));
@@ -2430,7 +2490,7 @@ mod tests {
     fn recv_blocking_fast_path() {
         let ch = ChannelInner::new(4);
         ch.try_send(vec![1]).unwrap();
-        let res = ch.recv_blocking(Duration::from_millis(100));
+        let res = ch.recv_blocking(Wait::Bounded(Duration::from_millis(100)));
         assert_eq!(res.unwrap(), Some(vec![1]));
     }
 
@@ -2439,7 +2499,7 @@ mod tests {
         let ch = Arc::new(ChannelInner::new(4));
         let receiver = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.recv_blocking(Duration::from_secs(2)))
+            std::thread::spawn(move || ch.recv_blocking(Wait::Bounded(Duration::from_secs(2))))
         };
         std::thread::sleep(Duration::from_millis(50));
         ch.try_send(vec![7]).unwrap();
@@ -2450,7 +2510,7 @@ mod tests {
     #[test]
     fn recv_blocking_timeout_returns_timeout() {
         let ch = ChannelInner::new(4);
-        let res = ch.recv_blocking(Duration::from_millis(50));
+        let res = ch.recv_blocking(Wait::Bounded(Duration::from_millis(50)));
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
     }
 
@@ -2458,7 +2518,7 @@ mod tests {
     fn recv_blocking_on_closed_empty_returns_none() {
         let ch = ChannelInner::new(4);
         ch.close();
-        let res = ch.recv_blocking(Duration::ZERO).expect("ok");
+        let res = ch.recv_blocking(Wait::Forever).expect("ok");
         assert!(res.is_none());
     }
 
@@ -2467,7 +2527,7 @@ mod tests {
         let ch = Arc::new(ChannelInner::new(4));
         let receiver = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.recv_blocking(Duration::from_secs(5)))
+            std::thread::spawn(move || ch.recv_blocking(Wait::Bounded(Duration::from_secs(5))))
         };
         // Let the blocker arm.
         std::thread::sleep(Duration::from_millis(50));
@@ -2488,9 +2548,9 @@ mod tests {
         ch.try_send(vec![1]).unwrap();
         ch.try_send(vec![2]).unwrap();
         ch.close();
-        assert_eq!(ch.recv_blocking(Duration::ZERO).unwrap(), Some(vec![1]));
-        assert_eq!(ch.recv_blocking(Duration::ZERO).unwrap(), Some(vec![2]));
-        assert_eq!(ch.recv_blocking(Duration::ZERO).unwrap(), None);
+        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![1]));
+        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![2]));
+        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), None);
     }
 
     #[test]
@@ -2499,7 +2559,9 @@ mod tests {
         ch.try_send(vec![1]).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Duration::from_secs(2)))
+            std::thread::spawn(move || {
+                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+            })
         };
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(ch.senders_blocked().load(Ordering::Relaxed), 1);
@@ -2514,7 +2576,7 @@ mod tests {
         let ch = Arc::new(ChannelInner::new(4));
         let receiver = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.recv_blocking(Duration::from_secs(2)))
+            std::thread::spawn(move || ch.recv_blocking(Wait::Bounded(Duration::from_secs(2))))
         };
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 1);
@@ -2719,12 +2781,12 @@ mod tests {
     }
 
     #[test]
-    fn send_blocking_timeout_zero_is_indefinite() {
+    fn send_blocking_forever_wait_is_indefinite() {
         let ch = Arc::new(ChannelInner::new(1));
         ch.try_send(vec![1]).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Duration::ZERO))
+            std::thread::spawn(move || ch.send_blocking(vec![2], Wait::Forever))
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
@@ -3050,7 +3112,7 @@ mod tests {
     fn send_many_fills_channel_and_returns_count() {
         let ch = ChannelInner::new(10);
         let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
-        let sent = ch.send_many(payloads, Duration::ZERO);
+        let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 5);
         assert_eq!(ch.pending(), 5);
     }
@@ -3060,7 +3122,7 @@ mod tests {
         let ch = ChannelInner::new(10);
         ch.close();
         let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
-        let sent = ch.send_many(payloads, Duration::ZERO);
+        let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 0);
     }
 
@@ -3070,7 +3132,7 @@ mod tests {
         // time out and send_many returns the running count.
         let ch = ChannelInner::new(2);
         let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
-        let sent = ch.send_many(payloads, Duration::from_millis(50));
+        let sent = ch.send_many(payloads, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(sent, 2);
         assert_eq!(ch.pending(), 2);
     }
@@ -3081,7 +3143,7 @@ mod tests {
         ch.try_send(vec![1]).unwrap();
         ch.try_send(vec![2]).unwrap();
         ch.try_send(vec![3]).unwrap();
-        let got = ch.recv_many(0, Duration::ZERO);
+        let got = ch.recv_many(0, Wait::Forever);
         assert_eq!(got, vec![vec![1], vec![2], vec![3]]);
         assert_eq!(ch.pending(), 0);
     }
@@ -3089,7 +3151,7 @@ mod tests {
     #[test]
     fn recv_many_drain_on_empty_returns_empty() {
         let ch = ChannelInner::new(10);
-        let got = ch.recv_many(0, Duration::ZERO);
+        let got = ch.recv_many(0, Wait::Forever);
         assert!(got.is_empty());
     }
 
@@ -3099,7 +3161,7 @@ mod tests {
         for i in 0u8..5 {
             ch.try_send(vec![i]).unwrap();
         }
-        let got = ch.recv_many(3, Duration::from_millis(50));
+        let got = ch.recv_many(3, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(got, vec![vec![0], vec![1], vec![2]]);
         assert_eq!(ch.pending(), 2);
     }
@@ -3109,7 +3171,7 @@ mod tests {
         let ch = ChannelInner::new(10);
         ch.try_send(vec![7]).unwrap();
         ch.close();
-        let got = ch.recv_many(10, Duration::from_millis(50));
+        let got = ch.recv_many(10, Wait::Bounded(Duration::from_millis(50)));
         // Got the buffered item and then stopped on closed+empty; no
         // timeout wait because recv_blocking returned Ok(None).
         assert_eq!(got, vec![vec![7]]);
@@ -3120,7 +3182,7 @@ mod tests {
         let ch = ChannelInner::new(10);
         ch.try_send(vec![1]).unwrap();
         let start = Instant::now();
-        let got = ch.recv_many(5, Duration::from_millis(50));
+        let got = ch.recv_many(5, Wait::Bounded(Duration::from_millis(50)));
         let elapsed = start.elapsed();
         assert_eq!(got, vec![vec![1]]);
         // Must have waited ~50ms for the remaining 4 slots.
