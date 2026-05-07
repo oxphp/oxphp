@@ -2144,11 +2144,12 @@ pub fn register_class(
         })
         // ── recvMany(max, timeout=0.0): array ──────────────────────
         //
-        // `max == 0` → drain currently-buffered items without waiting.
-        // `max > 0, timeout == 0.0` → block until max items collected
-        //   or channel closes+empties.
-        // `max > 0, timeout > 0` → block up to timeout; return whatever
-        //   was collected by then (may be empty).
+        // `max == 0`         → drain all currently-buffered items at once.
+        // `timeout > 0`      → block up to that many seconds collecting at most `max`.
+        // `timeout == 0.0`   → drain whatever is immediately available, return at once.
+        // TODO(Task 3): once read_timeout_arg lands, omitting `$timeout` (PHP `null`)
+        // will map to Wait::Forever, restoring the "block until max collected or
+        // channel closes" behavior.
         .method("recvMany")
         .param("max", PhpType::Int)
         .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
@@ -3103,6 +3104,37 @@ mod tests {
         let rc = unsafe {
             oxphp_shared_channel_recv_blocking(ch.id(), 50, &mut out_buf, &mut out_len, &mut state)
         };
+        assert_eq!(rc, SharedError::Timeout.code());
+    }
+
+    // ─── Wait::Try coverage ──────────────────────────────────
+
+    #[test]
+    fn send_blocking_try_returns_timeout_when_full() {
+        let ch = ChannelInner::new(1);
+        ch.try_send(vec![0]).unwrap();
+        let res = ch.send_blocking(vec![1], Wait::Try);
+        assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
+        // Gauge must not have been incremented — Try short-circuits before the guard.
+        assert_eq!(ch.senders_blocked().load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn recv_blocking_try_returns_timeout_when_empty() {
+        let ch = ChannelInner::new(4);
+        let res = ch.recv_blocking(Wait::Try);
+        assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
+        assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ffi_send_blocking_try_returns_timeout_when_full() {
+        let ch = TestChannel::new(1);
+        let first = [1u8];
+        let mut success: c_int = 0;
+        let _ = unsafe { oxphp_shared_channel_try_send(ch.id(), first.as_ptr(), 1, &mut success) };
+        let second = [2u8];
+        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), second.as_ptr(), 1, 0) };
         assert_eq!(rc, SharedError::Timeout.code());
     }
 
