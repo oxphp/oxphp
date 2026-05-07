@@ -29,7 +29,8 @@ shared/test_pool_destroy
 shared/test_pool_factory_throw
 shared/test_pool_factory_non_object
 shared/test_pool_multiple_instances
-shared/test_pool_default_timeout
 shared/test_pool_idle_eviction
+shared/test_mutex_timeout_contract
+shared/test_pool_timeout_contract
 shared/test_pool_perf
 shared/test_pool_observability

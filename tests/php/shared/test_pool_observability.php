@@ -25,7 +25,6 @@ $pool = new OxPHP\Shared\Pool(
     null,
     2,      // maxSize
     0.05,   // idleTimeout = 50ms → stale slot before evict()
-    5.0,    // defaultAcquireTimeout
 );
 $id = $pool->id();
 

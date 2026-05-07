@@ -22,7 +22,6 @@ $pool = new OxPHP\Shared\Pool(
     null,    // destroy
     1,       // maxSize
     300.0,   // idleTimeout
-    5.0,     // defaultAcquireTimeout
 );
 
 // Warm up both paths — first-call cost is dominated by one-off
