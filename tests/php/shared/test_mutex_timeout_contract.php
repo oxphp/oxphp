@@ -1,49 +1,57 @@
 <?php
 /**
  * Mutex — unified timeout contract on with():
- *   null=forever, 0.0=try, INF=forever, NaN→Type, negative→Type.
+ *   null=forever, 0.0=try, positive=bounded, INF=forever,
+ *   NaN→TypeException, negative→TypeException.
+ *
+ * Contention semantics (e.g. with(0.0) on a held mutex throws
+ * TimeoutException) require a second execution context and are
+ * covered indirectly by test_mutex_timeout.php under the async
+ * profile. Here we exercise the input-validation matrix and the
+ * uncontended success paths, all of which are observable without
+ * spawning a fiber.
  */
 header('Content-Type: text/plain');
 
 $m = new OxPHP\Shared\Mutex(0);
 
-// 0.0 = try → with on contended mutex throws TimeoutException without blocking.
-$holder = oxphp_async(function () use ($m) {
-    $m->with(function (&$s) { sleep(2); }, null);
-});
-usleep(100_000);
+// null = forever — bare with($fn) succeeds and returns body's value.
+$got = $m->with(fn(&$s) => 42);
+if ($got !== 42) { echo "FAIL: with(\$fn) (null) must return body value, got " . var_export($got, true) . "\n"; exit; }
 
-$start = microtime(true);
-$threw = false;
+// 0.0 = try — uncontended acquisition succeeds.
+$got = $m->with(fn(&$s) => 'try-ok', 0.0);
+if ($got !== 'try-ok') { echo "FAIL: with(\$fn, 0.0) uncontended must succeed, got " . var_export($got, true) . "\n"; exit; }
+
+// positive = bounded — uncontended acquisition succeeds within budget.
+$got = $m->with(fn(&$s) => 'bounded-ok', 1.0);
+if ($got !== 'bounded-ok') { echo "FAIL: with(\$fn, 1.0) uncontended must succeed, got " . var_export($got, true) . "\n"; exit; }
+
+// INF = forever — uncontended acquisition succeeds.
+$got = $m->with(fn(&$s) => 'inf-ok', INF);
+if ($got !== 'inf-ok') { echo "FAIL: with(\$fn, INF) uncontended must succeed, got " . var_export($got, true) . "\n"; exit; }
+
+// NaN → TypeException.
+$caught = null;
 try {
-    $m->with(fn(&$s) => 1, 0.0);
-} catch (OxPHP\Shared\TimeoutException $e) {
-    $threw = true;
+    $m->with(fn(&$s) => 1, NAN);
+} catch (OxPHP\Shared\TypeException $e) {
+    $caught = $e;
 }
-$elapsed = microtime(true) - $start;
-if (!$threw) { echo "FAIL: with(0.0) on contended must throw TimeoutException\n"; exit; }
-if ($elapsed >= 0.05) { echo "FAIL: with(0.0) must be immediate, elapsed=$elapsed\n"; exit; }
+if ($caught === null) { echo "FAIL: with(\$fn, NaN) must throw TypeException\n"; exit; }
 
-oxphp_async_await($holder);
-
-// NaN, negative → TypeException.
-foreach ([NAN, -0.5] as $bad) {
-    $caught = null;
-    try {
-        $m->with(fn(&$s) => 1, $bad);
-    } catch (OxPHP\Shared\TypeException $e) {
-        $caught = $e;
-    }
-    if ($caught === null) { echo "FAIL: with(" . var_export($bad, true) . ") must throw TypeException\n"; exit; }
+// Negative → TypeException.
+$caught = null;
+try {
+    $m->with(fn(&$s) => 1, -0.5);
+} catch (OxPHP\Shared\TypeException $e) {
+    $caught = $e;
 }
+if ($caught === null) { echo "FAIL: with(\$fn, -0.5) must throw TypeException\n"; exit; }
 
-// null = forever — short holder, ensure with() returns the body's value.
-$m2 = new OxPHP\Shared\Mutex(0);
-$short = oxphp_async(function () use ($m2) {
-    $m2->with(function (&$s) { usleep(50_000); $s = 7; }, null);
-});
-$result = $m2->with(fn(&$s) => $s + 1, null);
-if ($result !== 8) { echo "FAIL: with(null) wait-then-read got " . var_export($result, true) . "\n"; exit; }
-oxphp_async_await($short);
+// State persistence — bare with mutates the stored value.
+$m->with(function (&$s) { $s = 7; });
+$snapshot = $m->with(fn(&$s) => $s);
+if ($snapshot !== 7) { echo "FAIL: stored mutation lost, got " . var_export($snapshot, true) . "\n"; exit; }
 
 echo "OK\n";
