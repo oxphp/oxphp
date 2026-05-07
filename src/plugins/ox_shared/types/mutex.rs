@@ -204,8 +204,11 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
 
         let acquired = match parse_timeout(timeout_ms) {
             Wait::Forever => {
-                // Block until acquired or poisoned. Poll with a 100ms quantum
-                // so poison + holder bookkeeping still progresses.
+                // Block until acquired, poisoned, or cycle-broken. Poll with a
+                // 100ms quantum so poison + cycle-break signals can progress.
+                // The `waiter` guard is held alive across iterations — its Drop
+                // only fires on early-return error paths or when promoted via
+                // `promote_to_holder` after acquisition.
                 loop {
                     if let Some(g) = inner.state.try_lock_for(Duration::from_millis(100)) {
                         break Some(g);
@@ -214,6 +217,13 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                         set_last_error("Mutex::with: poisoned during wait");
                         drop(waiter);
                         return Err(SharedError::Poisoned);
+                    }
+                    // Mirror the bounded path's None-branch cycle detection: a
+                    // break signal targeted at this thread must abort the wait.
+                    if crate::plugins::ox_shared::deadlock::consume_break_signal().is_some() {
+                        set_last_error("Mutex::with: wait-for cycle detected during forever wait");
+                        drop(waiter);
+                        return Err(SharedError::Deadlock);
                     }
                 }
             }
