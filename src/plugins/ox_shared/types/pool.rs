@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 
 use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType};
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 
 /// Stable per-thread identifier used as the idle-deque key and as the
@@ -1466,15 +1466,10 @@ fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .optional_param("destroy", PhpType::Callable, PhpValue::Null)
         .optional_param("maxSize", PhpType::Int, PhpValue::Int(32))
         .optional_param("idleTimeout", PhpType::Float, PhpValue::Float(300.0))
-        .optional_param(
-            "defaultAcquireTimeout",
-            PhpType::Float,
-            PhpValue::Float(5.0),
-        )
         .handler(pool_construct)
-        // acquire(float $timeout = 0.0): Shared\Pool\Handle
+        // acquire(?float $timeout = null): Shared\Pool\Handle
         .method("acquire")
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Object)
         .handler(pool_acquire)
         // release(Shared\Pool\Handle $handle): void
@@ -1482,10 +1477,10 @@ fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .param("handle", PhpType::Object)
         .returns(PhpType::Void)
         .handler(pool_release)
-        // with(callable $body, float $timeout = 0.0): mixed
+        // with(callable $body, ?float $timeout = null): mixed
         .method("with")
         .param("body", PhpType::Callable)
-        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
         .handler(pool_with)
         // evict(): int — v1 stub returning 0
@@ -1595,12 +1590,7 @@ fn pool_get_id(call: &NativeCall) -> Result<u64, PhpError> {
 
 fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
     let id = pool_get_id(call)?;
-    let timeout_ms: i64 = if call.argc() > 0 {
-        let s = call.arg_double(0).unwrap_or(0.0);
-        (s * 1000.0).round() as i64
-    } else {
-        0
-    };
+    let timeout_ms: i64 = read_timeout_arg(call, 0)?;
 
     let mut slot_heap: *mut c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
@@ -1676,12 +1666,7 @@ fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
 fn pool_with(call: &mut NativeCall) -> Result<(), PhpError> {
     let id = pool_get_id(call)?;
     let body_zv = unsafe { call.raw_arg_ptr(0) };
-    let timeout_ms: i64 = if call.argc() > 1 {
-        let s = call.arg_double(1).unwrap_or(0.0);
-        (s * 1000.0).round() as i64
-    } else {
-        0
-    };
+    let timeout_ms: i64 = read_timeout_arg(call, 1)?;
     let rc = unsafe { oxphp_shared_pool_with(id, timeout_ms, body_zv, call.retval_ptr()) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::with"));
