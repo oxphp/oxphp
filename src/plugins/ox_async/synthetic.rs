@@ -125,7 +125,7 @@ pub fn cancel(id: i64) -> bool {
 ///
 /// - `Value(bytes)` → `{ success: true, serialized_value: malloc-copy of bytes }`
 /// - `Exception(fqn, msg)` → `{ success: false, exception_class: fqn, exception_message: msg }`
-/// - `Cancelled` → `{ success: false, exception_class: "OxPHP\\Async\\Exception", exception_message: "cancelled" }`
+/// - `Cancelled` → `{ success: false, exception_class: "OxPHP\\Async\\AsyncException", exception_message: "cancelled" }`
 fn payload_to_result(payload: PromisePayload) -> AsyncResult {
     match payload {
         PromisePayload::Value(bytes) => {
@@ -148,7 +148,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                         success: false,
                         serialized_value: std::ptr::null_mut(),
                         serialized_value_len: 0,
-                        exception_class: Some("OxPHP\\Async\\Exception".to_string()),
+                        exception_class: Some("OxPHP\\Async\\AsyncException".to_string()),
                         exception_message: Some(
                             "synthetic promise: failed to allocate result buffer".to_string(),
                         ),
@@ -180,7 +180,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
             success: false,
             serialized_value: std::ptr::null_mut(),
             serialized_value_len: 0,
-            exception_class: Some("OxPHP\\Async\\Exception".to_string()),
+            exception_class: Some("OxPHP\\Async\\AsyncException".to_string()),
             exception_message: Some("synthetic promise cancelled".to_string()),
             exception_trace: None,
         },
@@ -311,7 +311,7 @@ mod tests {
         assert!(!result.success);
         assert_eq!(
             result.exception_class.as_deref(),
-            Some("OxPHP\\Async\\Exception")
+            Some("OxPHP\\Async\\AsyncException")
         );
         assert_eq!(
             result.exception_message.as_deref(),
