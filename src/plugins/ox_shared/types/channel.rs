@@ -1495,9 +1495,9 @@ unsafe fn recv_fiber_register_shim(_id: u64, _timeout_ms: u64, _out: *mut i64) -
 ///
 /// Exposed PHP surface:
 ///   __construct(int $capacity)
-///   send(mixed $value, float $timeout = 0.0): void   [fiber-aware]
+///   send(mixed $value, ?float $timeout = null): void  [fiber-aware]
 ///   trySend(mixed $value): bool
-///   recv(float $timeout = 0.0): mixed                [fiber-aware]
+///   recv(?float $timeout = null): mixed               [fiber-aware]
 ///   tryRecv(): mixed
 ///   close(): void
 ///   isClosed(): bool
@@ -1629,8 +1629,11 @@ pub fn register_class(
                 //   - Cancelled    → Async\Exception               (fiber_rc == -1)
                 //   - Closed       → ClosedException propagated    (fiber_rc == -1)
                 let deadline = match parse_timeout(timeout_ms) {
-                    Wait::Forever | Wait::Try => None,
+                    Wait::Forever => None,
                     Wait::Bounded(d) => Some(std::time::Instant::now() + d),
+                    // Wait::Try is bailed inside the loop after the first try_send;
+                    // it never reaches deadline consumption.
+                    Wait::Try => unreachable!("Wait::Try is bailed in the loop body"),
                 };
 
                 loop {
