@@ -1518,7 +1518,7 @@ pub fn register_class(
         .magic(MagicMethod::Clone)
         .handler(|_call| {
             Err(PhpError::Exception {
-                class: "OxPHP\\Shared\\Exception".into(),
+                class: "OxPHP\\Shared\\SharedException".into(),
                 message: "Shared instances cannot be cloned. Use cross-thread \
                           transfer via oxphp_async(fn() use (\\$this) {...})."
                     .into(),
@@ -1725,7 +1725,7 @@ pub fn register_class(
                             } else {
                                 let cls =
                                     unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                                cls == "OxPHP\\Async\\Exception"
+                                cls == "OxPHP\\Async\\AsyncException"
                             };
                             if is_async_cancel {
                                 // Cancelled (timeout or close-side cancel).
@@ -1973,7 +1973,7 @@ pub fn register_class(
                         } else {
                             let cls =
                                 unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                            cls == "OxPHP\\Async\\Exception"
+                            cls == "OxPHP\\Async\\AsyncException"
                         };
                         if is_async_cancel {
                             unsafe { bridge_ffi::oxphp_exception_clear() };
@@ -2303,7 +2303,7 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\TimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
-        _ => "OxPHP\\Shared\\Exception",
+        _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
         class: class.to_string(),
@@ -2644,7 +2644,7 @@ mod tests {
         assert!(!got.success);
         assert_eq!(
             got.exception_class.as_deref(),
-            Some("OxPHP\\Async\\Exception")
+            Some("OxPHP\\Async\\AsyncException")
         );
     }
 
@@ -2659,7 +2659,7 @@ mod tests {
         assert!(!got.success);
         assert_eq!(
             got.exception_class.as_deref(),
-            Some("OxPHP\\Async\\Exception")
+            Some("OxPHP\\Async\\AsyncException")
         );
     }
 
@@ -2740,7 +2740,7 @@ mod tests {
             assert!(!got.success);
             assert_eq!(
                 got.exception_class.as_deref(),
-                Some("OxPHP\\Async\\Exception")
+                Some("OxPHP\\Async\\AsyncException")
             );
         }
     }
