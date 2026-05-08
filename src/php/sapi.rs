@@ -2412,6 +2412,17 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     // Store request start time for duration histogram
     WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
 
+    // Sub-design A: hand the cancel-reason pointer to the bridge so the
+    // Zend interrupt handler can read it between opcodes.
+    unsafe {
+        let p = if req.script.cancel_ptr == 0 {
+            std::ptr::null()
+        } else {
+            req.script.cancel_ptr as *const std::sync::atomic::AtomicU8
+        };
+        bindings::oxphp_bridge_set_cancel_ptr(p);
+    }
+
     // Sub-design A: one-shot capture of &EG(vm_interrupt) on the worker
     // thread + publish into WORKERS[id].interrupt_flag_ptr so other
     // threads can raise the flag for cross-thread cancellation.
