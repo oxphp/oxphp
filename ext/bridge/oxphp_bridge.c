@@ -1770,7 +1770,6 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.request_id[0] = '\0';
     ctx.request_time = 0.0;
     ctx.deadline_us = 0;
-    ctx.cancelled = false;
     ctx.cancel_ptr = NULL;
     ctx.write_count = 0;
     ctx.stream_mode = false;
@@ -1858,35 +1857,6 @@ void oxphp_bridge_request_interrupt(void) {
     if (ctx.vm_interrupt_addr) {
         __atomic_store_n((volatile uint8_t*)ctx.vm_interrupt_addr, 1, __ATOMIC_RELAXED);
     }
-}
-
-void oxphp_bridge_set_cancelled(bool cancelled) {
-    ctx.cancelled = cancelled;
-    /* Migration mirror: keep the new reason byte in sync with the
-     * legacy bool. The only legacy caller path is CLIENT_ABORT. */
-    if (ctx.cancel_ptr) {
-        if (cancelled) {
-            uint8_t expected = OXPHP_CANCEL_NONE;
-            atomic_compare_exchange_strong_explicit(
-                ctx.cancel_ptr, &expected,
-                (uint8_t)OXPHP_CANCEL_CLIENT_ABORT,
-                memory_order_relaxed, memory_order_relaxed);
-        } else {
-            atomic_store_explicit(ctx.cancel_ptr, OXPHP_CANCEL_NONE, memory_order_relaxed);
-        }
-    }
-}
-
-bool oxphp_bridge_is_cancelled(void) {
-    if (ctx.cancel_ptr) {
-        uint8_t v = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
-        return v != OXPHP_CANCEL_NONE;
-    }
-    return ctx.cancelled;
-}
-
-void oxphp_bridge_mark_connection_aborted(void) {
-    PG(connection_status) |= PHP_CONNECTION_ABORTED;
 }
 
 void oxphp_bridge_schedule_exit(void) {
@@ -2191,12 +2161,8 @@ void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_f
  * Called from C — longjmp stays within C frames, never crosses Rust FFI.
  */
 static inline void check_deadline_c(void) {
-    bool cancelled;
-    if (ctx.cancel_ptr) {
-        cancelled = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
-    } else {
-        cancelled = ctx.cancelled;
-    }
+    bool cancelled = ctx.cancel_ptr &&
+        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
     if (cancelled) {
         zend_bailout();
     }
@@ -2215,12 +2181,8 @@ static inline void check_deadline_c(void) {
  * Used on ub_write hot path between periodic full checks.
  */
 static inline void check_cancelled_c(void) {
-    bool cancelled;
-    if (ctx.cancel_ptr) {
-        cancelled = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
-    } else {
-        cancelled = ctx.cancelled;
-    }
+    bool cancelled = ctx.cancel_ptr &&
+        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
     if (cancelled) {
         zend_bailout();
     }

@@ -3,7 +3,6 @@
 //! threads can interrupt it. Each request stores a Weak back-ref
 //! to its CancellationState so cross-thread cancellation can
 //! find the right worker.
-#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock, Weak};

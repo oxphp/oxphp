@@ -1,7 +1,5 @@
 //! Per-request cancellation state shared between the tokio dispatch
-//! task and the worker thread. See spec under
-//! docs/superpowers/specs/.
-#![allow(dead_code)]
+//! task and the worker thread.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 

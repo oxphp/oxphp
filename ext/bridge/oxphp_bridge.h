@@ -56,8 +56,6 @@ typedef struct {
     /** ub_write call counter for periodic deadline checks. */
     uint32_t write_count;
 
-    /** Whether cancellation has been requested (client disconnected). */
-    bool cancelled;                  /* legacy — derived view; removed in Task A11 */
     _Atomic(uint8_t)* cancel_ptr;    /* into Arc<CancellationState>; NULL outside request */
     void* vm_interrupt_addr;         /* &EG(vm_interrupt); NULL until first php_request_startup */
 
@@ -950,7 +948,7 @@ bool oxphp_bridge_is_worker_mode(void);
 
 /**
  * Reset per-request TLS fields between worker mode requests.
- * Clears: request_id, request_time, deadline, cancelled, write_count,
+ * Clears: request_id, request_time, deadline, cancel_ptr, write_count,
  *         stream_mode, headers_sent, finished.
  * Increments: requests_done.
  */
@@ -1017,18 +1015,6 @@ void oxphp_capture_vm_interrupt(void);
  * registered zend_interrupt_function. Used from the worker thread
  * itself (e.g. streaming send-error). */
 void oxphp_bridge_request_interrupt(void);
-
-/** Set the cancellation flag (called from Rust when client disconnects). */
-void oxphp_bridge_set_cancelled(bool cancelled);
-
-/** Check if cancellation was requested. */
-bool oxphp_bridge_is_cancelled(void);
-
-/** Mark PG(connection_status) with PHP_CONNECTION_ABORTED so that PHP's
- *  connection_aborted() returns true. Called from Rust when the client
- *  closes the connection mid-request (early-response oneshot or streaming
- *  channel dropped). */
-void oxphp_bridge_mark_connection_aborted(void);
 
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
