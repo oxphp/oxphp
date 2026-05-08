@@ -61,6 +61,7 @@ mod tests {
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/html")),
             timeout_us: 0,
+            cancel_ptr: 0,
             trace_id: String::new(),
             span_id: String::new(),
             parent_span_id: String::new(),
