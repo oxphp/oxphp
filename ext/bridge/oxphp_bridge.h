@@ -1008,6 +1008,11 @@ void* oxphp_bridge_vm_interrupt_addr(void);
 /* Set by the SAPI module right after capturing &EG(vm_interrupt). */
 void oxphp_bridge_set_vm_interrupt_addr(void* addr);
 
+/* Sub-design A: capture &EG(vm_interrupt) from the current thread's
+ * Zend executor globals and store it in the bridge ctx. Must be called
+ * from a thread where TSRM is initialised (i.e. after ts_resource_ex). */
+void oxphp_capture_vm_interrupt(void);
+
 /* In-thread helper: request the next opcode boundary to call our
  * registered zend_interrupt_function. Used from the worker thread
  * itself (e.g. streaming send-error). */

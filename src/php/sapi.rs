@@ -60,6 +60,8 @@ thread_local! {
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Sub-design A: whether &EG(vm_interrupt) has been captured for this worker thread.
+    static VM_INTERRUPT_CAPTURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Pending request from non-blocking try_recv, awaiting prepare_received_request().
     static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
     /// Worker mode: whether the current request started with profiling enabled
@@ -2409,6 +2411,26 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
 
     // Store request start time for duration histogram
     WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
+    // Sub-design A: one-shot capture of &EG(vm_interrupt) on the worker
+    // thread + publish into WORKERS[id].interrupt_flag_ptr so other
+    // threads can raise the flag for cross-thread cancellation.
+    VM_INTERRUPT_CAPTURED.with(|c| {
+        if !c.get() {
+            unsafe {
+                bindings::oxphp_capture_vm_interrupt();
+            }
+            let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
+            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+                if let Some(slot) = workers.get(id) {
+                    let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
+                    slot.interrupt_flag_ptr
+                        .store(addr, std::sync::atomic::Ordering::Release);
+                }
+            }
+            c.set(true);
+        }
+    });
 
     // Increment soft_resets counter
     WORKER_METRICS_TLS.with(|slot| {

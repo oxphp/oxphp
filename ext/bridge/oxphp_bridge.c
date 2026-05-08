@@ -2017,6 +2017,13 @@ int oxphp_exception_pending(void) {
     return EG(exception) != NULL ? 1 : 0;
 }
 
+/* Sub-design A: capture &EG(vm_interrupt) for this worker thread.
+ * The address is stable for the thread's lifetime once TSRM is
+ * initialised. Subsequent calls re-store the same pointer (no-op). */
+void oxphp_capture_vm_interrupt(void) {
+    oxphp_bridge_set_vm_interrupt_addr((void*)&EG(vm_interrupt));
+}
+
 /* Thread-local buffers for exception class name (avoids allocation) */
 static __thread char exc_class_buf[256];
 static __thread char exc_message_buf[4096];

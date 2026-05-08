@@ -984,3 +984,11 @@ pub unsafe extern "C" fn oxphp_bridge_set_vm_interrupt_addr(_addr: *mut std::os:
 pub unsafe extern "C" fn oxphp_bridge_request_interrupt() {
     MOCK_VM_INTERRUPT.store(1, Ordering::Relaxed);
 }
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_capture_vm_interrupt() {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int {
+    0
+}
