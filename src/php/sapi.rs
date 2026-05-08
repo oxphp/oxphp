@@ -406,10 +406,11 @@ fn flush_stream_chunk() {
                 // Err means the receiver was dropped — client gone.
                 if tx.blocking_send(chunk).is_err() {
                     unsafe {
-                        if !bindings::oxphp_bridge_is_cancelled() {
+                        if bindings::oxphp_bridge_get_cancel_reason() == 0 {
                             tracing::warn!("Stream client disconnected during flush");
-                            bindings::oxphp_bridge_set_cancelled(true);
-                            bindings::oxphp_bridge_mark_connection_aborted();
+                            let _ =
+                                bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+                            bindings::oxphp_bridge_request_interrupt();
                         }
                     }
                 }
@@ -1048,16 +1049,16 @@ unsafe extern "C" fn oxphp_deactivate() -> c_int {
 ///   pre-stream and non-streaming requests).
 /// - `STREAM_TX`: present after streaming starts (covers SSE / chunked output).
 unsafe fn check_client_disconnected() {
-    if bindings::oxphp_bridge_is_cancelled() {
-        return; // already flagged, don't log again
+    if bindings::oxphp_bridge_get_cancel_reason() != 0 {
+        return;
     }
     let disconnected = EARLY_TX
         .with(|slot| slot.borrow().as_ref().is_some_and(|(_, tx)| tx.is_closed()))
         || STREAM_TX.with(|slot| slot.borrow().as_ref().is_some_and(|tx| tx.is_closed()));
     if disconnected {
         tracing::warn!("Client disconnected, requesting PHP cancellation");
-        bindings::oxphp_bridge_set_cancelled(true);
-        bindings::oxphp_bridge_mark_connection_aborted();
+        let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+        bindings::oxphp_bridge_request_interrupt();
     }
 }
 
