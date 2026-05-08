@@ -119,7 +119,7 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 - **`oxphp_async()` / `oxphp_async_await()`** — dispatch closures to a dedicated thread pool for true parallel execution
 - **Portable serialization** for `use` variables, arguments, and return values — safe cross-thread binary transfer
 - Supported types: scalars, strings, arrays (nested). Resources and objects rejected with `E_WARNING`
-- **Exception & die() safety** — exceptions, `die()`, and `exit()` are caught and re-thrown as `OxPHP\Async\Exception`
+- **Exception & die() safety** — exceptions, `die()`, and `exit()` are caught and re-thrown as `OxPHP\Async\AsyncException`
 - **Timeout support** — per-task timeouts with `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — batch and race primitives
 

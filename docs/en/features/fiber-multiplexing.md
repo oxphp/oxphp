@@ -165,7 +165,7 @@ $users = oxphp_async_await($promise);
 
 > **Note:** Database connections cannot be passed to `oxphp_async()` because objects are not serializable across threads. Create the connection inside the async closure, or use the direct query in the fiber if the query is fast enough that blocking is acceptable.
 
-> **Important:** `oxphp_async()` requires `ASYNC_WORKERS > 0`. When the async pool is disabled (the default), calling `oxphp_async()` throws `OxPHP\Async\Exception`.
+> **Important:** `oxphp_async()` requires `ASYNC_WORKERS > 0`. When the async pool is disabled (the default), calling `oxphp_async()` throws `OxPHP\Async\AsyncException`.
 
 ## How Fibers Are Recycled
 
@@ -207,7 +207,7 @@ $result = oxphp_async_await($promise);
 
 ### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-The async pool is not configured. When `ASYNC_WORKERS=0` (the default), all async functions throw `OxPHP\Async\Exception`.
+The async pool is not configured. When `ASYNC_WORKERS=0` (the default), all async functions throw `OxPHP\Async\AsyncException`.
 
 **Fix:** Set `ASYNC_WORKERS` to a positive value:
 

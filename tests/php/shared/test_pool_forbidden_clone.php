@@ -15,20 +15,20 @@ $pool = new OxPHP\Shared\Pool(
 $threwPool = false;
 try {
     $clone = clone $pool;
-} catch (\OxPHP\Shared\Exception $e) {
+} catch (\OxPHP\Shared\SharedException $e) {
     $threwPool = true;
 }
-if (!$threwPool) { echo "FAIL: clone Pool must throw Shared\\Exception\n"; exit; }
+if (!$threwPool) { echo "FAIL: clone Pool must throw Shared\\SharedException\n"; exit; }
 
 $h = $pool->acquire();
 
 $threwHandle = false;
 try {
     $clone = clone $h;
-} catch (\OxPHP\Shared\Exception $e) {
+} catch (\OxPHP\Shared\SharedException $e) {
     $threwHandle = true;
 }
-if (!$threwHandle) { echo "FAIL: clone Handle must throw Shared\\Exception\n"; exit; }
+if (!$threwHandle) { echo "FAIL: clone Handle must throw Shared\\SharedException\n"; exit; }
 
 $pool->release($h);
 

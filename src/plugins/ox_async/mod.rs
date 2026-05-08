@@ -71,14 +71,14 @@ impl Plugin for AsyncPlugin {
 
         // ── Exception classes (always registered) ─────────────────────────
 
-        // OxPHP\Async\Exception extends \Exception
-        ctx.register_class("OxPHP\\Async\\Exception")
+        // OxPHP\Async\AsyncException extends \Exception
+        ctx.register_class("OxPHP\\Async\\AsyncException")
             .extends("Exception")
             .build()?;
 
-        // OxPHP\Async\TimeoutException extends OxPHP\Async\Exception
+        // OxPHP\Async\TimeoutException extends OxPHP\Async\AsyncException
         ctx.register_class("OxPHP\\Async\\TimeoutException")
-            .extends("OxPHP\\Async\\Exception")
+            .extends("OxPHP\\Async\\AsyncException")
             .build()?;
 
         // OxPHP\Async\BorrowException extends \Exception
@@ -302,11 +302,11 @@ mod tests {
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
 
-        // Should register 4 classes: Exception, TimeoutException, BorrowException, BorrowedProxy
+        // Should register 4 classes: AsyncException, TimeoutException, BorrowException, BorrowedProxy
         assert_eq!(php_classes.len(), 4);
 
         let fqns: Vec<&str> = php_classes.iter().map(|c| c.fqn.as_str()).collect();
-        assert!(fqns.contains(&"OxPHP\\Async\\Exception"));
+        assert!(fqns.contains(&"OxPHP\\Async\\AsyncException"));
         assert!(fqns.contains(&"OxPHP\\Async\\TimeoutException"));
         assert!(fqns.contains(&"OxPHP\\Async\\BorrowException"));
         assert!(fqns.contains(&"OxPHP\\Async\\BorrowedProxy"));

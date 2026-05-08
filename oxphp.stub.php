@@ -298,7 +298,7 @@ function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
  * @param float|null $timeout Maximum seconds to wait, null = wait indefinitely
  * @return mixed The return value of the closure
  *
- * @throws \OxPHP\Async\Exception If the closure threw an exception or called die()/exit()
+ * @throws \OxPHP\Async\AsyncException If the closure threw an exception or called die()/exit()
  * @throws \OxPHP\Async\TimeoutException If the timeout expired before completion
  *
  * @example
@@ -324,7 +324,7 @@ function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
  * @param float|null $timeout Per-promise timeout in seconds, null = no limit
  * @return array<int, mixed> Map of promise ID => result value
  *
- * @throws \OxPHP\Async\Exception If any promise fails
+ * @throws \OxPHP\Async\AsyncException If any promise fails
  * @throws \OxPHP\Async\TimeoutException If any promise times out
  *
  * @example
@@ -349,7 +349,7 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * @param float|null $timeout Overall timeout in seconds, null = no limit
  * @return array{id: int, value: mixed} The winning promise ID and its result
  *
- * @throws \OxPHP\Async\Exception If the winning promise threw an exception
+ * @throws \OxPHP\Async\AsyncException If the winning promise threw an exception
  * @throws \OxPHP\Async\TimeoutException If no promise completes within timeout
  *
  * @example
@@ -786,12 +786,12 @@ namespace OxPHP\Async {
      * The message contains the original exception class and message:
      * "Async task failed: [DomainException] invalid value"
      */
-    class Exception extends \Exception {}
+    class AsyncException extends \Exception {}
 
     /**
      * Thrown when oxphp_async_await() times out before the task completes.
      */
-    class TimeoutException extends Exception {}
+    class TimeoutException extends AsyncException {}
 
     /**
      * Thrown by every access to a BorrowedProxy — proxies substituted for
@@ -1390,7 +1390,7 @@ namespace OxPHP\Shared {
     // ── Exception hierarchy ─────────────────────────────────────
     //
     //   \Exception
-    //     └── OxPHP\Shared\Exception
+    //     └── OxPHP\Shared\SharedException
     //          ├── StaleHandleException
     //          ├── TypeException
     //          │    └── CycleException
@@ -1402,34 +1402,34 @@ namespace OxPHP\Shared {
     //          └── UninitializedException
 
     /** Base class for every Shared\* exception. */
-    class Exception extends \Exception {}
+    class SharedException extends \Exception {}
 
     /** Operation used a handle whose underlying entry was dropped. */
-    class StaleHandleException extends Exception {}
+    class StaleHandleException extends SharedException {}
 
     /** Value is not storable in the target Shared\* container. */
-    class TypeException extends Exception {}
+    class TypeException extends SharedException {}
 
     /** Map::set would form a cycle via nested Shareable references. */
     class CycleException extends TypeException {}
 
     /** Container is full and cannot accept a new entry. */
-    class CapacityException extends Exception {}
+    class CapacityException extends SharedException {}
 
     /** Channel was closed and cannot send / drained on recv. */
-    class ClosedException extends Exception {}
+    class ClosedException extends SharedException {}
 
     /** Mutex was poisoned by a previous callback throwing mid-update. */
-    class PoisonedException extends Exception {}
+    class PoisonedException extends SharedException {}
 
     /** Operation exceeded its wait budget. */
-    class TimeoutException extends Exception {}
+    class TimeoutException extends SharedException {}
 
     /** Reentrant / cross-thread wait would deadlock — extends TimeoutException. */
     class DeadlockException extends TimeoutException {}
 
     /** Access to a Once before it was initialised. */
-    class UninitializedException extends Exception {}
+    class UninitializedException extends SharedException {}
 }
 
 namespace OxPHP\Shared\Pool {
@@ -1449,7 +1449,7 @@ namespace OxPHP\Shared\Pool {
         /**
          * The pooled resource. Always call inside the acquiring thread.
          *
-         * @throws \OxPHP\Shared\Exception If the handle has already been released.
+         * @throws \OxPHP\Shared\SharedException If the handle has already been released.
          */
         public function get(): mixed {}
     }

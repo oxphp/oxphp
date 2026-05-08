@@ -14,12 +14,12 @@ $caught = false;
 $msg = '';
 try {
     oxphp_async_await($p);
-} catch (\OxPHP\Async\Exception $e) {
+} catch (\OxPHP\Async\AsyncException $e) {
     $caught = true;
     $msg = $e->getMessage();
 }
 
-$t->assertTrue('OxPHP\\Async\\Exception was thrown', $caught);
+$t->assertTrue('OxPHP\\Async\\AsyncException was thrown', $caught);
 $t->assertTrue(
     'message contains DomainException or inner',
     str_contains($msg, 'DomainException') || str_contains($msg, 'inner')

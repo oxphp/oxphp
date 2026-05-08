@@ -15,10 +15,10 @@ for ($round = 1; $round <= 3; $round++) {
     $dieThrew = false;
     try {
         oxphp_async_await($pd);
-    } catch (\OxPHP\Async\Exception $e) {
+    } catch (\OxPHP\Async\AsyncException $e) {
         $dieThrew = true;
     }
-    $t->assertTrue("round $round: die() threw OxPHP\\Async\\Exception", $dieThrew);
+    $t->assertTrue("round $round: die() threw OxPHP\\Async\\AsyncException", $dieThrew);
 
     // Pool should still work
     $pr = oxphp_async(fn() => $round * 10);

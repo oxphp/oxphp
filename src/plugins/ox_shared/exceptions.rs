@@ -5,7 +5,7 @@
 //! Hierarchy (10 classes: 1 base + 9 subclasses):
 //!
 //!   \Exception
-//!     └── OxPHP\Shared\Exception            (1)
+//!     └── OxPHP\Shared\SharedException      (1)
 //!          ├── StaleHandleException          (2)
 //!          ├── TypeException                 (3)
 //!          │    └── CycleException           (4)  Map::set would form a cycle
@@ -20,7 +20,7 @@ use crate::plugin::{PluginContext, PluginError};
 
 pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
     // Base.
-    ctx.register_class("OxPHP\\Shared\\Exception")
+    ctx.register_class("OxPHP\\Shared\\SharedException")
         .extends("Exception")
         .build()?;
 
@@ -35,7 +35,7 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         "OxPHP\\Shared\\UninitializedException",
     ] {
         ctx.register_class(child)
-            .extends("OxPHP\\Shared\\Exception")
+            .extends("OxPHP\\Shared\\SharedException")
             .build()?;
     }
 
@@ -114,7 +114,7 @@ mod tests {
         let classes = run_register();
         let base = classes
             .iter()
-            .find(|c| c.fqn == "OxPHP\\Shared\\Exception")
+            .find(|c| c.fqn == "OxPHP\\Shared\\SharedException")
             .unwrap();
         assert_eq!(base.parent.as_deref(), Some("Exception"));
     }

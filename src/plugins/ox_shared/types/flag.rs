@@ -217,7 +217,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .magic(MagicMethod::Clone)
         .handler(|_call| {
             Err(PhpError::Exception {
-                class: "OxPHP\\Shared\\Exception".to_string(),
+                class: "OxPHP\\Shared\\SharedException".to_string(),
                 message: "Shared instances cannot be cloned. Use cross-thread \
                           transfer via oxphp_async(fn() use ($this) {...}) for \
                           sharing, or explicitly create a new instance for an \
@@ -238,7 +238,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let rc = unsafe { oxphp_shared_flag_create(initial as c_int, &mut out_id) };
             if rc != 0 {
                 return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\Exception".to_string(),
+                    class: "OxPHP\\Shared\\SharedException".to_string(),
                     message: rc_to_phperr_msg(rc),
                     code: 0,
                 });

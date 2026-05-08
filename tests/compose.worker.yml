@@ -26,7 +26,7 @@ services:
       WORKER_FILE: /var/www/html/worker/worker_entry.php
       # shared/test_channel_fiber_producer_consumer + shutdown_drain dispatch
       # producers/consumers via oxphp_async(); without async workers the pool
-      # is disabled and they fatally throw OxPHP\Async\Exception.
+      # is disabled and they fatally throw OxPHP\Async\AsyncException.
       ASYNC_WORKERS: 4
     volumes:
       - ../www:/var/www/html

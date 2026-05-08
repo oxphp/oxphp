@@ -1518,7 +1518,7 @@ pub fn register_class(
         .magic(MagicMethod::Clone)
         .handler(|_call| {
             Err(PhpError::Exception {
-                class: "OxPHP\\Shared\\Exception".into(),
+                class: "OxPHP\\Shared\\SharedException".into(),
                 message: "Shared instances cannot be cloned. Use cross-thread \
                           transfer via oxphp_async(fn() use (\\$this) {...})."
                     .into(),
@@ -1626,7 +1626,7 @@ pub fn register_class(
                 // Fiber path: try_send → on full, register send-waiter and
                 // suspend via fiber_await. Waker resolves with:
                 //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
-                //   - Cancelled    → Async\Exception               (fiber_rc == -1)
+                //   - Cancelled    → Async\AsyncException          (fiber_rc == -1)
                 //   - Closed       → ClosedException propagated    (fiber_rc == -1)
                 let deadline = match parse_timeout(timeout_ms) {
                     Wait::Forever => None,
@@ -1725,7 +1725,7 @@ pub fn register_class(
                             } else {
                                 let cls =
                                     unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                                cls == "OxPHP\\Async\\Exception"
+                                cls == "OxPHP\\Async\\AsyncException"
                             };
                             if is_async_cancel {
                                 // Cancelled (timeout or close-side cancel).
@@ -1957,7 +1957,7 @@ pub fn register_class(
                     // 0 = waker resolved with Value → retval written by
                     // await_dispatch_callback. Done.
                     0 => Ok(()),
-                    // -1 = exception pending. Cancelled (Async\Exception)
+                    // -1 = exception pending. Cancelled (Async\AsyncException)
                     // translates to null per spec; other exceptions propagate.
                     -1 => {
                         let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
@@ -1973,7 +1973,7 @@ pub fn register_class(
                         } else {
                             let cls =
                                 unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                            cls == "OxPHP\\Async\\Exception"
+                            cls == "OxPHP\\Async\\AsyncException"
                         };
                         if is_async_cancel {
                             unsafe { bridge_ffi::oxphp_exception_clear() };
@@ -2303,7 +2303,7 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\TimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
-        _ => "OxPHP\\Shared\\Exception",
+        _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
         class: class.to_string(),
@@ -2644,7 +2644,7 @@ mod tests {
         assert!(!got.success);
         assert_eq!(
             got.exception_class.as_deref(),
-            Some("OxPHP\\Async\\Exception")
+            Some("OxPHP\\Async\\AsyncException")
         );
     }
 
@@ -2659,7 +2659,7 @@ mod tests {
         assert!(!got.success);
         assert_eq!(
             got.exception_class.as_deref(),
-            Some("OxPHP\\Async\\Exception")
+            Some("OxPHP\\Async\\AsyncException")
         );
     }
 
@@ -2740,7 +2740,7 @@ mod tests {
             assert!(!got.success);
             assert_eq!(
                 got.exception_class.as_deref(),
-                Some("OxPHP\\Async\\Exception")
+                Some("OxPHP\\Async\\AsyncException")
             );
         }
     }

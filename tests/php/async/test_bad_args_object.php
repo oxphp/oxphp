@@ -7,11 +7,11 @@ require __DIR__ . '/../test_helper.php';
 $t = new TestCase('bad_args_object', 'async');
 
 $t->assertThrows(
-    'object arg throws OxPHP\\Async\\Exception',
+    'object arg throws OxPHP\\Async\\AsyncException',
     function() {
         oxphp_async(fn($x) => $x, new \stdClass());
     },
-    \OxPHP\Async\Exception::class
+    \OxPHP\Async\AsyncException::class
 );
 
 $t->done();

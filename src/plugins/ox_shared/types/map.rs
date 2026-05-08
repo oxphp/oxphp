@@ -1617,7 +1617,7 @@ fn map_rc_to_result(rc: c_int) -> Result<(), PhpError> {
         -4 => "OxPHP\\Shared\\CapacityException",
         -9 => "OxPHP\\Shared\\CycleException",
         -10 => "OxPHP\\Shared\\UninitializedException",
-        _ => "OxPHP\\Shared\\Exception",
+        _ => "OxPHP\\Shared\\SharedException",
     };
     Err(PhpError::Exception {
         class: class.to_string(),
@@ -1690,7 +1690,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .magic(MagicMethod::Clone)
         .handler(|_call| {
             Err(PhpError::Exception {
-                class: "OxPHP\\Shared\\Exception".to_string(),
+                class: "OxPHP\\Shared\\SharedException".to_string(),
                 message: "Shared\\Map instances cannot be cloned. Pass via \
                           oxphp_async(fn() use ($map) {...}) for cross-thread \
                           access, or construct a new instance."

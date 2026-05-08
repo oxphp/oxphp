@@ -433,7 +433,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()`.
 
-**Выбрасывает:** `OxPHP\Async\Exception` в следующих случаях:
+**Выбрасывает:** `OxPHP\Async\AsyncException` в следующих случаях:
 - Асинхронный пул отключён (`ASYNC_WORKERS=0`)
 - Замыкание не является пользовательским (не определено пользователем)
 - Пул асинхронных воркеров переполнен
@@ -476,8 +476,8 @@ oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed
 **Возвращает:** Возвращаемое значение асинхронного замыкания.
 
 **Выбрасывает:**
-- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
-- `OxPHP\Async\Exception` если асинхронная задача выбросила исключение
+- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\AsyncException` если асинхронная задача выбросила исключение
 - `OxPHP\Async\TimeoutException` если превышен `$timeout`
 
 **Пример:**
@@ -516,8 +516,8 @@ oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array
 **Возвращает:** Ассоциативный массив, где каждый ключ — идентификатор промиса (целое число), а значение — результат этого промиса.
 
 **Выбрасывает:**
-- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
-- `OxPHP\Async\Exception` если какой-либо промис завершился с ошибкой
+- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\AsyncException` если какой-либо промис завершился с ошибкой
 - `OxPHP\Async\TimeoutException` если какой-либо промис превысил `$timeout`
 
 **Пример:**
@@ -556,8 +556,8 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value` (`mixed`) — Возвращаемое значение промиса-победителя
 
 **Выбрасывает:**
-- `OxPHP\Async\Exception` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
-- `OxPHP\Async\Exception` если промис-победитель завершился с ошибкой
+- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\AsyncException` если промис-победитель завершился с ошибкой
 - `OxPHP\Async\TimeoutException` если ни один промис не завершился в течение `$timeout`
 
 **Пример:**
@@ -905,8 +905,8 @@ oxphp_apm_end($spanId);
 
 | Исключение | Наследует | Когда выбрасывается |
 |------------|-----------|---------------------|
-| `OxPHP\Async\Exception` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\Exception` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
+| `OxPHP\Async\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
 | `OxPHP\Async\BorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` внутри колбэка `oxphp_async()` |
@@ -962,7 +962,7 @@ print_r($functions);
 
 ## Совместимость с PHP-FPM
 
-> **Примечание:** `function_exists('oxphp_async')` возвращает `true` даже при отключённом асинхронном пуле (`ASYNC_WORKERS=0`). Функция зарегистрирована всегда — она лишь выбрасывает `OxPHP\Async\Exception` при вызове. Для проверки доступности фонового выполнения используйте `oxphp_server_info()['async_workers'] > 0`, а не `function_exists()`.
+> **Примечание:** `function_exists('oxphp_async')` возвращает `true` даже при отключённом асинхронном пуле (`ASYNC_WORKERS=0`). Функция зарегистрирована всегда — она лишь выбрасывает `OxPHP\Async\AsyncException` при вызове. Для проверки доступности фонового выполнения используйте `oxphp_server_info()['async_workers'] > 0`, а не `function_exists()`.
 
 Если ваш код должен работать как в OxPHP, так и в PHP-FPM, используйте обёртки с откатом:
 

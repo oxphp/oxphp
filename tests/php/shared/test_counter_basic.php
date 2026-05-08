@@ -26,9 +26,9 @@ if (!is_int($c->id()) || $c->id() < 1) { echo "FAIL: id\n"; exit; }
 $threw = false;
 try {
     $bad = clone $c;
-} catch (\OxPHP\Shared\Exception $e) {
+} catch (\OxPHP\Shared\SharedException $e) {
     $threw = true;
 }
-if (!$threw) { echo "FAIL: clone must throw Shared\\Exception\n"; exit; }
+if (!$threw) { echo "FAIL: clone must throw Shared\\SharedException\n"; exit; }
 
 echo "OK\n";

@@ -18,7 +18,7 @@ $ch = new OxPHP\Shared\Channel(1);
 $threw_at_clone = false;
 try {
     $copy = clone $ch;
-} catch (OxPHP\Shared\Exception $e) {
+} catch (OxPHP\Shared\SharedException $e) {
     $threw_at_clone = true;
 }
 
