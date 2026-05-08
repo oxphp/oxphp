@@ -195,6 +195,14 @@ extern "C" {
     pub fn oxphp_bridge_is_cancelled() -> bool;
     pub fn oxphp_bridge_mark_connection_aborted();
 
+    // ── Sub-design A: cancellation reason API ──
+    pub fn oxphp_bridge_set_cancel_ptr(ptr: *const std::sync::atomic::AtomicU8);
+    pub fn oxphp_bridge_get_cancel_reason() -> u8;
+    pub fn oxphp_bridge_set_cancel_reason(reason: u8) -> bool;
+    pub fn oxphp_bridge_vm_interrupt_addr() -> *mut u8;
+    pub fn oxphp_bridge_set_vm_interrupt_addr(addr: *mut std::os::raw::c_void);
+    pub fn oxphp_bridge_request_interrupt();
+
     // ─── Profiler observer ──────────────
     // Defined in ext/bridge/oxphp_bridge.c. Safe Rust wrappers
     // live in src/profiling/flush.rs.

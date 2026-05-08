@@ -612,6 +612,14 @@ extern "C" {
         code_out: *mut i64,
     );
     pub fn oxphp_exception_clear();
+
+    // ── Sub-design A: cancellation reason API ──
+    pub fn oxphp_bridge_set_cancel_ptr(ptr: *const std::sync::atomic::AtomicU8);
+    pub fn oxphp_bridge_get_cancel_reason() -> u8;
+    pub fn oxphp_bridge_set_cancel_reason(reason: u8) -> bool;
+    pub fn oxphp_bridge_vm_interrupt_addr() -> *mut u8;
+    pub fn oxphp_bridge_set_vm_interrupt_addr(addr: *mut std::os::raw::c_void);
+    pub fn oxphp_bridge_request_interrupt();
 }
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;

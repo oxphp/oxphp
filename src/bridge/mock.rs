@@ -938,3 +938,49 @@ mod worker_class_mock_tests {
         assert!(unsafe { oxphp_bridge_get_rss_bytes() } > 0);
     }
 }
+
+// ── Sub-design A: cancellation reason API (mock) ──
+
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+
+static MOCK_CANCEL_PTR: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
+static MOCK_VM_INTERRUPT: AtomicU8 = AtomicU8::new(0);
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_cancel_ptr(ptr: *const AtomicU8) {
+    MOCK_CANCEL_PTR.store(ptr as *mut AtomicU8, Ordering::Relaxed);
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_get_cancel_reason() -> u8 {
+    let p = MOCK_CANCEL_PTR.load(Ordering::Relaxed);
+    if p.is_null() {
+        0
+    } else {
+        (*p).load(Ordering::Relaxed)
+    }
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_cancel_reason(reason: u8) -> bool {
+    let p = MOCK_CANCEL_PTR.load(Ordering::Relaxed);
+    if p.is_null() || reason == 0 {
+        return false;
+    }
+    let expected = 0u8;
+    (*p).compare_exchange(expected, reason, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_vm_interrupt_addr() -> *mut u8 {
+    &MOCK_VM_INTERRUPT as *const _ as *mut u8
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_vm_interrupt_addr(_addr: *mut std::os::raw::c_void) {}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_request_interrupt() {
+    MOCK_VM_INTERRUPT.store(1, Ordering::Relaxed);
+}
