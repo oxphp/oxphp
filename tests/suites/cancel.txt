@@ -1,0 +1,13 @@
+# profile: default
+# description: Request cancellation infrastructure
+
+# Step 1: trigger — runner-side. curl disconnects after 0.7s while PHP is
+# sleeping inside the streaming response. The server's interrupt/bailout path
+# should fire the registered shutdown function, writing the marker file.
+# Expected status 0 because curl exits with a timeout error before the server
+# sends a response status line.
+cancel/test_streaming_bailout_runs_shutdown_handlers >> ?action=trigger | GET | --max-time 0.7 -o /dev/null | 0
+
+# Step 2: check — PHP-side TestCase assertion that the shutdown function ran
+# and wrote the marker file. Runs after step 1 (file order is preserved).
+cancel/test_streaming_bailout_runs_shutdown_handlers >> ?action=check
