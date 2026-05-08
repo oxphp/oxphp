@@ -5,6 +5,7 @@ pub mod ffi;
 pub mod mock;
 
 pub mod call;
+pub mod cancel;
 pub mod storage;
 pub mod types;
 
