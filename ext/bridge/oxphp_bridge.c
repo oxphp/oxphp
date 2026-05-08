@@ -1856,7 +1856,7 @@ void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
 
 void oxphp_bridge_request_interrupt(void) {
     if (ctx.vm_interrupt_addr) {
-        *(uint8_t*)ctx.vm_interrupt_addr = 1;
+        __atomic_store_n((volatile uint8_t*)ctx.vm_interrupt_addr, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -2184,7 +2184,13 @@ void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_f
  * Called from C — longjmp stays within C frames, never crosses Rust FFI.
  */
 static inline void check_deadline_c(void) {
-    if (ctx.cancelled) {
+    bool cancelled;
+    if (ctx.cancel_ptr) {
+        cancelled = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
+    } else {
+        cancelled = ctx.cancelled;
+    }
+    if (cancelled) {
         zend_bailout();
     }
     if (ctx.deadline_us != 0) {
@@ -2202,7 +2208,13 @@ static inline void check_deadline_c(void) {
  * Used on ub_write hot path between periodic full checks.
  */
 static inline void check_cancelled_c(void) {
-    if (ctx.cancelled) {
+    bool cancelled;
+    if (ctx.cancel_ptr) {
+        cancelled = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
+    } else {
+        cancelled = ctx.cancelled;
+    }
+    if (cancelled) {
         zend_bailout();
     }
 }
