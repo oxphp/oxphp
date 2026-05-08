@@ -118,7 +118,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **`oxphp_async()` / `oxphp_async_await()`** — 将闭包分发到专用线程池进行真正的并行执行
 - **可移植序列化** — `use` 变量、参数和返回值安全跨线程二进制传输
 - 支持类型：标量、字符串、数组（嵌套）。资源和对象将被拒绝并触发 `E_WARNING`
-- **异常与 die() 安全** — 异常、`die()` 和 `exit()` 被捕获并重新抛出为 `OxPHP\Async\Exception`
+- **异常与 die() 安全** — 异常、`die()` 和 `exit()` 被捕获并重新抛出为 `OxPHP\Async\AsyncException`
 - **超时支持** — 每任务超时，抛出 `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — 批量等待和竞速原语
 

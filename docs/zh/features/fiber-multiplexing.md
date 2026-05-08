@@ -165,7 +165,7 @@ $users = oxphp_async_await($promise);
 
 > **注意：** 数据库连接不能传递给 `oxphp_async()`，因为对象无法跨线程序列化。请在异步闭包内部创建连接，或者如果查询足够快速以至于阻塞是可以接受的，则直接在 fiber 中使用查询。
 
-> **重要：** `oxphp_async()` 需要 `ASYNC_WORKERS > 0`。当异步池被禁用时（默认），调用 `oxphp_async()` 会抛出 `OxPHP\Async\Exception`。
+> **重要：** `oxphp_async()` 需要 `ASYNC_WORKERS > 0`。当异步池被禁用时（默认），调用 `oxphp_async()` 会抛出 `OxPHP\Async\AsyncException`。
 
 ## Fiber 的回收方式
 
@@ -207,7 +207,7 @@ $result = oxphp_async_await($promise);
 
 ### 使用 oxphp_async() 时出现"Async pool is disabled"
 
-异步池未配置。当 `ASYNC_WORKERS=0`（默认值）时，所有异步函数均会抛出 `OxPHP\Async\Exception`。
+异步池未配置。当 `ASYNC_WORKERS=0`（默认值）时，所有异步函数均会抛出 `OxPHP\Async\AsyncException`。
 
 **修复：** 将 `ASYNC_WORKERS` 设置为正整数：
 

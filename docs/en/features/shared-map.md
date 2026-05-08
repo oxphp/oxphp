@@ -194,7 +194,7 @@ Cap violations throw `CapacityException`. The message names the limit so operato
 
 ## Exceptions
 
-All methods that can fail throw subclasses of `OxPHP\Shared\Exception`:
+All methods that can fail throw subclasses of `OxPHP\Shared\SharedException`:
 
 | Exception              | Raised by                               |
 |------------------------|-----------------------------------------|

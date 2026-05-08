@@ -144,7 +144,7 @@ $promise = oxphp_async(fn() => file_get_contents('https://example.com'));
 $html = oxphp_async_await($promise);
 ```
 
-> **Важно:** `oxphp_async()` требует `ASYNC_WORKERS > 0`. Без включённого асинхронного пула вызов выбросит `OxPHP\Async\Exception`. Установите `ASYNC_WORKERS` в нужное значение перед использованием этого паттерна.
+> **Важно:** `oxphp_async()` требует `ASYNC_WORKERS > 0`. Без включённого асинхронного пула вызов выбросит `OxPHP\Async\AsyncException`. Установите `ASYNC_WORKERS` в нужное значение перед использованием этого паттерна.
 
 Для запросов к базе данных:
 
@@ -203,7 +203,7 @@ $result = oxphp_async_await($promise);
 
 ### Асинхронный пул отключён при использовании oxphp_async()
 
-`ASYNC_WORKERS` равен `0` (значение по умолчанию). При отключённом пуле `oxphp_async()` выбрасывает `OxPHP\Async\Exception`.
+`ASYNC_WORKERS` равен `0` (значение по умолчанию). При отключённом пуле `oxphp_async()` выбрасывает `OxPHP\Async\AsyncException`.
 
 **Исправление:** установите `ASYNC_WORKERS` в нужное количество фоновых потоков:
 

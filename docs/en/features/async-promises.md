@@ -21,7 +21,7 @@ OxPHP provides an async execution system that runs PHP closures on a dedicated t
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. Set to `0` to disable the async pool entirely |
 | `ASYNC_QUEUE_CAPACITY` | `0` (auto) | Maximum pending async tasks. When `0`, defaults to `ASYNC_WORKERS × 64` |
 
-> **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\Exception` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
+> **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\AsyncException` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
 
 ## Dispatching Tasks
 
@@ -103,7 +103,7 @@ Non-winning promises remain awaitable individually after `oxphp_async_await_any(
 
 ## Error Handling
 
-Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\Async\Exception`:
+Exceptions thrown inside an async closure are captured and re-thrown at await time as `OxPHP\Async\AsyncException`:
 
 ```php
 <?php
@@ -113,19 +113,19 @@ $promise = oxphp_async(function () {
 
 try {
     $result = oxphp_async_await($promise);
-} catch (\OxPHP\Async\Exception $e) {
+} catch (\OxPHP\Async\AsyncException $e) {
     // "Async task failed: [RuntimeException] Something failed"
     echo $e->getMessage();
 }
 ```
 
-`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\Async\Exception`. The async worker survives and continues processing new tasks.
+`exit()` and `die()` inside an async closure are also caught and converted to `OxPHP\Async\AsyncException`. The async worker survives and continues processing new tasks.
 
 ### Exception Hierarchy
 
 ```text
 \Exception
-  └── OxPHP\Async\Exception              # All async errors
+  └── OxPHP\Async\AsyncException              # All async errors
         └── OxPHP\Async\TimeoutException  # Timeout-specific
 ```
 
@@ -165,7 +165,7 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 Additional constraints:
 
-- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\Exception`
+- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\AsyncException`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state** — each async worker has its own PHP environment. There are no shared variables between the dispatching thread and the async thread
@@ -190,7 +190,7 @@ services:
 
 ### "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
 
-The async pool is not configured. When `ASYNC_WORKERS=0` (the default), the async functions are registered but throw `OxPHP\Async\Exception` on every call.
+The async pool is not configured. When `ASYNC_WORKERS=0` (the default), the async functions are registered but throw `OxPHP\Async\AsyncException` on every call.
 
 **Fix:** Set `ASYNC_WORKERS` to a positive value:
 
