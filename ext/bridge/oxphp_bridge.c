@@ -1,5 +1,7 @@
 #include "oxphp_bridge.h"
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1769,6 +1771,7 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.request_time = 0.0;
     ctx.deadline_us = 0;
     ctx.cancelled = false;
+    ctx.cancel_ptr = NULL;
     ctx.write_count = 0;
     ctx.stream_mode = false;
     ctx.headers_sent = false;
@@ -1822,11 +1825,63 @@ int oxphp_bridge_prepare_request(void) {
     return 0;
 }
 
+void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr) {
+    ctx.cancel_ptr = ptr;
+}
+
+oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void) {
+    if (!ctx.cancel_ptr) return OXPHP_CANCEL_NONE;
+    uint8_t v = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
+    return (oxphp_cancel_reason_t)v;
+}
+
+bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason) {
+    if (!ctx.cancel_ptr || reason == OXPHP_CANCEL_NONE) return false;
+    uint8_t expected = OXPHP_CANCEL_NONE;
+    return atomic_compare_exchange_strong_explicit(
+        ctx.cancel_ptr,
+        &expected,
+        (uint8_t)reason,
+        memory_order_relaxed,
+        memory_order_relaxed);
+}
+
+void* oxphp_bridge_vm_interrupt_addr(void) {
+    return ctx.vm_interrupt_addr;
+}
+
+void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
+    ctx.vm_interrupt_addr = addr;
+}
+
+void oxphp_bridge_request_interrupt(void) {
+    if (ctx.vm_interrupt_addr) {
+        *(uint8_t*)ctx.vm_interrupt_addr = 1;
+    }
+}
+
 void oxphp_bridge_set_cancelled(bool cancelled) {
     ctx.cancelled = cancelled;
+    /* Migration mirror: keep the new reason byte in sync with the
+     * legacy bool. The only legacy caller path is CLIENT_ABORT. */
+    if (ctx.cancel_ptr) {
+        if (cancelled) {
+            uint8_t expected = OXPHP_CANCEL_NONE;
+            atomic_compare_exchange_strong_explicit(
+                ctx.cancel_ptr, &expected,
+                (uint8_t)OXPHP_CANCEL_CLIENT_ABORT,
+                memory_order_relaxed, memory_order_relaxed);
+        } else {
+            atomic_store_explicit(ctx.cancel_ptr, OXPHP_CANCEL_NONE, memory_order_relaxed);
+        }
+    }
 }
 
 bool oxphp_bridge_is_cancelled(void) {
+    if (ctx.cancel_ptr) {
+        uint8_t v = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
+        return v != OXPHP_CANCEL_NONE;
+    }
     return ctx.cancelled;
 }
 

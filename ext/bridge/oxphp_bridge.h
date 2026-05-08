@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,7 +57,9 @@ typedef struct {
     uint32_t write_count;
 
     /** Whether cancellation has been requested (client disconnected). */
-    bool cancelled;
+    bool cancelled;                  /* legacy — derived view; removed in Task A11 */
+    _Atomic(uint8_t)* cancel_ptr;    /* into Arc<CancellationState>; NULL outside request */
+    void* vm_interrupt_addr;         /* &EG(vm_interrupt); NULL until first php_request_startup */
 
     /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
     int64_t deadline_us;
@@ -978,6 +981,37 @@ int oxphp_bridge_worker_try_recv(void);
 
 /** Prepare TLS for pending request. Returns 1=ok, 0=nothing pending. */
 int oxphp_bridge_prepare_request(void);
+
+/* ── Cancellation reason (sub-design A) ──
+ *
+ * Pointer-based replacement for the legacy bool cancelled flag.
+ * Pointer references a Rust-owned Arc<CancellationState> whose
+ * lifetime exceeds the request.
+ */
+typedef enum {
+    OXPHP_CANCEL_NONE         = 0,
+    OXPHP_CANCEL_CLIENT_ABORT = 1,
+    OXPHP_CANCEL_TIMEOUT      = 2,
+    OXPHP_CANCEL_SHUTDOWN     = 3,
+    OXPHP_CANCEL_STUCK        = 4,
+    OXPHP_CANCEL_USER         = 5,
+} oxphp_cancel_reason_t;
+
+void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr);
+oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void);
+bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason);
+
+/* Returns &EG(vm_interrupt) for this worker; captured after the
+ * first php_request_startup. */
+void* oxphp_bridge_vm_interrupt_addr(void);
+
+/* Set by the SAPI module right after capturing &EG(vm_interrupt). */
+void oxphp_bridge_set_vm_interrupt_addr(void* addr);
+
+/* In-thread helper: request the next opcode boundary to call our
+ * registered zend_interrupt_function. Used from the worker thread
+ * itself (e.g. streaming send-error). */
+void oxphp_bridge_request_interrupt(void);
 
 /** Set the cancellation flag (called from Rust when client disconnects). */
 void oxphp_bridge_set_cancelled(bool cancelled);
