@@ -1,9 +1,18 @@
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use http::Method;
+
+/// Global handle installed at startup so C-side callbacks (e.g. the
+/// Zend interrupt handler) can reach the shared metrics from any
+/// thread without a per-call lookup.
+pub static GLOBAL_METRICS: OnceLock<Arc<Metrics>> = OnceLock::new();
+
+pub fn install_global(metrics: Arc<Metrics>) {
+    let _ = GLOBAL_METRICS.set(metrics);
+}
 
 // ── Worker Mode Metrics ──────────────────────────────────────
 

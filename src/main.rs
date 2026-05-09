@@ -50,6 +50,7 @@ fn main() -> Result<(), types::BoxError> {
     // Per-worker observability vectors are sized to the worker count
     // so the supervisor's per-slot observe_* helpers stay in bounds.
     let metrics = Arc::new(Metrics::new_with_workers(config.worker_mode.worker_count()));
+    oxphp::metrics::install_global(Arc::clone(&metrics));
 
     // Initialize plugins BEFORE PHP startup so MINIT can register plugin
     // functions with Zend (OPcache needs them at compile time).
