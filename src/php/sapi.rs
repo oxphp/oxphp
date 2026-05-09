@@ -60,6 +60,8 @@ thread_local! {
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Sub-design A: whether &EG(vm_interrupt) has been captured for this worker thread.
+    static VM_INTERRUPT_CAPTURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Pending request from non-blocking try_recv, awaiting prepare_received_request().
     static PENDING_REQUEST: RefCell<Option<WorkerIncomingRequest>> = const { RefCell::new(None) };
     /// Worker mode: whether the current request started with profiling enabled
@@ -404,10 +406,11 @@ fn flush_stream_chunk() {
                 // Err means the receiver was dropped — client gone.
                 if tx.blocking_send(chunk).is_err() {
                     unsafe {
-                        if !bindings::oxphp_bridge_is_cancelled() {
+                        if bindings::oxphp_bridge_get_cancel_reason() == 0 {
                             tracing::warn!("Stream client disconnected during flush");
-                            bindings::oxphp_bridge_set_cancelled(true);
-                            bindings::oxphp_bridge_mark_connection_aborted();
+                            let _ =
+                                bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+                            bindings::oxphp_bridge_request_interrupt();
                         }
                     }
                 }
@@ -855,10 +858,10 @@ pub fn clear_request_data() {
             0,
         );
         bindings::oxphp_bridge_set_request_id(std::ptr::null());
-        // Reset deadline and cancellation flags so the next request on this worker
-        // doesn't inherit stale state from a timed-out or cancelled request.
+        // Reset deadline so the next request on this worker doesn't inherit stale
+        // state from a timed-out request. Cancellation state is reset by
+        // oxphp_bridge_reset_request_ctx() (called earlier via clear_request_data).
         bindings::oxphp_bridge_set_deadline(0);
-        bindings::oxphp_bridge_set_cancelled(false);
     }
 }
 
@@ -1046,16 +1049,16 @@ unsafe extern "C" fn oxphp_deactivate() -> c_int {
 ///   pre-stream and non-streaming requests).
 /// - `STREAM_TX`: present after streaming starts (covers SSE / chunked output).
 unsafe fn check_client_disconnected() {
-    if bindings::oxphp_bridge_is_cancelled() {
-        return; // already flagged, don't log again
+    if bindings::oxphp_bridge_get_cancel_reason() != 0 {
+        return;
     }
     let disconnected = EARLY_TX
         .with(|slot| slot.borrow().as_ref().is_some_and(|(_, tx)| tx.is_closed()))
         || STREAM_TX.with(|slot| slot.borrow().as_ref().is_some_and(|tx| tx.is_closed()));
     if disconnected {
         tracing::warn!("Client disconnected, requesting PHP cancellation");
-        bindings::oxphp_bridge_set_cancelled(true);
-        bindings::oxphp_bridge_mark_connection_aborted();
+        let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+        bindings::oxphp_bridge_request_interrupt();
     }
 }
 
@@ -2409,6 +2412,37 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
 
     // Store request start time for duration histogram
     WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
+    // Sub-design A: hand the cancel-reason pointer to the bridge so the
+    // Zend interrupt handler can read it between opcodes.
+    unsafe {
+        let p = if req.script.cancel_ptr == 0 {
+            std::ptr::null()
+        } else {
+            req.script.cancel_ptr as *const std::sync::atomic::AtomicU8
+        };
+        bindings::oxphp_bridge_set_cancel_ptr(p);
+    }
+
+    // Sub-design A: one-shot capture of &EG(vm_interrupt) on the worker
+    // thread + publish into WORKERS[id].interrupt_flag_ptr so other
+    // threads can raise the flag for cross-thread cancellation.
+    VM_INTERRUPT_CAPTURED.with(|c| {
+        if !c.get() {
+            unsafe {
+                bindings::oxphp_capture_vm_interrupt();
+            }
+            let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
+            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+                if let Some(slot) = workers.get(id) {
+                    let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
+                    slot.interrupt_flag_ptr
+                        .store(addr, std::sync::atomic::Ordering::Release);
+                }
+            }
+            c.set(true);
+        }
+    });
 
     // Increment soft_resets counter
     WORKER_METRICS_TLS.with(|slot| {

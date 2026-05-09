@@ -122,6 +122,10 @@ fn main() -> Result<(), types::BoxError> {
         );
     }
 
+    // Initialise worker registry before workers are spawned so slots exist
+    // when workers register their EG(vm_interrupt) address.
+    oxphp::php::worker_registry::init_workers(config.worker_mode.worker_count());
+
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
     let executor: Arc<dyn executor::ScriptExecutor> =

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdatomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,8 +56,8 @@ typedef struct {
     /** ub_write call counter for periodic deadline checks. */
     uint32_t write_count;
 
-    /** Whether cancellation has been requested (client disconnected). */
-    bool cancelled;
+    _Atomic(uint8_t)* cancel_ptr;    /* into Arc<CancellationState>; NULL outside request */
+    void* vm_interrupt_addr;         /* &EG(vm_interrupt); NULL until first php_request_startup */
 
     /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
     int64_t deadline_us;
@@ -947,7 +948,7 @@ bool oxphp_bridge_is_worker_mode(void);
 
 /**
  * Reset per-request TLS fields between worker mode requests.
- * Clears: request_id, request_time, deadline, cancelled, write_count,
+ * Clears: request_id, request_time, deadline, cancel_ptr, write_count,
  *         stream_mode, headers_sent, finished.
  * Increments: requests_done.
  */
@@ -979,17 +980,41 @@ int oxphp_bridge_worker_try_recv(void);
 /** Prepare TLS for pending request. Returns 1=ok, 0=nothing pending. */
 int oxphp_bridge_prepare_request(void);
 
-/** Set the cancellation flag (called from Rust when client disconnects). */
-void oxphp_bridge_set_cancelled(bool cancelled);
+/* ── Cancellation reason (sub-design A) ──
+ *
+ * Pointer-based replacement for the legacy bool cancelled flag.
+ * Pointer references a Rust-owned Arc<CancellationState> whose
+ * lifetime exceeds the request.
+ */
+typedef enum {
+    OXPHP_CANCEL_NONE         = 0,
+    OXPHP_CANCEL_CLIENT_ABORT = 1,
+    OXPHP_CANCEL_TIMEOUT      = 2,
+    OXPHP_CANCEL_SHUTDOWN     = 3,
+    OXPHP_CANCEL_STUCK        = 4,
+    OXPHP_CANCEL_USER         = 5,
+} oxphp_cancel_reason_t;
 
-/** Check if cancellation was requested. */
-bool oxphp_bridge_is_cancelled(void);
+void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr);
+oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void);
+bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason);
 
-/** Mark PG(connection_status) with PHP_CONNECTION_ABORTED so that PHP's
- *  connection_aborted() returns true. Called from Rust when the client
- *  closes the connection mid-request (early-response oneshot or streaming
- *  channel dropped). */
-void oxphp_bridge_mark_connection_aborted(void);
+/* Returns &EG(vm_interrupt) for this worker; captured after the
+ * first php_request_startup. */
+void* oxphp_bridge_vm_interrupt_addr(void);
+
+/* Set by the SAPI module right after capturing &EG(vm_interrupt). */
+void oxphp_bridge_set_vm_interrupt_addr(void* addr);
+
+/* Sub-design A: capture &EG(vm_interrupt) from the current thread's
+ * Zend executor globals and store it in the bridge ctx. Must be called
+ * from a thread where TSRM is initialised (i.e. after ts_resource_ex). */
+void oxphp_capture_vm_interrupt(void);
+
+/* In-thread helper: request the next opcode boundary to call our
+ * registered zend_interrupt_function. Used from the worker thread
+ * itself (e.g. streaming send-error). */
+void oxphp_bridge_request_interrupt(void);
 
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);

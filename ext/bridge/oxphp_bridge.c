@@ -1,5 +1,7 @@
 #include "oxphp_bridge.h"
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1768,7 +1770,7 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.request_id[0] = '\0';
     ctx.request_time = 0.0;
     ctx.deadline_us = 0;
-    ctx.cancelled = false;
+    ctx.cancel_ptr = NULL;
     ctx.write_count = 0;
     ctx.stream_mode = false;
     ctx.headers_sent = false;
@@ -1822,16 +1824,39 @@ int oxphp_bridge_prepare_request(void) {
     return 0;
 }
 
-void oxphp_bridge_set_cancelled(bool cancelled) {
-    ctx.cancelled = cancelled;
+void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr) {
+    ctx.cancel_ptr = ptr;
 }
 
-bool oxphp_bridge_is_cancelled(void) {
-    return ctx.cancelled;
+oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void) {
+    if (!ctx.cancel_ptr) return OXPHP_CANCEL_NONE;
+    uint8_t v = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
+    return (oxphp_cancel_reason_t)v;
 }
 
-void oxphp_bridge_mark_connection_aborted(void) {
-    PG(connection_status) |= PHP_CONNECTION_ABORTED;
+bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason) {
+    if (!ctx.cancel_ptr || reason == OXPHP_CANCEL_NONE) return false;
+    uint8_t expected = OXPHP_CANCEL_NONE;
+    return atomic_compare_exchange_strong_explicit(
+        ctx.cancel_ptr,
+        &expected,
+        (uint8_t)reason,
+        memory_order_relaxed,
+        memory_order_relaxed);
+}
+
+void* oxphp_bridge_vm_interrupt_addr(void) {
+    return ctx.vm_interrupt_addr;
+}
+
+void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
+    ctx.vm_interrupt_addr = addr;
+}
+
+void oxphp_bridge_request_interrupt(void) {
+    if (ctx.vm_interrupt_addr) {
+        __atomic_store_n((volatile uint8_t*)ctx.vm_interrupt_addr, 1, __ATOMIC_RELAXED);
+    }
 }
 
 void oxphp_bridge_schedule_exit(void) {
@@ -1960,6 +1985,13 @@ void oxphp_throw_exception(const char *class_fqn, const char *message, int64_t c
 
 int oxphp_exception_pending(void) {
     return EG(exception) != NULL ? 1 : 0;
+}
+
+/* Sub-design A: capture &EG(vm_interrupt) for this worker thread.
+ * The address is stable for the thread's lifetime once TSRM is
+ * initialised. Subsequent calls re-store the same pointer (no-op). */
+void oxphp_capture_vm_interrupt(void) {
+    oxphp_bridge_set_vm_interrupt_addr((void*)&EG(vm_interrupt));
 }
 
 /* Thread-local buffers for exception class name (avoids allocation) */
@@ -2129,7 +2161,9 @@ void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_f
  * Called from C — longjmp stays within C frames, never crosses Rust FFI.
  */
 static inline void check_deadline_c(void) {
-    if (ctx.cancelled) {
+    bool cancelled = ctx.cancel_ptr &&
+        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
+    if (cancelled) {
         zend_bailout();
     }
     if (ctx.deadline_us != 0) {
@@ -2147,7 +2181,9 @@ static inline void check_deadline_c(void) {
  * Used on ub_write hot path between periodic full checks.
  */
 static inline void check_cancelled_c(void) {
-    if (ctx.cancelled) {
+    bool cancelled = ctx.cancel_ptr &&
+        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
+    if (cancelled) {
         zend_bailout();
     }
 }

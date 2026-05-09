@@ -57,6 +57,10 @@ pub struct ScriptRequest {
     pub document_root: Arc<PathBuf>,
     /// Execution deadline in microseconds (0 = no deadline).
     pub timeout_us: u64,
+    /// Pointer (as `usize`) into the request's `Arc<CancellationState>`.
+    /// 0 outside a request. The Arc is kept alive by the connection
+    /// task for the request's lifetime; the worker is non-owning.
+    pub cancel_ptr: usize,
     /// W3C Trace Context: trace ID (32 hex chars, empty if tracing disabled).
     pub trace_id: String,
     /// W3C Trace Context: span ID (16 hex chars, empty if tracing disabled).

@@ -2829,6 +2829,54 @@ static zend_object *oxphp_worker_clone_object(zend_object *object) {
     return zend_objects_new(oxphp_worker_ce);
 }
 
+/* ── Sub-design A: zend_interrupt_function override ──
+ * Centralised cancellation bailout. When a CancelReason is set on
+ * the active request and EG(vm_interrupt) becomes 1, Zend calls
+ * this handler at the next opcode boundary. We mirror to
+ * PG(connection_status), respect ignore_user_abort for ClientAbort,
+ * then bail through zend_error_noreturn — the same path as a
+ * regular PHP fatal error, so registered shutdown handlers run. */
+
+static void (*orig_zend_interrupt_function)(zend_execute_data*) = NULL;
+
+static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
+{
+    switch (r) {
+        case OXPHP_CANCEL_CLIENT_ABORT: return "client_abort";
+        case OXPHP_CANCEL_TIMEOUT:      return "timeout";
+        case OXPHP_CANCEL_SHUTDOWN:     return "shutdown";
+        case OXPHP_CANCEL_STUCK:        return "stuck";
+        case OXPHP_CANCEL_USER:         return "user_cancel";
+        default:                        return "unknown";
+    }
+}
+
+static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
+{
+    oxphp_cancel_reason_t reason = oxphp_bridge_get_cancel_reason();
+
+    if (reason == OXPHP_CANCEL_NONE) {
+        if (orig_zend_interrupt_function) {
+            orig_zend_interrupt_function(execute_data);
+        }
+        return;
+    }
+
+    if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
+        PG(connection_status) |= PHP_CONNECTION_ABORTED;
+        if (PG(ignore_user_abort)) {
+            return;
+        }
+    } else if (reason == OXPHP_CANCEL_TIMEOUT) {
+        PG(connection_status) |= PHP_CONNECTION_TIMEOUT;
+    }
+
+    zend_error_noreturn(E_ERROR,
+        "Request cancelled (%s)",
+        oxphp_cancel_reason_label(reason));
+    /* unreachable: zend_error_noreturn calls zend_bailout() */
+}
+
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
  * compile-time optimization of function_exists('literal') can see them. */
@@ -3510,6 +3558,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
+
+    /* Sub-design A: chain into Zend's interrupt mechanism so cancellation
+     * reasons cause clean bailout at the next opcode boundary. */
+    orig_zend_interrupt_function = zend_interrupt_function;
+    zend_interrupt_function = oxphp_zend_interrupt_handler;
 
     return SUCCESS;
 }

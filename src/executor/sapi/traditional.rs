@@ -245,6 +245,7 @@ impl Drop for RequestDataGuard {
         // php_request_startup. Drop runs after php_request_shutdown so
         // RSHUTDOWN handlers still see a real timestamp.
         unsafe {
+            bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
             bindings::oxphp_bridge_set_request_time(0.0);
         }
     }
