@@ -156,6 +156,18 @@ impl Default for ScriptResponse {
     }
 }
 
+impl ScriptResponse {
+    /// 499 Client Closed Request — nginx convention for "client gave up".
+    /// Used by the worker fast-path when a queued request's client has
+    /// disconnected before any PHP runs.
+    pub fn client_closed() -> Self {
+        Self {
+            status: 499,
+            ..Default::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
