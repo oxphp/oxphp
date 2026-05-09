@@ -5,4 +5,5 @@ pub mod header_match;
 pub mod heartbeat;
 #[cfg(feature = "php")]
 pub mod sapi;
+pub mod supervisor;
 pub mod worker_registry;
