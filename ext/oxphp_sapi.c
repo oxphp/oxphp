@@ -2853,6 +2853,15 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
+    /* Sub-design C: SIGALRM-driven max_execution_time. Zend set
+     * EG(timed_out)=1 alongside vm_interrupt. Convert to the unified
+     * cancellation reason and claim the flag so the standard
+     * zend_timeout() path is replaced by ours. */
+    if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+        oxphp_bridge_set_cancel_reason(OXPHP_CANCEL_TIMEOUT);
+        zend_atomic_bool_store_ex(&EG(timed_out), false);
+    }
+
     oxphp_cancel_reason_t reason = oxphp_bridge_get_cancel_reason();
 
     if (reason == OXPHP_CANCEL_NONE) {
