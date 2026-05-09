@@ -3172,12 +3172,17 @@ static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
         : "OxPHP\\Async\\AsyncException";
     size_t cls_len = strlen(cls_name);
 
-    zend_class_entry *ce = zend_lookup_class_str(cls_name, cls_len);
+    zend_string *name = zend_string_init(cls_name, cls_len, 0);
+    zend_class_entry *ce = zend_lookup_class(name);
+    zend_string_release(name);
     if (!ce) {
-        ce = zend_lookup_class_str(
+        zend_string *fallback = zend_string_init(
             "OxPHP\\Async\\AsyncException",
-            sizeof("OxPHP\\Async\\AsyncException") - 1
+            sizeof("OxPHP\\Async\\AsyncException") - 1,
+            0
         );
+        ce = zend_lookup_class(fallback);
+        zend_string_release(fallback);
         if (!ce) return -1;
     }
     if (object_init_ex(out, ce) != SUCCESS) return -1;
@@ -3188,7 +3193,8 @@ static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
             entry->message
         );
     }
-    /* Trace is informational; stored as "__trace" string property. */
+    /* Stored as "__trace" string property — informational only; does NOT
+     * populate Throwable::getTrace() (that's built from the live PHP stack). */
     if (entry->trace) {
         zend_update_property_string(
             ce, Z_OBJ_P(out),
@@ -3200,10 +3206,13 @@ static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
 }
 
 int oxphp_bridge_aggregate_throw(void) {
-    zend_class_entry *agg_ce = zend_lookup_class_str(
+    zend_string *agg_name = zend_string_init(
         "OxPHP\\Async\\AggregateAsyncException",
-        sizeof("OxPHP\\Async\\AggregateAsyncException") - 1
+        sizeof("OxPHP\\Async\\AggregateAsyncException") - 1,
+        0
     );
+    zend_class_entry *agg_ce = zend_lookup_class(agg_name);
+    zend_string_release(agg_name);
     if (!agg_ce) {
         oxphp_bridge_aggregate_clear();
         return -1;
@@ -3269,10 +3278,13 @@ int oxphp_bridge_aggregate_throw_timeout(
     const int64_t *pending_ids,
     uint32_t pending_count
 ) {
-    zend_class_entry *to_ce = zend_lookup_class_str(
+    zend_string *to_name = zend_string_init(
         "OxPHP\\Async\\TimeoutException",
-        sizeof("OxPHP\\Async\\TimeoutException") - 1
+        sizeof("OxPHP\\Async\\TimeoutException") - 1,
+        0
     );
+    zend_class_entry *to_ce = zend_lookup_class(to_name);
+    zend_string_release(to_name);
     if (!to_ce) {
         oxphp_bridge_aggregate_clear();
         return -1;
