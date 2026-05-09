@@ -259,6 +259,9 @@ impl Drop for RequestDataGuard {
                 let id = bindings::oxphp_bridge_get_worker_id() as usize;
                 if let Some(slot) = workers.get(id) {
                     *slot.cancel_state.lock().unwrap() = None;
+                    slot.heartbeat
+                        .request_start_us
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             bindings::oxphp_bridge_set_request_time(0.0);
@@ -324,6 +327,23 @@ fn execute_request(
         if let Some(slot) = workers.get(worker_id) {
             *slot.cancel_state.lock().unwrap() =
                 Some(std::sync::Arc::downgrade(&request.cancel_state));
+            slot.heartbeat.request_start_us.store(
+                crate::php::heartbeat::monotonic_us(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if slot
+                .heartbeat
+                .tid
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                let tid = crate::php::heartbeat::current_tid();
+                if tid != 0 {
+                    slot.heartbeat
+                        .tid
+                        .store(tid, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
 

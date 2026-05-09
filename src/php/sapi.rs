@@ -2176,6 +2176,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 let id = bindings::oxphp_bridge_get_worker_id() as usize;
                 if let Some(slot) = workers.get(id) {
                     *slot.cancel_state.lock().unwrap() = None;
+                    slot.heartbeat
+                        .request_start_us
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             bindings::oxphp_bridge_set_request_time(0.0);
@@ -2195,6 +2198,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             let id = bindings::oxphp_bridge_get_worker_id() as usize;
             if let Some(slot) = workers.get(id) {
                 *slot.cancel_state.lock().unwrap() = None;
+                slot.heartbeat
+                    .request_start_us
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
         }
         bindings::oxphp_bridge_set_request_time(0.0);
@@ -2275,6 +2281,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         let id = bindings::oxphp_bridge_get_worker_id() as usize;
         if let Some(slot) = workers.get(id) {
             *slot.cancel_state.lock().unwrap() = None;
+            slot.heartbeat
+                .request_start_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
     bindings::oxphp_bridge_set_request_time(0.0);
@@ -2448,12 +2457,31 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     });
 
     // Per-request: register a Weak back-ref so cancel_request() can
-    // find this worker by Arc::ptr_eq.
+    // find this worker by Arc::ptr_eq, and stamp request_start_us so
+    // the supervisor sees this worker as busy. tid is captured once
+    // per worker (zero-once) the first time we enter this path.
     if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
         let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
         if let Some(slot) = workers.get(id) {
             *slot.cancel_state.lock().unwrap() =
                 Some(std::sync::Arc::downgrade(&req.script.cancel_state));
+            slot.heartbeat.request_start_us.store(
+                crate::php::heartbeat::monotonic_us(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if slot
+                .heartbeat
+                .tid
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                let tid = crate::php::heartbeat::current_tid();
+                if tid != 0 {
+                    slot.heartbeat
+                        .tid
+                        .store(tid, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
 
