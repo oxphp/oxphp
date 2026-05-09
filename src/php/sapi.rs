@@ -3547,15 +3547,18 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 c.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
-            // Compute pending ids = input_ids minus those whose rejection was
-            // already recorded.
+            // Compute pending ids = post-take ids (only those for which
+            // take_promise actually succeeded) minus those whose rejection
+            // was recorded. Filtering against input_ids would surface
+            // already-awaited / invalid ids as "cancelled pending", which
+            // is misleading — they were never racing in the first place.
             let rejected_set: std::collections::HashSet<u64> = collected
                 .lock()
                 .unwrap()
                 .iter()
                 .map(|r| r.promise_id)
                 .collect();
-            let pending_ids: Vec<i64> = input_ids
+            let pending_ids: Vec<i64> = post_take_ids
                 .iter()
                 .filter(|id| !rejected_set.contains(id))
                 .map(|&id| id as i64)
