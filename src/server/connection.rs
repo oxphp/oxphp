@@ -8,8 +8,10 @@ use http_body_util::{BodyExt, Limited};
 use hyper::body::Body as _;
 use hyper::body::Incoming;
 
+use crate::bridge::cancel::{CancelReason, CancellationState};
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ExecuteResult;
+use crate::php::worker_registry::cancel_request;
 use crate::server::compression;
 use crate::server::response::static_file;
 use crate::server::routing::RouteResult;
@@ -59,6 +61,35 @@ fn parse_content_length(bytes: &[u8]) -> Option<usize> {
         n = n.checked_mul(10)?.checked_add(d as usize)?;
     }
     Some(n)
+}
+
+/// Drop-guard that fires `cancel_request(state, ClientAbort)` if the
+/// dispatch future is dropped before completing. Disarmed via
+/// `disarm()` once the future has returned a result.
+#[allow(dead_code)]
+struct ClientAbortGuard {
+    state: std::sync::Arc<CancellationState>,
+}
+
+#[allow(dead_code)]
+impl ClientAbortGuard {
+    fn new(state: std::sync::Arc<CancellationState>) -> Self {
+        Self { state }
+    }
+
+    fn disarm(self) {
+        self.state.mark_done();
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for ClientAbortGuard {
+    fn drop(&mut self) {
+        if self.state.is_done() {
+            return;
+        }
+        cancel_request(&self.state, CancelReason::ClientAbort);
+    }
 }
 
 /// Handle a single HTTP request with event-driven pipeline.
@@ -139,7 +170,7 @@ pub async fn handle_request(
 
     // Per-request cancellation state. Worker owns one Arc; this scope
     // owns the other so the upcoming drop guard can write into it.
-    let cancel_state = std::sync::Arc::new(crate::bridge::cancel::CancellationState::new());
+    let cancel_state = std::sync::Arc::new(CancellationState::new());
 
     // Apply request timeout if configured. Only one branch runs, so the
     // `profiling_run_id` can be moved into whichever `dispatch_request` call
