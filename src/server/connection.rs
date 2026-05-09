@@ -91,10 +91,18 @@ impl Drop for ClientAbortGuard {
 }
 
 /// Handle a single HTTP request with event-driven pipeline.
+///
+/// `closed_rx` is signalled by the owning connection when hyper's
+/// `serve_connection` returns. Racing the dispatch against it lets us
+/// cancel in-flight workers on HTTP/2 stream resets and HTTP/1.1
+/// between-request closes. HTTP/1.1 mid-handler closes for buffered
+/// responses remain undetectable here — hyper does not poll the socket
+/// while a service handler is running.
 pub async fn handle_request(
     req: Request<Incoming>,
     server: &Server,
     remote_addr: SocketAddr,
+    mut closed_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start = Instant::now();
     let (parts, body) = req.into_parts();
@@ -171,25 +179,51 @@ pub async fn handle_request(
     // so the byte the bridge reads is alive even if either side drops first.
     let cancel_state = std::sync::Arc::new(CancellationState::new());
 
-    let dispatch = dispatch_request(
-        parts,
-        body,
-        server,
-        remote_addr,
-        &request_id,
-        &metadata,
-        profiling_mode,
-        profiling_run_id,
-        cancel_state.clone(),
-    );
+    // Race the dispatch against the connection-closed watch in an inner
+    // scope so the pinned dispatch future (which borrows `request_id`,
+    // `metadata`, `server`) is fully dropped before those values are moved
+    // into `RequestComplete` / `ResponseBuilding` below.
+    let result = {
+        let dispatch = dispatch_request(
+            parts,
+            body,
+            server,
+            remote_addr,
+            &request_id,
+            &metadata,
+            profiling_mode,
+            profiling_run_id,
+            cancel_state.clone(),
+        );
 
-    // Drop guard fires cancel_request(ClientAbort) if the dispatch future
-    // is dropped before completing (hyper saw the client go away). Disarmed
-    // on the success path. Declared after `dispatch` so on a future-drop
-    // its Drop runs after the dispatch local has already gone.
-    let guard = ClientAbortGuard::new(cancel_state);
-    let result = dispatch.await;
-    guard.disarm();
+        // Drop guard fires cancel_request(ClientAbort) if the dispatch future
+        // is dropped before completing (hyper saw the client go away). Disarmed
+        // on the success path. Declared after `dispatch` so on a future-drop
+        // its Drop runs after the dispatch local has already gone.
+        let guard = ClientAbortGuard::new(cancel_state);
+
+        // If the connection ends first (HTTP/2 stream RST, HTTP/1.1 close
+        // between requests, or any other serve_connection completion), drop
+        // the guard to fire cancel_request(ClientAbort) on the worker, then
+        // keep awaiting the dispatch so the worker can ship its (likely
+        // 499 / 500) response.
+        tokio::pin!(dispatch);
+        tokio::select! {
+            biased;
+            r = &mut dispatch => {
+                guard.disarm();
+                r
+            }
+            _ = closed_rx.changed() => {
+                // Fires cancel_request(ClientAbort) via Drop on the worker side.
+                drop(guard);
+                // Wait for the worker to actually finish so we get a real
+                // response back instead of synthesising one and racing the
+                // worker.
+                dispatch.await
+            }
+        }
+    };
 
     let (response, request_body_size, mut php_exec) = match result {
         Ok((resp, body_size, exec)) => (resp, body_size, exec),
