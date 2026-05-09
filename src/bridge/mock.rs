@@ -909,37 +909,7 @@ pub unsafe extern "C" fn oxphp_bridge_get_max_memory_bytes() -> u64 {
     0
 }
 
-#[cfg(test)]
-mod worker_class_mock_tests {
-    use super::*;
-
-    #[test]
-    fn worker_start_time_round_trip() {
-        unsafe {
-            oxphp_bridge_set_worker_start_time(123.456);
-        }
-        let v = unsafe { oxphp_bridge_get_worker_start_time() };
-        assert!((v - 123.456).abs() < 1e-9);
-    }
-
-    #[test]
-    fn increment_requests_done_is_monotonic() {
-        REQUESTS_DONE.with(|c| c.set(0));
-        unsafe {
-            oxphp_bridge_increment_requests_done();
-            oxphp_bridge_increment_requests_done();
-            oxphp_bridge_increment_requests_done();
-        }
-        assert_eq!(unsafe { oxphp_bridge_get_requests_done() }, 3);
-    }
-
-    #[test]
-    fn get_rss_bytes_is_nonzero() {
-        assert!(unsafe { oxphp_bridge_get_rss_bytes() } > 0);
-    }
-}
-
-// ── Sub-design A: cancellation reason API (mock) ──
+// Cancellation reason API (mock).
 
 use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
@@ -991,4 +961,34 @@ pub unsafe extern "C" fn oxphp_capture_vm_interrupt() {}
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int {
     0
+}
+
+#[cfg(test)]
+mod worker_class_mock_tests {
+    use super::*;
+
+    #[test]
+    fn worker_start_time_round_trip() {
+        unsafe {
+            oxphp_bridge_set_worker_start_time(123.456);
+        }
+        let v = unsafe { oxphp_bridge_get_worker_start_time() };
+        assert!((v - 123.456).abs() < 1e-9);
+    }
+
+    #[test]
+    fn increment_requests_done_is_monotonic() {
+        REQUESTS_DONE.with(|c| c.set(0));
+        unsafe {
+            oxphp_bridge_increment_requests_done();
+            oxphp_bridge_increment_requests_done();
+            oxphp_bridge_increment_requests_done();
+        }
+        assert_eq!(unsafe { oxphp_bridge_get_requests_done() }, 3);
+    }
+
+    #[test]
+    fn get_rss_bytes_is_nonzero() {
+        assert!(unsafe { oxphp_bridge_get_rss_bytes() } > 0);
+    }
 }
