@@ -351,6 +351,17 @@ fn execute_request(
         }
     }
 
+    // Publish the cancel-state's atomic byte to the bridge so the
+    // SAPI's interrupt handler can record CancelReason via
+    // oxphp_bridge_set_cancel_reason. Without this, traditional-mode
+    // requests never observe the unified bailout — SIGALRM falls
+    // through to zend_timeout's default "Maximum execution time …"
+    // message instead of the centralised handler. Cleared in
+    // RequestDataGuard::drop.
+    unsafe {
+        bindings::oxphp_bridge_set_cancel_ptr(request.cancel_state.as_ptr());
+    }
+
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 
@@ -514,5 +525,6 @@ fn execute_request(
         stream_rx: None,
         errors: sapi::take_request_errors(),
         profile_tree,
+        cancel_reason: request.cancel_state.get() as u8,
     })
 }

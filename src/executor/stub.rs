@@ -32,6 +32,7 @@ impl ScriptExecutor for StubExecutor {
             stream_rx: None,
             errors: Vec::new(),
             profile_tree: None,
+            cancel_reason: 0,
         })
     }
 

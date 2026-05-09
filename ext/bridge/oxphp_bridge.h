@@ -1024,6 +1024,7 @@ static inline void oxphp_bridge_tick(void) {
     }
 }
 
+
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
 

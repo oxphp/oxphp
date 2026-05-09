@@ -339,6 +339,7 @@ pub fn try_early_send() -> bool {
                 stream_rx: None,
                 errors: take_request_errors(),
                 profile_tree: None, // early response — spans not finished yet
+                cancel_reason: unsafe { bindings::oxphp_bridge_get_cancel_reason() },
             });
             true
         } else {
@@ -384,6 +385,7 @@ pub fn send_streaming_headers() -> bool {
                 stream_rx: Some(chunk_rx),
                 errors: Vec::new(), // Streaming: errors accumulate during stream, not captured here.
                 profile_tree: None, // streaming — spans not finished yet
+                cancel_reason: 0,
             });
             true
         } else {
@@ -2253,6 +2255,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     #[cfg(not(any(feature = "plugin-apm", feature = "plugin-profiler")))]
     let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
+    let cancel_reason = bindings::oxphp_bridge_get_cancel_reason();
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
             let _ = tx.send(ScriptResponse {
@@ -2263,6 +2266,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 stream_rx: None,
                 errors: take_request_errors(),
                 profile_tree,
+                cancel_reason,
             });
         }
     });

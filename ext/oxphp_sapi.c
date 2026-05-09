@@ -2850,13 +2850,6 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         PG(connection_status) |= PHP_CONNECTION_TIMEOUT;
     }
 
-    /* Count this cancellation in the unified counter. The Rust side
-     * looks up GLOBAL_METRICS and bumps the per-reason atomic. For
-     * CLIENT_ABORT with ignore_user_abort=true the early-return above
-     * skips this — that's correct: nothing actually cancelled. */
-    extern void oxphp_metrics_cancelled(unsigned char reason);
-    oxphp_metrics_cancelled((unsigned char)reason);
-
     zend_error_noreturn(E_ERROR,
         "Request cancelled (%s)",
         oxphp_cancel_reason_label(reason));

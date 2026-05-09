@@ -522,6 +522,13 @@ async fn dispatch_request(
                 },
             };
 
+            // Bump the per-reason cancellation counter once per request,
+            // observed from the worker-side reason mirrored on the
+            // ScriptResponse. 0 = no cancellation → no-op.
+            server
+                .metrics
+                .observe_cancelled(script_response.cancel_reason);
+
             // Move PHP errors and profile tree into typed exec data.
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),
