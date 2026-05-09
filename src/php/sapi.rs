@@ -3364,6 +3364,12 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         }
     };
 
+    // Snapshot the post-take id list (only those for which `take_promise`
+    // succeeded). This is what `cancel_arc` is parallel to — `input_ids`
+    // may contain extras that were never taken, so we must not zip against
+    // it when building the cancel-flag lookup.
+    let post_take_ids: Vec<u64> = id_vec.clone();
+
     // Cancel-flag handle for the timeout arm. Wrapped in Arc so the outer
     // (post-block_on) code can still read the flags after the inner future
     // is dropped by `tokio::time::timeout`.
@@ -3455,6 +3461,14 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 std::mem::take(&mut *collected.lock().unwrap());
             sorted.sort_by_key(|r| position.get(&r.promise_id).copied().unwrap_or(usize::MAX));
 
+            // Free frozen-zval state for each rejected promise (matches
+            // single-await semantics — every settled promise gets cleaned
+            // up regardless of outcome instead of leaking PROMISE_CLEANUP
+            // entries until RSHUTDOWN).
+            for r in &sorted {
+                cleanup_promise(r.promise_id);
+            }
+
             ffi::oxphp_bridge_aggregate_clear();
             for r in &sorted {
                 let cls = CString::new(r.exception_class.as_str()).unwrap_or_default();
@@ -3479,9 +3493,10 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         // Loop completed naturally — winner found.
         Ok(Ok((winner_id, mut result, remaining_ids, remaining_rxs))) => {
             // Restore non-winner pending receivers to PROMISE_MAP. Look up
-            // their cancel flags by id from the original input list.
+            // their cancel flags by id from the post-take list — `cancel_arc`
+            // is parallel to that, NOT to `input_ids`.
             let cancel_lookup: std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>> =
-                input_ids
+                post_take_ids
                     .iter()
                     .copied()
                     .zip(cancel_arc.iter().cloned())
