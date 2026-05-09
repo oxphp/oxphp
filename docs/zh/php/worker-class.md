@@ -15,15 +15,15 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 |------|------|
 | `Worker::current(): self` | 返回当前 OS 线程的单例句柄。 |
 | `Worker::isWorkerMode(): bool` | 服务器运行在 Worker 模式（即 `WORKER_MODE_ENABLED=true`）时返回 `true`。 |
-| `getId(): int` | 当前 OS 线程的 Worker 数字标识符，范围为 `0..N-1`。 |
-| `getStartTime(): float` | 此 OS Worker 线程启动时的 Unix 时间戳（秒）。 |
-| `getRequestCount(): int` | 此 OS 线程已处理的请求数，从 1 开始计数。在两种模式下都会增长。 |
-| `getMemoryUsage(): int` | 当前 PHP 内存使用量（字节，`zend_memory_usage(0)`）。 |
-| `getRss(): int` | 进程常驻内存集大小（字节）。不缓存——每次请求最多调用一次。 |
-| `getMaxMemoryBytes(): int` | 配置的内存上限（字节）。`0` 表示无限制。 |
+| `id(): int` | 当前 OS 线程的 Worker 数字标识符，范围为 `0..N-1`。 |
+| `startTime(): float` | 此 OS Worker 线程启动时的 Unix 时间戳（秒）。 |
+| `requestCount(): int` | 此 OS 线程已处理的请求数，从 1 开始计数。在两种模式下都会增长。 |
+| `memoryUsage(): int` | 当前 PHP 内存使用量（字节，`zend_memory_usage(0)`）。 |
+| `rss(): int` | 进程常驻内存集大小（字节）。不缓存——每次请求最多调用一次。 |
+| `maxMemoryBytes(): int` | 配置的内存上限（字节）。`0` 表示无限制。 |
 | `scheduleExit(): void` | 标记 Worker 在当前请求完成后优雅退出。在传统模式下为 no-op。 |
 | `isExitScheduled(): bool` | 如果已对当前 Worker 调用过 `scheduleExit()`，则返回 `true`。在传统模式下始终为 `false`。 |
-| `getExitReason(): ?string` | 待退出原因：`'scheduled'`、`'max_memory'`、`'error'`，无待退出时为 `null`。在传统模式下始终为 `null`。 |
+| `exitReason(): ?string` | 待退出原因：`'scheduled'`、`'max_memory'`、`'error'`，无待退出时为 `null`。在传统模式下始终为 `null`。 |
 | `serve(callable $h): void` | 进入请求循环。在非 Worker 模式下抛出 `InvalidServeContextException`。 |
 
 ## 模式矩阵
@@ -32,15 +32,15 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 |------|----------|-------------|
 | `current()` | 每个 OS 线程的单例。 | 每个 OS 线程的单例。 |
 | `isWorkerMode()` | `false` | `true` |
-| `getId()` | Worker 池中的 OS 线程索引。 | Worker 池中的 OS 线程索引。 |
-| `getStartTime()` | OS 线程启动时间（通常是服务器启动时间）。 | OS 线程启动时间。 |
-| `getRequestCount()` | 从 1 开始，复用同一 OS 线程时跨请求递增（`1, 2, 3, …`）。 | 从 1 开始，每次 Worker 处理请求时递增。 |
-| `getMemoryUsage()` | 调用时的实时 PHP 内存。 | 调用时的实时 PHP 内存。 |
-| `getRss()` | 进程实时 RSS。 | 进程实时 RSS。 |
-| `getMaxMemoryBytes()` | `0`（不应用回收上限）。 | `WORKER_MAX_MEMORY_MIB` × 1 MiB 的值；未设置则为 `0`。 |
+| `id()` | Worker 池中的 OS 线程索引。 | Worker 池中的 OS 线程索引。 |
+| `startTime()` | OS 线程启动时间（通常是服务器启动时间）。 | OS 线程启动时间。 |
+| `requestCount()` | 从 1 开始，复用同一 OS 线程时跨请求递增（`1, 2, 3, …`）。 | 从 1 开始，每次 Worker 处理请求时递增。 |
+| `memoryUsage()` | 调用时的实时 PHP 内存。 | 调用时的实时 PHP 内存。 |
+| `rss()` | 进程实时 RSS。 | 进程实时 RSS。 |
+| `maxMemoryBytes()` | `0`（不应用回收上限）。 | `WORKER_MAX_MEMORY_MIB` × 1 MiB 的值；未设置则为 `0`。 |
 | `scheduleExit()` | No-op（脚本即将结束）。 | 设置退出标志；当前请求处理器返回后，请求循环退出。 |
 | `isExitScheduled()` | 始终为 `false`。 | 在该线程调用过 `scheduleExit()` 后为 `true`。 |
-| `getExitReason()` | 始终为 `null`。 | 未安排退出时为 `null`；待退出时为 `'scheduled'`、`'max_memory'` 或 `'error'`。 |
+| `exitReason()` | 始终为 `null`。 | 未安排退出时为 `null`；待退出时为 `'scheduled'`、`'max_memory'` 或 `'error'`。 |
 | `serve(callable)` | 抛出 `OxPHP\Server\Exception\InvalidServeContextException`。 | 进入请求循环。 |
 
 ## 示例
@@ -54,20 +54,20 @@ description: OxPHP\Server\Worker 类参考——用于 Worker 内省、Worker �
 $worker = OxPHP\Server\Worker::current();
 
 $logger->info('handling request', [
-    'worker_id'      => $worker->getId(),
-    'request_number' => $worker->getRequestCount(),
+    'worker_id'      => $worker->id(),
+    'request_number' => $worker->requestCount(),
 ]);
 ```
 
 ### 每个 OS 线程仅初始化一次
 
-`getRequestCount()` 从 1 开始计数，因此任何线程处理的第一个请求都会看到值 `1`。这是一个执行延迟初始化的可移植入口，每个线程只会运行一次。
+`requestCount()` 从 1 开始计数，因此任何线程处理的第一个请求都会看到值 `1`。这是一个执行延迟初始化的可移植入口，每个线程只会运行一次。
 
 ```php
 <?php
 $worker = OxPHP\Server\Worker::current();
 
-if ($worker->getRequestCount() === 1) {
+if ($worker->requestCount() === 1) {
     bootstrap();
 }
 ```
@@ -94,7 +94,7 @@ if (getenv('OXPHP_DEV') === '1') {
 - **基于 RSS 的回收** — `WORKER_MAX_MEMORY_MIB` 仅衡量 Zend 分配器。在涉及 curl、mysqli 等重型扩展的场景下，可在进程 RSS 超过你设定的阈值时触发回收：
 
   ```php
-  if ($worker->getRss() > 256 * 1024 * 1024) {
+  if ($worker->rss() > 256 * 1024 * 1024) {
       $worker->scheduleExit();
   }
   ```
@@ -116,15 +116,15 @@ OxPHP\Server\Worker::current()->serve(function () {
 
 ### RSS 可观测性
 
-`getRss()` 以字节为单位返回进程的实时常驻内存集大小。底层是一次真实的系统调用——开销低，但并非零成本。每次请求最多调用一次。
+`rss()` 以字节为单位返回进程的实时常驻内存集大小。底层是一次真实的系统调用——开销低，但并非零成本。每次请求最多调用一次。
 
 ```php
 <?php
 $worker = OxPHP\Server\Worker::current();
-$rss = $worker->getRss();
+$rss = $worker->rss();
 
 $metrics->gauge('php_worker_rss_bytes', $rss, [
-    'worker_id' => (string) $worker->getId(),
+    'worker_id' => (string) $worker->id(),
 ]);
 ```
 
@@ -135,14 +135,14 @@ $metrics->gauge('php_worker_rss_bytes', $rss, [
 | 旧函数 | 类 API |
 |--------|--------|
 | `oxphp_is_worker()` | `OxPHP\Server\Worker::isWorkerMode()` |
-| `oxphp_worker_id()` | `OxPHP\Server\Worker::current()->getId()` |
+| `oxphp_worker_id()` | `OxPHP\Server\Worker::current()->id()` |
 | `oxphp_worker(callable)` | `OxPHP\Server\Worker::current()->serve(callable)` |
 
 ## 注意事项
 
-- **`getRss()` 不缓存。** 每次调用都会执行系统调用（Linux 上读取 `/proc/self/statm`，macOS 上调用 `getrusage(RUSAGE_SELF)`）。开销低但非零——每次请求最多调用一次，通常在指标处理器内部，而不是每行日志都调用。
+- **`rss()` 不缓存。** 每次调用都会执行系统调用（Linux 上读取 `/proc/self/statm`，macOS 上调用 `getrusage(RUSAGE_SELF)`）。开销低但非零——每次请求最多调用一次，通常在指标处理器内部，而不是每行日志都调用。
 - **禁止克隆。** `clone $worker` 会抛出 `\Error("Cloning OxPHP\\Server\\Worker is not allowed")`。Worker 句柄代表 OS 线程身份；克隆会造成同一线程存在第二个句柄的错觉。
-- **在 OxPHP 宿主之外**（例如，链接到 SAPI 的扩展被加载到 PHP CLI 中时），`Worker::current()` 仍会返回一个实例，但所有访问器都返回零状态值：`getId()` 为 `0`，`getStartTime()` 为进程启动时间，`getRequestCount()` 为 `0`，`getRss()` 为实时 RSS，而 `serve()` 抛出 `InvalidServeContextException`。
+- **在 OxPHP 宿主之外**（例如，链接到 SAPI 的扩展被加载到 PHP CLI 中时），`Worker::current()` 仍会返回一个实例，但所有访问器都返回零状态值：`id()` 为 `0`，`startTime()` 为进程启动时间，`requestCount()` 为 `0`，`rss()` 为实时 RSS，而 `serve()` 抛出 `InvalidServeContextException`。
 
 ## 参见
 

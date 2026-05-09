@@ -432,7 +432,7 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     }
     /* Increment moved to request-start path (oxphp_scheduler_create_fiber
      * for the fast path; oxphp_scheduler_tick's new-request branch for
-     * the event-loop path) so PHP-side getRequestCount() observes the
+     * the event-loop path) so PHP-side requestCount() observes the
      * current request's index, not the previous count. */
 
     /* Send the HTTP response via Rust (same as worker_send_callback) */

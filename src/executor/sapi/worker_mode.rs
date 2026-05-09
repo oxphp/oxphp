@@ -68,7 +68,7 @@ fn worker_mode_thread(
         bindings::oxphp_bridge_set_worker_mode(config.max_memory_mib);
     }
 
-    // Stash spawn time in bridge ctx for Worker::getStartTime().
+    // Stash spawn time in bridge ctx for Worker::startTime().
     let spawn_secs_for_bridge = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()

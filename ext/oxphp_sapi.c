@@ -1369,7 +1369,7 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
 
             oxphp_soft_reset();
 
-            /* Increment counter at request START so getRequestCount() inside
+            /* Increment counter at request START so requestCount() inside
              * the handler observes the current request index (1-based). Also
              * syncs ctx->requests_done on the fast path (was only synced on
              * the event-loop path before — latent bug fix). */
@@ -2405,22 +2405,22 @@ ZEND_METHOD(OxPHP_Server_Worker, isWorkerMode) {
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getId(): int */
-ZEND_METHOD(OxPHP_Server_Worker, getId) {
+/* {{{ OxPHP\Server\Worker::id(): int */
+ZEND_METHOD(OxPHP_Server_Worker, id) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG((zend_long)oxphp_bridge_get_worker_id());
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getStartTime(): float */
-ZEND_METHOD(OxPHP_Server_Worker, getStartTime) {
+/* {{{ OxPHP\Server\Worker::startTime(): float */
+ZEND_METHOD(OxPHP_Server_Worker, startTime) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_DOUBLE(oxphp_bridge_get_worker_start_time());
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getRequestCount(): int */
-ZEND_METHOD(OxPHP_Server_Worker, getRequestCount) {
+/* {{{ OxPHP\Server\Worker::requestCount(): int */
+ZEND_METHOD(OxPHP_Server_Worker, requestCount) {
     ZEND_PARSE_PARAMETERS_NONE();
     /* Single source of truth: bridge counter, incremented at request
      * start by Rust (both modes). 1-based per OS thread. */
@@ -2428,8 +2428,8 @@ ZEND_METHOD(OxPHP_Server_Worker, getRequestCount) {
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getMemoryUsage(): int */
-ZEND_METHOD(OxPHP_Server_Worker, getMemoryUsage) {
+/* {{{ OxPHP\Server\Worker::memoryUsage(): int */
+ZEND_METHOD(OxPHP_Server_Worker, memoryUsage) {
     ZEND_PARSE_PARAMETERS_NONE();
     /* Live Zend allocator usage. Bridge's stored value is updated only
      * post-request — mid-handler we want what the script is using right
@@ -2438,15 +2438,15 @@ ZEND_METHOD(OxPHP_Server_Worker, getMemoryUsage) {
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getRss(): int */
-ZEND_METHOD(OxPHP_Server_Worker, getRss) {
+/* {{{ OxPHP\Server\Worker::rss(): int */
+ZEND_METHOD(OxPHP_Server_Worker, rss) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG((zend_long)oxphp_bridge_get_rss_bytes());
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getMaxMemoryBytes(): int */
-ZEND_METHOD(OxPHP_Server_Worker, getMaxMemoryBytes) {
+/* {{{ OxPHP\Server\Worker::maxMemoryBytes(): int */
+ZEND_METHOD(OxPHP_Server_Worker, maxMemoryBytes) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG((zend_long)oxphp_bridge_get_max_memory_bytes());
 }
@@ -2473,10 +2473,10 @@ ZEND_METHOD(OxPHP_Server_Worker, isExitScheduled) {
 }
 /* }}} */
 
-/* {{{ OxPHP\Server\Worker::getExitReason(): ?string
+/* {{{ OxPHP\Server\Worker::exitReason(): ?string
  * Returns null when no exit pending; otherwise one of
  * 'scheduled' | 'max_memory' | 'error'. Always null in traditional mode. */
-ZEND_METHOD(OxPHP_Server_Worker, getExitReason) {
+ZEND_METHOD(OxPHP_Server_Worker, exitReason) {
     ZEND_PARSE_PARAMETERS_NONE();
     uint8_t r = oxphp_bridge_get_exit_reason();
     switch (r) {
@@ -2537,22 +2537,24 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isWorkerMode, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getId, 0, 0, IS_LONG, 0)
+/* Class method arginfo; free-function `oxphp_worker_id()` already owns
+ * `arginfo_oxphp_worker_id`, so the class entry uses a distinct symbol. */
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_serverworker_id, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getStartTime, 0, 0, IS_DOUBLE, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_startTime, 0, 0, IS_DOUBLE, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRequestCount, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_requestCount, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMemoryUsage, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_memoryUsage, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getRss, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_rss, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getMaxMemoryBytes, 0, 0, IS_LONG, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_maxMemoryBytes, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_scheduleExit, 0, 0, IS_VOID, 0)
@@ -2561,7 +2563,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_isExitScheduled, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_getExitReason, 0, 0, IS_STRING, 1)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_exitReason, 0, 0, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_worker_serve, 0, 1, IS_VOID, 0)
@@ -2576,23 +2578,23 @@ static zend_function_entry oxphp_worker_methods[] = {
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
     ZEND_ME(OxPHP_Server_Worker, isWorkerMode,       arginfo_oxphp_worker_isWorkerMode,
             ZEND_ACC_PUBLIC | ZEND_ACC_STATIC)
-    ZEND_ME(OxPHP_Server_Worker, getId,              arginfo_oxphp_worker_getId,
+    ZEND_ME(OxPHP_Server_Worker, id,                 arginfo_oxphp_serverworker_id,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getStartTime,       arginfo_oxphp_worker_getStartTime,
+    ZEND_ME(OxPHP_Server_Worker, startTime,          arginfo_oxphp_worker_startTime,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getRequestCount,    arginfo_oxphp_worker_getRequestCount,
+    ZEND_ME(OxPHP_Server_Worker, requestCount,       arginfo_oxphp_worker_requestCount,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getMemoryUsage,     arginfo_oxphp_worker_getMemoryUsage,
+    ZEND_ME(OxPHP_Server_Worker, memoryUsage,        arginfo_oxphp_worker_memoryUsage,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getRss,             arginfo_oxphp_worker_getRss,
+    ZEND_ME(OxPHP_Server_Worker, rss,                arginfo_oxphp_worker_rss,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getMaxMemoryBytes,  arginfo_oxphp_worker_getMaxMemoryBytes,
+    ZEND_ME(OxPHP_Server_Worker, maxMemoryBytes,     arginfo_oxphp_worker_maxMemoryBytes,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, scheduleExit,       arginfo_oxphp_worker_scheduleExit,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, isExitScheduled,    arginfo_oxphp_worker_isExitScheduled,
             ZEND_ACC_PUBLIC)
-    ZEND_ME(OxPHP_Server_Worker, getExitReason,      arginfo_oxphp_worker_getExitReason,
+    ZEND_ME(OxPHP_Server_Worker, exitReason,         arginfo_oxphp_worker_exitReason,
             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Server_Worker, serve,              arginfo_oxphp_worker_serve,
             ZEND_ACC_PUBLIC)

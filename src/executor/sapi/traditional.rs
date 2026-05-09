@@ -68,7 +68,7 @@ fn worker_thread(
         // Initialize bridge TLS context and set the worker ID (once per thread).
         bindings::oxphp_bridge_init_ctx();
         bindings::oxphp_bridge_set_worker_id(worker_id as i32);
-        // Stash spawn time in bridge ctx for Worker::getStartTime().
+        // Stash spawn time in bridge ctx for Worker::startTime().
         let spawn_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -287,7 +287,7 @@ fn execute_request(
 
     unsafe {
         // Bump the per-thread counter at request START so that
-        // Worker::getRequestCount() inside the handler observes the current
+        // Worker::requestCount() inside the handler observes the current
         // request's index (1-based), independently of routing mode.
         bindings::oxphp_bridge_increment_requests_done();
     }

@@ -1866,7 +1866,7 @@ namespace OxPHP\Server {
          * Worker thread index, 0..N-1 where N is the configured pool size
          * (PHP_WORKERS). Stable for the lifetime of the thread.
          */
-        public function getId(): int {}
+        public function id(): int {}
 
         /**
          * Unix timestamp (float, sub-second precision) when this OS thread
@@ -1875,7 +1875,7 @@ namespace OxPHP\Server {
          *
          * For per-request start time, use OxPHP\Http\RequestInterface::startTime().
          */
-        public function getStartTime(): float {}
+        public function startTime(): float {}
 
         // ── Request counter ──
 
@@ -1890,7 +1890,7 @@ namespace OxPHP\Server {
          * traditional mode just as it survives across handler invocations
          * in worker mode.
          */
-        public function getRequestCount(): int {}
+        public function requestCount(): int {}
 
         // ── Memory observability ──
 
@@ -1900,7 +1900,7 @@ namespace OxPHP\Server {
          * Worker mode: cumulative across requests until the next gc cycle.
          * Traditional mode: scoped to the current request.
          */
-        public function getMemoryUsage(): int {}
+        public function memoryUsage(): int {}
 
         /**
          * Process RSS in bytes.
@@ -1911,9 +1911,9 @@ namespace OxPHP\Server {
          * variable.
          *
          * Use case: RSS-based recycle policy when extension-internal
-         * allocations are not visible to getMemoryUsage().
+         * allocations are not visible to memoryUsage().
          */
-        public function getRss(): int {}
+        public function rss(): int {}
 
         /**
          * Configured worker memory cap in bytes (WORKER_MAX_MEMORY_MIB × 1MB).
@@ -1923,7 +1923,36 @@ namespace OxPHP\Server {
          * traditional mode the value is reported for symmetry but not
          * enforced (PHP's per-request memory_limit applies instead).
          */
-        public function getMaxMemoryBytes(): int {}
+        public function maxMemoryBytes(): int {}
+
+        // ── Graceful exit ──
+
+        /**
+         * Mark this worker for graceful exit after the current request
+         * completes. The supervisor respawns a fresh worker, re-running
+         * the outer scope of the entry script.
+         *
+         * Idempotent: subsequent calls are no-ops; the first call wins
+         * and exitReason() reports 'scheduled'.
+         *
+         * No-op in traditional mode (the script is exiting anyway).
+         */
+        public function scheduleExit(): void {}
+
+        /**
+         * True iff scheduleExit() has been called for this worker, or
+         * the worker loop has otherwise queued an exit (e.g. memory cap
+         * exceeded). Always false in traditional mode.
+         */
+        public function isExitScheduled(): bool {}
+
+        /**
+         * Reason for the pending exit, or null when no exit is pending.
+         * One of: 'scheduled' (scheduleExit() was called), 'max_memory'
+         * (WORKER_MAX_MEMORY_MIB threshold crossed), 'error' (the worker
+         * loop bailed). Always null in traditional mode.
+         */
+        public function exitReason(): ?string {}
 
         // ── Worker entry point ──
 

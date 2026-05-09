@@ -99,7 +99,7 @@ See the full [documentation](docs/en/index.md) for details.
 - **Native PHP execution** — PHP runs directly inside the server process, in a dedicated thread pool
 - **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input` — see [Superglobals](docs/en/php/superglobals.md)
 - **HTTP Object API** — `oxphp_http_request()` returns a typed, lazy-loading request object with built-in JSON body parsing, content-detected MIME types for uploads, and a mutable attributes container for middleware — see [HTTP Request API](docs/en/php/request-api.md)
-- **Worker Runtime API** — `OxPHP\Server\Worker::current()` exposes per-thread introspection (`getId`, `getRequestCount`, `getStartTime`, `getMemoryUsage`, `getRss`, `getMaxMemoryBytes`) and the worker entry point (`serve`) — see [Worker class](docs/en/php/worker-class.md)
+- **Worker Runtime API** — `OxPHP\Server\Worker::current()` exposes per-thread introspection (`id`, `requestCount`, `startTime`, `memoryUsage`, `rss`, `maxMemoryBytes`) and the worker entry point (`serve`) — see [Worker class](docs/en/php/worker-class.md)
 - **Shared OPcache** across all workers — one worker compiles a file, every worker uses the cached bytecode — see [OPcache and JIT](docs/en/php/opcache.md)
 - **PHP extension functions** — `oxphp_*()` helpers for streaming, early response, async, tracing, and request access — see [PHP functions reference](docs/en/php/functions.md)
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
