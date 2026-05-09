@@ -2853,10 +2853,10 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
-    /* Sub-design C: SIGALRM-driven max_execution_time. Zend set
-     * EG(timed_out)=1 alongside vm_interrupt. Convert to the unified
-     * cancellation reason and claim the flag so the standard
-     * zend_timeout() path is replaced by ours. */
+    /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
+     * alongside vm_interrupt. Convert it to the unified cancellation
+     * reason and claim the flag so zend_timeout()'s default
+     * "Maximum execution time exceeded" path doesn't also fire. */
     if (zend_atomic_bool_load_ex(&EG(timed_out))) {
         oxphp_bridge_set_cancel_reason(OXPHP_CANCEL_TIMEOUT);
         zend_atomic_bool_store_ex(&EG(timed_out), false);
@@ -2886,10 +2886,10 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     /* unreachable: zend_error_noreturn calls zend_bailout() */
 }
 
-/* Sub-design C: own the max_execution_time ini handler so we can extend
- * its behaviour later (mirror to a deadline store, plug into the new
- * cancellation pipe, etc.). Today this is a thin pass-through with
- * worker-mode and startup/deactivate stages explicitly skipped. */
+/* Own the max_execution_time ini handler so future revisions can
+ * extend its behaviour without surgical patches. Today this is a thin
+ * pass-through; worker-mode and the STARTUP/DEACTIVATE stages are
+ * explicit early-exits so the hook is ready for later mirror logic. */
 static PHP_INI_MH((*orig_OnUpdateTimeout)) = NULL;
 
 static PHP_INI_MH(oxphp_OnUpdateTimeout)
@@ -3597,7 +3597,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     orig_zend_interrupt_function = zend_interrupt_function;
     zend_interrupt_function = oxphp_zend_interrupt_handler;
 
-    /* Sub-design C: install max_execution_time ini hook. */
+    /* Install the max_execution_time ini hook. */
     zend_ini_entry *me_entry = zend_hash_str_find_ptr(
         EG(ini_directives),
         "max_execution_time",
