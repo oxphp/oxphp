@@ -112,8 +112,18 @@ impl Plugin for AsyncPlugin {
             .build()?;
 
         // OxPHP\Async\TimeoutException extends OxPHP\Async\AsyncException
+        // Carries optional partial-errors / pending-ids context (populated only
+        // by oxphp_async_await_any timeout path; empty for all other timeouts).
         ctx.register_class("OxPHP\\Async\\TimeoutException")
             .extends("OxPHP\\Async\\AsyncException")
+            .property("__partialErrors", PhpType::Array, Visibility::Private)
+            .property("__pendingPromiseIds", PhpType::Array, Visibility::Private)
+            .method("getPartialErrors")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__partialErrors"))
+            .method("getPendingPromiseIds")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__pendingPromiseIds"))
             .build()?;
 
         // OxPHP\Async\AggregateAsyncException extends OxPHP\Async\AsyncException
@@ -431,6 +441,72 @@ mod tests {
         assert!(method_names.contains(&"getErrorMap"));
         assert!(method_names.contains(&"getPromiseIds"));
         for m in &agg.methods {
+            assert!(m.handler.is_some(), "method {} must have a handler", m.name);
+            assert_eq!(m.return_type, Some(PhpType::Array));
+        }
+    }
+
+    #[test]
+    fn timeout_exception_has_partial_errors_methods() {
+        std::env::remove_var("ASYNC_WORKERS");
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
+        let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
+        let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
+
+        let mut ctx = PluginContext::new(
+            "async".into(),
+            "__oxp_async_".into(),
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics_collectors,
+            &mut internal_routes,
+            &mut internal_route_prefixes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+            &mut core_flags,
+        );
+
+        let mut plugin = AsyncPlugin::new();
+        plugin.init(&mut ctx).unwrap();
+        drop(ctx);
+
+        let to = php_classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Async\\TimeoutException")
+            .expect("TimeoutException must be registered");
+
+        // Properties: __partialErrors, __pendingPromiseIds (private arrays).
+        let prop_names: Vec<&str> = to.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(prop_names.contains(&"__partialErrors"));
+        assert!(prop_names.contains(&"__pendingPromiseIds"));
+        for prop in &to.properties {
+            assert_eq!(prop.visibility, Visibility::Private);
+            assert_eq!(prop.php_type, PhpType::Array);
+        }
+
+        // Methods: getPartialErrors, getPendingPromiseIds (each with a handler).
+        let method_names: Vec<&str> = to.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(method_names.contains(&"getPartialErrors"));
+        assert!(method_names.contains(&"getPendingPromiseIds"));
+        for m in &to.methods {
             assert!(m.handler.is_some(), "method {} must have a handler", m.name);
             assert_eq!(m.return_type, Some(PhpType::Array));
         }

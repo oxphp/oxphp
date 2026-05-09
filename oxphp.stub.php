@@ -775,9 +775,32 @@ namespace OxPHP\Async {
     class AsyncException extends \Exception {}
 
     /**
-     * Thrown when oxphp_async_await() times out before the task completes.
+     * Thrown by async-await-style functions when a deadline expires.
+     *
+     * For oxphp_async_await_any(), additional context is exposed via
+     * getPartialErrors() and getPendingPromiseIds(). For other call sites
+     * (oxphp_async_await, oxphp_async_await_all, oxphp_async_await_race)
+     * both methods return empty arrays.
      */
-    class TimeoutException extends AsyncException {}
+    class TimeoutException extends AsyncException
+    {
+        /**
+         * Errors collected from promises that rejected before the deadline,
+         * keyed by promise_id. Only populated by oxphp_async_await_any().
+         *
+         * @return array<int, \Throwable>
+         */
+        public function getPartialErrors(): array {}
+
+        /**
+         * Promise IDs that did not settle before the deadline. They have been
+         * cancelled and should not be awaited again. Only populated by
+         * oxphp_async_await_any().
+         *
+         * @return list<int>
+         */
+        public function getPendingPromiseIds(): array {}
+    }
 
     /**
      * Thrown by oxphp_async_await_any() when every provided promise rejected
