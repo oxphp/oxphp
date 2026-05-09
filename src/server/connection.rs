@@ -137,9 +137,8 @@ pub async fn handle_request(
     let path_str = parts.uri.path().to_string();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
-    // Sub-design A: per-request cancellation state. The worker references
-    // it via raw pointer; we keep the Arc alive in this scope so the
-    // pointer stays valid until dispatch completes.
+    // Per-request cancellation state. Worker owns one Arc; this scope
+    // owns the other so the upcoming drop guard can write into it.
     let cancel_state = std::sync::Arc::new(crate::bridge::cancel::CancellationState::new());
 
     // Apply request timeout if configured. Only one branch runs, so the
@@ -154,7 +153,7 @@ pub async fn handle_request(
         &metadata,
         profiling_mode,
         profiling_run_id,
-        cancel_state.as_ptr() as usize,
+        cancel_state.clone(),
     );
     let result = dispatch.await;
 
@@ -244,7 +243,7 @@ async fn dispatch_request(
     metadata: &[(String, String)],
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
     profiling_run_id: Option<String>,
-    cancel_ptr: usize,
+    cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -386,7 +385,7 @@ async fn dispatch_request(
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
-                cancel_ptr,
+                cancel_state,
                 trace_id: metadata_get(metadata, "trace_id").to_string(),
                 span_id: metadata_get(metadata, "span_id").to_string(),
                 parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),

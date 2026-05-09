@@ -14,6 +14,7 @@ pub enum CancelReason {
     UserCancel = 5,
 }
 
+#[derive(Debug)]
 #[repr(C, align(64))]
 pub struct CancellationState {
     reason: AtomicU8,

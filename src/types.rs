@@ -55,10 +55,10 @@ pub struct ScriptRequest {
     pub body: Bytes,
     pub remote_addr: SocketAddr,
     pub document_root: Arc<PathBuf>,
-    /// Pointer (as `usize`) into the request's `Arc<CancellationState>`.
-    /// 0 outside a request. The Arc is kept alive by the connection
-    /// task for the request's lifetime; the worker is non-owning.
-    pub cancel_ptr: usize,
+    /// Per-request cancellation state shared with the dispatch task.
+    /// Holding an Arc on this side keeps the AtomicU8 alive even if
+    /// the tokio future is dropped before the worker finishes.
+    pub cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     /// W3C Trace Context: trace ID (32 hex chars, empty if tracing disabled).
     pub trace_id: String,
     /// W3C Trace Context: span ID (16 hex chars, empty if tracing disabled).
