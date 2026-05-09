@@ -2516,6 +2516,12 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
                     let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
                     slot.interrupt_flag_ptr
                         .store(addr, std::sync::atomic::Ordering::Release);
+                    // Hand the per-worker tick counter to the C observer
+                    // so each PHP function call bumps it.
+                    let tick_ptr = &slot.heartbeat.ticks as *const std::sync::atomic::AtomicU64;
+                    unsafe {
+                        bindings::oxphp_bridge_set_tick_ptr(tick_ptr);
+                    }
                 }
             }
             c.set(true);

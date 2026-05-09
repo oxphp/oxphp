@@ -622,6 +622,9 @@ extern "C" {
     pub fn oxphp_bridge_request_interrupt();
     pub fn oxphp_capture_vm_interrupt();
     pub fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int;
+
+    // Tick counter pointer; see common.rs binding for full docs.
+    pub fn oxphp_bridge_set_tick_ptr(ptr: *const std::sync::atomic::AtomicU64);
 }
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;

@@ -1001,6 +1001,29 @@ void oxphp_capture_vm_interrupt(void);
  * itself (e.g. streaming send-error). */
 void oxphp_bridge_request_interrupt(void);
 
+/* ── Tick observer ──
+ *
+ * Per-worker counter incremented once per PHP function call by a
+ * registered zend_observer_fcall_register callback. The supervisor
+ * uses tick deltas (combined with thread CPU-time deltas) to
+ * classify long-running workers: cpu_delta>0 + tick_delta==0 means
+ * the worker is stuck inside a C extension, etc.
+ *
+ * set_tick_ptr() is called once per worker on the first request
+ * (zero-once gate). oxphp_bridge_tick() is the inline fast path
+ * invoked by the observer; it bumps the per-thread pointer using a
+ * relaxed atomic add. Cost: ~3 ns per call. */
+extern _Thread_local _Atomic(uint64_t)* g_tick_ptr;
+
+void oxphp_bridge_set_tick_ptr(_Atomic(uint64_t)* ptr);
+
+static inline void oxphp_bridge_tick(void) {
+    _Atomic(uint64_t)* p = g_tick_ptr;
+    if (p) {
+        atomic_fetch_add_explicit(p, 1, memory_order_relaxed);
+    }
+}
+
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
 

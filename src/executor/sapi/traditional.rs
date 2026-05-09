@@ -318,6 +318,10 @@ fn execute_request(
                     let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
                     slot.interrupt_flag_ptr
                         .store(addr, std::sync::atomic::Ordering::Release);
+                    let tick_ptr = &slot.heartbeat.ticks as *const std::sync::atomic::AtomicU64;
+                    unsafe {
+                        bindings::oxphp_bridge_set_tick_ptr(tick_ptr);
+                    }
                 }
             }
             c.set(true);
