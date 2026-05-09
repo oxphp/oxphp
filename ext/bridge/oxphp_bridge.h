@@ -1228,6 +1228,37 @@ const char *oxphp_bridge_get_async_exc_message(void);
 const char *oxphp_bridge_get_async_exc_trace(void);
 void oxphp_bridge_clear_async_exception(void);
 
+/* ─── Async Aggregate Exception (multi-error) ────────────────────
+ *
+ * Used by oxphp_bridge_await_any_dispatch when accumulating rejections
+ * from multiple promises. Buffer is __thread-local; one buffer per
+ * worker thread. clear() must be called before push() sequence; throw()
+ * synthesises a PHP exception from the accumulated entries and clears
+ * the buffer.
+ */
+void oxphp_bridge_aggregate_clear(void);
+
+void oxphp_bridge_aggregate_push(
+    const char *exception_class,   /* PHP class name, NUL-terminated UTF-8; nullable → "OxPHP\\Async\\AsyncException" */
+    const char *message,           /* nullable → empty */
+    const char *trace,             /* nullable */
+    int64_t promise_id
+);
+
+/* Throws OxPHP\Async\AggregateAsyncException with accumulated entries.
+ * Returns 0 on success, -1 if the AggregateAsyncException class can't be
+ * looked up. Always clears the buffer (even on failure). */
+int oxphp_bridge_aggregate_throw(void);
+
+/* Throws OxPHP\Async\TimeoutException with partial errors (from the buffer)
+ * + pending ids (from the parameters). pending_ids is an array of
+ * pending_count int64 values. Always clears the buffer.
+ * Returns 0 on success, -1 on class lookup failure. */
+int oxphp_bridge_aggregate_throw_timeout(
+    const int64_t *pending_ids,
+    uint32_t pending_count
+);
+
 /* The remaining async functions use PHP types (zval, HashTable, zend_op_array)
  * and are only available when PHP headers have been included first.
  * Rust FFI uses *mut c_void for all these pointer types. */

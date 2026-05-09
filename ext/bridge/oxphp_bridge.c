@@ -3119,6 +3119,215 @@ void oxphp_bridge_clear_async_exception(void) {
     async_exc_trace = NULL;
 }
 
+/* ─── Async Aggregate Exception (multi-error) ──────────────── */
+
+typedef struct aggregate_entry_s {
+    char *exception_class;   /* strdup'd, free in clear() */
+    char *message;           /* strdup'd, free in clear() */
+    char *trace;             /* strdup'd, free in clear() — may be NULL */
+    int64_t promise_id;
+} aggregate_entry_t;
+
+static __thread aggregate_entry_t *aggregate_buf = NULL;
+static __thread size_t aggregate_len = 0;
+static __thread size_t aggregate_cap = 0;
+
+void oxphp_bridge_aggregate_clear(void) {
+    for (size_t i = 0; i < aggregate_len; i++) {
+        free(aggregate_buf[i].exception_class);
+        free(aggregate_buf[i].message);
+        free(aggregate_buf[i].trace);
+    }
+    aggregate_len = 0;
+    /* Keep allocation across requests; reset length only. */
+}
+
+void oxphp_bridge_aggregate_push(
+    const char *exception_class,
+    const char *message,
+    const char *trace,
+    int64_t promise_id
+) {
+    if (aggregate_len == aggregate_cap) {
+        size_t new_cap = aggregate_cap ? aggregate_cap * 2 : 8;
+        aggregate_entry_t *grown = realloc(aggregate_buf, new_cap * sizeof(*grown));
+        if (!grown) return; /* OOM: silently drop entry */
+        aggregate_buf = grown;
+        aggregate_cap = new_cap;
+    }
+    aggregate_buf[aggregate_len].exception_class =
+        exception_class ? strdup(exception_class) : NULL;
+    aggregate_buf[aggregate_len].message =
+        message ? strdup(message) : NULL;
+    aggregate_buf[aggregate_len].trace =
+        trace ? strdup(trace) : NULL;
+    aggregate_buf[aggregate_len].promise_id = promise_id;
+    aggregate_len++;
+}
+
+/* Build a Throwable zval for one aggregate entry. Caller owns the zval. */
+static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
+    const char *cls_name = entry->exception_class
+        ? entry->exception_class
+        : "OxPHP\\Async\\AsyncException";
+    size_t cls_len = strlen(cls_name);
+
+    zend_class_entry *ce = zend_lookup_class_str(cls_name, cls_len);
+    if (!ce) {
+        ce = zend_lookup_class_str(
+            "OxPHP\\Async\\AsyncException",
+            sizeof("OxPHP\\Async\\AsyncException") - 1
+        );
+        if (!ce) return -1;
+    }
+    if (object_init_ex(out, ce) != SUCCESS) return -1;
+    if (entry->message) {
+        zend_update_property_string(
+            ce, Z_OBJ_P(out),
+            "message", sizeof("message") - 1,
+            entry->message
+        );
+    }
+    /* Trace is informational; stored as "__trace" string property. */
+    if (entry->trace) {
+        zend_update_property_string(
+            ce, Z_OBJ_P(out),
+            "__trace", sizeof("__trace") - 1,
+            entry->trace
+        );
+    }
+    return 0;
+}
+
+int oxphp_bridge_aggregate_throw(void) {
+    zend_class_entry *agg_ce = zend_lookup_class_str(
+        "OxPHP\\Async\\AggregateAsyncException",
+        sizeof("OxPHP\\Async\\AggregateAsyncException") - 1
+    );
+    if (!agg_ce) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+    zval ex;
+    ZVAL_UNDEF(&ex);
+    if (object_init_ex(&ex, agg_ce) != SUCCESS) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+
+    char msg_buf[64];
+    snprintf(msg_buf, sizeof(msg_buf),
+             "All %zu promises rejected", aggregate_len);
+    zend_update_property_string(
+        agg_ce, Z_OBJ(ex),
+        "message", sizeof("message") - 1,
+        msg_buf
+    );
+
+    /* __errors: list<Throwable> in push order (Rust pushes in input-array order). */
+    zval errors;
+    array_init(&errors);
+    /* __errorMap: array<int, Throwable> keyed by promise_id. */
+    zval err_map;
+    array_init(&err_map);
+    /* __promiseIds: list<int>. */
+    zval ids;
+    array_init(&ids);
+
+    for (size_t i = 0; i < aggregate_len; i++) {
+        zval throwable;
+        if (build_throwable_zval(&throwable, &aggregate_buf[i]) != 0) {
+            ZVAL_NULL(&throwable);
+        }
+        /* Each Throwable goes into both `errors` (list) and `err_map`
+         * (id-keyed map). zend_hash_index_update / add_next_index_zval take
+         * ownership of one ref; bumping the refcount lets us hand the same
+         * zval to two arrays without double-free. */
+        Z_TRY_ADDREF(throwable);
+        add_next_index_zval(&errors, &throwable);
+        zend_hash_index_update(
+            Z_ARRVAL(err_map),
+            (zend_long)aggregate_buf[i].promise_id,
+            &throwable
+        );
+        add_next_index_long(&ids, (zend_long)aggregate_buf[i].promise_id);
+    }
+
+    zend_update_property(agg_ce, Z_OBJ(ex), "__errors", sizeof("__errors") - 1, &errors);
+    zend_update_property(agg_ce, Z_OBJ(ex), "__errorMap", sizeof("__errorMap") - 1, &err_map);
+    zend_update_property(agg_ce, Z_OBJ(ex), "__promiseIds", sizeof("__promiseIds") - 1, &ids);
+    zval_ptr_dtor(&errors);
+    zval_ptr_dtor(&err_map);
+    zval_ptr_dtor(&ids);
+
+    zend_throw_exception_object(&ex);
+    oxphp_bridge_aggregate_clear();
+    return 0;
+}
+
+int oxphp_bridge_aggregate_throw_timeout(
+    const int64_t *pending_ids,
+    uint32_t pending_count
+) {
+    zend_class_entry *to_ce = zend_lookup_class_str(
+        "OxPHP\\Async\\TimeoutException",
+        sizeof("OxPHP\\Async\\TimeoutException") - 1
+    );
+    if (!to_ce) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+    zval ex;
+    ZVAL_UNDEF(&ex);
+    if (object_init_ex(&ex, to_ce) != SUCCESS) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+
+    char msg_buf[96];
+    snprintf(msg_buf, sizeof(msg_buf),
+             "oxphp_async_await_any timed out (%u pending, %zu rejected before timeout)",
+             pending_count, aggregate_len);
+    zend_update_property_string(
+        to_ce, Z_OBJ(ex),
+        "message", sizeof("message") - 1,
+        msg_buf
+    );
+
+    /* __partialErrors: array<int, Throwable> keyed by promise_id. */
+    zval partial;
+    array_init(&partial);
+    for (size_t i = 0; i < aggregate_len; i++) {
+        zval throwable;
+        if (build_throwable_zval(&throwable, &aggregate_buf[i]) != 0) {
+            ZVAL_NULL(&throwable);
+        }
+        zend_hash_index_update(
+            Z_ARRVAL(partial),
+            (zend_long)aggregate_buf[i].promise_id,
+            &throwable
+        );
+    }
+
+    /* __pendingPromiseIds: list<int>. */
+    zval ids;
+    array_init(&ids);
+    for (uint32_t i = 0; i < pending_count; i++) {
+        add_next_index_long(&ids, (zend_long)pending_ids[i]);
+    }
+
+    zend_update_property(to_ce, Z_OBJ(ex),
+                         "__partialErrors", sizeof("__partialErrors") - 1, &partial);
+    zend_update_property(to_ce, Z_OBJ(ex),
+                         "__pendingPromiseIds", sizeof("__pendingPromiseIds") - 1, &ids);
+    zval_ptr_dtor(&partial);
+    zval_ptr_dtor(&ids);
+
+    zend_throw_exception_object(&ex);
+    oxphp_bridge_aggregate_clear();
+    return 0;
+}
+
 /* === Async Promise: Async Worker State === */
 
 void oxphp_bridge_set_async_worker(int is_async) {
