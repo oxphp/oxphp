@@ -3173,15 +3173,25 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> = Vec::with_capacity(ids.len());
 
     for &id in &ids {
-        if let Some((rx, cancelled)) = take_promise(id) {
-            id_map.push(id);
-            cancel_map.push(cancelled);
-            rxs.push(rx);
+        match take_promise(id) {
+            Some((rx, cancelled)) => {
+                id_map.push(id);
+                cancel_map.push(cancelled);
+                rxs.push(rx);
+            }
+            None => {
+                // Unknown / already-awaited promise id. Restore any
+                // receivers we already took and bail with -4. The handler
+                // surfaces the offending id via *out_winner_id.
+                for (rx, (taken_id, cancelled)) in
+                    rxs.into_iter().zip(id_map.iter().zip(cancel_map.iter()))
+                {
+                    store_promise(*taken_id, rx, cancelled.clone());
+                }
+                *out_winner_id = id as i64;
+                return -4;
+            }
         }
-    }
-
-    if rxs.is_empty() {
-        return -1;
     }
 
     let handle = match ASYNC_TOKIO_HANDLE.get() {
@@ -3337,10 +3347,27 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         Vec::with_capacity(input_ids.len());
 
     for &id in &input_ids {
-        if let Some((rx, cancelled)) = take_promise(id) {
-            id_vec.push(id);
-            cancel_vec.push(cancelled);
-            rxs.push(rx);
+        match take_promise(id) {
+            Some((rx, cancelled)) => {
+                id_vec.push(id);
+                cancel_vec.push(cancelled);
+                rxs.push(rx);
+            }
+            None => {
+                // Unknown / already-awaited promise id. Restore any
+                // receivers we already took and bail with -4. The handler
+                // surfaces the offending id via *out_winner_id.
+                for ((taken_id, rx), cancelled) in id_vec
+                    .iter()
+                    .copied()
+                    .zip(rxs.into_iter())
+                    .zip(cancel_vec.iter().cloned())
+                {
+                    store_promise(taken_id, rx, cancelled);
+                }
+                *out_winner_id = id as i64;
+                return -4;
+            }
         }
     }
 

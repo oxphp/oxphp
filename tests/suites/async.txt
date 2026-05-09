@@ -23,3 +23,5 @@ async/test_await_any_empty_array
 async/test_await_any_all_rejected
 async/test_await_any_partial_reject_then_success
 async/test_await_any_timeout
+
+async/test_await_any_unknown_id

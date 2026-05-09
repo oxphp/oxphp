@@ -1175,6 +1175,7 @@ typedef int (*oxphp_await_race_dispatch_fn_t)(
  *   0  : success — *out_winner_id and retval populated.
  *   -2 : timeout — TimeoutException already thrown via aggregate API.
  *   -3 : all rejected — AggregateAsyncException already thrown via aggregate API.
+ *   -4 : unknown / already-awaited promise id — *out_winner_id holds the bad id.
  *   -1 : other internal error.
  */
 typedef int (*oxphp_await_any_dispatch_fn_t)(

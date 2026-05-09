@@ -415,6 +415,10 @@ fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErr
         -2 => Err(timeout_err(
             "oxphp_async_await_race(): all promises timed out",
         )),
+        -4 => Err(async_err(format!(
+            "oxphp_async_await_race(): unknown or already-awaited promise id {}",
+            winner_id
+        ))),
         _ => Err(read_bridge_exception()),
     }
 }
@@ -501,6 +505,10 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
         // zend_throw_exception unconditionally, OVERRIDING EG(exception) with
         // a generic AsyncException. Don't do that.
         -2 | -3 => Ok(()),
+        -4 => Err(async_err(format!(
+            "oxphp_async_await_any(): unknown or already-awaited promise id {}",
+            winner_id
+        ))),
         _ => Err(read_bridge_exception()),
     }
 }
