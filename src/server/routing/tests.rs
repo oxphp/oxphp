@@ -1078,7 +1078,6 @@ mod php_deny_integration {
             listen_addr: "127.0.0.1:0".to_string(),
             document_root: dir.path().to_path_buf(),
             header_read_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(120),
         };
         let entry_path = entry_file.map(|name| dir.path().join(name));
         let cache = Arc::new(FileCache::new(1024));
