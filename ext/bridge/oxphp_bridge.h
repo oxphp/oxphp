@@ -1165,6 +1165,22 @@ typedef int (*oxphp_await_race_dispatch_fn_t)(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
 );
+/* await_any dispatch (Promise.any-style: first FULFILLED wins).
+ *
+ * Same signature as await_race_dispatch_fn_t. The Rust implementation
+ * accumulates rejections via the aggregate-exception API and only
+ * succeeds on first fulfilled promise.
+ *
+ * Return codes:
+ *   0  : success — *out_winner_id and retval populated.
+ *   -2 : timeout — TimeoutException already thrown via aggregate API.
+ *   -3 : all rejected — AggregateAsyncException already thrown via aggregate API.
+ *   -1 : other internal error.
+ */
+typedef int (*oxphp_await_any_dispatch_fn_t)(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
 
 typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
 typedef int (*oxphp_in_fiber_check_fn_t)(void);
@@ -1173,6 +1189,7 @@ typedef int (*oxphp_in_fiber_check_fn_t)(void);
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
 void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn);
+void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
@@ -1207,6 +1224,14 @@ int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval
  *  On success: *out_winner_id is the winning promise ID, retval has the result.
  *  Returns 0 (success), -1 (error), -2 (timeout). */
 int oxphp_bridge_await_race_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
+
+/** Call Rust await_any dispatch. First FULFILLED promise wins; rejections accumulate.
+ *  On success: *out_winner_id is the winning promise ID, retval has the result.
+ *  Returns 0 (success), -1 (error), -2 (timeout), -3 (all rejected). */
+int oxphp_bridge_await_any_dispatch(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
 );

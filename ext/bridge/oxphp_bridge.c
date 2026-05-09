@@ -2239,6 +2239,7 @@ int oxphp_execute_script_safe(void *file_handle) {
 static oxphp_async_dispatch_fn_t rust_async_dispatch = NULL;
 static oxphp_await_dispatch_fn_t rust_await_dispatch = NULL;
 static oxphp_await_race_dispatch_fn_t rust_await_race_dispatch = NULL;
+static oxphp_await_any_dispatch_fn_t rust_await_any_dispatch = NULL;
 
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn) {
     rust_async_dispatch = fn;
@@ -2250,6 +2251,10 @@ void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn) {
 
 void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn) {
     rust_await_race_dispatch = fn;
+}
+
+void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn) {
+    rust_await_any_dispatch = fn;
 }
 
 static oxphp_fiber_await_fn_t sapi_fiber_await = NULL;
@@ -2304,6 +2309,16 @@ int oxphp_bridge_await_race_dispatch(
 ) {
     if (__builtin_expect(rust_await_race_dispatch != NULL, 1)) {
         return rust_await_race_dispatch(promise_ids, count, timeout, out_winner_id, retval);
+    }
+    return -1;
+}
+
+int oxphp_bridge_await_any_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+) {
+    if (__builtin_expect(rust_await_any_dispatch != NULL, 1)) {
+        return rust_await_any_dispatch(promise_ids, count, timeout, out_winner_id, retval);
     }
     return -1;
 }
