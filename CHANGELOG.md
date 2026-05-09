@@ -10,6 +10,7 @@ All notable changes to OxPHP are documented in this file.
 - `oxphp_request_heartbeat($time)` PHP function. Use `set_time_limit($seconds)` instead — both reset the per-request timer to N seconds from now.
 - `oxphp_bridge_set_deadline` / `_get_deadline` / `_is_deadline_expired` C exports from the bridge.
 - `tokio::time::timeout` wrapping of the dispatch future. SIGALRM-driven `max_execution_time` is now the single execution-timeout source.
+- **BREAKING:** `sapi` key from the array returned by `oxphp_server_info()`. The key used to hardcode `"oxphp"`, contradicting `php_sapi_name()` which reports `"cli-server"` (the real SAPI module name, kept that way for OPcache compatibility). Callers reading `$info['sapi']` will now get `null`. Use `php_sapi_name()` to get the SAPI identifier directly.
 
 ### Changed
 

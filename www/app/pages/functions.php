@@ -33,11 +33,10 @@ $tmp = "/tmp/worker_{$wid}_buffer.dat";',
         'name'    => 'oxphp_server_info',
         'sig'     => 'oxphp_server_info(): array',
         'params'  => [],
-        'return'  => 'array — Associative array with keys: <code>sapi</code>, <code>version</code>, <code>worker_id</code>, <code>request_time</code>, <code>worker_mode</code>.',
+        'return'  => 'array — Associative array with keys: <code>version</code>, <code>worker_id</code>, <code>request_time</code>, <code>worker_mode</code>.',
         'desc'    => 'Returns server metadata for the current request. The <code>request_time</code> is a Unix timestamp with microsecond precision, set before <code>php_request_startup()</code> for accurate timing.',
         'example' => '$info = oxphp_server_info();
 // [
-//     "sapi"         => "oxphp",
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1740000000.123456,

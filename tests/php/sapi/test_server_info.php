@@ -8,7 +8,6 @@ $t = new TestCase('server_info', 'sapi');
 
 $info = oxphp_server_info();
 $t->assertType('oxphp_server_info() is array', $info, 'array');
-$t->assertKeyExists('has key: sapi', $info, 'sapi');
 $t->assertKeyExists('has key: version', $info, 'version');
 $t->assertKeyExists('has key: worker_id', $info, 'worker_id');
 $t->assertKeyExists('has key: request_time', $info, 'request_time');

@@ -81,12 +81,12 @@ $info      = oxphp_server_info();
 echo "<h1>OxPHP</h1>\n";
 echo "<p>Request ID: {$requestId}</p>\n";
 echo "<p>Worker: {$info['worker_id']}</p>\n";
-echo "<p>SAPI: {$info['sapi']}</p>\n";
+echo "<p>SAPI: " . php_sapi_name() . "</p>\n";
 echo "<p>Version: {$info['version']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `sapi`, `version`, `worker_id`, and `worker_mode`.
+`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `version`, `worker_id`, `request_time`, and `worker_mode`.
 
 ### 5. Build and Start
 
