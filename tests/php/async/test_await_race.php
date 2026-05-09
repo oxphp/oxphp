@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/../test_helper.php';
 
-$t = new TestCase('await_any', 'async');
+$t = new TestCase('await_race', 'async');
 
 $promises = [];
 $delays = [300000, 100000, 200000]; // 300ms, 100ms, 200ms
@@ -15,7 +15,7 @@ foreach ($delays as $d) {
     }, $d);
 }
 
-$result = oxphp_async_await_any($promises);
+$result = oxphp_async_await_race($promises);
 
 $t->assertType('result is array', $result, 'array');
 $t->assertKeyExists('result has key: id', $result, 'id');

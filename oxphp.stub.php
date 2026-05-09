@@ -341,11 +341,11 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * @example
  * $p1 = oxphp_async(fn() => slow_api_a());
  * $p2 = oxphp_async(fn() => slow_api_b());
- * $winner = oxphp_async_await_any([$p1, $p2]);
+ * $winner = oxphp_async_await_race([$p1, $p2]);
  * // ['id' => $p2, 'value' => ...] (whichever finished first)
  * $other = oxphp_async_await($p1); // non-winner still awaitable
  */
-function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
+function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): array {}
 
 /**
  * Register a PHP class as an attribute-based decorator.

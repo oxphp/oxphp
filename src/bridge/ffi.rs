@@ -160,7 +160,7 @@ extern "C" {
     pub fn oxphp_bridge_set_await_dispatch(
         f: Option<unsafe extern "C" fn(i64, f64, *mut c_void) -> c_int>,
     );
-    pub fn oxphp_bridge_set_await_any_dispatch(
+    pub fn oxphp_bridge_set_await_race_dispatch(
         f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
     );
 
@@ -294,7 +294,7 @@ extern "C" {
     ) -> i64;
     pub fn oxphp_bridge_await_dispatch(promise_id: i64, timeout: f64, retval: *mut c_void)
         -> c_int;
-    pub fn oxphp_bridge_await_any_dispatch(
+    pub fn oxphp_bridge_await_race_dispatch(
         promise_ids: *const i64,
         count: u32,
         timeout: f64,

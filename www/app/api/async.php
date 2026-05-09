@@ -3,7 +3,7 @@
 /**
  * Async promises API endpoint.
  *
- * Demonstrates oxphp_async() / oxphp_async_await_all() / oxphp_async_await_any().
+ * Demonstrates oxphp_async() / oxphp_async_await_all() / oxphp_async_await_race().
  * Query params:
  *   ?mode=parallel  — dispatch 4 tasks, await all (default)
  *   ?mode=race      — dispatch 3 tasks, await fastest
@@ -70,7 +70,7 @@ switch ($mode) {
             });
         }
 
-        $winner = oxphp_async_await_any($promises);
+        $winner = oxphp_async_await_race($promises);
         $wall_ms = round((microtime(true) - $start) * 1000, 1);
 
         json_response(200, [

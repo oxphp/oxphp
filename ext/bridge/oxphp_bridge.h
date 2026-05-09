@@ -1133,7 +1133,7 @@ typedef int64_t (*oxphp_async_dispatch_fn_t)(
 typedef int (*oxphp_await_dispatch_fn_t)(
     int64_t promise_id, double timeout, void *retval
 );
-typedef int (*oxphp_await_any_dispatch_fn_t)(
+typedef int (*oxphp_await_race_dispatch_fn_t)(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
 );
@@ -1144,7 +1144,7 @@ typedef int (*oxphp_in_fiber_check_fn_t)(void);
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
-void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
+void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
 
@@ -1175,10 +1175,10 @@ int64_t oxphp_bridge_async_dispatch(
 /** Call Rust await dispatch. Returns 0 (success), -1 (error), -2 (timeout). */
 int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval);
 
-/** Call Rust await_any dispatch. Races multiple promises, returns the first to complete.
+/** Call Rust await_race dispatch. Races multiple promises, returns the first to complete.
  *  On success: *out_winner_id is the winning promise ID, retval has the result.
  *  Returns 0 (success), -1 (error), -2 (timeout). */
-int oxphp_bridge_await_any_dispatch(
+int oxphp_bridge_await_race_dispatch(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
 );

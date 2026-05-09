@@ -5,7 +5,7 @@ async/test_basic_dispatch
 async/test_with_args
 async/test_return_types
 async/test_await_all
-async/test_await_any
+async/test_await_race
 async/test_parallel_wall_time
 async/test_exception_propagation
 async/test_nested_exception

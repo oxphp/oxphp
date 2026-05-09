@@ -3126,7 +3126,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
     }
 }
 
-/// Rust-side callback invoked from C when PHP calls `oxphp_async_await_any()`.
+/// Rust-side callback invoked from C when PHP calls `oxphp_async_await_race()`.
 ///
 /// Races multiple promise receivers using `futures::select_all`, returning the
 /// first to complete. Non-winning receivers are put back into PROMISE_MAP so
@@ -3142,7 +3142,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
 /// # Safety
 /// Called from C FFI. `promise_ids` must point to `count` valid i64 values.
 /// `out_winner_id` and `retval` must be valid writable pointers.
-pub unsafe extern "C" fn await_any_dispatch_callback(
+pub unsafe extern "C" fn await_race_dispatch_callback(
     promise_ids: *const i64,
     count: u32,
     timeout: f64,
@@ -3408,7 +3408,9 @@ pub fn register_async_callbacks() {
     unsafe {
         crate::bridge::ffi::oxphp_bridge_set_async_dispatch(Some(async_dispatch_callback));
         crate::bridge::ffi::oxphp_bridge_set_await_dispatch(Some(await_dispatch_callback));
-        crate::bridge::ffi::oxphp_bridge_set_await_any_dispatch(Some(await_any_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_await_race_dispatch(Some(
+            await_race_dispatch_callback,
+        ));
         crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
             cleanup_outstanding_promises_callback,
         ));

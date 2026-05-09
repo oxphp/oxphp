@@ -241,7 +241,7 @@ pub unsafe fn oxphp_bridge_set_await_dispatch(
 ) {
 }
 
-pub unsafe fn oxphp_bridge_set_await_any_dispatch(
+pub unsafe fn oxphp_bridge_set_await_race_dispatch(
     _f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
 ) {
 }
@@ -434,7 +434,7 @@ pub unsafe fn oxphp_bridge_await_dispatch(
 ) -> c_int {
     -1
 }
-pub unsafe fn oxphp_bridge_await_any_dispatch(
+pub unsafe fn oxphp_bridge_await_race_dispatch(
     _promise_ids: *const i64,
     _count: u32,
     _timeout: f64,

@@ -52,7 +52,7 @@ $content = <<<'HTML'
                 <td>Blocks until <strong>all</strong> promises resolve. Returns an array of results in the same order as the input promises.</td>
             </tr>
             <tr>
-                <td><code>oxphp_async_await_any()</code></td>
+                <td><code>oxphp_async_await_race()</code></td>
                 <td>Blocks until the <strong>first</strong> promise resolves. Returns the winner's result — useful for racing tasks or timeouts.</td>
             </tr>
             <tr>
