@@ -339,6 +339,7 @@ pub fn try_early_send() -> bool {
                 stream_rx: None,
                 errors: take_request_errors(),
                 profile_tree: None, // early response — spans not finished yet
+                cancel_reason: unsafe { bindings::oxphp_bridge_get_cancel_reason() },
             });
             true
         } else {
@@ -384,6 +385,7 @@ pub fn send_streaming_headers() -> bool {
                 stream_rx: Some(chunk_rx),
                 errors: Vec::new(), // Streaming: errors accumulate during stream, not captured here.
                 profile_tree: None, // streaming — spans not finished yet
+                cancel_reason: 0,
             });
             true
         } else {
@@ -2176,6 +2178,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 let id = bindings::oxphp_bridge_get_worker_id() as usize;
                 if let Some(slot) = workers.get(id) {
                     *slot.cancel_state.lock().unwrap() = None;
+                    slot.heartbeat
+                        .request_start_us
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             bindings::oxphp_bridge_set_request_time(0.0);
@@ -2195,6 +2200,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             let id = bindings::oxphp_bridge_get_worker_id() as usize;
             if let Some(slot) = workers.get(id) {
                 *slot.cancel_state.lock().unwrap() = None;
+                slot.heartbeat
+                    .request_start_us
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
             }
         }
         bindings::oxphp_bridge_set_request_time(0.0);
@@ -2247,6 +2255,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     #[cfg(not(any(feature = "plugin-apm", feature = "plugin-profiler")))]
     let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
+    let cancel_reason = bindings::oxphp_bridge_get_cancel_reason();
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
             let _ = tx.send(ScriptResponse {
@@ -2257,6 +2266,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 stream_rx: None,
                 errors: take_request_errors(),
                 profile_tree,
+                cancel_reason,
             });
         }
     });
@@ -2275,6 +2285,9 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         let id = bindings::oxphp_bridge_get_worker_id() as usize;
         if let Some(slot) = workers.get(id) {
             *slot.cancel_state.lock().unwrap() = None;
+            slot.heartbeat
+                .request_start_us
+                .store(0, std::sync::atomic::Ordering::Relaxed);
         }
     }
     bindings::oxphp_bridge_set_request_time(0.0);
@@ -2448,12 +2461,31 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     });
 
     // Per-request: register a Weak back-ref so cancel_request() can
-    // find this worker by Arc::ptr_eq.
+    // find this worker by Arc::ptr_eq, and stamp request_start_us so
+    // the supervisor sees this worker as busy. tid is captured once
+    // per worker (zero-once) the first time we enter this path.
     if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
         let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
         if let Some(slot) = workers.get(id) {
             *slot.cancel_state.lock().unwrap() =
                 Some(std::sync::Arc::downgrade(&req.script.cancel_state));
+            slot.heartbeat.request_start_us.store(
+                crate::php::heartbeat::monotonic_us(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if slot
+                .heartbeat
+                .tid
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                let tid = crate::php::heartbeat::current_tid();
+                if tid != 0 {
+                    slot.heartbeat
+                        .tid
+                        .store(tid, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -2488,6 +2520,12 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
                     let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
                     slot.interrupt_flag_ptr
                         .store(addr, std::sync::atomic::Ordering::Release);
+                    // Hand the per-worker tick counter to the C observer
+                    // so each PHP function call bumps it.
+                    let tick_ptr = &slot.heartbeat.ticks as *const std::sync::atomic::AtomicU64;
+                    unsafe {
+                        bindings::oxphp_bridge_set_tick_ptr(tick_ptr);
+                    }
                 }
             }
             c.set(true);

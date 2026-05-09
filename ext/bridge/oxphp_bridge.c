@@ -1831,6 +1831,13 @@ void* oxphp_bridge_vm_interrupt_addr(void) {
     return ctx.vm_interrupt_addr;
 }
 
+_Thread_local _Atomic(uint64_t)* g_tick_ptr = NULL;
+
+void oxphp_bridge_set_tick_ptr(_Atomic(uint64_t)* ptr) {
+    g_tick_ptr = ptr;
+}
+
+
 void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
     ctx.vm_interrupt_addr = addr;
 }

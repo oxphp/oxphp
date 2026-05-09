@@ -126,6 +126,11 @@ pub struct ScriptResponse {
     /// Finalized span tree for the request. Produced by `ProfilingContext::finalize()` on the
     /// PHP worker thread. `None` when APM is disabled or no spans were created.
     pub profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
+    /// Cancellation reason observed at response-send time, mirrored from
+    /// the per-request `CancellationState`. 0 = no cancellation.
+    /// Used by the dispatch side to bump
+    /// `oxphp_request_cancelled_total{reason}`.
+    pub cancel_reason: u8,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -152,6 +157,7 @@ impl Default for ScriptResponse {
             stream_rx: None,
             errors: Vec::new(),
             profile_tree: None,
+            cancel_reason: 0,
         }
     }
 }
@@ -163,6 +169,7 @@ impl ScriptResponse {
     pub fn client_closed() -> Self {
         Self {
             status: 499,
+            cancel_reason: crate::bridge::cancel::CancelReason::ClientAbort as u8,
             ..Default::default()
         }
     }

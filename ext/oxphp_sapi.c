@@ -103,6 +103,27 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(zend_execute_d
 static void oxphp_decorator_begin(zend_execute_data *execute_data);
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval);
 
+/* Tick observer: increments the per-worker heartbeat tick counter on
+ * every PHP function call. Used by the supervisor to distinguish
+ * "stuck inside C extension" (cpu>0, ticks==0) from "PHP loop making
+ * progress" (cpu>0, ticks>0). The fast path is `oxphp_bridge_tick`,
+ * an inline atomic_fetch_add on a per-thread pointer. */
+static void oxphp_tick_observer_begin(zend_execute_data *execute_data)
+{
+    (void)execute_data;
+    oxphp_bridge_tick();
+}
+
+static zend_observer_fcall_handlers
+oxphp_tick_observer_init(zend_execute_data *execute_data)
+{
+    (void)execute_data;
+    return (zend_observer_fcall_handlers){
+        .begin = oxphp_tick_observer_begin,
+        .end   = NULL,
+    };
+}
+
 /* Profiler observer init — defined in ext/bridge/oxphp_bridge.c.
  * Registered globally at MINIT alongside the decorator observer;
  * multiple registrations are merged by the Zend Observer API. */
@@ -3511,6 +3532,11 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
     /* Register decorator observer */
     zend_observer_fcall_register(oxphp_decorator_observer_init);
+
+    /* Register tick observer — increments per-worker heartbeat counter
+     * once per PHP function call so the supervisor can classify
+     * long-running workers (io / c_call / cpu). */
+    zend_observer_fcall_register(oxphp_tick_observer_init);
 
     /* Register profiler observer. The init callback always returns
      * handlers for user functions; the begin/end pair early-returns

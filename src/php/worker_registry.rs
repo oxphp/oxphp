@@ -12,6 +12,7 @@ use crate::bridge::cancel::{CancelReason, CancellationState};
 pub struct WorkerSlot {
     pub cancel_state: Mutex<Option<Weak<CancellationState>>>,
     pub interrupt_flag_ptr: AtomicPtr<u8>,
+    pub heartbeat: crate::php::heartbeat::WorkerHeartbeat,
 }
 
 impl WorkerSlot {
@@ -19,6 +20,7 @@ impl WorkerSlot {
         Self {
             cancel_state: Mutex::new(None),
             interrupt_flag_ptr: AtomicPtr::new(std::ptr::null_mut()),
+            heartbeat: crate::php::heartbeat::WorkerHeartbeat::new(),
         }
     }
 }

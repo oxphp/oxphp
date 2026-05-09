@@ -963,6 +963,9 @@ pub unsafe extern "C" fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int {
     0
 }
 
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_tick_ptr(_ptr: *const std::sync::atomic::AtomicU64) {}
+
 #[cfg(test)]
 mod worker_class_mock_tests {
     use super::*;

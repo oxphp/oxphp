@@ -175,6 +175,23 @@ pub struct Metrics {
     async_tasks_failed: AtomicU64,
     async_tasks_cancelled: AtomicU64,
     async_tasks_rejected: AtomicU64,
+
+    // ── Per-worker observability (supervisor-driven) ──
+    /// Age of the in-flight request per worker, in microseconds.
+    /// Written each scan; idle workers carry 0.
+    pub worker_request_age_us: Vec<AtomicU64>,
+    /// Per-worker count of supervisor scans that observed an
+    /// above-threshold request age.
+    pub worker_long_running_total: Vec<AtomicU64>,
+    /// Per-worker stuck classification counters (one Vec per kind).
+    pub worker_stuck_total_io: Vec<AtomicU64>,
+    pub worker_stuck_total_c_call: Vec<AtomicU64>,
+    pub worker_stuck_total_cpu: Vec<AtomicU64>,
+
+    /// Cancelled-request counters by reason.
+    pub request_cancelled_client_abort: AtomicU64,
+    pub request_cancelled_timeout: AtomicU64,
+    pub request_cancelled_shutdown: AtomicU64,
 }
 
 const METHOD_LABELS: [&str; 10] = [
@@ -226,6 +243,15 @@ impl Default for Metrics {
 
 impl Metrics {
     pub fn new() -> Self {
+        Self::new_with_workers(0)
+    }
+
+    /// Construct with per-worker observability vectors sized to `n`.
+    /// `Metrics::new()` keeps the vectors empty; the supervisor and
+    /// helpers no-op for out-of-range indices, so legacy callers stay
+    /// correct while production initialises with the real worker count.
+    pub fn new_with_workers(n: usize) -> Self {
+        let mk_vec = || (0..n).map(|_| AtomicU64::new(0)).collect();
         Self {
             start_time: Instant::now(),
             total_requests: AtomicU64::new(0),
@@ -259,6 +285,59 @@ impl Metrics {
             async_tasks_failed: AtomicU64::new(0),
             async_tasks_cancelled: AtomicU64::new(0),
             async_tasks_rejected: AtomicU64::new(0),
+            worker_request_age_us: mk_vec(),
+            worker_long_running_total: mk_vec(),
+            worker_stuck_total_io: mk_vec(),
+            worker_stuck_total_c_call: mk_vec(),
+            worker_stuck_total_cpu: mk_vec(),
+            request_cancelled_client_abort: AtomicU64::new(0),
+            request_cancelled_timeout: AtomicU64::new(0),
+            request_cancelled_shutdown: AtomicU64::new(0),
+        }
+    }
+
+    pub fn observe_age(&self, worker_id: usize, age_us: u64) {
+        if let Some(a) = self.worker_request_age_us.get(worker_id) {
+            a.store(age_us, Ordering::Relaxed);
+        }
+    }
+
+    pub fn observe_long_running(&self, worker_id: usize) {
+        if let Some(c) = self.worker_long_running_total.get(worker_id) {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn observe_stuck(&self, worker_id: usize, kind: crate::php::supervisor::StuckKind) {
+        let v = match kind {
+            crate::php::supervisor::StuckKind::Io => &self.worker_stuck_total_io,
+            crate::php::supervisor::StuckKind::CCall => &self.worker_stuck_total_c_call,
+            crate::php::supervisor::StuckKind::Cpu => &self.worker_stuck_total_cpu,
+        };
+        if let Some(c) = v.get(worker_id) {
+            c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Increment the counter that matches `reason` (1=client_abort,
+    /// 2=timeout, 3=shutdown). Other values are ignored — reason 4
+    /// (stuck) is reserved and reason 5 (user) is intentionally not
+    /// emitted today.
+    pub fn observe_cancelled(&self, reason: u8) {
+        match reason {
+            1 => {
+                self.request_cancelled_client_abort
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.request_cancelled_timeout
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            3 => {
+                self.request_cancelled_shutdown
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 
@@ -899,6 +978,79 @@ impl Metrics {
                 wm.duration_count.load(Ordering::Relaxed)
             );
         }
+
+        // ── Per-worker observability (supervisor) ──
+        if !self.worker_request_age_us.is_empty() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_request_age_seconds Age of in-flight request per worker."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_request_age_seconds gauge");
+            for (i, age) in self.worker_request_age_us.iter().enumerate() {
+                let secs = age.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_request_age_seconds{{worker_id=\"{i}\"}} {secs}"
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_long_running_total Supervisor scans observing a request older than the stuck threshold."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_long_running_total counter");
+            for (i, c) in self.worker_long_running_total.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_long_running_total{{worker_id=\"{i}\"}} {}",
+                    c.load(Ordering::Relaxed)
+                );
+            }
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_stuck_total Stuck-classification counter per worker and kind."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_stuck_total counter");
+            for i in 0..self.worker_stuck_total_io.len() {
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_stuck_total{{worker_id=\"{i}\",kind=\"io\"}} {}",
+                    self.worker_stuck_total_io[i].load(Ordering::Relaxed)
+                );
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_stuck_total{{worker_id=\"{i}\",kind=\"c_call\"}} {}",
+                    self.worker_stuck_total_c_call[i].load(Ordering::Relaxed)
+                );
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_stuck_total{{worker_id=\"{i}\",kind=\"cpu\"}} {}",
+                    self.worker_stuck_total_cpu[i].load(Ordering::Relaxed)
+                );
+            }
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_request_cancelled_total Cancelled requests by reason."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_request_cancelled_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_request_cancelled_total{{reason=\"client_abort\"}} {}",
+            self.request_cancelled_client_abort.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "oxphp_request_cancelled_total{{reason=\"timeout\"}} {}",
+            self.request_cancelled_timeout.load(Ordering::Relaxed)
+        );
+        let _ = writeln!(
+            out,
+            "oxphp_request_cancelled_total{{reason=\"shutdown\"}} {}",
+            self.request_cancelled_shutdown.load(Ordering::Relaxed)
+        );
 
         out
     }

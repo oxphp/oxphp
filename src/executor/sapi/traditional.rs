@@ -259,6 +259,9 @@ impl Drop for RequestDataGuard {
                 let id = bindings::oxphp_bridge_get_worker_id() as usize;
                 if let Some(slot) = workers.get(id) {
                     *slot.cancel_state.lock().unwrap() = None;
+                    slot.heartbeat
+                        .request_start_us
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             bindings::oxphp_bridge_set_request_time(0.0);
@@ -315,6 +318,10 @@ fn execute_request(
                     let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
                     slot.interrupt_flag_ptr
                         .store(addr, std::sync::atomic::Ordering::Release);
+                    let tick_ptr = &slot.heartbeat.ticks as *const std::sync::atomic::AtomicU64;
+                    unsafe {
+                        bindings::oxphp_bridge_set_tick_ptr(tick_ptr);
+                    }
                 }
             }
             c.set(true);
@@ -324,7 +331,35 @@ fn execute_request(
         if let Some(slot) = workers.get(worker_id) {
             *slot.cancel_state.lock().unwrap() =
                 Some(std::sync::Arc::downgrade(&request.cancel_state));
+            slot.heartbeat.request_start_us.store(
+                crate::php::heartbeat::monotonic_us(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            if slot
+                .heartbeat
+                .tid
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == 0
+            {
+                let tid = crate::php::heartbeat::current_tid();
+                if tid != 0 {
+                    slot.heartbeat
+                        .tid
+                        .store(tid, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
+    }
+
+    // Publish the cancel-state's atomic byte to the bridge so the
+    // SAPI's interrupt handler can record CancelReason via
+    // oxphp_bridge_set_cancel_reason. Without this, traditional-mode
+    // requests never observe the unified bailout — SIGALRM falls
+    // through to zend_timeout's default "Maximum execution time …"
+    // message instead of the centralised handler. Cleared in
+    // RequestDataGuard::drop.
+    unsafe {
+        bindings::oxphp_bridge_set_cancel_ptr(request.cancel_state.as_ptr());
     }
 
     sapi::set_request_data(request);
@@ -490,5 +525,6 @@ fn execute_request(
         stream_rx: None,
         errors: sapi::take_request_errors(),
         profile_tree,
+        cancel_reason: request.cancel_state.get() as u8,
     })
 }
