@@ -46,8 +46,10 @@ fn main() -> Result<(), types::BoxError> {
         }
     });
 
-    // Create metrics early — needed by executor for worker metrics
-    let metrics = Arc::new(Metrics::new());
+    // Create metrics early — needed by executor for worker metrics.
+    // Per-worker observability vectors are sized to the worker count
+    // so the supervisor's per-slot observe_* helpers stay in bounds.
+    let metrics = Arc::new(Metrics::new_with_workers(config.worker_mode.worker_count()));
 
     // Initialize plugins BEFORE PHP startup so MINIT can register plugin
     // functions with Zend (OPcache needs them at compile time).
@@ -125,6 +127,12 @@ fn main() -> Result<(), types::BoxError> {
     // Initialise worker registry before workers are spawned so slots exist
     // when workers register their EG(vm_interrupt) address.
     oxphp::php::worker_registry::init_workers(config.worker_mode.worker_count());
+
+    // Spawn the per-second observability supervisor (no automatic
+    // intervention — operators react to the exposed metrics).
+    let supervisor_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _supervisor_handle = oxphp::php::supervisor::Supervisor::production(Arc::clone(&metrics))
+        .spawn(Arc::clone(&supervisor_shutdown));
 
     // Create executor AFTER plugin functions are on the bridge —
     // php_module_startup() (MINIT) registers them with Zend.
