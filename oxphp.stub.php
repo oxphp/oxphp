@@ -783,7 +783,7 @@ namespace OxPHP\Async {
      * Thrown by oxphp_async_await_any() when every provided promise rejected
      * before any could fulfill (analog of JavaScript AggregateError).
      */
-    final class AggregateAsyncException extends AsyncException {}
+    class AggregateAsyncException extends AsyncException {}
 
     /**
      * Thrown by every access to a BorrowedProxy — proxies substituted for
