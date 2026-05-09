@@ -1512,31 +1512,42 @@ ZEND_FUNCTION(oxphp_method_dispatch)
     void *this_zval = NULL;
 
     /* For instance methods on classes registered with custom storage,
-     * extract rust_data and class_index from the custom object wrapper.
+     * extract rust_data and class_index from the custom object wrapper —
+     * O(1) read of the prefix that `oxphp_plugin_create_object` allocated.
+     *
      * For instance methods on plugin classes WITHOUT custom storage
      * (e.g. exception classes that just hold PHP-level properties), the
      * underlying zend_object has no oxphp_custom_object prefix, so we
-     * resolve class_index from the scope name instead and leave rust_data
-     * NULL. `this_zval` exposes the zval* of `$this` to the dispatch
-     * callback so Rust handlers can read PHP-level properties via
+     * resolve class_index from the scope name via a linear scan and leave
+     * rust_data NULL. The fast path is selected by checking whether the
+     * class entry's `create_object` slot points to our custom hook —
+     * that's exactly the bit set during registration for custom-storage
+     * classes (see oxphp_register_class flow above).
+     *
+     * `this_zval` exposes the zval* of `$this` to the dispatch callback
+     * so Rust handlers can read PHP-level properties via
      * oxphp_object_read_property. */
     if (Z_TYPE(execute_data->This) == IS_OBJECT) {
         this_zval = (void *)&execute_data->This;
-        zend_class_entry *scope = execute_data->func->common.scope;
-        int has_custom = 0;
-        int cls_count = oxphp_bridge_get_plugin_class_count();
-        for (int i = 0; i < cls_count; i++) {
-            const char *fqn = oxphp_bridge_get_class_fqn(i);
-            if (fqn && scope && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
-                class_index = (uint32_t)i;
-                has_custom = oxphp_bridge_get_class_has_custom_object(i);
-                break;
-            }
-        }
-        if (has_custom) {
+        zend_class_entry *ce = Z_OBJCE(execute_data->This);
+        if (ce->create_object == oxphp_plugin_create_object) {
+            /* Fast path: O(1) prefix read for custom-storage classes. */
             oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
             rust_data = intern->rust_data;
             class_index = intern->class_index;
+        } else {
+            /* Slow fallback: linear scan to resolve class_index from
+             * scope name. Only for plugin classes without custom storage
+             * (e.g. AggregateAsyncException, TimeoutException). */
+            zend_class_entry *scope = execute_data->func->common.scope;
+            int cls_count = oxphp_bridge_get_plugin_class_count();
+            for (int i = 0; i < cls_count; i++) {
+                const char *fqn = oxphp_bridge_get_class_fqn(i);
+                if (fqn && scope && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
+                    class_index = (uint32_t)i;
+                    break;
+                }
+            }
         }
     } else if (execute_data->func->common.scope) {
         /* Static method — find class_index from the scope CE.
