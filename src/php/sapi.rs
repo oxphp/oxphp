@@ -1561,6 +1561,7 @@ unsafe extern "C" fn method_dispatch_callback(
     argc: u32,
     retval: *mut c_void,
     rust_data: *mut c_void,
+    this_zval: *mut c_void,
 ) -> c_int {
     // Safety: method names are ASCII identifiers — UTF-8 validation is unnecessary overhead.
     let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(method_name).to_bytes());
@@ -1584,12 +1585,13 @@ unsafe extern "C" fn method_dispatch_callback(
         Some(rust_data)
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut call = crate::bridge::call::NativeCall::new(
+        let mut call = crate::bridge::call::NativeCall::new_with_this(
             args,
             argc,
             retval,
             Some(class_index as u64),
             rust_data_opt,
+            this_zval,
         );
         handler.handle(&mut call)
     }));

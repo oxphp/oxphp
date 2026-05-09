@@ -1509,12 +1509,35 @@ ZEND_FUNCTION(oxphp_method_dispatch)
 
     void *rust_data = NULL;
     uint32_t class_index = 0;
+    void *this_zval = NULL;
 
-    /* For instance methods, extract rust_data from the custom object */
+    /* For instance methods on classes registered with custom storage,
+     * extract rust_data and class_index from the custom object wrapper.
+     * For instance methods on plugin classes WITHOUT custom storage
+     * (e.g. exception classes that just hold PHP-level properties), the
+     * underlying zend_object has no oxphp_custom_object prefix, so we
+     * resolve class_index from the scope name instead and leave rust_data
+     * NULL. `this_zval` exposes the zval* of `$this` to the dispatch
+     * callback so Rust handlers can read PHP-level properties via
+     * oxphp_object_read_property. */
     if (Z_TYPE(execute_data->This) == IS_OBJECT) {
-        oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
-        rust_data = intern->rust_data;
-        class_index = intern->class_index;
+        this_zval = (void *)&execute_data->This;
+        zend_class_entry *scope = execute_data->func->common.scope;
+        int has_custom = 0;
+        int cls_count = oxphp_bridge_get_plugin_class_count();
+        for (int i = 0; i < cls_count; i++) {
+            const char *fqn = oxphp_bridge_get_class_fqn(i);
+            if (fqn && scope && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
+                class_index = (uint32_t)i;
+                has_custom = oxphp_bridge_get_class_has_custom_object(i);
+                break;
+            }
+        }
+        if (has_custom) {
+            oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
+            rust_data = intern->rust_data;
+            class_index = intern->class_index;
+        }
     } else if (execute_data->func->common.scope) {
         /* Static method — find class_index from the scope CE.
          * Walk the plugin class CE array to find the match. */
@@ -1535,7 +1558,7 @@ ZEND_FUNCTION(oxphp_method_dispatch)
         return;
     }
 
-    int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data);
+    int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data, this_zval);
     if (rc != 0 && !EG(exception)) {
         zend_throw_error(NULL, "Plugin method %s::%s failed",
             execute_data->func->common.scope

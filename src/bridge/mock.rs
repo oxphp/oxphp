@@ -741,10 +741,26 @@ pub unsafe fn oxphp_bridge_set_method_dispatch(
             argc: u32,
             retval: *mut c_void,
             rust_data: *mut c_void,
+            this_zval: *mut c_void,
         ) -> c_int,
     >,
 ) {
 }
+
+// ─── Object property access ─────────────────────────────────
+
+pub unsafe fn oxphp_object_read_property(
+    _object_zval: *mut c_void,
+    _property_name: *const c_char,
+) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+pub unsafe fn oxphp_zval_is_null_or_unset(_zval_ptr: *const c_void) -> c_int {
+    1
+}
+
+pub unsafe fn oxphp_zval_copy_to_retval(_src_zval: *const c_void, _dst_zval: *mut c_void) {}
 
 // ─── Storage Callbacks ──────────────────────────────────────
 

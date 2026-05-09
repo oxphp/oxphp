@@ -548,10 +548,14 @@ int oxphp_bridge_get_plugin_function_param_optional(int index, int param_index);
 
 /* ─── Method Dispatch Callback ──────────────────────────────── */
 
-/** Callback type for dispatching class method calls to Rust. */
+/** Callback type for dispatching class method calls to Rust.
+ * `this_zval` is the zval* of `$this` for instance methods, NULL for
+ * static method calls and free functions. The pointer is valid only
+ * for the duration of the dispatch call; do not store it. */
 typedef int (*oxphp_method_dispatch_fn_t)(
     uint32_t class_index, const char *method_name,
-    void *args, uint32_t argc, void *retval, void *rust_data
+    void *args, uint32_t argc, void *retval, void *rust_data,
+    void *this_zval
 );
 
 /** Set the method dispatch callback (called once at startup). */
@@ -600,6 +604,23 @@ void oxphp_exception_get(const char **class_out, const char **message_out, int64
 
 /** Clear the current pending exception. */
 void oxphp_exception_clear(void);
+
+/* ─── Object Property Access ───────────────────────────────── */
+
+/** Read a property from a zend object zval. Returns a pointer to the
+ *  zval stored in the object's property table (or to EG(uninitialized_zval)
+ *  if the property is unset). Returns NULL if `object_zval` is NULL or not
+ *  an object. The returned pointer is valid for the duration of the current
+ *  request. `property_name` must be NUL-terminated. */
+void *oxphp_object_read_property(void *object_zval, const char *property_name);
+
+/** Returns 1 if the zval pointer is NULL, IS_UNDEF, or IS_NULL; 0 otherwise. */
+int oxphp_zval_is_null_or_unset(const void *zval_ptr);
+
+/** Copy zval contents from `src` into `dst` (typically the retval slot).
+ *  Increments refcounts as needed (uses ZVAL_COPY semantics). `dst` must
+ *  point to an uninitialized or destroyed zval slot. */
+void oxphp_zval_copy_to_retval(const void *src_zval, void *dst_zval);
 
 /* ═══════════════════════════════════════════════════════════
  *  Native Bridge API — Zero-Serialization Value Access

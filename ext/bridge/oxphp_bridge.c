@@ -1559,6 +1559,33 @@ void oxphp_zval_addref(void *zv) {
     Z_TRY_ADDREF_P((zval*)zv);
 }
 
+/* ── Object property access ── */
+
+void *oxphp_object_read_property(void *object_zval, const char *property_name) {
+    zval *obj = (zval *)object_zval;
+    if (!obj || Z_TYPE_P(obj) != IS_OBJECT || !property_name) return NULL;
+    size_t len = strlen(property_name);
+    zval rv;
+    /* zend_read_property returns &EG(uninitialized_zval) when the property is
+     * unset; the caller must check via oxphp_zval_is_null_or_unset. */
+    zval *result = zend_read_property(
+        Z_OBJCE_P(obj), Z_OBJ_P(obj), property_name, len, /* silent */ 1, &rv);
+    return (void *)result;
+}
+
+int oxphp_zval_is_null_or_unset(const void *zval_ptr) {
+    if (!zval_ptr) return 1;
+    const zval *z = (const zval *)zval_ptr;
+    return (Z_ISUNDEF_P(z) || Z_ISNULL_P(z)) ? 1 : 0;
+}
+
+void oxphp_zval_copy_to_retval(const void *src_zval, void *dst_zval) {
+    if (!src_zval || !dst_zval) return;
+    zval *src = (zval *)src_zval;
+    zval *dst = (zval *)dst_zval;
+    ZVAL_COPY(dst, src);
+}
+
 void *oxphp_closure_addref(void *closure_zv) {
     zval *zv = (zval*)closure_zv;
     if (Z_TYPE_P(zv) == IS_OBJECT) {

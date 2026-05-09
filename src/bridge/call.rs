@@ -21,6 +21,7 @@ pub struct NativeCall<'a> {
     retval: *mut c_void,
     object_id: Option<u64>,
     rust_data: Option<*mut c_void>,
+    this_zval: *mut c_void,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -31,6 +32,7 @@ impl<'a> NativeCall<'a> {
     /// `args` and `retval` must be valid zval pointers for the duration of `'a`.
     /// `rust_data`, if `Some`, must point to a valid object of the expected type
     /// for the duration of `'a`.
+    /// `this_zval`, if non-null, must point to a valid object zval for `'a`.
     #[allow(dead_code)]
     pub(crate) unsafe fn new(
         args: *mut c_void,
@@ -45,6 +47,32 @@ impl<'a> NativeCall<'a> {
             retval,
             object_id,
             rust_data,
+            this_zval: std::ptr::null_mut(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Create from raw pointers including the `$this` zval pointer.
+    ///
+    /// # Safety
+    /// Same as `new`, plus: `this_zval` must point to a valid object zval
+    /// for the duration of `'a`, or be null for static / free-function calls.
+    #[allow(dead_code)]
+    pub(crate) unsafe fn new_with_this(
+        args: *mut c_void,
+        argc: u32,
+        retval: *mut c_void,
+        object_id: Option<u64>,
+        rust_data: Option<*mut c_void>,
+        this_zval: *mut c_void,
+    ) -> Self {
+        Self {
+            args,
+            argc,
+            retval,
+            object_id,
+            rust_data,
+            this_zval,
             _marker: PhantomData,
         }
     }
@@ -79,6 +107,14 @@ impl<'a> NativeCall<'a> {
     /// Object ID (for class methods). None for free functions.
     pub fn object_id(&self) -> Option<u64> {
         self.object_id
+    }
+
+    /// Raw `$this` zval pointer for instance method calls. Null for static
+    /// method calls, free functions, and contexts where the dispatch path
+    /// did not provide it. Use with FFI helpers such as
+    /// `oxphp_object_read_property` to access PHP-level properties.
+    pub fn this_ptr(&self) -> *mut c_void {
+        self.this_zval
     }
 
     /// Get typed immutable reference to Rust storage for current object.

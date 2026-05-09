@@ -590,9 +590,20 @@ extern "C" {
                 argc: u32,
                 retval: *mut c_void,
                 rust_data: *mut c_void,
+                this_zval: *mut c_void,
             ) -> c_int,
         >,
     );
+
+    // ─── Object property access ─────────────────────────────────
+    pub fn oxphp_object_read_property(
+        object_zval: *mut c_void,
+        property_name: *const c_char,
+    ) -> *mut c_void;
+
+    pub fn oxphp_zval_is_null_or_unset(zval_ptr: *const c_void) -> c_int;
+
+    pub fn oxphp_zval_copy_to_retval(src_zval: *const c_void, dst_zval: *mut c_void);
 
     // ─── Storage Callbacks ──────────────────────────────────────
     pub fn oxphp_bridge_set_storage_callbacks(
