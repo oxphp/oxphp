@@ -1562,6 +1562,10 @@ void oxphp_zval_addref(void *zv) {
 /* ── Object property access ── */
 
 void *oxphp_object_read_property(void *object_zval, const char *property_name) {
+    /* Caller contract: property is plain private/protected, no __get / hooks /
+     * readonly. zend_std_read_property's rv-write branches are not handled —
+     * for those branches Zend writes into the stack-allocated `rv` below and
+     * returns its address, which would dangle once we leave this frame. */
     zval *obj = (zval *)object_zval;
     if (!obj || Z_TYPE_P(obj) != IS_OBJECT || !property_name) return NULL;
     size_t len = strlen(property_name);

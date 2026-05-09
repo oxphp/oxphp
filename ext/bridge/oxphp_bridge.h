@@ -607,11 +607,18 @@ void oxphp_exception_clear(void);
 
 /* ─── Object Property Access ───────────────────────────────── */
 
-/** Read a property from a zend object zval. Returns a pointer to the
- *  zval stored in the object's property table (or to EG(uninitialized_zval)
- *  if the property is unset). Returns NULL if `object_zval` is NULL or not
- *  an object. The returned pointer is valid for the duration of the current
- *  request. `property_name` must be NUL-terminated. */
+/* Read a private or protected property from a zend object zval, where the
+ * property has NO __get magic, NO property hooks, and is NOT readonly.
+ * Returns a pointer to the zval stored in the object's property table, or
+ * NULL if the input zval is not an object, or &EG(uninitialized_zval) if
+ * the property is unset.
+ *
+ * The returned pointer is valid for the duration of the current request.
+ *
+ * UNSAFE for properties with __get / hooks / asymmetric-readonly: those code
+ * paths in zend_std_read_property write into a caller-provided rv buffer,
+ * and this helper does not satisfy that contract. property_name is
+ * NUL-terminated. */
 void *oxphp_object_read_property(void *object_zval, const char *property_name);
 
 /** Returns 1 if the zval pointer is NULL, IS_UNDEF, or IS_NULL; 0 otherwise. */
