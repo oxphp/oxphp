@@ -2848,6 +2848,13 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         }
     } else if (reason == OXPHP_CANCEL_TIMEOUT) {
         PG(connection_status) |= PHP_CONNECTION_TIMEOUT;
+    } else {
+        /* OXPHP_CANCEL_SHUTDOWN / _STUCK / _USER: the connection is no
+         * longer being serviced (server going away, supervisor giving up,
+         * userland-initiated cancel). Mirror to PHP_CONNECTION_ABORTED so
+         * shutdown handlers calling connection_aborted() / connection_status()
+         * observe a non-zero state instead of PHP_CONNECTION_NORMAL. */
+        PG(connection_status) |= PHP_CONNECTION_ABORTED;
     }
 
     zend_error_noreturn(E_ERROR,

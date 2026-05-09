@@ -105,22 +105,6 @@ for ($i = 0; $i < 10; $i++) {
 }',
     ],
     [
-        'name'    => 'oxphp_request_heartbeat',
-        'sig'     => 'oxphp_request_heartbeat(int $time = 10): bool',
-        'params'  => [
-            ['name' => '$time', 'type' => 'int', 'default' => '10', 'desc' => 'Seconds to extend the timeout by.'],
-        ],
-        'return'  => 'bool — Always <code>true</code>.',
-        'desc'    => 'Signals that the script is still alive and extends the request timeout. Call periodically in long-running loops to prevent the server from killing the request due to <code>REQUEST_TIMEOUT_SECONDS</code>.',
-        'example' => '// Process large CSV import without hitting timeout
-$handle = fopen("large_import.csv", "r");
-while (($row = fgetcsv($handle)) !== false) {
-    oxphp_request_heartbeat(30);
-    import_row($row);
-}
-fclose($handle);',
-    ],
-    [
         'name'    => 'oxphp_sleep',
         'version' => '0.2.0',
         'sig'     => 'oxphp_sleep(float $seconds): void',
@@ -314,7 +298,6 @@ foreach ($functions as $fn) {
             'oxphp_server_info'       => '<pre class="fn-live-pre">' . h(json_encode(oxphp_server_info(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) . '</pre>',
             'oxphp_is_worker'         => '<span class="mono">' . (oxphp_is_worker() ? 'true' : 'false') . '</span>',
             'oxphp_is_streaming'      => '<span class="mono">' . (oxphp_is_streaming() ? 'true' : 'false') . '</span>',
-            'oxphp_request_heartbeat' => '<span class="mono">' . (oxphp_request_heartbeat() ? 'true' : 'false') . '</span>',
             'oxphp_stream_flush'      => '<span class="mono dim">not called &mdash; would activate streaming</span>',
             'oxphp_finish_request'    => '<span class="mono dim">not called &mdash; would end response</span>',
             'oxphp_sleep'             => '<span class="mono dim">not called &mdash; would suspend fiber</span>',

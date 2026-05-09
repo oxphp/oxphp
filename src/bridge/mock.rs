@@ -956,6 +956,11 @@ pub unsafe extern "C" fn oxphp_bridge_request_interrupt() {
 }
 
 #[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_request_interrupt_at(_addr: *mut std::os::raw::c_void) {
+    MOCK_VM_INTERRUPT.store(1, Ordering::Relaxed);
+}
+
+#[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn oxphp_capture_vm_interrupt() {}
 
 #[allow(clippy::missing_safety_doc)]

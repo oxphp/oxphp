@@ -196,6 +196,7 @@ extern "C" {
     pub fn oxphp_bridge_vm_interrupt_addr() -> *mut u8;
     pub fn oxphp_bridge_set_vm_interrupt_addr(addr: *mut std::os::raw::c_void);
     pub fn oxphp_bridge_request_interrupt();
+    pub fn oxphp_bridge_request_interrupt_at(addr: *mut std::os::raw::c_void);
     pub fn oxphp_capture_vm_interrupt();
     pub fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int;
 

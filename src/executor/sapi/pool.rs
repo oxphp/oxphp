@@ -3,6 +3,7 @@
 //! centralized through the `SpawnStrategy` enum so monitor / scale-up /
 //! respawn paths never branch on worker-mode configuration.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -33,6 +34,27 @@ pub(super) struct ManagedWorker {
 pub(super) fn now_millis() -> u64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Best-effort wipe of a recycled WORKERS slot: drops the request's
+/// Weak<CancellationState> back-ref and nulls the interrupt-flag pointer
+/// so a `cancel_request()` for this slot's previous occupant can't write
+/// into now-defunct TLS memory before the replacement worker re-publishes
+/// its own `EG(vm_interrupt)` address. Normal Drop already does the
+/// per-request half of this; the slot-level wipe defends against
+/// abnormal worker exit (abort, segfault) where Drop never ran.
+fn clear_worker_slot(id: usize) {
+    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+        if let Some(slot) = workers.get(id) {
+            if let Ok(mut g) = slot.cancel_state.lock() {
+                *g = None;
+            }
+            slot.interrupt_flag_ptr
+                .store(std::ptr::null_mut(), Ordering::Release);
+            slot.heartbeat.request_start_us.store(0, Ordering::Relaxed);
+            slot.heartbeat.tid.store(0, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Bundles the parameters every spawn call needs, regardless of model.
@@ -138,7 +160,10 @@ pub(super) async fn run_worker_monitor(
     strategy: Arc<SpawnStrategy>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_millis(500));
-    let mut next_id = target;
+    // IDs 0..target are taken by the initial pool; respawned workers
+    // pull from this free-list so the WORKERS / metrics slot tables
+    // (sized to `target` on startup) always cover the live worker set.
+    let mut free_ids: VecDeque<usize> = VecDeque::new();
 
     loop {
         interval.tick().await;
@@ -148,7 +173,14 @@ pub(super) async fn run_worker_monitor(
 
         let mut guard = workers.lock().unwrap();
         let before = guard.len();
-        guard.retain(|w| !w.handle.is_finished());
+        guard.retain(|w| {
+            let alive = !w.handle.is_finished();
+            if !alive {
+                free_ids.push_back(w.id);
+                clear_worker_slot(w.id);
+            }
+            alive
+        });
         let dead = before - guard.len();
 
         if dead > 0 {
@@ -169,7 +201,12 @@ pub(super) async fn run_worker_monitor(
         for _ in 0..to_spawn {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now_millis()));
-            let id = next_id;
+            // Free-list invariant: every spawn matches a prior death,
+            // and the initial pool occupies 0..target — so on the first
+            // respawn iteration, free_ids holds exactly `dead` IDs.
+            let id = free_ids
+                .pop_front()
+                .expect("free-id underflow: spawning more workers than have died");
             let handle = strategy.spawn(SpawnArgs {
                 id,
                 rx: request_rx.clone(),
@@ -182,7 +219,6 @@ pub(super) async fn run_worker_monitor(
                 shutdown,
                 last_active,
             });
-            next_id += 1;
             metrics.worker_spawned();
         }
 
@@ -207,7 +243,12 @@ pub(super) async fn run_scale_manager(
     let mut last_scale_up = Instant::now();
     let mut last_scale_down = Instant::now();
     let idle_timeout_ms = idle_timeout_seconds * 1000;
-    let mut next_id = max;
+    // Free-list of slot IDs in `0..max`. Initial pool occupied 0..min,
+    // so the headroom IDs `min..max` are immediately available for
+    // scale-up; respawn / scale-down feed dead IDs back to the front.
+    // Bounded to max workers ⇒ slot tables (WORKERS / metrics) always
+    // index into a real slot.
+    let mut free_ids: VecDeque<usize> = (min..max).collect();
 
     loop {
         interval.tick().await;
@@ -219,7 +260,14 @@ pub(super) async fn run_scale_manager(
         let now = now_millis();
 
         let before = workers_guard.len();
-        workers_guard.retain(|w| !w.handle.is_finished());
+        workers_guard.retain(|w| {
+            let alive = !w.handle.is_finished();
+            if !alive {
+                free_ids.push_back(w.id);
+                clear_worker_slot(w.id);
+            }
+            alive
+        });
         let dead = before - workers_guard.len();
         let total = workers_guard.len();
 
@@ -237,7 +285,9 @@ pub(super) async fn run_scale_manager(
         for _ in 0..to_spawn_min {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
-            let id = next_id;
+            let id = free_ids
+                .pop_front()
+                .expect("free-id underflow in scale-manager respawn");
             let handle = strategy.spawn(SpawnArgs {
                 id,
                 rx: request_rx.clone(),
@@ -250,7 +300,6 @@ pub(super) async fn run_scale_manager(
                 shutdown,
                 last_active,
             });
-            next_id += 1;
             metrics.worker_spawned();
         }
 
@@ -272,7 +321,9 @@ pub(super) async fn run_scale_manager(
             // pthread_create must not run under `workers`.
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(AtomicU64::new(now));
-            let spawn_id = next_id;
+            // total<max plus the invariant `len(alive)+len(free_ids)==max`
+            // guarantees free_ids has at least one entry here.
+            let spawn_id = free_ids.pop_front().expect("free-id underflow in scale-up");
             drop(workers_guard);
 
             let handle = strategy.spawn(SpawnArgs {
@@ -290,7 +341,6 @@ pub(super) async fn run_scale_manager(
                 last_active,
             });
             total = g.len();
-            next_id += 1;
             last_scale_up = Instant::now();
             metrics.worker_spawned();
             tracing::info!(id = spawn_id, total, "Scale-up: spawned worker");
@@ -300,7 +350,12 @@ pub(super) async fn run_scale_manager(
                 now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
             }) {
                 let worker = workers_guard.remove(pos);
+                let retired_id = worker.id;
                 worker.shutdown.store(true, Ordering::Relaxed);
+                // Recycle the slot before the thread has finished joining;
+                // the slot's per-thread state is re-published the next time
+                // a worker spawns into it, so an early reuse is safe.
+                free_ids.push_back(retired_id);
                 // Join on Tokio's blocking pool so the async runtime isn't blocked
                 // and we don't pay pthread_create latency per scale-down event.
                 tokio::task::spawn_blocking(move || {

@@ -30,11 +30,16 @@ impl CancellationState {
     }
 
     pub fn mark_done(&self) {
-        self.done.store(true, Ordering::Relaxed);
+        // Release pairs with the Acquire load in `is_done()` so that any
+        // state the dispatch task established before disarming the guard
+        // (response sent, work completed) is visible to the disconnect
+        // path running on a different Tokio task before it sees done=true.
+        // x86_64's TSO model masks the bug, but ARM/POWER need this.
+        self.done.store(true, Ordering::Release);
     }
 
     pub fn is_done(&self) -> bool {
-        self.done.load(Ordering::Relaxed)
+        self.done.load(Ordering::Acquire)
     }
 
     pub fn set(&self, reason: CancelReason) -> bool {
