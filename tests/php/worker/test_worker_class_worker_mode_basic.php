@@ -6,20 +6,20 @@ if (!$w->isWorkerMode()) {
     exit;
 }
 
-if ($w->getId() < 0) {
+if ($w->id() < 0) {
     http_response_code(500);
-    echo "FAIL: getId() negative\n";
+    echo "FAIL: id() negative\n";
     exit;
 }
-if ($w->getStartTime() <= 0.0) {
+if ($w->startTime() <= 0.0) {
     http_response_code(500);
-    echo "FAIL: getStartTime() non-positive\n";
+    echo "FAIL: startTime() non-positive\n";
     exit;
 }
-$count = $w->getRequestCount();
+$count = $w->requestCount();
 if ($count < 1) {
     http_response_code(500);
-    echo "FAIL: getRequestCount() = $count, expected >= 1\n";
+    echo "FAIL: requestCount() = $count, expected >= 1\n";
     exit;
 }
 

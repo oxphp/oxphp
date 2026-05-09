@@ -21,9 +21,9 @@ if (!$exRefl->isSubclassOf('RuntimeException')) {
     exit;
 }
 
-$expected = ['current', 'isWorkerMode', 'getId', 'getStartTime',
-             'getRequestCount', 'getMemoryUsage', 'getRss',
-             'getMaxMemoryBytes', 'serve'];
+$expected = ['current', 'isWorkerMode', 'id', 'startTime',
+             'requestCount', 'memoryUsage', 'rss',
+             'maxMemoryBytes', 'serve'];
 foreach ($expected as $m) {
     if (!$wRefl->hasMethod($m)) {
         http_response_code(500);

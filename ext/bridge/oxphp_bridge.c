@@ -1933,7 +1933,7 @@ uint64_t oxphp_bridge_get_rss_bytes(void) {
     return (uint64_t)ru.ru_maxrss;
 #else
     /* Unsupported OS — log once per process, then return 0 on every call.
-     * Callers (Worker::getRss()) treat 0 as "no info available". */
+     * Callers (Worker::rss()) treat 0 as "no info available". */
     static bool warned = false;
     if (!warned) {
         fprintf(stderr,

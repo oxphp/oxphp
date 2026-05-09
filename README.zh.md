@@ -99,6 +99,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **原生 PHP 执行** — PHP 直接在服务器进程内运行，使用专用线程池
 - **完整超全局变量**支持：`$_SERVER`、`$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`php://input` — 参见 [超全局变量](docs/zh/php/superglobals.md)
 - **HTTP Object API** — `oxphp_http_request()` 返回类型化、惰性加载的请求对象，内置 JSON 请求体解析、基于文件内容的 MIME 类型检测以及用于中间件的可变属性容器 — 参见 [HTTP Request API](docs/zh/php/request-api.md)
+- **Worker Runtime API** — `OxPHP\Server\Worker::current()` 暴露当前 OS 线程的运行时内省（`id`、`requestCount`、`startTime`、`memoryUsage`、`rss`、`maxMemoryBytes`）以及请求循环入口点（`serve`） — 参见 [Worker 类](docs/zh/php/worker-class.md)
 - **跨工作线程共享 OPcache** — 一个工作线程编译文件，其余线程复用缓存字节码 — 参见 [OPcache 与 JIT](docs/zh/php/opcache.md)
 - **PHP 扩展函数** — `oxphp_*()` 辅助函数，用于流式传输、提前响应、异步、追踪和请求访问 — 参见 [PHP 函数参考](docs/zh/php/functions.md)
 - **插件系统** — 支持类型化事件分发、优先级排序及 PHP 函数注册

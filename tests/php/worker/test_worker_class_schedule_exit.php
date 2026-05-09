@@ -9,9 +9,9 @@ if (!$w->isWorkerMode()) {
         echo "FAIL: traditional isExitScheduled() should always be false\n";
         exit;
     }
-    if ($w->getExitReason() !== null) {
+    if ($w->exitReason() !== null) {
         http_response_code(500);
-        echo "FAIL: traditional getExitReason() should be null\n";
+        echo "FAIL: traditional exitReason() should be null\n";
         exit;
     }
     echo "OK (traditional)\n";
@@ -25,9 +25,9 @@ if ($w->isExitScheduled() !== false) {
     echo "FAIL: isExitScheduled() must be false before scheduleExit()\n";
     exit;
 }
-if ($w->getExitReason() !== null) {
+if ($w->exitReason() !== null) {
     http_response_code(500);
-    echo "FAIL: getExitReason() must be null before scheduleExit()\n";
+    echo "FAIL: exitReason() must be null before scheduleExit()\n";
     exit;
 }
 
@@ -38,15 +38,15 @@ if ($w->isExitScheduled() !== true) {
     echo "FAIL: isExitScheduled() must be true after scheduleExit()\n";
     exit;
 }
-if ($w->getExitReason() !== 'scheduled') {
+if ($w->exitReason() !== 'scheduled') {
     http_response_code(500);
-    echo "FAIL: getExitReason() = " . var_export($w->getExitReason(), true) . " (want 'scheduled')\n";
+    echo "FAIL: exitReason() = " . var_export($w->exitReason(), true) . " (want 'scheduled')\n";
     exit;
 }
 
 /* Idempotency: second call must not change anything. */
 $w->scheduleExit();
-if ($w->isExitScheduled() !== true || $w->getExitReason() !== 'scheduled') {
+if ($w->isExitScheduled() !== true || $w->exitReason() !== 'scheduled') {
     http_response_code(500);
     echo "FAIL: scheduleExit() not idempotent\n";
     exit;

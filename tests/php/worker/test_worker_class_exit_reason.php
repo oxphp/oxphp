@@ -1,11 +1,11 @@
 <?php
 $w = OxPHP\Server\Worker::current();
 
-/* getExitReason() typing: nullable string. */
-$r = $w->getExitReason();
+/* exitReason() typing: nullable string. */
+$r = $w->exitReason();
 if ($r !== null && !is_string($r)) {
     http_response_code(500);
-    echo "FAIL: getExitReason() must be ?string, got " . gettype($r) . "\n";
+    echo "FAIL: exitReason() must be ?string, got " . gettype($r) . "\n";
     exit;
 }
 
@@ -20,7 +20,7 @@ if ($r !== null) {
 $allowed = [null, 'scheduled', 'max_memory', 'error'];
 if (!in_array($r, $allowed, true)) {
     http_response_code(500);
-    echo "FAIL: getExitReason() returned a value outside of allowed set\n";
+    echo "FAIL: exitReason() returned a value outside of allowed set\n";
     exit;
 }
 

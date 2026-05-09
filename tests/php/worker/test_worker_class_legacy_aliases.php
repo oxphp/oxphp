@@ -7,9 +7,9 @@ if (oxphp_is_worker() !== $w->isWorkerMode()) {
     exit;
 }
 
-if (oxphp_worker_id() !== $w->getId()) {
+if (oxphp_worker_id() !== $w->id()) {
     http_response_code(500);
-    echo "FAIL: oxphp_worker_id() !== Worker::getId()\n";
+    echo "FAIL: oxphp_worker_id() !== Worker::id()\n";
     exit;
 }
 
