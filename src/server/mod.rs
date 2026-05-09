@@ -158,25 +158,38 @@ impl Server {
         self.metrics.connection_opened();
         let _guard = ConnectionGuard(Arc::clone(&self.metrics));
 
+        // Per-connection close signal. Flips to `true` after `serve_connection`
+        // returns (clean close, RST, or error). Each in-flight request races
+        // its dispatch.await against this watch so HTTP/2 stream resets and
+        // HTTP/1.1 between-request closes proactively cancel the worker.
+        let (closed_tx, closed_rx) = tokio::sync::watch::channel(false);
+
         let server = Arc::clone(self); // 1 Arc clone for the connection
-        let service = service_fn(move |req| {
-            let server = Arc::clone(&server); // 1 Arc clone per request (was 10)
-            async move { connection::handle_request(req, &server, remote_addr).await }
+        let service = service_fn({
+            let closed_rx = closed_rx.clone();
+            move |req| {
+                let server = Arc::clone(&server); // 1 Arc clone per request (was 10)
+                let closed_rx = closed_rx.clone();
+                async move { connection::handle_request(req, &server, remote_addr, closed_rx).await }
+            }
         });
 
-        if let Some(ref acceptor) = self.tls_acceptor {
+        let result = if let Some(ref acceptor) = self.tls_acceptor {
             let tls_stream = acceptor.accept(stream).await?;
             let io = TokioIo::new(tls_stream);
-            let result = self.http_builder.serve_connection(io, service).await;
-            if let Err(e) = result {
-                return Err(format!("connection error: {e}").into());
-            }
+            self.http_builder.serve_connection(io, service).await
         } else {
             let io = TokioIo::new(stream);
-            let result = self.http_builder.serve_connection(io, service).await;
-            if let Err(e) = result {
-                return Err(format!("connection error: {e}").into());
-            }
+            self.http_builder.serve_connection(io, service).await
+        };
+
+        // Notify any in-flight handler that the connection is done. This lets
+        // them race their dispatch against the watch and trigger client-abort
+        // cancellation on the worker side.
+        let _ = closed_tx.send(true);
+
+        if let Err(e) = result {
+            return Err(format!("connection error: {e}").into());
         }
 
         Ok(())

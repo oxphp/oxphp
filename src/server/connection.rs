@@ -8,8 +8,10 @@ use http_body_util::{BodyExt, Limited};
 use hyper::body::Body as _;
 use hyper::body::Incoming;
 
+use crate::bridge::cancel::{CancelReason, CancellationState};
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ExecuteResult;
+use crate::php::worker_registry::cancel_request;
 use crate::server::compression;
 use crate::server::response::static_file;
 use crate::server::routing::RouteResult;
@@ -61,11 +63,46 @@ fn parse_content_length(bytes: &[u8]) -> Option<usize> {
     Some(n)
 }
 
+/// Drop-guard that fires `cancel_request(state, ClientAbort)` if the
+/// dispatch future is dropped before completing. Disarmed via
+/// `disarm()` once the future has returned a result.
+struct ClientAbortGuard {
+    state: std::sync::Arc<CancellationState>,
+}
+
+impl ClientAbortGuard {
+    fn new(state: std::sync::Arc<CancellationState>) -> Self {
+        Self { state }
+    }
+
+    fn disarm(self) {
+        self.state.mark_done();
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for ClientAbortGuard {
+    fn drop(&mut self) {
+        if self.state.is_done() {
+            return;
+        }
+        cancel_request(&self.state, CancelReason::ClientAbort);
+    }
+}
+
 /// Handle a single HTTP request with event-driven pipeline.
+///
+/// `closed_rx` is signalled by the owning connection when hyper's
+/// `serve_connection` returns. Racing the dispatch against it lets us
+/// cancel in-flight workers on HTTP/2 stream resets and HTTP/1.1
+/// between-request closes. HTTP/1.1 mid-handler closes for buffered
+/// responses remain undetectable here — hyper does not poll the socket
+/// while a service handler is running.
 pub async fn handle_request(
     req: Request<Incoming>,
     server: &Server,
     remote_addr: SocketAddr,
+    mut closed_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start = Instant::now();
     let (parts, body) = req.into_parts();
@@ -137,26 +174,56 @@ pub async fn handle_request(
     let path_str = parts.uri.path().to_string();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
-    // Sub-design A: per-request cancellation state. The worker references
-    // it via raw pointer; we keep the Arc alive in this scope so the
-    // pointer stays valid until dispatch completes.
-    let cancel_state = std::sync::Arc::new(crate::bridge::cancel::CancellationState::new());
+    // Per-request cancellation state. Worker holds one Arc (stashed in its
+    // TLS slot); this scope holds the other through the ClientAbortGuard,
+    // so the byte the bridge reads is alive even if either side drops first.
+    let cancel_state = std::sync::Arc::new(CancellationState::new());
 
-    // Apply request timeout if configured. Only one branch runs, so the
-    // `profiling_run_id` can be moved into whichever `dispatch_request` call
-    // is selected — no clone on the hot path.
-    let dispatch = dispatch_request(
-        parts,
-        body,
-        server,
-        remote_addr,
-        &request_id,
-        &metadata,
-        profiling_mode,
-        profiling_run_id,
-        cancel_state.as_ptr() as usize,
-    );
-    let result = dispatch.await;
+    // Race the dispatch against the connection-closed watch in an inner
+    // scope so the pinned dispatch future (which borrows `request_id`,
+    // `metadata`, `server`) is fully dropped before those values are moved
+    // into `RequestComplete` / `ResponseBuilding` below.
+    let result = {
+        let dispatch = dispatch_request(
+            parts,
+            body,
+            server,
+            remote_addr,
+            &request_id,
+            &metadata,
+            profiling_mode,
+            profiling_run_id,
+            cancel_state.clone(),
+        );
+
+        // Drop guard fires cancel_request(ClientAbort) if the dispatch future
+        // is dropped before completing (hyper saw the client go away). Disarmed
+        // on the success path. Declared after `dispatch` so on a future-drop
+        // its Drop runs after the dispatch local has already gone.
+        let guard = ClientAbortGuard::new(cancel_state);
+
+        // If the connection ends first (HTTP/2 stream RST, HTTP/1.1 close
+        // between requests, or any other serve_connection completion), drop
+        // the guard to fire cancel_request(ClientAbort) on the worker, then
+        // keep awaiting the dispatch so the worker can ship its (likely
+        // 499 / 500) response.
+        tokio::pin!(dispatch);
+        tokio::select! {
+            biased;
+            r = &mut dispatch => {
+                guard.disarm();
+                r
+            }
+            _ = closed_rx.changed() => {
+                // Fires cancel_request(ClientAbort) via Drop on the worker side.
+                drop(guard);
+                // Wait for the worker to actually finish so we get a real
+                // response back instead of synthesising one and racing the
+                // worker.
+                dispatch.await
+            }
+        }
+    };
 
     let (response, request_body_size, mut php_exec) = match result {
         Ok((resp, body_size, exec)) => (resp, body_size, exec),
@@ -244,7 +311,7 @@ async fn dispatch_request(
     metadata: &[(String, String)],
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
     profiling_run_id: Option<String>,
-    cancel_ptr: usize,
+    cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -386,7 +453,7 @@ async fn dispatch_request(
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
-                cancel_ptr,
+                cancel_state,
                 trace_id: metadata_get(metadata, "trace_id").to_string(),
                 span_id: metadata_get(metadata, "span_id").to_string(),
                 parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),

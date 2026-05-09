@@ -60,7 +60,7 @@ mod tests {
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/html")),
-            cancel_ptr: 0,
+            cancel_state: std::sync::Arc::new(crate::bridge::cancel::CancellationState::new()),
             trace_id: String::new(),
             span_id: String::new(),
             parent_span_id: String::new(),

@@ -15,6 +15,12 @@ use crate::types::{ScriptRequest, ScriptResponse};
 
 use super::pool::WorkerRequest;
 
+thread_local! {
+    /// Whether &EG(vm_interrupt) has been captured for this traditional
+    /// worker thread and published into WORKERS[id].interrupt_flag_ptr.
+    static VM_INTERRUPT_CAPTURED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Controls whether the worker loop uses blocking `recv()` or `recv_timeout()`.
 /// Static mode workers sleep via futex with zero CPU cost; dynamic mode workers
 /// must wake periodically to check their per-worker shutdown flag.
@@ -246,6 +252,15 @@ impl Drop for RequestDataGuard {
         // RSHUTDOWN handlers still see a real timestamp.
         unsafe {
             bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
+            // Clear our request's Weak ref from WORKERS so a stale
+            // cancel_request() walking the registry can't accidentally
+            // match a finished request.
+            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+                let id = bindings::oxphp_bridge_get_worker_id() as usize;
+                if let Some(slot) = workers.get(id) {
+                    *slot.cancel_state.lock().unwrap() = None;
+                }
+            }
             bindings::oxphp_bridge_set_request_time(0.0);
         }
     }
@@ -259,6 +274,13 @@ fn execute_request(
     response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
 ) -> Option<ScriptResponse> {
     let start = Instant::now();
+
+    // Fast-path: client disconnected while we were in the queue.
+    // Drop guard already wrote the reason; ship 499 and skip PHP.
+    if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
+        let _ = response_tx.send(crate::types::ScriptResponse::client_closed());
+        return None;
+    }
 
     unsafe {
         // Bump the per-thread counter at request START so that
@@ -276,6 +298,35 @@ fn execute_request(
     // first oxphp_stream_flush call on a worker. Worker-mode does this in
     // `setup_request_tls`; traditional needs the same guarantee.
     unsafe { bindings::oxphp_bridge_reset_request_ctx() };
+
+    // One-shot capture per traditional worker thread: publish
+    // EG(vm_interrupt)'s address into WORKERS[id] so cross-thread
+    // cancellation can interrupt this thread's PHP execution. Then
+    // register a Weak back-ref to this request's CancellationState so
+    // cancel_request() can find this worker by Arc::ptr_eq.
+    let worker_id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
+    VM_INTERRUPT_CAPTURED.with(|c| {
+        if !c.get() {
+            unsafe {
+                bindings::oxphp_capture_vm_interrupt();
+            }
+            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+                if let Some(slot) = workers.get(worker_id) {
+                    let addr = unsafe { bindings::oxphp_bridge_vm_interrupt_addr() };
+                    slot.interrupt_flag_ptr
+                        .store(addr, std::sync::atomic::Ordering::Release);
+                }
+            }
+            c.set(true);
+        }
+    });
+    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+        if let Some(slot) = workers.get(worker_id) {
+            *slot.cancel_state.lock().unwrap() =
+                Some(std::sync::Arc::downgrade(&request.cancel_state));
+        }
+    }
+
     sapi::set_request_data(request);
     sapi::set_early_tx(start, response_tx);
 

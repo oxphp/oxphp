@@ -1,7 +1,7 @@
 //! Per-request cancellation state shared between the tokio dispatch
 //! task and the worker thread.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -14,16 +14,27 @@ pub enum CancelReason {
     UserCancel = 5,
 }
 
+#[derive(Debug)]
 #[repr(C, align(64))]
 pub struct CancellationState {
     reason: AtomicU8,
+    done: AtomicBool,
 }
 
 impl CancellationState {
     pub fn new() -> Self {
         Self {
             reason: AtomicU8::new(CancelReason::None as u8),
+            done: AtomicBool::new(false),
         }
+    }
+
+    pub fn mark_done(&self) {
+        self.done.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Relaxed)
     }
 
     pub fn set(&self, reason: CancelReason) -> bool {
@@ -100,5 +111,22 @@ mod tests {
     #[test]
     fn cache_line_alignment() {
         assert_eq!(std::mem::align_of::<CancellationState>(), 64);
+    }
+
+    #[test]
+    fn done_starts_false() {
+        let s = CancellationState::new();
+        assert!(!s.is_done());
+    }
+
+    #[test]
+    fn mark_done_sets_flag() {
+        let s = CancellationState::new();
+        s.mark_done();
+        assert!(s.is_done());
+        // done is independent of reason; setting reason still works.
+        assert!(s.set(CancelReason::ClientAbort));
+        assert_eq!(s.get(), CancelReason::ClientAbort);
+        assert!(s.is_done());
     }
 }
