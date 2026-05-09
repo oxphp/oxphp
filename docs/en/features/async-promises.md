@@ -126,7 +126,10 @@ try {
         // promises that already rejected before the deadline
     }
     $still_running = $e->getPendingPromiseIds();
-    // promise ids that had not settled at the deadline; they were cancelled
+    // Promise ids that had not settled at the deadline. They were cancelled
+    // AND their receivers were dropped — passing any of these ids to
+    // oxphp_async_await*() afterwards throws "unknown or already-awaited
+    // promise id". Treat the list as an audit trail, not a resumable queue.
 }
 ```
 

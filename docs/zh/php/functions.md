@@ -559,7 +559,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 **抛出异常：**
 - 若异步池已禁用（`ASYNC_WORKERS=0`），则抛出 `OxPHP\Async\AsyncException`
 - 若所有 Promise 都失败，则抛出 `OxPHP\Async\AggregateAsyncException`。该异常通过 `getErrors()`（按位置，键为 0..N-1）、`getErrorMap()`（按 Promise ID 索引）和 `getPromiseIds()` 携带所有错误。
-- 若在 `$timeout` 内没有 Promise 成功完成，则抛出 `OxPHP\Async\TimeoutException`。`getPartialErrors()` 列出在截止时间之前已经失败的 Promise；`getPendingPromiseIds()` 列出尚未完成且已被取消的 Promise。
+- 若在 `$timeout` 内没有 Promise 成功完成，则抛出 `OxPHP\Async\TimeoutException`。`getPartialErrors()` 列出在截止时间之前已经失败的 Promise；`getPendingPromiseIds()` 列出尚未完成的 Promise。**这些挂起 Promise 已被取消，并且其 receivers 已被丢弃**——之后将任一 ID 传给 `oxphp_async_await*()` 都会抛出 `"unknown or already-awaited promise id"`。该列表用于审计记录，而非可恢复的工作队列。
 
 **行为：**
 - 获胜时仍处于挂起状态的非获胜 Promise 仍可通过 `oxphp_async_await()` 单独等待。

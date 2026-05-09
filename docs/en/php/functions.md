@@ -559,7 +559,7 @@ Returns as soon as one promise FULFILLS. Rejections are accumulated, and only be
 **Throws:**
 - `OxPHP\Async\AsyncException` if the async pool is disabled (`ASYNC_WORKERS=0`)
 - `OxPHP\Async\AggregateAsyncException` if every promise rejected. The exception carries every error via `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), and `getPromiseIds()`.
-- `OxPHP\Async\TimeoutException` if no promise fulfilled within `$timeout`. `getPartialErrors()` lists the promises that already rejected before the deadline; `getPendingPromiseIds()` lists those that had not settled and were cancelled.
+- `OxPHP\Async\TimeoutException` if no promise fulfilled within `$timeout`. `getPartialErrors()` lists the promises that already rejected before the deadline; `getPendingPromiseIds()` lists those that had not settled. **Pending promises are cancelled and their receivers are dropped** — passing any of these ids to `oxphp_async_await*()` afterwards throws `"unknown or already-awaited promise id"`. The list is an audit trail, not a queue of resumable work.
 
 **Behavior:**
 - Promises that were still pending at the moment of victory remain awaitable individually with `oxphp_async_await()`.

@@ -356,7 +356,11 @@ function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): arr
  * promise rejects, throws AggregateAsyncException carrying all errors.
  *
  * On timeout, throws TimeoutException populated with partial errors collected
- * up to the deadline and the ids of promises still pending (and now cancelled).
+ * up to the deadline and the ids of promises still pending. Pending promises
+ * are cancelled AND their receivers are dropped — those ids cannot be re-awaited
+ * with oxphp_async_await*() afterwards (each such call throws
+ * "unknown or already-awaited promise id"). The pending list is an audit
+ * trail, not a queue of resumable work.
  *
  * @param int[]      $promise_ids Array of promise IDs from oxphp_async()
  * @param float|null $timeout     Overall timeout in seconds; null = no limit
@@ -380,6 +384,7 @@ function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): arr
  *         // who failed
  *     }
  *     $cancelled = $e->getPendingPromiseIds();
+ *     // Audit-only: these ids are no longer awaitable.
  * }
  */
 function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
@@ -830,9 +835,13 @@ namespace OxPHP\Async {
         public function getPartialErrors(): array {}
 
         /**
-         * Promise IDs that did not settle before the deadline. They have been
-         * cancelled and should not be awaited again. Only populated by
-         * oxphp_async_await_any().
+         * Promise IDs that did not settle before the deadline. These promises
+         * have been cancelled AND their receivers were dropped — passing any
+         * of these ids to oxphp_async_await() / oxphp_async_await_race() /
+         * oxphp_async_await_any() / oxphp_async_await_all() afterwards throws
+         * OxPHP\Async\AsyncException ("unknown or already-awaited promise id").
+         * Treat the list as a fire-and-forget audit trail, not a queue of
+         * resumable work. Only populated by oxphp_async_await_any().
          *
          * @return list<int>
          */

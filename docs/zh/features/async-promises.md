@@ -126,7 +126,10 @@ try {
         // 在截止时间之前已经失败的 Promise
     }
     $still_running = $e->getPendingPromiseIds();
-    // 截止时间到达时仍未完成的 Promise ID；它们已被取消
+    // 截止时间到达时仍未完成的 Promise ID。这些 Promise 已被取消，并且其
+    // receivers 已被丢弃——之后将这些 ID 中的任何一个传给
+    // oxphp_async_await*() 都会抛出 "unknown or already-awaited promise id"。
+    // 该列表用于审计记录，而非可恢复的工作队列。
 }
 ```
 

@@ -561,7 +561,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 **Выбрасывает:**
 - `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
 - `OxPHP\Async\AggregateAsyncException` если все промисы завершились с ошибкой. Исключение содержит все ошибки через `getErrors()` (по позиции, ключи 0..N-1), `getErrorMap()` (по идентификатору промиса) и `getPromiseIds()`.
-- `OxPHP\Async\TimeoutException` если ни один промис не завершился успешно в течение `$timeout`. `getPartialErrors()` содержит промисы, успевшие завершиться с ошибкой до истечения тайм-аута; `getPendingPromiseIds()` — те, что не успели завершиться и были отменены.
+- `OxPHP\Async\TimeoutException` если ни один промис не завершился успешно в течение `$timeout`. `getPartialErrors()` содержит промисы, успевшие завершиться с ошибкой до истечения тайм-аута; `getPendingPromiseIds()` — те, что не успели завершиться. **Незавершённые промисы отменяются, а их receivers уничтожаются** — последующая передача любого такого id в `oxphp_async_await*()` выбросит `"unknown or already-awaited promise id"`. Список — это журнал аудита, а не очередь незавершённой работы.
 
 **Поведение:**
 - Промисы, остававшиеся в ожидании на момент победы, остаются доступными для индивидуального вызова `oxphp_async_await()`.
