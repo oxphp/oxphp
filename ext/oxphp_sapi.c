@@ -1002,52 +1002,6 @@ PHP_FUNCTION(oxphp_server_info)
 }
 /* }}} */
 
-/* {{{ oxphp_request_heartbeat(int $time = 10): bool
- * Extend the execution deadline by $time seconds from now.
- * Returns false if $time is non-positive. */
-PHP_FUNCTION(oxphp_request_heartbeat)
-{
-    zend_long time = 10;
-
-    ZEND_PARSE_PARAMETERS_START(0, 1)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_LONG(time)
-    ZEND_PARSE_PARAMETERS_END();
-
-    if (time <= 0) {
-        RETURN_FALSE;
-    }
-
-    /* Clamp $time to INT_MAX up front. zend_set_timeout() takes int, and
-     * time * 1000000 on the server-deadline path would overflow int64 for
-     * values above ~2^43. INT_MAX seconds (~68 years) is already absurd
-     * for a heartbeat, so a single clamp serves both sides. */
-    if (time > INT_MAX) {
-        php_error_docref(NULL, E_WARNING,
-            "oxphp_request_heartbeat(): $time=%lld exceeds INT_MAX; "
-            "clamped to %d seconds",
-            (long long)time, INT_MAX);
-        time = INT_MAX;
-    }
-
-    /* Extend deadline by $time seconds from now */
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-    oxphp_bridge_set_deadline(now_us + (int64_t)time * 1000000);
-
-    /* Also extend PHP's own max_execution_time timer so Zend doesn't
-     * kill the script with "Maximum execution time exceeded" before the
-     * server deadline is reached. Skip if the script opted out of the
-     * timer entirely (max_execution_time = 0 / set_time_limit(0)). */
-    if (EG(timeout_seconds) > 0) {
-        zend_set_timeout((int)time, /* reset_signals */ 0);
-    }
-
-    RETURN_TRUE;
-}
-/* }}} */
-
 /* {{{ oxphp_finish_request(): bool
  * Flush the HTTP response to the client immediately.
  * PHP continues executing for background tasks (analytics, cleanup, etc.).
@@ -2645,10 +2599,6 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_server_info, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_request_heartbeat, 0, 0, _IS_BOOL, 0)
-    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, time, IS_LONG, 0, "10")
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -2682,7 +2632,6 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_request_id,        arginfo_oxphp_request_id)
     PHP_FE(oxphp_worker_id,         arginfo_oxphp_worker_id)
     PHP_FE(oxphp_server_info,       arginfo_oxphp_server_info)
-    PHP_FE(oxphp_request_heartbeat, arginfo_oxphp_request_heartbeat)
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
     PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)

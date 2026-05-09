@@ -20,7 +20,6 @@ PHP_MINIT_FUNCTION(oxphp_sapi);
 PHP_FUNCTION(oxphp_request_id);
 PHP_FUNCTION(oxphp_worker_id);
 PHP_FUNCTION(oxphp_server_info);
-PHP_FUNCTION(oxphp_request_heartbeat);
 PHP_FUNCTION(oxphp_finish_request);
 PHP_FUNCTION(oxphp_is_streaming);
 PHP_FUNCTION(oxphp_stream_flush);

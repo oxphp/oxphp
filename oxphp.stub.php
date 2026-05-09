@@ -149,24 +149,6 @@ function oxphp_is_worker(): bool {}
 function oxphp_is_streaming(): bool {}
 
 /**
- * Extends the request timeout to prevent the server from killing
- * long-running scripts.
- *
- * Call periodically in long-running loops. The timeout is extended
- * by the given number of seconds from the time of the call.
- *
- * @param int $time Seconds to extend the timeout by (default: 10)
- * @return bool Always true
- *
- * @example
- * foreach ($large_dataset as $row) {
- *     oxphp_request_heartbeat(30);
- *     process($row);
- * }
- */
-function oxphp_request_heartbeat(int $time = 10): bool {}
-
-/**
  * Activate streaming mode and flush buffered output as a chunk to the client.
  *
  * On the first call, HTTP headers are sent immediately. Each subsequent call
