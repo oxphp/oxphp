@@ -7,3 +7,9 @@ timeout/test_heartbeat_extends
 timeout/test_heartbeat_resets_php_timer
 timeout/test_heartbeat_respects_disabled_php_timer
 timeout/test_heartbeat_clamps_oversized_time
+timeout/test_set_time_limit_extends
+timeout/test_set_time_limit_zero_unlimited
+timeout/test_timeout_runs_shutdown_handlers >> ?action=trigger | GET | | 500
+timeout/test_timeout_runs_shutdown_handlers >> ?action=check
+timeout/test_timeout_sets_connection_status >> ?action=trigger | GET | | 500
+timeout/test_timeout_sets_connection_status >> ?action=check
