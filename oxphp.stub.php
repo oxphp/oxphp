@@ -1423,10 +1423,10 @@ namespace OxPHP\Shared\Pool {
     /**
      * Scope-bound reference to an acquired Pool slot.
      *
-     * Clone is forbidden. `get()` returns a copy of the underlying resource
-     * that is safe to use within the acquiring thread; on destruction or
-     * explicit release via {@see \OxPHP\Shared\Pool::release()} the slot
-     * returns to the pool.
+     * Clone is forbidden. `get()` returns the pooled value owned by this
+     * acquire — no copy is made, and the slot is exclusive to the acquiring
+     * thread until destruction or explicit release via
+     * {@see \OxPHP\Shared\Pool::release()} returns it to the pool.
      *
      * @internal Produced by {@see \OxPHP\Shared\Pool::acquire()}; never constructed directly.
      */
