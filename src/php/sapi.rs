@@ -3283,6 +3283,268 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     }
 }
 
+/// Per-promise rejection record collected by `await_any_dispatch_callback`.
+struct AggregateRejection {
+    promise_id: u64,
+    exception_class: String,
+    message: String,
+    trace: Option<String>,
+}
+
+/// Rust-side callback for `oxphp_async_await_any()`.
+///
+/// Promise.any semantics:
+///   * First FULFILLED promise wins. Remaining still-pending promises are
+///     restored to PROMISE_MAP (individually awaitable via `oxphp_async_await`).
+///   * If every promise rejects before any fulfills, accumulates errors and
+///     throws `OxPHP\Async\AggregateAsyncException` via the aggregate API.
+///     Returns -3.
+///   * If the timeout expires before a fulfilled winner, accumulates errors
+///     that arrived before the deadline plus computes still-pending ids, then
+///     throws `OxPHP\Async\TimeoutException` with both fields. Returns -2.
+///   * Other internal failures return -1.
+///
+/// # Safety
+/// Called from C FFI. `promise_ids` must point to `count` valid i64 values.
+/// `out_winner_id` and `retval` must be valid writable pointers.
+pub unsafe extern "C" fn await_any_dispatch_callback(
+    promise_ids: *const i64,
+    count: u32,
+    timeout: f64,
+    out_winner_id: *mut i64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    use futures_util::future::select_all;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    if count == 0 || promise_ids.is_null() {
+        return -1;
+    }
+
+    // Snapshot input ids in input-array order — used later for sorting
+    // accumulated rejections back into positional order.
+    let input_ids: Vec<u64> = (0..count as usize)
+        .map(|i| *promise_ids.add(i) as u64)
+        .collect();
+
+    // Pull receivers + cancel flags out of PROMISE_MAP.
+    let mut id_vec: Vec<u64> = Vec::with_capacity(input_ids.len());
+    let mut cancel_vec: Vec<Arc<std::sync::atomic::AtomicBool>> =
+        Vec::with_capacity(input_ids.len());
+    let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> =
+        Vec::with_capacity(input_ids.len());
+
+    for &id in &input_ids {
+        if let Some((rx, cancelled)) = take_promise(id) {
+            id_vec.push(id);
+            cancel_vec.push(cancelled);
+            rxs.push(rx);
+        }
+    }
+
+    if rxs.is_empty() {
+        return -1;
+    }
+
+    let handle = match ASYNC_TOKIO_HANDLE.get() {
+        Some(h) => h,
+        None => {
+            // Restore receivers to PROMISE_MAP before failing.
+            for ((id, rx), cancelled) in id_vec
+                .iter()
+                .copied()
+                .zip(rxs.into_iter())
+                .zip(cancel_vec.iter().cloned())
+            {
+                store_promise(id, rx, cancelled);
+            }
+            return -1;
+        }
+    };
+
+    // Cancel-flag handle for the timeout arm. Wrapped in Arc so the outer
+    // (post-block_on) code can still read the flags after the inner future
+    // is dropped by `tokio::time::timeout`.
+    let cancel_arc: Arc<Vec<Arc<std::sync::atomic::AtomicBool>>> = Arc::new(cancel_vec);
+
+    // Shared rejection log between the cancellable race future and the
+    // outer code. Mutex is required because `tokio::time::timeout` drops
+    // the inner future on timeout — owned state inside the future would be
+    // lost otherwise.
+    let collected: Arc<Mutex<Vec<AggregateRejection>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected_inner = collected.clone();
+
+    // Race loop: select_all in a loop so on victory we can return remaining
+    // receivers to caller for restoring to PROMISE_MAP. On all-rejected we
+    // return Err(()).
+    let race_fut = async move {
+        let mut id_vec = id_vec;
+        let mut rxs = rxs;
+        loop {
+            if rxs.is_empty() {
+                return Err::<
+                    (
+                        u64,
+                        AsyncResult,
+                        Vec<u64>,
+                        Vec<tokio::sync::oneshot::Receiver<AsyncResult>>,
+                    ),
+                    (),
+                >(());
+            }
+            let (recv_result, idx, remaining) = select_all(rxs).await;
+            let id = id_vec.remove(idx);
+            match recv_result {
+                Ok(r) if r.success => {
+                    return Ok((id, r, id_vec, remaining));
+                }
+                Ok(r) => {
+                    let cls = r
+                        .exception_class
+                        .clone()
+                        .unwrap_or_else(|| "OxPHP\\Async\\AsyncException".to_string());
+                    let msg = r
+                        .exception_message
+                        .clone()
+                        .unwrap_or_else(|| "promise rejected without message".to_string());
+                    let trace = r.exception_trace.clone();
+                    collected_inner.lock().unwrap().push(AggregateRejection {
+                        promise_id: id,
+                        exception_class: cls,
+                        message: msg,
+                        trace,
+                    });
+                }
+                Err(_) => {
+                    // Channel closed (worker dropped). Treat as rejection.
+                    collected_inner.lock().unwrap().push(AggregateRejection {
+                        promise_id: id,
+                        exception_class: "OxPHP\\Async\\AsyncException".to_string(),
+                        message: "promise channel closed unexpectedly".to_string(),
+                        trace: None,
+                    });
+                }
+            }
+            rxs = remaining;
+        }
+    };
+
+    let outcome = if timeout > 0.0 {
+        let dur = Duration::from_secs_f64(timeout);
+        match handle.block_on(tokio::time::timeout(dur, race_fut)) {
+            Ok(v) => Ok(v),
+            Err(_elapsed) => Err(()),
+        }
+    } else {
+        Ok(handle.block_on(race_fut))
+    };
+
+    // Push collected rejections in input-array position order into the
+    // C-bridge aggregate buffer. Used by both the all-rejected (-3) and
+    // timeout (-2) paths.
+    let push_collected_in_position_order =
+        |collected: &Mutex<Vec<AggregateRejection>>, input_ids: &[u64]| {
+            let position: std::collections::HashMap<u64, usize> = input_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, i))
+                .collect();
+            let mut sorted: Vec<AggregateRejection> =
+                std::mem::take(&mut *collected.lock().unwrap());
+            sorted.sort_by_key(|r| position.get(&r.promise_id).copied().unwrap_or(usize::MAX));
+
+            ffi::oxphp_bridge_aggregate_clear();
+            for r in &sorted {
+                let cls = CString::new(r.exception_class.as_str()).unwrap_or_default();
+                let msg = CString::new(r.message.as_str()).unwrap_or_default();
+                let trace = r
+                    .trace
+                    .as_deref()
+                    .map(|t| CString::new(t).unwrap_or_default());
+                ffi::oxphp_bridge_aggregate_push(
+                    cls.as_ptr(),
+                    msg.as_ptr(),
+                    trace
+                        .as_ref()
+                        .map(|c| c.as_ptr())
+                        .unwrap_or(std::ptr::null()),
+                    r.promise_id as i64,
+                );
+            }
+        };
+
+    match outcome {
+        // Loop completed naturally — winner found.
+        Ok(Ok((winner_id, mut result, remaining_ids, remaining_rxs))) => {
+            // Restore non-winner pending receivers to PROMISE_MAP. Look up
+            // their cancel flags by id from the original input list.
+            let cancel_lookup: std::collections::HashMap<u64, Arc<std::sync::atomic::AtomicBool>> =
+                input_ids
+                    .iter()
+                    .copied()
+                    .zip(cancel_arc.iter().cloned())
+                    .collect();
+            for (id, rx) in remaining_ids.into_iter().zip(remaining_rxs.into_iter()) {
+                if let Some(cancelled) = cancel_lookup.get(&id) {
+                    store_promise(id, rx, cancelled.clone());
+                }
+            }
+            cleanup_promise(winner_id);
+            *out_winner_id = winner_id as i64;
+            if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                let rc = ffi::oxphp_portable_deserialize(
+                    result.serialized_value,
+                    result.serialized_value_len,
+                    1,
+                    retval,
+                );
+                ffi::oxphp_portable_free(result.serialized_value);
+                result.serialized_value = std::ptr::null_mut();
+                if rc != 0 {
+                    return -1;
+                }
+            }
+            0
+        }
+        // All rejected — loop exhausted without success.
+        Ok(Err(())) => {
+            push_collected_in_position_order(&collected, &input_ids);
+            ffi::oxphp_bridge_aggregate_throw();
+            -3
+        }
+        // Timeout fired.
+        Err(()) => {
+            // Cancel any still-pending workers (best-effort signal).
+            for c in cancel_arc.iter() {
+                c.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+
+            // Compute pending ids = input_ids minus those whose rejection was
+            // already recorded.
+            let rejected_set: std::collections::HashSet<u64> = collected
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.promise_id)
+                .collect();
+            let pending_ids: Vec<i64> = input_ids
+                .iter()
+                .filter(|id| !rejected_set.contains(id))
+                .map(|&id| id as i64)
+                .collect();
+
+            push_collected_in_position_order(&collected, &input_ids);
+            ffi::oxphp_bridge_aggregate_throw_timeout(
+                pending_ids.as_ptr(),
+                pending_ids.len() as u32,
+            );
+            -2
+        }
+    }
+}
+
 /// Restore frozen and borrowed zvals for a completed/timed-out promise.
 unsafe fn cleanup_promise(id: u64) {
     use crate::bridge::ffi;
@@ -3413,6 +3675,7 @@ pub fn register_async_callbacks() {
         crate::bridge::ffi::oxphp_bridge_set_await_race_dispatch(Some(
             await_race_dispatch_callback,
         ));
+        crate::bridge::ffi::oxphp_bridge_set_await_any_dispatch(Some(await_any_dispatch_callback));
         crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
             cleanup_outstanding_promises_callback,
         ));
