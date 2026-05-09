@@ -3401,7 +3401,14 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 >(());
             }
             let (recv_result, idx, remaining) = select_all(rxs).await;
-            let id = id_vec.remove(idx);
+            // `select_all` uses `Vec::swap_remove` internally on its inner
+            // Vec — `remaining` is NOT a stable order-preserving slice of
+            // the input. We must use the same swap-remove semantics on
+            // `id_vec` to keep it parallel with `remaining`. Using
+            // `Vec::remove` here would leave id_vec and remaining out of
+            // sync after the first iteration, producing AggregateRejection
+            // entries with mismatched promise_id and message fields.
+            let id = id_vec.swap_remove(idx);
             match recv_result {
                 Ok(r) if r.success => {
                     return Ok((id, r, id_vec, remaining));
@@ -3439,7 +3446,11 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 
     let outcome = if timeout > 0.0 {
         let dur = Duration::from_secs_f64(timeout);
-        match handle.block_on(tokio::time::timeout(dur, race_fut)) {
+        // `tokio::time::timeout` builds a `Sleep` that registers with the
+        // current runtime's timer driver at construction time, not just at
+        // poll time. Construct it inside `block_on` so the runtime context
+        // is established first.
+        match handle.block_on(async move { tokio::time::timeout(dur, race_fut).await }) {
             Ok(v) => Ok(v),
             Err(_elapsed) => Err(()),
         }
