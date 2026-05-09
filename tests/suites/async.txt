@@ -18,3 +18,8 @@ async/test_not_awaited_cleanup
 async/test_finish_request_with_async
 async/test_strings_frozen
 async/test_arrays_frozen
+async/test_await_any
+async/test_await_any_empty_array
+async/test_await_any_all_rejected
+async/test_await_any_partial_reject_then_success
+async/test_await_any_timeout
