@@ -51,22 +51,35 @@ pub fn cancel_request(state: &std::sync::Arc<CancellationState>, reason: CancelR
         None => return,
     };
     for slot in workers.iter() {
-        let guard = slot.cancel_state.lock().unwrap();
-        if let Some(active) = guard.as_ref().and_then(Weak::upgrade) {
-            if std::sync::Arc::ptr_eq(&active, state) {
-                let p = slot.interrupt_flag_ptr.load(Ordering::Acquire);
-                if !p.is_null() {
-                    // SAFETY: documented Zend cross-thread interrupt
-                    // pattern (see pcntl_signal). The address points
-                    // to a TLS byte that lives for the worker's
-                    // thread lifetime.
-                    unsafe {
-                        p.write_volatile(1);
-                    }
+        // Resolve the target's interrupt-flag pointer under the lock,
+        // then DROP the guard before writing across threads. Holding
+        // the Mutex during the cross-thread store would deadlock the
+        // disconnect path if the worker panics and poisons it; the
+        // Mutex's job is only to keep the Weak<>→Arc<> upgrade
+        // race-free, not to serialise the interrupt write itself.
+        let interrupt_addr = {
+            let guard = slot.cancel_state.lock().unwrap();
+            match guard.as_ref().and_then(Weak::upgrade) {
+                Some(active) if std::sync::Arc::ptr_eq(&active, state) => {
+                    slot.interrupt_flag_ptr.load(Ordering::Acquire)
                 }
-                return;
+                _ => continue,
+            }
+            // guard dropped here at end of scope
+        };
+        if !interrupt_addr.is_null() {
+            // SAFETY: cross-thread Zend interrupt pattern. Routed
+            // through the bridge so the underlying `zend_atomic_bool`
+            // is mutated via `zend_atomic_bool_store_ex`, not aliased
+            // as a plain `uint8_t*`. The TLS byte lives for the
+            // worker thread's lifetime.
+            unsafe {
+                crate::bridge::ffi::oxphp_bridge_request_interrupt_at(
+                    interrupt_addr as *mut std::os::raw::c_void,
+                );
             }
         }
+        return;
     }
 }
 

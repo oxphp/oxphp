@@ -46,10 +46,15 @@ fn main() -> Result<(), types::BoxError> {
         }
     });
 
-    // Create metrics early — needed by executor for worker metrics.
-    // Per-worker observability vectors are sized to the worker count
-    // so the supervisor's per-slot observe_* helpers stay in bounds.
-    let metrics = Arc::new(Metrics::new_with_workers(config.worker_mode.worker_count()));
+    // Create metrics early — needed by executor for worker metrics. Sized
+    // by `max_worker_count()` rather than the initial pool size: dynamic-mode
+    // scale-ups and traditional-mode respawns hand out IDs up to this limit
+    // (see executor::sapi::pool — IDs are recycled within the same range so
+    // they never exceed it), and the supervisor's per-slot observe_* helpers
+    // need a slot for every possible live worker.
+    let metrics = Arc::new(Metrics::new_with_workers(
+        config.worker_mode.max_worker_count(),
+    ));
 
     // Initialize plugins BEFORE PHP startup so MINIT can register plugin
     // functions with Zend (OPcache needs them at compile time).
@@ -125,8 +130,10 @@ fn main() -> Result<(), types::BoxError> {
     }
 
     // Initialise worker registry before workers are spawned so slots exist
-    // when workers register their EG(vm_interrupt) address.
-    oxphp::php::worker_registry::init_workers(config.worker_mode.worker_count());
+    // when workers register their EG(vm_interrupt) address. Sized by the
+    // maximum worker count so dynamic-mode scale-ups and respawned IDs
+    // (recycled within `0..max`) all map to a real slot.
+    oxphp::php::worker_registry::init_workers(config.worker_mode.max_worker_count());
 
     // Spawn the per-second observability supervisor (no automatic
     // intervention — operators react to the exposed metrics).

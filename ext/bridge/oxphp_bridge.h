@@ -1001,6 +1001,13 @@ void oxphp_capture_vm_interrupt(void);
  * itself (e.g. streaming send-error). */
 void oxphp_bridge_request_interrupt(void);
 
+/* Cross-thread helper: same as oxphp_bridge_request_interrupt() but takes
+ * the target thread's &EG(vm_interrupt) as a parameter. Routes the write
+ * through zend_atomic_bool_store_ex so we don't C11-strict-aliasing the
+ * underlying _Atomic(bool) via uint8_t*. Caller is responsible for keeping
+ * the address valid (the target worker thread must still be alive). */
+void oxphp_bridge_request_interrupt_at(void* addr);
+
 /* ── Tick observer ──
  *
  * Per-worker counter incremented once per PHP function call by a

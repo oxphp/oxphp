@@ -41,7 +41,10 @@ pub fn read_thread_cpu_us(tid: u64) -> Option<u64> {
     }
     #[cfg(target_os = "linux")]
     {
-        read_thread_cpu_us_linux(tid)
+        // Uncached fallback used only by tests / non-supervisor callers.
+        // The supervisor's hot path uses `CpuStatCache` to keep per-slot
+        // fds open across scans (see `Supervisor::scan_once_at`).
+        read_thread_cpu_us_linux_uncached(tid)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -51,14 +54,7 @@ pub fn read_thread_cpu_us(tid: u64) -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_thread_cpu_us_linux(tid: u64) -> Option<u64> {
-    use std::io::Read;
-    let path = format!("/proc/self/task/{}/stat", tid);
-    let mut buf = String::with_capacity(512);
-    std::fs::File::open(&path)
-        .ok()?
-        .read_to_string(&mut buf)
-        .ok()?;
+fn parse_cpu_us_from_stat(buf: &str) -> Option<u64> {
     // Format: "<pid> (<comm>) <state> <ppid> ...". `<comm>` may
     // contain spaces and parens, so locate the rightmost ')'.
     let close = buf.rfind(')')?;
@@ -76,6 +72,72 @@ fn read_thread_cpu_us_linux(tid: u64) -> Option<u64> {
         return None;
     }
     Some((utime + stime) * 1_000_000 / ticks_per_sec)
+}
+
+#[cfg(target_os = "linux")]
+fn read_thread_cpu_us_linux_uncached(tid: u64) -> Option<u64> {
+    use std::io::Read;
+    let path = format!("/proc/self/task/{}/stat", tid);
+    let mut buf = String::with_capacity(512);
+    std::fs::File::open(&path)
+        .ok()?
+        .read_to_string(&mut buf)
+        .ok()?;
+    parse_cpu_us_from_stat(&buf)
+}
+
+/// Per-slot fd cache for `/proc/self/task/<tid>/stat`. The supervisor
+/// thread is the only reader; one cache instance lives for the
+/// supervisor's lifetime. Open is a syscall (~few μs); on a 1 Hz scan
+/// across N stuck workers, the cache amortises that to one open per
+/// `(slot, tid)` pair. When tid changes (worker respawn), the cached
+/// fd is replaced.
+#[cfg(target_os = "linux")]
+struct CpuStatCache {
+    slots: Vec<Option<(u64, std::fs::File)>>,
+}
+
+#[cfg(target_os = "linux")]
+impl CpuStatCache {
+    fn new() -> Self {
+        Self { slots: Vec::new() }
+    }
+
+    fn read(&mut self, slot_id: usize, tid: u64) -> Option<u64> {
+        if tid == 0 {
+            return None;
+        }
+        if slot_id >= self.slots.len() {
+            self.slots.resize_with(slot_id + 1, || None);
+        }
+        let entry = &mut self.slots[slot_id];
+        if entry.as_ref().map(|(t, _)| *t) != Some(tid) {
+            // Either uncached or tid changed (worker respawn).
+            let path = format!("/proc/self/task/{}/stat", tid);
+            match std::fs::File::open(&path) {
+                Ok(f) => *entry = Some((tid, f)),
+                Err(_) => {
+                    *entry = None;
+                    return None;
+                }
+            }
+        }
+        let (_, file) = entry.as_mut()?;
+        // /proc files re-evaluate on every read; rewind to start before
+        // reading. If seek/read fails, drop the cache so the next scan
+        // re-opens.
+        use std::io::{Read, Seek, SeekFrom};
+        if file.seek(SeekFrom::Start(0)).is_err() {
+            *entry = None;
+            return None;
+        }
+        let mut buf = String::with_capacity(512);
+        if file.read_to_string(&mut buf).is_err() {
+            *entry = None;
+            return None;
+        }
+        parse_cpu_us_from_stat(&buf)
+    }
 }
 
 use std::sync::Arc;
@@ -124,9 +186,14 @@ impl Supervisor {
     }
 
     fn run(self, shutdown: Arc<std::sync::atomic::AtomicBool>) {
+        #[cfg(target_os = "linux")]
+        let mut cpu_cache = CpuStatCache::new();
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(self.scan_period);
             if let Some(workers) = WORKERS.get() {
+                #[cfg(target_os = "linux")]
+                self.scan_once_at_with_cache(workers, monotonic_us(), &mut cpu_cache);
+                #[cfg(not(target_os = "linux"))]
                 self.scan_once(workers);
             }
         }
@@ -138,48 +205,72 @@ impl Supervisor {
 
     /// Test seam: same as `scan_once` but takes an explicit `now_us`
     /// so tests don't depend on the monotonic-clock warm-up state.
+    /// Uses the uncached `read_thread_cpu_us` path; the supervisor's
+    /// `run()` loop uses `scan_once_at_with_cache` instead.
     pub fn scan_once_at(&self, workers: &[WorkerSlot], now_us: u64) {
         for (id, slot) in workers.iter().enumerate() {
-            let start = slot
-                .heartbeat
-                .request_start_us
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if start == 0 {
-                self.metrics.observe_age(id, 0);
-                continue;
-            }
-            let age_us = now_us.saturating_sub(start);
-            self.metrics.observe_age(id, age_us);
-
-            if age_us < self.stuck_threshold_us {
-                continue;
-            }
-            self.metrics.observe_long_running(id);
-
-            let tid = slot
-                .heartbeat
-                .tid
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let cpu_us = read_thread_cpu_us(tid).unwrap_or(0);
-            let prev_cpu = slot
-                .heartbeat
-                .last_cpu_us
-                .swap(cpu_us, std::sync::atomic::Ordering::Relaxed);
-            let cpu_delta = cpu_us.saturating_sub(prev_cpu);
-
-            let ticks = slot
-                .heartbeat
-                .ticks
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let prev_ticks = slot
-                .heartbeat
-                .last_ticks
-                .swap(ticks, std::sync::atomic::Ordering::Relaxed);
-            let tick_delta = ticks.saturating_sub(prev_ticks);
-
-            let kind = classify(cpu_delta, tick_delta);
-            self.metrics.observe_stuck(id, kind);
+            self.scan_slot(id, slot, now_us, read_thread_cpu_us);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scan_once_at_with_cache(
+        &self,
+        workers: &[WorkerSlot],
+        now_us: u64,
+        cache: &mut CpuStatCache,
+    ) {
+        for (id, slot) in workers.iter().enumerate() {
+            self.scan_slot(id, slot, now_us, |tid| cache.read(id, tid));
+        }
+    }
+
+    fn scan_slot(
+        &self,
+        id: usize,
+        slot: &WorkerSlot,
+        now_us: u64,
+        mut read_cpu_us: impl FnMut(u64) -> Option<u64>,
+    ) {
+        let start = slot
+            .heartbeat
+            .request_start_us
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if start == 0 {
+            self.metrics.observe_age(id, 0);
+            return;
+        }
+        let age_us = now_us.saturating_sub(start);
+        self.metrics.observe_age(id, age_us);
+
+        if age_us < self.stuck_threshold_us {
+            return;
+        }
+        self.metrics.observe_long_running(id);
+
+        let tid = slot
+            .heartbeat
+            .tid
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cpu_us = read_cpu_us(tid).unwrap_or(0);
+        let prev_cpu = slot
+            .heartbeat
+            .last_cpu_us
+            .swap(cpu_us, std::sync::atomic::Ordering::Relaxed);
+        let cpu_delta = cpu_us.saturating_sub(prev_cpu);
+
+        let ticks = slot
+            .heartbeat
+            .ticks
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let prev_ticks = slot
+            .heartbeat
+            .last_ticks
+            .swap(ticks, std::sync::atomic::Ordering::Relaxed);
+        let tick_delta = ticks.saturating_sub(prev_ticks);
+
+        let kind = classify(cpu_delta, tick_delta);
+        self.metrics.observe_stuck(id, kind);
     }
 }
 

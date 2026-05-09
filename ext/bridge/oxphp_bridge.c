@@ -1843,8 +1843,18 @@ void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
 }
 
 void oxphp_bridge_request_interrupt(void) {
-    if (ctx.vm_interrupt_addr) {
-        __atomic_store_n((volatile uint8_t*)ctx.vm_interrupt_addr, 1, __ATOMIC_RELAXED);
+    oxphp_bridge_request_interrupt_at(ctx.vm_interrupt_addr);
+}
+
+void oxphp_bridge_request_interrupt_at(void* addr) {
+    /* EG(vm_interrupt) is `zend_atomic_bool` (struct wrapping _Atomic(bool)
+     * under HAVE_C11_ATOMICS). Aliasing it as plain uint8_t* and writing
+     * with __atomic_store_n is C11 strict-aliasing UB — works on current
+     * GCC/Clang on x86_64 but not guaranteed. The Zend public API
+     * zend_atomic_bool_store_ex is the supported way to mutate it
+     * cross-thread (used by pcntl_signal, win32/signal.c). */
+    if (addr) {
+        zend_atomic_bool_store_ex((zend_atomic_bool*)addr, true);
     }
 }
 
@@ -3625,10 +3635,14 @@ void oxphp_apm_install_on_thread(void) {
         if (!func || func->type != ZEND_INTERNAL_FUNCTION) continue;
 
         oxphp_apm_hook_t *entry = &apm_hooks[apm_hook_count];
-        strncpy(entry->class_name, approved_hooks[i].class_name, sizeof(entry->class_name) - 1);
-        entry->class_name[sizeof(entry->class_name) - 1] = '\0';
-        strncpy(entry->func_name, approved_hooks[i].func_name, sizeof(entry->func_name) - 1);
-        entry->func_name[sizeof(entry->func_name) - 1] = '\0';
+        /* snprintf truncates and NUL-terminates in one call; the strncpy +
+         * explicit-NUL pair triggered -Wstringop-truncation when the source
+         * could exceed the dest buffer (which the Rust-side approved_hooks
+         * table can in theory do). */
+        snprintf(entry->class_name, sizeof(entry->class_name), "%s",
+                 approved_hooks[i].class_name);
+        snprintf(entry->func_name, sizeof(entry->func_name), "%s",
+                 approved_hooks[i].func_name);
         /* Use the original handler captured during MINIT (before any replacement),
            not the current handler which may already be our wrapper from another thread. */
         entry->original_handler = approved_hooks[i].original_handler;
