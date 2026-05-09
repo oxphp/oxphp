@@ -189,9 +189,6 @@ extern "C" {
     pub fn oxphp_bridge_set_headers_sent(sent: bool);
     pub fn oxphp_bridge_get_headers_sent() -> bool;
 
-    pub fn oxphp_bridge_set_deadline(deadline_us: i64);
-    pub fn oxphp_bridge_is_deadline_expired() -> bool;
-
     // ── Sub-design A: cancellation reason API ──
     pub fn oxphp_bridge_set_cancel_ptr(ptr: *const std::sync::atomic::AtomicU8);
     pub fn oxphp_bridge_get_cancel_reason() -> u8;

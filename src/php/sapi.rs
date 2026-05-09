@@ -858,10 +858,8 @@ pub fn clear_request_data() {
             0,
         );
         bindings::oxphp_bridge_set_request_id(std::ptr::null());
-        // Reset deadline so the next request on this worker doesn't inherit stale
-        // state from a timed-out request. Cancellation state is reset by
-        // oxphp_bridge_reset_request_ctx() (called earlier via clear_request_data).
-        bindings::oxphp_bridge_set_deadline(0);
+        // Cancellation state is reset by oxphp_bridge_reset_request_ctx()
+        // (called earlier via clear_request_data).
     }
 }
 

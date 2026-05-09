@@ -53,14 +53,8 @@ extern "C" {
 typedef struct {
     /* ── Hot: accessed every ub_write (~per PHP opcode) ───── */
 
-    /** ub_write call counter for periodic deadline checks. */
-    uint32_t write_count;
-
     _Atomic(uint8_t)* cancel_ptr;    /* into Arc<CancellationState>; NULL outside request */
     void* vm_interrupt_addr;         /* &EG(vm_interrupt); NULL until first php_request_startup */
-
-    /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
-    int64_t deadline_us;
 
     /* ── Warm: accessed once per request ─────────────────── */
 
@@ -171,15 +165,6 @@ void oxphp_bridge_set_finished(bool finished);
 
 /** Check if request is finished. */
 bool oxphp_bridge_is_finished(void);
-
-/** Set the execution deadline (Unix epoch, microseconds). 0 = no deadline. */
-void oxphp_bridge_set_deadline(int64_t deadline_us);
-
-/** Get the execution deadline. */
-int64_t oxphp_bridge_get_deadline(void);
-
-/** Check if the execution deadline has expired. */
-bool oxphp_bridge_is_deadline_expired(void);
 
 /** Mark headers as sent (streaming mode). */
 void oxphp_bridge_set_headers_sent(bool sent);
@@ -948,7 +933,7 @@ bool oxphp_bridge_is_worker_mode(void);
 
 /**
  * Reset per-request TLS fields between worker mode requests.
- * Clears: request_id, request_time, deadline, cancel_ptr, write_count,
+ * Clears: request_id, request_time, cancel_ptr,
  *         stream_mode, headers_sent, finished.
  * Increments: requests_done.
  */
