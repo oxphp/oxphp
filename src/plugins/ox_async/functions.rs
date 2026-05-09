@@ -492,10 +492,15 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
             Ok(())
         }
-        // -2 → bridge already threw OxPHP\Async\TimeoutException via aggregate API
-        // -3 → bridge already threw OxPHP\Async\AggregateAsyncException
-        // In both cases EG(exception) is set; surface the existing exception.
-        -2 | -3 => Err(read_bridge_exception()),
+        // -2 → bridge threw OxPHP\Async\TimeoutException via aggregate API
+        // -3 → bridge threw OxPHP\Async\AggregateAsyncException
+        // EG(exception) is already set by zend_throw_exception_object inside the
+        // bridge. Returning Ok(()) lets Zend's normal unwinding propagate that
+        // pre-set exception unchanged. Returning Err(...) would route through
+        // oxphp_throw_exception in the outer SAPI dispatch, which calls
+        // zend_throw_exception unconditionally, OVERRIDING EG(exception) with
+        // a generic AsyncException. Don't do that.
+        -2 | -3 => Ok(()),
         _ => Err(read_bridge_exception()),
     }
 }
