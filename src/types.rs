@@ -55,8 +55,6 @@ pub struct ScriptRequest {
     pub body: Bytes,
     pub remote_addr: SocketAddr,
     pub document_root: Arc<PathBuf>,
-    /// Execution deadline in microseconds (0 = no deadline).
-    pub timeout_us: u64,
     /// Pointer (as `usize`) into the request's `Arc<CancellationState>`.
     /// 0 outside a request. The Arc is kept alive by the connection
     /// task for the request's lifetime; the worker is non-owning.

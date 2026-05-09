@@ -2450,13 +2450,6 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
             wm.soft_resets_total.fetch_add(1, Ordering::Relaxed);
         }
     });
-
-    // Set execution deadline
-    if req.script.timeout_us > 0 {
-        let now_us = now.as_micros() as i64;
-        let deadline = now_us.saturating_add(req.script.timeout_us.min(i64::MAX as u64) as i64);
-        unsafe { bindings::oxphp_bridge_set_deadline(deadline) };
-    }
 }
 
 /// Takes a pending request from `PENDING_REQUEST` TLS (deposited by
