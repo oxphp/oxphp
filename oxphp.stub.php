@@ -8,6 +8,10 @@
  * This file is NOT loaded at runtime — it is only used by IDEs
  * (PhpStorm, VS Code + Intelephense) and static analyzers (PHPStan, Psalm).
  *
+ * Migration: oxphp_request_heartbeat($time) was removed.
+ * Replace each call with set_time_limit($seconds). Both reset the
+ * per-request execution timer to N seconds from now.
+ *
  * @package OxPHP
  * @version 0.3.0
  * @link https://github.com/oxphp/oxphp

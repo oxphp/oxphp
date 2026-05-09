@@ -106,12 +106,14 @@ oxphp_worker(function () {
 
 ### Background work is not completing
 
-The request timeout (`REQUEST_TIMEOUT_SECONDS`) continues to apply after `oxphp_finish_request()` is called. If the total script execution time — including background work — exceeds the timeout, the worker is terminated.
+PHP's `max_execution_time` continues to apply after `oxphp_finish_request()` is called. If the total script execution time — including background work — exceeds the limit, the request is cancelled with a `Request cancelled (timeout)` fatal.
 
-**Fix:** Increase the timeout, or move long background tasks to a message queue:
+**Fix:** Raise `max_execution_time` (in `php.ini` or via `set_time_limit()` from the script), or move long background tasks to a message queue:
 
-```bash
-REQUEST_TIMEOUT_SECONDS=300
+```php
+set_time_limit(300);
+oxphp_finish_request();
+// ... long-running work ...
 ```
 
 For work that regularly takes more than a few seconds, publish a message to Redis, RabbitMQ, or a similar queue and let a dedicated consumer handle it asynchronously.

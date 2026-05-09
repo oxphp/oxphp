@@ -14,7 +14,6 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
-- [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
 - [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
@@ -211,35 +210,6 @@ oxphp_finish_request();
 // Клиент уже получил ответ 202; продолжаем работу
 send_notification_email($user);
 update_analytics($event);
-```
-
----
-
-## oxphp_request_heartbeat()
-
-```php
-oxphp_request_heartbeat(int $time = 10): bool
-```
-
-Продлевает дедлайн `REQUEST_TIMEOUT_SECONDS` на `$time` секунд с момента вызова и одновременно сбрасывает собственный таймер PHP `max_execution_time` на те же `$time` секунд. Вызывайте эту функцию периодически в длительных циклах, чтобы OxPHP не прерывал запрос ни на уровне сервера, ни фатальной ошибкой Zend «Maximum execution time exceeded».
-
-**Параметры:**
-- `$time` — Количество секунд, на которое продлевается дедлайн тайм-аута. По умолчанию: `10`
-
-**Возвращает:** `true` при успехе, `false` если `$time` равно нулю или отрицательно.
-
-> **Примечание:** Каждый вызов устанавливает новый дедлайн относительно текущего момента, а не начала запроса. Вызов `oxphp_request_heartbeat(30)` на 100-й секунде запроса устанавливает дедлайн через 30 секунд от текущего момента (то есть на 130-й секунде от начала запроса).
-
-> **Примечание:** Если скрипт уже отключил PHP-таймер (`set_time_limit(0)` или `max_execution_time=0`), `oxphp_request_heartbeat()` не включает его обратно — PHP-таймер остаётся выключенным.
-
-**Пример:**
-
-```php
-<?php
-foreach ($large_dataset as $row) {
-    oxphp_request_heartbeat(30); // продлить на 30 секунд от текущего момента
-    process($row);
-}
 ```
 
 ---
@@ -934,29 +904,28 @@ print_r($functions);
 //     [2]  => oxphp_request_id
 //     [3]  => oxphp_worker_id
 //     [4]  => oxphp_server_info
-//     [5]  => oxphp_request_heartbeat
-//     [6]  => oxphp_finish_request
-//     [7]  => oxphp_is_worker
-//     [8]  => oxphp_is_streaming
-//     [9]  => oxphp_stream_flush
-//     [10] => oxphp_sleep
-//     [11] => oxphp_usleep
-//     [12] => oxphp_worker
-//     [13] => oxphp_async
-//     [14] => oxphp_async_await
-//     [15] => oxphp_async_await_all
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
-//     [18] => oxphp_apm_trace
-//     [19] => oxphp_apm_start
-//     [20] => oxphp_apm_end
-//     [21] => oxphp_apm_attribute
-//     [22] => oxphp_apm_event
-//     [23] => oxphp_apm_error
-//     [24] => oxphp_apm_status
-//     [25] => oxphp_apm_trace_id
-//     [26] => oxphp_apm_span_id
-//     [27] => oxphp_apm_header
+//     [5]  => oxphp_finish_request
+//     [6]  => oxphp_is_worker
+//     [7]  => oxphp_is_streaming
+//     [8]  => oxphp_stream_flush
+//     [9]  => oxphp_sleep
+//     [10] => oxphp_usleep
+//     [11] => oxphp_worker
+//     [12] => oxphp_async
+//     [13] => oxphp_async_await
+//     [14] => oxphp_async_await_all
+//     [15] => oxphp_async_await_any
+//     [16] => oxphp_register_decorator
+//     [17] => oxphp_apm_trace
+//     [18] => oxphp_apm_start
+//     [19] => oxphp_apm_end
+//     [20] => oxphp_apm_attribute
+//     [21] => oxphp_apm_event
+//     [22] => oxphp_apm_error
+//     [23] => oxphp_apm_status
+//     [24] => oxphp_apm_trace_id
+//     [25] => oxphp_apm_span_id
+//     [26] => oxphp_apm_header
 // )
 ```
 
@@ -995,4 +964,4 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Ранний ответ](../features/early-response.md) — фоновая обработка с `oxphp_finish_request()`
 - [Суперглобальные переменные](superglobals.md) — как OxPHP заполняет `$_SERVER`, `$_GET`, `$_POST` и другие суперглобальные переменные
 - [Распределённая трассировка и APM](../features/distributed-tracing.md) — W3C Trace Context, экспорт OTel и SDK `oxphp_apm_*()`
-- [Справочник по конфигурации](../operations/configuration.md) — `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS` и другие переменные окружения
+- [Справочник по конфигурации](../operations/configuration.md) — `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS` и другие переменные окружения

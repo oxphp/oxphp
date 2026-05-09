@@ -4,6 +4,17 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Removed
+
+- `REQUEST_TIMEOUT_SECONDS` env var. Use `max_execution_time` in `php.ini` (or `set_time_limit($seconds)` per script) instead.
+- `oxphp_request_heartbeat($time)` PHP function. Use `set_time_limit($seconds)` instead — both reset the per-request timer to N seconds from now.
+- `oxphp_bridge_set_deadline` / `_get_deadline` / `_is_deadline_expired` C exports from the bridge.
+- `tokio::time::timeout` wrapping of the dispatch future. SIGALRM-driven `max_execution_time` is now the single execution-timeout source.
+
+### Changed
+
+- Execution-timeout cancellation now bails through the unified `Request cancelled (timeout)` error instead of `Maximum execution time of N second(s) exceeded`. Userland-visible state (`connection_status() & PHP_CONNECTION_TIMEOUT`, registered shutdown handlers) is preserved. HTTP status flips from 408 (the old `tokio::time::timeout` short-circuit) to 500 (PHP fatal).
+
 ### Changed
 
 - **BREAKING:** Renamed base exception classes to remove shadowing of PHP's global `\Exception` inside the `OxPHP\Async\` and `OxPHP\Shared\` namespaces: `OxPHP\Async\Exception` → `OxPHP\Async\AsyncException`, `OxPHP\Shared\Exception` → `OxPHP\Shared\SharedException`. Subclasses (`TimeoutException`, `BorrowException`, `ClosedException`, etc.) keep their names; only their parent FQN changes. No `class_alias` shim — any `catch (\OxPHP\Async\Exception $e)` or `catch (\OxPHP\Shared\Exception $e)` clauses must be updated to the new names.

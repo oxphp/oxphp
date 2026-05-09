@@ -256,7 +256,6 @@ services:
       - LOG_LEVEL=info
       - ACCESS_LOG=error
       - PHP_WORKERS=4
-      - REQUEST_TIMEOUT_SECONDS=120
       - DRAIN_TIMEOUT_SECONDS=30
       - COMPRESSION_LEVEL=4
     restart: unless-stopped

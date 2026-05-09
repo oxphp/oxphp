@@ -106,12 +106,14 @@ oxphp_worker(function () {
 
 ### 后台工作未能完成
 
-请求超时（`REQUEST_TIMEOUT_SECONDS`）在调用 `oxphp_finish_request()` 后仍继续计时。如果脚本总执行时间（包括后台工作）超过超时限制，Worker 将被终止。
+PHP 的 `max_execution_time` 在调用 `oxphp_finish_request()` 后仍继续计时。如果脚本总执行时间（包括后台工作）超过限制，请求将被取消并触发 `Request cancelled (timeout)` 致命错误。
 
-**修复：** 增大超时值，或将耗时较长的后台任务移至消息队列：
+**修复：** 提高 `max_execution_time`（在 `php.ini` 中或通过脚本调用 `set_time_limit()`），或将耗时较长的后台任务移至消息队列：
 
-```bash
-REQUEST_TIMEOUT_SECONDS=300
+```php
+set_time_limit(300);
+oxphp_finish_request();
+// ... 长时间运行的工作 ...
 ```
 
 对于经常需要超过几秒的工作，请向 Redis、RabbitMQ 或类似队列发布消息，让专用消费者异步处理。
