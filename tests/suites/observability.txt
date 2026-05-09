@@ -1,0 +1,15 @@
+# profile: default
+# description: Per-worker observability — supervisor heartbeats, age gauge, cancellation counters
+
+# The age gauge is populated by the supervisor (1 s period). The test
+# script sleeps 2 s and then scrapes /metrics from inside the same
+# request — its own slot's request_start_us is still non-zero, so the
+# supervisor wrote a non-zero age into oxphp_worker_request_age_seconds.
+observability/test_request_age_metric
+
+# Two-phase: trigger self-cancels via set_time_limit(1) + sleep(3),
+# which routes through the unified bailout and bumps
+# oxphp_request_cancelled_total{reason="timeout"}. Curl's exit status
+# is 0 because the server returns a 500 error response after PHP bails.
+observability/test_cancellation_counters >> ?action=trigger
+observability/test_cancellation_counters >> ?action=check
