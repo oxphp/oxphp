@@ -11,3 +11,9 @@ cancel/test_streaming_bailout_runs_shutdown_handlers >> ?action=trigger | GET | 
 # Step 2: check — PHP-side TestCase assertion that the shutdown function ran
 # and wrote the marker file. Runs after step 1 (file order is preserved).
 cancel/test_streaming_bailout_runs_shutdown_handlers >> ?action=check
+
+# ignore_user_abort(true) opts out of the interrupt path: the script keeps
+# running through the client disconnect and writes the marker file even
+# though the response is unreachable.
+cancel/test_ignore_user_abort_keeps_running >> ?action=trigger | GET | --max-time 0.5 -o /dev/null | 0
+cancel/test_ignore_user_abort_keeps_running >> ?action=check
