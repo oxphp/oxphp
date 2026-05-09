@@ -24,6 +24,7 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_async()](#oxphp_async)
 - [oxphp_async_await()](#oxphp_async_await)
 - [oxphp_async_await_all()](#oxphp_async_await_all)
+- [oxphp_async_await_race()](#oxphp_async_await_race)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
 - [oxphp_apm_trace()](#oxphp_apm_trace)
@@ -399,7 +400,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 - `$closure` — 要在异步 Worker 线程上运行的用户定义 `Closure`
 - `...$args` — 传递给闭包的参数。仅接受标量值（`null`、`bool`、`int`、`float`、`string`）及标量数组。对象和资源不能跨线程传递。
 
-**返回值：** 整数类型的 Promise ID。将其传递给 `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()`。
+**返回值：** 整数类型的 Promise ID。将其传递给 `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` 或 `oxphp_async_await_any()`。
 
 **抛出异常：** 在以下情况下抛出 `OxPHP\Async\AsyncException`：
 - 异步池已禁用（`ASYNC_WORKERS=0`）
@@ -505,13 +506,13 @@ foreach ($results as $promiseId => $result) {
 
 ---
 
-## oxphp_async_await_any()
+## oxphp_async_await_race()
 
 ```php
-oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array
 ```
 
-竞争多个 Promise，返回最先完成的那个。其他 Promise 不会被取消——它们继续运行，仍可通过 `oxphp_async_await()` 等待。
+竞速多个 Promise，返回最先完成的那个，无论成功还是失败。其他 Promise 不会被取消——它们继续运行，仍可通过 `oxphp_async_await()` 等待。这是 JavaScript `Promise.race` 的对应函数。
 
 **参数：**
 - `$promise_ids` — 至少包含一个 `oxphp_async()` 返回的整数 Promise ID 的数组。不得为空。
@@ -533,8 +534,58 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 $p1 = oxphp_async(fn() => fetch('https://mirror-1.example.com/data'));
 $p2 = oxphp_async(fn() => fetch('https://mirror-2.example.com/data'));
 
-$winner = oxphp_async_await_any([$p1, $p2], timeout: 10.0);
+$winner = oxphp_async_await_race([$p1, $p2], timeout: 10.0);
 echo "Mirror {$winner['id']} won: " . json_encode($winner['value']);
+```
+
+---
+
+## oxphp_async_await_any()
+
+```php
+oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+```
+
+在任意一个 Promise 成功完成时立即返回。失败会被累积，仅当所有 Promise 都失败时才会暴露出来。这是 JavaScript `Promise.any` 的对应函数——适用于回退 / 冗余场景，希望"任何能正常工作的来源"获胜。
+
+**参数：**
+- `$promise_ids` — 至少包含一个 `oxphp_async()` 返回的整数 Promise ID 的数组。不得为空。
+- `$timeout` — 等待首次成功完成的最长秒数。`0.0` 表示无限等待。默认值：`0.0`
+
+**返回值：** 包含两个键的关联数组：
+- `id`（`int`）— 第一个成功完成的 Promise 的 ID
+- `value`（`mixed`）— 获胜 Promise 的返回值
+
+**抛出异常：**
+- 若异步池已禁用（`ASYNC_WORKERS=0`），则抛出 `OxPHP\Async\AsyncException`
+- 若所有 Promise 都失败，则抛出 `OxPHP\Async\AggregateAsyncException`。该异常通过 `getErrors()`（按位置，键为 0..N-1）、`getErrorMap()`（按 Promise ID 索引）和 `getPromiseIds()` 携带所有错误。
+- 若在 `$timeout` 内没有 Promise 成功完成，则抛出 `OxPHP\Async\TimeoutException`。`getPartialErrors()` 列出在截止时间之前已经失败的 Promise；`getPendingPromiseIds()` 列出尚未完成且已被取消的 Promise。
+
+**行为：**
+- 获胜时仍处于挂起状态的非获胜 Promise 仍可通过 `oxphp_async_await()` 单独等待。
+- 在获胜者出现之前已经失败的 Promise 不再可等待——它们的结果在被累积为候选错误时已被消费。
+
+**示例：**
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    echo "Mirror {$winner['id']} 响应了：" . json_encode($winner['value']);
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    // 所有镜像都失败了
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        error_log("mirror {$promise_id}: " . $err->getMessage());
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    // 在任何镜像成功之前已超时
+    $partial = $e->getPartialErrors();
+    $pending = $e->getPendingPromiseIds();
+}
 ```
 
 ---
@@ -871,7 +922,8 @@ oxphp_apm_end($spanId);
 | 异常 | 继承自 | 触发时机 |
 |------|--------|----------|
 | `OxPHP\Async\AsyncException` | `\Exception` | 异步任务中的错误（`oxphp_async_await()`）或 `oxphp_async()` 中的无效参数 |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()` 或 `oxphp_async_await_any()` 中超时 |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` 或 `oxphp_async_await_any()` 中超时。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors(): array<int, \Throwable>` 和 `getPendingPromiseIds(): list<int>` 已填充；其他调用站点二者均返回 `[]`。 |
+| `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | 由 `oxphp_async_await_any()` 在所有 Promise 都失败时抛出。方法：`getErrors(): list<\Throwable>`（按输入位置，键为 0..N-1）、`getErrorMap(): array<int, \Throwable>`（按 Promise ID 索引）、`getPromiseIds(): list<int>`（按调用顺序的输入 Promise ID）。 |
 | `OxPHP\Async\BorrowException` | `\Exception` | 线程间借用值时出错 |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | 在没有活跃请求时调用 `oxphp_http_request()` |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | 在 `oxphp_async()` 回调内部调用 `oxphp_http_request()` |
@@ -909,18 +961,19 @@ print_r($functions);
 //     [12] => oxphp_async
 //     [13] => oxphp_async_await
 //     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_any
-//     [16] => oxphp_register_decorator
-//     [17] => oxphp_apm_trace
-//     [18] => oxphp_apm_start
-//     [19] => oxphp_apm_end
-//     [20] => oxphp_apm_attribute
-//     [21] => oxphp_apm_event
-//     [22] => oxphp_apm_error
-//     [23] => oxphp_apm_status
-//     [24] => oxphp_apm_trace_id
-//     [25] => oxphp_apm_span_id
-//     [26] => oxphp_apm_header
+//     [15] => oxphp_async_await_race
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
+//     [18] => oxphp_apm_trace
+//     [19] => oxphp_apm_start
+//     [20] => oxphp_apm_end
+//     [21] => oxphp_apm_attribute
+//     [22] => oxphp_apm_event
+//     [23] => oxphp_apm_error
+//     [24] => oxphp_apm_status
+//     [25] => oxphp_apm_trace_id
+//     [26] => oxphp_apm_span_id
+//     [27] => oxphp_apm_header
 // )
 ```
 

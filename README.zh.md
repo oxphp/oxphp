@@ -121,7 +121,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - 支持类型：标量、字符串、数组（嵌套）。资源和对象将被拒绝并触发 `E_WARNING`
 - **异常与 die() 安全** — 异常、`die()` 和 `exit()` 被捕获并重新抛出为 `OxPHP\Async\AsyncException`
 - **超时支持** — 每任务超时，抛出 `OxPHP\Async\TimeoutException`
-- **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — 批量等待和竞速原语
+- **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — 批量、竞速（首个完成）以及 any 原语（首个成功完成，JS `Promise.any` 风格）
 
 ### 共享状态（`OxPHP\Shared\*`）
 进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/features/shared-state.md)，[可观测性参考](docs/zh/operations/shared-observability.md)。

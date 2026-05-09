@@ -4,6 +4,36 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Breaking changes
+
+- `oxphp_async_await_any(array, ?float): array` was renamed to `oxphp_async_await_race(array, ?float): array`. The implementation is unchanged — first settled (success or failure) wins, as before. If your code relied on this behavior, replace the function name in-place.
+
+### Added
+
+- `oxphp_async_await_any(array, ?float): array` now exists with proper JavaScript `Promise.any`-style semantics: the first FULFILLED promise wins. Rejections are accumulated. If every promise rejects, throws the new `OxPHP\Async\AggregateAsyncException` carrying all errors (`getErrors()`, `getErrorMap()`, `getPromiseIds()`). On timeout, throws `OxPHP\Async\TimeoutException` with `getPartialErrors()` and `getPendingPromiseIds()` populated.
+- `OxPHP\Async\AggregateAsyncException` (extends `AsyncException`) — new exception class. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>`.
+- `OxPHP\Async\TimeoutException::getPartialErrors(): array<int, \Throwable>` and `getPendingPromiseIds(): list<int>` — new methods. Existing throw sites (`oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`) populate them with empty arrays; only `oxphp_async_await_any()` timeouts fill them.
+
+### Migration
+
+```php
+// If you wrote this:
+$winner = oxphp_async_await_any([$p1, $p2], 5.0);
+
+// And you wanted "first response, regardless of success", change to:
+$winner = oxphp_async_await_race([$p1, $p2], 5.0);
+
+// If you wanted "first SUCCESS, ignore failures", the same call now does
+// what you actually wanted — but the failure-handling code shape changes:
+try {
+    $winner = oxphp_async_await_any([$p1, $p2], 5.0);
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    // every promise rejected
+} catch (\OxPHP\Async\TimeoutException $e) {
+    // deadline elapsed before any fulfilled
+}
+```
+
 ### Removed
 
 - `REQUEST_TIMEOUT_SECONDS` env var. Use `max_execution_time` in `php.ini` (or `set_time_limit($seconds)` per script) instead.

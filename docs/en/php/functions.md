@@ -24,6 +24,7 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_async()](#oxphp_async)
 - [oxphp_async_await()](#oxphp_async_await)
 - [oxphp_async_await_all()](#oxphp_async_await_all)
+- [oxphp_async_await_race()](#oxphp_async_await_race)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
 - [oxphp_apm_trace()](#oxphp_apm_trace)
@@ -399,7 +400,7 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 - `$closure` — A user-defined `Closure` to run on an async worker thread
 - `...$args` — Arguments to pass to the closure. Only scalar values (`null`, `bool`, `int`, `float`, `string`) and arrays of scalars are accepted. Objects and resources cannot be passed across threads.
 
-**Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()`.
+**Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`.
 
 **Throws:** `OxPHP\Async\AsyncException` in the following cases:
 - The async pool is disabled (`ASYNC_WORKERS=0`) — message: "Async pool is disabled. Set ASYNC_WORKERS > 0 to enable."
@@ -505,25 +506,25 @@ foreach ($results as $promiseId => $result) {
 
 ---
 
-## oxphp_async_await_any()
+## oxphp_async_await_race()
 
 ```php
-oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array
 ```
 
-Races multiple promises and returns the first one to complete. The other promises are not cancelled — they continue running and remain awaitable with `oxphp_async_await()`.
+Races multiple promises and returns the first one to settle, whether it fulfilled or rejected. The other promises are not cancelled — they continue running and remain awaitable with `oxphp_async_await()`. This is the JavaScript `Promise.race` analog.
 
 **Parameters:**
 - `$promise_ids` — An array of at least one integer promise ID returned by `oxphp_async()`. Must not be empty.
-- `$timeout` — Maximum seconds to wait for any promise to complete. `0.0` means wait indefinitely. Default: `0.0`
+- `$timeout` — Maximum seconds to wait for any promise to settle. `0.0` means wait indefinitely. Default: `0.0`
 
 **Returns:** An associative array with two keys:
 - `id` (`int`) — The promise ID of the winner
 - `value` (`mixed`) — The return value of the winning promise
 
 **Throws:**
-- `OxPHP\Async\AsyncException` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the winning promise failed
-- `OxPHP\Async\TimeoutException` if no promise completes within `$timeout`
+- `OxPHP\Async\AsyncException` if the async pool is disabled (`ASYNC_WORKERS=0`), or if the winning promise rejected
+- `OxPHP\Async\TimeoutException` if no promise settles within `$timeout`
 
 **Example:**
 
@@ -533,8 +534,58 @@ Races multiple promises and returns the first one to complete. The other promise
 $p1 = oxphp_async(fn() => fetch('https://mirror-1.example.com/data'));
 $p2 = oxphp_async(fn() => fetch('https://mirror-2.example.com/data'));
 
-$winner = oxphp_async_await_any([$p1, $p2], timeout: 10.0);
+$winner = oxphp_async_await_race([$p1, $p2], timeout: 10.0);
 echo "Mirror {$winner['id']} won: " . json_encode($winner['value']);
+```
+
+---
+
+## oxphp_async_await_any()
+
+```php
+oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+```
+
+Returns as soon as one promise FULFILLS. Rejections are accumulated, and only become observable if every promise rejects. This is the JavaScript `Promise.any` analog — useful for fallback / redundancy patterns where you want any source that works.
+
+**Parameters:**
+- `$promise_ids` — An array of at least one integer promise ID returned by `oxphp_async()`. Must not be empty.
+- `$timeout` — Maximum seconds to wait for the first fulfillment. `0.0` means wait indefinitely. Default: `0.0`
+
+**Returns:** An associative array with two keys:
+- `id` (`int`) — The promise ID of the first fulfilled promise
+- `value` (`mixed`) — The return value of the winning promise
+
+**Throws:**
+- `OxPHP\Async\AsyncException` if the async pool is disabled (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\AggregateAsyncException` if every promise rejected. The exception carries every error via `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), and `getPromiseIds()`.
+- `OxPHP\Async\TimeoutException` if no promise fulfilled within `$timeout`. `getPartialErrors()` lists the promises that already rejected before the deadline; `getPendingPromiseIds()` lists those that had not settled and were cancelled.
+
+**Behavior:**
+- Promises that were still pending at the moment of victory remain awaitable individually with `oxphp_async_await()`.
+- Promises that already rejected before the winner do not — their results were consumed when accumulated as candidate errors.
+
+**Example:**
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    echo "Mirror {$winner['id']} responded: " . json_encode($winner['value']);
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    // every mirror rejected
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        error_log("mirror {$promise_id}: " . $err->getMessage());
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    // deadline elapsed before any mirror fulfilled
+    $partial = $e->getPartialErrors();
+    $pending = $e->getPendingPromiseIds();
+}
 ```
 
 ---
@@ -871,7 +922,8 @@ All exceptions registered by the extension:
 | Exception | Extends | When thrown |
 |-----------|---------|------------|
 | `OxPHP\Async\AsyncException` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Timeout exceeded in `oxphp_async_await()`, `oxphp_async_await_all()`, or `oxphp_async_await_any()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Timeout exceeded in any of `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`. For `oxphp_async_await_any()` timeouts the accessors `getPartialErrors(): array<int, \Throwable>` and `getPendingPromiseIds(): list<int>` are populated; for the other call sites both return `[]`. |
+| `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | Thrown by `oxphp_async_await_any()` when every promise rejected. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>` (input promise ids in order). |
 | `OxPHP\Async\BorrowException` | `\Exception` | Error borrowing a value between threads |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Calling `oxphp_http_request()` inside an `oxphp_async()` callback |
@@ -909,18 +961,19 @@ print_r($functions);
 //     [12] => oxphp_async
 //     [13] => oxphp_async_await
 //     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_any
-//     [16] => oxphp_register_decorator
-//     [17] => oxphp_apm_trace
-//     [18] => oxphp_apm_start
-//     [19] => oxphp_apm_end
-//     [20] => oxphp_apm_attribute
-//     [21] => oxphp_apm_event
-//     [22] => oxphp_apm_error
-//     [22] => oxphp_apm_status
-//     [23] => oxphp_apm_trace_id
-//     [25] => oxphp_apm_span_id
-//     [26] => oxphp_apm_header
+//     [15] => oxphp_async_await_race
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
+//     [18] => oxphp_apm_trace
+//     [19] => oxphp_apm_start
+//     [20] => oxphp_apm_end
+//     [21] => oxphp_apm_attribute
+//     [22] => oxphp_apm_event
+//     [23] => oxphp_apm_error
+//     [24] => oxphp_apm_status
+//     [25] => oxphp_apm_trace_id
+//     [26] => oxphp_apm_span_id
+//     [27] => oxphp_apm_header
 // )
 ```
 

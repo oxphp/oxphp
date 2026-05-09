@@ -84,22 +84,61 @@ $orders = $results[$p2];
 
 > **Примечание:** `oxphp_async_await_all()` ожидает промисы последовательно в порядке массива. Все замыкания выполняются параллельно в асинхронном пуле, но вызывающий поток собирает результаты по одному.
 
-### Первый промис (гонка)
+### Первый завершившийся промис (гонка)
 
-`oxphp_async_await_any()` возвращает результат, как только один из промисов завершается:
+`oxphp_async_await_race()` возвращает результат, как только один из промисов завершается — успешно или с ошибкой:
 
 ```php
 <?php
 $p1 = oxphp_async(fn() => fetch_from_primary_db());
 $p2 = oxphp_async(fn() => fetch_from_replica_db());
 
-$winner = oxphp_async_await_any([$p1, $p2], 5.0);
+$winner = oxphp_async_await_race([$p1, $p2], 5.0);
 // $winner = ['id' => int, 'value' => mixed]
 
 echo "Promise {$winner['id']} won: {$winner['value']}";
 ```
 
-Проигравшие промисы остаются доступными для индивидуального ожидания после возврата `oxphp_async_await_any()`.
+Проигравшие промисы остаются доступными для индивидуального ожидания после возврата `oxphp_async_await_race()`. Если выигравший промис завершился с ошибкой, выбрасывается `OxPHP\Async\AsyncException`, при этом проигравшие всё равно остаются доступными. Это аналог `Promise.race` из JavaScript.
+
+### Первый успешно завершившийся промис
+
+`oxphp_async_await_any()` возвращает результат, как только один из промисов УСПЕШНО завершается. Ошибки накапливаются и становятся видны только если все промисы завершились с ошибкой. Это аналог `Promise.any` из JavaScript — подходит для сценариев резервирования и отказоустойчивости («любое зеркало, которое ответит»).
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    // ['id' => один из идентификаторов входных промисов, 'value' => его результат]
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    foreach ($e->getErrors() as $i => $err) {
+        // $err по позиции во входном массиве 0..N-1
+    }
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        // $err по идентификатору промиса
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    foreach ($e->getPartialErrors() as $promise_id => $err) {
+        // промисы, завершившиеся с ошибкой до истечения тайм-аута
+    }
+    $still_running = $e->getPendingPromiseIds();
+    // идентификаторы промисов, не успевших завершиться к моменту тайм-аута; они были отменены
+}
+```
+
+Не выигравшие промисы, которые на момент победы ещё ожидали, остаются доступными для индивидуального ожидания. Промисы, успевшие завершиться с ошибкой до победителя, — нет: их результаты были потреблены при накоплении в качестве кандидатов на ошибку.
+
+### Типы исключений
+
+| Класс | Выбрасывается | Примечания |
+|-------|---------------|------------|
+| `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` | Одиночная ошибка с сообщением и (опционально) подробностями исходного исключения. |
+| `OxPHP\Async\TimeoutException`         | Все четыре функции `await_*` при истечении тайм-аута | Наследует `AsyncException`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors()` и `getPendingPromiseIds()` заполнены; для остальных вариантов оба возвращают `[]`. |
+| `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()`, когда все промисы завершились с ошибкой | Наследует `AsyncException`. Предоставляет `getErrors()` (по позиции, ключи 0..N-1), `getErrorMap()` (по идентификатору промиса), `getPromiseIds()`. |
 
 ## Обработка ошибок
 

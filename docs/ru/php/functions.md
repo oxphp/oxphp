@@ -24,6 +24,7 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_async()](#oxphp_async)
 - [oxphp_async_await()](#oxphp_async_await)
 - [oxphp_async_await_all()](#oxphp_async_await_all)
+- [oxphp_async_await_race()](#oxphp_async_await_race)
 - [oxphp_async_await_any()](#oxphp_async_await_any)
 - [oxphp_register_decorator()](#oxphp_register_decorator)
 - [oxphp_apm_trace()](#oxphp_apm_trace)
@@ -399,7 +400,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 - `$closure` — Пользовательское `Closure` для выполнения в асинхронном воркер-потоке
 - `...$args` — Аргументы для передачи в замыкание. Принимаются только скалярные значения (`null`, `bool`, `int`, `float`, `string`) и массивы из скаляров. Объекты и ресурсы не могут передаваться между потоками.
 
-**Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()`.
+**Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` или `oxphp_async_await_any()`.
 
 **Выбрасывает:** `OxPHP\Async\AsyncException` в следующих случаях:
 - Асинхронный пул отключён (`ASYNC_WORKERS=0`)
@@ -507,13 +508,13 @@ foreach ($results as $promiseId => $result) {
 
 ---
 
-## oxphp_async_await_any()
+## oxphp_async_await_race()
 
 ```php
-oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array
 ```
 
-Запускает гонку нескольких промисов и возвращает первый завершившийся. Остальные промисы не отменяются — они продолжают выполнение и остаются доступными через `oxphp_async_await()`.
+Запускает гонку нескольких промисов и возвращает первый завершившийся, успешно или с ошибкой. Остальные промисы не отменяются — они продолжают выполнение и остаются доступными через `oxphp_async_await()`. Это аналог `Promise.race` из JavaScript.
 
 **Параметры:**
 - `$promise_ids` — Массив из как минимум одного целочисленного идентификатора промиса, возвращённого `oxphp_async()`. Не может быть пустым.
@@ -524,8 +525,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 - `value` (`mixed`) — Возвращаемое значение промиса-победителя
 
 **Выбрасывает:**
-- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
-- `OxPHP\Async\AsyncException` если промис-победитель завершился с ошибкой
+- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`) или если промис-победитель завершился с ошибкой
 - `OxPHP\Async\TimeoutException` если ни один промис не завершился в течение `$timeout`
 
 **Пример:**
@@ -536,8 +536,58 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 $p1 = oxphp_async(fn() => fetch('https://mirror-1.example.com/data'));
 $p2 = oxphp_async(fn() => fetch('https://mirror-2.example.com/data'));
 
-$winner = oxphp_async_await_any([$p1, $p2], timeout: 10.0);
+$winner = oxphp_async_await_race([$p1, $p2], timeout: 10.0);
 echo "Mirror {$winner['id']} won: " . json_encode($winner['value']);
+```
+
+---
+
+## oxphp_async_await_any()
+
+```php
+oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+```
+
+Возвращает результат, как только один из промисов УСПЕШНО завершается. Ошибки накапливаются и становятся видны только если все промисы завершились с ошибкой. Это аналог `Promise.any` из JavaScript — подходит для сценариев резервирования и отказоустойчивости, когда нужен любой источник, который сработает.
+
+**Параметры:**
+- `$promise_ids` — Массив из как минимум одного целочисленного идентификатора промиса, возвращённого `oxphp_async()`. Не может быть пустым.
+- `$timeout` — Максимальное время ожидания первого успешного завершения в секундах. `0.0` означает ждать бесконечно. По умолчанию: `0.0`
+
+**Возвращает:** Ассоциативный массив с двумя ключами:
+- `id` (`int`) — Идентификатор первого успешно завершившегося промиса
+- `value` (`mixed`) — Возвращаемое значение промиса-победителя
+
+**Выбрасывает:**
+- `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
+- `OxPHP\Async\AggregateAsyncException` если все промисы завершились с ошибкой. Исключение содержит все ошибки через `getErrors()` (по позиции, ключи 0..N-1), `getErrorMap()` (по идентификатору промиса) и `getPromiseIds()`.
+- `OxPHP\Async\TimeoutException` если ни один промис не завершился успешно в течение `$timeout`. `getPartialErrors()` содержит промисы, успевшие завершиться с ошибкой до истечения тайм-аута; `getPendingPromiseIds()` — те, что не успели завершиться и были отменены.
+
+**Поведение:**
+- Промисы, остававшиеся в ожидании на момент победы, остаются доступными для индивидуального вызова `oxphp_async_await()`.
+- Промисы, успевшие завершиться с ошибкой до победителя, — нет: их результаты были потреблены при накоплении в качестве кандидатов на ошибку.
+
+**Пример:**
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    echo "Mirror {$winner['id']} ответил: " . json_encode($winner['value']);
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    // все зеркала завершились с ошибкой
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        error_log("mirror {$promise_id}: " . $err->getMessage());
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    // тайм-аут истёк прежде чем какое-либо зеркало успело ответить
+    $partial = $e->getPartialErrors();
+    $pending = $e->getPendingPromiseIds();
+}
 ```
 
 ---
@@ -874,7 +924,8 @@ oxphp_apm_end($spanId);
 | Исключение | Наследует | Когда выбрасывается |
 |------------|-----------|---------------------|
 | `OxPHP\Async\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Превышен таймаут в `oxphp_async_await()`, `oxphp_async_await_all()` или `oxphp_async_await_any()` |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Превышен тайм-аут в любой из функций `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` или `oxphp_async_await_any()`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors(): array<int, \Throwable>` и `getPendingPromiseIds(): list<int>` заполнены; для остальных вариантов оба возвращают `[]`. |
+| `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | Выбрасывается из `oxphp_async_await_any()`, когда все промисы завершились с ошибкой. Методы: `getErrors(): list<\Throwable>` (по позиции во входном массиве, ключи 0..N-1), `getErrorMap(): array<int, \Throwable>` (по идентификатору промиса), `getPromiseIds(): list<int>` (исходные идентификаторы промисов в порядке вызова). |
 | `OxPHP\Async\BorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Вызов `oxphp_http_request()` внутри колбэка `oxphp_async()` |
@@ -912,18 +963,19 @@ print_r($functions);
 //     [12] => oxphp_async
 //     [13] => oxphp_async_await
 //     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_any
-//     [16] => oxphp_register_decorator
-//     [17] => oxphp_apm_trace
-//     [18] => oxphp_apm_start
-//     [19] => oxphp_apm_end
-//     [20] => oxphp_apm_attribute
-//     [21] => oxphp_apm_event
-//     [22] => oxphp_apm_error
-//     [23] => oxphp_apm_status
-//     [24] => oxphp_apm_trace_id
-//     [25] => oxphp_apm_span_id
-//     [26] => oxphp_apm_header
+//     [15] => oxphp_async_await_race
+//     [16] => oxphp_async_await_any
+//     [17] => oxphp_register_decorator
+//     [18] => oxphp_apm_trace
+//     [19] => oxphp_apm_start
+//     [20] => oxphp_apm_end
+//     [21] => oxphp_apm_attribute
+//     [22] => oxphp_apm_event
+//     [23] => oxphp_apm_error
+//     [24] => oxphp_apm_status
+//     [25] => oxphp_apm_trace_id
+//     [26] => oxphp_apm_span_id
+//     [27] => oxphp_apm_header
 // )
 ```
 

@@ -121,7 +121,7 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 - Supported types: scalars, strings, arrays (nested). Resources and objects rejected with `E_WARNING`
 - **Exception & die() safety** — exceptions, `die()`, and `exit()` are caught and re-thrown as `OxPHP\Async\AsyncException`
 - **Timeout support** — per-task timeouts with `OxPHP\Async\TimeoutException`
-- **`oxphp_async_await_all()` / `oxphp_async_await_any()`** — batch and race primitives
+- **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — batch, race (first settled), and any (first fulfilled, JS `Promise.any` style) primitives
 
 ### Shared State (`OxPHP\Shared\*`)
 Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/features/shared-state.md) and [observability reference](docs/en/operations/shared-observability.md).
