@@ -81,12 +81,12 @@ $info      = oxphp_server_info();
 echo "<h1>OxPHP</h1>\n";
 echo "<p>Request ID: {$requestId}</p>\n";
 echo "<p>Worker: {$info['worker_id']}</p>\n";
-echo "<p>SAPI: {$info['sapi']}</p>\n";
+echo "<p>SAPI: " . php_sapi_name() . "</p>\n";
 echo "<p>Version: {$info['version']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-`oxphp_request_id()` 返回每个请求的唯一 ID，`oxphp_server_info()` 返回运行中服务器的详细信息，包括 `sapi`、`version`、`worker_id` 和 `worker_mode`。
+`oxphp_request_id()` 返回每个请求的唯一 ID，`oxphp_server_info()` 返回运行中服务器的详细信息，包括 `version`、`worker_id`、`request_time` 和 `worker_mode`。
 
 ### 5. 构建并启动
 

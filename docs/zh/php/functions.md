@@ -162,7 +162,6 @@ oxphp_server_info(): array
 
 | 键 | 类型 | 描述 |
 |----|------|------|
-| `sapi` | `string` | 始终为 `"oxphp"` |
 | `version` | `string` | 服务器版本（例如 `"0.1.0"`） |
 | `worker_id` | `int` | 与 `oxphp_worker_id()` 返回值相同 |
 | `request_time` | `float` | 请求开始时的 Unix 时间戳，精确到微秒 |
@@ -174,7 +173,6 @@ oxphp_server_info(): array
 <?php
 $info = oxphp_server_info();
 // [
-//     "sapi"         => "oxphp",
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,

@@ -162,7 +162,6 @@ oxphp_server_info(): array
 
 | Ключ | Тип | Описание |
 |------|-----|----------|
-| `sapi` | `string` | Всегда `"oxphp"` |
 | `version` | `string` | Версия сервера (например, `"0.1.0"`) |
 | `worker_id` | `int` | То же значение, что и `oxphp_worker_id()` |
 | `request_time` | `float` | Unix-timestamp с точностью до микросекунды в момент начала запроса |
@@ -174,7 +173,6 @@ oxphp_server_info(): array
 <?php
 $info = oxphp_server_info();
 // [
-//     "sapi"         => "oxphp",
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,

@@ -162,7 +162,6 @@ Returns an associative array with server and request metadata.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `sapi` | `string` | Always `"oxphp"` |
 | `version` | `string` | Server version (e.g. `"0.1.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
@@ -174,7 +173,6 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "sapi"         => "oxphp",
 //     "version"      => "0.1.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,

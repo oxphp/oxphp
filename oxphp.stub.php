@@ -91,11 +91,11 @@ function oxphp_worker_id(): int {}
  * The request_time is a Unix timestamp with microsecond precision,
  * set before php_request_startup() for accurate timing.
  *
- * @return array{sapi: string, version: string, worker_id: int, request_time: float}
+ * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool}
  *
  * @example
  * $info = oxphp_server_info();
- * // ["sapi" => "oxphp", "version" => "0.1.0", "worker_id" => 3, "request_time" => 1740000000.123]
+ * // ["version" => "0.1.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false]
  */
 function oxphp_server_info(): array {}
 

@@ -6,7 +6,6 @@ sapi/test_request_id
 sapi/test_request_id_unique
 sapi/test_worker_id
 sapi/test_server_info
-sapi/test_server_info_sapi
 sapi/test_request_time_matches_start_time
 sapi/test_superglobals_enabled
 sapi/test_is_worker_false

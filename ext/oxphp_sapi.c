@@ -1009,13 +1009,12 @@ PHP_FUNCTION(oxphp_worker_id)
 /* }}} */
 
 /* {{{ oxphp_server_info(): array
- * Returns an array with SAPI information. */
+ * Returns an array with server and request metadata. */
 PHP_FUNCTION(oxphp_server_info)
 {
     ZEND_PARSE_PARAMETERS_NONE();
 
     array_init(return_value);
-    add_assoc_string(return_value, "sapi", "oxphp");
     add_assoc_string(return_value, "version", PHP_OXPHP_SAPI_VERSION);
     add_assoc_long(return_value, "worker_id", oxphp_bridge_get_worker_id());
     add_assoc_double(return_value, "request_time", oxphp_bridge_get_request_time());
