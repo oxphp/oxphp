@@ -274,6 +274,29 @@ pub unsafe fn oxphp_bridge_get_async_exc_trace() -> *const c_char {
 }
 pub unsafe fn oxphp_bridge_clear_async_exception() {}
 
+// ── Aggregate exception API (multi-error) ──
+
+pub unsafe fn oxphp_bridge_aggregate_clear() {}
+
+pub unsafe fn oxphp_bridge_aggregate_push(
+    _exception_class: *const c_char,
+    _message: *const c_char,
+    _trace: *const c_char,
+    _promise_id: i64,
+) {
+}
+
+pub unsafe fn oxphp_bridge_aggregate_throw() -> c_int {
+    0
+}
+
+pub unsafe fn oxphp_bridge_aggregate_throw_timeout(
+    _pending_ids: *const i64,
+    _pending_count: u32,
+) -> c_int {
+    0
+}
+
 // === Async promise bridge functions ===
 
 // Freeze/unfreeze
