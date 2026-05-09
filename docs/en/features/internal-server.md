@@ -102,7 +102,6 @@ curl -s http://localhost:9090/config | jq .
   "drain_timeout_seconds": 30,
   "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
-  "request_timeout_seconds": 120,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,

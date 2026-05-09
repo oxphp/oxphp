@@ -14,7 +14,6 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_request_id()](#oxphp_request_id)
 - [oxphp_worker_id()](#oxphp_worker_id)
 - [oxphp_server_info()](#oxphp_server_info)
-- [oxphp_request_heartbeat()](#oxphp_request_heartbeat)
 - [oxphp_finish_request()](#oxphp_finish_request)
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
@@ -211,35 +210,6 @@ oxphp_finish_request();
 // The client already has its 202 response; continue working
 send_notification_email($user);
 update_analytics($event);
-```
-
----
-
-## oxphp_request_heartbeat()
-
-```php
-oxphp_request_heartbeat(int $time = 10): bool
-```
-
-Extends the `REQUEST_TIMEOUT_SECONDS` deadline by `$time` seconds from the moment of the call, and simultaneously resets PHP's execution timer to `$time` seconds. Call this periodically in long-running loops to prevent OxPHP from killing the request mid-processing — either at the server level or via Zend's "Maximum execution time exceeded" fatal.
-
-**Parameters:**
-- `$time` — Seconds to extend the timeout deadline by. Default: `10`
-
-**Returns:** `true` on success, `false` if `$time` is zero or negative.
-
-> **Note:** Each call sets a new deadline relative to the current time, not the original request start. Calling `oxphp_request_heartbeat(30)` at the 100-second mark of a request sets the deadline 30 seconds from now (130 seconds from request start).
-
-> **Note:** If the script has already opted out of PHP's execution timer (`set_time_limit(0)` or `max_execution_time=0`), the PHP-side timer is left disabled — `oxphp_request_heartbeat()` will not re-enable it.
-
-**Example:**
-
-```php
-<?php
-foreach ($large_dataset as $row) {
-    oxphp_request_heartbeat(30); // extend by 30 seconds from now
-    process($row);
-}
 ```
 
 ---
@@ -931,29 +901,28 @@ print_r($functions);
 //     [2]  => oxphp_request_id
 //     [3]  => oxphp_worker_id
 //     [4]  => oxphp_server_info
-//     [5]  => oxphp_request_heartbeat
-//     [6]  => oxphp_finish_request
-//     [7]  => oxphp_is_worker
-//     [8]  => oxphp_is_streaming
-//     [9]  => oxphp_stream_flush
-//     [10] => oxphp_sleep
-//     [11] => oxphp_usleep
-//     [12] => oxphp_worker
-//     [13] => oxphp_async
-//     [14] => oxphp_async_await
-//     [15] => oxphp_async_await_all
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
-//     [18] => oxphp_apm_trace
-//     [19] => oxphp_apm_start
-//     [20] => oxphp_apm_end
-//     [21] => oxphp_apm_attribute
-//     [22] => oxphp_apm_event
-//     [23] => oxphp_apm_error
-//     [24] => oxphp_apm_status
-//     [25] => oxphp_apm_trace_id
-//     [26] => oxphp_apm_span_id
-//     [27] => oxphp_apm_header
+//     [5]  => oxphp_finish_request
+//     [6]  => oxphp_is_worker
+//     [7]  => oxphp_is_streaming
+//     [8]  => oxphp_stream_flush
+//     [9]  => oxphp_sleep
+//     [10] => oxphp_usleep
+//     [11] => oxphp_worker
+//     [12] => oxphp_async
+//     [13] => oxphp_async_await
+//     [14] => oxphp_async_await_all
+//     [15] => oxphp_async_await_any
+//     [16] => oxphp_register_decorator
+//     [17] => oxphp_apm_trace
+//     [18] => oxphp_apm_start
+//     [19] => oxphp_apm_end
+//     [20] => oxphp_apm_attribute
+//     [21] => oxphp_apm_event
+//     [22] => oxphp_apm_error
+//     [22] => oxphp_apm_status
+//     [23] => oxphp_apm_trace_id
+//     [25] => oxphp_apm_span_id
+//     [26] => oxphp_apm_header
 // )
 ```
 
@@ -992,4 +961,4 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 - [Early Response](../features/early-response.md) -- background processing with `oxphp_finish_request()`
 - [Superglobals](superglobals.md) -- how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, and other superglobals
 - [Distributed Tracing & APM](../features/distributed-tracing.md) -- W3C Trace Context, OTel export, and the `oxphp_apm_*()` SDK
-- [Configuration Reference](../operations/configuration.md) -- `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, `REQUEST_TIMEOUT_SECONDS`, and other env vars
+- [Configuration Reference](../operations/configuration.md) -- `WORKER_MODE_ENABLED`, `ENTRY_FILE`, `PHP_WORKERS`, and other env vars

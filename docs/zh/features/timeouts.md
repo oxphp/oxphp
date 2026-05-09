@@ -1,27 +1,27 @@
 ---
 title: 超时配置
-description: 在 OxPHP 中配置请求头读取超时和请求处理超时，防止慢速客户端和失控 PHP 脚本占用资源。
+description: 在 OxPHP 中配置请求头读取超时和 PHP 执行时间限制，防止慢速客户端和失控 PHP 脚本占用资源。
 ---
 
 # 超时配置
 
-OxPHP 强制执行两个独立的超时机制，防止慢速客户端和失控请求占用资源。请求头超时保护连接阶段，请求超时则限制包含 PHP 执行在内的总处理时间。
+OxPHP 强制执行两个独立的超时机制，防止慢速客户端和失控请求占用资源。请求头超时在服务器层面保护连接阶段。PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及 `set_time_limit()` 运行时函数）限制，与其他 SAPI 的行为完全一致。
 
 ## 工作原理
 
-每个请求依次经历两个超时阶段：
+每个请求经历以下阶段：
 
 1. **连接已接受** — 请求头超时开始计时。OxPHP 等待客户端发送完整的 HTTP 请求头。
-2. **请求头已接收** — 请求头超时结束。请求超时开始计时，涵盖路由、PHP 执行和响应构建。
-3. **PHP 处理请求** — 应用代码在请求超时范围内运行。
-4. **响应已发送** — 两个超时均已结束。在 keep-alive 连接上，循环从第 1 步重新开始。
+2. **请求头已接收** — 请求头超时结束。请求被分发到 PHP Worker。
+3. **PHP 处理请求** — 应用代码在 PHP 自身的 `max_execution_time`（基于 SIGALRM）下运行。达到限制时，请求被取消，触发统一的 `Request cancelled (timeout)` 致命错误。
+4. **响应已发送** — 在 keep-alive 连接上，循环从第 1 步重新开始。
 
 ```text
 TCP 连接（如启用 TLS 则包含 TLS 握手）
   |
   +-- [HEADER_TIMEOUT_SECONDS] --> 请求头已接收
                                    |
-                                   +-- [REQUEST_TIMEOUT_SECONDS] --> 响应已发送
+                                   +-- [max_execution_time] --> 响应已发送
                                                                     |
                                                                     +-- 下一个请求（keep-alive）
 ```
@@ -30,50 +30,62 @@ TCP 连接（如启用 TLS 则包含 TLS 握手）
 
 > **注意：** 启用 TLS 时，请求头超时从 TLS 握手完成后开始计时，而非从 TCP 连接建立时开始。
 
-请求头超时可防御 slowloris 风格的攻击——攻击者每次只发送一个字节的请求头，以无限期地占用连接。请求超时确保即使 PHP 不遵守自身的 `max_execution_time` 设置，服务器资源也能被及时回收。
+请求头超时可防御 slowloris 风格的攻击——攻击者每次只发送一个字节的请求头，以无限期地占用连接。
 
-当请求超时触发时，OxPHP 返回 `504 Gateway Timeout` 响应，并记录一条包含请求 ID 和已配置超时值的警告日志。
+PHP 执行计时完全委托给 PHP。当 `max_execution_time` 超时时，OxPHP 的统一取消路径会：
+
+- 设置 `connection_status() & PHP_CONNECTION_TIMEOUT`，使用户代码可以检测原因。
+- 运行所有 `register_shutdown_function()` 回调，与 PHP-FPM 完全一致。
+- 返回 HTTP `500`（PHP 致命错误），错误日志中写入消息 `Request cancelled (timeout)`。
 
 ## 配置
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | 连接建立后接收请求头的最长秒数。防御 slowloris 攻击。设为 `0` 可禁用 |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | 包含 PHP 执行在内的请求总处理最长秒数。超时时返回 `504`。设为 `0` 可禁用 |
+
+PHP 执行时间通过 `php.ini` 配置，而非 OxPHP 的环境变量：
+
+```ini
+; php.ini
+max_execution_time = 30
+```
+
+或通过运行时按脚本配置：
+
+```php
+set_time_limit(60);  // 从当前时刻起 60 秒
+set_time_limit(0);   // 为本请求禁用
+```
 
 ## 推荐值
 
-| 场景 | 请求头超时 | 请求超时 |
-|----------|----------------|-----------------|
+| 场景 | 请求头超时 | `max_execution_time` |
+|----------|----------------|----------------------|
 | API 服务器 | 5s | 30s |
 | 通用 Web 服务 | 5s | 60s |
 | 文件上传 | 10s | 300s |
-| SSE / 长轮询 | 5s | 0（禁用） |
+| SSE / 长轮询 | 5s | 0（按脚本禁用） |
 
-请根据应用特点调整这些值。如果 PHP 脚本需要执行耗时操作（如报表生成或数据导入），请相应增大请求超时值。对于 SSE 端点，应禁用请求超时，以避免长连接被提前终止。
+请根据应用特点调整这些值。对于 SSE 端点，应在流式脚本顶部调用 `set_time_limit(0)`，而非全局禁用 `max_execution_time`。
 
 ## 故障排除
 
-### 客户端意外收到 504 Gateway Timeout
+### 客户端意外收到 500 并附带 `Request cancelled (timeout)`
 
-请求超时在 PHP 执行完成之前触发。
+PHP 执行时间限制在脚本完成前触发。
 
-**检查：** 查询 `/config` 端点确认当前超时值：
+**修复：** 提高受影响脚本的 `max_execution_time`，或在运行时调用 `set_time_limit($seconds)` 进行扩展：
 
-```bash
-curl http://localhost:9090/config | grep request_timeout
+```php
+// 在慢速脚本顶部
+set_time_limit(300);
 ```
 
-**修复：** 增大超时值，或排查哪个 PHP 操作耗时过长。对于已知耗时较长的操作，提高限制值：
+对于需要无限期保持连接的 SSE 或流式端点，为该脚本禁用计时器：
 
-```bash
-REQUEST_TIMEOUT_SECONDS=300
-```
-
-对于需要无限期保持连接的 SSE 或流式端点，禁用超时：
-
-```bash
-REQUEST_TIMEOUT_SECONDS=0
+```php
+set_time_limit(0);
 ```
 
 ### 连接在请求头到达前被断开
@@ -88,7 +100,7 @@ HEADER_TIMEOUT_SECONDS=15
 
 ### OPcache 导致脚本变更后的第一个请求超时
 
-脚本文件变更后，首次请求时 OPcache 重新编译会增加延迟。在包含大量文件的开发环境中更为常见。可适当增大超时值或在开发期间禁用超时。
+脚本文件变更后，首次请求时 OPcache 重新编译会增加延迟。在包含大量文件的开发环境中更为常见。可适当增大 `max_execution_time` 或在开发期间禁用。
 
 ## Docker 示例
 
@@ -100,15 +112,21 @@ services:
       - "8080:8080"
     environment:
       HEADER_TIMEOUT_SECONDS: "5"
-      REQUEST_TIMEOUT_SECONDS: "30"
     volumes:
       - ./app:/var/www/html:ro
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-app.ini:ro
+```
+
+`php.ini` 内容如下：
+
+```ini
+max_execution_time = 30
 ```
 
 ## 最佳实践
 
-- **生产环境中绝不禁用请求超时**，除非有需要无限期连接的 SSE 或长轮询端点。缺少超时会导致失控的 PHP 脚本无限期占用 Worker。
-- **为 API 服务器使用较短的超时值。** API 的响应时间通常可预测。30 秒的请求超时可快速捕获卡死的请求，同时不影响正常流量。
+- **生产环境中绝不全局设置 `max_execution_time = 0`**，除非有需要无限期连接的 SSE 或长轮询端点。优先使用按脚本的 `set_time_limit(0)`。
+- **为 API 服务器使用较短的限制值。** API 的响应时间通常可预测。30 秒的 `max_execution_time` 可快速捕获卡死的请求，同时不影响正常流量。
 - **结合速率限制使用。** 超时保护单个请求，速率限制防御高请求量。两者结合可全面防御慢速和快速两种攻击模式。
 
 ## 参见

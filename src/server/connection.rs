@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytes::Bytes;
 use http::{header, Method, Request, Response, StatusCode};
@@ -156,30 +156,7 @@ pub async fn handle_request(
         profiling_run_id,
         cancel_state.as_ptr() as usize,
     );
-    let result = if server.request_timeout > Duration::ZERO {
-        match tokio::time::timeout(server.request_timeout, dispatch).await {
-            Ok(inner_result) => inner_result,
-            Err(_) => {
-                tracing::warn!(
-                    request_id = %request_id,
-                    path = %path_str,
-                    timeout_secs = server.request_timeout.as_secs(),
-                    "Request timeout"
-                );
-                Ok((
-                    Response::builder()
-                        .status(StatusCode::REQUEST_TIMEOUT)
-                        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                        .body(full_body(Bytes::from_static(b"408 Request Timeout")))
-                        .unwrap(),
-                    0usize,
-                    PhpExecData::default(),
-                ))
-            }
-        }
-    } else {
-        dispatch.await
-    };
+    let result = dispatch.await;
 
     let (response, request_body_size, mut php_exec) = match result {
         Ok((resp, body_size, exec)) => (resp, body_size, exec),
@@ -409,7 +386,6 @@ async fn dispatch_request(
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
-                timeout_us: server.request_timeout.as_micros() as u64,
                 cancel_ptr,
                 trace_id: metadata_get(metadata, "trace_id").to_string(),
                 span_id: metadata_get(metadata, "span_id").to_string(),

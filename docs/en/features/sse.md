@@ -147,15 +147,20 @@ The PHP output buffer is capturing output instead of streaming it. This happens 
 
 ### SSE connections are closed after a few minutes
 
-The request timeout is terminating the connection. SSE streams must run longer than `REQUEST_TIMEOUT_SECONDS`.
+PHP's `max_execution_time` is firing and terminating the script. SSE streams must run longer than the configured limit.
 
-**Fix:** Disable the request timeout for SSE endpoints:
+**Fix:** Disable the per-request execution timer at the top of the streaming script:
 
-```bash
-REQUEST_TIMEOUT_SECONDS=0
+```php
+set_time_limit(0);
 ```
 
-If you have a mix of SSE and regular endpoints, set the timeout high enough for your longest stream, or run SSE on a separate OxPHP instance with the timeout disabled.
+This is preferred over setting `max_execution_time = 0` globally — it leaves the limit in place for non-SSE endpoints. Alternatively, if the entire instance is dedicated to long-lived streams:
+
+```ini
+; php.ini
+max_execution_time = 0
+```
 
 ### Intermediate proxies close idle SSE connections
 
@@ -174,7 +179,7 @@ oxphp_stream_flush();
 
 ## Docker Example
 
-SSE endpoints require the request timeout to be disabled or set high. Each active SSE connection occupies one PHP worker for the full duration of the stream, so size the worker pool to accommodate your expected concurrent stream count.
+SSE endpoints require PHP's execution timer to be disabled or set high. Each active SSE connection occupies one PHP worker for the full duration of the stream, so size the worker pool to accommodate your expected concurrent stream count.
 
 ```yaml
 services:
@@ -187,18 +192,17 @@ services:
     environment:
       DOCUMENT_ROOT: "/var/www/html/public"
       ENTRY_FILE: "index.php"
-      REQUEST_TIMEOUT_SECONDS: "0"
       PHP_WORKERS: "32"
 ```
 
-> **Note:** `REQUEST_TIMEOUT_SECONDS=0` disables the timeout for all requests on this instance, including non-SSE endpoints. If that is a concern, dedicate a separate OxPHP instance to SSE.
+Each streaming script should call `set_time_limit(0)` at the top so the per-request timer does not fire mid-stream. This keeps the global `max_execution_time` in effect for non-SSE requests.
 
 ## Best Practices
 
 - **Use `oxphp_stream_flush()` instead of native `flush()`** for automatic output buffer management and backpressure integration.
 - **Send periodic comment heartbeats** (`: heartbeat\n\n`) every 20–30 seconds to keep intermediate proxies from closing idle connections and to detect client disconnections early.
 - **Keep event payloads small.** Large payloads fill the 64-chunk buffer faster, causing PHP to stall on each flush. For large data, send an event ID and let the client fetch the full payload via a separate request.
-- **Disable the request timeout** (`REQUEST_TIMEOUT_SECONDS=0`) for long-lived SSE endpoints, or set it high enough to cover your longest expected stream duration.
+- **Disable PHP's execution timer per-script** with `set_time_limit(0)` for long-lived SSE endpoints, or set `max_execution_time` high enough to cover your longest expected stream duration.
 - **Size your worker pool for peak concurrent streams.** Each active SSE connection holds one PHP worker for its full duration. Budget at least one worker per expected concurrent client, plus additional workers for regular non-SSE requests.
 
 ## Notes

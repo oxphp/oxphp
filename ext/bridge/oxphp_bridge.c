@@ -84,22 +84,6 @@ bool oxphp_bridge_is_finished(void) {
     return ctx.finished;
 }
 
-void oxphp_bridge_set_deadline(int64_t deadline_us) {
-    ctx.deadline_us = deadline_us;
-}
-
-int64_t oxphp_bridge_get_deadline(void) {
-    return ctx.deadline_us;
-}
-
-bool oxphp_bridge_is_deadline_expired(void) {
-    if (ctx.deadline_us == 0) return false;
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-    return now_us >= ctx.deadline_us;
-}
-
 void oxphp_bridge_set_headers_sent(bool sent) {
     ctx.headers_sent = sent;
 }
@@ -1769,9 +1753,7 @@ bool oxphp_bridge_is_worker_mode(void) {
 void oxphp_bridge_reset_request_ctx(void) {
     ctx.request_id[0] = '\0';
     ctx.request_time = 0.0;
-    ctx.deadline_us = 0;
     ctx.cancel_ptr = NULL;
-    ctx.write_count = 0;
     ctx.stream_mode = false;
     ctx.headers_sent = false;
     ctx.finished = false;
@@ -2141,7 +2123,7 @@ zend_object *oxphp_plugin_clone_object(zend_object *obj) {
     return new_obj;
 }
 
-/* ── SAPI callback wrappers with cooperative deadline check ── */
+/* ── SAPI callback wrappers with cooperative cancellation check ── */
 
 /*
  * Global (not __thread) — set once at startup by build_sapi_module() BEFORE
@@ -2157,28 +2139,8 @@ void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_f
 }
 
 /**
- * Check deadline and cancellation, bailout if needed.
+ * Check cancellation and bailout if needed.
  * Called from C — longjmp stays within C frames, never crosses Rust FFI.
- */
-static inline void check_deadline_c(void) {
-    bool cancelled = ctx.cancel_ptr &&
-        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
-    if (cancelled) {
-        zend_bailout();
-    }
-    if (ctx.deadline_us != 0) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-        if (now_us >= ctx.deadline_us) {
-            zend_bailout();
-        }
-    }
-}
-
-/**
- * Fast check — only tests the cancelled flag (no syscall).
- * Used on ub_write hot path between periodic full checks.
  */
 static inline void check_cancelled_c(void) {
     bool cancelled = ctx.cancel_ptr &&
@@ -2188,17 +2150,8 @@ static inline void check_cancelled_c(void) {
     }
 }
 
-/* Check interval for ub_write: every 128 calls do a full deadline check,
- * otherwise only check the cancelled flag (a single bool read, no syscall). */
-#define DEADLINE_CHECK_INTERVAL 128
-
 size_t oxphp_bridge_ub_write(const char *str, size_t str_length) {
-    if (++ctx.write_count >= DEADLINE_CHECK_INTERVAL) {
-        ctx.write_count = 0;
-        check_deadline_c();
-    } else {
-        check_cancelled_c();
-    }
+    check_cancelled_c();
     if (rust_ub_write) {
         return rust_ub_write(str, str_length);
     }
@@ -2206,8 +2159,7 @@ size_t oxphp_bridge_ub_write(const char *str, size_t str_length) {
 }
 
 void oxphp_bridge_flush(void *server_context) {
-    /* flush is infrequent — always do a full check. */
-    check_deadline_c();
+    check_cancelled_c();
     if (rust_flush) {
         rust_flush(server_context);
     }

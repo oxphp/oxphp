@@ -88,8 +88,9 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive HTTP headers after connection (Slowloris protection) |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | Maximum seconds for the entire request-response cycle. `0` = disabled |
 | `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
+
+PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and `set_time_limit()` at runtime), not an OxPHP env var.
 
 ## Rate Limiting
 
@@ -205,7 +206,6 @@ RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
-REQUEST_TIMEOUT_SECONDS=60
 DRAIN_TIMEOUT_SECONDS=30
 COMPRESSION_LEVEL=4
 STATIC_MAX_AGE=30d
@@ -258,7 +258,6 @@ curl -s http://localhost:9090/config | jq .
   "drain_timeout_seconds": 30,
   "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
-  "request_timeout_seconds": 120,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,

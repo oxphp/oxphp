@@ -53,14 +53,8 @@ extern "C" {
 typedef struct {
     /* ── Hot: accessed every ub_write (~per PHP opcode) ───── */
 
-    /** ub_write call counter for periodic deadline checks. */
-    uint32_t write_count;
-
     _Atomic(uint8_t)* cancel_ptr;    /* into Arc<CancellationState>; NULL outside request */
     void* vm_interrupt_addr;         /* &EG(vm_interrupt); NULL until first php_request_startup */
-
-    /** Deadline timestamp (Unix epoch, microseconds). 0 = no deadline. */
-    int64_t deadline_us;
 
     /* ── Warm: accessed once per request ─────────────────── */
 
@@ -171,15 +165,6 @@ void oxphp_bridge_set_finished(bool finished);
 
 /** Check if request is finished. */
 bool oxphp_bridge_is_finished(void);
-
-/** Set the execution deadline (Unix epoch, microseconds). 0 = no deadline. */
-void oxphp_bridge_set_deadline(int64_t deadline_us);
-
-/** Get the execution deadline. */
-int64_t oxphp_bridge_get_deadline(void);
-
-/** Check if the execution deadline has expired. */
-bool oxphp_bridge_is_deadline_expired(void);
 
 /** Mark headers as sent (streaming mode). */
 void oxphp_bridge_set_headers_sent(bool sent);
@@ -836,12 +821,12 @@ size_t oxphp_op_array_size(void);
 /** Trigger zend_bailout() — safely abort PHP execution from SAPI callbacks. */
 void oxphp_bridge_bailout(void);
 
-/* ── SAPI callback wrappers with cooperative deadline check ── */
+/* ── SAPI callback wrappers with cooperative cancellation check ── */
 
 /**
  * Register the Rust-side ub_write and flush implementations.
- * The bridge provides wrapper functions that check the deadline BEFORE
- * calling through to Rust, and call zend_bailout() from C if expired.
+ * The bridge provides wrapper functions that check the cancellation flag
+ * BEFORE calling through to Rust, and call zend_bailout() from C if set.
  * This avoids longjmp crossing Rust FFI boundaries.
  */
 typedef size_t (*oxphp_ub_write_fn_t)(const char *str, size_t str_length);
@@ -849,10 +834,10 @@ typedef void   (*oxphp_flush_fn_t)(void *server_context);
 
 void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_fn_t flush);
 
-/** C wrapper for ub_write — checks deadline, then calls Rust impl. */
+/** C wrapper for ub_write — checks cancellation, then calls Rust impl. */
 size_t oxphp_bridge_ub_write(const char *str, size_t str_length);
 
-/** C wrapper for flush — checks deadline, then calls Rust impl. */
+/** C wrapper for flush — checks cancellation, then calls Rust impl. */
 void oxphp_bridge_flush(void *server_context);
 
 /* ─── Superglobals Configuration ──────────────────────────── */
@@ -948,7 +933,7 @@ bool oxphp_bridge_is_worker_mode(void);
 
 /**
  * Reset per-request TLS fields between worker mode requests.
- * Clears: request_id, request_time, deadline, cancel_ptr, write_count,
+ * Clears: request_id, request_time, cancel_ptr,
  *         stream_mode, headers_sent, finished.
  * Increments: requests_done.
  */

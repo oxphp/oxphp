@@ -1,6 +1,6 @@
-# Request timeout mode: REQUEST_TIMEOUT_SECONDS=2.
-# Requests that take longer than 2 seconds receive 504 Gateway Timeout.
-# Used to test timeout enforcement and error handling for slow PHP scripts.
+# Timeout-suite test environment. The PHP-side `set_time_limit()` /
+# `max_execution_time` ini drives cancellation; tests configure their own
+# per-script budget.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.timeout.yml up
@@ -22,7 +22,6 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      REQUEST_TIMEOUT_SECONDS: 2
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

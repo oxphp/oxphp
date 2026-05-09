@@ -324,7 +324,6 @@ mod tests {
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/public")),
-            timeout_us: 0,
             cancel_ptr: 0,
             trace_id: String::new(),
             span_id: String::new(),

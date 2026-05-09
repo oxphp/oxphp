@@ -147,15 +147,20 @@ PHP 输出缓冲区在捕获输出而非流式传输。这发生在 OB 层处于
 
 ### SSE 连接在几分钟后关闭
 
-请求超时正在终止连接。SSE 流的运行时间必须超过 `REQUEST_TIMEOUT_SECONDS`。
+PHP 的 `max_execution_time` 触发并终止脚本。SSE 流的运行时间必须超过配置的限制。
 
-**修复：** 为 SSE 端点禁用请求超时：
+**修复：** 在流式脚本顶部禁用按请求的执行计时器：
 
-```bash
-REQUEST_TIMEOUT_SECONDS=0
+```php
+set_time_limit(0);
 ```
 
-如果同时有 SSE 和普通端点，可将超时设置得足够高以覆盖最长的流，或在单独的 OxPHP 实例上运行 SSE，并禁用该实例的超时。
+这优于全局设置 `max_execution_time = 0` —— 限制在非 SSE 端点上仍然有效。或者，如果整个实例专用于长连接流：
+
+```ini
+; php.ini
+max_execution_time = 0
+```
 
 ### 中间代理关闭空闲的 SSE 连接
 
@@ -174,7 +179,7 @@ oxphp_stream_flush();
 
 ## Docker 示例
 
-SSE 端点需要禁用请求超时或将其设置得足够高。每个活跃的 SSE 连接在整个流传输期间占用一个 PHP Worker，因此请根据预期的并发流数量调整 Worker 池大小。
+SSE 端点需要禁用 PHP 执行计时器或将其设置得足够高。每个活跃的 SSE 连接在整个流传输期间占用一个 PHP Worker，因此请根据预期的并发流数量调整 Worker 池大小。
 
 ```yaml
 services:
@@ -187,18 +192,17 @@ services:
     environment:
       DOCUMENT_ROOT: "/var/www/html/public"
       ENTRY_FILE: "index.php"
-      REQUEST_TIMEOUT_SECONDS: "0"
       PHP_WORKERS: "32"
 ```
 
-> **注意：** `REQUEST_TIMEOUT_SECONDS=0` 会为该实例上的所有请求禁用超时，包括非 SSE 端点。如有顾虑，请将 SSE 专用于独立的 OxPHP 实例。
+每个流式脚本应在顶部调用 `set_time_limit(0)`，以避免按请求的计时器在流传输中途触发。这样可保留全局的 `max_execution_time` 对非 SSE 请求的限制。
 
 ## 最佳实践
 
 - **使用 `oxphp_stream_flush()` 而非原生 `flush()`**，以自动管理输出缓冲区并与背压系统集成。
 - **定期发送注释心跳**（`: heartbeat\n\n`），每 20–30 秒一次，防止中间代理关闭空闲连接，并尽早检测客户端断开。
 - **保持事件载荷小巧。** 大载荷会更快填满 64 个数据块的缓冲区，导致 PHP 在每次 flush 时停顿。对于大数据，发送事件 ID 并让客户端通过单独的请求获取完整载荷。
-- **禁用请求超时**（`REQUEST_TIMEOUT_SECONDS=0`）用于长连接的 SSE 端点，或将其设置得足够高以覆盖预期的最长流传输时间。
+- **按脚本禁用 PHP 执行计时器**（`set_time_limit(0)`）用于长连接的 SSE 端点，或将 `max_execution_time` 设置得足够高以覆盖预期的最长流传输时间。
 - **根据峰值并发流数量调整 Worker 池大小。** 每个活跃的 SSE 连接在整个持续期间占用一个 PHP Worker。至少为每个预期并发客户端分配一个 Worker，并额外留出 Worker 用于普通的非 SSE 请求。
 
 ## 注意事项

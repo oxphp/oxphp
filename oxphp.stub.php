@@ -8,6 +8,10 @@
  * This file is NOT loaded at runtime — it is only used by IDEs
  * (PhpStorm, VS Code + Intelephense) and static analyzers (PHPStan, Psalm).
  *
+ * Migration: oxphp_request_heartbeat($time) was removed.
+ * Replace each call with set_time_limit($seconds). Both reset the
+ * per-request execution timer to N seconds from now.
+ *
  * @package OxPHP
  * @version 0.3.0
  * @link https://github.com/oxphp/oxphp
@@ -147,24 +151,6 @@ function oxphp_is_worker(): bool {}
  * }
  */
 function oxphp_is_streaming(): bool {}
-
-/**
- * Extends the request timeout to prevent the server from killing
- * long-running scripts.
- *
- * Call periodically in long-running loops. The timeout is extended
- * by the given number of seconds from the time of the call.
- *
- * @param int $time Seconds to extend the timeout by (default: 10)
- * @return bool Always true
- *
- * @example
- * foreach ($large_dataset as $row) {
- *     oxphp_request_heartbeat(30);
- *     process($row);
- * }
- */
-function oxphp_request_heartbeat(int $time = 10): bool {}
 
 /**
  * Activate streaming mode and flush buffered output as a chunk to the client.

@@ -317,7 +317,6 @@ All settings are via environment variables — no config files required.
 | `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
 | `RATE_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
 | `HEADER_TIMEOUT_SECONDS` | `5` | Header read timeout (Slowloris protection) |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | Overall request timeout; 0 = disabled |
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |

@@ -1002,52 +1002,6 @@ PHP_FUNCTION(oxphp_server_info)
 }
 /* }}} */
 
-/* {{{ oxphp_request_heartbeat(int $time = 10): bool
- * Extend the execution deadline by $time seconds from now.
- * Returns false if $time is non-positive. */
-PHP_FUNCTION(oxphp_request_heartbeat)
-{
-    zend_long time = 10;
-
-    ZEND_PARSE_PARAMETERS_START(0, 1)
-        Z_PARAM_OPTIONAL
-        Z_PARAM_LONG(time)
-    ZEND_PARSE_PARAMETERS_END();
-
-    if (time <= 0) {
-        RETURN_FALSE;
-    }
-
-    /* Clamp $time to INT_MAX up front. zend_set_timeout() takes int, and
-     * time * 1000000 on the server-deadline path would overflow int64 for
-     * values above ~2^43. INT_MAX seconds (~68 years) is already absurd
-     * for a heartbeat, so a single clamp serves both sides. */
-    if (time > INT_MAX) {
-        php_error_docref(NULL, E_WARNING,
-            "oxphp_request_heartbeat(): $time=%lld exceeds INT_MAX; "
-            "clamped to %d seconds",
-            (long long)time, INT_MAX);
-        time = INT_MAX;
-    }
-
-    /* Extend deadline by $time seconds from now */
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    int64_t now_us = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-    oxphp_bridge_set_deadline(now_us + (int64_t)time * 1000000);
-
-    /* Also extend PHP's own max_execution_time timer so Zend doesn't
-     * kill the script with "Maximum execution time exceeded" before the
-     * server deadline is reached. Skip if the script opted out of the
-     * timer entirely (max_execution_time = 0 / set_time_limit(0)). */
-    if (EG(timeout_seconds) > 0) {
-        zend_set_timeout((int)time, /* reset_signals */ 0);
-    }
-
-    RETURN_TRUE;
-}
-/* }}} */
-
 /* {{{ oxphp_finish_request(): bool
  * Flush the HTTP response to the client immediately.
  * PHP continues executing for background tasks (analytics, cleanup, etc.).
@@ -2645,10 +2599,6 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_server_info, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_request_heartbeat, 0, 0, _IS_BOOL, 0)
-    ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, time, IS_LONG, 0, "10")
-ZEND_END_ARG_INFO()
-
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -2682,7 +2632,6 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_request_id,        arginfo_oxphp_request_id)
     PHP_FE(oxphp_worker_id,         arginfo_oxphp_worker_id)
     PHP_FE(oxphp_server_info,       arginfo_oxphp_server_info)
-    PHP_FE(oxphp_request_heartbeat, arginfo_oxphp_request_heartbeat)
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
     PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
@@ -2853,6 +2802,15 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
+    /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
+     * alongside vm_interrupt. Convert it to the unified cancellation
+     * reason and claim the flag so zend_timeout()'s default
+     * "Maximum execution time exceeded" path doesn't also fire. */
+    if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+        oxphp_bridge_set_cancel_reason(OXPHP_CANCEL_TIMEOUT);
+        zend_atomic_bool_store_ex(&EG(timed_out), false);
+    }
+
     oxphp_cancel_reason_t reason = oxphp_bridge_get_cancel_reason();
 
     if (reason == OXPHP_CANCEL_NONE) {
@@ -2875,6 +2833,30 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         "Request cancelled (%s)",
         oxphp_cancel_reason_label(reason));
     /* unreachable: zend_error_noreturn calls zend_bailout() */
+}
+
+/* Own the max_execution_time ini handler so future revisions can
+ * extend its behaviour without surgical patches. Today this is a thin
+ * pass-through; worker-mode and the STARTUP/DEACTIVATE stages are
+ * explicit early-exits so the hook is ready for later mirror logic. */
+static PHP_INI_MH((*orig_OnUpdateTimeout)) = NULL;
+
+static PHP_INI_MH(oxphp_OnUpdateTimeout)
+{
+    /* Run upstream first — it updates EG(timeout_seconds) and (re)arms
+     * SIGALRM via zend_set_timeout. We never replace its behaviour. */
+    int rc = orig_OnUpdateTimeout(entry, new_value, mh_arg1, mh_arg2,
+                                  mh_arg3, stage);
+
+    if (oxphp_bridge_is_worker_mode()) {
+        return rc;
+    }
+    if (stage == PHP_INI_STAGE_STARTUP || stage == PHP_INI_STAGE_DEACTIVATE) {
+        return rc;
+    }
+    /* Reserved for future mirror logic. SIGALRM is the source of truth;
+     * the interrupt handler converts EG(timed_out) into CancelReason. */
+    return rc;
 }
 
 /* {{{ MINIT — register plugin functions with native dispatch handler.
@@ -3563,6 +3545,20 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * reasons cause clean bailout at the next opcode boundary. */
     orig_zend_interrupt_function = zend_interrupt_function;
     zend_interrupt_function = oxphp_zend_interrupt_handler;
+
+    /* Install the max_execution_time ini hook. */
+    zend_ini_entry *me_entry = zend_hash_str_find_ptr(
+        EG(ini_directives),
+        "max_execution_time",
+        sizeof("max_execution_time") - 1);
+    if (me_entry) {
+        orig_OnUpdateTimeout = me_entry->on_modify;
+        me_entry->on_modify = oxphp_OnUpdateTimeout;
+    } else {
+        php_log_err("oxphp: max_execution_time directive not found at startup; "
+                    "set_time_limit() integration disabled");
+        /* Continue startup — PHP's default OnUpdateTimeout still works. */
+    }
 
     return SUCCESS;
 }
