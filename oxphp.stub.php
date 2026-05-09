@@ -348,6 +348,43 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
 function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): array {}
 
 /**
+ * Wait for the first FULFILLED promise (analog of JavaScript Promise.any).
+ *
+ * Unlike oxphp_async_await_race(), rejections do NOT win — they accumulate.
+ * If at least one promise fulfills before the deadline, returns its id+value
+ * and leaves remaining pending promises individually awaitable. If every
+ * promise rejects, throws AggregateAsyncException carrying all errors.
+ *
+ * On timeout, throws TimeoutException populated with partial errors collected
+ * up to the deadline and the ids of promises still pending (and now cancelled).
+ *
+ * @param int[]      $promise_ids Array of promise IDs from oxphp_async()
+ * @param float|null $timeout     Overall timeout in seconds; null = no limit
+ * @return array{id: int, value: mixed} The first-fulfilled promise's id and result
+ *
+ * @throws \OxPHP\Async\AggregateAsyncException If every promise rejects
+ * @throws \OxPHP\Async\TimeoutException        If the deadline elapses before any fulfills
+ *
+ * @example
+ * $a = oxphp_async(fn() => fetch_mirror_a());
+ * $b = oxphp_async(fn() => fetch_mirror_b());
+ * try {
+ *     $winner = oxphp_async_await_any([$a, $b], 2.0);
+ *     // ['id' => $a or $b, 'value' => ...]
+ * } catch (\OxPHP\Async\AggregateAsyncException $e) {
+ *     foreach ($e->getErrors() as $i => $err) {
+ *         // by input position
+ *     }
+ * } catch (\OxPHP\Async\TimeoutException $e) {
+ *     foreach ($e->getPartialErrors() as $promise_id => $err) {
+ *         // who failed
+ *     }
+ *     $cancelled = $e->getPendingPromiseIds();
+ * }
+ */
+function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
+
+/**
  * Register a PHP class as an attribute-based decorator.
  *
  * The class must implement OxPHP\Decorator\AttributeInterface and be
