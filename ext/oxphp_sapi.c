@@ -2877,6 +2877,30 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     /* unreachable: zend_error_noreturn calls zend_bailout() */
 }
 
+/* Sub-design C: own the max_execution_time ini handler so we can extend
+ * its behaviour later (mirror to a deadline store, plug into the new
+ * cancellation pipe, etc.). Today this is a thin pass-through with
+ * worker-mode and startup/deactivate stages explicitly skipped. */
+static PHP_INI_MH((*orig_OnUpdateTimeout)) = NULL;
+
+static PHP_INI_MH(oxphp_OnUpdateTimeout)
+{
+    /* Run upstream first — it updates EG(timeout_seconds) and (re)arms
+     * SIGALRM via zend_set_timeout. We never replace its behaviour. */
+    int rc = orig_OnUpdateTimeout(entry, new_value, mh_arg1, mh_arg2,
+                                  mh_arg3, stage);
+
+    if (oxphp_bridge_is_worker_mode()) {
+        return rc;
+    }
+    if (stage == PHP_INI_STAGE_STARTUP || stage == PHP_INI_STAGE_DEACTIVATE) {
+        return rc;
+    }
+    /* Reserved for future mirror logic. SIGALRM is the source of truth;
+     * the interrupt handler converts EG(timed_out) into CancelReason. */
+    return rc;
+}
+
 /* {{{ MINIT — register plugin functions with native dispatch handler.
  * Plugin functions must be registered here (not RINIT) so OPcache's
  * compile-time optimization of function_exists('literal') can see them. */
@@ -3563,6 +3587,20 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * reasons cause clean bailout at the next opcode boundary. */
     orig_zend_interrupt_function = zend_interrupt_function;
     zend_interrupt_function = oxphp_zend_interrupt_handler;
+
+    /* Sub-design C: install max_execution_time ini hook. */
+    zend_ini_entry *me_entry = zend_hash_str_find_ptr(
+        EG(ini_directives),
+        "max_execution_time",
+        sizeof("max_execution_time") - 1);
+    if (me_entry) {
+        orig_OnUpdateTimeout = me_entry->on_modify;
+        me_entry->on_modify = oxphp_OnUpdateTimeout;
+    } else {
+        php_log_err("oxphp: max_execution_time directive not found at startup; "
+                    "set_time_limit() integration disabled");
+        /* Continue startup — PHP's default OnUpdateTimeout still works. */
+    }
 
     return SUCCESS;
 }
