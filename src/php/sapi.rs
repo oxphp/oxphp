@@ -2172,6 +2172,12 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             clear_buffers();
             bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
             WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
+            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+                let id = bindings::oxphp_bridge_get_worker_id() as usize;
+                if let Some(slot) = workers.get(id) {
+                    *slot.cancel_state.lock().unwrap() = None;
+                }
+            }
             bindings::oxphp_bridge_set_request_time(0.0);
             return 0;
         }
@@ -2185,6 +2191,12 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         clear_buffers();
         bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
         WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
+        if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+            let id = bindings::oxphp_bridge_get_worker_id() as usize;
+            if let Some(slot) = workers.get(id) {
+                *slot.cancel_state.lock().unwrap() = None;
+            }
+        }
         bindings::oxphp_bridge_set_request_time(0.0);
         return 0;
     }
@@ -2259,6 +2271,12 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     // pointer; the next request installs fresh state in setup_request_tls.
     bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
     WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
+    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+        let id = bindings::oxphp_bridge_get_worker_id() as usize;
+        if let Some(slot) = workers.get(id) {
+            *slot.cancel_state.lock().unwrap() = None;
+        }
+    }
     bindings::oxphp_bridge_set_request_time(0.0);
 
     0
@@ -2419,10 +2437,6 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     }
 
     let start = Instant::now();
-    set_early_tx(start, req.response_tx);
-
-    // Store request start time for duration histogram
-    WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
 
     // Stash a strong Arc on the worker thread so the bridge's raw
     // pointer stays valid even if the tokio dispatch future is
@@ -2432,13 +2446,37 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     WORKER_CANCEL_STATE.with(|slot| {
         *slot.borrow_mut() = Some(req.script.cancel_state.clone());
     });
+
+    // Per-request: register a Weak back-ref so cancel_request() can
+    // find this worker by Arc::ptr_eq.
+    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
+        let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
+        if let Some(slot) = workers.get(id) {
+            *slot.cancel_state.lock().unwrap() =
+                Some(std::sync::Arc::downgrade(&req.script.cancel_state));
+        }
+    }
+
+    // Fast-path: client disconnected while we were in the queue.
+    // Ship 499 directly via the still-owned response_tx and bail
+    // before any further setup (no PHP, no early_tx stash).
+    if req.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
+        let _ = req.response_tx.send(ScriptResponse::client_closed());
+        return;
+    }
+
+    set_early_tx(start, req.response_tx);
+
+    // Store request start time for duration histogram
+    WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
+
     unsafe {
         bindings::oxphp_bridge_set_cancel_ptr(cancel_ptr);
     }
 
-    // Sub-design A: one-shot capture of &EG(vm_interrupt) on the worker
-    // thread + publish into WORKERS[id].interrupt_flag_ptr so other
-    // threads can raise the flag for cross-thread cancellation.
+    // One-shot capture of &EG(vm_interrupt) on the worker thread +
+    // publish into WORKERS[id].interrupt_flag_ptr so other threads
+    // can raise the flag for cross-thread cancellation.
     VM_INTERRUPT_CAPTURED.with(|c| {
         if !c.get() {
             unsafe {
