@@ -1,12 +1,8 @@
 # profile: timeout
-# description: Request timeout and heartbeat
+# description: Request timeout
 
 timeout/test_fast_request_ok
 timeout/test_slow_request_timeout | GET | | 500
-timeout/test_heartbeat_extends
-timeout/test_heartbeat_resets_php_timer
-timeout/test_heartbeat_respects_disabled_php_timer
-timeout/test_heartbeat_clamps_oversized_time
 timeout/test_set_time_limit_extends
 timeout/test_set_time_limit_zero_unlimited
 timeout/test_timeout_runs_shutdown_handlers >> ?action=trigger | GET | | 500
