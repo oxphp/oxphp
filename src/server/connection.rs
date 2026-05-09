@@ -66,12 +66,10 @@ fn parse_content_length(bytes: &[u8]) -> Option<usize> {
 /// Drop-guard that fires `cancel_request(state, ClientAbort)` if the
 /// dispatch future is dropped before completing. Disarmed via
 /// `disarm()` once the future has returned a result.
-#[allow(dead_code)]
 struct ClientAbortGuard {
     state: std::sync::Arc<CancellationState>,
 }
 
-#[allow(dead_code)]
 impl ClientAbortGuard {
     fn new(state: std::sync::Arc<CancellationState>) -> Self {
         Self { state }
@@ -168,13 +166,11 @@ pub async fn handle_request(
     let path_str = parts.uri.path().to_string();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
-    // Per-request cancellation state. Worker owns one Arc; this scope
-    // owns the other so the upcoming drop guard can write into it.
+    // Per-request cancellation state. Worker holds one Arc (stashed in its
+    // TLS slot); this scope holds the other through the ClientAbortGuard,
+    // so the byte the bridge reads is alive even if either side drops first.
     let cancel_state = std::sync::Arc::new(CancellationState::new());
 
-    // Apply request timeout if configured. Only one branch runs, so the
-    // `profiling_run_id` can be moved into whichever `dispatch_request` call
-    // is selected — no clone on the hot path.
     let dispatch = dispatch_request(
         parts,
         body,
@@ -186,7 +182,14 @@ pub async fn handle_request(
         profiling_run_id,
         cancel_state.clone(),
     );
+
+    // Drop guard fires cancel_request(ClientAbort) if the dispatch future
+    // is dropped before completing (hyper saw the client go away). Disarmed
+    // on the success path. Declared after `dispatch` so on a future-drop
+    // its Drop runs after the dispatch local has already gone.
+    let guard = ClientAbortGuard::new(cancel_state);
     let result = dispatch.await;
+    guard.disarm();
 
     let (response, request_body_size, mut php_exec) = match result {
         Ok((resp, body_size, exec)) => (resp, body_size, exec),
