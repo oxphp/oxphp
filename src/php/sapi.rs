@@ -3258,8 +3258,8 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     // oneshot::Receiver<T> is Unpin, so `Pin::new(&mut rxs[i])` is sound.
     let race_result = {
         let race_fut = poll_fn(|cx| {
-            for i in 0..rxs.len() {
-                if let Poll::Ready(res) = Pin::new(&mut rxs[i]).poll(cx) {
+            for (i, rx) in rxs.iter_mut().enumerate() {
+                if let Poll::Ready(res) = Pin::new(rx).poll(cx) {
                     return Poll::Ready((i, res));
                 }
             }
@@ -3284,7 +3284,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             // slot is filled with the last entry, then the last is popped.
             id_map.swap_remove(winner_idx);
             cancel_map.swap_remove(winner_idx);
-            let _ = rxs.swap_remove(winner_idx); // already consumed via poll
+            drop(rxs.swap_remove(winner_idx)); // already consumed via poll
             for ((id, cancelled), rx) in id_map
                 .into_iter()
                 .zip(cancel_map.into_iter())
@@ -3480,8 +3480,8 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 return Err::<(u64, AsyncResult), ()>(());
             }
             let (idx, recv_result) = poll_fn(|cx| {
-                for i in 0..rxs.len() {
-                    if let Poll::Ready(r) = Pin::new(&mut rxs[i]).poll(cx) {
+                for (i, rx) in rxs.iter_mut().enumerate() {
+                    if let Poll::Ready(r) = Pin::new(rx).poll(cx) {
                         return Poll::Ready((i, r));
                     }
                 }
@@ -3489,7 +3489,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             })
             .await;
             let id = id_vec.swap_remove(idx);
-            let _ = rxs.swap_remove(idx);
+            drop(rxs.swap_remove(idx));
             let _ = cancel_vec.swap_remove(idx);
             match recv_result {
                 Ok(r) if r.success => return Ok((id, r)),
