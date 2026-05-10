@@ -53,7 +53,7 @@ final class SharedCounterBackend implements CounterBackend
     public function reset(string $key): int
     {
         $counter = $this->counters->get($key);
-        return $counter?->swap(0) ?? 0;
+        return $counter?->reset() ?? 0;
     }
 }
 
