@@ -125,9 +125,9 @@ try {
     foreach ($e->getPartialErrors() as $promise_id => $err) {
         // 在截止时间之前已经失败的 Promise
     }
-    $still_running = $e->getPendingPromiseIds();
-    // 截止时间到达时仍未完成的 Promise ID。这些 Promise 已被取消，并且其
-    // receivers 已被丢弃——之后将这些 ID 中的任何一个传给
+    $cancelled = $e->getCancelledPromiseIds();
+    // 截止时间到达时仍未完成的 Promise ID。每个 Promise 的取消标志已被
+    // 设置，其 receivers 已被丢弃——之后将这些 ID 中的任何一个传给
     // oxphp_async_await*() 都会抛出 "unknown or already-awaited promise id"。
     // 该列表用于审计记录，而非可恢复的工作队列。
 }
@@ -140,7 +140,7 @@ try {
 | 类 | 抛出于 | 说明 |
 |----|--------|------|
 | `OxPHP\Async\AsyncException`           | `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` | 单个错误，包含消息和可选的原始异常详情。 |
-| `OxPHP\Async\TimeoutException`         | 全部四个 `await_*` 函数在到达截止时间时 | 继承自 `AsyncException`。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors()` 和 `getPendingPromiseIds()` 已填充；其他调用站点二者均返回 `[]`。 |
+| `OxPHP\Async\TimeoutException`         | 全部四个 `await_*` 函数在到达截止时间时 | 继承自 `AsyncException`。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors()` 和 `getCancelledPromiseIds()` 已填充；其他调用站点二者均返回 `[]`。 |
 | `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()` 在所有 Promise 都失败时 | 继承自 `AsyncException`。提供 `getErrors()`（按位置，键为 0..N-1）、`getErrorMap()`（按 ID 索引）、`getPromiseIds()`。 |
 
 ## 错误处理

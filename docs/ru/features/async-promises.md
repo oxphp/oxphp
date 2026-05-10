@@ -125,12 +125,12 @@ try {
     foreach ($e->getPartialErrors() as $promise_id => $err) {
         // промисы, завершившиеся с ошибкой до истечения тайм-аута
     }
-    $still_running = $e->getPendingPromiseIds();
+    $cancelled = $e->getCancelledPromiseIds();
     // Идентификаторы промисов, не успевших завершиться к моменту тайм-аута.
-    // Эти промисы отменены, а их receivers уничтожены — последующая передача
-    // любого такого id в oxphp_async_await*() выбросит «unknown or
-    // already-awaited promise id». Список — это журнал аудита, а не очередь
-    // незавершённой работы.
+    // На каждом из них выставлен флаг отмены, а их receivers уничтожены —
+    // последующая передача любого такого id в oxphp_async_await*() выбросит
+    // «unknown or already-awaited promise id». Список — это журнал аудита,
+    // а не очередь незавершённой работы.
 }
 ```
 
@@ -141,7 +141,7 @@ try {
 | Класс | Выбрасывается | Примечания |
 |-------|---------------|------------|
 | `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` | Одиночная ошибка с сообщением и (опционально) подробностями исходного исключения. |
-| `OxPHP\Async\TimeoutException`         | Все четыре функции `await_*` при истечении тайм-аута | Наследует `AsyncException`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors()` и `getPendingPromiseIds()` заполнены; для остальных вариантов оба возвращают `[]`. |
+| `OxPHP\Async\TimeoutException`         | Все четыре функции `await_*` при истечении тайм-аута | Наследует `AsyncException`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors()` и `getCancelledPromiseIds()` заполнены; для остальных вариантов оба возвращают `[]`. |
 | `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()`, когда все промисы завершились с ошибкой | Наследует `AsyncException`. Предоставляет `getErrors()` (по позиции, ключи 0..N-1), `getErrorMap()` (по идентификатору промиса), `getPromiseIds()`. |
 
 ## Обработка ошибок

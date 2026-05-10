@@ -559,7 +559,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 **抛出异常：**
 - 若异步池已禁用（`ASYNC_WORKERS=0`），则抛出 `OxPHP\Async\AsyncException`
 - 若所有 Promise 都失败，则抛出 `OxPHP\Async\AggregateAsyncException`。该异常通过 `getErrors()`（按位置，键为 0..N-1）、`getErrorMap()`（按 Promise ID 索引）和 `getPromiseIds()` 携带所有错误。
-- 若在 `$timeout` 内没有 Promise 成功完成，则抛出 `OxPHP\Async\TimeoutException`。`getPartialErrors()` 列出在截止时间之前已经失败的 Promise；`getPendingPromiseIds()` 列出尚未完成的 Promise。**这些挂起 Promise 已被取消，并且其 receivers 已被丢弃**——之后将任一 ID 传给 `oxphp_async_await*()` 都会抛出 `"unknown or already-awaited promise id"`。该列表用于审计记录，而非可恢复的工作队列。
+- 若在 `$timeout` 内没有 Promise 成功完成，则抛出 `OxPHP\Async\TimeoutException`。`getPartialErrors()` 列出在截止时间之前已经失败的 Promise；`getCancelledPromiseIds()` 列出尚未完成、因此已被取消的 Promise。**每个 Promise 的取消标志已被设置，其 receivers 已被丢弃**——之后将任一 ID 传给 `oxphp_async_await*()` 都会抛出 `"unknown or already-awaited promise id"`。该列表用于审计记录，而非可恢复的工作队列。
 
 **行为：**
 - 获胜时仍处于挂起状态的非获胜 Promise 仍可通过 `oxphp_async_await()` 单独等待。
@@ -584,7 +584,7 @@ try {
 } catch (\OxPHP\Async\TimeoutException $e) {
     // 在任何镜像成功之前已超时
     $partial = $e->getPartialErrors();
-    $pending = $e->getPendingPromiseIds();
+    $cancelled = $e->getCancelledPromiseIds();
 }
 ```
 
@@ -922,7 +922,7 @@ oxphp_apm_end($spanId);
 | 异常 | 继承自 | 触发时机 |
 |------|--------|----------|
 | `OxPHP\Async\AsyncException` | `\Exception` | 异步任务中的错误（`oxphp_async_await()`）或 `oxphp_async()` 中的无效参数 |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` 或 `oxphp_async_await_any()` 中超时。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors(): array<int, \Throwable>` 和 `getPendingPromiseIds(): list<int>` 已填充；其他调用站点二者均返回 `[]`。 |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` 或 `oxphp_async_await_any()` 中超时。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors(): array<int, \Throwable>` 和 `getCancelledPromiseIds(): list<int>` 已填充；其他调用站点二者均返回 `[]`。 |
 | `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | 由 `oxphp_async_await_any()` 在所有 Promise 都失败时抛出。方法：`getErrors(): list<\Throwable>`（按输入位置，键为 0..N-1）、`getErrorMap(): array<int, \Throwable>`（按 Promise ID 索引）、`getPromiseIds(): list<int>`（按调用顺序的输入 Promise ID）。 |
 | `OxPHP\Async\BorrowException` | `\Exception` | 线程间借用值时出错 |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | 在没有活跃请求时调用 `oxphp_http_request()` |

@@ -125,11 +125,12 @@ try {
     foreach ($e->getPartialErrors() as $promise_id => $err) {
         // promises that already rejected before the deadline
     }
-    $still_running = $e->getPendingPromiseIds();
-    // Promise ids that had not settled at the deadline. They were cancelled
-    // AND their receivers were dropped — passing any of these ids to
-    // oxphp_async_await*() afterwards throws "unknown or already-awaited
-    // promise id". Treat the list as an audit trail, not a resumable queue.
+    $cancelled = $e->getCancelledPromiseIds();
+    // Promise ids that had not settled at the deadline. The cancel flag
+    // is set on each AND their receivers were dropped — passing any of
+    // these ids to oxphp_async_await*() afterwards throws "unknown or
+    // already-awaited promise id". Treat the list as an audit trail, not
+    // a resumable queue.
 }
 ```
 
@@ -140,7 +141,7 @@ Non-winning promises that were still pending at the moment of victory remain awa
 | Class | Thrown by | Notes |
 |-------|-----------|-------|
 | `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` | Single error with message and optional original-exception details. |
-| `OxPHP\Async\TimeoutException`         | All four await-* on deadline | Extends `AsyncException`. For `oxphp_async_await_any()` timeouts, `getPartialErrors()` and `getPendingPromiseIds()` are populated; for the other call sites both return `[]`. |
+| `OxPHP\Async\TimeoutException`         | All four await-* on deadline | Extends `AsyncException`. For `oxphp_async_await_any()` timeouts, `getPartialErrors()` and `getCancelledPromiseIds()` are populated; for the other call sites both return `[]`. |
 | `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()` when every promise rejects | Extends `AsyncException`. Provides `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), `getPromiseIds()`. |
 
 ## Error Handling

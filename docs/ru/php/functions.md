@@ -561,7 +561,7 @@ oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
 **Выбрасывает:**
 - `OxPHP\Async\AsyncException` если асинхронный пул отключён (`ASYNC_WORKERS=0`)
 - `OxPHP\Async\AggregateAsyncException` если все промисы завершились с ошибкой. Исключение содержит все ошибки через `getErrors()` (по позиции, ключи 0..N-1), `getErrorMap()` (по идентификатору промиса) и `getPromiseIds()`.
-- `OxPHP\Async\TimeoutException` если ни один промис не завершился успешно в течение `$timeout`. `getPartialErrors()` содержит промисы, успевшие завершиться с ошибкой до истечения тайм-аута; `getPendingPromiseIds()` — те, что не успели завершиться. **Незавершённые промисы отменяются, а их receivers уничтожаются** — последующая передача любого такого id в `oxphp_async_await*()` выбросит `"unknown or already-awaited promise id"`. Список — это журнал аудита, а не очередь незавершённой работы.
+- `OxPHP\Async\TimeoutException` если ни один промис не завершился успешно в течение `$timeout`. `getPartialErrors()` содержит промисы, успевшие завершиться с ошибкой до истечения тайм-аута; `getCancelledPromiseIds()` — те, что не успели завершиться и были поэтому отменены. **На каждом из них выставлен флаг отмены, а их receivers уничтожены** — последующая передача любого такого id в `oxphp_async_await*()` выбросит `"unknown or already-awaited promise id"`. Список — это журнал аудита, а не очередь незавершённой работы.
 
 **Поведение:**
 - Промисы, остававшиеся в ожидании на момент победы, остаются доступными для индивидуального вызова `oxphp_async_await()`.
@@ -586,7 +586,7 @@ try {
 } catch (\OxPHP\Async\TimeoutException $e) {
     // тайм-аут истёк прежде чем какое-либо зеркало успело ответить
     $partial = $e->getPartialErrors();
-    $pending = $e->getPendingPromiseIds();
+    $cancelled = $e->getCancelledPromiseIds();
 }
 ```
 
@@ -924,7 +924,7 @@ oxphp_apm_end($spanId);
 | Исключение | Наследует | Когда выбрасывается |
 |------------|-----------|---------------------|
 | `OxPHP\Async\AsyncException` | `\Exception` | Ошибка в асинхронной задаче (`oxphp_async_await()`) или невалидные аргументы в `oxphp_async()` |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Превышен тайм-аут в любой из функций `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` или `oxphp_async_await_any()`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors(): array<int, \Throwable>` и `getPendingPromiseIds(): list<int>` заполнены; для остальных вариантов оба возвращают `[]`. |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Превышен тайм-аут в любой из функций `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` или `oxphp_async_await_any()`. Для тайм-аутов `oxphp_async_await_any()` методы `getPartialErrors(): array<int, \Throwable>` и `getCancelledPromiseIds(): list<int>` заполнены; для остальных вариантов оба возвращают `[]`. |
 | `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | Выбрасывается из `oxphp_async_await_any()`, когда все промисы завершились с ошибкой. Методы: `getErrors(): list<\Throwable>` (по позиции во входном массиве, ключи 0..N-1), `getErrorMap(): array<int, \Throwable>` (по идентификатору промиса), `getPromiseIds(): list<int>` (исходные идентификаторы промисов в порядке вызова). |
 | `OxPHP\Async\BorrowException` | `\Exception` | Ошибка заимствования значения между потоками |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Вызов `oxphp_http_request()` вне активного запроса |

@@ -559,7 +559,7 @@ Returns as soon as one promise FULFILLS. Rejections are accumulated, and only be
 **Throws:**
 - `OxPHP\Async\AsyncException` if the async pool is disabled (`ASYNC_WORKERS=0`)
 - `OxPHP\Async\AggregateAsyncException` if every promise rejected. The exception carries every error via `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), and `getPromiseIds()`.
-- `OxPHP\Async\TimeoutException` if no promise fulfilled within `$timeout`. `getPartialErrors()` lists the promises that already rejected before the deadline; `getPendingPromiseIds()` lists those that had not settled. **Pending promises are cancelled and their receivers are dropped** — passing any of these ids to `oxphp_async_await*()` afterwards throws `"unknown or already-awaited promise id"`. The list is an audit trail, not a queue of resumable work.
+- `OxPHP\Async\TimeoutException` if no promise fulfilled within `$timeout`. `getPartialErrors()` lists the promises that already rejected before the deadline; `getCancelledPromiseIds()` lists those that had not settled and have therefore been cancelled. **Their cancel flag is set and their receivers are dropped** — passing any of these ids to `oxphp_async_await*()` afterwards throws `"unknown or already-awaited promise id"`. The list is an audit trail, not a queue of resumable work.
 
 **Behavior:**
 - Promises that were still pending at the moment of victory remain awaitable individually with `oxphp_async_await()`.
@@ -584,7 +584,7 @@ try {
 } catch (\OxPHP\Async\TimeoutException $e) {
     // deadline elapsed before any mirror fulfilled
     $partial = $e->getPartialErrors();
-    $pending = $e->getPendingPromiseIds();
+    $cancelled = $e->getCancelledPromiseIds();
 }
 ```
 
@@ -922,7 +922,7 @@ All exceptions registered by the extension:
 | Exception | Extends | When thrown |
 |-----------|---------|------------|
 | `OxPHP\Async\AsyncException` | `\Exception` | Error in an async task (`oxphp_async_await()`) or invalid arguments in `oxphp_async()` |
-| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Timeout exceeded in any of `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`. For `oxphp_async_await_any()` timeouts the accessors `getPartialErrors(): array<int, \Throwable>` and `getPendingPromiseIds(): list<int>` are populated; for the other call sites both return `[]`. |
+| `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Timeout exceeded in any of `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`. For `oxphp_async_await_any()` timeouts the accessors `getPartialErrors(): array<int, \Throwable>` and `getCancelledPromiseIds(): list<int>` are populated; for the other call sites both return `[]`. |
 | `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | Thrown by `oxphp_async_await_any()` when every promise rejected. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>` (input promise ids in order). |
 | `OxPHP\Async\BorrowException` | `\Exception` | Error borrowing a value between threads |
 | `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |

@@ -39,11 +39,11 @@ if ($caught !== null) {
         $t->assertContains('partial error message', $partial[$p1]->getMessage(), 'quick fail');
     }
 
-    $pending = $caught->getPendingPromiseIds();
-    $t->assertCount('two pending ids', $pending, 2);
-    // Order of pending may not match input order; check membership both ways.
-    $t->assertTrue("pending contains p2 id", in_array($p2, $pending, true));
-    $t->assertTrue("pending contains p3 id", in_array($p3, $pending, true));
+    $cancelled = $caught->getCancelledPromiseIds();
+    $t->assertCount('two cancelled ids', $cancelled, 2);
+    // Order of cancelled may not match input order; check membership both ways.
+    $t->assertTrue("cancelled contains p2 id", in_array($p2, $cancelled, true));
+    $t->assertTrue("cancelled contains p3 id", in_array($p3, $cancelled, true));
 }
 
 $t->done();

@@ -112,18 +112,18 @@ impl Plugin for AsyncPlugin {
             .build()?;
 
         // OxPHP\Async\TimeoutException extends OxPHP\Async\AsyncException
-        // Carries optional partial-errors / pending-ids context (populated only
+        // Carries optional partial-errors / cancelled-ids context (populated only
         // by oxphp_async_await_any timeout path; empty for all other timeouts).
         ctx.register_class("OxPHP\\Async\\TimeoutException")
             .extends("OxPHP\\Async\\AsyncException")
             .property("__partialErrors", PhpType::Array, Visibility::Private)
-            .property("__pendingPromiseIds", PhpType::Array, Visibility::Private)
+            .property("__cancelledPromiseIds", PhpType::Array, Visibility::Private)
             .method("getPartialErrors")
             .returns(PhpType::Array)
             .handler(|call| return_property_array(call, "__partialErrors"))
-            .method("getPendingPromiseIds")
+            .method("getCancelledPromiseIds")
             .returns(PhpType::Array)
-            .handler(|call| return_property_array(call, "__pendingPromiseIds"))
+            .handler(|call| return_property_array(call, "__cancelledPromiseIds"))
             .build()?;
 
         // OxPHP\Async\AggregateAsyncException extends OxPHP\Async\AsyncException
@@ -493,19 +493,19 @@ mod tests {
             .find(|c| c.fqn == "OxPHP\\Async\\TimeoutException")
             .expect("TimeoutException must be registered");
 
-        // Properties: __partialErrors, __pendingPromiseIds (private arrays).
+        // Properties: __partialErrors, __cancelledPromiseIds (private arrays).
         let prop_names: Vec<&str> = to.properties.iter().map(|p| p.name.as_str()).collect();
         assert!(prop_names.contains(&"__partialErrors"));
-        assert!(prop_names.contains(&"__pendingPromiseIds"));
+        assert!(prop_names.contains(&"__cancelledPromiseIds"));
         for prop in &to.properties {
             assert_eq!(prop.visibility, Visibility::Private);
             assert_eq!(prop.php_type, PhpType::Array);
         }
 
-        // Methods: getPartialErrors, getPendingPromiseIds (each with a handler).
+        // Methods: getPartialErrors, getCancelledPromiseIds (each with a handler).
         let method_names: Vec<&str> = to.methods.iter().map(|m| m.name.as_str()).collect();
         assert!(method_names.contains(&"getPartialErrors"));
-        assert!(method_names.contains(&"getPendingPromiseIds"));
+        assert!(method_names.contains(&"getCancelledPromiseIds"));
         for m in &to.methods {
             assert!(m.handler.is_some(), "method {} must have a handler", m.name);
             assert_eq!(m.return_type, Some(PhpType::Array));

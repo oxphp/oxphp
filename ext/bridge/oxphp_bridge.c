@@ -3344,7 +3344,9 @@ int oxphp_bridge_aggregate_throw_timeout(
         );
     }
 
-    /* __pendingPromiseIds: list<int>. */
+    /* __cancelledPromiseIds: list<int>. The cancel flag has been set on
+     * each of these promises and their receivers stranded — they are
+     * not resumable via oxphp_async_await*(). */
     zval ids;
     array_init(&ids);
     for (uint32_t i = 0; i < pending_count; i++) {
@@ -3354,7 +3356,7 @@ int oxphp_bridge_aggregate_throw_timeout(
     zend_update_property(to_ce, Z_OBJ(ex),
                          "__partialErrors", sizeof("__partialErrors") - 1, &partial);
     zend_update_property(to_ce, Z_OBJ(ex),
-                         "__pendingPromiseIds", sizeof("__pendingPromiseIds") - 1, &ids);
+                         "__cancelledPromiseIds", sizeof("__cancelledPromiseIds") - 1, &ids);
     zval_ptr_dtor(&partial);
     zval_ptr_dtor(&ids);
 

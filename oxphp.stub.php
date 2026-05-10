@@ -383,7 +383,7 @@ function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): arr
  *     foreach ($e->getPartialErrors() as $promise_id => $err) {
  *         // who failed
  *     }
- *     $cancelled = $e->getPendingPromiseIds();
+ *     $cancelled = $e->getCancelledPromiseIds();
  *     // Audit-only: these ids are no longer awaitable.
  * }
  */
@@ -820,7 +820,7 @@ namespace OxPHP\Async {
      * Thrown by async-await-style functions when a deadline expires.
      *
      * For oxphp_async_await_any(), additional context is exposed via
-     * getPartialErrors() and getPendingPromiseIds(). For other call sites
+     * getPartialErrors() and getCancelledPromiseIds(). For other call sites
      * (oxphp_async_await, oxphp_async_await_all, oxphp_async_await_race)
      * both methods return empty arrays.
      */
@@ -835,17 +835,18 @@ namespace OxPHP\Async {
         public function getPartialErrors(): array {}
 
         /**
-         * Promise IDs that did not settle before the deadline. These promises
-         * have been cancelled AND their receivers were dropped — passing any
-         * of these ids to oxphp_async_await() / oxphp_async_await_race() /
-         * oxphp_async_await_any() / oxphp_async_await_all() afterwards throws
-         * OxPHP\Async\AsyncException ("unknown or already-awaited promise id").
-         * Treat the list as a fire-and-forget audit trail, not a queue of
-         * resumable work. Only populated by oxphp_async_await_any().
+         * Promise IDs that did not settle before the deadline. The cancel
+         * flag has been set on each, AND their receivers were dropped —
+         * passing any of these ids to oxphp_async_await() /
+         * oxphp_async_await_race() / oxphp_async_await_any() /
+         * oxphp_async_await_all() afterwards throws OxPHP\Async\AsyncException
+         * ("unknown or already-awaited promise id"). Treat the list as a
+         * fire-and-forget audit trail, not a queue of resumable work. Only
+         * populated by oxphp_async_await_any().
          *
          * @return list<int>
          */
-        public function getPendingPromiseIds(): array {}
+        public function getCancelledPromiseIds(): array {}
     }
 
     /**
