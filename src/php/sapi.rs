@@ -3220,15 +3220,27 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             let winner_id = id_map[winner_idx];
 
             // Put remaining (non-winning) receivers back into PROMISE_MAP.
-            // select_all returns remaining in original order with the winner removed.
-            let mut remaining_iter = remaining.into_iter();
-            for orig_idx in 0..id_map.len() {
-                if orig_idx == winner_idx {
-                    continue;
-                }
-                if let Some(rx) = remaining_iter.next() {
-                    store_promise(id_map[orig_idx], rx, cancel_map[orig_idx].clone());
-                }
+            //
+            // `select_all` uses `Vec::swap_remove` internally on its inner
+            // Vec when one future settles — the resulting `remaining` is NOT
+            // an order-preserving slice of the input. Specifically, the
+            // element previously at the LAST index gets swapped into the
+            // winner's slot, then the last is popped. We must apply the same
+            // swap_remove to id_map / cancel_map so they stay parallel with
+            // `remaining`. Earlier code paired remaining[i] with the i-th
+            // input slot skipping the winner, which is wrong whenever
+            // winner_idx is anything other than the last index.
+            let mut id_map = id_map;
+            let mut cancel_map = cancel_map;
+            id_map.swap_remove(winner_idx);
+            cancel_map.swap_remove(winner_idx);
+            for ((id, cancelled), rx) in id_map
+                .iter()
+                .copied()
+                .zip(cancel_map.iter().cloned())
+                .zip(remaining.into_iter())
+            {
+                store_promise(id, rx, cancelled);
             }
 
             // Handle the winning result
