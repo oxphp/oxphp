@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 use dashmap::DashMap;
 
 use crate::plugins::ox_shared::cycle::{format_cycle_path, would_create_cycle, CycleError};
-use crate::plugins::ox_shared::error::{set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{read_last_error_message, set_last_error, SharedError};
 use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType, REGISTRY};
 use crate::plugins::ox_shared::value::{
     collect_shared_refs, sv_release_nested, sv_retain_nested, SharedRef, SharedValue,
@@ -1621,21 +1621,9 @@ fn map_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     };
     Err(PhpError::Exception {
         class: class.to_string(),
-        message: read_last_error(),
+        message: read_last_error_message(),
         code: 0,
     })
-}
-
-fn read_last_error() -> String {
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
 /// Serialise arg `idx` (a `mixed` PHP value) to a libc-malloc'd portbuf
