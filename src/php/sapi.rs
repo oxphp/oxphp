@@ -3005,6 +3005,22 @@ pub unsafe extern "C" fn async_dispatch_callback(
     }
 }
 
+/// Stores a generic error in bridge TLS so the PHP-side handler's
+/// `read_bridge_exception` surfaces a meaningful class+message when an
+/// internal failure (channel closed, unknown id, runtime not initialized)
+/// occurs without a worker-thrown exception. Without this, the handler
+/// reads stale or empty TLS and reports `[Unknown] unknown error`.
+///
+/// # Safety
+/// Calls into the bridge C FFI; safe as long as the bridge module is loaded
+/// (which it is for any await path that can reach this helper).
+unsafe fn set_bridge_internal_error(message: &str) {
+    use crate::bridge::ffi;
+    let cls = CString::new("OxPHP\\Async\\AsyncException").unwrap_or_default();
+    let msg = CString::new(message).unwrap_or_default();
+    ffi::oxphp_bridge_set_async_exception(cls.as_ptr(), msg.as_ptr());
+}
+
 /// Rust-side callback invoked from C when PHP calls `oxphp_async_await()`.
 ///
 /// Blocks on the oneshot receiver until the async result arrives,
@@ -3058,7 +3074,12 @@ pub unsafe extern "C" fn await_dispatch_callback(
     // Take promise from map
     let (rx, cancelled) = match take_promise(id) {
         Some(p) => p,
-        None => return -1,
+        None => {
+            set_bridge_internal_error(&format!(
+                "unknown or already-awaited promise id {promise_id}"
+            ));
+            return -1;
+        }
     };
 
     // Block on result — use tokio::runtime::Handle::block_on for timeout support
@@ -3071,6 +3092,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
                     Ok(Err(_)) => {
                         // Channel closed — task was dropped
                         cleanup_promise(id);
+                        set_bridge_internal_error("promise channel closed unexpectedly");
                         return -1;
                     }
                     Err(_) => {
@@ -3090,6 +3112,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
                     Ok(r) => r,
                     Err(_) => {
                         cleanup_promise(id);
+                        set_bridge_internal_error("promise channel closed unexpectedly");
                         return -1;
                     }
                 }
@@ -3101,6 +3124,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
             Ok(r) => r,
             Err(_) => {
                 cleanup_promise(id);
+                set_bridge_internal_error("promise channel closed unexpectedly");
                 return -1;
             }
         }
@@ -3217,6 +3241,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             for (rx, (id, cancelled)) in rxs.into_iter().zip(id_map.iter().zip(cancel_map.iter())) {
                 store_promise(*id, rx, cancelled.clone());
             }
+            set_bridge_internal_error("async runtime not initialized");
             return -1;
         }
     };
@@ -3274,6 +3299,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
                 Err(_) => {
                     // Channel closed — task was dropped
                     cleanup_promise(winner_id);
+                    set_bridge_internal_error("promise channel closed unexpectedly");
                     return -1;
                 }
             };
