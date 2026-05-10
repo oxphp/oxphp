@@ -71,6 +71,7 @@ impl Plugin for SharedPlugin {
 
         // Register the atomic type classes.
         types::counter::register_class(ctx)?;
+        types::atomic::register_class(ctx)?;
         types::flag::register_class(ctx)?;
         types::once::register_class(ctx)?;
         types::mutex::register_class(ctx)?;

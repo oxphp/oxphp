@@ -256,22 +256,16 @@ atomic_fetch_ffi!(oxphp_shared_atomic_fetch_xor, fetch_xor);
 // at the PHP boundary and raise a typed exception instead, so PHP users
 // get a clear error rather than a "Rust panic" generic.
 //
-// `#[allow(dead_code)]` because these are only consumed by the PHP class
-// handler registered in a follow-up commit; the Rust unit tests below
-// use them directly so they are reachable.
+// Consumed by the PHP class handlers registered below.
 
-#[allow(dead_code)]
 use crate::plugin::php::PhpError;
 
-#[allow(dead_code)]
 const ORDERING_NAMES: [&str; 5] = ["Relaxed", "Acquire", "Release", "AcqRel", "SeqCst"];
 
-#[allow(dead_code)]
 fn ordering_name(v: u8) -> &'static str {
     ORDERING_NAMES.get(v as usize).copied().unwrap_or("?")
 }
 
-#[allow(dead_code)]
 fn invalid_ordering(op: &str, v: u8, allowed: &str) -> PhpError {
     PhpError::Exception {
         class: "OxPHP\\Shared\\InvalidOrderingException".to_string(),
@@ -285,7 +279,6 @@ fn invalid_ordering(op: &str, v: u8, allowed: &str) -> PhpError {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn validate_ordering_for_load(v: u8) -> Result<(), PhpError> {
     match v {
         0 | 1 | 4 => Ok(()), // Relaxed, Acquire, SeqCst
@@ -293,7 +286,6 @@ pub(crate) fn validate_ordering_for_load(v: u8) -> Result<(), PhpError> {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn validate_ordering_for_store(v: u8) -> Result<(), PhpError> {
     match v {
         0 | 2 | 4 => Ok(()), // Relaxed, Release, SeqCst
@@ -301,7 +293,6 @@ pub(crate) fn validate_ordering_for_store(v: u8) -> Result<(), PhpError> {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn validate_cas_failure_ordering(v: u8) -> Result<(), PhpError> {
     match v {
         0 | 1 | 4 => Ok(()),
@@ -311,6 +302,263 @@ pub(crate) fn validate_cas_failure_ordering(v: u8) -> Result<(), PhpError> {
             "Relaxed, Acquire, SeqCst",
         )),
     }
+}
+
+// ─── PHP class registration ───────────────────────────────────────────
+
+use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
+use crate::plugin::{PluginContext, PluginError};
+use crate::plugins::ox_shared::handle::SharedHandle;
+
+fn atomic_rc_to_result(rc: c_int) -> Result<(), PhpError> {
+    if rc == 0 {
+        return Ok(());
+    }
+    let class = match rc {
+        -2 => "OxPHP\\Shared\\StaleHandleException",
+        -3 => "OxPHP\\Shared\\TypeException",
+        -4 => "OxPHP\\Shared\\CapacityException",
+        -10 => "OxPHP\\Shared\\UninitializedException",
+        _ => "OxPHP\\Shared\\SharedException",
+    };
+    Err(PhpError::Exception {
+        class: class.to_string(),
+        message: read_last_error_atomic(),
+        code: 0,
+    })
+}
+
+fn read_last_error_atomic() -> String {
+    let mut buf = [0u8; 512];
+    let n = unsafe {
+        crate::plugins::ox_shared::error::oxphp_shared_last_error(
+            buf.as_mut_ptr() as *mut std::os::raw::c_char,
+            buf.len(),
+        )
+    };
+    let len = n.min(buf.len() - 1);
+    String::from_utf8_lossy(&buf[..len]).into_owned()
+}
+
+/// Read the optional `order` enum argument at `idx`. Returns the SeqCst
+/// default (4) if the caller omitted it.
+fn read_order_arg(call: &mut crate::bridge::call::NativeCall, idx: u32) -> Result<u8, PhpError> {
+    if call.argc() > idx {
+        Ok(call.arg_enum_long(idx)? as u8)
+    } else {
+        Ok(4)
+    }
+}
+
+fn order_default() -> PhpValue {
+    PhpValue::ConstExpr("\\OxPHP\\Shared\\Ordering::SeqCst".to_string())
+}
+
+fn order_type() -> PhpType {
+    PhpType::Enum("OxPHP\\Shared\\Ordering".to_string())
+}
+
+pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
+    ctx.register_class("OxPHP\\Shared\\Atomic")
+        .implements("OxPHP\\Shared\\Shareable")
+        .with_storage(|| SharedHandle::new(SharedType::Atomic))
+        .magic(MagicMethod::Clone)
+        .handler(|_call| {
+            Err(PhpError::Exception {
+                class: "OxPHP\\Shared\\SharedException".to_string(),
+                message: "Shared instances cannot be cloned. Use cross-thread \
+                          transfer via oxphp_async(fn() use ($this) {...}) for \
+                          sharing, or explicitly create a new instance for an \
+                          independent copy."
+                    .to_string(),
+                code: 0,
+            })
+        })
+        .method("__construct")
+        .optional_param("initial", PhpType::Int, PhpValue::Int(0))
+        .handler(|call| {
+            let initial = if call.argc() > 0 {
+                call.arg_long(0).unwrap_or(0)
+            } else {
+                0
+            };
+            let mut out_id: u64 = 0;
+            let rc = unsafe { oxphp_shared_atomic_create(initial, &mut out_id) };
+            if rc != 0 {
+                return Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\SharedException".to_string(),
+                    message: read_last_error_atomic(),
+                    code: 0,
+                });
+            }
+            let handle = call.storage_mut::<SharedHandle>()?;
+            handle.shared_id = out_id;
+            handle.type_tag = SharedType::Atomic as u8;
+            Ok(())
+        })
+        .method("load")
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let order = read_order_arg(call, 0)?;
+            validate_ordering_for_load(order)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut out: i64 = 0;
+            let rc = unsafe { oxphp_shared_atomic_load(handle.shared_id, order, &mut out) };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(out);
+            Ok(())
+        })
+        .method("store")
+        .param("value", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Void)
+        .handler(|call| {
+            let value = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            validate_ordering_for_store(order)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let rc = unsafe { oxphp_shared_atomic_store(handle.shared_id, value, order) };
+            atomic_rc_to_result(rc)?;
+            Ok(())
+        })
+        .method("swap")
+        .param("value", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let value = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc =
+                unsafe { oxphp_shared_atomic_swap(handle.shared_id, value, order, &mut prev) };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("compareAndSet")
+        .param("expect", PhpType::Int)
+        .param("new", PhpType::Int)
+        .optional_param("success", order_type(), order_default())
+        .optional_param("failure", order_type(), order_default())
+        .returns(PhpType::Bool)
+        .handler(|call| {
+            let expect = call.arg_long(0)?;
+            let new_val = call.arg_long(1)?;
+            let success = read_order_arg(call, 2)?;
+            let failure = read_order_arg(call, 3)?;
+            validate_cas_failure_ordering(failure)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut swapped: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_atomic_cas(
+                    handle.shared_id,
+                    expect,
+                    new_val,
+                    success,
+                    failure,
+                    &mut swapped,
+                )
+            };
+            atomic_rc_to_result(rc)?;
+            call.ret_bool(swapped != 0);
+            Ok(())
+        })
+        .method("fetchAdd")
+        .param("delta", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let delta = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc = unsafe {
+                oxphp_shared_atomic_fetch_add(handle.shared_id, delta, order, &mut prev)
+            };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("fetchSub")
+        .param("delta", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let delta = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc = unsafe {
+                oxphp_shared_atomic_fetch_sub(handle.shared_id, delta, order, &mut prev)
+            };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("fetchAnd")
+        .param("mask", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let mask = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc =
+                unsafe { oxphp_shared_atomic_fetch_and(handle.shared_id, mask, order, &mut prev) };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("fetchOr")
+        .param("mask", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let mask = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc =
+                unsafe { oxphp_shared_atomic_fetch_or(handle.shared_id, mask, order, &mut prev) };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("fetchXor")
+        .param("mask", PhpType::Int)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let mask = call.arg_long(0)?;
+            let order = read_order_arg(call, 1)?;
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc =
+                unsafe { oxphp_shared_atomic_fetch_xor(handle.shared_id, mask, order, &mut prev) };
+            atomic_rc_to_result(rc)?;
+            call.ret_long(prev);
+            Ok(())
+        })
+        .method("id")
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let handle = call.storage::<SharedHandle>()?;
+            if !handle.is_initialized() {
+                return Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\UninitializedException".to_string(),
+                    message: "uninitialised Shared wrapper".to_string(),
+                    code: 0,
+                });
+            }
+            call.ret_long(handle.shared_id as i64);
+            Ok(())
+        })
+        .build()?;
+
+    Ok(())
 }
 
 #[cfg(test)]
