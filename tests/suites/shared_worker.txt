@@ -1,5 +1,7 @@
 # profile: worker
-# description: Shared state primitives — Channel fiber tests under worker mode
+# description: Shared state primitives — Channel fiber tests + Counter / Atomic cross-thread
 
 shared/test_channel_fiber_producer_consumer
 shared/test_channel_shutdown_drain
+shared/test_counter_cross_thread
+shared/test_atomic_cross_thread

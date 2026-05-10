@@ -1,6 +1,11 @@
 # profile: default
-# description: Shared state primitives — Channel, Map, Pool
+# description: Shared state primitives — Channel, Map, Pool, Counter, Atomic
 
+shared/test_counter_basic
+shared/test_counter_no_swap
+shared/test_atomic_basic
+shared/test_atomic_ordering
+shared/test_atomic_state_machine
 shared/test_channel_basic
 shared/test_channel_forbidden_clone
 shared/test_channel_try_send_full
