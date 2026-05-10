@@ -110,7 +110,9 @@ impl SharedInnerAtomicExt for dyn SharedInner {
 use std::os::raw::c_int;
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{
+    ffi_entry, read_last_error_message, set_last_error, SharedError,
+};
 use crate::plugins::ox_shared::registry::registry;
 
 fn ordering_from_u8(v: u8) -> Ordering {
@@ -344,21 +346,9 @@ fn atomic_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     };
     Err(PhpError::Exception {
         class: class.to_string(),
-        message: read_last_error_atomic(),
+        message: read_last_error_message(),
         code: 0,
     })
-}
-
-fn read_last_error_atomic() -> String {
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
 /// Read the optional `order` enum argument at `idx`. Returns the SeqCst
@@ -422,7 +412,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error_atomic(),
+                    message: read_last_error_message(),
                     code: 0,
                 });
             }

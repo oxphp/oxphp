@@ -4,7 +4,9 @@ use std::os::raw::c_int;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{
+    ffi_entry, read_last_error_message, set_last_error, SharedError,
+};
 use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
 use crate::plugins::ox_shared::value::SharedValue;
 
@@ -223,7 +225,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error(),
+                    message: read_last_error_message(),
                     code: 0,
                 });
             }
@@ -343,7 +345,7 @@ pub(super) fn counter_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     if rc == 0 {
         return Ok(());
     }
-    let msg = read_last_error();
+    let msg = read_last_error_message();
     let class = match rc {
         -2 => "OxPHP\\Shared\\StaleHandleException",
         -3 => "OxPHP\\Shared\\TypeException",
@@ -356,18 +358,6 @@ pub(super) fn counter_rc_to_result(rc: c_int) -> Result<(), PhpError> {
         message: msg,
         code: 0,
     })
-}
-
-fn read_last_error() -> String {
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
 }
 
 #[cfg(test)]

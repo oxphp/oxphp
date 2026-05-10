@@ -102,6 +102,18 @@ pub unsafe extern "C" fn oxphp_shared_last_error(buf: *mut c_char, buflen: usize
     })
 }
 
+/// Read the thread-local last-error string by calling
+/// `oxphp_shared_last_error` into a fixed 512-byte stack buffer.
+/// Used by every Shared\* type's PHP-facing exception path so the
+/// message field of the thrown PhpError matches what the FFI layer
+/// recorded just before it returned a non-zero status.
+pub fn read_last_error_message() -> String {
+    let mut buf = [0u8; 512];
+    let n = unsafe { oxphp_shared_last_error(buf.as_mut_ptr() as *mut c_char, buf.len()) };
+    let len = n.min(buf.len() - 1);
+    String::from_utf8_lossy(&buf[..len]).into_owned()
+}
+
 /// FFI wrapper that runs `body` inside `catch_unwind` and translates
 /// errors into status codes per SharedError::code.
 pub fn ffi_entry<F>(body: F) -> c_int
