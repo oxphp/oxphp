@@ -65,8 +65,6 @@ pub struct AsyncResult {
     pub exception_class: Option<String>,
     /// Exception message, if the closure threw.
     pub exception_message: Option<String>,
-    /// Exception backtrace string, if the closure threw.
-    pub exception_trace: Option<String>,
 }
 
 // SAFETY: The serialized_value pointer is a system-malloc'd buffer exclusively
@@ -197,14 +195,12 @@ mod tests {
             serialized_value_len: 0,
             exception_class: None,
             exception_message: None,
-            exception_trace: None,
         };
 
         assert!(result.success);
         assert!(result.serialized_value.is_null());
         assert!(result.exception_class.is_none());
         assert!(result.exception_message.is_none());
-        assert!(result.exception_trace.is_none());
     }
 
     #[test]
@@ -215,7 +211,6 @@ mod tests {
             serialized_value_len: 0,
             exception_class: Some("RuntimeException".to_string()),
             exception_message: Some("something went wrong".to_string()),
-            exception_trace: Some("#0 main()".to_string()),
         };
 
         assert!(!result.success);
@@ -225,7 +220,6 @@ mod tests {
             result.exception_message.as_deref(),
             Some("something went wrong")
         );
-        assert_eq!(result.exception_trace.as_deref(), Some("#0 main()"));
     }
 
     #[test]

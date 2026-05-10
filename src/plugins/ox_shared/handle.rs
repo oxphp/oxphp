@@ -1,8 +1,5 @@
 //! SharedHandle — per-instance storage attached to every Shared\*
 //! PHP wrapper via ClassBuilder::with_storage().
-//!
-//! Spec: .internal/technical-docs/en/features/shared/01-registry.md
-//!       §PHP-side wrapper
 
 use crate::plugins::ox_shared::registry::SharedType;
 

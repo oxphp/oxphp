@@ -1,6 +1,4 @@
 //! /__ox_shared/* API endpoints + Prometheus metrics collector.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/30-observability.md
 
 use bytes::Bytes;
 use http::{Response, StatusCode};

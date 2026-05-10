@@ -1,6 +1,4 @@
 //! SharedRegistry — process-global entry store. Arc-refcount lifecycle.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/01-registry.md
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};

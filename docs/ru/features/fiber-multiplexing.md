@@ -244,7 +244,7 @@ fiber.stack_size = 512K
 - **Только кооперативное** — CPU-нагруженный код голодает другие файберы. Вытеснения нет
 - **Блокирующий I/O блокирует поток** — все блокирующие вызовы должны быть обёрнуты в `oxphp_async()`
 - **Встроенные `sleep()`/`usleep()` PHP не поддерживают файберы** — используйте `oxphp_sleep()`/`oxphp_usleep()`
-- **`oxphp_async_await_all()` и `oxphp_async_await_any()` не приостанавливают файбер** — используйте последовательные вызовы `oxphp_async_await()`
+- **`oxphp_async_await_all()`, `oxphp_async_await_race()` и `oxphp_async_await_any()` не приостанавливают файбер** — используйте последовательные вызовы `oxphp_async_await()`
 
 ## См. также
 

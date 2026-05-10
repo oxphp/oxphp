@@ -1559,6 +1559,37 @@ void oxphp_zval_addref(void *zv) {
     Z_TRY_ADDREF_P((zval*)zv);
 }
 
+/* ── Object property access ── */
+
+void *oxphp_object_read_property(void *object_zval, const char *property_name) {
+    /* Caller contract: property is plain private/protected, no __get / hooks /
+     * readonly. zend_std_read_property's rv-write branches are not handled —
+     * for those branches Zend writes into the stack-allocated `rv` below and
+     * returns its address, which would dangle once we leave this frame. */
+    zval *obj = (zval *)object_zval;
+    if (!obj || Z_TYPE_P(obj) != IS_OBJECT || !property_name) return NULL;
+    size_t len = strlen(property_name);
+    zval rv;
+    /* zend_read_property returns &EG(uninitialized_zval) when the property is
+     * unset; the caller must check via oxphp_zval_is_null_or_unset. */
+    zval *result = zend_read_property(
+        Z_OBJCE_P(obj), Z_OBJ_P(obj), property_name, len, /* silent */ 1, &rv);
+    return (void *)result;
+}
+
+int oxphp_zval_is_null_or_unset(const void *zval_ptr) {
+    if (!zval_ptr) return 1;
+    const zval *z = (const zval *)zval_ptr;
+    return (Z_ISUNDEF_P(z) || Z_ISNULL_P(z)) ? 1 : 0;
+}
+
+void oxphp_zval_copy_to_retval(const void *src_zval, void *dst_zval) {
+    if (!src_zval || !dst_zval) return;
+    zval *src = (zval *)src_zval;
+    zval *dst = (zval *)dst_zval;
+    ZVAL_COPY(dst, src);
+}
+
 void *oxphp_closure_addref(void *closure_zv) {
     zval *zv = (zval*)closure_zv;
     if (Z_TYPE_P(zv) == IS_OBJECT) {
@@ -2207,6 +2238,7 @@ int oxphp_execute_script_safe(void *file_handle) {
  */
 static oxphp_async_dispatch_fn_t rust_async_dispatch = NULL;
 static oxphp_await_dispatch_fn_t rust_await_dispatch = NULL;
+static oxphp_await_race_dispatch_fn_t rust_await_race_dispatch = NULL;
 static oxphp_await_any_dispatch_fn_t rust_await_any_dispatch = NULL;
 
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn) {
@@ -2215,6 +2247,10 @@ void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn) {
 
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn) {
     rust_await_dispatch = fn;
+}
+
+void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn) {
+    rust_await_race_dispatch = fn;
 }
 
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn) {
@@ -2263,6 +2299,16 @@ int64_t oxphp_bridge_async_dispatch(
 int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval) {
     if (__builtin_expect(rust_await_dispatch != NULL, 1)) {
         return rust_await_dispatch(promise_id, timeout, retval);
+    }
+    return -1;
+}
+
+int oxphp_bridge_await_race_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+) {
+    if (__builtin_expect(rust_await_race_dispatch != NULL, 1)) {
+        return rust_await_race_dispatch(promise_ids, count, timeout, out_winner_id, retval);
     }
     return -1;
 }
@@ -3064,28 +3110,259 @@ zval *oxphp_closure_get_this(zval *closure) {
 /* ─── Async Exception Details ────────────────────────────── */
 static __thread char *async_exc_class = NULL;
 static __thread char *async_exc_msg = NULL;
-static __thread char *async_exc_trace = NULL;
 
-void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace) {
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg) {
     free(async_exc_class);
     free(async_exc_msg);
-    free(async_exc_trace);
     async_exc_class = cls ? strdup(cls) : NULL;
     async_exc_msg = msg ? strdup(msg) : NULL;
-    async_exc_trace = trace ? strdup(trace) : NULL;
 }
 
 const char *oxphp_bridge_get_async_exc_class(void) { return async_exc_class; }
 const char *oxphp_bridge_get_async_exc_message(void) { return async_exc_msg; }
-const char *oxphp_bridge_get_async_exc_trace(void) { return async_exc_trace; }
 
 void oxphp_bridge_clear_async_exception(void) {
     free(async_exc_class);
     free(async_exc_msg);
-    free(async_exc_trace);
     async_exc_class = NULL;
     async_exc_msg = NULL;
-    async_exc_trace = NULL;
+}
+
+/* ─── Async Aggregate Exception (multi-error) ──────────────── */
+
+typedef struct aggregate_entry_s {
+    char *exception_class;   /* strdup'd, free in clear() */
+    char *message;           /* strdup'd, free in clear() */
+    int64_t promise_id;
+} aggregate_entry_t;
+
+static __thread aggregate_entry_t *aggregate_buf = NULL;
+static __thread size_t aggregate_len = 0;
+static __thread size_t aggregate_cap = 0;
+
+void oxphp_bridge_aggregate_clear(void) {
+    for (size_t i = 0; i < aggregate_len; i++) {
+        free(aggregate_buf[i].exception_class);
+        free(aggregate_buf[i].message);
+    }
+    aggregate_len = 0;
+    /* Keep allocation across requests; reset length only. */
+}
+
+void oxphp_bridge_aggregate_push(
+    const char *exception_class,
+    const char *message,
+    int64_t promise_id
+) {
+    if (aggregate_len == aggregate_cap) {
+        size_t new_cap = aggregate_cap ? aggregate_cap * 2 : 8;
+        aggregate_entry_t *grown = realloc(aggregate_buf, new_cap * sizeof(*grown));
+        if (!grown) {
+            php_error_docref(NULL, E_WARNING,
+                "oxphp_bridge_aggregate_push: realloc(%zu bytes) failed; "
+                "dropping aggregate entry for promise_id=%" PRId64,
+                new_cap * sizeof(*grown), promise_id);
+            return;
+        }
+        aggregate_buf = grown;
+        aggregate_cap = new_cap;
+    }
+    aggregate_buf[aggregate_len].exception_class =
+        exception_class ? strdup(exception_class) : NULL;
+    aggregate_buf[aggregate_len].message =
+        message ? strdup(message) : NULL;
+    aggregate_buf[aggregate_len].promise_id = promise_id;
+    aggregate_len++;
+}
+
+/* Build a Throwable zval for one aggregate entry. Caller owns the zval.
+ * Walks a fallback chain: entry's class → OxPHP\Async\AsyncException →
+ * builtin \Exception. The last step is always reachable (zend_ce_exception
+ * is provided by Zend itself), so the only remaining -1 path is
+ * object_init_ex failure (catastrophic OOM). */
+static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
+    const char *cls_name = entry->exception_class
+        ? entry->exception_class
+        : "OxPHP\\Async\\AsyncException";
+    size_t cls_len = strlen(cls_name);
+
+    zend_string *name = zend_string_init(cls_name, cls_len, 0);
+    zend_class_entry *ce = zend_lookup_class(name);
+    zend_string_release(name);
+    if (!ce) {
+        zend_string *fallback = zend_string_init(
+            "OxPHP\\Async\\AsyncException",
+            sizeof("OxPHP\\Async\\AsyncException") - 1,
+            0
+        );
+        ce = zend_lookup_class(fallback);
+        zend_string_release(fallback);
+        if (!ce) {
+            /* Last-resort fallback. zend_ce_exception is the global
+             * builtin \Exception class entry, registered by Zend during
+             * MINIT — always available. Preserves the list<Throwable>
+             * contract on getErrors() even if the async plugin's classes
+             * somehow weren't registered yet. */
+            ce = zend_ce_exception;
+        }
+    }
+    if (object_init_ex(out, ce) != SUCCESS) return -1;
+    if (entry->message) {
+        zend_update_property_string(
+            ce, Z_OBJ_P(out),
+            "message", sizeof("message") - 1,
+            entry->message
+        );
+    }
+    return 0;
+}
+
+int oxphp_bridge_aggregate_throw(void) {
+    zend_string *agg_name = zend_string_init(
+        "OxPHP\\Async\\AggregateAsyncException",
+        sizeof("OxPHP\\Async\\AggregateAsyncException") - 1,
+        0
+    );
+    zend_class_entry *agg_ce = zend_lookup_class(agg_name);
+    zend_string_release(agg_name);
+    if (!agg_ce) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+    zval ex;
+    ZVAL_UNDEF(&ex);
+    if (object_init_ex(&ex, agg_ce) != SUCCESS) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+
+    char msg_buf[64];
+    snprintf(msg_buf, sizeof(msg_buf),
+             "All %zu promises rejected", aggregate_len);
+    zend_update_property_string(
+        agg_ce, Z_OBJ(ex),
+        "message", sizeof("message") - 1,
+        msg_buf
+    );
+
+    /* __errors: list<Throwable> in push order (Rust pushes in input-array order). */
+    zval errors;
+    array_init(&errors);
+    /* __errorMap: array<int, Throwable> keyed by promise_id. */
+    zval err_map;
+    array_init(&err_map);
+    /* __promiseIds: list<int>. */
+    zval ids;
+    array_init(&ids);
+
+    for (size_t i = 0; i < aggregate_len; i++) {
+        /* __promiseIds always records the id — it's just a long, no
+         * allocation can fail per-element. Doing this first keeps the
+         * id list complete even if Throwable construction below OOMs. */
+        add_next_index_long(&ids, (zend_long)aggregate_buf[i].promise_id);
+
+        zval throwable;
+        if (build_throwable_zval(&throwable, &aggregate_buf[i]) != 0) {
+            /* OOM during object_init_ex on every fallback class. Skip
+             * this entry from __errors/__errorMap rather than pushing a
+             * null — the property stubs declare list<Throwable> /
+             * array<int, Throwable>, and a null violates that contract
+             * (foreach ($e->getErrors() as $err) { $err->...; } would
+             * TypeError downstream). The id is still present in
+             * __promiseIds, so the rejection isn't silently lost. */
+            continue;
+        }
+        /* Each Throwable goes into both `errors` (list) and `err_map`
+         * (id-keyed map). zend_hash_index_update / add_next_index_zval take
+         * ownership of one ref; bumping the refcount lets us hand the same
+         * zval to two arrays without double-free. */
+        Z_TRY_ADDREF(throwable);
+        add_next_index_zval(&errors, &throwable);
+        zend_hash_index_update(
+            Z_ARRVAL(err_map),
+            (zend_long)aggregate_buf[i].promise_id,
+            &throwable
+        );
+    }
+
+    zend_update_property(agg_ce, Z_OBJ(ex), "__errors", sizeof("__errors") - 1, &errors);
+    zend_update_property(agg_ce, Z_OBJ(ex), "__errorMap", sizeof("__errorMap") - 1, &err_map);
+    zend_update_property(agg_ce, Z_OBJ(ex), "__promiseIds", sizeof("__promiseIds") - 1, &ids);
+    zval_ptr_dtor(&errors);
+    zval_ptr_dtor(&err_map);
+    zval_ptr_dtor(&ids);
+
+    zend_throw_exception_object(&ex);
+    oxphp_bridge_aggregate_clear();
+    return 0;
+}
+
+int oxphp_bridge_aggregate_throw_timeout(
+    const int64_t *pending_ids,
+    uint32_t pending_count
+) {
+    zend_string *to_name = zend_string_init(
+        "OxPHP\\Async\\TimeoutException",
+        sizeof("OxPHP\\Async\\TimeoutException") - 1,
+        0
+    );
+    zend_class_entry *to_ce = zend_lookup_class(to_name);
+    zend_string_release(to_name);
+    if (!to_ce) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+    zval ex;
+    ZVAL_UNDEF(&ex);
+    if (object_init_ex(&ex, to_ce) != SUCCESS) {
+        oxphp_bridge_aggregate_clear();
+        return -1;
+    }
+
+    char msg_buf[96];
+    snprintf(msg_buf, sizeof(msg_buf),
+             "oxphp_async_await_any timed out (%u pending, %zu rejected before timeout)",
+             pending_count, aggregate_len);
+    zend_update_property_string(
+        to_ce, Z_OBJ(ex),
+        "message", sizeof("message") - 1,
+        msg_buf
+    );
+
+    /* __partialErrors: array<int, Throwable> keyed by promise_id. */
+    zval partial;
+    array_init(&partial);
+    for (size_t i = 0; i < aggregate_len; i++) {
+        zval throwable;
+        if (build_throwable_zval(&throwable, &aggregate_buf[i]) != 0) {
+            ZVAL_NULL(&throwable);
+        }
+        zend_hash_index_update(
+            Z_ARRVAL(partial),
+            (zend_long)aggregate_buf[i].promise_id,
+            &throwable
+        );
+    }
+
+    /* __cancelledPromiseIds: list<int>. The cancel flag has been set on
+     * each of these promises and their receivers stranded — they are
+     * not resumable via oxphp_async_await*(). */
+    zval ids;
+    array_init(&ids);
+    for (uint32_t i = 0; i < pending_count; i++) {
+        add_next_index_long(&ids, (zend_long)pending_ids[i]);
+    }
+
+    zend_update_property(to_ce, Z_OBJ(ex),
+                         "__partialErrors", sizeof("__partialErrors") - 1, &partial);
+    zend_update_property(to_ce, Z_OBJ(ex),
+                         "__cancelledPromiseIds", sizeof("__cancelledPromiseIds") - 1, &ids);
+    zval_ptr_dtor(&partial);
+    zval_ptr_dtor(&ids);
+
+    zend_throw_exception_object(&ex);
+    oxphp_bridge_aggregate_clear();
+    return 0;
 }
 
 /* === Async Promise: Async Worker State === */
@@ -3200,15 +3477,13 @@ int oxphp_execute_async_task(
     zval *args,
     zval *retval,
     char **exc_class,
-    char **exc_message,
-    char **exc_trace
+    char **exc_message
 ) {
     zval closure;
     zend_function func;
 
     *exc_class = NULL;
     *exc_message = NULL;
-    *exc_trace = NULL;
     ZVAL_NULL(retval);
 
     /* Reconstruct closure from op_array + static_vars */
@@ -3259,19 +3534,6 @@ int oxphp_execute_async_task(
                 *exc_message = strdup(Z_STRVAL_P(msg_zv));
             } else {
                 *exc_message = strdup("(unknown)");
-            }
-
-            /* Get trace string via getTraceAsString() */
-            zval trace_zv;
-            zend_function *trace_fn = zend_hash_str_find_ptr(
-                &ce->function_table, "gettraceasstring", sizeof("gettraceasstring") - 1
-            );
-            if (trace_fn) {
-                zend_call_known_instance_method_with_0_params(trace_fn, ex, &trace_zv);
-                if (Z_TYPE(trace_zv) == IS_STRING) {
-                    *exc_trace = strdup(Z_STRVAL(trace_zv));
-                }
-                zval_ptr_dtor(&trace_zv);
             }
 
             zend_clear_exception();
@@ -4574,9 +4836,6 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
  * Rust never touches emalloc — all zvals allocated and freed here.
  * On closure throw, EG(exception) stays set; caller returns
  * RETURN_THROWS-style from its plugin method handler.
- *
- * Spec: .internal/technical-docs/en/features/shared/40-ffi-conventions.md
- *       §Convention 1.5 + §Convention 2
  */
 
 #define OXPHP_SHARED_INVOKE_OK          0

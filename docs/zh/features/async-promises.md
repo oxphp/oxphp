@@ -84,22 +84,64 @@ $orders = $results[$p2];
 
 > **注意：** `oxphp_async_await_all()` 按数组顺序依次等待各 Promise。所有闭包在异步池上并发运行，但调用线程逐一收集结果。
 
-### 最先完成的 Promise（竞争）
+### 最先完成的 Promise（竞速）
 
-`oxphp_async_await_any()` 在任意一个 Promise 完成时立即返回：
+`oxphp_async_await_race()` 在任意一个 Promise 完成（无论成功还是失败）时立即返回：
 
 ```php
 <?php
 $p1 = oxphp_async(fn() => fetch_from_primary_db());
 $p2 = oxphp_async(fn() => fetch_from_replica_db());
 
-$winner = oxphp_async_await_any([$p1, $p2], 5.0);
+$winner = oxphp_async_await_race([$p1, $p2], 5.0);
 // $winner = ['id' => int, 'value' => mixed]
 
-echo "Promise {$winner['id']} 赢得竞争：{$winner['value']}";
+echo "Promise {$winner['id']} 赢得竞速：{$winner['value']}";
 ```
 
-`oxphp_async_await_any()` 返回后，未获胜的 Promise 仍可单独等待。
+`oxphp_async_await_race()` 返回后，未获胜的 Promise 仍可单独等待。如果获胜的 Promise 以失败告终，则抛出 `OxPHP\Async\AsyncException`，未获胜的 Promise 仍然可以等待。这是 JavaScript `Promise.race` 的对应函数。
+
+### 最先成功完成的 Promise
+
+`oxphp_async_await_any()` 在任意一个 Promise 成功完成时立即返回。失败会被累积，只有当所有 Promise 都失败时才会暴露出来。这是 JavaScript `Promise.any` 的对应函数——适用于回退 / 冗余场景（"任何能响应的镜像"）。
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    // ['id' => 输入数组中某个 Promise 的 id, 'value' => 它的结果]
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    foreach ($e->getErrors() as $i => $err) {
+        // $err 按输入位置 0..N-1 索引
+    }
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        // $err 按 Promise ID 索引
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    foreach ($e->getPartialErrors() as $promise_id => $err) {
+        // 在截止时间之前已经失败的 Promise
+    }
+    $cancelled = $e->getCancelledPromiseIds();
+    // 截止时间到达时仍未完成的 Promise ID。每个 Promise 的取消标志已被
+    // 设置，其 receivers 已被丢弃——之后将这些 ID 中的任何一个传给
+    // oxphp_async_await*() 都会抛出 "unknown or already-awaited promise id"。
+    // 该列表用于审计记录，而非可恢复的工作队列。
+}
+```
+
+获胜时仍处于挂起状态的非获胜 Promise 仍可单独等待。在获胜者出现之前已经失败的 Promise 不再可等待——它们的结果在被累积为候选错误时已被消费。
+
+### 异常类型
+
+| 类 | 抛出于 | 说明 |
+|----|--------|------|
+| `OxPHP\Async\AsyncException`           | `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` | 单个错误，包含消息和可选的原始异常详情。 |
+| `OxPHP\Async\TimeoutException`         | 全部四个 `await_*` 函数在到达截止时间时 | 继承自 `AsyncException`。对于 `oxphp_async_await_any()` 的超时，`getPartialErrors()` 和 `getCancelledPromiseIds()` 已填充；其他调用站点二者均返回 `[]`。 |
+| `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()` 在所有 Promise 都失败时 | 继承自 `AsyncException`。提供 `getErrors()`（按位置，键为 0..N-1）、`getErrorMap()`（按 ID 索引）、`getPromiseIds()`。 |
 
 ## 错误处理
 

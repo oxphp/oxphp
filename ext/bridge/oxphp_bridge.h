@@ -548,10 +548,14 @@ int oxphp_bridge_get_plugin_function_param_optional(int index, int param_index);
 
 /* ─── Method Dispatch Callback ──────────────────────────────── */
 
-/** Callback type for dispatching class method calls to Rust. */
+/** Callback type for dispatching class method calls to Rust.
+ * `this_zval` is the zval* of `$this` for instance methods, NULL for
+ * static method calls and free functions. The pointer is valid only
+ * for the duration of the dispatch call; do not store it. */
 typedef int (*oxphp_method_dispatch_fn_t)(
     uint32_t class_index, const char *method_name,
-    void *args, uint32_t argc, void *retval, void *rust_data
+    void *args, uint32_t argc, void *retval, void *rust_data,
+    void *this_zval
 );
 
 /** Set the method dispatch callback (called once at startup). */
@@ -600,6 +604,30 @@ void oxphp_exception_get(const char **class_out, const char **message_out, int64
 
 /** Clear the current pending exception. */
 void oxphp_exception_clear(void);
+
+/* ─── Object Property Access ───────────────────────────────── */
+
+/* Read a private or protected property from a zend object zval, where the
+ * property has NO __get magic, NO property hooks, and is NOT readonly.
+ * Returns a pointer to the zval stored in the object's property table, or
+ * NULL if the input zval is not an object, or &EG(uninitialized_zval) if
+ * the property is unset.
+ *
+ * The returned pointer is valid for the duration of the current request.
+ *
+ * UNSAFE for properties with __get / hooks / asymmetric-readonly: those code
+ * paths in zend_std_read_property write into a caller-provided rv buffer,
+ * and this helper does not satisfy that contract. property_name is
+ * NUL-terminated. */
+void *oxphp_object_read_property(void *object_zval, const char *property_name);
+
+/** Returns 1 if the zval pointer is NULL, IS_UNDEF, or IS_NULL; 0 otherwise. */
+int oxphp_zval_is_null_or_unset(const void *zval_ptr);
+
+/** Copy zval contents from `src` into `dst` (typically the retval slot).
+ *  Increments refcounts as needed (uses ZVAL_COPY semantics). `dst` must
+ *  point to an uninitialized or destroyed zval slot. */
+void oxphp_zval_copy_to_retval(const void *src_zval, void *dst_zval);
 
 /* ═══════════════════════════════════════════════════════════
  *  Native Bridge API — Zero-Serialization Value Access
@@ -1133,6 +1161,23 @@ typedef int64_t (*oxphp_async_dispatch_fn_t)(
 typedef int (*oxphp_await_dispatch_fn_t)(
     int64_t promise_id, double timeout, void *retval
 );
+typedef int (*oxphp_await_race_dispatch_fn_t)(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
+/* await_any dispatch (Promise.any-style: first FULFILLED wins).
+ *
+ * Same signature as await_race_dispatch_fn_t. The Rust implementation
+ * accumulates rejections via the aggregate-exception API and only
+ * succeeds on first fulfilled promise.
+ *
+ * Return codes:
+ *   0  : success — *out_winner_id and retval populated.
+ *   -2 : timeout — TimeoutException already thrown via aggregate API.
+ *   -3 : all rejected — AggregateAsyncException already thrown via aggregate API.
+ *   -4 : unknown / already-awaited promise id — *out_winner_id holds the bad id.
+ *   -1 : other internal error.
+ */
 typedef int (*oxphp_await_any_dispatch_fn_t)(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
@@ -1144,6 +1189,7 @@ typedef int (*oxphp_in_fiber_check_fn_t)(void);
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
 void oxphp_bridge_set_await_dispatch(oxphp_await_dispatch_fn_t fn);
+void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn);
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
@@ -1175,9 +1221,17 @@ int64_t oxphp_bridge_async_dispatch(
 /** Call Rust await dispatch. Returns 0 (success), -1 (error), -2 (timeout). */
 int oxphp_bridge_await_dispatch(int64_t promise_id, double timeout, void *retval);
 
-/** Call Rust await_any dispatch. Races multiple promises, returns the first to complete.
+/** Call Rust await_race dispatch. Races multiple promises, returns the first to complete.
  *  On success: *out_winner_id is the winning promise ID, retval has the result.
  *  Returns 0 (success), -1 (error), -2 (timeout). */
+int oxphp_bridge_await_race_dispatch(
+    const int64_t *promise_ids, uint32_t count, double timeout,
+    int64_t *out_winner_id, void *retval
+);
+
+/** Call Rust await_any dispatch. First FULFILLED promise wins; rejections accumulate.
+ *  On success: *out_winner_id is the winning promise ID, retval has the result.
+ *  Returns 0 (success), -1 (error), -2 (timeout), -3 (all rejected). */
 int oxphp_bridge_await_any_dispatch(
     const int64_t *promise_ids, uint32_t count, double timeout,
     int64_t *out_winner_id, void *retval
@@ -1194,11 +1248,40 @@ void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn);
 void oxphp_bridge_cleanup_outstanding_promises(void);
 
 /* ─── Async Exception Details ────────────────────────────── */
-void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace);
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg);
 const char *oxphp_bridge_get_async_exc_class(void);
 const char *oxphp_bridge_get_async_exc_message(void);
-const char *oxphp_bridge_get_async_exc_trace(void);
 void oxphp_bridge_clear_async_exception(void);
+
+/* ─── Async Aggregate Exception (multi-error) ────────────────────
+ *
+ * Used by oxphp_bridge_await_any_dispatch when accumulating rejections
+ * from multiple promises. Buffer is __thread-local; one buffer per
+ * worker thread. clear() must be called before push() sequence; throw()
+ * synthesises a PHP exception from the accumulated entries and clears
+ * the buffer.
+ */
+void oxphp_bridge_aggregate_clear(void);
+
+void oxphp_bridge_aggregate_push(
+    const char *exception_class,   /* PHP class name, NUL-terminated UTF-8; nullable → "OxPHP\\Async\\AsyncException" */
+    const char *message,           /* nullable → empty */
+    int64_t promise_id
+);
+
+/* Throws OxPHP\Async\AggregateAsyncException with accumulated entries.
+ * Returns 0 on success, -1 if the AggregateAsyncException class can't be
+ * looked up. Always clears the buffer (even on failure). */
+int oxphp_bridge_aggregate_throw(void);
+
+/* Throws OxPHP\Async\TimeoutException with partial errors (from the buffer)
+ * + pending ids (from the parameters). pending_ids is an array of
+ * pending_count int64 values. Always clears the buffer.
+ * Returns 0 on success, -1 on class lookup failure. */
+int oxphp_bridge_aggregate_throw_timeout(
+    const int64_t *pending_ids,
+    uint32_t pending_count
+);
 
 /* The remaining async functions use PHP types (zval, HashTable, zend_op_array)
  * and are only available when PHP headers have been included first.
@@ -1304,7 +1387,7 @@ void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 
 /* Execute an async task on an async worker thread.
  * Returns 0 on success, -1 on exception.
- * On exception: exc_class, exc_message, exc_trace are malloc'd strings (caller frees). */
+ * On exception: exc_class, exc_message are malloc'd strings (caller frees). */
 int oxphp_execute_async_task(
     zend_op_array *op_array,
     HashTable *static_vars,
@@ -1313,8 +1396,7 @@ int oxphp_execute_async_task(
     zval *args,
     zval *retval,
     char **exc_class,
-    char **exc_message,
-    char **exc_trace
+    char **exc_message
 );
 
 /* ─── Custom Object for Plugin Classes ──────────────────────── */

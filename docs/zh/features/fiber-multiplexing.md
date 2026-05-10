@@ -249,7 +249,7 @@ fiber.stack_size = 512K
 - **仅协作式** — CPU 密集型代码（紧密循环、大量计算）会使其他 fiber 饥饿。没有抢占机制
 - **阻塞 I/O 会阻塞线程** — 所有阻塞调用必须封装在 `oxphp_async()` 中才能实现真正的并发
 - **PHP 原生的 `sleep()`/`usleep()` 不感知 fiber** — 请使用 `oxphp_sleep()`/`oxphp_usleep()`
-- **`oxphp_async_await_all()` 和 `oxphp_async_await_any()` 不产生让步** — 即使在 fiber 内部它们目前也会阻塞。对于 fiber 友好的行为，请使用顺序的 `oxphp_async_await()` 调用
+- **`oxphp_async_await_all()`、`oxphp_async_await_race()` 和 `oxphp_async_await_any()` 不产生让步** — 即使在 fiber 内部它们目前也会阻塞。对于 fiber 友好的行为，请使用顺序的 `oxphp_async_await()` 调用
 
 ## 参见
 

@@ -1,7 +1,4 @@
 //! Shared\Mutex — exclusive lock over a SharedValue.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/23-type-mutex.md
-//!       .internal/technical-docs/en/features/shared/06-mutex-contract.md
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};

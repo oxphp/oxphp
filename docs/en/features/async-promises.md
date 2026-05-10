@@ -84,22 +84,65 @@ $orders = $results[$p2];
 
 > **Note:** `oxphp_async_await_all()` awaits promises sequentially in array order. All closures run concurrently on the async pool, but the calling thread collects results one at a time.
 
-### First Promise (Race)
+### First Settled Promise (Race)
 
-`oxphp_async_await_any()` returns as soon as one promise completes:
+`oxphp_async_await_race()` returns as soon as one promise settles, whether it fulfilled or rejected:
 
 ```php
 <?php
 $p1 = oxphp_async(fn() => fetch_from_primary_db());
 $p2 = oxphp_async(fn() => fetch_from_replica_db());
 
-$winner = oxphp_async_await_any([$p1, $p2], 5.0);
+$winner = oxphp_async_await_race([$p1, $p2], 5.0);
 // $winner = ['id' => int, 'value' => mixed]
 
 echo "Promise {$winner['id']} won: {$winner['value']}";
 ```
 
-Non-winning promises remain awaitable individually after `oxphp_async_await_any()` returns.
+Non-winning promises remain awaitable individually after `oxphp_async_await_race()` returns. If the winning promise rejected, `OxPHP\Async\AsyncException` is thrown — losers are still awaitable. This is the JavaScript `Promise.race` analog.
+
+### First Fulfilled Promise
+
+`oxphp_async_await_any()` returns as soon as one promise FULFILLS. Rejections are accumulated and only become observable if every promise rejects. This is the JavaScript `Promise.any` analog — useful for fallback / redundancy patterns ("any mirror that responds").
+
+```php
+<?php
+$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+
+try {
+    $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
+    // ['id' => one of the input ids, 'value' => its result]
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    foreach ($e->getErrors() as $i => $err) {
+        // $err keyed by input position 0..N-1
+    }
+    foreach ($e->getErrorMap() as $promise_id => $err) {
+        // $err keyed by promise id
+    }
+} catch (\OxPHP\Async\TimeoutException $e) {
+    foreach ($e->getPartialErrors() as $promise_id => $err) {
+        // promises that already rejected before the deadline
+    }
+    $cancelled = $e->getCancelledPromiseIds();
+    // Promise ids that had not settled at the deadline. The cancel flag
+    // is set on each AND their receivers were dropped — passing any of
+    // these ids to oxphp_async_await*() afterwards throws "unknown or
+    // already-awaited promise id". Treat the list as an audit trail, not
+    // a resumable queue.
+}
+```
+
+Non-winning promises that were still pending at the moment of victory remain awaitable individually. Promises that already rejected before the winner do not — their results were consumed when accumulated as candidate errors.
+
+### Exception Types
+
+| Class | Thrown by | Notes |
+|-------|-----------|-------|
+| `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` | Single error with message and optional original-exception details. |
+| `OxPHP\Async\TimeoutException`         | All four await-* on deadline | Extends `AsyncException`. For `oxphp_async_await_any()` timeouts, `getPartialErrors()` and `getCancelledPromiseIds()` are populated; for the other call sites both return `[]`. |
+| `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()` when every promise rejects | Extends `AsyncException`. Provides `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), `getPromiseIds()`. |
 
 ## Error Handling
 

@@ -341,9 +341,51 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * @example
  * $p1 = oxphp_async(fn() => slow_api_a());
  * $p2 = oxphp_async(fn() => slow_api_b());
- * $winner = oxphp_async_await_any([$p1, $p2]);
+ * $winner = oxphp_async_await_race([$p1, $p2]);
  * // ['id' => $p2, 'value' => ...] (whichever finished first)
  * $other = oxphp_async_await($p1); // non-winner still awaitable
+ */
+function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): array {}
+
+/**
+ * Wait for the first FULFILLED promise (analog of JavaScript Promise.any).
+ *
+ * Unlike oxphp_async_await_race(), rejections do NOT win — they accumulate.
+ * If at least one promise fulfills before the deadline, returns its id+value
+ * and leaves remaining pending promises individually awaitable. If every
+ * promise rejects, throws AggregateAsyncException carrying all errors.
+ *
+ * On timeout, throws TimeoutException populated with partial errors collected
+ * up to the deadline and the ids of promises still pending. Pending promises
+ * are cancelled AND their receivers are dropped — those ids cannot be re-awaited
+ * with oxphp_async_await*() afterwards (each such call throws
+ * "unknown or already-awaited promise id"). The pending list is an audit
+ * trail, not a queue of resumable work.
+ *
+ * @param int[]      $promise_ids Array of promise IDs from oxphp_async()
+ * @param float|null $timeout     Overall timeout in seconds; null = no limit
+ * @return array{id: int, value: mixed} The first-fulfilled promise's id and result
+ *
+ * @throws \OxPHP\Async\AggregateAsyncException If every promise rejects
+ * @throws \OxPHP\Async\TimeoutException        If the deadline elapses before any fulfills
+ *
+ * @example
+ * $a = oxphp_async(fn() => fetch_mirror_a());
+ * $b = oxphp_async(fn() => fetch_mirror_b());
+ * try {
+ *     $winner = oxphp_async_await_any([$a, $b], 2.0);
+ *     // ['id' => $a or $b, 'value' => ...]
+ * } catch (\OxPHP\Async\AggregateAsyncException $e) {
+ *     foreach ($e->getErrors() as $i => $err) {
+ *         // by input position
+ *     }
+ * } catch (\OxPHP\Async\TimeoutException $e) {
+ *     foreach ($e->getPartialErrors() as $promise_id => $err) {
+ *         // who failed
+ *     }
+ *     $cancelled = $e->getCancelledPromiseIds();
+ *     // Audit-only: these ids are no longer awaitable.
+ * }
  */
 function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
 
@@ -775,9 +817,65 @@ namespace OxPHP\Async {
     class AsyncException extends \Exception {}
 
     /**
-     * Thrown when oxphp_async_await() times out before the task completes.
+     * Thrown by async-await-style functions when a deadline expires.
+     *
+     * For oxphp_async_await_any(), additional context is exposed via
+     * getPartialErrors() and getCancelledPromiseIds(). For other call sites
+     * (oxphp_async_await, oxphp_async_await_all, oxphp_async_await_race)
+     * both methods return empty arrays.
      */
-    class TimeoutException extends AsyncException {}
+    class TimeoutException extends AsyncException
+    {
+        /**
+         * Errors collected from promises that rejected before the deadline,
+         * keyed by promise_id. Only populated by oxphp_async_await_any().
+         *
+         * @return array<int, \Throwable>
+         */
+        public function getPartialErrors(): array {}
+
+        /**
+         * Promise IDs that did not settle before the deadline. The cancel
+         * flag has been set on each, AND their receivers were dropped —
+         * passing any of these ids to oxphp_async_await() /
+         * oxphp_async_await_race() / oxphp_async_await_any() /
+         * oxphp_async_await_all() afterwards throws OxPHP\Async\AsyncException
+         * ("unknown or already-awaited promise id"). Treat the list as a
+         * fire-and-forget audit trail, not a queue of resumable work. Only
+         * populated by oxphp_async_await_any().
+         *
+         * @return list<int>
+         */
+        public function getCancelledPromiseIds(): array {}
+    }
+
+    /**
+     * Thrown by oxphp_async_await_any() when every provided promise rejected
+     * before any could fulfill (analog of JavaScript AggregateError).
+     */
+    class AggregateAsyncException extends AsyncException
+    {
+        /**
+         * Errors in the order of the input promise_ids array.
+         *
+         * @return list<\Throwable>
+         */
+        public function getErrors(): array {}
+
+        /**
+         * Errors keyed by promise_id (input order preserved as values).
+         *
+         * @return array<int, \Throwable>
+         */
+        public function getErrorMap(): array {}
+
+        /**
+         * Promise IDs in the order of the input array.
+         *
+         * @return list<int>
+         */
+        public function getPromiseIds(): array {}
+    }
 
     /**
      * Thrown by every access to a BorrowedProxy — proxies substituted for

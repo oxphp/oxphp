@@ -1,9 +1,44 @@
 pub mod functions;
 pub mod synthetic;
 
+use crate::bridge::call::NativeCall;
 use crate::plugin::types::MagicMethod;
 use crate::plugin::types::PhpType;
+use crate::plugin::types::Visibility;
 use crate::plugin::{PhpError, Plugin, PluginContext, PluginDeps, PluginError, PluginHealth};
+use std::ffi::CString;
+
+/// Read a private array property of `$this` and copy it into the return
+/// value. If the property is unset, null, or `$this` is not available,
+/// return an empty array. Used by the `AggregateAsyncException` accessor
+/// methods (`getErrors`, `getErrorMap`, `getPromiseIds`); the C bridge
+/// populates the underlying properties at construction time.
+fn return_property_array(call: &mut NativeCall, name: &str) -> Result<(), PhpError> {
+    use crate::bridge::ffi;
+
+    let this = call.this_ptr();
+    if this.is_null() {
+        call.ret_array(0, |_| {});
+        return Ok(());
+    }
+
+    let cname = match CString::new(name) {
+        Ok(c) => c,
+        Err(_) => {
+            call.ret_array(0, |_| {});
+            return Ok(());
+        }
+    };
+
+    let prop = unsafe { ffi::oxphp_object_read_property(this, cname.as_ptr()) };
+    if prop.is_null() || unsafe { ffi::oxphp_zval_is_null_or_unset(prop) } != 0 {
+        call.ret_array(0, |_| {});
+        return Ok(());
+    }
+
+    unsafe { ffi::oxphp_zval_copy_to_retval(prop, call.retval_ptr()) };
+    Ok(())
+}
 
 // ─── Borrow error helper ──────────────────────────────────────────────────────
 
@@ -77,8 +112,37 @@ impl Plugin for AsyncPlugin {
             .build()?;
 
         // OxPHP\Async\TimeoutException extends OxPHP\Async\AsyncException
+        // Carries optional partial-errors / cancelled-ids context (populated only
+        // by oxphp_async_await_any timeout path; empty for all other timeouts).
         ctx.register_class("OxPHP\\Async\\TimeoutException")
             .extends("OxPHP\\Async\\AsyncException")
+            .property("__partialErrors", PhpType::Array, Visibility::Private)
+            .property("__cancelledPromiseIds", PhpType::Array, Visibility::Private)
+            .method("getPartialErrors")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__partialErrors"))
+            .method("getCancelledPromiseIds")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__cancelledPromiseIds"))
+            .build()?;
+
+        // OxPHP\Async\AggregateAsyncException extends OxPHP\Async\AsyncException
+        // Carries a list of errors (one per rejected promise) when every
+        // promise passed to oxphp_async_await_any() rejected before any could fulfill.
+        ctx.register_class("OxPHP\\Async\\AggregateAsyncException")
+            .extends("OxPHP\\Async\\AsyncException")
+            .property("__errors", PhpType::Array, Visibility::Private)
+            .property("__errorMap", PhpType::Array, Visibility::Private)
+            .property("__promiseIds", PhpType::Array, Visibility::Private)
+            .method("getErrors")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__errors"))
+            .method("getErrorMap")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__errorMap"))
+            .method("getPromiseIds")
+            .returns(PhpType::Array)
+            .handler(|call| return_property_array(call, "__promiseIds"))
             .build()?;
 
         // OxPHP\Async\BorrowException extends \Exception
@@ -302,14 +366,150 @@ mod tests {
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
 
-        // Should register 4 classes: AsyncException, TimeoutException, BorrowException, BorrowedProxy
-        assert_eq!(php_classes.len(), 4);
+        // Should register 5 classes: AsyncException, TimeoutException,
+        // AggregateAsyncException, BorrowException, BorrowedProxy
+        assert_eq!(php_classes.len(), 5);
 
         let fqns: Vec<&str> = php_classes.iter().map(|c| c.fqn.as_str()).collect();
         assert!(fqns.contains(&"OxPHP\\Async\\AsyncException"));
         assert!(fqns.contains(&"OxPHP\\Async\\TimeoutException"));
+        assert!(fqns.contains(&"OxPHP\\Async\\AggregateAsyncException"));
         assert!(fqns.contains(&"OxPHP\\Async\\BorrowException"));
         assert!(fqns.contains(&"OxPHP\\Async\\BorrowedProxy"));
+    }
+
+    #[test]
+    fn aggregate_async_exception_methods_registered() {
+        std::env::remove_var("ASYNC_WORKERS");
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
+        let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
+        let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
+
+        let mut ctx = PluginContext::new(
+            "async".into(),
+            "__oxp_async_".into(),
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics_collectors,
+            &mut internal_routes,
+            &mut internal_route_prefixes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+            &mut core_flags,
+        );
+
+        let mut plugin = AsyncPlugin::new();
+        plugin.init(&mut ctx).unwrap();
+        drop(ctx);
+
+        let agg = php_classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Async\\AggregateAsyncException")
+            .expect("AggregateAsyncException must be registered");
+
+        // Properties: __errors, __errorMap, __promiseIds (all private arrays).
+        let prop_names: Vec<&str> = agg.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(prop_names.contains(&"__errors"));
+        assert!(prop_names.contains(&"__errorMap"));
+        assert!(prop_names.contains(&"__promiseIds"));
+        for prop in &agg.properties {
+            assert_eq!(prop.visibility, Visibility::Private);
+            assert_eq!(prop.php_type, PhpType::Array);
+        }
+
+        // Methods: getErrors, getErrorMap, getPromiseIds (each with a handler).
+        let method_names: Vec<&str> = agg.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(method_names.contains(&"getErrors"));
+        assert!(method_names.contains(&"getErrorMap"));
+        assert!(method_names.contains(&"getPromiseIds"));
+        for m in &agg.methods {
+            assert!(m.handler.is_some(), "method {} must have a handler", m.name);
+            assert_eq!(m.return_type, Some(PhpType::Array));
+        }
+    }
+
+    #[test]
+    fn timeout_exception_has_partial_errors_methods() {
+        std::env::remove_var("ASYNC_WORKERS");
+
+        let mut dispatcher = EventDispatcher::new();
+        let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
+        let mut config_values = HashMap::new();
+        let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
+        let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
+        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
+        let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+        let mut php_classes = Vec::new();
+        let mut php_interfaces = Vec::new();
+        let mut php_enums = Vec::new();
+        let mut php_attributes = Vec::new();
+        let mut php_functions = Vec::new();
+        let mut core_flags = HashMap::new();
+
+        let mut ctx = PluginContext::new(
+            "async".into(),
+            "__oxp_async_".into(),
+            &mut dispatcher,
+            &mut services,
+            &mut config_values,
+            &mut metrics_collectors,
+            &mut internal_routes,
+            &mut internal_route_prefixes,
+            &mut native_php_functions,
+            &mut decorators,
+            &mut php_classes,
+            &mut php_interfaces,
+            &mut php_enums,
+            &mut php_attributes,
+            &mut php_functions,
+            &mut core_flags,
+        );
+
+        let mut plugin = AsyncPlugin::new();
+        plugin.init(&mut ctx).unwrap();
+        drop(ctx);
+
+        let to = php_classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Async\\TimeoutException")
+            .expect("TimeoutException must be registered");
+
+        // Properties: __partialErrors, __cancelledPromiseIds (private arrays).
+        let prop_names: Vec<&str> = to.properties.iter().map(|p| p.name.as_str()).collect();
+        assert!(prop_names.contains(&"__partialErrors"));
+        assert!(prop_names.contains(&"__cancelledPromiseIds"));
+        for prop in &to.properties {
+            assert_eq!(prop.visibility, Visibility::Private);
+            assert_eq!(prop.php_type, PhpType::Array);
+        }
+
+        // Methods: getPartialErrors, getCancelledPromiseIds (each with a handler).
+        let method_names: Vec<&str> = to.methods.iter().map(|m| m.name.as_str()).collect();
+        assert!(method_names.contains(&"getPartialErrors"));
+        assert!(method_names.contains(&"getCancelledPromiseIds"));
+        for m in &to.methods {
+            assert!(m.handler.is_some(), "method {} must have a handler", m.name);
+            assert_eq!(m.return_type, Some(PhpType::Array));
+        }
     }
 
     #[test]

@@ -175,6 +175,13 @@ pub struct Metrics {
     async_tasks_failed: AtomicU64,
     async_tasks_cancelled: AtomicU64,
     async_tasks_rejected: AtomicU64,
+    /// Workers left running past an `oxphp_async_await_race` /
+    /// `oxphp_async_await_any` timeout. Cancel flag is signalled but the
+    /// worker keeps running PHP code on its OS thread. Each stranded
+    /// worker can extend RSHUTDOWN by up to 5s (the per-promise budget
+    /// in `cleanup_outstanding_promises_callback`). Watch this counter
+    /// to size that risk.
+    async_tasks_stranded: AtomicU64,
 
     // ── Per-worker observability (supervisor-driven) ──
     /// Age of the in-flight request per worker, in microseconds.
@@ -285,6 +292,7 @@ impl Metrics {
             async_tasks_failed: AtomicU64::new(0),
             async_tasks_cancelled: AtomicU64::new(0),
             async_tasks_rejected: AtomicU64::new(0),
+            async_tasks_stranded: AtomicU64::new(0),
             worker_request_age_us: mk_vec(),
             worker_long_running_total: mk_vec(),
             worker_stuck_total_io: mk_vec(),
@@ -459,6 +467,12 @@ impl Metrics {
 
     pub fn async_task_rejected(&self) {
         self.async_tasks_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record `n` workers stranded by an `await_race` / `await_any`
+    /// timeout — see the field doc for context.
+    pub fn async_tasks_stranded(&self, n: u64) {
+        self.async_tasks_stranded.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn workers_current(&self) -> usize {
@@ -840,6 +854,17 @@ impl Metrics {
                 out,
                 "oxphp_async_tasks_rejected_total {}",
                 self.async_tasks_rejected.load(Ordering::Relaxed)
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_stranded_total Workers left running past an await_race/await_any timeout. Each can extend RSHUTDOWN by up to 5s."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_stranded_total counter");
+            let _ = writeln!(
+                out,
+                "oxphp_async_tasks_stranded_total {}",
+                self.async_tasks_stranded.load(Ordering::Relaxed)
             );
         }
 

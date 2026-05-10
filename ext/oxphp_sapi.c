@@ -1509,23 +1509,75 @@ ZEND_FUNCTION(oxphp_method_dispatch)
 
     void *rust_data = NULL;
     uint32_t class_index = 0;
+    void *this_zval = NULL;
 
-    /* For instance methods, extract rust_data from the custom object */
+    /* For instance methods on classes registered with custom storage,
+     * extract rust_data and class_index from the custom object wrapper —
+     * O(1) read of the prefix that `oxphp_plugin_create_object` allocated.
+     *
+     * For instance methods on plugin classes WITHOUT custom storage
+     * (e.g. exception classes that just hold PHP-level properties), the
+     * underlying zend_object has no oxphp_custom_object prefix, so we
+     * resolve class_index from the scope name via a linear scan and leave
+     * rust_data NULL. The fast path is selected by checking whether the
+     * class entry's `create_object` slot points to our custom hook —
+     * that's exactly the bit set during registration for custom-storage
+     * classes (see oxphp_register_class flow above).
+     *
+     * `this_zval` exposes the zval* of `$this` to the dispatch callback
+     * so Rust handlers can read PHP-level properties via
+     * oxphp_object_read_property. */
     if (Z_TYPE(execute_data->This) == IS_OBJECT) {
-        oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
-        rust_data = intern->rust_data;
-        class_index = intern->class_index;
+        this_zval = (void *)&execute_data->This;
+        zend_class_entry *ce = Z_OBJCE(execute_data->This);
+        if (ce->create_object == oxphp_plugin_create_object) {
+            /* Fast path: O(1) prefix read for custom-storage classes. */
+            oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ(execute_data->This));
+            rust_data = intern->rust_data;
+            class_index = intern->class_index;
+        } else {
+            /* Slow fallback: linear scan to resolve class_index from
+             * scope name. Only for plugin classes without custom storage
+             * (e.g. AggregateAsyncException, TimeoutException). */
+            zend_class_entry *scope = execute_data->func->common.scope;
+            int cls_count = oxphp_bridge_get_plugin_class_count();
+            int found = 0;
+            for (int i = 0; i < cls_count; i++) {
+                const char *fqn = oxphp_bridge_get_class_fqn(i);
+                if (fqn && scope && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
+                    class_index = (uint32_t)i;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                zend_throw_error(NULL,
+                    "OxPHP plugin method %s::%s dispatched but class is not registered",
+                    scope ? ZSTR_VAL(scope->name) : "?",
+                    method_name);
+                return;
+            }
+        }
     } else if (execute_data->func->common.scope) {
         /* Static method — find class_index from the scope CE.
          * Walk the plugin class CE array to find the match. */
         zend_class_entry *scope = execute_data->func->common.scope;
         int cls_count = oxphp_bridge_get_plugin_class_count();
+        int found = 0;
         for (int i = 0; i < cls_count; i++) {
             const char *fqn = oxphp_bridge_get_class_fqn(i);
             if (fqn && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
                 class_index = (uint32_t)i;
+                found = 1;
                 break;
             }
+        }
+        if (!found) {
+            zend_throw_error(NULL,
+                "OxPHP plugin static method %s::%s dispatched but class is not registered",
+                ZSTR_VAL(scope->name),
+                method_name);
+            return;
         }
     }
 
@@ -1535,7 +1587,7 @@ ZEND_FUNCTION(oxphp_method_dispatch)
         return;
     }
 
-    int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data);
+    int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data, this_zval);
     if (rc != 0 && !EG(exception)) {
         zend_throw_error(NULL, "Plugin method %s::%s failed",
             execute_data->func->common.scope
@@ -3610,6 +3662,15 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 PHP_RINIT_FUNCTION(oxphp_sapi)
 {
     oxphp_apm_install_on_thread();  /* no-op after first call per thread */
+
+    /* Defensive: clear the per-thread aggregate-exception buffer in case
+     * a prior request faulted between aggregate_push and the trailing
+     * aggregate_clear in oxphp_bridge_aggregate_throw{,_timeout} (e.g.
+     * a fatal during array_init or zend_throw_exception_object). The
+     * normal happy/error paths already clear; this is belt-and-suspenders
+     * so a stranded entry can't bleed into a new request. */
+    oxphp_bridge_aggregate_clear();
+
     return SUCCESS;
 }
 /* }}} */

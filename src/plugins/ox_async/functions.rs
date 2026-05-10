@@ -1,8 +1,9 @@
-//! Handler implementations for the 4 async PHP functions:
+//! Handler implementations for the 5 async PHP functions:
 //!
 //! - `oxphp_async(Closure $fn, mixed ...$args): int`
 //! - `oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed`
 //! - `oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array`
+//! - `oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array`
 //! - `oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array`
 
 use std::ffi::CStr;
@@ -83,7 +84,7 @@ fn read_bridge_exception() -> PhpError {
 
 // ─── Registration ────────────────────────────────────────────────────────────
 
-/// Register the 4 async PHP functions via the builder API.
+/// Register the 5 async PHP functions via the builder API.
 pub fn register_functions(ctx: &mut PluginContext, enabled: bool) -> Result<(), PluginError> {
     // 1. oxphp_async(Closure $fn, mixed ...$args): int
     ctx.function("oxphp_async")
@@ -106,7 +107,14 @@ pub fn register_functions(ctx: &mut PluginContext, enabled: bool) -> Result<(), 
         .returns(PhpType::Array)
         .handler(move |call: &mut NativeCall| handler_await_all(call, enabled))?;
 
-    // 4. oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
+    // 4. oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array
+    ctx.function("oxphp_async_await_race")
+        .param("promise_ids", PhpType::Array)
+        .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
+        .returns(PhpType::Array)
+        .handler(move |call: &mut NativeCall| handler_await_race(call, enabled))?;
+
+    // 5. oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array
     ctx.function("oxphp_async_await_any")
         .param("promise_ids", PhpType::Array)
         .optional_param("timeout", PhpType::Float, PhpValue::Float(0.0))
@@ -334,12 +342,96 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
     Ok(())
 }
 
-// ─── handler_await_any ───────────────────────────────────────────────────────
+// ─── handler_await_race ──────────────────────────────────────────────────────
 
-/// `oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array`
+/// `oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array`
 ///
 /// Races all promises. Returns `['id' => int, 'value' => mixed]` for the
 /// first promise that completes.
+fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
+    if !enabled {
+        return Err(async_disabled());
+    }
+
+    // Collect promise IDs from the array argument
+    let mut ids: Vec<i64> = Vec::new();
+    call.arg_array_foreach(0, |_key, val| {
+        if val.val_type() == ValType::Long {
+            ids.push(val.as_long());
+        }
+    })?;
+
+    if ids.is_empty() {
+        return Err(async_err(
+            "oxphp_async_await_race(): promise_ids array must not be empty",
+        ));
+    }
+
+    let timeout = if call.argc() > 1 {
+        match call.arg_is_null(1) {
+            Ok(true) => 0.0,
+            Ok(false) => call.arg_double(1).unwrap_or(0.0),
+            Err(_) => 0.0,
+        }
+    } else {
+        0.0
+    };
+
+    let count = ids.len() as u32;
+
+    // Allocate a stack-aligned temporary zval for the winner's result.
+    #[repr(C, align(8))]
+    struct TempZval([u8; 16]);
+    let mut winner_zval = TempZval([0u8; 16]);
+    let winner_ptr = &mut winner_zval as *mut TempZval as *mut c_void;
+    let mut winner_id: i64 = -1;
+
+    let rc = unsafe {
+        ffi::oxphp_bridge_await_race_dispatch(
+            ids.as_ptr(),
+            count,
+            timeout,
+            &mut winner_id,
+            winner_ptr,
+        )
+    };
+
+    match rc {
+        0 => {
+            // Build return array: ['id' => winner_id, 'value' => winner_result]
+            let retval = call.retval_ptr();
+            unsafe { ffi::oxphp_ret_array_init(retval, 2) };
+            unsafe {
+                ffi::oxphp_arr_add_long(
+                    retval,
+                    c"id".as_ptr(),
+                    2, // key length without NUL
+                    winner_id,
+                )
+            };
+            unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
+            Ok(())
+        }
+        -2 => Err(timeout_err(
+            "oxphp_async_await_race(): all promises timed out",
+        )),
+        -4 => Err(async_err(format!(
+            "oxphp_async_await_race(): unknown or already-awaited promise id {}",
+            winner_id
+        ))),
+        _ => Err(read_bridge_exception()),
+    }
+}
+
+// ─── handler_await_any ───────────────────────────────────────────────────────
+
+/// `oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array`
+///
+/// Promise.any semantics: first FULFILLED promise wins. Rejections accumulate.
+/// If every promise rejects, the bridge throws OxPHP\Async\AggregateAsyncException
+/// carrying every error. If the timeout expires before any promise fulfills, the
+/// bridge throws OxPHP\Async\TimeoutException populated with partial errors and
+/// the ids of promises still pending (now cancelled).
 fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
     if !enabled {
         return Err(async_disabled());
@@ -404,9 +496,19 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
             Ok(())
         }
-        -2 => Err(timeout_err(
-            "oxphp_async_await_any(): all promises timed out",
-        )),
+        // -2 → bridge threw OxPHP\Async\TimeoutException via aggregate API
+        // -3 → bridge threw OxPHP\Async\AggregateAsyncException
+        // EG(exception) is already set by zend_throw_exception_object inside the
+        // bridge. Returning Ok(()) lets Zend's normal unwinding propagate that
+        // pre-set exception unchanged. Returning Err(...) would route through
+        // oxphp_throw_exception in the outer SAPI dispatch, which calls
+        // zend_throw_exception unconditionally, OVERRIDING EG(exception) with
+        // a generic AsyncException. Don't do that.
+        -2 | -3 => Ok(()),
+        -4 => Err(async_err(format!(
+            "oxphp_async_await_any(): unknown or already-awaited promise id {}",
+            winner_id
+        ))),
         _ => Err(read_bridge_exception()),
     }
 }
@@ -463,9 +565,9 @@ mod tests {
     }
 
     #[test]
-    fn test_registers_all_4_functions() {
+    fn test_registers_all_5_functions() {
         let funcs = make_context_and_functions(true);
-        assert_eq!(funcs.len(), 4);
+        assert_eq!(funcs.len(), 5);
     }
 
     #[test]
@@ -475,6 +577,7 @@ mod tests {
         assert!(names.contains(&"oxphp_async"));
         assert!(names.contains(&"oxphp_async_await"));
         assert!(names.contains(&"oxphp_async_await_all"));
+        assert!(names.contains(&"oxphp_async_await_race"));
         assert!(names.contains(&"oxphp_async_await_any"));
     }
 
@@ -489,7 +592,7 @@ mod tests {
     #[test]
     fn test_registers_same_count_when_disabled() {
         let funcs = make_context_and_functions(false);
-        assert_eq!(funcs.len(), 4);
+        assert_eq!(funcs.len(), 5);
     }
 
     #[test]
@@ -535,6 +638,22 @@ mod tests {
     }
 
     #[test]
+    fn test_oxphp_async_await_race_param_signature() {
+        let funcs = make_context_and_functions(true);
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_race")
+            .unwrap();
+        assert_eq!(f.params.len(), 2);
+        assert_eq!(f.params[0].name, "promise_ids");
+        assert!(f.params[0].required);
+        assert_eq!(f.params[0].php_type, PhpType::Array);
+        assert_eq!(f.params[1].name, "timeout");
+        assert!(!f.params[1].required);
+        assert_eq!(f.params[1].php_type, PhpType::Float);
+    }
+
+    #[test]
     fn test_oxphp_async_await_any_param_signature() {
         let funcs = make_context_and_functions(true);
         let f = funcs
@@ -559,6 +678,10 @@ mod tests {
         assert_eq!(find("oxphp_async_await").return_type, Some(PhpType::Mixed));
         assert_eq!(
             find("oxphp_async_await_all").return_type,
+            Some(PhpType::Array)
+        );
+        assert_eq!(
+            find("oxphp_async_await_race").return_type,
             Some(PhpType::Array)
         );
         assert_eq!(
@@ -683,6 +806,16 @@ mod tests {
         let f = funcs
             .iter()
             .find(|f| f.fqn == "oxphp_async_await_all")
+            .unwrap();
+        assert!(!f.is_variadic);
+    }
+
+    #[test]
+    fn test_oxphp_async_await_race_not_variadic() {
+        let funcs = make_context_and_functions(true);
+        let f = funcs
+            .iter()
+            .find(|f| f.fqn == "oxphp_async_await_race")
             .unwrap();
         assert!(!f.is_variadic);
     }

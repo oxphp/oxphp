@@ -1,6 +1,4 @@
 //! Shared\Counter — lock-free atomic i64.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/20-type-counter.md
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicI64, Ordering};

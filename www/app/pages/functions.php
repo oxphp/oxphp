@@ -220,9 +220,9 @@ $results = oxphp_async_await_all([$p1, $p2, $p3]);
 // [$p1 => 1, $p2 => 2, $p3 => 3]',
     ],
     [
-        'name'    => 'oxphp_async_await_any',
+        'name'    => 'oxphp_async_await_race',
         'version' => '0.2.0',
-        'sig'     => 'oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array',
+        'sig'     => 'oxphp_async_await_race(array $promise_ids, ?float $timeout = null): array',
         'params'  => [
             ['name' => '$promise_ids', 'type' => 'array', 'desc' => 'Array of promise IDs from <code>oxphp_async()</code>.'],
             ['name' => '$timeout', 'type' => '?float', 'default' => 'null', 'desc' => 'Overall timeout in seconds.'],
@@ -231,7 +231,7 @@ $results = oxphp_async_await_all([$p1, $p2, $p3]);
         'desc'    => 'Races multiple promises using <code>futures::select_all</code> and returns the first to complete. Non-winning promises remain individually awaitable via <code>oxphp_async_await()</code>. On timeout, all specified promises are cancelled.',
         'example' => '$p1 = oxphp_async(fn() => slow_api_a()); // 500ms
 $p2 = oxphp_async(fn() => slow_api_b()); // 100ms
-$winner = oxphp_async_await_any([$p1, $p2]);
+$winner = oxphp_async_await_race([$p1, $p2]);
 // ["id" => $p2, "value" => ...]  (fastest wins)
 $other = oxphp_async_await($p1); // still awaitable',
     ],
@@ -305,7 +305,7 @@ foreach ($functions as $fn) {
             'oxphp_async'             => '<span class="mono dim">not called &mdash; dispatches closure to async pool</span>',
             'oxphp_async_await'       => '<span class="mono dim">not called &mdash; blocks until promise completes</span>',
             'oxphp_async_await_all'   => '<span class="mono dim">not called &mdash; awaits multiple promises</span>',
-            'oxphp_async_await_any'   => '<span class="mono dim">not called &mdash; races promises, returns fastest</span>',
+            'oxphp_async_await_race'  => '<span class="mono dim">not called &mdash; races promises, returns fastest</span>',
             'oxphp_register_decorator' => '<span class="mono dim">not called &mdash; registers a decorator class</span>',
             default                   => '',
         };

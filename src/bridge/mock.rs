@@ -241,6 +241,11 @@ pub unsafe fn oxphp_bridge_set_await_dispatch(
 ) {
 }
 
+pub unsafe fn oxphp_bridge_set_await_race_dispatch(
+    _f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
+) {
+}
+
 pub unsafe fn oxphp_bridge_set_await_any_dispatch(
     _f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
 ) {
@@ -257,22 +262,36 @@ pub unsafe fn oxphp_bridge_cleanup_outstanding_promises() {}
 
 // ── Async exception details ──
 
-pub unsafe fn oxphp_bridge_set_async_exception(
-    _cls: *const c_char,
-    _msg: *const c_char,
-    _trace: *const c_char,
-) {
-}
+pub unsafe fn oxphp_bridge_set_async_exception(_cls: *const c_char, _msg: *const c_char) {}
 pub unsafe fn oxphp_bridge_get_async_exc_class() -> *const c_char {
     std::ptr::null()
 }
 pub unsafe fn oxphp_bridge_get_async_exc_message() -> *const c_char {
     std::ptr::null()
 }
-pub unsafe fn oxphp_bridge_get_async_exc_trace() -> *const c_char {
-    std::ptr::null()
-}
 pub unsafe fn oxphp_bridge_clear_async_exception() {}
+
+// ── Aggregate exception API (multi-error) ──
+
+pub unsafe fn oxphp_bridge_aggregate_clear() {}
+
+pub unsafe fn oxphp_bridge_aggregate_push(
+    _exception_class: *const c_char,
+    _message: *const c_char,
+    _promise_id: i64,
+) {
+}
+
+pub unsafe fn oxphp_bridge_aggregate_throw() -> c_int {
+    0
+}
+
+pub unsafe fn oxphp_bridge_aggregate_throw_timeout(
+    _pending_ids: *const i64,
+    _pending_count: u32,
+) -> c_int {
+    0
+}
 
 // === Async promise bridge functions ===
 
@@ -434,6 +453,15 @@ pub unsafe fn oxphp_bridge_await_dispatch(
 ) -> c_int {
     -1
 }
+pub unsafe fn oxphp_bridge_await_race_dispatch(
+    _promise_ids: *const i64,
+    _count: u32,
+    _timeout: f64,
+    _out_winner_id: *mut i64,
+    _retval: *mut c_void,
+) -> c_int {
+    -1
+}
 pub unsafe fn oxphp_bridge_await_any_dispatch(
     _promise_ids: *const i64,
     _count: u32,
@@ -497,7 +525,6 @@ pub unsafe fn oxphp_execute_async_task(
     _retval: *mut c_void,
     _exc_class: *mut *mut c_char,
     _exc_message: *mut *mut c_char,
-    _exc_trace: *mut *mut c_char,
 ) -> c_int {
     0
 }
@@ -741,10 +768,26 @@ pub unsafe fn oxphp_bridge_set_method_dispatch(
             argc: u32,
             retval: *mut c_void,
             rust_data: *mut c_void,
+            this_zval: *mut c_void,
         ) -> c_int,
     >,
 ) {
 }
+
+// ─── Object property access ─────────────────────────────────
+
+pub unsafe fn oxphp_object_read_property(
+    _object_zval: *mut c_void,
+    _property_name: *const c_char,
+) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+pub unsafe fn oxphp_zval_is_null_or_unset(_zval_ptr: *const c_void) -> c_int {
+    1
+}
+
+pub unsafe fn oxphp_zval_copy_to_retval(_src_zval: *const c_void, _dst_zval: *mut c_void) {}
 
 // ─── Storage Callbacks ──────────────────────────────────────
 

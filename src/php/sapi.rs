@@ -98,6 +98,17 @@ thread_local! {
     static PROMISE_CLEANUP: RefCell<HashMap<u64, PromiseCleanup>>
         = RefCell::new(HashMap::new());
 
+    /// Receivers for promises stranded by an `await_race` / `await_any`
+    /// timeout. The original `select_all` / poll-loop future was dropped
+    /// when the timeout fired, so these rxs are no longer in PROMISE_MAP
+    /// — but the workers may still be running and still touching frozen
+    /// captures. RSHUTDOWN drains this map first, block_on'ing each rx
+    /// (5 s budget) before the matching PROMISE_CLEANUP entry unfreezes
+    /// the zvals — closing the UAF window between cancel-flag signal and
+    /// vm_interrupt observation.
+    static PROMISE_STRANDED: RefCell<HashMap<u64, PromiseEntry>>
+        = RefCell::new(HashMap::new());
+
     /// True on async worker threads, false on HTTP workers.
     static IS_ASYNC_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
@@ -1561,6 +1572,7 @@ unsafe extern "C" fn method_dispatch_callback(
     argc: u32,
     retval: *mut c_void,
     rust_data: *mut c_void,
+    this_zval: *mut c_void,
 ) -> c_int {
     // Safety: method names are ASCII identifiers — UTF-8 validation is unnecessary overhead.
     let name_str = std::str::from_utf8_unchecked(CStr::from_ptr(method_name).to_bytes());
@@ -1584,12 +1596,13 @@ unsafe extern "C" fn method_dispatch_callback(
         Some(rust_data)
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut call = crate::bridge::call::NativeCall::new(
+        let mut call = crate::bridge::call::NativeCall::new_with_this(
             args,
             argc,
             retval,
             Some(class_index as u64),
             rust_data_opt,
+            this_zval,
         );
         handler.handle(&mut call)
     }));
@@ -2645,7 +2658,30 @@ pub fn outstanding_promise_ids() -> Vec<u64> {
             ids.insert(id);
         }
     });
+    PROMISE_STRANDED.with(|m| {
+        for &id in m.borrow().keys() {
+            ids.insert(id);
+        }
+    });
     ids.into_iter().collect()
+}
+
+/// Stash an (rx, cancel) pair whose owning future was dropped by a
+/// timeout (await_race / await_any). RSHUTDOWN block_on's these rxs
+/// before unfreezing the matching PROMISE_CLEANUP entry, ensuring the
+/// worker has actually finished touching the frozen captures.
+fn stash_stranded(
+    id: u64,
+    rx: tokio::sync::oneshot::Receiver<AsyncResult>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+) {
+    PROMISE_STRANDED.with(|m| {
+        m.borrow_mut().insert(id, (rx, cancelled));
+    });
+}
+
+fn take_stranded(id: u64) -> Option<PromiseEntry> {
+    PROMISE_STRANDED.with(|m| m.borrow_mut().remove(&id))
 }
 
 pub fn set_async_tx(tx: crossbeam_channel::Sender<AsyncTask>) {
@@ -2969,6 +3005,22 @@ pub unsafe extern "C" fn async_dispatch_callback(
     }
 }
 
+/// Stores a generic error in bridge TLS so the PHP-side handler's
+/// `read_bridge_exception` surfaces a meaningful class+message when an
+/// internal failure (channel closed, unknown id, runtime not initialized)
+/// occurs without a worker-thrown exception. Without this, the handler
+/// reads stale or empty TLS and reports `[Unknown] unknown error`.
+///
+/// # Safety
+/// Calls into the bridge C FFI; safe as long as the bridge module is loaded
+/// (which it is for any await path that can reach this helper).
+unsafe fn set_bridge_internal_error(message: &str) {
+    use crate::bridge::ffi;
+    let cls = CString::new("OxPHP\\Async\\AsyncException").unwrap_or_default();
+    let msg = CString::new(message).unwrap_or_default();
+    ffi::oxphp_bridge_set_async_exception(cls.as_ptr(), msg.as_ptr());
+}
+
 /// Rust-side callback invoked from C when PHP calls `oxphp_async_await()`.
 ///
 /// Blocks on the oneshot receiver until the async result arrives,
@@ -3013,18 +3065,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
             if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
                 let cls_c = CString::new(cls.as_str()).unwrap_or_default();
                 let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-                let trace_c = result
-                    .exception_trace
-                    .as_deref()
-                    .map(|t| CString::new(t).unwrap_or_default());
-                ffi::oxphp_bridge_set_async_exception(
-                    cls_c.as_ptr(),
-                    msg_c.as_ptr(),
-                    trace_c
-                        .as_ref()
-                        .map(|c| c.as_ptr())
-                        .unwrap_or(std::ptr::null()),
-                );
+                ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
             }
             return -1;
         }
@@ -3033,7 +3074,12 @@ pub unsafe extern "C" fn await_dispatch_callback(
     // Take promise from map
     let (rx, cancelled) = match take_promise(id) {
         Some(p) => p,
-        None => return -1,
+        None => {
+            set_bridge_internal_error(&format!(
+                "unknown or already-awaited promise id {promise_id}"
+            ));
+            return -1;
+        }
     };
 
     // Block on result — use tokio::runtime::Handle::block_on for timeout support
@@ -3046,6 +3092,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
                     Ok(Err(_)) => {
                         // Channel closed — task was dropped
                         cleanup_promise(id);
+                        set_bridge_internal_error("promise channel closed unexpectedly");
                         return -1;
                     }
                     Err(_) => {
@@ -3065,6 +3112,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
                     Ok(r) => r,
                     Err(_) => {
                         cleanup_promise(id);
+                        set_bridge_internal_error("promise channel closed unexpectedly");
                         return -1;
                     }
                 }
@@ -3076,6 +3124,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
             Ok(r) => r,
             Err(_) => {
                 cleanup_promise(id);
+                set_bridge_internal_error("promise channel closed unexpectedly");
                 return -1;
             }
         }
@@ -3105,44 +3154,37 @@ pub unsafe extern "C" fn await_dispatch_callback(
         0
     } else {
         // Store exception details in bridge TLS so the C extension can
-        // create a proper exception with class/message/trace from the worker.
+        // create a proper exception with class/message from the worker.
         if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
             let cls_c = CString::new(cls.as_str()).unwrap_or_default();
             let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-            let trace_c = result
-                .exception_trace
-                .as_deref()
-                .map(|t| CString::new(t).unwrap_or_default());
-            ffi::oxphp_bridge_set_async_exception(
-                cls_c.as_ptr(),
-                msg_c.as_ptr(),
-                trace_c
-                    .as_ref()
-                    .map(|c| c.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-            );
+            ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
         }
         -1
     }
 }
 
-/// Rust-side callback invoked from C when PHP calls `oxphp_async_await_any()`.
+/// Rust-side callback invoked from C when PHP calls `oxphp_async_await_race()`.
 ///
-/// Races multiple promise receivers using `futures::select_all`, returning the
-/// first to complete. Non-winning receivers are put back into PROMISE_MAP so
-/// they can be awaited individually later via `oxphp_async_await()`.
+/// Races multiple promise receivers via a `poll_fn` over `&mut rxs[..]`,
+/// returning the first to complete. Non-winning receivers are put back into
+/// PROMISE_MAP so they can be awaited individually later via
+/// `oxphp_async_await()`.
 ///
 /// Returns: 0 = success, -1 = error, -2 = timeout.
 /// On success: `*out_winner_id` is the winning promise ID, `retval` is populated.
 ///
-/// **Timeout behavior**: On timeout, all receivers are consumed by `select_all`
-/// and cannot be recovered. The corresponding promises are cancelled and will be
-/// cleaned up by RSHUTDOWN. Remaining promises cannot be awaited after timeout.
+/// **Timeout behavior**: On timeout, the cancel flag is set on every still-
+/// pending promise and the (id, rx, cancelled) tuples are moved into
+/// PROMISE_STRANDED. RSHUTDOWN's cleanup callback block_on's each stranded
+/// rx (5 s per promise) before unfreezing captures, so workers finish
+/// touching the frozen state before it's released. Stranded promises cannot
+/// be awaited after timeout — their rxs live only in PROMISE_STRANDED.
 ///
 /// # Safety
 /// Called from C FFI. `promise_ids` must point to `count` valid i64 values.
 /// `out_winner_id` and `retval` must be valid writable pointers.
-pub unsafe extern "C" fn await_any_dispatch_callback(
+pub unsafe extern "C" fn await_race_dispatch_callback(
     promise_ids: *const i64,
     count: u32,
     timeout: f64,
@@ -3150,7 +3192,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    use futures_util::future::select_all;
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::task::Poll;
     use std::time::Duration;
 
     if count == 0 || promise_ids.is_null() {
@@ -3163,23 +3207,31 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         .collect();
 
     // Take all receivers and cancelled flags from PROMISE_MAP.
-    // Track (id, cancelled) in parallel vecs — select_all returns remaining
-    // receivers in original order (minus winner), so index-based mapping works.
     let mut id_map: Vec<u64> = Vec::with_capacity(ids.len());
     let mut cancel_map: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
         Vec::with_capacity(ids.len());
     let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> = Vec::with_capacity(ids.len());
 
     for &id in &ids {
-        if let Some((rx, cancelled)) = take_promise(id) {
-            id_map.push(id);
-            cancel_map.push(cancelled);
-            rxs.push(rx);
+        match take_promise(id) {
+            Some((rx, cancelled)) => {
+                id_map.push(id);
+                cancel_map.push(cancelled);
+                rxs.push(rx);
+            }
+            None => {
+                // Unknown / already-awaited promise id. Restore any
+                // receivers we already took and bail with -4. The handler
+                // surfaces the offending id via *out_winner_id.
+                for (rx, (taken_id, cancelled)) in
+                    rxs.into_iter().zip(id_map.iter().zip(cancel_map.iter()))
+                {
+                    store_promise(*taken_id, rx, cancelled.clone());
+                }
+                *out_winner_id = id as i64;
+                return -4;
+            }
         }
-    }
-
-    if rxs.is_empty() {
-        return -1;
     }
 
     let handle = match ASYNC_TOKIO_HANDLE.get() {
@@ -3189,34 +3241,56 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             for (rx, (id, cancelled)) in rxs.into_iter().zip(id_map.iter().zip(cancel_map.iter())) {
                 store_promise(*id, rx, cancelled.clone());
             }
+            set_bridge_internal_error("async runtime not initialized");
             return -1;
         }
     };
 
-    // select_all races all receivers. oneshot::Receiver<T> is Unpin + Future,
-    // so select_all operates directly — no Box::pin needed.
-    // Returns (winner_output, winner_index, remaining_receivers).
-    let race_result = if timeout > 0.0 {
-        let dur = Duration::from_secs_f64(timeout);
-        handle.block_on(async { tokio::time::timeout(dur, select_all(rxs)).await })
-    } else {
-        Ok(handle.block_on(select_all(rxs)))
+    // Race rxs by polling them through a `&mut [Receiver]` borrow rather
+    // than consuming the Vec via `select_all`. This is the soundness fix
+    // for the timeout path: when `tokio::time::timeout` fires, it drops
+    // the inner future, releasing the borrow — but `rxs` itself stays
+    // owned by this function so we can stash the surviving receivers in
+    // PROMISE_STRANDED. The previous `select_all(rxs)` design dropped the
+    // receivers along with the timeout future, leaving RSHUTDOWN unable
+    // to wait for the still-running workers before unfreezing captures.
+    //
+    // oneshot::Receiver<T> is Unpin, so `Pin::new(&mut rxs[i])` is sound.
+    let race_result = {
+        let race_fut = poll_fn(|cx| {
+            for (i, rx) in rxs.iter_mut().enumerate() {
+                if let Poll::Ready(res) = Pin::new(rx).poll(cx) {
+                    return Poll::Ready((i, res));
+                }
+            }
+            Poll::Pending
+        });
+        if timeout > 0.0 {
+            let dur = Duration::from_secs_f64(timeout);
+            // Construct `Sleep` inside `block_on` so the runtime context is
+            // established before the timer driver registers.
+            handle.block_on(async move { tokio::time::timeout(dur, race_fut).await })
+        } else {
+            Ok(handle.block_on(race_fut))
+        }
     };
 
     match race_result {
-        Ok((recv_result, winner_idx, remaining)) => {
+        Ok((winner_idx, recv_result)) => {
             let winner_id = id_map[winner_idx];
 
-            // Put remaining (non-winning) receivers back into PROMISE_MAP.
-            // select_all returns remaining in original order with the winner removed.
-            let mut remaining_iter = remaining.into_iter();
-            for orig_idx in 0..id_map.len() {
-                if orig_idx == winner_idx {
-                    continue;
-                }
-                if let Some(rx) = remaining_iter.next() {
-                    store_promise(id_map[orig_idx], rx, cancel_map[orig_idx].clone());
-                }
+            // Restore non-winning receivers to PROMISE_MAP. Use swap_remove on
+            // all three parallel vecs so they stay in lockstep — the winner's
+            // slot is filled with the last entry, then the last is popped.
+            id_map.swap_remove(winner_idx);
+            cancel_map.swap_remove(winner_idx);
+            drop(rxs.swap_remove(winner_idx)); // already consumed via poll
+            for ((id, cancelled), rx) in id_map
+                .into_iter()
+                .zip(cancel_map.into_iter())
+                .zip(rxs.into_iter())
+            {
+                store_promise(id, rx, cancelled);
             }
 
             // Handle the winning result
@@ -3225,6 +3299,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 Err(_) => {
                     // Channel closed — task was dropped
                     cleanup_promise(winner_id);
+                    set_bridge_internal_error("promise channel closed unexpectedly");
                     return -1;
                 }
             };
@@ -3253,29 +3328,334 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 {
                     let cls_c = CString::new(cls.as_str()).unwrap_or_default();
                     let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-                    let trace_c = result
-                        .exception_trace
-                        .as_deref()
-                        .map(|t| CString::new(t).unwrap_or_default());
-                    ffi::oxphp_bridge_set_async_exception(
-                        cls_c.as_ptr(),
-                        msg_c.as_ptr(),
-                        trace_c
-                            .as_ref()
-                            .map(|c| c.as_ptr())
-                            .unwrap_or(std::ptr::null()),
-                    );
+                    ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
                 }
                 *out_winner_id = winner_id as i64;
                 -1
             }
         }
         Err(_timeout) => {
-            // Timeout — select_all consumed all receivers. Signal cancellation
-            // so async workers stop early. RSHUTDOWN will clean up PromiseCleanup data.
-            for cancel in &cancel_map {
-                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Timeout — the poll_fn future was dropped, releasing its
+            // `&mut rxs` borrow. `rxs` itself survived (it's owned here),
+            // so we can stash the still-pending (id, rx, cancelled)
+            // tuples in PROMISE_STRANDED. RSHUTDOWN's cleanup callback
+            // block_on's each stranded rx with a 5 s budget BEFORE
+            // unfreezing the matching PROMISE_CLEANUP entry — the
+            // worker therefore finishes touching the frozen captures
+            // before they're released, closing the UAF window.
+            //
+            // We also signal cancellation on every cancel flag so the
+            // worker observes the request at the next vm_interrupt poll
+            // and can return early instead of running to completion.
+            //
+            // Each stranded worker can extend RSHUTDOWN by up to 5 s
+            // (the per-promise block_on budget). Tracked via
+            // async_tasks_stranded so the stall risk shows up in metrics.
+            let stranded_count = rxs.len() as u64;
+            for ((id, rx), cancelled) in id_map
+                .into_iter()
+                .zip(rxs.into_iter())
+                .zip(cancel_map.into_iter())
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                stash_stranded(id, rx, cancelled);
             }
+            if let Some(m) = get_async_metrics() {
+                m.async_tasks_stranded(stranded_count);
+            }
+            -2
+        }
+    }
+}
+
+/// Per-promise rejection record collected by `await_any_dispatch_callback`.
+struct AggregateRejection {
+    promise_id: u64,
+    exception_class: String,
+    message: String,
+}
+
+/// Rust-side callback for `oxphp_async_await_any()`.
+///
+/// Promise.any semantics:
+///   * First FULFILLED promise wins. Remaining still-pending promises are
+///     restored to PROMISE_MAP (individually awaitable via `oxphp_async_await`).
+///   * If every promise rejects before any fulfills, accumulates errors and
+///     throws `OxPHP\Async\AggregateAsyncException` via the aggregate API.
+///     Returns -3.
+///   * If the timeout expires before a fulfilled winner, accumulates errors
+///     that arrived before the deadline plus computes still-pending ids, then
+///     throws `OxPHP\Async\TimeoutException` with both fields. Returns -2.
+///   * Other internal failures return -1.
+///
+/// # Safety
+/// Called from C FFI. `promise_ids` must point to `count` valid i64 values.
+/// `out_winner_id` and `retval` must be valid writable pointers.
+pub unsafe extern "C" fn await_any_dispatch_callback(
+    promise_ids: *const i64,
+    count: u32,
+    timeout: f64,
+    out_winner_id: *mut i64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    use std::future::{poll_fn, Future};
+    use std::pin::Pin;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    if count == 0 || promise_ids.is_null() {
+        return -1;
+    }
+
+    // Snapshot input ids in input-array order — used later for sorting
+    // accumulated rejections back into positional order.
+    let input_ids: Vec<u64> = (0..count as usize)
+        .map(|i| *promise_ids.add(i) as u64)
+        .collect();
+
+    // Pull receivers + cancel flags out of PROMISE_MAP.
+    let mut id_vec: Vec<u64> = Vec::with_capacity(input_ids.len());
+    let mut cancel_vec: Vec<Arc<std::sync::atomic::AtomicBool>> =
+        Vec::with_capacity(input_ids.len());
+    let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> =
+        Vec::with_capacity(input_ids.len());
+
+    for &id in &input_ids {
+        match take_promise(id) {
+            Some((rx, cancelled)) => {
+                id_vec.push(id);
+                cancel_vec.push(cancelled);
+                rxs.push(rx);
+            }
+            None => {
+                // Unknown / already-awaited promise id. Restore any
+                // receivers we already took and bail with -4. The handler
+                // surfaces the offending id via *out_winner_id.
+                for ((taken_id, rx), cancelled) in id_vec
+                    .iter()
+                    .copied()
+                    .zip(rxs.into_iter())
+                    .zip(cancel_vec.iter().cloned())
+                {
+                    store_promise(taken_id, rx, cancelled);
+                }
+                *out_winner_id = id as i64;
+                return -4;
+            }
+        }
+    }
+
+    if rxs.is_empty() {
+        return -1;
+    }
+
+    let handle = match ASYNC_TOKIO_HANDLE.get() {
+        Some(h) => h,
+        None => {
+            // Restore receivers to PROMISE_MAP before failing.
+            for ((id, rx), cancelled) in id_vec
+                .iter()
+                .copied()
+                .zip(rxs.into_iter())
+                .zip(cancel_vec.iter().cloned())
+            {
+                store_promise(id, rx, cancelled);
+            }
+            set_bridge_internal_error("async runtime not initialized");
+            return -1;
+        }
+    };
+
+    // Race loop. The future borrows `&mut rxs`, `&mut id_vec`, `&mut
+    // cancel_vec`, and `&mut collected` rather than owning them — so
+    // when `tokio::time::timeout` drops it on timeout, the residue
+    // (still-pending promises and accumulated rejections) survives in
+    // outer scope. swap_remove inside the loop keeps the three vecs
+    // parallel with each rejection consumed.
+    let mut collected: Vec<AggregateRejection> = Vec::new();
+    let race_fut = async {
+        loop {
+            if rxs.is_empty() {
+                return Err::<(u64, AsyncResult), ()>(());
+            }
+            let (idx, recv_result) = poll_fn(|cx| {
+                for (i, rx) in rxs.iter_mut().enumerate() {
+                    if let Poll::Ready(r) = Pin::new(rx).poll(cx) {
+                        return Poll::Ready((i, r));
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+            let id = id_vec.swap_remove(idx);
+            drop(rxs.swap_remove(idx));
+            let _ = cancel_vec.swap_remove(idx);
+            match recv_result {
+                Ok(r) if r.success => return Ok((id, r)),
+                Ok(r) => {
+                    let cls = r
+                        .exception_class
+                        .clone()
+                        .unwrap_or_else(|| "OxPHP\\Async\\AsyncException".to_string());
+                    let msg = r
+                        .exception_message
+                        .clone()
+                        .unwrap_or_else(|| "promise rejected without message".to_string());
+                    collected.push(AggregateRejection {
+                        promise_id: id,
+                        exception_class: cls,
+                        message: msg,
+                    });
+                }
+                Err(_) => {
+                    // Channel closed (worker dropped). Treat as rejection.
+                    collected.push(AggregateRejection {
+                        promise_id: id,
+                        exception_class: "OxPHP\\Async\\AsyncException".to_string(),
+                        message: "promise channel closed unexpectedly".to_string(),
+                    });
+                }
+            }
+        }
+    };
+
+    enum AnyOutcome {
+        Winner(u64, AsyncResult),
+        AllRejected,
+        Timeout,
+    }
+
+    let outcome = if timeout > 0.0 {
+        let dur = Duration::from_secs_f64(timeout);
+        // Construct `Sleep` inside `block_on` so the runtime context is
+        // established before the timer driver registers.
+        match handle.block_on(async move { tokio::time::timeout(dur, race_fut).await }) {
+            Ok(Ok((id, r))) => AnyOutcome::Winner(id, r),
+            Ok(Err(())) => AnyOutcome::AllRejected,
+            Err(_elapsed) => AnyOutcome::Timeout,
+        }
+    } else {
+        match handle.block_on(race_fut) {
+            Ok((id, r)) => AnyOutcome::Winner(id, r),
+            Err(()) => AnyOutcome::AllRejected,
+        }
+    };
+
+    // Push collected rejections in input-array position order into the
+    // C-bridge aggregate buffer. Used by both the all-rejected (-3) and
+    // timeout (-2) paths.
+    let push_collected_in_position_order =
+        |collected: &mut Vec<AggregateRejection>, input_ids: &[u64]| {
+            let position: std::collections::HashMap<u64, usize> = input_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, i))
+                .collect();
+            let mut sorted: Vec<AggregateRejection> = std::mem::take(collected);
+            sorted.sort_by_key(|r| position.get(&r.promise_id).copied().unwrap_or(usize::MAX));
+
+            // Free frozen-zval state for each rejected promise. Safe here
+            // because a promise only enters `collected` after its rx has
+            // resolved — i.e., the worker thread is done touching the
+            // captured zvals and the closure's op_array.
+            //
+            // Pending promises on the timeout (-2) path are intentionally
+            // NOT cleaned up here. Their workers are still running on
+            // dedicated OS threads and still reading the borrowed/frozen
+            // zvals + holding the closure refcount; calling
+            // cleanup_promise on them would unfreeze captures (letting
+            // PHP free buffers the worker still reads) and release the
+            // closure (potentially freeing the op_array mid-execution) —
+            // a use-after-free. The timeout branch instead stashes the
+            // (id, rx, cancelled) tuples in PROMISE_STRANDED;
+            // cleanup_outstanding_promises_callback at RSHUTDOWN
+            // block_on's each rx (5 s budget) before unfreezing the
+            // matching PROMISE_CLEANUP entry, so cleanup only runs after
+            // the worker actually finishes.
+            for r in &sorted {
+                cleanup_promise(r.promise_id);
+            }
+
+            ffi::oxphp_bridge_aggregate_clear();
+            for r in &sorted {
+                let cls = CString::new(r.exception_class.as_str()).unwrap_or_default();
+                let msg = CString::new(r.message.as_str()).unwrap_or_default();
+                ffi::oxphp_bridge_aggregate_push(cls.as_ptr(), msg.as_ptr(), r.promise_id as i64);
+            }
+        };
+
+    match outcome {
+        AnyOutcome::Winner(winner_id, mut result) => {
+            // Restore non-winner pending receivers to PROMISE_MAP.
+            // After race_fut returned with the winner, id_vec/rxs/cancel_vec
+            // hold exactly the still-pending non-winner non-rejected entries
+            // (race_fut swap_removed both rejected and the winning entry
+            // before returning).
+            for ((id, rx), cancelled) in id_vec
+                .into_iter()
+                .zip(rxs.into_iter())
+                .zip(cancel_vec.into_iter())
+            {
+                store_promise(id, rx, cancelled);
+            }
+            cleanup_promise(winner_id);
+            *out_winner_id = winner_id as i64;
+            if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                let rc = ffi::oxphp_portable_deserialize(
+                    result.serialized_value,
+                    result.serialized_value_len,
+                    1,
+                    retval,
+                );
+                ffi::oxphp_portable_free(result.serialized_value);
+                result.serialized_value = std::ptr::null_mut();
+                if rc != 0 {
+                    return -1;
+                }
+            }
+            0
+        }
+        AnyOutcome::AllRejected => {
+            push_collected_in_position_order(&mut collected, &input_ids);
+            ffi::oxphp_bridge_aggregate_throw();
+            -3
+        }
+        AnyOutcome::Timeout => {
+            // Stash (id, rx, cancelled) tuples for every still-pending
+            // promise into PROMISE_STRANDED. After race_fut was dropped
+            // by tokio::time::timeout, id_vec/rxs/cancel_vec hold exactly
+            // these — race_fut had already swap_removed each promise it
+            // managed to record as a rejection. RSHUTDOWN's cleanup
+            // callback block_on's each stranded rx (5 s per promise)
+            // before unfreezing the matching PROMISE_CLEANUP entry, so
+            // workers finish touching the frozen captures before they're
+            // released. Each stranded worker can therefore extend
+            // RSHUTDOWN by up to 5 s — tracked via async_tasks_stranded.
+            //
+            // We also signal cancellation on every cancel flag so the
+            // worker can return early at the next vm_interrupt poll
+            // instead of running to completion.
+            let pending_ids: Vec<i64> = id_vec.iter().map(|&id| id as i64).collect();
+            let stranded_count = pending_ids.len() as u64;
+            for ((id, rx), cancelled) in id_vec
+                .into_iter()
+                .zip(rxs.into_iter())
+                .zip(cancel_vec.into_iter())
+            {
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                stash_stranded(id, rx, cancelled);
+            }
+
+            if let Some(m) = get_async_metrics() {
+                m.async_tasks_stranded(stranded_count);
+            }
+
+            push_collected_in_position_order(&mut collected, &input_ids);
+            ffi::oxphp_bridge_aggregate_throw_timeout(
+                pending_ids.as_ptr(),
+                pending_ids.len() as u32,
+            );
             -2
         }
     }
@@ -3327,7 +3707,14 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     tracing::warn!(count = ids.len(), "Cleaning up non-awaited async promises");
 
     for id in ids {
-        if let Some((rx, cancelled)) = take_promise(id) {
+        // Receivers can live in either PROMISE_MAP (never-awaited) or
+        // PROMISE_STRANDED (await_race / await_any timed out). Drain
+        // both before unfreezing — the rx must complete (or hit the 5 s
+        // budget) before the matching PROMISE_CLEANUP entry releases
+        // frozen captures, otherwise the still-running worker observes
+        // freed memory.
+        let entry = take_promise(id).or_else(|| take_stranded(id));
+        if let Some((rx, cancelled)) = entry {
             // Signal cancellation
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
             // Block with 5-second timeout per promise to avoid indefinite hang
@@ -3408,6 +3795,9 @@ pub fn register_async_callbacks() {
     unsafe {
         crate::bridge::ffi::oxphp_bridge_set_async_dispatch(Some(async_dispatch_callback));
         crate::bridge::ffi::oxphp_bridge_set_await_dispatch(Some(await_dispatch_callback));
+        crate::bridge::ffi::oxphp_bridge_set_await_race_dispatch(Some(
+            await_race_dispatch_callback,
+        ));
         crate::bridge::ffi::oxphp_bridge_set_await_any_dispatch(Some(await_any_dispatch_callback));
         crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
             cleanup_outstanding_promises_callback,
@@ -3760,7 +4150,6 @@ mod tests {
             serialized_value_len: 0,
             exception_class: None,
             exception_message: None,
-            exception_trace: None,
         };
         tx.send(result).unwrap();
 

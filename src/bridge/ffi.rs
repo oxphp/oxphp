@@ -160,6 +160,9 @@ extern "C" {
     pub fn oxphp_bridge_set_await_dispatch(
         f: Option<unsafe extern "C" fn(i64, f64, *mut c_void) -> c_int>,
     );
+    pub fn oxphp_bridge_set_await_race_dispatch(
+        f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
+    );
     pub fn oxphp_bridge_set_await_any_dispatch(
         f: Option<unsafe extern "C" fn(*const i64, u32, f64, *mut i64, *mut c_void) -> c_int>,
     );
@@ -172,15 +175,27 @@ extern "C" {
     pub fn oxphp_bridge_cleanup_outstanding_promises();
 
     // ── Async exception details ──
-    pub fn oxphp_bridge_set_async_exception(
-        cls: *const c_char,
-        msg: *const c_char,
-        trace: *const c_char,
-    );
+    pub fn oxphp_bridge_set_async_exception(cls: *const c_char, msg: *const c_char);
     pub fn oxphp_bridge_get_async_exc_class() -> *const c_char;
     pub fn oxphp_bridge_get_async_exc_message() -> *const c_char;
-    pub fn oxphp_bridge_get_async_exc_trace() -> *const c_char;
     pub fn oxphp_bridge_clear_async_exception();
+
+    // ── Aggregate exception API (multi-error) ──
+
+    pub fn oxphp_bridge_aggregate_clear();
+
+    pub fn oxphp_bridge_aggregate_push(
+        exception_class: *const c_char,
+        message: *const c_char,
+        promise_id: i64,
+    );
+
+    pub fn oxphp_bridge_aggregate_throw() -> c_int;
+
+    pub fn oxphp_bridge_aggregate_throw_timeout(
+        pending_ids: *const i64,
+        pending_count: u32,
+    ) -> c_int;
 
     // === Async promise bridge functions ===
 
@@ -294,6 +309,13 @@ extern "C" {
     ) -> i64;
     pub fn oxphp_bridge_await_dispatch(promise_id: i64, timeout: f64, retval: *mut c_void)
         -> c_int;
+    pub fn oxphp_bridge_await_race_dispatch(
+        promise_ids: *const i64,
+        count: u32,
+        timeout: f64,
+        out_winner_id: *mut i64,
+        retval: *mut c_void,
+    ) -> c_int;
     pub fn oxphp_bridge_await_any_dispatch(
         promise_ids: *const i64,
         count: u32,
@@ -408,7 +430,6 @@ extern "C" {
         retval: *mut c_void,
         exc_class: *mut *mut c_char,
         exc_message: *mut *mut c_char,
-        exc_trace: *mut *mut c_char,
     ) -> c_int;
 
     // ─── Plugin Class Registry ──────────────────────────────────
@@ -590,9 +611,20 @@ extern "C" {
                 argc: u32,
                 retval: *mut c_void,
                 rust_data: *mut c_void,
+                this_zval: *mut c_void,
             ) -> c_int,
         >,
     );
+
+    // ─── Object property access ─────────────────────────────────
+    pub fn oxphp_object_read_property(
+        object_zval: *mut c_void,
+        property_name: *const c_char,
+    ) -> *mut c_void;
+
+    pub fn oxphp_zval_is_null_or_unset(zval_ptr: *const c_void) -> c_int;
+
+    pub fn oxphp_zval_copy_to_retval(src_zval: *const c_void, dst_zval: *mut c_void);
 
     // ─── Storage Callbacks ──────────────────────────────────────
     pub fn oxphp_bridge_set_storage_callbacks(
