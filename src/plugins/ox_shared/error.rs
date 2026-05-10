@@ -27,7 +27,10 @@ pub enum SharedError {
 }
 
 impl SharedError {
-    /// FFI status code per 05-exceptions.md §FFI status code → exception mapping.
+    /// FFI status code. Each variant maps one-to-one to a `Shared\*Exception`
+    /// PHP class via the per-type rc-to-result helpers (see e.g.
+    /// `counter::counter_rc_to_result`, `atomic::atomic_rc_to_result`).
+    /// The numeric values are part of the FFI ABI — do not renumber.
     pub fn code(&self) -> i32 {
         match self {
             Self::Generic => -1,
