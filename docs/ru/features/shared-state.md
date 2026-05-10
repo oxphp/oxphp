@@ -58,7 +58,8 @@ OxPHP 0.3 поставляется с семью типами. Выбирайт�
 
 | Тип                                      | Форма                    | Подходит для                                                              |
 |------------------------------------------|--------------------------|-----------------------------------------------------------------------|
-| [`Shared\Counter`](shared-counter.md)    | атомарный int64          | счётчики запросов, использование на тенант, отслеживание срабатываний фич |
+| [`Shared\Counter`](shared-counter.md)    | int64-аккумулятор        | счётчики запросов, использование на тенант, отслеживание срабатываний фич |
+| [`Shared\Atomic`](shared-atomic.md)      | атомарный int64-примитив | конечные автоматы, version stamps, CAS-циклы, bitflag-маски           |
 | [`Shared\Flag`](shared-flag.md)          | атомарный bool           | kill-switch'и, маркеры одноразовой инициализации, состояние circuit-breaker |
 | [`Shared\Once`](shared-once.md)          | контейнер с init-once    | дорогая инициализация синглтона между воркерами (побеждает один запуск) |
 | [`Shared\Mutex`](shared-mutex.md)        | отравляющийся mutex      | критические секции над неатомарным значением                               |
@@ -335,7 +336,8 @@ $queue->send(['url' => $_POST['url']]);
 
 ## См. также
 
-- [Shared\Counter](shared-counter.md) — атомарный целочисленный примитив.
+- [Shared\Counter](shared-counter.md) — domain-аккумулятор.
+- [Shared\Atomic](shared-atomic.md) — generic атомарный int64 с полным контролем memory ordering.
 - [Shared\Flag](shared-flag.md) — атомарный bool / kill-switch.
 - [Shared\Once](shared-once.md) — запуск-один-раз между воркерами.
 - [Shared\Mutex](shared-mutex.md) — отравляющийся mutex над значением.
