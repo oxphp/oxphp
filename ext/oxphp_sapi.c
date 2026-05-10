@@ -1541,12 +1541,21 @@ ZEND_FUNCTION(oxphp_method_dispatch)
              * (e.g. AggregateAsyncException, TimeoutException). */
             zend_class_entry *scope = execute_data->func->common.scope;
             int cls_count = oxphp_bridge_get_plugin_class_count();
+            int found = 0;
             for (int i = 0; i < cls_count; i++) {
                 const char *fqn = oxphp_bridge_get_class_fqn(i);
                 if (fqn && scope && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
                     class_index = (uint32_t)i;
+                    found = 1;
                     break;
                 }
+            }
+            if (!found) {
+                zend_throw_error(NULL,
+                    "OxPHP plugin method %s::%s dispatched but class is not registered",
+                    scope ? ZSTR_VAL(scope->name) : "?",
+                    method_name);
+                return;
             }
         }
     } else if (execute_data->func->common.scope) {
@@ -1554,12 +1563,21 @@ ZEND_FUNCTION(oxphp_method_dispatch)
          * Walk the plugin class CE array to find the match. */
         zend_class_entry *scope = execute_data->func->common.scope;
         int cls_count = oxphp_bridge_get_plugin_class_count();
+        int found = 0;
         for (int i = 0; i < cls_count; i++) {
             const char *fqn = oxphp_bridge_get_class_fqn(i);
             if (fqn && strcmp(ZSTR_VAL(scope->name), fqn) == 0) {
                 class_index = (uint32_t)i;
+                found = 1;
                 break;
             }
+        }
+        if (!found) {
+            zend_throw_error(NULL,
+                "OxPHP plugin static method %s::%s dispatched but class is not registered",
+                ZSTR_VAL(scope->name),
+                method_name);
+            return;
         }
     }
 
