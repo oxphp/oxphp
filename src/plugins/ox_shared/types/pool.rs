@@ -1297,7 +1297,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_max_size(id: u64, out_max: *mut u64) 
 use crate::bridge::call::NativeCall;
 use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
 use crate::plugin::{PhpError, PluginContext, PluginError};
-use crate::plugins::ox_shared::error::SharedError;
+use crate::plugins::ox_shared::error::{read_last_error_message, SharedError};
 
 /// Custom storage attached to every `Shared\Pool\Handle` instance via
 /// `with_storage`. Layout is `#[repr(C)]` so the C bridge helpers
@@ -1354,18 +1354,6 @@ impl Drop for PoolHandleStorage {
     }
 }
 
-fn read_last_error() -> String {
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
-}
-
 /// Map an FFI status code to the appropriate `Shared\*Exception`.
 /// Special-cases `Generic` (-1) — used by the pool FFI to signal
 /// "PHP callable threw; EG(exception) already set" — by returning
@@ -1379,7 +1367,7 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
         // PhpError::Custom lets the framework propagate without throwing
         // a fresh exception; the message is included so debug logs show
         // what actually happened.
-        let msg = read_last_error();
+        let msg = read_last_error_message();
         return PhpError::Custom(format!("{context}: {msg}"));
     }
     let class = match rc {
@@ -1393,7 +1381,7 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
     };
     PhpError::Exception {
         class: class.to_string(),
-        message: read_last_error(),
+        message: read_last_error_message(),
         code: 0,
     }
 }
