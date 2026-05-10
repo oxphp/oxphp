@@ -32,6 +32,9 @@ pub unsafe fn oxphp_arg_str(_args: *mut c_void, _idx: u32, out_len: *mut usize) 
     unsafe { *out_len = 0 };
     std::ptr::null()
 }
+pub unsafe fn oxphp_arg_enum_long(_args: *mut c_void, _idx: u32) -> i64 {
+    0
+}
 
 pub unsafe fn oxphp_arg_array_count(_args: *mut c_void, _idx: u32) -> u32 {
     0

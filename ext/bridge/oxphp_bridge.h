@@ -655,6 +655,9 @@ int64_t oxphp_arg_long(void *args, uint32_t idx);
 double oxphp_arg_double(void *args, uint32_t idx);
 int oxphp_arg_bool(void *args, uint32_t idx);
 const uint8_t *oxphp_arg_str(void *args, uint32_t idx, size_t *out_len);
+/* Read a backed-int enum's value via zend_enum_fetch_case_value. Returns 0
+ * if the arg is not a backed-int enum. */
+int64_t oxphp_arg_enum_long(void *args, uint32_t idx);
 
 /* ── Array reading from args[idx] ── */
 uint32_t oxphp_arg_array_count(void *args, uint32_t idx);
