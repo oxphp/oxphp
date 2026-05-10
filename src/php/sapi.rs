@@ -3192,7 +3192,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    use std::future::poll_fn;
+    use std::future::{poll_fn, Future};
     use std::pin::Pin;
     use std::task::Poll;
     use std::time::Duration;
@@ -3399,7 +3399,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    use std::future::poll_fn;
+    use std::future::{poll_fn, Future};
     use std::pin::Pin;
     use std::task::Poll;
     use std::time::Duration;
