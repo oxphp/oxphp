@@ -34,12 +34,6 @@ impl CounterInner {
             .wrapping_add(delta)
     }
 
-    pub fn cas(&self, expect: i64, new: i64) -> bool {
-        self.value
-            .compare_exchange(expect, new, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
     pub fn add_batch(&self, deltas: &[i64]) -> i64 {
         let sum: i64 = deltas.iter().fold(0i64, |acc, d| acc.wrapping_add(*d));
         self.add(sum)
@@ -136,30 +130,6 @@ pub unsafe extern "C" fn oxphp_shared_counter_add(id: u64, delta: i64, out_new: 
         let new_val = inner.add(delta);
         reg.record_op(id);
         unsafe { *out_new = new_val };
-        Ok(())
-    })
-}
-
-/// # Safety
-/// `out_swapped` must be valid for writes of `c_int` if non-null.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_cas(
-    id: u64,
-    expect: i64,
-    new_val: i64,
-    out_swapped: *mut c_int,
-) -> c_int {
-    if out_swapped.is_null() {
-        set_last_error("out_swapped is null");
-        return SharedError::Generic.code();
-    }
-    ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
-        let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
-        let swapped = inner.cas(expect, new_val);
-        reg.record_op(id);
-        unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
 }
@@ -272,18 +242,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(out);
             Ok(())
         })
-        .method("swap")
-        .param("value", PhpType::Int)
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let new_val = call.arg_long(0)?;
-            let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_swap(handle.shared_id, new_val, &mut prev) };
-            counter_rc_to_result(rc)?;
-            call.ret_long(prev);
-            Ok(())
-        })
         .method("inc")
         .optional_param("by", PhpType::Int, PhpValue::Int(1))
         .returns(PhpType::Int)
@@ -328,21 +286,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(new_val);
             Ok(())
         })
-        .method("compareAndSet")
-        .param("expect", PhpType::Int)
-        .param("new", PhpType::Int)
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let expect = call.arg_long(0)?;
-            let new = call.arg_long(1)?;
-            let mut swapped: c_int = 0;
-            let rc =
-                unsafe { oxphp_shared_counter_cas(handle.shared_id, expect, new, &mut swapped) };
-            counter_rc_to_result(rc)?;
-            call.ret_bool(swapped != 0);
-            Ok(())
-        })
         .method("addBatch")
         .param("deltas", PhpType::Array)
         .returns(PhpType::Int)
@@ -365,6 +308,16 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             };
             counter_rc_to_result(rc)?;
             call.ret_long(new_val);
+            Ok(())
+        })
+        .method("reset")
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let handle = call.storage::<SharedHandle>()?;
+            let mut prev: i64 = 0;
+            let rc = unsafe { oxphp_shared_counter_swap(handle.shared_id, 0, &mut prev) };
+            counter_rc_to_result(rc)?;
+            call.ret_long(prev);
             Ok(())
         })
         .method("id")
@@ -429,14 +382,6 @@ mod tests {
         assert_eq!(c.get(), 20);
         assert_eq!(c.add(5), 25);
         assert_eq!(c.add(-10), 15);
-    }
-
-    #[test]
-    fn cas_success_and_failure() {
-        let c = CounterInner::new(0);
-        assert!(c.cas(0, 42));
-        assert!(!c.cas(0, 999));
-        assert_eq!(c.get(), 42);
     }
 
     #[test]
