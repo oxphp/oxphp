@@ -3662,6 +3662,15 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 PHP_RINIT_FUNCTION(oxphp_sapi)
 {
     oxphp_apm_install_on_thread();  /* no-op after first call per thread */
+
+    /* Defensive: clear the per-thread aggregate-exception buffer in case
+     * a prior request faulted between aggregate_push and the trailing
+     * aggregate_clear in oxphp_bridge_aggregate_throw{,_timeout} (e.g.
+     * a fatal during array_init or zend_throw_exception_object). The
+     * normal happy/error paths already clear; this is belt-and-suspenders
+     * so a stranded entry can't bleed into a new request. */
+    oxphp_bridge_aggregate_clear();
+
     return SUCCESS;
 }
 /* }}} */
