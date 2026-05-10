@@ -54,6 +54,21 @@ impl Plugin for SharedPlugin {
         // so user `catch` blocks compile against the full hierarchy from v1).
         exceptions::register_all(ctx)?;
 
+        // Register the Shared\Ordering enum first — Shared\Atomic methods
+        // accept it as a parameter, so its FQN must resolve at class
+        // registration time.
+        {
+            use crate::plugin::types::{PhpType, PhpValue};
+            ctx.register_enum("OxPHP\\Shared\\Ordering")
+                .backed_by(PhpType::Int)
+                .case_value("Relaxed", PhpValue::Int(0))
+                .case_value("Acquire", PhpValue::Int(1))
+                .case_value("Release", PhpValue::Int(2))
+                .case_value("AcqRel", PhpValue::Int(3))
+                .case_value("SeqCst", PhpValue::Int(4))
+                .build()?;
+        }
+
         // Register the atomic type classes.
         types::counter::register_class(ctx)?;
         types::flag::register_class(ctx)?;
