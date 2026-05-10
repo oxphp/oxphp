@@ -3166,7 +3166,13 @@ void oxphp_bridge_aggregate_push(
     if (aggregate_len == aggregate_cap) {
         size_t new_cap = aggregate_cap ? aggregate_cap * 2 : 8;
         aggregate_entry_t *grown = realloc(aggregate_buf, new_cap * sizeof(*grown));
-        if (!grown) return; /* OOM: silently drop entry */
+        if (!grown) {
+            php_error_docref(NULL, E_WARNING,
+                "oxphp_bridge_aggregate_push: realloc(%zu bytes) failed; "
+                "dropping aggregate entry for promise_id=%" PRId64,
+                new_cap * sizeof(*grown), promise_id);
+            return;
+        }
         aggregate_buf = grown;
         aggregate_cap = new_cap;
     }
