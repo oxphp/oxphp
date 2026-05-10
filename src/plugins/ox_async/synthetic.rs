@@ -19,11 +19,7 @@
 //!   regular async-pool task.
 //!
 //! This design is strictly additive: it does not alter the
-//! `PROMISE_MAP` state enum or any existing hot-path code, which keeps
-//! Part D within the fragility guardrail.
-//!
-//! Contract and rationale: see
-//! `.internal/technical-docs/en/features/shared/11-prereq-synthetic-promise.md`
+//! `PROMISE_MAP` state enum or any existing hot-path code.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::OnceLock;
@@ -136,7 +132,6 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                     serialized_value_len: 0,
                     exception_class: None,
                     exception_message: None,
-                    exception_trace: None,
                 }
             } else {
                 // The downstream `oxphp_portable_free(serialized_value)`
@@ -152,7 +147,6 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                         exception_message: Some(
                             "synthetic promise: failed to allocate result buffer".to_string(),
                         ),
-                        exception_trace: None,
                     };
                 }
                 unsafe {
@@ -164,7 +158,6 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                     serialized_value_len: len,
                     exception_class: None,
                     exception_message: None,
-                    exception_trace: None,
                 }
             }
         }
@@ -174,7 +167,6 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
             serialized_value_len: 0,
             exception_class: Some(class),
             exception_message: Some(message),
-            exception_trace: None,
         },
         PromisePayload::Cancelled => AsyncResult {
             success: false,
@@ -182,7 +174,6 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
             serialized_value_len: 0,
             exception_class: Some("OxPHP\\Async\\AsyncException".to_string()),
             exception_message: Some("synthetic promise cancelled".to_string()),
-            exception_trace: None,
         },
     }
 }

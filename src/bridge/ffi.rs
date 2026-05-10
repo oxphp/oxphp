@@ -175,14 +175,9 @@ extern "C" {
     pub fn oxphp_bridge_cleanup_outstanding_promises();
 
     // ── Async exception details ──
-    pub fn oxphp_bridge_set_async_exception(
-        cls: *const c_char,
-        msg: *const c_char,
-        trace: *const c_char,
-    );
+    pub fn oxphp_bridge_set_async_exception(cls: *const c_char, msg: *const c_char);
     pub fn oxphp_bridge_get_async_exc_class() -> *const c_char;
     pub fn oxphp_bridge_get_async_exc_message() -> *const c_char;
-    pub fn oxphp_bridge_get_async_exc_trace() -> *const c_char;
     pub fn oxphp_bridge_clear_async_exception();
 
     // ── Aggregate exception API (multi-error) ──
@@ -192,7 +187,6 @@ extern "C" {
     pub fn oxphp_bridge_aggregate_push(
         exception_class: *const c_char,
         message: *const c_char,
-        trace: *const c_char,
         promise_id: i64,
     );
 
@@ -436,7 +430,6 @@ extern "C" {
         retval: *mut c_void,
         exc_class: *mut *mut c_char,
         exc_message: *mut *mut c_char,
-        exc_trace: *mut *mut c_char,
     ) -> c_int;
 
     // ─── Plugin Class Registry ──────────────────────────────────

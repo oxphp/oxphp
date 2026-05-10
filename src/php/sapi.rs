@@ -3015,18 +3015,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
             if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
                 let cls_c = CString::new(cls.as_str()).unwrap_or_default();
                 let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-                let trace_c = result
-                    .exception_trace
-                    .as_deref()
-                    .map(|t| CString::new(t).unwrap_or_default());
-                ffi::oxphp_bridge_set_async_exception(
-                    cls_c.as_ptr(),
-                    msg_c.as_ptr(),
-                    trace_c
-                        .as_ref()
-                        .map(|c| c.as_ptr())
-                        .unwrap_or(std::ptr::null()),
-                );
+                ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
             }
             return -1;
         }
@@ -3107,22 +3096,11 @@ pub unsafe extern "C" fn await_dispatch_callback(
         0
     } else {
         // Store exception details in bridge TLS so the C extension can
-        // create a proper exception with class/message/trace from the worker.
+        // create a proper exception with class/message from the worker.
         if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
             let cls_c = CString::new(cls.as_str()).unwrap_or_default();
             let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-            let trace_c = result
-                .exception_trace
-                .as_deref()
-                .map(|t| CString::new(t).unwrap_or_default());
-            ffi::oxphp_bridge_set_async_exception(
-                cls_c.as_ptr(),
-                msg_c.as_ptr(),
-                trace_c
-                    .as_ref()
-                    .map(|c| c.as_ptr())
-                    .unwrap_or(std::ptr::null()),
-            );
+            ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
         }
         -1
     }
@@ -3277,18 +3255,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
                 {
                     let cls_c = CString::new(cls.as_str()).unwrap_or_default();
                     let msg_c = CString::new(msg.as_str()).unwrap_or_default();
-                    let trace_c = result
-                        .exception_trace
-                        .as_deref()
-                        .map(|t| CString::new(t).unwrap_or_default());
-                    ffi::oxphp_bridge_set_async_exception(
-                        cls_c.as_ptr(),
-                        msg_c.as_ptr(),
-                        trace_c
-                            .as_ref()
-                            .map(|c| c.as_ptr())
-                            .unwrap_or(std::ptr::null()),
-                    );
+                    ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
                 }
                 *out_winner_id = winner_id as i64;
                 -1
@@ -3310,7 +3277,6 @@ struct AggregateRejection {
     promise_id: u64,
     exception_class: String,
     message: String,
-    trace: Option<String>,
 }
 
 /// Rust-side callback for `oxphp_async_await_any()`.
@@ -3461,12 +3427,10 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                         .exception_message
                         .clone()
                         .unwrap_or_else(|| "promise rejected without message".to_string());
-                    let trace = r.exception_trace.clone();
                     collected_inner.lock().unwrap().push(AggregateRejection {
                         promise_id: id,
                         exception_class: cls,
                         message: msg,
-                        trace,
                     });
                 }
                 Err(_) => {
@@ -3475,7 +3439,6 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                         promise_id: id,
                         exception_class: "OxPHP\\Async\\AsyncException".to_string(),
                         message: "promise channel closed unexpectedly".to_string(),
-                        trace: None,
                     });
                 }
             }
@@ -3537,19 +3500,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             for r in &sorted {
                 let cls = CString::new(r.exception_class.as_str()).unwrap_or_default();
                 let msg = CString::new(r.message.as_str()).unwrap_or_default();
-                let trace = r
-                    .trace
-                    .as_deref()
-                    .map(|t| CString::new(t).unwrap_or_default());
-                ffi::oxphp_bridge_aggregate_push(
-                    cls.as_ptr(),
-                    msg.as_ptr(),
-                    trace
-                        .as_ref()
-                        .map(|c| c.as_ptr())
-                        .unwrap_or(std::ptr::null()),
-                    r.promise_id as i64,
-                );
+                ffi::oxphp_bridge_aggregate_push(cls.as_ptr(), msg.as_ptr(), r.promise_id as i64);
             }
         };
 
@@ -4109,7 +4060,6 @@ mod tests {
             serialized_value_len: 0,
             exception_class: None,
             exception_message: None,
-            exception_trace: None,
         };
         tx.send(result).unwrap();
 

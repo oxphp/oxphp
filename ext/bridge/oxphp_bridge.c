@@ -3110,28 +3110,22 @@ zval *oxphp_closure_get_this(zval *closure) {
 /* ─── Async Exception Details ────────────────────────────── */
 static __thread char *async_exc_class = NULL;
 static __thread char *async_exc_msg = NULL;
-static __thread char *async_exc_trace = NULL;
 
-void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace) {
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg) {
     free(async_exc_class);
     free(async_exc_msg);
-    free(async_exc_trace);
     async_exc_class = cls ? strdup(cls) : NULL;
     async_exc_msg = msg ? strdup(msg) : NULL;
-    async_exc_trace = trace ? strdup(trace) : NULL;
 }
 
 const char *oxphp_bridge_get_async_exc_class(void) { return async_exc_class; }
 const char *oxphp_bridge_get_async_exc_message(void) { return async_exc_msg; }
-const char *oxphp_bridge_get_async_exc_trace(void) { return async_exc_trace; }
 
 void oxphp_bridge_clear_async_exception(void) {
     free(async_exc_class);
     free(async_exc_msg);
-    free(async_exc_trace);
     async_exc_class = NULL;
     async_exc_msg = NULL;
-    async_exc_trace = NULL;
 }
 
 /* ─── Async Aggregate Exception (multi-error) ──────────────── */
@@ -3139,7 +3133,6 @@ void oxphp_bridge_clear_async_exception(void) {
 typedef struct aggregate_entry_s {
     char *exception_class;   /* strdup'd, free in clear() */
     char *message;           /* strdup'd, free in clear() */
-    char *trace;             /* strdup'd, free in clear() — may be NULL */
     int64_t promise_id;
 } aggregate_entry_t;
 
@@ -3151,7 +3144,6 @@ void oxphp_bridge_aggregate_clear(void) {
     for (size_t i = 0; i < aggregate_len; i++) {
         free(aggregate_buf[i].exception_class);
         free(aggregate_buf[i].message);
-        free(aggregate_buf[i].trace);
     }
     aggregate_len = 0;
     /* Keep allocation across requests; reset length only. */
@@ -3160,7 +3152,6 @@ void oxphp_bridge_aggregate_clear(void) {
 void oxphp_bridge_aggregate_push(
     const char *exception_class,
     const char *message,
-    const char *trace,
     int64_t promise_id
 ) {
     if (aggregate_len == aggregate_cap) {
@@ -3180,8 +3171,6 @@ void oxphp_bridge_aggregate_push(
         exception_class ? strdup(exception_class) : NULL;
     aggregate_buf[aggregate_len].message =
         message ? strdup(message) : NULL;
-    aggregate_buf[aggregate_len].trace =
-        trace ? strdup(trace) : NULL;
     aggregate_buf[aggregate_len].promise_id = promise_id;
     aggregate_len++;
 }
@@ -3212,15 +3201,6 @@ static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
             ce, Z_OBJ_P(out),
             "message", sizeof("message") - 1,
             entry->message
-        );
-    }
-    /* Stored as "__trace" string property — informational only; does NOT
-     * populate Throwable::getTrace() (that's built from the live PHP stack). */
-    if (entry->trace) {
-        zend_update_property_string(
-            ce, Z_OBJ_P(out),
-            "__trace", sizeof("__trace") - 1,
-            entry->trace
         );
     }
     return 0;
@@ -3473,15 +3453,13 @@ int oxphp_execute_async_task(
     zval *args,
     zval *retval,
     char **exc_class,
-    char **exc_message,
-    char **exc_trace
+    char **exc_message
 ) {
     zval closure;
     zend_function func;
 
     *exc_class = NULL;
     *exc_message = NULL;
-    *exc_trace = NULL;
     ZVAL_NULL(retval);
 
     /* Reconstruct closure from op_array + static_vars */
@@ -3532,19 +3510,6 @@ int oxphp_execute_async_task(
                 *exc_message = strdup(Z_STRVAL_P(msg_zv));
             } else {
                 *exc_message = strdup("(unknown)");
-            }
-
-            /* Get trace string via getTraceAsString() */
-            zval trace_zv;
-            zend_function *trace_fn = zend_hash_str_find_ptr(
-                &ce->function_table, "gettraceasstring", sizeof("gettraceasstring") - 1
-            );
-            if (trace_fn) {
-                zend_call_known_instance_method_with_0_params(trace_fn, ex, &trace_zv);
-                if (Z_TYPE(trace_zv) == IS_STRING) {
-                    *exc_trace = strdup(Z_STRVAL(trace_zv));
-                }
-                zval_ptr_dtor(&trace_zv);
             }
 
             zend_clear_exception();
@@ -4847,9 +4812,6 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
  * Rust never touches emalloc — all zvals allocated and freed here.
  * On closure throw, EG(exception) stays set; caller returns
  * RETURN_THROWS-style from its plugin method handler.
- *
- * Spec: .internal/technical-docs/en/features/shared/40-ffi-conventions.md
- *       §Convention 1.5 + §Convention 2
  */
 
 #define OXPHP_SHARED_INVOKE_OK          0

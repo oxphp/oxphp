@@ -262,19 +262,11 @@ pub unsafe fn oxphp_bridge_cleanup_outstanding_promises() {}
 
 // ── Async exception details ──
 
-pub unsafe fn oxphp_bridge_set_async_exception(
-    _cls: *const c_char,
-    _msg: *const c_char,
-    _trace: *const c_char,
-) {
-}
+pub unsafe fn oxphp_bridge_set_async_exception(_cls: *const c_char, _msg: *const c_char) {}
 pub unsafe fn oxphp_bridge_get_async_exc_class() -> *const c_char {
     std::ptr::null()
 }
 pub unsafe fn oxphp_bridge_get_async_exc_message() -> *const c_char {
-    std::ptr::null()
-}
-pub unsafe fn oxphp_bridge_get_async_exc_trace() -> *const c_char {
     std::ptr::null()
 }
 pub unsafe fn oxphp_bridge_clear_async_exception() {}
@@ -286,7 +278,6 @@ pub unsafe fn oxphp_bridge_aggregate_clear() {}
 pub unsafe fn oxphp_bridge_aggregate_push(
     _exception_class: *const c_char,
     _message: *const c_char,
-    _trace: *const c_char,
     _promise_id: i64,
 ) {
 }
@@ -534,7 +525,6 @@ pub unsafe fn oxphp_execute_async_task(
     _retval: *mut c_void,
     _exc_class: *mut *mut c_char,
     _exc_message: *mut *mut c_char,
-    _exc_trace: *mut *mut c_char,
 ) -> c_int {
     0
 }

@@ -1248,10 +1248,9 @@ void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn);
 void oxphp_bridge_cleanup_outstanding_promises(void);
 
 /* ─── Async Exception Details ────────────────────────────── */
-void oxphp_bridge_set_async_exception(const char *cls, const char *msg, const char *trace);
+void oxphp_bridge_set_async_exception(const char *cls, const char *msg);
 const char *oxphp_bridge_get_async_exc_class(void);
 const char *oxphp_bridge_get_async_exc_message(void);
-const char *oxphp_bridge_get_async_exc_trace(void);
 void oxphp_bridge_clear_async_exception(void);
 
 /* ─── Async Aggregate Exception (multi-error) ────────────────────
@@ -1267,7 +1266,6 @@ void oxphp_bridge_aggregate_clear(void);
 void oxphp_bridge_aggregate_push(
     const char *exception_class,   /* PHP class name, NUL-terminated UTF-8; nullable → "OxPHP\\Async\\AsyncException" */
     const char *message,           /* nullable → empty */
-    const char *trace,             /* nullable */
     int64_t promise_id
 );
 
@@ -1389,7 +1387,7 @@ void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 
 /* Execute an async task on an async worker thread.
  * Returns 0 on success, -1 on exception.
- * On exception: exc_class, exc_message, exc_trace are malloc'd strings (caller frees). */
+ * On exception: exc_class, exc_message are malloc'd strings (caller frees). */
 int oxphp_execute_async_task(
     zend_op_array *op_array,
     HashTable *static_vars,
@@ -1398,8 +1396,7 @@ int oxphp_execute_async_task(
     zval *args,
     zval *retval,
     char **exc_class,
-    char **exc_message,
-    char **exc_trace
+    char **exc_message
 );
 
 /* ─── Custom Object for Plugin Classes ──────────────────────── */

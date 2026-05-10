@@ -177,7 +177,6 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: Some("OxPHP\\Async\\AsyncException".into()),
                 exception_message: Some("Task cancelled before execution".into()),
-                exception_trace: None,
             });
             if let Some(ref m) = metrics {
                 m.async_task_cancelled();
@@ -202,7 +201,6 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: Some("RuntimeException".into()),
                     exception_message: Some("Failed to allocate args buffer".into()),
-                    exception_trace: None,
                 });
                 continue;
             }
@@ -223,7 +221,6 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: Some("RuntimeException".into()),
                     exception_message: Some("Failed to deserialize arguments".into()),
-                    exception_trace: None,
                 });
                 continue;
             }
@@ -258,7 +255,6 @@ fn async_worker_thread(
                         serialized_value_len: 0,
                         exception_class: Some("RuntimeException".into()),
                         exception_message: Some("Failed to deserialize static vars".into()),
-                        exception_trace: None,
                     });
                     continue;
                 }
@@ -273,7 +269,6 @@ fn async_worker_thread(
         // Execute the closure via the C bridge (zend_try protected)
         let mut exc_class: *mut c_char = std::ptr::null_mut();
         let mut exc_message: *mut c_char = std::ptr::null_mut();
-        let mut exc_trace: *mut c_char = std::ptr::null_mut();
 
         // Allocate a zval for the return value
         let retval_layout =
@@ -288,7 +283,6 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: Some("RuntimeException".into()),
                 exception_message: Some("Failed to allocate return value buffer".into()),
-                exception_trace: None,
             });
             continue;
         }
@@ -303,7 +297,6 @@ fn async_worker_thread(
                 retval_buf as *mut c_void,
                 &mut exc_class,
                 &mut exc_message,
-                &mut exc_trace,
             )
         };
 
@@ -331,7 +324,6 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: None,
                     exception_message: None,
-                    exception_trace: None,
                 }
             } else {
                 AsyncResult {
@@ -340,14 +332,12 @@ fn async_worker_thread(
                     serialized_value_len: ser_len,
                     exception_class: None,
                     exception_message: None,
-                    exception_trace: None,
                 }
             }
         } else {
             // Failure — extract exception details from C-allocated strings
             let class_str = unsafe { cstr_to_string_free(exc_class) };
             let message_str = unsafe { cstr_to_string_free(exc_message) };
-            let trace_str = unsafe { cstr_to_string_free(exc_trace) };
 
             // Free the retval contents (may have been partially initialized)
             unsafe { ffi::oxphp_deep_free_zval(retval_buf as *mut c_void) };
@@ -360,7 +350,6 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: class_str,
                 exception_message: message_str,
-                exception_trace: trace_str,
             }
         };
 
