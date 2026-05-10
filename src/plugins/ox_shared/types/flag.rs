@@ -1,6 +1,4 @@
 //! Shared\Flag — atomic bool.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/21-type-flag.md
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};

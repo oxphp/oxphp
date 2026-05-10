@@ -1,7 +1,4 @@
 //! Cross-thread deadlock detection via wait-for graph.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/06-mutex-contract.md
-//!       §Cross-thread deadlock detection — 3 levels
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

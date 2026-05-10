@@ -1,6 +1,4 @@
 //! SharedError enum + thread-local LAST_ERROR + FFI accessor.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/05-exceptions.md
 
 use std::cell::RefCell;
 use std::os::raw::{c_char, c_int};

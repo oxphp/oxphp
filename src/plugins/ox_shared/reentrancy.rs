@@ -1,9 +1,5 @@
 //! Thread-local held-mutex set for intra-thread deadlock detection
 //! and lock-order-hazard warnings.
-//!
-//! Spec: .internal/technical-docs/en/features/shared/06-mutex-contract.md
-//!       §Reentrancy
-//!       §Rate-limited file:line for lock-ordering warnings
 
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};

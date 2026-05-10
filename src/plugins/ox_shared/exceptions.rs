@@ -1,7 +1,5 @@
 //! Register all Shared\* exception classes at plugin init.
 //!
-//! Spec: .internal/technical-docs/en/features/shared/05-exceptions.md
-//!
 //! Hierarchy (10 classes: 1 base + 9 subclasses):
 //!
 //!   \Exception
