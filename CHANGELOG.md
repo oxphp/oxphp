@@ -4,6 +4,116 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Migration from 0.5.0
+
+Mechanical replacements unless noted otherwise. Apply with grep/sed before upgrading.
+
+**1. `oxphp_async_await_any()` — name kept, semantics replaced**
+
+The function under that name now follows JS `Promise.any`: returns the first FULFILLED promise, throws `AggregateAsyncException` only when every promise rejects. The previous "first settled, success or failure" behavior moved to `oxphp_async_await_race()`.
+
+```php
+// If you wanted "first response, regardless of success":
+$winner = oxphp_async_await_race([$p1, $p2], 5.0);
+
+// If you wanted "first SUCCESS, ignore failures": same call, new failure shape:
+try {
+    $winner = oxphp_async_await_any([$p1, $p2], 5.0);
+} catch (\OxPHP\Async\AggregateAsyncException $e) {
+    // every promise rejected
+} catch (\OxPHP\Async\TimeoutException $e) {
+    // deadline elapsed before any fulfilled
+}
+```
+
+**2. Cancelled-request HTTP status no longer collapses to `500`**
+
+The wire status now reflects the cancel reason: `max_execution_time` exhaustion → `504`, graceful-drain shutdown → `503` with `Retry-After: 5`, mid-request client disconnect → `499` (log-only, not on the wire). Supervisor kills (`Stuck`) and userland cancels (`UserCancel`) keep `500`.
+
+- Replace any monitoring/log pattern that maps `500` to "timeout" with `504` (or, more robustly, the `oxphp_request_cancelled_total{reason}` metric).
+- If you ship a custom `ERROR_PAGES_DIR`, add `504.html`, `503.html`, and optionally `499.html` next to `500.html`.
+- `5xx` rate SLOs will drop after rollout because `499` is no longer 5xx — this is honest improvement, not a regression.
+
+**3. `Shared\Counter` is now a pure accumulator**
+
+`Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed; atomic-replace and CAS live on the new `Shared\Atomic` class. `Counter::reset()` no longer takes an argument and always zeroes the counter, returning the prior sum.
+
+```php
+// Before
+$c->set(42);
+$c->swap(0);
+$c->compareAndSet(0, 1);
+$prev = $c->reset(5);
+
+// After — atomic-replace and CAS on Atomic
+$a = new \OxPHP\Shared\Atomic(42);
+$a->store(42);
+$a->swap(0);
+$a->compareAndSet(0, 1);
+
+// Counter::reset() always zeroes
+$prev = $c->reset();
+```
+
+**4. `OxPHP\Server\Worker` — drop the `get` prefix**
+
+| Before                       | After                     |
+| ---                          | ---                       |
+| `$w->getId()`                | `$w->id()`                |
+| `$w->getStartTime()`         | `$w->startTime()`         |
+| `$w->getRequestCount()`      | `$w->requestCount()`      |
+| `$w->getMemoryUsage()`       | `$w->memoryUsage()`       |
+| `$w->getRss()`               | `$w->rss()`               |
+| `$w->getMaxMemoryBytes()`    | `$w->maxMemoryBytes()`    |
+| `$w->getExitReason()`        | `$w->exitReason()`        |
+
+`Worker::current()`, `Worker::isWorkerMode()`, `scheduleExit()`, `isExitScheduled()`, and `serve()` are unchanged.
+
+**5. Base exception class renames**
+
+```php
+// Before
+catch (\OxPHP\Async\Exception $e) { ... }
+catch (\OxPHP\Shared\Exception $e) { ... }
+
+// After
+catch (\OxPHP\Async\AsyncException $e) { ... }
+catch (\OxPHP\Shared\SharedException $e) { ... }
+```
+
+Subclasses (`TimeoutException`, `BorrowException`, `ClosedException`, …) keep their names — only the parent FQN changes.
+
+**6. `oxphp_request_heartbeat()` → `set_time_limit()`**
+
+```php
+// Before
+oxphp_request_heartbeat(30);
+
+// After
+set_time_limit(30);
+```
+
+Both reset the per-request timer to N seconds from now.
+
+**7. `REQUEST_TIMEOUT_SECONDS` → `max_execution_time`**
+
+```ini
+; php.ini (or oxphp.ini)
+max_execution_time = 30
+```
+
+Or per-script: `set_time_limit(30);`. Drop `REQUEST_TIMEOUT_SECONDS` from your deployment manifest.
+
+**8. `sapi` key removed from `oxphp_server_info()`**
+
+```php
+// Before
+$sapi = oxphp_server_info()['sapi'];  // hardcoded "oxphp", lied about the real SAPI
+
+// After
+$sapi = php_sapi_name();              // "cli-server"
+```
+
 ### Breaking changes
 
 - `Shared\Counter` is now a pure accumulator. `Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed — atomic-replace and compare-and-swap belong on the new `Shared\Atomic` class. `Counter::reset(int $newValue)` lost its argument; `reset()` now always returns the previous value and atomically zeroes the counter (the LongAdder `sumThenReset` pattern). For state machines, version stamps, or arbitrary atomic int storage, use `Shared\Atomic` instead.
@@ -17,26 +127,6 @@ All notable changes to OxPHP are documented in this file.
 - `oxphp_async_await_any(array, ?float): array` now exists with proper JavaScript `Promise.any`-style semantics: the first FULFILLED promise wins. Rejections are accumulated. If every promise rejects, throws the new `OxPHP\Async\AggregateAsyncException` carrying all errors (`getErrors()`, `getErrorMap()`, `getPromiseIds()`). On timeout, throws `OxPHP\Async\TimeoutException` with `getPartialErrors()` and `getCancelledPromiseIds()` populated.
 - `OxPHP\Async\AggregateAsyncException` (extends `AsyncException`) — new exception class. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>`.
 - `OxPHP\Async\TimeoutException::getPartialErrors(): array<int, \Throwable>` and `getCancelledPromiseIds(): list<int>` — new methods. Existing throw sites (`oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`) populate them with empty arrays; only `oxphp_async_await_any()` timeouts fill them. The cancelled-id list is an audit trail — those promises have already been signalled to cancel and their receivers stranded, so they cannot be re-awaited.
-
-### Migration
-
-```php
-// If you wrote this:
-$winner = oxphp_async_await_any([$p1, $p2], 5.0);
-
-// And you wanted "first response, regardless of success", change to:
-$winner = oxphp_async_await_race([$p1, $p2], 5.0);
-
-// If you wanted "first SUCCESS, ignore failures", the same call now does
-// what you actually wanted — but the failure-handling code shape changes:
-try {
-    $winner = oxphp_async_await_any([$p1, $p2], 5.0);
-} catch (\OxPHP\Async\AggregateAsyncException $e) {
-    // every promise rejected
-} catch (\OxPHP\Async\TimeoutException $e) {
-    // deadline elapsed before any fulfilled
-}
-```
 
 ### Removed
 
