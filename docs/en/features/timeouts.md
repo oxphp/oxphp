@@ -36,7 +36,21 @@ PHP execution timing is delegated entirely to PHP. When `max_execution_time` is 
 
 - Sets `connection_status() & PHP_CONNECTION_TIMEOUT` so userland code can detect the cause.
 - Runs all `register_shutdown_function()` callbacks, exactly as PHP-FPM does.
-- Returns HTTP `500` (PHP fatal error) with the message `Request cancelled (timeout)` written to the error log.
+- Returns HTTP `504 Gateway Timeout` with the message `Request cancelled (timeout)` written to the error log.
+
+### Cancellation status codes
+
+OxPHP cancels a request for several distinct reasons. Each maps to a wire status that reflects the actual condition rather than a generic `500`:
+
+| Cause | Status | Notes |
+|-------|--------|-------|
+| `max_execution_time` / `set_time_limit()` exceeded | `504 Gateway Timeout` | Server-side execution-time exhaustion. |
+| Server graceful shutdown drained the request | `503 Service Unavailable` | Adds `Retry-After: 5` so clients retry against a recovered or replacement instance. |
+| Client closed the connection mid-request | `499` | nginx-style "Client Closed Request". The connection is already gone, so this status only ever appears in access logs and metrics — it is never written to the wire. Surfaces client-driven aborts as non-`5xx` so they don't pollute server-error alerts. |
+| Worker pronounced stuck by supervisor | `500 Internal Server Error` | Generic server error — cause (deadlock, blocked syscall, …) is unknown. |
+| Userland-initiated cancellation | `500 Internal Server Error` | Userland may set its own status with `http_response_code()` before triggering the cancel; that explicit status is preserved. |
+
+If your `ERROR_PAGES_DIR` only ships a `500.html`, add `504.html`, `503.html`, and (optionally) `499.html` to keep the styled pages consistent across cancellation causes.
 
 ## Configuration
 
@@ -71,7 +85,7 @@ Adjust these values based on your application's characteristics. For SSE endpoin
 
 ## Troubleshooting
 
-### Clients receive 500 with `Request cancelled (timeout)` unexpectedly
+### Clients receive 504 with `Request cancelled (timeout)` unexpectedly
 
 The PHP execution-time limit fired before the script finished.
 
