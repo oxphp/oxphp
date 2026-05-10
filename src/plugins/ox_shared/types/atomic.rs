@@ -3,6 +3,9 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use crate::plugins::ox_shared::registry::{SharedInner, SharedType};
+use crate::plugins::ox_shared::value::SharedValue;
+
 pub struct AtomicInner {
     value: AtomicI64,
 }
@@ -57,6 +60,20 @@ impl AtomicInner {
     pub fn fetch_xor(&self, mask: i64, order: Ordering) -> i64 {
         self.value.fetch_xor(mask, order)
     }
+}
+
+impl SharedInner for AtomicInner {
+    fn type_tag(&self) -> SharedType {
+        SharedType::Atomic
+    }
+    fn debug_snapshot(&self) -> SharedValue {
+        SharedValue::Long(self.load(Ordering::SeqCst))
+    }
+    fn mem_bytes(&self) -> usize {
+        16
+    }
+    fn on_drop(&self) {}
+    fn on_shutdown_notify(&self) {}
 }
 
 #[cfg(test)]

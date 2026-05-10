@@ -204,6 +204,10 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
             SharedValue::Long(v) => json!({"value": v}),
             _ => Value::Null,
         },
+        SharedType::Atomic => match e.inner.debug_snapshot() {
+            SharedValue::Long(v) => json!({"value": v}),
+            _ => Value::Null,
+        },
         SharedType::Flag => match e.inner.debug_snapshot() {
             SharedValue::Bool(b) => json!({"set": b}),
             _ => Value::Null,
@@ -298,6 +302,7 @@ fn handle_types(_req: &PluginInternalRequest) -> Response<ResponseBody> {
         json!({"tag": 10, "name": "Counter", "php_class": "OxPHP\\Shared\\Counter"}),
         json!({"tag": 11, "name": "Flag",    "php_class": "OxPHP\\Shared\\Flag"}),
         json!({"tag": 12, "name": "Once",    "php_class": "OxPHP\\Shared\\Once"}),
+        json!({"tag": 13, "name": "Atomic",  "php_class": "OxPHP\\Shared\\Atomic"}),
         json!({"tag": 20, "name": "Map",     "php_class": "OxPHP\\Shared\\Map"}),
         json!({"tag": 31, "name": "Channel", "php_class": "OxPHP\\Shared\\Channel"}),
         json!({"tag": 50, "name": "Pool",    "php_class": "OxPHP\\Shared\\Pool"}),
