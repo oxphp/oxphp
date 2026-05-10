@@ -3462,6 +3462,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             {
                 store_promise(id, rx, cancelled);
             }
+            set_bridge_internal_error("async runtime not initialized");
             return -1;
         }
     };
