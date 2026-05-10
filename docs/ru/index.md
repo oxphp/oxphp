@@ -59,7 +59,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [SSE](features/sse.md) — стриминг Server-Sent Events в реальном времени из PHP
 - [Ранний ответ](features/early-response.md) — немедленная отправка ответа с продолжением фоновой обработки
 - [Асинхронные промисы](features/async-promises.md) — выполнение PHP-замыканий в фоновых потоках с ожиданием результатов
-- [Разделяемое состояние](features/shared-state.md) — process-wide примитивы: [Counter](features/shared-counter.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [наблюдаемость](operations/shared-observability.md); [миграция на внешнее хранилище](features/migrating-to-external-store.md)
+- [Разделяемое состояние](features/shared-state.md) — process-wide примитивы: [Counter](features/shared-counter.md), [Atomic](features/shared-atomic.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [наблюдаемость](operations/shared-observability.md); [миграция на внешнее хранилище](features/migrating-to-external-store.md)
 - [Декораторы](features/decorators.md) — перехват вызовов функций и методов с помощью атрибутов PHP 8
 - [Распределённая трассировка и APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, автоинструментирование и PHP tracing SDK
 - [Внутренний сервер](features/internal-server.md) — выделенный порт для проверок состояния, метрик Prometheus и просмотра конфигурации

@@ -59,7 +59,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [SSE](features/sse.md) —— 从 PHP 进行实时 Server-Sent Events 流式传输
 - [提前响应](features/early-response.md) —— 立即发送响应并继续后台处理
 - [异步 Promise](features/async-promises.md) —— 在后台线程运行 PHP 闭包并等待结果
-- [共享状态](features/shared-state.md) —— 进程内原语：[Counter](features/shared-counter.md)、[Flag](features/shared-flag.md)、[Once](features/shared-once.md)、[Mutex](features/shared-mutex.md)、[Channel](features/shared-channel.md)、[Map](features/shared-map.md)、[Pool](features/shared-pool.md)；[可观测性](operations/shared-observability.md)；[迁移到外部存储](features/migrating-to-external-store.md)
+- [共享状态](features/shared-state.md) —— 进程内原语：[Counter](features/shared-counter.md)、[Atomic](features/shared-atomic.md)、[Flag](features/shared-flag.md)、[Once](features/shared-once.md)、[Mutex](features/shared-mutex.md)、[Channel](features/shared-channel.md)、[Map](features/shared-map.md)、[Pool](features/shared-pool.md)；[可观测性](operations/shared-observability.md)；[迁移到外部存储](features/migrating-to-external-store.md)
 - [装饰器](features/decorators.md) —— 使用 PHP 8 属性拦截函数和方法调用
 - [分布式追踪与 APM](features/distributed-tracing.md) —— W3C Trace Context、OpenTelemetry、自动埋点和 PHP 追踪 SDK
 - [内部服务器](features/internal-server.md) —— 用于健康检查、Prometheus 指标和实时配置的专用端口
