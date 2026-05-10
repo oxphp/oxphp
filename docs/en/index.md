@@ -59,7 +59,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [SSE](features/sse.md) — real-time Server-Sent Events streaming from PHP
 - [Early Response](features/early-response.md) — send the response immediately and continue background processing
 - [Async Promises](features/async-promises.md) — run PHP closures on background threads and await results
-- [Shared State](features/shared-state.md) — process-wide primitives: [Counter](features/shared-counter.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [observability](operations/shared-observability.md); [migrating to an external store](features/migrating-to-external-store.md)
+- [Shared State](features/shared-state.md) — process-wide primitives: [Counter](features/shared-counter.md), [Atomic](features/shared-atomic.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [observability](operations/shared-observability.md); [migrating to an external store](features/migrating-to-external-store.md)
 - [Decorators](features/decorators.md) — intercept function and method calls with PHP 8 attributes
 - [Distributed Tracing & APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, auto-instrumentation, and PHP tracing SDK
 - [Internal Server](features/internal-server.md) — dedicated port for health checks, Prometheus metrics, and live configuration

@@ -1191,6 +1191,7 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_attributes.h"
+#include "Zend/zend_enum.h"
 
 /* Custom object struct — defined here because it depends on zend_object from php.h.
  * oxphp_bridge.h declares this inside #ifdef PHP_H, but the header is included
@@ -1274,6 +1275,26 @@ const uint8_t *oxphp_arg_str(void *args, uint32_t idx, size_t *out_len) {
     }
     *out_len = Z_STRLEN_P(z);
     return (const uint8_t*)Z_STRVAL_P(z);
+}
+
+int64_t oxphp_arg_enum_long(void *args, uint32_t idx) {
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) != IS_OBJECT) {
+        return 0;
+    }
+    zend_object *obj = Z_OBJ_P(z);
+    zend_class_entry *ce = obj->ce;
+    if ((ce->ce_flags & ZEND_ACC_ENUM) == 0) {
+        return 0;
+    }
+    if (ce->enum_backing_type != IS_LONG) {
+        return 0;
+    }
+    zval *backing = zend_enum_fetch_case_value(obj);
+    if (Z_TYPE_P(backing) != IS_LONG) {
+        return 0;
+    }
+    return Z_LVAL_P(backing);
 }
 
 /* ── Array reading ── */

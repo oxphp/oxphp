@@ -1,6 +1,6 @@
 //! Register all Shared\* exception classes at plugin init.
 //!
-//! Hierarchy (10 classes: 1 base + 9 subclasses):
+//! Hierarchy (11 classes: 1 base + 10 subclasses):
 //!
 //!   \Exception
 //!     └── OxPHP\Shared\SharedException      (1)
@@ -12,7 +12,8 @@
 //!          ├── PoisonedException             (7)
 //!          ├── TimeoutException              (8)
 //!          │    └── DeadlockException        (9)
-//!          └── UninitializedException        (10) access before first set()
+//!          ├── UninitializedException        (10) access before first set()
+//!          └── InvalidOrderingException      (11) Atomic op got a memory ordering invalid for that op
 
 use crate::plugin::{PluginContext, PluginError};
 
@@ -31,6 +32,7 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         "OxPHP\\Shared\\PoisonedException",
         "OxPHP\\Shared\\TimeoutException",
         "OxPHP\\Shared\\UninitializedException",
+        "OxPHP\\Shared\\InvalidOrderingException",
     ] {
         ctx.register_class(child)
             .extends("OxPHP\\Shared\\SharedException")
@@ -102,9 +104,9 @@ mod tests {
     }
 
     #[test]
-    fn all_ten_classes_registered() {
+    fn all_eleven_classes_registered() {
         let classes = run_register();
-        assert_eq!(classes.len(), 10);
+        assert_eq!(classes.len(), 11);
     }
 
     #[test]

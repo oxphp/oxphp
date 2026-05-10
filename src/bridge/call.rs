@@ -156,6 +156,18 @@ impl<'a> NativeCall<'a> {
         Ok(unsafe { ffi::oxphp_arg_long(self.args, idx) })
     }
 
+    /// Read a backed-int enum argument (e.g. `OxPHP\Shared\Ordering`) as its
+    /// underlying `i64` value. The argument must be an object; the PHP
+    /// type-hint at the method declaration enforces it's specifically the
+    /// expected enum class. Returns 0 if the object is not a backed-int
+    /// enum (e.g. unit enum or string-backed) — callers that need stricter
+    /// checking should validate the value separately.
+    pub fn arg_enum_long(&self, idx: u32) -> Result<i64, PhpError> {
+        self.check_idx(idx)?;
+        self.check_type(idx, ValType::Object)?;
+        Ok(unsafe { ffi::oxphp_arg_enum_long(self.args, idx) })
+    }
+
     /// Read float argument.
     pub fn arg_double(&self, idx: u32) -> Result<f64, PhpError> {
         self.check_idx(idx)?;

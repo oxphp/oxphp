@@ -4,7 +4,9 @@ use std::os::raw::c_int;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{
+    ffi_entry, read_last_error_message, set_last_error, SharedError,
+};
 use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
 use crate::plugins::ox_shared::value::SharedValue;
 
@@ -23,7 +25,7 @@ impl CounterInner {
         self.value.load(Ordering::SeqCst)
     }
 
-    pub fn set(&self, v: i64) -> i64 {
+    pub fn swap(&self, v: i64) -> i64 {
         self.value.swap(v, Ordering::SeqCst)
     }
 
@@ -32,12 +34,6 @@ impl CounterInner {
         self.value
             .fetch_add(delta, Ordering::SeqCst)
             .wrapping_add(delta)
-    }
-
-    pub fn cas(&self, expect: i64, new: i64) -> bool {
-        self.value
-            .compare_exchange(expect, new, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
     }
 
     pub fn add_batch(&self, deltas: &[i64]) -> i64 {
@@ -101,7 +97,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_get(id: u64, out: *mut i64) -> c_i
 /// # Safety
 /// `out_prev` must be valid for writes of `i64` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_set(
+pub unsafe extern "C" fn oxphp_shared_counter_swap(
     id: u64,
     new_val: i64,
     out_prev: *mut i64,
@@ -114,7 +110,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_set(
         let reg = registry();
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
-        let prev = inner.set(new_val);
+        let prev = inner.swap(new_val);
         reg.record_op(id);
         unsafe { *out_prev = prev };
         Ok(())
@@ -136,30 +132,6 @@ pub unsafe extern "C" fn oxphp_shared_counter_add(id: u64, delta: i64, out_new: 
         let new_val = inner.add(delta);
         reg.record_op(id);
         unsafe { *out_new = new_val };
-        Ok(())
-    })
-}
-
-/// # Safety
-/// `out_swapped` must be valid for writes of `c_int` if non-null.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_cas(
-    id: u64,
-    expect: i64,
-    new_val: i64,
-    out_swapped: *mut c_int,
-) -> c_int {
-    if out_swapped.is_null() {
-        set_last_error("out_swapped is null");
-        return SharedError::Generic.code();
-    }
-    ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
-        let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
-        let swapped = inner.cas(expect, new_val);
-        reg.record_op(id);
-        unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
 }
@@ -253,7 +225,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error(),
+                    message: read_last_error_message(),
                     code: 0,
                 });
             }
@@ -270,18 +242,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let rc = unsafe { oxphp_shared_counter_get(handle.shared_id, &mut out) };
             counter_rc_to_result(rc)?;
             call.ret_long(out);
-            Ok(())
-        })
-        .method("set")
-        .param("value", PhpType::Int)
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let new_val = call.arg_long(0)?;
-            let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_set(handle.shared_id, new_val, &mut prev) };
-            counter_rc_to_result(rc)?;
-            call.ret_long(prev);
             Ok(())
         })
         .method("inc")
@@ -328,21 +288,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(new_val);
             Ok(())
         })
-        .method("compareAndSet")
-        .param("expect", PhpType::Int)
-        .param("new", PhpType::Int)
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let expect = call.arg_long(0)?;
-            let new = call.arg_long(1)?;
-            let mut swapped: c_int = 0;
-            let rc =
-                unsafe { oxphp_shared_counter_cas(handle.shared_id, expect, new, &mut swapped) };
-            counter_rc_to_result(rc)?;
-            call.ret_bool(swapped != 0);
-            Ok(())
-        })
         .method("addBatch")
         .param("deltas", PhpType::Array)
         .returns(PhpType::Int)
@@ -368,17 +313,11 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             Ok(())
         })
         .method("reset")
-        .optional_param("newValue", PhpType::Int, PhpValue::Int(0))
         .returns(PhpType::Int)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
-            let v = if call.argc() > 0 {
-                call.arg_long(0).unwrap_or(0)
-            } else {
-                0
-            };
             let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_set(handle.shared_id, v, &mut prev) };
+            let rc = unsafe { oxphp_shared_counter_swap(handle.shared_id, 0, &mut prev) };
             counter_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -406,7 +345,7 @@ pub(super) fn counter_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     if rc == 0 {
         return Ok(());
     }
-    let msg = read_last_error();
+    let msg = read_last_error_message();
     let class = match rc {
         -2 => "OxPHP\\Shared\\StaleHandleException",
         -3 => "OxPHP\\Shared\\TypeException",
@@ -421,38 +360,18 @@ pub(super) fn counter_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     })
 }
 
-fn read_last_error() -> String {
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn get_set_add() {
+    fn get_swap_add() {
         let c = CounterInner::new(10);
         assert_eq!(c.get(), 10);
-        assert_eq!(c.set(20), 10);
+        assert_eq!(c.swap(20), 10);
         assert_eq!(c.get(), 20);
         assert_eq!(c.add(5), 25);
         assert_eq!(c.add(-10), 15);
-    }
-
-    #[test]
-    fn cas_success_and_failure() {
-        let c = CounterInner::new(0);
-        assert!(c.cas(0, 42));
-        assert!(!c.cas(0, 999));
-        assert_eq!(c.get(), 42);
     }
 
     #[test]

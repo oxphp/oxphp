@@ -58,7 +58,8 @@ OxPHP 0.3 ships seven types. Pick by semantics, not by what feels familiar:
 
 | Type                                     | Shape                    | Good for                                                              |
 |------------------------------------------|--------------------------|-----------------------------------------------------------------------|
-| [`Shared\Counter`](shared-counter.md)    | atomic int64             | request counts, per-tenant usage, feature-gate hit tracking           |
+| [`Shared\Counter`](shared-counter.md)    | int64 accumulator        | request counts, per-tenant usage, feature-gate hit tracking           |
+| [`Shared\Atomic`](shared-atomic.md)      | atomic int64 primitive   | state machines, version stamps, CAS loops, bitflag masks              |
 | [`Shared\Flag`](shared-flag.md)          | atomic bool              | kill-switches, one-off initialisation markers, circuit-breaker state  |
 | [`Shared\Once`](shared-once.md)          | init-once container      | expensive singleton initialisation across workers (one run wins)      |
 | [`Shared\Mutex`](shared-mutex.md)        | poisoning mutual excl.   | critical sections over a non-atomic value                             |
@@ -335,7 +336,8 @@ Shared state is in-process. That constrains when it fits.
 
 ## Related
 
-- [Shared\Counter](shared-counter.md) — atomic integer primitive.
+- [Shared\Counter](shared-counter.md) — domain accumulator.
+- [Shared\Atomic](shared-atomic.md) — generic atomic int64 with full memory-ordering control.
 - [Shared\Flag](shared-flag.md) — atomic bool / kill-switch.
 - [Shared\Once](shared-once.md) — run-once across workers.
 - [Shared\Mutex](shared-mutex.md) — poisoning mutex over a value.

@@ -13,6 +13,7 @@ extern "C" {
     pub fn oxphp_arg_double(args: *mut c_void, idx: u32) -> f64;
     pub fn oxphp_arg_bool(args: *mut c_void, idx: u32) -> c_int;
     pub fn oxphp_arg_str(args: *mut c_void, idx: u32, out_len: *mut usize) -> *const u8;
+    pub fn oxphp_arg_enum_long(args: *mut c_void, idx: u32) -> i64;
 
     pub fn oxphp_arg_array_count(args: *mut c_void, idx: u32) -> u32;
     pub fn oxphp_arg_array(args: *mut c_void, idx: u32) -> *mut c_void;

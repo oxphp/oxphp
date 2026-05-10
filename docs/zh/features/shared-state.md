@@ -58,7 +58,8 @@ OxPHP 0.3 提供七种类型。请按语义而非熟悉度来选择：
 
 | 类型                                     | 形态                      | 适用场景                                                              |
 |------------------------------------------|--------------------------|-----------------------------------------------------------------------|
-| [`Shared\Counter`](shared-counter.md)    | 原子 int64                | 请求计数、按租户的使用量、特性开关命中跟踪                            |
+| [`Shared\Counter`](shared-counter.md)    | int64 累加器              | 请求计数、按租户的使用量、特性开关命中跟踪                            |
+| [`Shared\Atomic`](shared-atomic.md)      | 通用原子 int64            | 状态机、版本戳、CAS 循环、bitflag 掩码                                |
 | [`Shared\Flag`](shared-flag.md)          | 原子 bool                 | 终止开关、一次性初始化标记、熔断器状态                                |
 | [`Shared\Once`](shared-once.md)          | 一次性初始化容器          | 跨工作线程的昂贵单例初始化（仅一次运行会胜出）                        |
 | [`Shared\Mutex`](shared-mutex.md)        | 带毒化的互斥              | 对非原子值的临界区                                                    |
@@ -335,7 +336,8 @@ $queue->send(['url' => $_POST['url']]);
 
 ## 相关
 
-- [Shared\Counter](shared-counter.md) —— 原子整数原语。
+- [Shared\Counter](shared-counter.md) —— 领域累加器。
+- [Shared\Atomic](shared-atomic.md) —— 通用原子 int64,支持完整的内存顺序控制。
 - [Shared\Flag](shared-flag.md) —— 原子 bool / 终止开关。
 - [Shared\Once](shared-once.md) —— 跨工作线程仅运行一次。
 - [Shared\Mutex](shared-mutex.md) —— 对值的带毒化互斥。

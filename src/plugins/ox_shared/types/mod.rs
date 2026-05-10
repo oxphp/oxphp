@@ -1,5 +1,6 @@
 //! Shared\* type implementations.
 
+pub mod atomic;
 pub mod channel;
 pub mod counter;
 pub mod flag;
