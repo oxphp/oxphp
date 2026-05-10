@@ -250,6 +250,69 @@ atomic_fetch_ffi!(oxphp_shared_atomic_fetch_and, fetch_and);
 atomic_fetch_ffi!(oxphp_shared_atomic_fetch_or, fetch_or);
 atomic_fetch_ffi!(oxphp_shared_atomic_fetch_xor, fetch_xor);
 
+// ─── Memory-ordering validation ──────────────────────────────────────
+//
+// `std::sync::atomic` panics on bad ordering combinations. We catch them
+// at the PHP boundary and raise a typed exception instead, so PHP users
+// get a clear error rather than a "Rust panic" generic.
+//
+// `#[allow(dead_code)]` because these are only consumed by the PHP class
+// handler registered in a follow-up commit; the Rust unit tests below
+// use them directly so they are reachable.
+
+#[allow(dead_code)]
+use crate::plugin::php::PhpError;
+
+#[allow(dead_code)]
+const ORDERING_NAMES: [&str; 5] = ["Relaxed", "Acquire", "Release", "AcqRel", "SeqCst"];
+
+#[allow(dead_code)]
+fn ordering_name(v: u8) -> &'static str {
+    ORDERING_NAMES.get(v as usize).copied().unwrap_or("?")
+}
+
+#[allow(dead_code)]
+fn invalid_ordering(op: &str, v: u8, allowed: &str) -> PhpError {
+    PhpError::Exception {
+        class: "OxPHP\\Shared\\InvalidOrderingException".to_string(),
+        message: format!(
+            "{op}() cannot use Ordering::{name} — allowed: {allowed}",
+            op = op,
+            name = ordering_name(v),
+            allowed = allowed,
+        ),
+        code: 0,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn validate_ordering_for_load(v: u8) -> Result<(), PhpError> {
+    match v {
+        0 | 1 | 4 => Ok(()), // Relaxed, Acquire, SeqCst
+        _ => Err(invalid_ordering("load", v, "Relaxed, Acquire, SeqCst")),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn validate_ordering_for_store(v: u8) -> Result<(), PhpError> {
+    match v {
+        0 | 2 | 4 => Ok(()), // Relaxed, Release, SeqCst
+        _ => Err(invalid_ordering("store", v, "Relaxed, Release, SeqCst")),
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn validate_cas_failure_ordering(v: u8) -> Result<(), PhpError> {
+    match v {
+        0 | 1 | 4 => Ok(()),
+        _ => Err(invalid_ordering(
+            "compareAndSet failure",
+            v,
+            "Relaxed, Acquire, SeqCst",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +383,33 @@ mod tests {
             preview_string_limit: 256,
             preview_array_limit: 20,
         });
+    }
+
+    #[test]
+    fn validate_ordering_for_load_rejects_release_acqrel() {
+        assert!(validate_ordering_for_load(0).is_ok()); // Relaxed
+        assert!(validate_ordering_for_load(1).is_ok()); // Acquire
+        assert!(validate_ordering_for_load(4).is_ok()); // SeqCst
+        assert!(validate_ordering_for_load(2).is_err()); // Release
+        assert!(validate_ordering_for_load(3).is_err()); // AcqRel
+    }
+
+    #[test]
+    fn validate_ordering_for_store_rejects_acquire_acqrel() {
+        assert!(validate_ordering_for_store(0).is_ok()); // Relaxed
+        assert!(validate_ordering_for_store(2).is_ok()); // Release
+        assert!(validate_ordering_for_store(4).is_ok()); // SeqCst
+        assert!(validate_ordering_for_store(1).is_err()); // Acquire
+        assert!(validate_ordering_for_store(3).is_err()); // AcqRel
+    }
+
+    #[test]
+    fn validate_cas_failure_rejects_release_acqrel() {
+        assert!(validate_cas_failure_ordering(0).is_ok());
+        assert!(validate_cas_failure_ordering(1).is_ok());
+        assert!(validate_cas_failure_ordering(4).is_ok());
+        assert!(validate_cas_failure_ordering(2).is_err());
+        assert!(validate_cas_failure_ordering(3).is_err());
     }
 
     #[test]
