@@ -3511,10 +3511,24 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 std::mem::take(&mut *collected.lock().unwrap());
             sorted.sort_by_key(|r| position.get(&r.promise_id).copied().unwrap_or(usize::MAX));
 
-            // Free frozen-zval state for each rejected promise (matches
-            // single-await semantics — every settled promise gets cleaned
-            // up regardless of outcome instead of leaking PROMISE_CLEANUP
-            // entries until RSHUTDOWN).
+            // Free frozen-zval state for each rejected promise. Safe here
+            // because a promise only enters `collected` after its rx has
+            // resolved — i.e., the worker thread is done touching the
+            // captured zvals and the closure's op_array.
+            //
+            // Pending promises on the timeout (-2) path are intentionally
+            // NOT cleaned up here. Their workers are still running on
+            // dedicated OS threads and still reading the borrowed/frozen
+            // zvals + holding the closure refcount; calling
+            // cleanup_promise on them would unfreeze captures (letting
+            // PHP free buffers the worker still reads) and release the
+            // closure (potentially freeing the op_array mid-execution) —
+            // a use-after-free. PROMISE_CLEANUP is thread-local and
+            // drained at RSHUTDOWN by cleanup_outstanding_promises_callback,
+            // which block_on's each pending rx (5s budget) so cleanup
+            // runs only after the worker actually finishes. The leak
+            // window is therefore bounded by the lifetime of the current
+            // request, not the process.
             for r in &sorted {
                 cleanup_promise(r.promise_id);
             }
