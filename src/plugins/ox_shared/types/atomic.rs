@@ -119,7 +119,16 @@ fn ordering_from_u8(v: u8) -> Ordering {
         1 => Ordering::Acquire,
         2 => Ordering::Release,
         3 => Ordering::AcqRel,
-        _ => Ordering::SeqCst,
+        4 => Ordering::SeqCst,
+        // Out-of-range input means a caller bypassed `read_order_arg` (whose
+        // range check is the primary defence). In debug builds we want to
+        // catch that immediately; in release we fall back to SeqCst, which is
+        // strictly stronger than any other valid ordering, so behaviour stays
+        // safe even if a value slips through.
+        _ => {
+            debug_assert!(false, "ordering value {v} out of range; expected 0..=4");
+            Ordering::SeqCst
+        }
     }
 }
 
@@ -353,10 +362,24 @@ fn read_last_error_atomic() -> String {
 }
 
 /// Read the optional `order` enum argument at `idx`. Returns the SeqCst
-/// default (4) if the caller omitted it.
+/// default (4) if the caller omitted it. Range-checks the backed value
+/// before returning — `Shared\Ordering` always backs to 0..=4, but a
+/// caller who reaches us through reflection or a bug could plant garbage,
+/// and silently mapping it to SeqCst would mask the problem.
 fn read_order_arg(call: &mut crate::bridge::call::NativeCall, idx: u32) -> Result<u8, PhpError> {
     if call.argc() > idx {
-        Ok(call.arg_enum_long(idx)? as u8)
+        let v = call.arg_enum_long(idx)?;
+        if !(0..=4).contains(&v) {
+            return Err(PhpError::Exception {
+                class: "OxPHP\\Shared\\InvalidOrderingException".to_string(),
+                message: format!(
+                    "Ordering value {v} out of range \
+                     — expected 0..=4 (Relaxed, Acquire, Release, AcqRel, SeqCst)"
+                ),
+                code: 0,
+            });
+        }
+        Ok(v as u8)
     } else {
         Ok(4)
     }
@@ -658,6 +681,15 @@ mod tests {
         assert!(validate_ordering_for_store(4).is_ok()); // SeqCst
         assert!(validate_ordering_for_store(1).is_err()); // Acquire
         assert!(validate_ordering_for_store(3).is_err()); // AcqRel
+    }
+
+    #[test]
+    fn ordering_from_u8_in_range_round_trips() {
+        assert_eq!(ordering_from_u8(0), Ordering::Relaxed);
+        assert_eq!(ordering_from_u8(1), Ordering::Acquire);
+        assert_eq!(ordering_from_u8(2), Ordering::Release);
+        assert_eq!(ordering_from_u8(3), Ordering::AcqRel);
+        assert_eq!(ordering_from_u8(4), Ordering::SeqCst);
     }
 
     #[test]
