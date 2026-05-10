@@ -3175,7 +3175,11 @@ void oxphp_bridge_aggregate_push(
     aggregate_len++;
 }
 
-/* Build a Throwable zval for one aggregate entry. Caller owns the zval. */
+/* Build a Throwable zval for one aggregate entry. Caller owns the zval.
+ * Walks a fallback chain: entry's class → OxPHP\Async\AsyncException →
+ * builtin \Exception. The last step is always reachable (zend_ce_exception
+ * is provided by Zend itself), so the only remaining -1 path is
+ * object_init_ex failure (catastrophic OOM). */
 static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
     const char *cls_name = entry->exception_class
         ? entry->exception_class
@@ -3193,7 +3197,14 @@ static int build_throwable_zval(zval *out, const aggregate_entry_t *entry) {
         );
         ce = zend_lookup_class(fallback);
         zend_string_release(fallback);
-        if (!ce) return -1;
+        if (!ce) {
+            /* Last-resort fallback. zend_ce_exception is the global
+             * builtin \Exception class entry, registered by Zend during
+             * MINIT — always available. Preserves the list<Throwable>
+             * contract on getErrors() even if the async plugin's classes
+             * somehow weren't registered yet. */
+            ce = zend_ce_exception;
+        }
     }
     if (object_init_ex(out, ce) != SUCCESS) return -1;
     if (entry->message) {
@@ -3245,9 +3256,21 @@ int oxphp_bridge_aggregate_throw(void) {
     array_init(&ids);
 
     for (size_t i = 0; i < aggregate_len; i++) {
+        /* __promiseIds always records the id — it's just a long, no
+         * allocation can fail per-element. Doing this first keeps the
+         * id list complete even if Throwable construction below OOMs. */
+        add_next_index_long(&ids, (zend_long)aggregate_buf[i].promise_id);
+
         zval throwable;
         if (build_throwable_zval(&throwable, &aggregate_buf[i]) != 0) {
-            ZVAL_NULL(&throwable);
+            /* OOM during object_init_ex on every fallback class. Skip
+             * this entry from __errors/__errorMap rather than pushing a
+             * null — the property stubs declare list<Throwable> /
+             * array<int, Throwable>, and a null violates that contract
+             * (foreach ($e->getErrors() as $err) { $err->...; } would
+             * TypeError downstream). The id is still present in
+             * __promiseIds, so the rejection isn't silently lost. */
+            continue;
         }
         /* Each Throwable goes into both `errors` (list) and `err_map`
          * (id-keyed map). zend_hash_index_update / add_next_index_zval take
@@ -3260,7 +3283,6 @@ int oxphp_bridge_aggregate_throw(void) {
             (zend_long)aggregate_buf[i].promise_id,
             &throwable
         );
-        add_next_index_long(&ids, (zend_long)aggregate_buf[i].promise_id);
     }
 
     zend_update_property(agg_ce, Z_OBJ(ex), "__errors", sizeof("__errors") - 1, &errors);
