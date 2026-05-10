@@ -3262,10 +3262,26 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             }
         }
         Err(_timeout) => {
-            // Timeout — select_all consumed all receivers. Signal cancellation
-            // so async workers stop early. RSHUTDOWN will clean up PromiseCleanup data.
+            // Timeout — select_all dropped all receivers. We can only
+            // signal cancellation; the workers keep running on their
+            // own OS threads until the cancel flag is observed at the
+            // next vm_interrupt poll (or until the closure returns
+            // naturally). They can't be force-killed, and we can't
+            // call cleanup_promise on them while they may still be
+            // reading frozen captures / holding the closure refcount.
+            //
+            // PROMISE_CLEANUP entries for these promises are drained
+            // by cleanup_outstanding_promises_callback at RSHUTDOWN,
+            // which block_on's each pending rx with a 5s budget per
+            // promise. So: each stranded worker can extend RSHUTDOWN
+            // by up to 5s. Track this via async_tasks_stranded so
+            // operators can spot pathological workloads (long PHP
+            // loops + frequent await_race timeouts).
             for cancel in &cancel_map {
                 cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(m) = get_async_metrics() {
+                m.async_tasks_stranded(cancel_map.len() as u64);
             }
             -2
         }
@@ -3547,6 +3563,14 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         // Timeout fired.
         Err(()) => {
             // Cancel any still-pending workers (best-effort signal).
+            // The cancel flag is observed at the next vm_interrupt
+            // poll, but the worker keeps running on its OS thread
+            // until then. Cleanup of these promises happens at
+            // RSHUTDOWN via cleanup_outstanding_promises_callback,
+            // which block_on's each pending rx with a 5s budget — so
+            // each stranded worker can extend RSHUTDOWN by up to 5s.
+            // Tracked under async_tasks_stranded so the
+            // RSHUTDOWN-stall risk shows up in metrics.
             for c in cancel_arc.iter() {
                 c.store(true, std::sync::atomic::Ordering::Relaxed);
             }
@@ -3567,6 +3591,10 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 .filter(|id| !rejected_set.contains(id))
                 .map(|&id| id as i64)
                 .collect();
+
+            if let Some(m) = get_async_metrics() {
+                m.async_tasks_stranded(pending_ids.len() as u64);
+            }
 
             push_collected_in_position_order(&collected, &input_ids);
             ffi::oxphp_bridge_aggregate_throw_timeout(
