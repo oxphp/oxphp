@@ -23,13 +23,12 @@ final class Counter implements Shareable
     public function __construct(int $initial = 0);
 
     public function get(): int;
-    public function set(int $value): int;             // 返回原值
+    public function swap(int $value): int;            // 返回原值
     public function inc(int $by = 1): int;            // 返回新值
     public function dec(int $by = 1): int;            // 返回新值
     public function add(int $delta): int;             // 返回新值
     public function compareAndSet(int $expect, int $new): bool;
     public function addBatch(array $deltas): int;     // 返回新值
-    public function reset(int $newValue = 0): int;    // 返回原值
 
     public function id(): int;
 }
@@ -38,12 +37,11 @@ final class Counter implements Shareable
 | 方法             | 返回值      | 使用场景                                                        |
 |------------------|-------------|-----------------------------------------------------------------|
 | `get`            | 当前值      | 无变更的读取。                                                  |
-| `set`            | 原值        | 无条件替换；适合以种子值初始化。                                |
+| `swap`           | 原值        | 原子替换；`swap(0)` 即 snapshot-and-zero 模式。                 |
 | `inc` / `dec`    | 新值        | 按事件计数；`$by` 允许一次原子操作跳 N 步。                     |
 | `add`            | 新值        | 任意正负增量。                                                  |
 | `compareAndSet`  | 是否交换    | 乐观状态机（idle → busy → done）。                              |
 | `addBatch`       | 新值        | 单次 FFI 往返完成批量累加。                                     |
-| `reset`          | 原值        | 窗口结束的归零；`reset()` 置零，`reset(n)` 置种子。             |
 | `id`             | 注册表 id   | 日志、追踪、`/__ox_shared/entry?id=…` 关联。                    |
 
 ## 示例
@@ -73,9 +71,9 @@ if (!$state->compareAndSet(expect: 0, new: 1)) {
 
 try {
     doWork();
-    $state->set(2);
+    $state->swap(2);
 } catch (Throwable $e) {
-    $state->set(0); // 出错时释放回 idle
+    $state->swap(0); // 出错时释放回 idle
     throw $e;
 }
 ```
@@ -87,7 +85,7 @@ try {
 $hits = new OxPHP\Shared\Counter();
 
 // 每 N 分钟在 cron/工作循环中：
-$prev = $hits->reset();                // 原子地读取并置零
+$prev = $hits->swap(0);                // 原子地读取并置零
 logWindowMetric($prev);
 ```
 
@@ -104,7 +102,7 @@ $newTotal = $bytes->addBatch($deltas);
 
 ## 语义与陷阱
 
-- **`set` 返回原值，不是新值。** 这与 `std::atomic<T>::exchange` 语义一致，也与 `reset` 保持一致。若需要刚刚写入的值，请在 `set()` 之后调用 `get()`。
+- **`swap` 返回原值，不是新值。** 这与 `std::atomic<T>::exchange` 以及 Rust 的 `AtomicI64::swap` 语义一致。若需要刚刚写入的值，请在 `swap()` 之后调用 `get()`。
 - **`addBatch` 在跨项上不是原子的。** 底层是一轮 `fetch_add` 循环——最终值正确，但其他工作线程在批处理过程中会看到中间总和。如果你需要整批可见性，请用 `Shared\Mutex` 包裹一个 Counter。
 - **溢出会回绕。** 加 `INT_MAX + 1` 会回到 `INT_MIN`。对于可能在月级时间尺度上每秒数千次增长的单调计数器，把值保持在数十万亿级，或定期重置。
 - **不支持小数。** 若你在计数字节数并需要浮点精度的平均值，把分子（Counter）和分母（Counter）分开跟踪，读取时再相除。

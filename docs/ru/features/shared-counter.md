@@ -23,13 +23,12 @@ final class Counter implements Shareable
     public function __construct(int $initial = 0);
 
     public function get(): int;
-    public function set(int $value): int;             // возвращает предыдущее
+    public function swap(int $value): int;            // возвращает предыдущее
     public function inc(int $by = 1): int;            // возвращает новое
     public function dec(int $by = 1): int;            // возвращает новое
     public function add(int $delta): int;             // возвращает новое
     public function compareAndSet(int $expect, int $new): bool;
     public function addBatch(array $deltas): int;     // возвращает новое
-    public function reset(int $newValue = 0): int;    // возвращает предыдущее
 
     public function id(): int;
 }
@@ -38,12 +37,11 @@ final class Counter implements Shareable
 | Метод            | Возвращает | Применение                                                     |
 |------------------|-----------|-----------------------------------------------------------------|
 | `get`            | текущее   | Чтение без мутации.                                             |
-| `set`            | предыдущее | Безусловная замена; полезно для инициализации с seed-значением. |
+| `swap`           | предыдущее | Атомарная замена; `swap(0)` — паттерн snapshot-and-zero.       |
 | `inc` / `dec`    | новое     | Подсчёт событий; `$by` позволяет шагнуть на N одной атомарной операцией. |
 | `add`            | новое     | Любая дельта, положительная или отрицательная.                  |
 | `compareAndSet`  | swap?     | Оптимистичные конечные автоматы (idle → busy → done).           |
 | `addBatch`       | новое     | Массовая аккумуляция за один FFI round trip.                    |
-| `reset`          | предыдущее | Смена окна; `reset()` обнуляет, `reset(n)` задаёт seed.          |
 | `id`             | id реестра | Логи, трассировки, корреляция `/__ox_shared/entry?id=…`.        |
 
 ## Примеры
@@ -73,9 +71,9 @@ if (!$state->compareAndSet(expect: 0, new: 1)) {
 
 try {
     doWork();
-    $state->set(2);
+    $state->swap(2);
 } catch (Throwable $e) {
-    $state->set(0); // вернуть в idle при ошибке
+    $state->swap(0); // вернуть в idle при ошибке
     throw $e;
 }
 ```
@@ -87,7 +85,7 @@ try {
 $hits = new OxPHP\Shared\Counter();
 
 // Каждые N минут в вашем cron/worker loop:
-$prev = $hits->reset();                // атомарно читает-и-обнуляет
+$prev = $hits->swap(0);                // атомарно читает-и-обнуляет
 logWindowMetric($prev);
 ```
 
@@ -104,7 +102,7 @@ $newTotal = $bytes->addBatch($deltas);
 
 ## Семантика и подводные камни
 
-- **`set` возвращает предыдущее значение, а не новое.** Это соответствует семантике `std::atomic<T>::exchange` и согласовано с `reset`. Используйте `get()` после `set()`, если хотите получить то, что только что записали.
+- **`swap` возвращает предыдущее значение, а не новое.** Это соответствует `std::atomic<T>::exchange` и `AtomicI64::swap` в Rust. Используйте `get()` после `swap()`, если хотите получить то, что только что записали.
 - **`addBatch` не атомарен между элементами.** Под капотом это цикл `fetch_add` — итоговое значение корректно, но другие воркеры видят промежуточные итоги во время пакета. Используйте `Shared\Mutex`, оборачивающий Counter, если нужна видимость всего пакета.
 - **Переполнение оборачивается.** Добавление `INT_MAX + 1` возвращает к `INT_MIN`. Для монотонных счётчиков, которые могут работать месяцами с тысячами тиков в секунду, держите значение в диапазоне десятков триллионов или периодически сбрасывайте.
 - **Нет дробных значений.** Если вы считаете байты и вам нужны усреднения с точностью float, отслеживайте числитель (Counter) и знаменатель (Counter) отдельно и делите при чтении.

@@ -23,13 +23,12 @@ final class Counter implements Shareable
     public function __construct(int $initial = 0);
 
     public function get(): int;
-    public function set(int $value): int;             // returns previous
+    public function swap(int $value): int;            // returns previous
     public function inc(int $by = 1): int;            // returns new
     public function dec(int $by = 1): int;            // returns new
     public function add(int $delta): int;             // returns new
     public function compareAndSet(int $expect, int $new): bool;
     public function addBatch(array $deltas): int;     // returns new
-    public function reset(int $newValue = 0): int;    // returns previous
 
     public function id(): int;
 }
@@ -38,12 +37,11 @@ final class Counter implements Shareable
 | Method           | Returns   | Use case                                                        |
 |------------------|-----------|-----------------------------------------------------------------|
 | `get`            | current   | Read without mutation.                                          |
-| `set`            | previous  | Replace unconditionally; useful for initialisation with seed.   |
+| `swap`           | previous  | Atomic replace; `swap(0)` is the snapshot-and-zero pattern.     |
 | `inc` / `dec`    | new       | Per-event tallies; `$by` lets you skip by N in one atomic op.   |
 | `add`            | new       | Any delta, positive or negative.                                |
 | `compareAndSet`  | swapped?  | Optimistic state machines (idle → busy → done).                 |
 | `addBatch`       | new       | Bulk accumulation with one FFI round trip.                      |
-| `reset`          | previous  | End-of-window roll-over; `reset()` zeroes, `reset(n)` seeds.    |
 | `id`             | registry id | Logging, tracing, `/__ox_shared/entry?id=…` correlation.      |
 
 ## Examples
@@ -73,9 +71,9 @@ if (!$state->compareAndSet(expect: 0, new: 1)) {
 
 try {
     doWork();
-    $state->set(2);
+    $state->swap(2);
 } catch (Throwable $e) {
-    $state->set(0); // release back to idle on error
+    $state->swap(0); // release back to idle on error
     throw $e;
 }
 ```
@@ -87,7 +85,7 @@ try {
 $hits = new OxPHP\Shared\Counter();
 
 // Every N minutes in your cron/worker loop:
-$prev = $hits->reset();                // atomically reads-and-zeroes
+$prev = $hits->swap(0);                // atomically reads-and-zeroes
 logWindowMetric($prev);
 ```
 
@@ -104,7 +102,7 @@ $newTotal = $bytes->addBatch($deltas);
 
 ## Semantics & gotchas
 
-- **`set` returns the previous value, not the new one.** This matches `std::atomic<T>::exchange` semantics and is consistent with `reset`. Use `get()` after `set()` if you want what you just wrote.
+- **`swap` returns the previous value, not the new one.** This matches `std::atomic<T>::exchange` and Rust's `AtomicI64::swap`. Use `get()` after `swap()` if you want what you just wrote.
 - **`addBatch` is not atomic across items.** It is a loop of `fetch_add` under the hood — the final value is correct, but other workers see intermediate totals during the batch. Use `Shared\Mutex` wrapping a Counter if you need whole-batch visibility.
 - **Overflow wraps.** Adding `INT_MAX + 1` loops back to `INT_MIN`. For monotonic counters that may run for months at thousands-per-second, keep the value in tens-of-trillions range or reset periodically.
 - **No fractional values.** If you are counting bytes and need float-precision averages, track numerator (Counter) and denominator (Counter) separately and divide at read time.

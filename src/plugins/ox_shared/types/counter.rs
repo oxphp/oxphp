@@ -23,7 +23,7 @@ impl CounterInner {
         self.value.load(Ordering::SeqCst)
     }
 
-    pub fn set(&self, v: i64) -> i64 {
+    pub fn swap(&self, v: i64) -> i64 {
         self.value.swap(v, Ordering::SeqCst)
     }
 
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_get(id: u64, out: *mut i64) -> c_i
 /// # Safety
 /// `out_prev` must be valid for writes of `i64` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_set(
+pub unsafe extern "C" fn oxphp_shared_counter_swap(
     id: u64,
     new_val: i64,
     out_prev: *mut i64,
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_set(
         let reg = registry();
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
-        let prev = inner.set(new_val);
+        let prev = inner.swap(new_val);
         reg.record_op(id);
         unsafe { *out_prev = prev };
         Ok(())
@@ -272,14 +272,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(out);
             Ok(())
         })
-        .method("set")
+        .method("swap")
         .param("value", PhpType::Int)
         .returns(PhpType::Int)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let new_val = call.arg_long(0)?;
             let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_set(handle.shared_id, new_val, &mut prev) };
+            let rc = unsafe { oxphp_shared_counter_swap(handle.shared_id, new_val, &mut prev) };
             counter_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -367,22 +367,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(new_val);
             Ok(())
         })
-        .method("reset")
-        .optional_param("newValue", PhpType::Int, PhpValue::Int(0))
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let v = if call.argc() > 0 {
-                call.arg_long(0).unwrap_or(0)
-            } else {
-                0
-            };
-            let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_set(handle.shared_id, v, &mut prev) };
-            counter_rc_to_result(rc)?;
-            call.ret_long(prev);
-            Ok(())
-        })
         .method("id")
         .returns(PhpType::Int)
         .handler(|call| {
@@ -438,10 +422,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_set_add() {
+    fn get_swap_add() {
         let c = CounterInner::new(10);
         assert_eq!(c.get(), 10);
-        assert_eq!(c.set(20), 10);
+        assert_eq!(c.swap(20), 10);
         assert_eq!(c.get(), 20);
         assert_eq!(c.add(5), 25);
         assert_eq!(c.add(-10), 15);
