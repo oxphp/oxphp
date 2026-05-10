@@ -1306,6 +1306,18 @@ unsafe extern "C" fn oxphp_error_cb(
     // The original callback may trigger zend_bailout (longjmp) which would skip any
     // code placed after the delegation.
     if level == "error" {
+        // Zend's `zend_fcall_interrupt` checks `EG(timed_out)` BEFORE
+        // dispatching to `zend_interrupt_function`, so SIGALRM-driven
+        // `max_execution_time` reaches us as a plain `zend_error_noreturn`
+        // with the canonical "Maximum execution time of N second(s) exceeded"
+        // message — our oxphp_zend_interrupt_handler never sees it. Pattern-
+        // match the message here so the cancel-reason mapping in
+        // `set_fatal_error_status_if_default` can still surface 504 for the
+        // PHP-native timeout path. The message format is stable across
+        // PHP 8.4 / 8.5 (Zend/zend_execute_API.c::zend_timeout).
+        if msg.starts_with("Maximum execution time of") {
+            let _ = bindings::oxphp_bridge_set_cancel_reason(2 /* Timeout */);
+        }
         set_fatal_error_status_if_default();
 
         // On async worker threads, capture the error message for exception propagation.
@@ -1427,14 +1439,28 @@ pub fn clear_buffers() {
     REQUEST_ERRORS.with(|errors| errors.borrow_mut().clear());
 }
 
-/// Set HTTP 500 status if the current status is still the default 200.
-/// Used by error callback for fatal errors and by execute_request on bailout.
+/// Set the response status if the current status is still the default 200.
+///
+/// Called from the fatal-error callback and from `execute_request` on bailout.
+/// When a cancellation reason is recorded on the bridge, the status reflects
+/// the cause: ClientAbort → 499 (nginx-style, log-only — connection is gone),
+/// Timeout → 504, Shutdown → 503. Other reasons (None / Stuck / UserCancel)
+/// fall through to the generic 500. The `status == 200` guard preserves any
+/// status the userland set explicitly via `http_response_code()` before bailout.
 pub fn set_fatal_error_status_if_default() {
     RESPONSE.with(|r| {
         let mut resp = r.borrow_mut();
-        if resp.status_code == 200 {
-            resp.status_code = 500;
+        if resp.status_code != 200 {
+            return;
         }
+        let reason = unsafe { bindings::oxphp_bridge_get_cancel_reason() };
+        resp.status_code = match reason {
+            1 => 499, // CancelReason::ClientAbort
+            2 => 504, // CancelReason::Timeout
+            3 => 503, // CancelReason::Shutdown
+            // 0 None, 4 Stuck, 5 UserCancel — generic server error.
+            _ => 500,
+        };
     });
 }
 
@@ -4103,8 +4129,17 @@ mod tests {
         assert_eq!(error_type_str(0x1000002), ("warn", "E_WARNING"));
     }
 
+    // Serializes tests that mutate the global mock cancel-reason pointer so
+    // they don't observe each other's setup. Tests that don't touch the
+    // pointer (and rely on the default null/None reading) also acquire it
+    // because a concurrent set-then-clear from another test would leak a
+    // non-zero reason into their window.
+    static FATAL_STATUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn fatal_error_status_sets_500_from_default() {
+        let _g = FATAL_STATUS_LOCK.lock().unwrap();
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
         RESPONSE.with(|r| r.borrow_mut().status_code = 200);
         set_fatal_error_status_if_default();
         RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 500));
@@ -4112,6 +4147,8 @@ mod tests {
 
     #[test]
     fn fatal_error_status_idempotent() {
+        let _g = FATAL_STATUS_LOCK.lock().unwrap();
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
         RESPONSE.with(|r| r.borrow_mut().status_code = 200);
         set_fatal_error_status_if_default();
         set_fatal_error_status_if_default();
@@ -4120,9 +4157,41 @@ mod tests {
 
     #[test]
     fn fatal_error_status_preserves_non_200() {
+        let _g = FATAL_STATUS_LOCK.lock().unwrap();
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
         RESPONSE.with(|r| r.borrow_mut().status_code = 404);
         set_fatal_error_status_if_default();
         RESPONSE.with(|r| assert_eq!(r.borrow().status_code, 404));
+    }
+
+    #[test]
+    fn fatal_error_status_maps_cancel_reason() {
+        let _g = FATAL_STATUS_LOCK.lock().unwrap();
+        let cell = std::sync::atomic::AtomicU8::new(0);
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(&cell as *const _) };
+
+        // (reason, expected_status). 0 None / 4 Stuck / 5 UserCancel → 500.
+        for (reason, expected) in [
+            (0u8, 500u16),
+            (1, 499),
+            (2, 504),
+            (3, 503),
+            (4, 500),
+            (5, 500),
+        ] {
+            cell.store(reason, std::sync::atomic::Ordering::Relaxed);
+            RESPONSE.with(|r| r.borrow_mut().status_code = 200);
+            set_fatal_error_status_if_default();
+            RESPONSE.with(|r| {
+                assert_eq!(
+                    r.borrow().status_code,
+                    expected,
+                    "cancel reason {reason} should map to {expected}"
+                )
+            });
+        }
+
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
     }
 
     #[test]

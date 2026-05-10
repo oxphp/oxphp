@@ -529,6 +529,21 @@ async fn dispatch_request(
                 .metrics
                 .observe_cancelled(script_response.cancel_reason);
 
+            // Graceful-drain replies (Shutdown → 503) advertise a short
+            // retry window so clients can hit a recovered/replacement
+            // instance. Userland-set Retry-After wins.
+            if script_response.cancel_reason == CancelReason::Shutdown as u8
+                && script_response.status == 503
+                && !script_response
+                    .headers
+                    .iter()
+                    .any(|(n, _)| n == header::RETRY_AFTER)
+            {
+                script_response
+                    .headers
+                    .push((header::RETRY_AFTER, http::HeaderValue::from_static("5")));
+            }
+
             // Move PHP errors and profile tree into typed exec data.
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),

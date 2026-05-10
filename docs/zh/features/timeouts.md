@@ -36,7 +36,21 @@ PHP 执行计时完全委托给 PHP。当 `max_execution_time` 超时时，OxPHP
 
 - 设置 `connection_status() & PHP_CONNECTION_TIMEOUT`，使用户代码可以检测原因。
 - 运行所有 `register_shutdown_function()` 回调，与 PHP-FPM 完全一致。
-- 返回 HTTP `500`（PHP 致命错误），错误日志中写入消息 `Request cancelled (timeout)`。
+- 返回 HTTP `504 Gateway Timeout`，错误日志中写入消息 `Request cancelled (timeout)`。
+
+### 取消请求时的状态码
+
+OxPHP 因多种不同原因取消请求。每种原因都映射为反映实际情况的 HTTP 状态，而不是统一的 `500`：
+
+| 原因 | 状态码 | 说明 |
+|------|--------|------|
+| 超出 `max_execution_time` / `set_time_limit()` | `504 Gateway Timeout` | 服务端执行时间耗尽。 |
+| 服务器优雅关停时中断了请求 | `503 Service Unavailable` | 附加 `Retry-After: 5` 响应头，提示客户端在已恢复或新启动的实例上重试。 |
+| 客户端在请求处理过程中关闭连接 | `499` | nginx 风格的 "Client Closed Request"。连接已断开，因此该状态仅出现在访问日志和指标中——永远不会写入响应。把客户端引发的中断从 `5xx` 中区分出来，避免污染服务器错误告警。 |
+| Worker 被监督进程判定为卡死 | `500 Internal Server Error` | 通用服务端错误——具体原因（死锁、阻塞 syscall 等）未知。 |
+| 用户代码主动触发的取消 | `500 Internal Server Error` | 用户代码可在触发取消之前通过 `http_response_code()` 设置自己的状态码——该显式状态会被保留。 |
+
+如果 `ERROR_PAGES_DIR` 中只放了 `500.html`，请额外添加 `504.html`、`503.html` 以及（可选的）`499.html`，让所有取消原因下的错误页保持一致的样式。
 
 ## 配置
 
@@ -71,7 +85,7 @@ set_time_limit(0);   // 为本请求禁用
 
 ## 故障排除
 
-### 客户端意外收到 500 并附带 `Request cancelled (timeout)`
+### 客户端意外收到 504 并附带 `Request cancelled (timeout)`
 
 PHP 执行时间限制在脚本完成前触发。
 
