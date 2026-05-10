@@ -431,8 +431,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let order = read_order_arg(call, 1)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
-            let rc =
-                unsafe { oxphp_shared_atomic_swap(handle.shared_id, value, order, &mut prev) };
+            let rc = unsafe { oxphp_shared_atomic_swap(handle.shared_id, value, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -474,9 +473,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let order = read_order_arg(call, 1)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
-            let rc = unsafe {
-                oxphp_shared_atomic_fetch_add(handle.shared_id, delta, order, &mut prev)
-            };
+            let rc =
+                unsafe { oxphp_shared_atomic_fetch_add(handle.shared_id, delta, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -490,9 +488,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let order = read_order_arg(call, 1)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
-            let rc = unsafe {
-                oxphp_shared_atomic_fetch_sub(handle.shared_id, delta, order, &mut prev)
-            };
+            let rc =
+                unsafe { oxphp_shared_atomic_fetch_sub(handle.shared_id, delta, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -670,7 +667,9 @@ mod tests {
         assert!(id > 0);
 
         let mut out: i64 = 0;
-        let rc = unsafe { oxphp_shared_atomic_load(id, 4 /* SeqCst */, &mut out) };
+        let rc = unsafe {
+            oxphp_shared_atomic_load(id, 4 /* SeqCst */, &mut out)
+        };
         assert_eq!(rc, 0);
         assert_eq!(out, 100);
 
