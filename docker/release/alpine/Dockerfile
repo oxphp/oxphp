@@ -161,9 +161,23 @@ RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 # replace this with their own webroot via bind-mount or a downstream FROM.
 COPY --chown=www-data:www-data www/public/welcome.php /var/www/html/public/index.php
 
+# Bundle license texts so the image is self-documenting and satisfies the
+# attribution requirements of bundled crates (MIT, Apache-2.0, BSD, etc.).
+# THIRD_PARTY_LICENSES.html is generated from Cargo.lock by cargo-about; CI
+# enforces that it stays in sync.
+COPY LICENSE THIRD_PARTY_LICENSES.html /usr/share/licenses/oxphp/
+
 # LD_LIBRARY_PATH is set above before the build-time extension load assert
 # so `php -m` finds liboxphp_bridge.so during that check; persist it for
 # runtime too so `oxphp` and any downstream `php` invocations resolve it.
+
+# OCI image annotations. `image.licenses` declares the image-as-distribution
+# license (AGPL-3.0). `image.source` points consumers at the source tree
+# (also satisfies AGPL §6's offer-of-source for the binary-only image).
+LABEL org.opencontainers.image.title="OxPHP" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/oxphp/oxphp" \
+      org.opencontainers.image.documentation="https://github.com/oxphp/oxphp#readme"
 
 EXPOSE 80 443
 

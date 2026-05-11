@@ -74,3 +74,88 @@ jobs:
           key: test-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: test-${{ steps.rust.outputs.hash }}-
       - run: cargo test --no-default-features
+
+  # Always runs so the required status check is always reported, but the
+  # expensive steps are gated on changes to license-relevant files. PRs that
+  # don't touch them finish in seconds with a no-op message.
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect license-relevant changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            cargo:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - 'about.toml'
+              - 'about.hbs'
+              - 'THIRD_PARTY_LICENSES.html'
+              - '.github/workflows/pr.yml'
+
+      - name: No license-relevant changes — skipping
+        if: steps.filter.outputs.cargo != 'true'
+        run: echo "No changes to Cargo.toml/Cargo.lock/deny.toml/about.{toml,hbs}/THIRD_PARTY_LICENSES.html/pr.yml — skipping cargo-deny + cargo-about."
+
+      - name: cargo-deny (licenses, advisories, sources)
+        if: steps.filter.outputs.cargo == 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories sources
+
+      - name: Rust version (for cache key)
+        if: steps.filter.outputs.cargo == 'true'
+        id: rust
+        run: echo "hash=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo-about install
+        if: steps.filter.outputs.cargo == 'true'
+        id: cache-about
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-0.6-${{ steps.rust.outputs.hash }}
+
+      - name: Install cargo-about
+        if: steps.filter.outputs.cargo == 'true' && steps.cache-about.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-about --version '^0.6'
+
+      # Registry cache so `cargo fetch` is a no-op on cache hit. Keyed by
+      # Cargo.lock — same convention as the clippy/test jobs.
+      - if: steps.filter.outputs.cargo == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: licenses-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: licenses-${{ steps.rust.outputs.hash }}-
+
+      # Populate the registry so `cargo about generate --offline` (which runs
+      # `cargo metadata --offline` internally) can resolve the dep graph.
+      - name: Prefetch dependencies
+        if: steps.filter.outputs.cargo == 'true'
+        run: cargo fetch --locked
+
+      - name: Regenerate THIRD_PARTY_LICENSES.html
+        if: steps.filter.outputs.cargo == 'true'
+        # --offline makes generation deterministic by skipping clearlydefined.io
+        # fetches; otherwise harvest-cache state can shift which crate's copy
+        # of a shared license text becomes first_of_kind between runs.
+        run: cargo about generate --offline about.hbs -o /tmp/notices.html
+
+      - name: Verify committed THIRD_PARTY_LICENSES.html is fresh
+        if: steps.filter.outputs.cargo == 'true'
+        run: |
+          if ! diff -q /tmp/notices.html THIRD_PARTY_LICENSES.html >/dev/null; then
+            echo "::error::THIRD_PARTY_LICENSES.html is stale. Regenerate locally:"
+            echo "::error::  cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html"
+            echo "::error::then commit the result alongside your Cargo.toml/Cargo.lock change."
+            diff -u THIRD_PARTY_LICENSES.html /tmp/notices.html | head -200 || true
+            exit 1
+          fi
