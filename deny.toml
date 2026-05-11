@@ -1,0 +1,50 @@
+# cargo-deny config. Run locally: cargo deny check licenses advisories sources
+# CI runs the same in .github/workflows/pr.yml (job: licenses).
+
+[graph]
+# Only enforce on targets the release image actually ships on.
+targets = [
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "aarch64-unknown-linux-musl" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+# AGPL-3.0 is OxPHP's own license; not in [allow] because an AGPL crate as a
+# *dependency* would impose additional obligations on consumers. The workspace
+# crate itself gets an explicit exception below.
+[[licenses.exceptions]]
+name = "oxphp"
+allow = ["AGPL-3.0-only"]
+
+[advisories]
+version = 2
+yanked = "warn"
+# RustSec advisory DB is the default source.
+ignore = [
+    # rustls-pemfile is archived; upstream recommends migrating to
+    # rustls-pki-types::pem::PemObject. Not a vulnerability, just unmaintained.
+    # Tracked as separate work — see follow-up issue (TODO: file).
+    "RUSTSEC-2025-0134",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# Intentionally permissive — license compliance is the focus, not version dedup.
+multiple-versions = "allow"
