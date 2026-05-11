@@ -102,7 +102,10 @@ jobs:
         run: cargo install --locked cargo-about --version '^0.6'
 
       - name: Regenerate THIRD_PARTY_LICENSES.html
-        run: cargo about generate about.hbs -o /tmp/notices.html
+        # --offline makes generation deterministic by skipping clearlydefined.io
+        # fetches; otherwise harvest-cache state can shift which crate's copy
+        # of a shared license text becomes first_of_kind between runs.
+        run: cargo about generate --offline about.hbs -o /tmp/notices.html
 
       - name: Verify committed THIRD_PARTY_LICENSES.html is fresh
         run: |
