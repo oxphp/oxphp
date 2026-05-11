@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OxPHP Third-Party Licenses</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.4; }
+  h1 { border-bottom: 1px solid #ccc; padding-bottom: .3rem; }
+  h2 { margin-top: 2rem; color: #333; }
+  h3 { margin-top: 1.5rem; color: #555; }
+  ul.crates { columns: 2; font-size: .9rem; padding-left: 1.2rem; }
+  ul.crates li { break-inside: avoid; }
+  pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-size: .85rem; }
+  .spdx { color: #666; font-family: ui-monospace, monospace; font-size: .85rem; }
+</style>
+</head>
+<body>
+<h1>OxPHP &mdash; Third-Party Licenses</h1>
+<p>This document lists the licenses of all Rust crates linked into the OxPHP binary. OxPHP itself is licensed under AGPL-3.0; see the accompanying <code>LICENSE</code> file.</p>
+
+<h2>Crates</h2>
+<ul class="crates">
+{{#each crates}}
+  <li><code>{{package.name}} {{package.version}}</code> <span class="spdx">&mdash; {{package.license}}</span></li>
+{{/each}}
+</ul>
+
+<h2>License Texts</h2>
+{{#each licenses}}
+{{#if first_of_kind}}
+<h3>{{name}} <span class="spdx">({{id}})</span></h3>
+<pre>{{text}}</pre>
+{{/if}}
+{{/each}}
+
+</body>
+</html>
