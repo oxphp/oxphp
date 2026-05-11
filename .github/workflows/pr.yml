@@ -101,6 +101,21 @@ jobs:
         if: steps.cache-about.outputs.cache-hit != 'true'
         run: cargo install --locked cargo-about --version '^0.6'
 
+      # Registry cache so `cargo fetch` is a no-op on cache hit. Keyed by
+      # Cargo.lock — same convention as the clippy/test jobs.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: licenses-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: licenses-${{ steps.rust.outputs.hash }}-
+
+      # Populate the registry so `cargo about generate --offline` (which runs
+      # `cargo metadata --offline` internally) can resolve the dep graph.
+      - name: Prefetch dependencies
+        run: cargo fetch --locked
+
       - name: Regenerate THIRD_PARTY_LICENSES.html
         # --offline makes generation deterministic by skipping clearlydefined.io
         # fetches; otherwise harvest-cache state can shift which crate's copy
