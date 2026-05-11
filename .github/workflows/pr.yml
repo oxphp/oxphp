@@ -74,3 +74,42 @@ jobs:
           key: test-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: test-${{ steps.rust.outputs.hash }}-
       - run: cargo test --no-default-features
+
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo-deny (licenses, advisories, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories sources
+
+      - name: Rust version (for cache key)
+        id: rust
+        run: echo "hash=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo-about install
+        id: cache-about
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-0.6-${{ steps.rust.outputs.hash }}
+
+      - name: Install cargo-about
+        if: steps.cache-about.outputs.cache-hit != 'true'
+        run: cargo install --locked cargo-about --version '^0.6'
+
+      - name: Regenerate THIRD_PARTY_LICENSES.html
+        run: cargo about generate about.hbs -o /tmp/notices.html
+
+      - name: Verify committed THIRD_PARTY_LICENSES.html is fresh
+        run: |
+          if ! diff -q /tmp/notices.html THIRD_PARTY_LICENSES.html >/dev/null; then
+            echo "::error::THIRD_PARTY_LICENSES.html is stale. Regenerate locally:"
+            echo "::error::  cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html"
+            echo "::error::then commit the result alongside your Cargo.toml/Cargo.lock change."
+            diff -u THIRD_PARTY_LICENSES.html /tmp/notices.html | head -200 || true
+            exit 1
+          fi
