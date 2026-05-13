@@ -385,6 +385,24 @@ pub extern "C" fn oxphp_shared_total_bytes() -> u64 {
 }
 
 #[cfg(test)]
+impl SharedRegistry {
+    /// Build a standalone registry that is **not** registered with the
+    /// global `OnceLock`. Use this in unit tests that need to exercise
+    /// behaviour parametrised on `SharedConfig` — the global registry
+    /// can only be initialised once per process.
+    pub(crate) fn new_for_test(config: SharedConfig) -> Self {
+        SharedRegistry {
+            entries: DashMap::with_capacity(16),
+            next_id: AtomicI64::new(1),
+            total_bytes: AtomicU64::new(0),
+            total_entries: AtomicU64::new(0),
+            config,
+            shutting_down: AtomicBool::new(false),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugins::ox_shared::value::SharedValue;
