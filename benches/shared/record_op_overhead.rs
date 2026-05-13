@@ -11,10 +11,10 @@
 //! Each variant is measured single-thread (criterion bench_function)
 //! and multi-thread at N=4, N=8 (iter_custom + Barrier).
 
+use criterion::BenchmarkId;
 use criterion::Criterion;
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::init_registry;
-use criterion::BenchmarkId;
 use oxphp::plugins::ox_shared::registry::registry;
 use oxphp::plugins::ox_shared::types::atomic::{
     oxphp_shared_atomic_create, oxphp_shared_atomic_load, AtomicInner, SharedInnerAtomicExt,
@@ -25,10 +25,10 @@ use oxphp::plugins::ox_shared::types::counter::{
 use oxphp::plugins::ox_shared::types::flag::{
     oxphp_shared_flag_create, oxphp_shared_flag_test, FlagInner, SharedInnerFlagExt,
 };
-use std::sync::atomic::AtomicBool;
 use oxphp::plugins::ox_shared::types::once::{
     oxphp_shared_once_create, oxphp_shared_once_is_initialized, OnceInner, SharedInnerOnceExt,
 };
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Copy, Clone)]
@@ -213,8 +213,7 @@ fn bench_atomic_multi(c: &mut Criterion, ids: EntryIds) {
                 run_threads(n, iters, || {
                     let reg = registry();
                     let entry = reg.lookup(id).expect("entry exists");
-                    let inner: &AtomicInner =
-                        entry.inner.as_any_atomic().expect("type matches");
+                    let inner: &AtomicInner = entry.inner.as_any_atomic().expect("type matches");
                     let v = inner.load(Ordering::Relaxed);
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
@@ -228,8 +227,7 @@ fn bench_atomic_multi(c: &mut Criterion, ids: EntryIds) {
                 run_threads(n, iters, || {
                     let reg = registry();
                     let entry = reg.lookup(id).expect("entry exists");
-                    let inner: &AtomicInner =
-                        entry.inner.as_any_atomic().expect("type matches");
+                    let inner: &AtomicInner = entry.inner.as_any_atomic().expect("type matches");
                     let v = inner.load(Ordering::Relaxed);
                     criterion::black_box(v);
                 })
@@ -314,8 +312,7 @@ fn bench_counter(c: &mut Criterion, ids: EntryIds) {
                 run_threads(n, iters, || {
                     let reg = registry();
                     let entry = reg.lookup(id).expect("entry exists");
-                    let inner: &CounterInner =
-                        entry.inner.as_any_counter().expect("type matches");
+                    let inner: &CounterInner = entry.inner.as_any_counter().expect("type matches");
                     let v = inner.add(1);
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
@@ -327,8 +324,7 @@ fn bench_counter(c: &mut Criterion, ids: EntryIds) {
                 run_threads(n, iters, || {
                     let reg = registry();
                     let entry = reg.lookup(id).expect("entry exists");
-                    let inner: &CounterInner =
-                        entry.inner.as_any_counter().expect("type matches");
+                    let inner: &CounterInner = entry.inner.as_any_counter().expect("type matches");
                     let v = inner.add(1);
                     criterion::black_box(v);
                 })
