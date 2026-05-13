@@ -525,4 +525,47 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn record_op_respects_metrics_enabled_flag() {
+        use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
+        use crate::plugins::ox_shared::types::atomic::AtomicInner;
+        use std::sync::atomic::Ordering;
+
+        let make_config = |metrics_enabled: bool| SharedConfig {
+            enabled: true,
+            max_entries: 100,
+            max_bytes: 1024,
+            soft_limit_ratio: 0.7,
+            metrics_enabled,
+            introspection_enabled: true,
+            introspection_preview_enabled: true,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            shutdown_timeout_seconds: 5.0,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        };
+
+        // metrics_enabled = false ⇒ ops stays at 0.
+        let reg = SharedRegistry::new_for_test(make_config(false));
+        let id = reg
+            .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
+            .expect("insert succeeds");
+        let entry = reg.lookup(id).expect("entry exists");
+        reg.record_op(&entry);
+        assert_eq!(entry.ops.load(Ordering::Relaxed), 0);
+
+        // metrics_enabled = true ⇒ ops increments.
+        let reg = SharedRegistry::new_for_test(make_config(true));
+        let id = reg
+            .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
+            .expect("insert succeeds");
+        let entry = reg.lookup(id).expect("entry exists");
+        reg.record_op(&entry);
+        assert_eq!(entry.ops.load(Ordering::Relaxed), 1);
+    }
 }
