@@ -14,6 +14,42 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::init_registry;
+use oxphp::plugins::ox_shared::types::atomic::oxphp_shared_atomic_create;
+use oxphp::plugins::ox_shared::types::counter::oxphp_shared_counter_create;
+use oxphp::plugins::ox_shared::types::flag::oxphp_shared_flag_create;
+use oxphp::plugins::ox_shared::types::once::oxphp_shared_once_create;
+
+#[derive(Copy, Clone)]
+#[allow(dead_code)] // fields consumed by per-type bench fns added in later tasks
+struct EntryIds {
+    atomic: u64,
+    counter: u64,
+    flag: u64,
+    once: u64,
+}
+
+fn setup_entries() -> EntryIds {
+    let mut atomic = 0u64;
+    let mut counter = 0u64;
+    let mut flag = 0u64;
+    let mut once = 0u64;
+
+    let rc = unsafe { oxphp_shared_atomic_create(0, &mut atomic) };
+    assert_eq!(rc, 0, "atomic_create failed");
+    let rc = unsafe { oxphp_shared_counter_create(0, &mut counter) };
+    assert_eq!(rc, 0, "counter_create failed");
+    let rc = unsafe { oxphp_shared_flag_create(0, &mut flag) };
+    assert_eq!(rc, 0, "flag_create failed");
+    let rc = unsafe { oxphp_shared_once_create(&mut once) };
+    assert_eq!(rc, 0, "once_create failed");
+
+    EntryIds {
+        atomic,
+        counter,
+        flag,
+        once,
+    }
+}
 
 fn ensure_registry() {
     // metrics_enabled is set to false here even though it does not
@@ -41,8 +77,9 @@ fn ensure_registry() {
 
 fn bench_record_op_overhead(c: &mut Criterion) {
     ensure_registry();
-    // Per-type groups are filled in by later tasks.
-    let _ = c;
+    let ids = setup_entries();
+    // Per-type bench fns called here in later tasks.
+    let _ = (c, ids);
 }
 
 criterion_group!(benches, bench_record_op_overhead);
