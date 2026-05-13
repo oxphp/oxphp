@@ -14,10 +14,15 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::init_registry;
-use oxphp::plugins::ox_shared::types::atomic::oxphp_shared_atomic_create;
+use criterion::BenchmarkId;
+use oxphp::plugins::ox_shared::registry::registry;
+use oxphp::plugins::ox_shared::types::atomic::{
+    oxphp_shared_atomic_create, oxphp_shared_atomic_load, AtomicInner, SharedInnerAtomicExt,
+};
 use oxphp::plugins::ox_shared::types::counter::oxphp_shared_counter_create;
 use oxphp::plugins::ox_shared::types::flag::oxphp_shared_flag_create;
 use oxphp::plugins::ox_shared::types::once::oxphp_shared_once_create;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Copy, Clone)]
 #[allow(dead_code)] // fields consumed by per-type bench fns added in later tasks
@@ -115,11 +120,62 @@ where
     })
 }
 
+// `0u8` is the wire encoding of `Ordering::Relaxed` accepted by
+// oxphp_shared_atomic_load (see `ordering_from_u8` in atomic.rs).
+const ORDER_RELAXED: u8 = 0;
+
+fn bench_atomic_single(c: &mut Criterion, ids: EntryIds) {
+    let mut group = c.benchmark_group("atomic_load");
+    let id = ids.atomic;
+    let reg = registry();
+
+    // V0 bare — a thread-local AtomicI64 with no registry involvement.
+    let bare = AtomicI64::new(0);
+    group.bench_function(BenchmarkId::new("bare", 1), |b| {
+        b.iter(|| {
+            criterion::black_box(bare.load(Ordering::Relaxed));
+        });
+    });
+
+    // V1 current — the actual public FFI entrypoint.
+    group.bench_function(BenchmarkId::new("current", 1), |b| {
+        b.iter(|| {
+            let mut out: i64 = 0;
+            let rc = unsafe { oxphp_shared_atomic_load(id, ORDER_RELAXED, &mut out) };
+            debug_assert_eq!(rc, 0);
+            criterion::black_box(out);
+        });
+    });
+
+    // V2 one_lookup — single registry.lookup, manual record_op via
+    // the already-resolved Arc<Entry>.
+    group.bench_function(BenchmarkId::new("one_lookup", 1), |b| {
+        b.iter(|| {
+            let entry = reg.lookup(id).expect("entry exists");
+            let inner: &AtomicInner = entry.inner.as_any_atomic().expect("type matches");
+            let v = inner.load(Ordering::Relaxed);
+            entry.ops.fetch_add(1, Ordering::Relaxed);
+            criterion::black_box(v);
+        });
+    });
+
+    // V3 no_record_op — V2 minus the ops.fetch_add.
+    group.bench_function(BenchmarkId::new("no_record_op", 1), |b| {
+        b.iter(|| {
+            let entry = reg.lookup(id).expect("entry exists");
+            let inner: &AtomicInner = entry.inner.as_any_atomic().expect("type matches");
+            let v = inner.load(Ordering::Relaxed);
+            criterion::black_box(v);
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_record_op_overhead(c: &mut Criterion) {
     ensure_registry();
     let ids = setup_entries();
-    // Per-type bench fns called here in later tasks.
-    let _ = (c, ids);
+    bench_atomic_single(c, ids);
 }
 
 criterion_group!(benches, bench_record_op_overhead);
