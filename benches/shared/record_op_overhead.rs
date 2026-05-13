@@ -26,7 +26,9 @@ use oxphp::plugins::ox_shared::types::flag::{
     oxphp_shared_flag_create, oxphp_shared_flag_test, FlagInner, SharedInnerFlagExt,
 };
 use std::sync::atomic::AtomicBool;
-use oxphp::plugins::ox_shared::types::once::oxphp_shared_once_create;
+use oxphp::plugins::ox_shared::types::once::{
+    oxphp_shared_once_create, oxphp_shared_once_is_initialized, OnceInner, SharedInnerOnceExt,
+};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 #[derive(Copy, Clone)]
@@ -430,6 +432,99 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
     group.finish();
 }
 
+fn bench_once(c: &mut Criterion, ids: EntryIds) {
+    let mut group = c.benchmark_group("once_is_initialized");
+    let id = ids.once;
+
+    let bare_single = AtomicBool::new(false);
+    group.bench_function(BenchmarkId::new("bare", 1), |b| {
+        b.iter(|| {
+            criterion::black_box(bare_single.load(Ordering::SeqCst));
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("current", 1), |b| {
+        b.iter(|| {
+            let mut out: std::os::raw::c_int = 0;
+            let rc = unsafe { oxphp_shared_once_is_initialized(id, &mut out) };
+            debug_assert_eq!(rc, 0);
+            criterion::black_box(out);
+        });
+    });
+
+    {
+        let reg = registry();
+        group.bench_function(BenchmarkId::new("one_lookup", 1), |b| {
+            b.iter(|| {
+                let entry = reg.lookup(id).expect("entry exists");
+                let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+                let v = inner.is_initialized();
+                entry.ops.fetch_add(1, Ordering::Relaxed);
+                criterion::black_box(v);
+            });
+        });
+    }
+
+    {
+        let reg = registry();
+        group.bench_function(BenchmarkId::new("no_record_op", 1), |b| {
+            b.iter(|| {
+                let entry = reg.lookup(id).expect("entry exists");
+                let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+                let v = inner.is_initialized();
+                criterion::black_box(v);
+            });
+        });
+    }
+
+    for &n in &[4usize, 8usize] {
+        let bare_multi = Arc::new(AtomicBool::new(false));
+        group.bench_function(BenchmarkId::new("bare", n), |b| {
+            b.iter_custom(|iters| {
+                let bare = Arc::clone(&bare_multi);
+                run_threads(n, iters, move || {
+                    criterion::black_box(bare.load(Ordering::SeqCst));
+                })
+            });
+        });
+        group.bench_function(BenchmarkId::new("current", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let mut out: std::os::raw::c_int = 0;
+                    let rc = unsafe { oxphp_shared_once_is_initialized(id, &mut out) };
+                    debug_assert_eq!(rc, 0);
+                    criterion::black_box(out);
+                })
+            });
+        });
+        group.bench_function(BenchmarkId::new("one_lookup", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let reg = registry();
+                    let entry = reg.lookup(id).expect("entry exists");
+                    let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+                    let v = inner.is_initialized();
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
+                    criterion::black_box(v);
+                })
+            });
+        });
+        group.bench_function(BenchmarkId::new("no_record_op", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let reg = registry();
+                    let entry = reg.lookup(id).expect("entry exists");
+                    let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+                    let v = inner.is_initialized();
+                    criterion::black_box(v);
+                })
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_record_op_overhead(c: &mut Criterion) {
     ensure_registry();
     let ids = setup_entries();
@@ -437,6 +532,7 @@ fn bench_record_op_overhead(c: &mut Criterion) {
     bench_atomic_multi(c, ids);
     bench_counter(c, ids);
     bench_flag(c, ids);
+    bench_once(c, ids);
 }
 
 criterion_group!(benches, bench_record_op_overhead);
