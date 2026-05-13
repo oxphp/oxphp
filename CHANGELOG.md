@@ -148,10 +148,11 @@ $sapi = php_sapi_name();              // "cli-server"
   - `Dockerfile.alpine-release` → `docker/release/alpine/Dockerfile` (used by CI to publish `ghcr.io/oxphp/oxphp`). The `alpine/` subdirectory leaves room for future `docker/release/debian/`, `docker/release/distroless/` variants.
   - `Dockerfile.best.example` → `examples/dockerfile/Dockerfile` (copy-and-adapt template for downstream users; also adds a sibling `README.md`).
   No `Dockerfile*` remains in the repo root, so a stray `docker build .` no longer accidentally kicks off the dev build. Update any tooling that referenced the old paths.
+- `ox_shared.metrics_enabled` is now an actual runtime opt-out for per-entry operation counters on `Shared\*` primitives. Previously the flag was inert on the `record_op` path — per-entry counters incremented regardless of the setting, and only the registry's coarse aggregate metrics responded to it. Now, when `metrics_enabled = false`, `Entry::ops` stays at `0` and introspection snapshots (`OxPHP\Shared\introspect()`, `oxphp_shared_*` debug exports) report `0` for per-entry op counts. Operators who were reading per-entry `ops` values while running with `metrics_enabled = false` will see `0` instead of the previously-incrementing approximate count; switch the flag back to `true` (the default) to restore the prior behaviour.
 
 ### Performance
 
-- Reduced per-call overhead of `Shared\*` primitive operations: one DashMap lookup per call instead of two. The `ox_shared.metrics_enabled` config setting now functions as a runtime opt-out for per-entry operation counters; when `false`, `Entry::ops` stays at 0 and observability snapshots reflect that.
+- Reduced per-call overhead of `Shared\*` primitive operations: one DashMap lookup per call instead of two. The optimisation is unconditional and applies whether `ox_shared.metrics_enabled` is on or off.
 
 ### Fixed
 
