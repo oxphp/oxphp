@@ -244,11 +244,34 @@ impl SharedRegistry {
     }
 
     /// Retain: atomically increment the entry's ext_refcount. Returns
-    /// the new count, or -1 if the entry does not exist.
+    /// the new count, or -1 if the entry does not exist or its
+    /// refcount already reached zero (a concurrent `release` has
+    /// committed to eviction).
+    ///
+    /// Plain `fetch_add` is unsafe here: between a concurrent
+    /// `release`'s `fetch_sub` returning 1 and its `entries.remove`,
+    /// the entry is still in the map but already destined to die.
+    /// A naive retain in that window would resurrect it (bump 0 → 1)
+    /// and leave a phantom external reference no future release can
+    /// drain. CAS-loop refuses to bump from zero.
     pub fn retain(&self, id: SharedId) -> i32 {
-        match self.entries.get(&id) {
-            Some(e) => (e.ext_refcount.fetch_add(1, Ordering::AcqRel) + 1) as i32,
-            None => -1,
+        let Some(e) = self.entries.get(&id) else {
+            return -1;
+        };
+        let mut cur = e.ext_refcount.load(Ordering::Acquire);
+        loop {
+            if cur == 0 {
+                return -1;
+            }
+            match e.ext_refcount.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return (cur + 1) as i32,
+                Err(actual) => cur = actual,
+            }
         }
     }
 
@@ -573,5 +596,88 @@ mod tests {
         let entry = reg.lookup(id).expect("entry exists");
         reg.record_op(&entry);
         assert_eq!(entry.ops.load(Ordering::Relaxed), 1);
+    }
+
+    /// Pins the invariant that `retain` MUST NOT raise `ext_refcount`
+    /// from 0 to 1. Hitting 0 means a concurrent `release` already
+    /// committed to eviction; a successful retain there would
+    /// resurrect an entry that the registry is about to drop and
+    /// leave a phantom external reference no future `release` can
+    /// balance (entries.get later returns None).
+    ///
+    /// The race is timing-dependent, so this is a stress test:
+    /// thousands of insert/release-vs-retain races, asserting zero
+    /// resurrections at the end.
+    #[test]
+    fn retain_does_not_resurrect_after_release_to_zero() {
+        use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
+        use std::sync::atomic::AtomicU64 as StdAtomicU64;
+        use std::sync::Arc as StdArc;
+        use std::sync::Barrier;
+
+        // Standalone registry with generous caps so 5k iterations
+        // don't trip the default 100-entry limit when retain wins
+        // the race (entry leaks until both threads drain).
+        let reg = StdArc::new(SharedRegistry::new_for_test(SharedConfig {
+            enabled: true,
+            max_entries: 1_000_000,
+            max_bytes: 1 << 30,
+            soft_limit_ratio: 0.7,
+            metrics_enabled: false,
+            introspection_enabled: false,
+            introspection_preview_enabled: false,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            shutdown_timeout_seconds: 5.0,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        }));
+        let resurrections = StdArc::new(StdAtomicU64::new(0));
+        let iters = 5_000;
+
+        for _ in 0..iters {
+            let id = reg
+                .insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
+                .unwrap();
+
+            let barrier = StdArc::new(Barrier::new(2));
+            let reg_r = StdArc::clone(&reg);
+            let reg_a = StdArc::clone(&reg);
+            let b1 = StdArc::clone(&barrier);
+            let b2 = StdArc::clone(&barrier);
+            let resurrections_t = StdArc::clone(&resurrections);
+
+            let t_release = std::thread::spawn(move || {
+                b1.wait();
+                reg_r.release(id);
+            });
+            let t_retain = std::thread::spawn(move || {
+                b2.wait();
+                let rc = reg_a.retain(id);
+                // rc == 1 means retain just bumped ext_refcount from 0 to 1
+                // — i.e. resurrected an entry release() was committing to
+                // evict.
+                if rc == 1 {
+                    resurrections_t.fetch_add(1, Ordering::Relaxed);
+                }
+                // Balance a successful retain so total_entries drains
+                // and the next iteration doesn't fight capacity caps.
+                if rc > 0 {
+                    reg_a.release(id);
+                }
+            });
+
+            t_release.join().unwrap();
+            t_retain.join().unwrap();
+        }
+
+        assert_eq!(
+            resurrections.load(Ordering::Relaxed),
+            0,
+            "retain resurrected an entry that release() drove to ext_refcount=0"
+        );
     }
 }
