@@ -178,6 +178,12 @@ impl SharedRegistry {
 
     /// Insert a new entry. Returns the SharedId.
     /// Fails with CapacityExceeded if hard caps would be breached.
+    ///
+    /// Reserves capacity via `fetch_add` and rolls back on cap-miss
+    /// (Tokio-style semaphore pattern). A concurrent burst may briefly
+    /// observe `total_*` above the configured cap (for the duration of
+    /// the failing thread's rollback — sub-µs); the post-condition
+    /// `total_* <= max_*` is preserved.
     pub fn insert(
         &self,
         type_tag: SharedType,
@@ -185,9 +191,10 @@ impl SharedRegistry {
     ) -> Result<SharedId, SharedError> {
         let mem = inner.mem_bytes();
 
-        // Hard-cap check on entries count.
-        let new_count = self.total_entries.load(Ordering::Relaxed) + 1;
+        // Reserve an entries slot.
+        let new_count = self.total_entries.fetch_add(1, Ordering::Relaxed) + 1;
         if new_count as usize > self.config.max_entries {
+            self.total_entries.fetch_sub(1, Ordering::Relaxed);
             set_last_error(format!(
                 "Entries capacity exceeded: {} / {} entries",
                 new_count, self.config.max_entries
@@ -195,9 +202,11 @@ impl SharedRegistry {
             return Err(SharedError::CapacityExceeded);
         }
 
-        // Hard-cap check on total bytes.
-        let new_bytes = self.total_bytes.load(Ordering::Relaxed) + mem as u64;
+        // Reserve bytes.
+        let new_bytes = self.total_bytes.fetch_add(mem as u64, Ordering::Relaxed) + mem as u64;
         if new_bytes > self.config.max_bytes {
+            self.total_bytes.fetch_sub(mem as u64, Ordering::Relaxed);
+            self.total_entries.fetch_sub(1, Ordering::Relaxed);
             set_last_error(format!(
                 "Bytes capacity exceeded: {} / {} bytes",
                 new_bytes, self.config.max_bytes
@@ -217,8 +226,6 @@ impl SharedRegistry {
             ext_refcount: AtomicU64::new(1),
         });
         self.entries.insert(id, entry);
-        self.total_entries.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes.fetch_add(mem as u64, Ordering::Relaxed);
         Ok(id)
     }
 
@@ -678,6 +685,127 @@ mod tests {
             resurrections.load(Ordering::Relaxed),
             0,
             "retain resurrected an entry that release() drove to ext_refcount=0"
+        );
+    }
+
+    fn capped_config(max_entries: usize, max_bytes: u64) -> SharedConfig {
+        use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
+        SharedConfig {
+            enabled: true,
+            max_entries,
+            max_bytes,
+            soft_limit_ratio: 0.7,
+            metrics_enabled: false,
+            introspection_enabled: false,
+            introspection_preview_enabled: false,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            shutdown_timeout_seconds: 5.0,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        }
+    }
+
+    /// Pins the cap invariant under concurrent insert: a load+check+
+    /// fetch_add pattern lets N threads all read the same pre-cap
+    /// value, all pass the `>` check, and all commit — overshooting
+    /// `max_entries` by up to N. The fix reserves the slot with
+    /// `fetch_add` first and rolls back on cap-miss; the post-condition
+    /// is `total_entries == max_entries` no matter the thread count.
+    #[test]
+    fn concurrent_insert_respects_max_entries() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Barrier;
+
+        const THREADS: usize = 100;
+        const CAP: usize = 50;
+
+        let reg = StdArc::new(SharedRegistry::new_for_test(capped_config(CAP, u64::MAX)));
+        let barrier = StdArc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+
+        for _ in 0..THREADS {
+            let reg = StdArc::clone(&reg);
+            let barrier = StdArc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 1 }))
+            }));
+        }
+
+        let mut oks = 0usize;
+        let mut errs = 0usize;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(_) => oks += 1,
+                Err(SharedError::CapacityExceeded) => errs += 1,
+                Err(other) => panic!("unexpected error: {other:?}"),
+            }
+        }
+
+        assert_eq!(oks, CAP, "exactly CAP inserts must succeed");
+        assert_eq!(errs, THREADS - CAP, "the rest must hit CapacityExceeded");
+        assert_eq!(
+            reg.total_entries() as usize,
+            CAP,
+            "total_entries must not overshoot the cap after rollbacks"
+        );
+    }
+
+    /// Same shape, but constrains `max_bytes` instead of `max_entries`.
+    /// Each insert reports a fixed `mem_bytes`, so the byte-cap admits
+    /// exactly `max_bytes / mem` entries regardless of contention.
+    #[test]
+    fn concurrent_insert_respects_max_bytes() {
+        use std::sync::Arc as StdArc;
+        use std::sync::Barrier;
+
+        const THREADS: usize = 100;
+        const MEM_PER: u64 = 32;
+        const CAP_BYTES: u64 = MEM_PER * 50;
+
+        let reg = StdArc::new(SharedRegistry::new_for_test(capped_config(
+            10_000, CAP_BYTES,
+        )));
+        let barrier = StdArc::new(Barrier::new(THREADS));
+        let mut handles = Vec::with_capacity(THREADS);
+
+        for _ in 0..THREADS {
+            let reg = StdArc::clone(&reg);
+            let barrier = StdArc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                reg.insert(
+                    SharedType::Counter,
+                    Arc::new(TestInner {
+                        bytes: MEM_PER as usize,
+                    }),
+                )
+            }));
+        }
+
+        let mut oks = 0usize;
+        for h in handles {
+            if h.join().unwrap().is_ok() {
+                oks += 1;
+            }
+        }
+
+        let expected_oks = (CAP_BYTES / MEM_PER) as usize;
+        assert_eq!(oks, expected_oks, "Ok count must equal max_bytes/mem");
+        assert!(
+            reg.total_bytes() <= CAP_BYTES,
+            "total_bytes ({}) must not overshoot CAP_BYTES ({})",
+            reg.total_bytes(),
+            CAP_BYTES
+        );
+        assert_eq!(
+            reg.total_entries() as usize,
+            expected_oks,
+            "total_entries must match successful inserts (bytes-cap rollback also drops entries)"
         );
     }
 }
