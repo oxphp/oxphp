@@ -54,7 +54,7 @@ impl SharedInner for FlagInner {
         SharedValue::Bool(self.test())
     }
     fn mem_bytes(&self) -> usize {
-        16
+        std::mem::size_of::<Self>()
     }
     fn on_drop(&self) {}
     fn on_shutdown_notify(&self) {}

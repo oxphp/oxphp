@@ -12,6 +12,39 @@ use crate::plugins::ox_shared::value::SharedValue;
 
 pub type SharedId = u64;
 
+/// Per-entry fixed overhead booked against `total_bytes` at insert,
+/// in addition to `SharedInner::mem_bytes()`. Accounts for the storage
+/// chain around the inner value:
+///
+/// | Component                                  | Bytes (approx) |
+/// |--------------------------------------------|----------------|
+/// | `Entry` struct                             | ~72            |
+/// | `Arc<Entry>` strong/weak header            | 16             |
+/// | `Arc<dyn SharedInner>` header              | 16             |
+/// | DashMap shard bucket entry                 | 32–48          |
+/// | Per-allocation malloc prologue (×3 allocs) | ~48            |
+/// | **Total**                                  | **184–216**    |
+///
+/// 200 sits in the middle of that structural breakdown. **The number
+/// is a static accounting estimate, NOT measured against a heap
+/// profiler** — calibrating against heaptrack / `jemalloc_stats_print`
+/// / `mi_stats_print` on a target platform (glibc, musl, macOS) is a
+/// nice-to-have follow-up that would tighten the bound, but adds CI
+/// dependencies. For now the doc and the code are honest about being
+/// a guess inside a known range.
+///
+/// Treat `max_bytes` as a grace-cap, not a precise RSS budget. Operators
+/// should still cap the container at the orchestrator level (cgroups,
+/// k8s `resources.limits.memory`) for hard isolation.
+///
+/// **Capacity-planning impact for operators on upgrade**: this constant
+/// did not exist before — scalar types (`Atomic`, `Counter`, `Flag`)
+/// reported only their ~16 B content. After this change the same
+/// `OX_SHARED_MAX_BYTES` admits roughly an order of magnitude fewer
+/// scalar entries (200 B booked per insert instead of ~16 B). See the
+/// `CHANGELOG.md` Migration section for the recommended cap retune.
+pub const ENTRY_FIXED_OVERHEAD: usize = 200;
+
 #[repr(u8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
 pub enum SharedType {
@@ -189,7 +222,12 @@ impl SharedRegistry {
         type_tag: SharedType,
         inner: Arc<dyn SharedInner>,
     ) -> Result<SharedId, SharedError> {
-        let mem = inner.mem_bytes();
+        // Inner content + per-entry overhead (storage chain around the
+        // inner value — see ENTRY_FIXED_OVERHEAD doc). Saturating-add
+        // keeps the arithmetic robust against a pathological inner that
+        // reports near-`usize::MAX`; in practice inner.mem_bytes() is
+        // bounded by per-instance caps inside each type.
+        let mem = inner.mem_bytes().saturating_add(ENTRY_FIXED_OVERHEAD);
 
         // Reserve an entries slot.
         let new_count = self.total_entries.fetch_add(1, Ordering::Relaxed) + 1;
@@ -248,6 +286,54 @@ impl SharedRegistry {
             return;
         }
         entry.ops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Adjust a live entry's accounted memory by `delta` bytes.
+    ///
+    /// Called by container types (Map, Channel, Pool) whose internal
+    /// footprint changes after `insert` — without this, `total_bytes`
+    /// reflects only the initial inner size and drifts arbitrarily far
+    /// from reality as the container grows. Positive `delta` for adds,
+    /// negative for removes; `0` is a no-op.
+    ///
+    /// Best-effort, never fails:
+    /// - Unknown id is silently ignored. Callers are container methods
+    ///   running under their own shard lock; a vanished registry entry
+    ///   means a concurrent shutdown is racing the mutator, and the
+    ///   entry's eventual `release` will fix `total_bytes` from the
+    ///   stored `Entry::mem_bytes`.
+    /// - Positive deltas do NOT re-check `max_bytes`. Cap enforcement on
+    ///   container growth is the per-instance type's job (`Map::max_entries`,
+    ///   `Channel` capacity, `Pool` size) — the global cap acts only at
+    ///   `insert` time. Treating it otherwise would force every Map::set
+    ///   to be fallible on a cap-overshoot it cannot easily roll back.
+    /// - Negative deltas saturate at zero, so a stale undercount can't
+    ///   wrap `Entry::mem_bytes` or `total_bytes`.
+    pub fn adjust_mem_bytes(&self, id: SharedId, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        let Some(e) = self.entries.get(&id) else {
+            return;
+        };
+        if delta > 0 {
+            let d = delta as usize;
+            e.mem_bytes.fetch_add(d, Ordering::Relaxed);
+            self.total_bytes.fetch_add(d as u64, Ordering::Relaxed);
+        } else {
+            let d = delta.unsigned_abs();
+            // saturating_sub + fetch_update on AtomicUsize: clamp at 0.
+            let _ = e
+                .mem_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(d))
+                });
+            let _ = self
+                .total_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(d as u64))
+                });
+        }
     }
 
     /// Retain: atomically increment the entry's ext_refcount. Returns
@@ -757,7 +843,8 @@ mod tests {
 
     /// Same shape, but constrains `max_bytes` instead of `max_entries`.
     /// Each insert reports a fixed `mem_bytes`, so the byte-cap admits
-    /// exactly `max_bytes / mem` entries regardless of contention.
+    /// exactly `max_bytes / (mem + ENTRY_FIXED_OVERHEAD)` entries
+    /// regardless of contention.
     #[test]
     fn concurrent_insert_respects_max_bytes() {
         use std::sync::Arc as StdArc;
@@ -765,7 +852,8 @@ mod tests {
 
         const THREADS: usize = 100;
         const MEM_PER: u64 = 32;
-        const CAP_BYTES: u64 = MEM_PER * 50;
+        const PER_ENTRY: u64 = MEM_PER + ENTRY_FIXED_OVERHEAD as u64;
+        const CAP_BYTES: u64 = PER_ENTRY * 50;
 
         let reg = StdArc::new(SharedRegistry::new_for_test(capped_config(
             10_000, CAP_BYTES,
@@ -794,8 +882,11 @@ mod tests {
             }
         }
 
-        let expected_oks = (CAP_BYTES / MEM_PER) as usize;
-        assert_eq!(oks, expected_oks, "Ok count must equal max_bytes/mem");
+        let expected_oks = (CAP_BYTES / PER_ENTRY) as usize;
+        assert_eq!(
+            oks, expected_oks,
+            "Ok count must equal max_bytes / (mem + overhead)"
+        );
         assert!(
             reg.total_bytes() <= CAP_BYTES,
             "total_bytes ({}) must not overshoot CAP_BYTES ({})",
@@ -807,5 +898,83 @@ mod tests {
             expected_oks,
             "total_entries must match successful inserts (bytes-cap rollback also drops entries)"
         );
+    }
+
+    /// Pins the contract that `insert` books `ENTRY_FIXED_OVERHEAD` in
+    /// addition to `inner.mem_bytes()`. Without this, an operator who
+    /// sets `OX_SHARED_MAX_BYTES=128MiB` would see real RSS climb past a
+    /// gigabyte for scalars whose inner content reports ~8 B but whose
+    /// storage chain (Arc<Entry>, DashMap bucket, malloc prologues)
+    /// dominates the actual footprint.
+    #[test]
+    fn insert_books_fixed_overhead() {
+        let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
+        assert_eq!(reg.total_bytes(), 0);
+        reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
+            .unwrap();
+        assert_eq!(
+            reg.total_bytes(),
+            (8 + ENTRY_FIXED_OVERHEAD) as u64,
+            "total_bytes must include ENTRY_FIXED_OVERHEAD per insert"
+        );
+    }
+
+    /// Pins the contract that `max_bytes` enforcement now includes
+    /// `ENTRY_FIXED_OVERHEAD`. Without this test, a future change that
+    /// silently removes the overhead from the cap-check path would
+    /// only surface under concurrent stress
+    /// (`concurrent_insert_respects_max_bytes`) — easier to misread as
+    /// "flaky scheduling".
+    ///
+    /// Scenario: zero-content entries (`bytes: 0`) inserted serially.
+    /// Each booked byte comes from `ENTRY_FIXED_OVERHEAD` alone. The
+    /// cap admits exactly `floor(max_bytes / ENTRY_FIXED_OVERHEAD)`
+    /// entries; the next insert must fail `CapacityExceeded`.
+    #[test]
+    fn max_bytes_cap_counts_overhead_for_zero_content_entries() {
+        const N: u64 = 5;
+        let cap = N * ENTRY_FIXED_OVERHEAD as u64;
+        let reg = SharedRegistry::new_for_test(capped_config(1_000, cap));
+
+        for i in 0..N {
+            reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
+                .unwrap_or_else(|e| panic!("insert {i}/{N} must succeed: {e:?}"));
+        }
+        assert_eq!(reg.total_bytes(), cap);
+        assert_eq!(reg.total_entries(), N);
+
+        let err = reg
+            .insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
+            .expect_err("(N+1)th insert must trip max_bytes");
+        assert_eq!(err, SharedError::CapacityExceeded);
+        assert_eq!(
+            reg.total_bytes(),
+            cap,
+            "rolled-back insert must leave total_bytes untouched"
+        );
+        assert_eq!(reg.total_entries(), N);
+    }
+
+    /// Pins the contract that `adjust_mem_bytes` keeps `total_bytes`
+    /// and `Entry::mem_bytes` in sync. Adds, removes, and a negative
+    /// delta that would underflow saturate at zero.
+    #[test]
+    fn adjust_mem_bytes_tracks_growth_and_shrink() {
+        let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
+        let id = reg
+            .insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
+            .unwrap();
+        let baseline = reg.total_bytes();
+
+        reg.adjust_mem_bytes(id, 320);
+        assert_eq!(reg.total_bytes(), baseline + 320);
+
+        reg.adjust_mem_bytes(id, -100);
+        assert_eq!(reg.total_bytes(), baseline + 220);
+
+        // Underflow guard: subtracting more than current must clamp,
+        // not wrap.
+        reg.adjust_mem_bytes(id, -(i64::from(u32::MAX) as isize));
+        assert_eq!(reg.total_bytes(), 0);
     }
 }

@@ -70,7 +70,10 @@ impl SharedInner for AtomicInner {
         SharedValue::Long(self.load(Ordering::SeqCst))
     }
     fn mem_bytes(&self) -> usize {
-        16
+        // Content only. Per-entry registry overhead (Arc<Entry>,
+        // DashMap bucket, allocator prologues) is booked by
+        // `SharedRegistry::insert` via `ENTRY_FIXED_OVERHEAD`.
+        std::mem::size_of::<Self>()
     }
     fn on_drop(&self) {}
     fn on_shutdown_notify(&self) {}

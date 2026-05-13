@@ -36,9 +36,14 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType, REGISTRY};
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
+
+/// Approximate per-slot footprint booked against `total_bytes` on
+/// `try_reserve_budget` / `release_budget`. Mirrors the `128 + slots * 64`
+/// formula in [`PoolInner::mem_bytes`].
+const POOL_PER_SLOT_BYTES: isize = 64;
 
 /// Stable per-thread identifier used as the idle-deque key and as the
 /// FFI-level `owner` tag. Obtained via `pthread_self` so it round-trips
@@ -276,7 +281,8 @@ impl PoolInner {
     /// reservations from multiple threads cannot breach `max_size`.
     pub fn try_reserve_budget(&self) -> bool {
         let max = self.max_size as u64;
-        self.size
+        let ok = self
+            .size
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 if cur < max {
                     Some(cur + 1)
@@ -284,15 +290,30 @@ impl PoolInner {
                     None
                 }
             })
-            .is_ok()
+            .is_ok();
+        if ok {
+            self.track_slot_delta(1);
+        }
+        ok
     }
 
     /// Undo a `try_reserve_budget`. Used when the PHP factory threw
     /// or a slot got destroyed out-of-band.
     pub fn release_budget(&self) {
         self.size.fetch_sub(1, Ordering::AcqRel);
+        self.track_slot_delta(-1);
         // Destroying a slot frees capacity — nudge one waiter.
         self.waiters_cv.notify_one();
+    }
+
+    fn track_slot_delta(&self, delta_count: isize) {
+        let Some(id) = self.self_id.get().copied() else {
+            return;
+        };
+        let Some(reg) = REGISTRY.get() else {
+            return;
+        };
+        reg.adjust_mem_bytes(id, delta_count * POOL_PER_SLOT_BYTES);
     }
 
     /// Increment the current thread's in-flight counter. Called from
@@ -914,18 +935,19 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
             Duration::from_secs(300)
         };
 
-        let inner: Arc<dyn SharedInner> = Arc::new(PoolInner::new(
+        // Typed `Arc<PoolInner>` alongside the trait-object copy: lets
+        // us call `bind_id` directly. The downcast would succeed here
+        // by construction; keeping the typed handle avoids dressing a
+        // static invariant as a runtime check.
+        let typed = Arc::new(PoolInner::new(
             factory_fcc,
             destroy_fcc,
             max_size as usize,
             idle_timeout,
         ));
         let reg = registry();
-        let id = reg.insert(SharedType::Pool, Arc::clone(&inner))?;
-        (*inner)
-            .as_any_pool()
-            .expect("just inserted PoolInner")
-            .bind_id(id);
+        let id = reg.insert(SharedType::Pool, typed.clone())?;
+        typed.bind_id(id);
         unsafe { *out_id = id };
         Ok(())
     })
@@ -2933,5 +2955,40 @@ mod tests {
         pool.release_budget();
         assert_eq!(pool.size(), 0);
         assert_eq!(pool.idle_count(), 0);
+    }
+
+    /// Pins the contract that `try_reserve_budget` / `release_budget`
+    /// propagate per-slot growth into `SharedRegistry::total_bytes`.
+    /// Counterpart to `map_set_grows_registry_total_bytes` / `channel_
+    /// send_recv_track_registry_total_bytes` — exercises the same
+    /// `adjust_mem_bytes` plumbing via `track_slot_delta`.
+    #[test]
+    fn pool_reserve_release_track_registry_total_bytes() {
+        let reg = ensure_registry();
+        let id = register_pool(8);
+        let entry = reg.lookup(id).expect("pool was just inserted");
+        let pool = (*entry.inner).as_any_pool().expect("downcast");
+
+        let baseline = reg.total_bytes();
+        for _ in 0..4 {
+            assert!(pool.try_reserve_budget());
+        }
+        let grown = reg.total_bytes();
+        assert_eq!(
+            grown - baseline,
+            (4 * POOL_PER_SLOT_BYTES) as u64,
+            "total_bytes must grow by 4 × POOL_PER_SLOT_BYTES"
+        );
+
+        for _ in 0..4 {
+            pool.release_budget();
+        }
+        assert_eq!(
+            reg.total_bytes(),
+            baseline,
+            "total_bytes must return to baseline after symmetric releases"
+        );
+
+        reg.release(id);
     }
 }

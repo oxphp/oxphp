@@ -50,7 +50,7 @@ impl SharedInner for CounterInner {
         SharedValue::Long(self.get())
     }
     fn mem_bytes(&self) -> usize {
-        16
+        std::mem::size_of::<Self>()
     }
     fn on_drop(&self) {}
     fn on_shutdown_notify(&self) {}
