@@ -172,10 +172,72 @@ fn bench_atomic_single(c: &mut Criterion, ids: EntryIds) {
     group.finish();
 }
 
+fn bench_atomic_multi(c: &mut Criterion, ids: EntryIds) {
+    let mut group = c.benchmark_group("atomic_load");
+    let id = ids.atomic;
+
+    for &n in &[4usize, 8usize] {
+        // V0 bare — shared AtomicI64 across threads.
+        let bare = Arc::new(AtomicI64::new(0));
+        group.bench_function(BenchmarkId::new("bare", n), |b| {
+            b.iter_custom(|iters| {
+                let bare = Arc::clone(&bare);
+                run_threads(n, iters, move || {
+                    criterion::black_box(bare.load(Ordering::Relaxed));
+                })
+            });
+        });
+
+        // V1 current
+        group.bench_function(BenchmarkId::new("current", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let mut out: i64 = 0;
+                    let rc = unsafe { oxphp_shared_atomic_load(id, ORDER_RELAXED, &mut out) };
+                    debug_assert_eq!(rc, 0);
+                    criterion::black_box(out);
+                })
+            });
+        });
+
+        // V2 one_lookup
+        group.bench_function(BenchmarkId::new("one_lookup", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let reg = registry();
+                    let entry = reg.lookup(id).expect("entry exists");
+                    let inner: &AtomicInner =
+                        entry.inner.as_any_atomic().expect("type matches");
+                    let v = inner.load(Ordering::Relaxed);
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
+                    criterion::black_box(v);
+                })
+            });
+        });
+
+        // V3 no_record_op
+        group.bench_function(BenchmarkId::new("no_record_op", n), |b| {
+            b.iter_custom(|iters| {
+                run_threads(n, iters, || {
+                    let reg = registry();
+                    let entry = reg.lookup(id).expect("entry exists");
+                    let inner: &AtomicInner =
+                        entry.inner.as_any_atomic().expect("type matches");
+                    let v = inner.load(Ordering::Relaxed);
+                    criterion::black_box(v);
+                })
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_record_op_overhead(c: &mut Criterion) {
     ensure_registry();
     let ids = setup_entries();
     bench_atomic_single(c, ids);
+    bench_atomic_multi(c, ids);
 }
 
 criterion_group!(benches, bench_record_op_overhead);
