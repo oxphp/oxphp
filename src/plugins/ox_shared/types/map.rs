@@ -24,6 +24,33 @@ use crate::plugins::ox_shared::value::{
     collect_shared_refs, sv_release_nested, sv_retain_nested, SharedRef, SharedValue,
 };
 
+/// Approximate byte-cost of a single `(key, value)` pair as accounted
+/// in [`MapInner::mem_bytes`]: 64 B shard-slot + 16 B `Arc<str>`
+/// overhead + `key.len()` + `value.mem_bytes()`. Used by mutator-site
+/// delta tracking to keep `Entry::mem_bytes` and `total_bytes` in sync
+/// with container growth without recomputing the full footprint on
+/// every op.
+///
+/// **Invariant — keep in sync with [`MapInner::mem_bytes`]**: the
+/// formula there is `count*64 + Σ(key.len + 16 + value.mem_bytes) + 128`.
+/// Per-entry portion (`64 + 16 + key.len + value.mem_bytes`) must match
+/// this function (and its `_parts` twin) exactly, else the delta
+/// stream and the recomputed-from-scratch baseline drift apart. The
+/// +128 base is booked separately by `SharedRegistry::insert` (it's
+/// part of the initial `inner.mem_bytes()` reported at construction)
+/// and is NOT counted here.
+fn map_entry_cost(key: &str, value: &SharedValue) -> isize {
+    map_entry_cost_parts(key.len(), value.mem_bytes())
+}
+
+/// Parts-shaped twin of [`map_entry_cost`] for hot loops where the key
+/// has already been moved into `DashMap::insert` and only the lengths
+/// survive. Single source of truth for the per-entry cost formula —
+/// callers that have a `&str` go through [`map_entry_cost`].
+fn map_entry_cost_parts(key_len: usize, value_mem: usize) -> isize {
+    (64 + 16 + key_len + value_mem) as isize
+}
+
 /// Rust-side storage for one `Shared\Map` instance.
 pub struct MapInner {
     entries: DashMap<Arc<str>, SharedValue>,
@@ -68,6 +95,23 @@ impl MapInner {
         self.self_id.get().copied()
     }
 
+    /// Adjust the registry's accounted memory by `delta`. No-op when
+    /// the Map is not yet registered (`bind_id` not called) or when
+    /// the global registry has been torn down. See
+    /// [`SharedRegistry::adjust_mem_bytes`] for the best-effort contract.
+    fn track_map_delta(&self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        let Some(id) = self.self_id.get().copied() else {
+            return;
+        };
+        let Some(reg) = REGISTRY.get() else {
+            return;
+        };
+        reg.adjust_mem_bytes(id, delta);
+    }
+
     /// Insert or replace. Returns the previous value, if any.
     ///
     /// Runs the cycle check BEFORE any mutation so a rejected insert
@@ -106,6 +150,7 @@ impl MapInner {
         // Atomic insert path. The shard lock inside `entry(key)` serialises
         // all writes to this key; the cap enforcement uses a separate
         // CAS-loop on `self.count` to stay consistent across shards.
+        let new_size = value.mem_bytes() as isize;
         let e = self.entries.entry(key);
         match e {
             dashmap::Entry::Occupied(mut occ) => {
@@ -114,6 +159,7 @@ impl MapInner {
                     sv_retain_nested(&value, reg);
                 }
                 let prev = std::mem::replace(occ.get_mut(), value);
+                self.track_map_delta(new_size - prev.mem_bytes() as isize);
                 Ok(Some(prev))
             }
             dashmap::Entry::Vacant(vac) => {
@@ -141,10 +187,12 @@ impl MapInner {
                     self.count.fetch_add(1, Ordering::Relaxed);
                 }
 
+                let delta = map_entry_cost(vac.key(), &value);
                 if let Some(reg) = reg {
                     sv_retain_nested(&value, reg);
                 }
                 vac.insert(value);
+                self.track_map_delta(delta);
                 Ok(None)
             }
         }
@@ -224,6 +272,7 @@ impl MapInner {
         value: SharedValue,
     ) -> Result<Option<SharedValue>, SharedError> {
         let reg = REGISTRY.get();
+        let new_size = value.mem_bytes() as isize;
         let e = self.entries.entry(key);
         match e {
             dashmap::Entry::Occupied(mut occ) => {
@@ -231,6 +280,7 @@ impl MapInner {
                     sv_retain_nested(&value, reg);
                 }
                 let prev = std::mem::replace(occ.get_mut(), value);
+                self.track_map_delta(new_size - prev.mem_bytes() as isize);
                 Ok(Some(prev))
             }
             dashmap::Entry::Vacant(vac) => {
@@ -257,10 +307,12 @@ impl MapInner {
                     self.count.fetch_add(1, Ordering::Relaxed);
                 }
 
+                let delta = map_entry_cost(vac.key(), &value);
                 if let Some(reg) = reg {
                     sv_retain_nested(&value, reg);
                 }
                 vac.insert(value);
+                self.track_map_delta(delta);
                 Ok(None)
             }
         }
@@ -344,14 +396,19 @@ impl MapInner {
             let mut overwrites: usize = 0;
             let mut inserted = 0;
             for (k, v) in batch {
+                let new_size = v.mem_bytes();
+                let key_len = k.len();
                 if let Some(reg) = reg {
                     sv_retain_nested(&v, reg);
                 }
                 if let Some(prev) = self.entries.insert(k, v) {
                     overwrites += 1;
+                    self.track_map_delta(new_size as isize - prev.mem_bytes() as isize);
                     if let Some(reg) = reg {
                         sv_release_nested(&prev, reg);
                     }
+                } else {
+                    self.track_map_delta(map_entry_cost_parts(key_len, new_size));
                 }
                 inserted += 1;
             }
@@ -420,10 +477,12 @@ impl MapInner {
                 } else {
                     self.count.fetch_add(1, Ordering::Relaxed);
                 }
+                let delta = map_entry_cost(vac.key(), &value);
                 if let Some(reg) = reg {
                     sv_retain_nested(&value, reg);
                 }
                 vac.insert(value);
+                self.track_map_delta(delta);
                 Ok(true)
             }
         }
@@ -513,7 +572,10 @@ impl MapInner {
     ///
     /// [`set`]: MapInner::set
     pub fn remove(&self, key: &str) -> Option<SharedValue> {
-        let removed = self.entries.remove(key).map(|(_, v)| v);
+        let removed = self.entries.remove(key).map(|(k, v)| {
+            self.track_map_delta(-map_entry_cost(&k, &v));
+            v
+        });
         if removed.is_some() {
             self.count.fetch_sub(1, Ordering::AcqRel);
         }
@@ -528,12 +590,15 @@ impl MapInner {
     /// `SharedValue::Shared`. Terminal — there is no caller to inherit.
     pub fn clear(&self) {
         let reg = REGISTRY.get();
-        self.entries.retain(|_, v| {
+        let mut total_delta: isize = 0;
+        self.entries.retain(|k, v| {
             if let Some(r) = reg {
                 sv_release_nested(v, r);
             }
+            total_delta -= map_entry_cost(k, v);
             false
         });
+        self.track_map_delta(total_delta);
         // Resync count with DashMap's post-retain view (handles races
         // where a concurrent set slipped in during the retain walk).
         self.count.store(self.entries.len(), Ordering::Release);
@@ -559,6 +624,7 @@ impl MapInner {
         F: FnMut(&str, &SharedValue) -> bool,
     {
         let reg = REGISTRY.get();
+        let mut total_delta: isize = 0;
         self.entries.retain(|k, v| {
             if f(k, v) {
                 true
@@ -566,9 +632,11 @@ impl MapInner {
                 if let Some(r) = reg {
                     sv_release_nested(v, r);
                 }
+                total_delta -= map_entry_cost(k, v);
                 false
             }
         });
+        self.track_map_delta(total_delta);
         // Resync count: the predicate may have been called any number
         // of times, and concurrent writers may have slipped in during
         // the walk. DashMap's post-retain len() is the authoritative
@@ -711,13 +779,14 @@ pub unsafe extern "C" fn oxphp_shared_map_create(max_entries: i64, out_id: *mut 
             None
         };
         let reg = registry();
-        let inner: Arc<dyn SharedInner> = Arc::new(MapInner::new(max));
-        let id = reg.insert(SharedType::Map, Arc::clone(&inner))?;
-        // Bind the Map's own id so cycle check activates on subsequent sets.
-        (*inner)
-            .as_any_map()
-            .expect("just inserted MapInner")
-            .bind_id(id);
+        // Hold a typed `Arc<MapInner>` alongside the trait-object copy
+        // handed to the registry: lets us call `bind_id` directly
+        // without a downcast + `.expect`. The downcast would succeed by
+        // construction here, but laundering a static invariant through
+        // a runtime check makes the API look more dynamic than it is.
+        let typed = Arc::new(MapInner::new(max));
+        let id = reg.insert(SharedType::Map, typed.clone())?;
+        typed.bind_id(id);
         unsafe { *out_id = id };
         Ok(())
     })
@@ -3552,5 +3621,53 @@ mod tests {
         drop(a_arc);
         reg.release(a_id);
         reg.release(counter_id);
+    }
+
+    /// Pins the contract that `Map::set` propagates per-entry growth
+    /// into the registry's `total_bytes` accounting. Without dynamic
+    /// updates, an empty Map's `Entry::mem_bytes` stays frozen at
+    /// insert-time, so an attacker that pushes thousands of entries
+    /// can grow the container far past `OX_SHARED_MAX_BYTES` while the
+    /// operator's gauges show the original 128 B base footprint.
+    #[test]
+    fn map_set_grows_registry_total_bytes() {
+        let reg = ensure_registry();
+        let (map_arc, map_id) = bootstrap_map(reg, None);
+        let m = (*map_arc).as_any_map().unwrap();
+
+        let baseline = reg.total_bytes();
+        for i in 0..32u64 {
+            m.set(k(&format!("key{i:03}")), SharedValue::Long(i as i64))
+                .unwrap();
+        }
+        let grown = reg.total_bytes();
+
+        assert!(
+            grown > baseline,
+            "total_bytes ({grown}) must exceed baseline ({baseline}) after 32 set()s"
+        );
+
+        // Each entry contributes ≥ 64 (slot) + 16 (key) + 6 (key.len for
+        // "keyNNN") + 8 (Long value) = 94 B. Lower-bound the growth.
+        let min_growth = 32 * 94;
+        assert!(
+            grown - baseline >= min_growth,
+            "growth ({}) below conservative lower bound ({min_growth})",
+            grown - baseline
+        );
+
+        // remove() refunds the per-entry cost.
+        for i in 0..32u64 {
+            m.remove(&format!("key{i:03}"));
+        }
+        assert_eq!(
+            reg.total_bytes(),
+            baseline,
+            "total_bytes must return to baseline after symmetric removes"
+        );
+
+        m.clear();
+        drop(map_arc);
+        reg.release(map_id);
     }
 }

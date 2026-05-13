@@ -6,7 +6,7 @@
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crossbeam_channel::{RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError};
@@ -16,9 +16,15 @@ use tokio::sync::Notify;
 
 use crate::plugins::ox_async::synthetic::{self, PromisePayload};
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
-use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{registry, SharedId, SharedInner, SharedType, REGISTRY};
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::SharedValue;
+
+/// Approximate per-pending-payload footprint booked against
+/// `total_bytes` on send/recv. Mirrors the `64 + pending * 32` formula
+/// in [`ChannelInner::mem_bytes`] — the constant tracks crossbeam's
+/// per-slot bookkeeping plus the empty `Payload` (`Vec<u8>` header).
+const CHANNEL_PER_PAYLOAD_BYTES: isize = 32;
 
 /// Serialized zval payload (portbuf bytes). Opaque at this layer —
 /// encoding/decoding lives in `value.rs` and is driven by the FFI
@@ -100,6 +106,12 @@ pub struct ChannelInner {
     items_sent_total: AtomicU64,
     #[allow(dead_code)]
     items_dropped_total: AtomicU64,
+    /// Registry id, bound once by the creating FFI path via
+    /// [`ChannelInner::bind_id`] right after `registry.insert`. `None`
+    /// before bind (or in Rust-only tests that skip registry insertion)
+    /// — memory tracking is then a no-op because the channel is not
+    /// reachable via the registry.
+    self_id: OnceLock<SharedId>,
 }
 
 impl ChannelInner {
@@ -125,7 +137,67 @@ impl ChannelInner {
             receivers_blocked: AtomicU32::new(0),
             items_sent_total: AtomicU64::new(0),
             items_dropped_total: AtomicU64::new(0),
+            self_id: OnceLock::new(),
         }
+    }
+
+    /// Bind this Channel to its registry id. Called exactly once by the
+    /// creating FFI path right after `registry.insert`. Subsequent calls
+    /// are silently ignored (OnceLock semantics). Required for the
+    /// per-payload memory tracking to find its entry on
+    /// [`bump_pending`] / [`drop_pending`].
+    pub fn bind_id(&self, id: SharedId) {
+        let _ = self.self_id.set(id);
+    }
+
+    /// Increment `pending` by one and book one payload's worth of
+    /// memory against `total_bytes`. Centralises the two side-effects so
+    /// every send path (buffer commit, blocking send, send_many) ends up
+    /// doing the same accounting.
+    ///
+    /// Pre-existing race (predates the memory-tracking patch): both
+    /// `try_send` and `send_blocking` deposit into the crossbeam buffer
+    /// *before* calling [`bump_pending`]. A racing `try_recv` between
+    /// those two steps observes the item, calls [`drop_pending`], and
+    /// underflows `pending` (`fetch_sub` from zero wraps to
+    /// `usize::MAX`). The memory-tracking side stays safe because
+    /// [`SharedRegistry::adjust_mem_bytes`] saturates at zero on
+    /// negative deltas — `total_bytes` cannot wrap.
+    ///
+    /// **Drift direction — `total_bytes` leaks UPWARD**, not down:
+    /// the racing `drop_pending` saturates at 0 (no refund happens),
+    /// then the lagging `bump_pending` adds `CHANNEL_PER_PAYLOAD_BYTES`
+    /// against an empty buffer. Under sustained send/recv hammering a
+    /// single Channel can accrete megabytes of phantom bytes and trip
+    /// the global `max_bytes` cap while its actual queue is empty.
+    /// The `pending` counter undercounts symmetrically.
+    ///
+    /// Proper fix (deferred — invasive, touches 8 mutator sites): swap
+    /// the order so `bump_pending` runs *before* `tx.try_send` with a
+    /// rollback `drop_pending` on `Err`, and apply the symmetric flip
+    /// to recv. Or drop the parallel atomic entirely and derive
+    /// `pending` from `tx.len()` (cheap on crossbeam, no race window).
+    fn bump_pending(&self) {
+        self.pending.fetch_add(1, Ordering::AcqRel);
+        self.track_payload_delta(1);
+    }
+
+    /// Decrement `pending` by one and refund one payload's worth of
+    /// memory. Mirrors [`bump_pending`] on the consumer side; see the
+    /// note there for the pre-existing send/recv interleaving caveat.
+    fn drop_pending(&self) {
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+        self.track_payload_delta(-1);
+    }
+
+    fn track_payload_delta(&self, delta_count: isize) {
+        let Some(id) = self.self_id.get().copied() else {
+            return;
+        };
+        let Some(reg) = REGISTRY.get() else {
+            return;
+        };
+        reg.adjust_mem_bytes(id, delta_count * CHANNEL_PER_PAYLOAD_BYTES);
     }
 
     pub fn capacity(&self) -> usize {
@@ -166,7 +238,7 @@ impl ChannelInner {
         };
         match self.tx.try_send(payload) {
             Ok(()) => {
-                self.pending.fetch_add(1, Ordering::AcqRel);
+                self.bump_pending();
                 self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                 self.notify_recv.notify_one();
                 Ok(())
@@ -185,7 +257,7 @@ impl ChannelInner {
         match rx.try_recv() {
             Ok(p) => {
                 drop(rx);
-                self.pending.fetch_sub(1, Ordering::AcqRel);
+                self.drop_pending();
                 self.notify_send.notify_one();
                 // Slot just freed — hand it to a parked send-waiter if
                 // any. Resolving with empty-Value means "you may retry
@@ -283,7 +355,7 @@ impl ChannelInner {
             };
             match self.tx.send_timeout(payload, quantum) {
                 Ok(()) => {
-                    self.pending.fetch_add(1, Ordering::AcqRel);
+                    self.bump_pending();
                     self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                     self.notify_recv.notify_one();
                     return Ok(());
@@ -317,7 +389,7 @@ impl ChannelInner {
             match rx.try_recv() {
                 Ok(p) => {
                     drop(rx);
-                    self.pending.fetch_sub(1, Ordering::AcqRel);
+                    self.drop_pending();
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -357,7 +429,7 @@ impl ChannelInner {
                 return match rx.try_recv() {
                     Ok(p) => {
                         drop(rx);
-                        self.pending.fetch_sub(1, Ordering::AcqRel);
+                        self.drop_pending();
                         self.notify_send.notify_one();
                         Ok(Some(p))
                     }
@@ -380,7 +452,7 @@ impl ChannelInner {
             };
             match recv_res {
                 Ok(p) => {
-                    self.pending.fetch_sub(1, Ordering::AcqRel);
+                    self.drop_pending();
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -688,7 +760,7 @@ impl ChannelInner {
                 match rx.try_recv() {
                     Ok(p) => {
                         drop(rx);
-                        self.pending.fetch_sub(1, Ordering::AcqRel);
+                        self.drop_pending();
                         self.notify_send.notify_one();
                         p
                     }
@@ -711,7 +783,7 @@ impl ChannelInner {
                     // drain_one_recv_waiter_with again — infinite loop.
                     // So we bypass and write directly.
                     let _ = self.tx.try_send(p).map(|()| {
-                        self.pending.fetch_add(1, Ordering::AcqRel);
+                        self.bump_pending();
                     });
                     return;
                 }
@@ -827,10 +899,14 @@ pub unsafe extern "C" fn oxphp_shared_channel_create(capacity: u64, out_id: *mut
             return Err(SharedError::Type);
         }
         let reg = registry();
-        let id = reg.insert(
-            SharedType::Channel,
-            Arc::new(ChannelInner::new(capacity as usize)),
-        )?;
+        // Hold a typed `Arc<ChannelInner>` alongside the trait-object
+        // copy handed to the registry: lets us call `bind_id` directly
+        // without round-tripping through `as_any_channel` (whose
+        // success here is a static fact, but a downcast + `.expect`
+        // makes a structural invariant look like a runtime contract).
+        let typed = Arc::new(ChannelInner::new(capacity as usize));
+        let id = reg.insert(SharedType::Channel, typed.clone())?;
+        typed.bind_id(id);
         unsafe { *out_id = id };
         Ok(())
     })
@@ -3389,5 +3465,47 @@ mod tests {
         // Empty-Value ack = "slot free, retry your send".
         assert_eq!(got.serialized_value_len, 0);
         assert!(got.serialized_value.is_null());
+    }
+
+    /// Pins the contract that `try_send` / `try_recv` propagate per-
+    /// payload growth into `SharedRegistry::total_bytes`. Counterpart
+    /// to `map_set_grows_registry_total_bytes` in map.rs — exercises
+    /// the same `adjust_mem_bytes` plumbing via the Channel's
+    /// `bump_pending` / `drop_pending` helpers.
+    #[test]
+    fn channel_send_recv_track_registry_total_bytes() {
+        ensure_test_registry();
+        let reg = registry();
+
+        let inner: Arc<dyn SharedInner> = Arc::new(ChannelInner::new(8));
+        let id = reg
+            .insert(SharedType::Channel, Arc::clone(&inner))
+            .expect("registry insert should succeed");
+        let ch = (*inner).as_any_channel().expect("downcast");
+        ch.bind_id(id);
+
+        let baseline = reg.total_bytes();
+        for i in 0..4u8 {
+            ch.try_send(vec![i]).expect("buffer has room");
+        }
+        let grown = reg.total_bytes();
+        assert_eq!(
+            grown - baseline,
+            (4 * CHANNEL_PER_PAYLOAD_BYTES) as u64,
+            "total_bytes must grow by 4 × CHANNEL_PER_PAYLOAD_BYTES"
+        );
+
+        for _ in 0..4 {
+            ch.try_recv()
+                .expect("not empty")
+                .expect("not closed-and-empty");
+        }
+        assert_eq!(
+            reg.total_bytes(),
+            baseline,
+            "total_bytes must return to baseline after symmetric recvs"
+        );
+
+        reg.release(id);
     }
 }
