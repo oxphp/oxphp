@@ -11,7 +11,7 @@
 //! Each variant is measured single-thread (criterion bench_function)
 //! and multi-thread at N=4, N=8 (iter_custom + Barrier).
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::Criterion;
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::init_registry;
 use criterion::BenchmarkId;
@@ -535,5 +535,139 @@ fn bench_record_op_overhead(c: &mut Criterion) {
     bench_once(c, ids);
 }
 
-criterion_group!(benches, bench_record_op_overhead);
-criterion_main!(benches);
+// ─── Summary table ────────────────────────────────────────────────────
+
+use serde_json::Value;
+use std::fs;
+use std::path::PathBuf;
+
+/// Reads the mean point-estimate (in ns) from a criterion sub-bench's
+/// `estimates.json`. Returns None if the file is missing or malformed.
+fn read_mean_ns(group: &str, variant: &str, threads: usize) -> Option<f64> {
+    let path: PathBuf = [
+        "target",
+        "criterion",
+        group,
+        &format!("{variant}/{threads}"),
+        "new",
+        "estimates.json",
+    ]
+    .iter()
+    .collect();
+    let raw = fs::read_to_string(&path).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v.get("mean")?.get("point_estimate")?.as_f64()
+}
+
+fn fmt_ns(opt: Option<f64>) -> String {
+    match opt {
+        Some(ns) if ns < 10.0 => format!("{ns:>6.2}ns"),
+        Some(ns) if ns < 1_000.0 => format!("{ns:>6.1}ns"),
+        Some(ns) if ns < 1_000_000.0 => format!("{:>6.1}µs", ns / 1_000.0),
+        Some(ns) => format!("{:>6.1}ms", ns / 1_000_000.0),
+        None => "    -- ".to_string(),
+    }
+}
+
+fn fmt_ratio(numer: Option<f64>, denom: Option<f64>) -> String {
+    match (numer, denom) {
+        (Some(n), Some(d)) if d > 0.0 => format!("{:>5.1}x", n / d),
+        _ => "  --x".to_string(),
+    }
+}
+
+fn geomean(xs: &[f64]) -> Option<f64> {
+    let nonzero: Vec<_> = xs.iter().copied().filter(|x| *x > 0.0).collect();
+    if nonzero.is_empty() {
+        return None;
+    }
+    let log_sum: f64 = nonzero.iter().map(|x| x.ln()).sum();
+    Some((log_sum / nonzero.len() as f64).exp())
+}
+
+const GROUPS: &[&str] = &[
+    "atomic_load",
+    "counter_add",
+    "flag_test",
+    "once_is_initialized",
+];
+const VARIANTS: &[&str] = &["bare", "current", "one_lookup", "no_record_op"];
+
+fn print_summary() {
+    let host_cpus = std::thread::available_parallelism()
+        .map(|n| n.get().to_string())
+        .unwrap_or_else(|_| "?".into());
+    println!();
+    println!("=== record_op overhead summary (host: {host_cpus} cores) ===");
+
+    let mut current_vs_bare_8t = Vec::new();
+    let mut current_vs_no_record_op_8t = Vec::new();
+    let mut v2_vs_v3_8t = Vec::new();
+
+    for group in GROUPS {
+        println!();
+        println!("{group:>22}    1t       4t       8t");
+        for variant in VARIANTS {
+            let t1 = read_mean_ns(group, variant, 1);
+            let t4 = read_mean_ns(group, variant, 4);
+            let t8 = read_mean_ns(group, variant, 8);
+            let ratio_str = if *variant == "bare" {
+                String::new()
+            } else {
+                let bare_t8 = read_mean_ns(group, "bare", 8);
+                format!("   ratio_8t={}", fmt_ratio(t8, bare_t8))
+            };
+            println!(
+                "  {variant:<16} {} {} {}{}",
+                fmt_ns(t1),
+                fmt_ns(t4),
+                fmt_ns(t8),
+                ratio_str
+            );
+        }
+
+        let bare_8t = read_mean_ns(group, "bare", 8);
+        let current_8t = read_mean_ns(group, "current", 8);
+        let one_lookup_8t = read_mean_ns(group, "one_lookup", 8);
+        let no_record_op_8t = read_mean_ns(group, "no_record_op", 8);
+
+        if let (Some(c), Some(b)) = (current_8t, bare_8t) {
+            if b > 0.0 {
+                current_vs_bare_8t.push(c / b);
+            }
+        }
+        if let (Some(c), Some(nro)) = (current_8t, no_record_op_8t) {
+            if nro > 0.0 {
+                current_vs_no_record_op_8t.push(c / nro);
+            }
+        }
+        if let (Some(v2), Some(v3)) = (one_lookup_8t, no_record_op_8t) {
+            if v3 > 0.0 {
+                v2_vs_v3_8t.push(v2 / v3);
+            }
+        }
+    }
+
+    println!();
+    println!("DECISION INPUTS (geomean across types at 8 threads):");
+    println!(
+        "  current vs bare:            {}",
+        fmt_ratio(geomean(&current_vs_bare_8t), Some(1.0))
+    );
+    println!(
+        "  current vs no_record_op:    {}   <- record_op-specific overhead",
+        fmt_ratio(geomean(&current_vs_no_record_op_8t), Some(1.0))
+    );
+    println!(
+        "  one_lookup vs no_record_op: {}   <- record_op overhead w/o 2nd lookup",
+        fmt_ratio(geomean(&v2_vs_v3_8t), Some(1.0))
+    );
+    println!();
+}
+
+fn main() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_record_op_overhead(&mut criterion);
+    criterion.final_summary();
+    print_summary();
+}
