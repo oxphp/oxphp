@@ -873,14 +873,14 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
 
         match ch.try_send(payload) {
             Ok(()) => {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_success = 1 };
                 Ok(())
             }
             Err(TrySendErr::Full(_)) => {
                 // Not an error per FFI contract — the caller distinguishes
                 // via *out_success = 0.
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_success = 0 };
                 Ok(())
             }
@@ -929,7 +929,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
         match ch.try_recv() {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload)? };
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe {
                     *out_buf = ptr;
                     *out_len = n;
@@ -938,12 +938,12 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
                 Ok(())
             }
             Err(TryRecvErr::WouldBlockEmpty) => {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_state = 1 };
                 Ok(())
             }
             Ok(None) => {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_state = 2 };
                 Ok(())
             }
@@ -986,7 +986,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         let res = ch.send_blocking(payload, wait);
         match res {
             Ok(()) => {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 Ok(())
             }
             Err(e @ SharedError::Closed) => {
@@ -1042,7 +1042,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload)? };
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe {
                     *out_buf = ptr;
                     *out_len = n;
@@ -1051,7 +1051,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
                 Ok(())
             }
             Ok(None) => {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_state = 2 };
                 Ok(())
             }
@@ -1074,7 +1074,7 @@ pub extern "C" fn oxphp_shared_channel_close(id: u64) -> c_int {
         let entry = reg.lookup(id)?;
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         ch.close();
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -1094,7 +1094,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_is_closed(id: u64, out: *mut c_int
         let entry = reg.lookup(id)?;
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         let v = ch.is_closed();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = v as c_int };
         Ok(())
     })
@@ -1115,7 +1115,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_pending(id: u64, out: *mut u64) ->
         let entry = reg.lookup(id)?;
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         let v = ch.pending() as u64;
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = v };
         Ok(())
     })
@@ -1161,7 +1161,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         if n == 0 {
-            reg.record_op(id);
+            reg.record_op(&entry);
             return Ok(());
         }
 
@@ -1192,7 +1192,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
 
         let wait = parse_timeout(timeout_ms);
         let sent = ch.send_many(payloads, wait);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_sent = sent };
         Ok(())
     })
@@ -1243,7 +1243,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
 
         let wait = parse_timeout(timeout_ms);
         let items = ch.recv_many(max as usize, wait);
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         let n = items.len();
         if n == 0 {
@@ -1375,7 +1375,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_fiber_register(
         //    `close()`.
         spawn_fiber_timeout(promise_id, timeout_ms);
 
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_promise_id = promise_id };
         Ok(())
     })
@@ -1413,7 +1413,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_fiber_register(
         ch.register_send_waiter(promise_id);
         spawn_fiber_timeout(promise_id, timeout_ms);
 
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_promise_id = promise_id };
         Ok(())
     })

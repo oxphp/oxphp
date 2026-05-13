@@ -200,7 +200,7 @@ pub unsafe extern "C" fn oxphp_shared_once_is_initialized(id: u64, out: *mut c_i
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_once().ok_or(SharedError::Type)?;
         let init = inner.is_initialized();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = init as c_int };
         Ok(())
     })
@@ -246,7 +246,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 Some(v) => write_value_to_retval(call, &v)?,
                 None => call.ret_null(),
             }
-            reg.record_op(id);
+            reg.record_op(&entry);
             Ok(())
         })
         .method("isInitialized")
@@ -274,7 +274,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             // Read argument as a SharedValue (scalar-only).
             let sv = read_arg_as_shared_value(call, 0)?;
             let winner = inner.try_set(sv);
-            reg.record_op(id);
+            reg.record_op(&entry);
             call.ret_bool(winner);
             Ok(())
         })
@@ -302,7 +302,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             // Fast path: already initialised; write cached value, skip factory.
             if let Some(v) = inner.get() {
                 write_value_to_retval(call, &v)?;
-                reg.record_op(id);
+                reg.record_op(&entry);
                 return Ok(());
             }
 
@@ -342,7 +342,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             match sv {
                 Ok(v) => {
                     write_value_to_retval(call, &v)?;
-                    reg.record_op(id);
+                    reg.record_op(&entry);
                     Ok(())
                 }
                 Err(SharedError::Generic) => {

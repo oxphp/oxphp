@@ -996,7 +996,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
 
             // 1. Local idle.
             if let Some(slot) = pool.try_acquire_local() {
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe {
                     *out_slot_zv_heap = slot.resource;
                     *out_owner_tid = slot.owner;
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                 let rc =
                     unsafe { ffi::oxphp_pool_factory_invoke(pool.factory_fcc(), &mut slot_heap) };
                 if rc == 0 {
-                    reg.record_op(id);
+                    reg.record_op(&entry);
                     unsafe {
                         *out_slot_zv_heap = slot_heap;
                         *out_owner_tid = current_thread_key();
@@ -1126,7 +1126,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_release(
         // lands on the original minting thread.
         pool.untrack_released(owner_tid);
         pool.release(slot);
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }

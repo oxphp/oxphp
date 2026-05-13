@@ -735,7 +735,7 @@ pub unsafe extern "C" fn oxphp_shared_map_count(id: u64, out_count: *mut u64) ->
         let reg = registry();
         let entry = reg.lookup(id)?;
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_count = map.count() as u64 };
         Ok(())
     })
@@ -760,7 +760,7 @@ pub unsafe extern "C" fn oxphp_shared_map_has(
         let entry = reg.lookup(id)?;
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
         let k = unsafe { key_from_raw(key, klen)? };
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = map.has(&k) as c_int };
         Ok(())
     })
@@ -773,7 +773,7 @@ pub extern "C" fn oxphp_shared_map_clear(id: u64) -> c_int {
         let entry = reg.lookup(id)?;
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
         map.clear();
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -808,7 +808,7 @@ pub unsafe extern "C" fn oxphp_shared_map_get(
         let entry = reg.lookup(id)?;
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
         let k = unsafe { key_from_raw(key, klen)? };
-        reg.record_op(id);
+        reg.record_op(&entry);
         match map.get(&k) {
             Some(v) => {
                 let bytes = sv_to_portbuf(&v);
@@ -865,7 +865,7 @@ pub unsafe extern "C" fn oxphp_shared_map_set(
         if let Some(prev) = prev {
             sv_release_nested(&prev, reg);
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -905,7 +905,7 @@ pub unsafe extern "C" fn oxphp_shared_map_set_if_absent(
         };
         let value = portbuf_to_sv(value_bytes)?;
         let inserted = map.set_if_absent(k, value)?;
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_inserted = inserted as c_int };
         Ok(())
     })
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn oxphp_shared_map_remove(
                 unsafe { *out_missing = 1 };
             }
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -1020,11 +1020,11 @@ pub unsafe extern "C" fn oxphp_shared_map_set_many(
             }
             Err((e, n)) => {
                 unsafe { *out_inserted = n as u64 };
-                reg.record_op(id);
+                reg.record_op(&entry);
                 return Err(e);
             }
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -1088,7 +1088,7 @@ pub unsafe extern "C" fn oxphp_shared_map_get_many(
             let value = map.get(&key_str).unwrap_or(SharedValue::Null);
             out_arr.str_keyed.push((key_str, value));
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         let result = SharedValue::Array(Arc::new(out_arr));
         let bytes = sv_to_portbuf(&result);
@@ -1158,7 +1158,7 @@ pub unsafe extern "C" fn oxphp_shared_map_remove_many(
                 unsafe { *out_removed = removed };
             }
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -1188,7 +1188,7 @@ pub unsafe extern "C" fn oxphp_shared_map_keys(
         let reg = registry();
         let entry = reg.lookup(id)?;
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         let keys = map.keys();
         let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
@@ -1325,7 +1325,7 @@ pub unsafe extern "C" fn oxphp_shared_map_update(
                 v
             }
         };
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         // Emit the stored value as portbuf so PHP side can decode directly.
         let out_bytes = sv_to_portbuf(&stored);
@@ -1373,7 +1373,7 @@ pub unsafe extern "C" fn oxphp_shared_map_get_or_set(
 
         // Fast path: already present.
         if let Some(v) = map.get(&k) {
-            reg.record_op(id);
+            reg.record_op(&entry);
             let bytes = sv_to_portbuf(&v);
             let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
             unsafe {
@@ -1422,7 +1422,7 @@ pub unsafe extern "C" fn oxphp_shared_map_get_or_set(
             true => candidate,
             false => map.get(&k).unwrap_or(candidate),
         };
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         let bytes = sv_to_portbuf(&stored);
         let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
@@ -1563,7 +1563,7 @@ pub unsafe extern "C" fn oxphp_shared_map_update_many(
             };
             out_arr.str_keyed.push((key_str, stored));
         }
-        reg.record_op(id);
+        reg.record_op(&entry);
 
         let result = SharedValue::Array(Arc::new(out_arr));
         let bytes = sv_to_portbuf(&result);

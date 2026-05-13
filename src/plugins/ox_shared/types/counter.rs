@@ -88,7 +88,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_get(id: u64, out: *mut i64) -> c_i
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let v = inner.get();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = v };
         Ok(())
     })
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_swap(
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let prev = inner.swap(new_val);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_prev = prev };
         Ok(())
     })
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_add(id: u64, delta: i64, out_new: 
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let new_val = inner.add(delta);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_new = new_val };
         Ok(())
     })
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
             unsafe { std::slice::from_raw_parts(deltas, n) }
         };
         let new_val = inner.add_batch(slice);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_new = new_val };
         Ok(())
     })

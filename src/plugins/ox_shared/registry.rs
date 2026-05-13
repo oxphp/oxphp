@@ -230,11 +230,17 @@ impl SharedRegistry {
             .ok_or(SharedError::StaleHandle)
     }
 
-    /// Record an op (increments per-entry counter).
-    pub fn record_op(&self, id: SharedId) {
-        if let Some(e) = self.entries.get(&id) {
-            e.ops.fetch_add(1, Ordering::Relaxed);
+    /// Record a single operation on `entry`. No-op when
+    /// `config.metrics_enabled` is `false`.
+    ///
+    /// Takes `&Entry` (not `SharedId`) so the caller's existing
+    /// `lookup()` result is reused — this avoids a second DashMap
+    /// shard-lock per call.
+    pub fn record_op(&self, entry: &Entry) {
+        if !self.config.metrics_enabled {
+            return;
         }
+        entry.ops.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Retain: atomically increment the entry's ext_refcount. Returns
