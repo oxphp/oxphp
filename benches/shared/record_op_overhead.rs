@@ -75,6 +75,46 @@ fn ensure_registry() {
     });
 }
 
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Run `body` `iters` times on each of `n_threads` worker threads,
+/// timing from the synchronised barrier release to the last join.
+///
+/// `body` must be `Send + Sync` and is invoked with no arguments inside
+/// each worker's iteration loop.
+#[allow(dead_code)] // consumed by multi-thread bench fns in later tasks
+fn run_threads<F>(n_threads: usize, iters: u64, body: F) -> Duration
+where
+    F: Fn() + Send + Sync,
+{
+    thread::scope(|s| {
+        let barrier = Arc::new(Barrier::new(n_threads + 1));
+        let body_ref = &body;
+
+        let handles: Vec<_> = (0..n_threads)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..iters {
+                        body_ref();
+                    }
+                })
+            })
+            .collect();
+
+        // Release all workers simultaneously, then start the clock.
+        barrier.wait();
+        let start = Instant::now();
+        for h in handles {
+            h.join().expect("worker panicked");
+        }
+        start.elapsed()
+    })
+}
+
 fn bench_record_op_overhead(c: &mut Criterion) {
     ensure_registry();
     let ids = setup_entries();
