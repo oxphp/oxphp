@@ -92,7 +92,7 @@ pub unsafe extern "C" fn oxphp_shared_flag_test(id: u64, out: *mut c_int) -> c_i
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let v = inner.test();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = v as c_int };
         Ok(())
     })
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn oxphp_shared_flag_set(id: u64, out_prev: *mut c_int) ->
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.set();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn oxphp_shared_flag_clear(id: u64, out_prev: *mut c_int) 
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.clear();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn oxphp_shared_flag_cas(
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let swapped = inner.cas(expect != 0, new_val != 0);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn oxphp_shared_flag_exchange(
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.exchange(new_val != 0);
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })

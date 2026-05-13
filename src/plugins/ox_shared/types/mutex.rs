@@ -126,7 +126,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_is_poisoned(id: u64, out: *mut c_int
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
         let p = inner.is_poisoned();
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = p as c_int };
         Ok(())
     })
@@ -139,7 +139,7 @@ pub extern "C" fn oxphp_shared_mutex_clear_poison(id: u64) -> c_int {
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
         inner.clear_poison();
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
                 }
-                reg.record_op(id);
+                reg.record_op(&entry);
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
@@ -328,7 +328,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                reg.record_op(id);
+                reg.record_op(&entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
             }
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
                 }
-                reg.record_op(id);
+                reg.record_op(&entry);
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
@@ -457,7 +457,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                reg.record_op(id);
+                reg.record_op(&entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
             }

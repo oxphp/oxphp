@@ -164,7 +164,7 @@ pub unsafe extern "C" fn oxphp_shared_atomic_load(id: u64, order: u8, out: *mut 
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         let v = inner.load(ordering_from_u8(order));
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out = v };
         Ok(())
     })
@@ -179,7 +179,7 @@ pub unsafe extern "C" fn oxphp_shared_atomic_store(id: u64, value: i64, order: u
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         inner.store(value, ordering_from_u8(order));
-        reg.record_op(id);
+        reg.record_op(&entry);
         Ok(())
     })
 }
@@ -202,7 +202,7 @@ pub unsafe extern "C" fn oxphp_shared_atomic_swap(
         let entry = reg.lookup(id)?;
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         let prev = inner.swap(value, ordering_from_u8(order));
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_prev = prev };
         Ok(())
     })
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn oxphp_shared_atomic_cas(
             ordering_from_u8(success),
             ordering_from_u8(failure),
         );
-        reg.record_op(id);
+        reg.record_op(&entry);
         unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
@@ -259,7 +259,7 @@ macro_rules! atomic_fetch_ffi {
                 let entry = reg.lookup(id)?;
                 let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
                 let prev = inner.$method(delta, ordering_from_u8(order));
-                reg.record_op(id);
+                reg.record_op(&entry);
                 unsafe { *out_prev = prev };
                 Ok(())
             })

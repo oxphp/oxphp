@@ -230,11 +230,17 @@ impl SharedRegistry {
             .ok_or(SharedError::StaleHandle)
     }
 
-    /// Record an op (increments per-entry counter).
-    pub fn record_op(&self, id: SharedId) {
-        if let Some(e) = self.entries.get(&id) {
-            e.ops.fetch_add(1, Ordering::Relaxed);
+    /// Record a single operation on `entry`. No-op when
+    /// `config.metrics_enabled` is `false`.
+    ///
+    /// Takes `&Entry` (not `SharedId`) so the caller's existing
+    /// `lookup()` result is reused — this avoids a second DashMap
+    /// shard-lock per call.
+    pub fn record_op(&self, entry: &Entry) {
+        if !self.config.metrics_enabled {
+            return;
         }
+        entry.ops.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Retain: atomically increment the entry's ext_refcount. Returns
@@ -385,6 +391,24 @@ pub extern "C" fn oxphp_shared_total_bytes() -> u64 {
 }
 
 #[cfg(test)]
+impl SharedRegistry {
+    /// Build a standalone registry that is **not** registered with the
+    /// global `OnceLock`. Use this in unit tests that need to exercise
+    /// behaviour parametrised on `SharedConfig` — the global registry
+    /// can only be initialised once per process.
+    pub(crate) fn new_for_test(config: SharedConfig) -> Self {
+        SharedRegistry {
+            entries: DashMap::with_capacity(16),
+            next_id: AtomicI64::new(1),
+            total_bytes: AtomicU64::new(0),
+            total_entries: AtomicU64::new(0),
+            config,
+            shutting_down: AtomicBool::new(false),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugins::ox_shared::value::SharedValue;
@@ -506,5 +530,48 @@ mod tests {
                 "unknown tag {tag} must map to NULL"
             );
         }
+    }
+
+    #[test]
+    fn record_op_respects_metrics_enabled_flag() {
+        use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
+        use crate::plugins::ox_shared::types::atomic::AtomicInner;
+        use std::sync::atomic::Ordering;
+
+        let make_config = |metrics_enabled: bool| SharedConfig {
+            enabled: true,
+            max_entries: 100,
+            max_bytes: 1024,
+            soft_limit_ratio: 0.7,
+            metrics_enabled,
+            introspection_enabled: true,
+            introspection_preview_enabled: true,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            shutdown_timeout_seconds: 5.0,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        };
+
+        // metrics_enabled = false ⇒ ops stays at 0.
+        let reg = SharedRegistry::new_for_test(make_config(false));
+        let id = reg
+            .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
+            .expect("insert succeeds");
+        let entry = reg.lookup(id).expect("entry exists");
+        reg.record_op(&entry);
+        assert_eq!(entry.ops.load(Ordering::Relaxed), 0);
+
+        // metrics_enabled = true ⇒ ops increments.
+        let reg = SharedRegistry::new_for_test(make_config(true));
+        let id = reg
+            .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
+            .expect("insert succeeds");
+        let entry = reg.lookup(id).expect("entry exists");
+        reg.record_op(&entry);
+        assert_eq!(entry.ops.load(Ordering::Relaxed), 1);
     }
 }
