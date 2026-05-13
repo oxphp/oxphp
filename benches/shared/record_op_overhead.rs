@@ -64,16 +64,19 @@ fn setup_entries() -> EntryIds {
 }
 
 fn ensure_registry() {
-    // metrics_enabled is set to false here even though it does not
-    // currently gate record_op — that gap is part of what the bench
-    // measures. introspection_enabled is also false to avoid any
-    // background sampling work interfering with measurements.
+    // metrics_enabled is `true` so the V1 (current FFI) variant
+    // exercises the post-fix hot path with record_op enabled — this
+    // is what production runs by default. The V3 (no_record_op)
+    // hand-rolled variant remains in the bench as the upper-bound
+    // estimate for the metrics_enabled = false configuration.
+    // introspection_enabled stays off to avoid background sampling
+    // work interfering with measurements.
     init_registry(SharedConfig {
         enabled: true,
         max_entries: 1_000_000,
         max_bytes: 1 << 30,
         soft_limit_ratio: 0.7,
-        metrics_enabled: false,
+        metrics_enabled: true,
         introspection_enabled: false,
         introspection_preview_enabled: false,
         cycle_detect_depth: 16,
