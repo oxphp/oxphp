@@ -191,3 +191,9 @@ name = "pool_uncontested"
 path = "benches/shared/pool_uncontested.rs"
 harness = false
 required-features = ["plugin-shared"]
+
+[[bench]]
+name = "record_op_overhead"
+path = "benches/shared/record_op_overhead.rs"
+harness = false
+required-features = ["plugin-shared"]
