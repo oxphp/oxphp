@@ -149,6 +149,10 @@ $sapi = php_sapi_name();              // "cli-server"
   - `Dockerfile.best.example` → `examples/dockerfile/Dockerfile` (copy-and-adapt template for downstream users; also adds a sibling `README.md`).
   No `Dockerfile*` remains in the repo root, so a stray `docker build .` no longer accidentally kicks off the dev build. Update any tooling that referenced the old paths.
 
+### Performance
+
+- Reduced per-call overhead of `Shared\*` primitive operations: one DashMap lookup per call instead of two. The `ox_shared.metrics_enabled` config setting now functions as a runtime opt-out for per-entry operation counters; when `false`, `Entry::ops` stays at 0 and observability snapshots reflect that.
+
 ### Fixed
 
 - `Request::startTime(true)` and `oxphp_server_info()['request_time']` now agree across all SAPI modes and lifecycle phases. Both return `0.0` when no HTTP request is being processed — during worker boot (top-level code in the entry script before `oxphp_worker()` enters its receive loop) and between requests in worker mode — and the request start timestamp during request handling. Previously the worker-mode field leaked the worker thread's spawn time during boot and the previous request's timestamp between requests, while traditional mode left it set to the last finished request after `php_request_shutdown`. Code that reads either API outside an active request (boot-phase initialization, async callbacks running between requests) will now observe `0.0` instead of a misleading non-zero value. OPcache and other RSHUTDOWN consumers of `sapi_get_request_time()` still see a valid timestamp because the field is reseated to the current wall-clock time immediately before the worker's final `php_request_shutdown`.
