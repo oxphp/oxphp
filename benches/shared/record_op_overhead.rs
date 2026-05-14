@@ -179,6 +179,22 @@ fn bench_atomic_single(c: &mut Criterion, ids: EntryIds) {
         });
     });
 
+    // V4 raw_ptr — Arc<Entry> resolved once up front; the timed body
+    // is the pointer-dereference hot path the pointer-based handle
+    // will ship. No DashMap, no Arc::clone inside the loop.
+    {
+        let entry = reg.lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
+            b.iter(|| {
+                let inner: &AtomicInner =
+                    entry.inner.as_any_atomic().expect("type matches");
+                let v = inner.load(Ordering::Relaxed);
+                entry.ops.fetch_add(1, Ordering::Relaxed);
+                criterion::black_box(v);
+            });
+        });
+    }
+
     group.finish();
 }
 
@@ -232,6 +248,23 @@ fn bench_atomic_multi(c: &mut Criterion, ids: EntryIds) {
                     let entry = reg.lookup(id).expect("entry exists");
                     let inner: &AtomicInner = entry.inner.as_any_atomic().expect("type matches");
                     let v = inner.load(Ordering::Relaxed);
+                    criterion::black_box(v);
+                })
+            });
+        });
+
+        // V4 raw_ptr — shared Arc<Entry> cloned into the closure;
+        // every thread dereferences the same Arc, exactly as the
+        // pointer-based handle will.
+        let entry_v4 = registry().lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", n), |b| {
+            b.iter_custom(|iters| {
+                let entry = std::sync::Arc::clone(&entry_v4);
+                run_threads(n, iters, move || {
+                    let inner: &AtomicInner =
+                        entry.inner.as_any_atomic().expect("type matches");
+                    let v = inner.load(Ordering::Relaxed);
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
             });
@@ -290,6 +323,21 @@ fn bench_counter(c: &mut Criterion, ids: EntryIds) {
         });
     }
 
+    // V4 raw_ptr
+    {
+        let reg = registry();
+        let entry = reg.lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
+            b.iter(|| {
+                let inner: &CounterInner =
+                    entry.inner.as_any_counter().expect("type matches");
+                let v = inner.add(1);
+                entry.ops.fetch_add(1, Ordering::Relaxed);
+                criterion::black_box(v);
+            });
+        });
+    }
+
     for &n in &[4usize, 8usize] {
         let bare_multi = Arc::new(AtomicI64::new(0));
         group.bench_function(BenchmarkId::new("bare", n), |b| {
@@ -329,6 +377,21 @@ fn bench_counter(c: &mut Criterion, ids: EntryIds) {
                     let entry = reg.lookup(id).expect("entry exists");
                     let inner: &CounterInner = entry.inner.as_any_counter().expect("type matches");
                     let v = inner.add(1);
+                    criterion::black_box(v);
+                })
+            });
+        });
+
+        // V4 raw_ptr
+        let entry_v4 = registry().lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", n), |b| {
+            b.iter_custom(|iters| {
+                let entry = std::sync::Arc::clone(&entry_v4);
+                run_threads(n, iters, move || {
+                    let inner: &CounterInner =
+                        entry.inner.as_any_counter().expect("type matches");
+                    let v = inner.add(1);
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
             });
@@ -383,6 +446,21 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
         });
     }
 
+    // V4 raw_ptr
+    {
+        let reg = registry();
+        let entry = reg.lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
+            b.iter(|| {
+                let inner: &FlagInner =
+                    entry.inner.as_any_flag().expect("type matches");
+                let v = inner.test();
+                entry.ops.fetch_add(1, Ordering::Relaxed);
+                criterion::black_box(v);
+            });
+        });
+    }
+
     for &n in &[4usize, 8usize] {
         let bare_multi = Arc::new(AtomicBool::new(false));
         group.bench_function(BenchmarkId::new("bare", n), |b| {
@@ -422,6 +500,21 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
                     let entry = reg.lookup(id).expect("entry exists");
                     let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
                     let v = inner.test();
+                    criterion::black_box(v);
+                })
+            });
+        });
+
+        // V4 raw_ptr
+        let entry_v4 = registry().lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", n), |b| {
+            b.iter_custom(|iters| {
+                let entry = std::sync::Arc::clone(&entry_v4);
+                run_threads(n, iters, move || {
+                    let inner: &FlagInner =
+                        entry.inner.as_any_flag().expect("type matches");
+                    let v = inner.test();
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
             });
@@ -476,6 +569,21 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
         });
     }
 
+    // V4 raw_ptr
+    {
+        let reg = registry();
+        let entry = reg.lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
+            b.iter(|| {
+                let inner: &OnceInner =
+                    entry.inner.as_any_once().expect("type matches");
+                let v = inner.is_initialized();
+                entry.ops.fetch_add(1, Ordering::Relaxed);
+                criterion::black_box(v);
+            });
+        });
+    }
+
     for &n in &[4usize, 8usize] {
         let bare_multi = Arc::new(AtomicBool::new(false));
         group.bench_function(BenchmarkId::new("bare", n), |b| {
@@ -515,6 +623,21 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
                     let entry = reg.lookup(id).expect("entry exists");
                     let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
                     let v = inner.is_initialized();
+                    criterion::black_box(v);
+                })
+            });
+        });
+
+        // V4 raw_ptr
+        let entry_v4 = registry().lookup(id).expect("entry exists");
+        group.bench_function(BenchmarkId::new("raw_ptr", n), |b| {
+            b.iter_custom(|iters| {
+                let entry = std::sync::Arc::clone(&entry_v4);
+                run_threads(n, iters, move || {
+                    let inner: &OnceInner =
+                        entry.inner.as_any_once().expect("type matches");
+                    let v = inner.is_initialized();
+                    entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
             });
@@ -590,7 +713,7 @@ const GROUPS: &[&str] = &[
     "flag_test",
     "once_is_initialized",
 ];
-const VARIANTS: &[&str] = &["bare", "current", "one_lookup", "no_record_op"];
+const VARIANTS: &[&str] = &["bare", "current", "one_lookup", "no_record_op", "raw_ptr"];
 
 fn print_summary() {
     let host_cpus = std::thread::available_parallelism()
@@ -602,6 +725,7 @@ fn print_summary() {
     let mut current_vs_bare_8t = Vec::new();
     let mut current_vs_no_record_op_8t = Vec::new();
     let mut v2_vs_v3_8t = Vec::new();
+    let mut current_vs_raw_ptr_8t = Vec::new();
 
     for group in GROUPS {
         println!();
@@ -629,6 +753,7 @@ fn print_summary() {
         let current_8t = read_mean_ns(group, "current", 8);
         let one_lookup_8t = read_mean_ns(group, "one_lookup", 8);
         let no_record_op_8t = read_mean_ns(group, "no_record_op", 8);
+        let raw_ptr_8t = read_mean_ns(group, "raw_ptr", 8);
 
         if let (Some(c), Some(b)) = (current_8t, bare_8t) {
             if b > 0.0 {
@@ -643,6 +768,11 @@ fn print_summary() {
         if let (Some(v2), Some(v3)) = (one_lookup_8t, no_record_op_8t) {
             if v3 > 0.0 {
                 v2_vs_v3_8t.push(v2 / v3);
+            }
+        }
+        if let (Some(c), Some(rp)) = (current_8t, raw_ptr_8t) {
+            if rp > 0.0 {
+                current_vs_raw_ptr_8t.push(c / rp);
             }
         }
     }
@@ -660,6 +790,10 @@ fn print_summary() {
     println!(
         "  one_lookup vs no_record_op: {}   <- record_op overhead w/o 2nd lookup",
         fmt_ratio(geomean(&v2_vs_v3_8t), Some(1.0))
+    );
+    println!(
+        "  current vs raw_ptr:         {}   <- GO if >= 1.25x (>=25% faster)",
+        fmt_ratio(geomean(&current_vs_raw_ptr_8t), Some(1.0))
     );
     println!();
 }
