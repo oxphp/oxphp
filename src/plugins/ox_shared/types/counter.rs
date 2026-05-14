@@ -21,6 +21,12 @@ impl CounterInner {
         }
     }
 
+    // All Counter ops use SeqCst by contract: the value participates in a
+    // single global modification order, so PHP code may treat a Counter as
+    // a synchronisation point (write payload, then bump; a reader who sees
+    // the bump sees the payload). Stronger than a bare metric needs — kept
+    // deliberately so the public contract is one sentence. Do not weaken
+    // without updating the public Counter stubs and CHANGELOG.
     pub fn get(&self) -> i64 {
         self.value.load(Ordering::SeqCst)
     }

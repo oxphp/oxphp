@@ -256,7 +256,11 @@ impl SharedRegistry {
         // bounded by per-instance caps inside each type.
         let mem = inner.mem_bytes().saturating_add(ENTRY_FIXED_OVERHEAD);
 
-        // Reserve an entries slot.
+        // Reserve an entries slot. Relaxed: `total_entries` is a pure
+        // accumulator for the cap-check — it establishes no happens-before
+        // with the inserted Entry. The Entry becomes visible to other
+        // threads through `self.entries.insert` below, whose DashMap shard
+        // lock carries its own ordering.
         let new_count = self.total_entries.fetch_add(1, Ordering::Relaxed) + 1;
         if new_count as usize > self.config.max_entries {
             self.total_entries.fetch_sub(1, Ordering::Relaxed);
@@ -312,6 +316,9 @@ impl SharedRegistry {
         if !self.config.metrics_enabled {
             return;
         }
+        // Relaxed: `ops` is a pure metric counter, never read for
+        // synchronisation — unlike `ext_refcount`, which is a lifecycle
+        // guard and therefore uses AcqRel.
         entry.ops.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -383,6 +390,12 @@ impl SharedRegistry {
             if cur == 0 {
                 return -1;
             }
+            // AcqRel on success: `ext_refcount` is the entry's lifecycle
+            // guard, not a metric. The Acquire half pairs with the Release
+            // in `release`'s `fetch_sub` so a retained entry observes every
+            // prior holder's writes; the Release half publishes this retain
+            // to the thread that will eventually evict. Acquire on failure
+            // re-reads a coherent `cur` for the next CAS attempt.
             match e.ext_refcount.compare_exchange_weak(
                 cur,
                 cur + 1,
@@ -399,6 +412,12 @@ impl SharedRegistry {
     /// entry is evicted from the registry (on_drop fires, totals adjust).
     /// Returns the new count, or -1 if the entry does not exist.
     pub fn release(&self, id: SharedId) -> i32 {
+        // AcqRel: the Release half publishes this thread's writes to whoever
+        // drops the last ref; the Acquire half ensures the thread that sees
+        // `prev == 1` observes every other holder's writes before it runs
+        // `on_drop` and evicts. Stronger than Arc's Release + Acquire-fence
+        // pattern (the fence is folded into the RMW), kept uniform with
+        // `retain` so the refcount has one consistent ordering story.
         let prev = match self.entries.get(&id) {
             Some(e) => e.ext_refcount.fetch_sub(1, Ordering::AcqRel),
             None => return -1,
