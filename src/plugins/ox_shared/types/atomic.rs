@@ -70,7 +70,10 @@ impl SharedInner for AtomicInner {
         self
     }
     fn debug_snapshot(&self) -> SharedValue {
-        SharedValue::Long(self.load(Ordering::SeqCst))
+        // Relaxed: introspection-only read. Unlike the user-facing `load()`,
+        // this never participates in a happens-before the caller controls,
+        // so a stronger ordering would add a barrier for nothing.
+        SharedValue::Long(self.load(Ordering::Relaxed))
     }
     fn mem_bytes(&self) -> usize {
         // Content only. Per-entry registry overhead (Arc<Entry>,
