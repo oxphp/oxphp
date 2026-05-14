@@ -46,6 +46,9 @@ impl SharedInner for CounterInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Counter
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         SharedValue::Long(self.get())
     }
@@ -175,17 +178,7 @@ pub trait SharedInnerCounterExt {
 
 impl SharedInnerCounterExt for dyn SharedInner {
     fn as_any_counter(&self) -> Option<&CounterInner> {
-        if self.type_tag() == SharedType::Counter {
-            // SAFETY: type_tag() == Counter guarantees the concrete type is
-            // CounterInner. Casting a `*const dyn SharedInner` fat pointer to
-            // `*const CounterInner` yields the data pointer, which is the
-            // address of the CounterInner allocation. Sound as long as
-            // SharedType::Counter is only ever used with CounterInner — enforced
-            // by the sole insertion site in oxphp_shared_counter_create.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const CounterInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<CounterInner>()
     }
 }
 

@@ -718,6 +718,10 @@ impl SharedInner for PoolInner {
         SharedType::Pool
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn debug_snapshot(&self) -> SharedValue {
         // Matches MapInner's pattern: expose the primary gauge as
         // Long. /entry surfaces it as `type_specific.size`.
@@ -799,22 +803,16 @@ impl SharedInner for PoolInner {
 
 // Helper trait for downcasting `Arc<dyn SharedInner>` to `&PoolInner`.
 // Mirrors the `SharedInnerChannelExt` / `SharedInnerMapExt` pattern so
-// the FFI can resolve a PoolId → &PoolInner without juggling
-// `Any`. Implemented on `dyn SharedInner` (bare, no `+ Send + Sync`)
-// to match the actual trait-object type stored in `Entry.inner`.
+// the FFI can resolve a PoolId → &PoolInner. Implemented on
+// `dyn SharedInner` (bare, no `+ Send + Sync`) to match the actual
+// trait-object type stored in `Entry.inner`.
 pub trait SharedInnerPoolExt {
     fn as_any_pool(&self) -> Option<&PoolInner>;
 }
 
 impl SharedInnerPoolExt for dyn SharedInner {
     fn as_any_pool(&self) -> Option<&PoolInner> {
-        if self.type_tag() == SharedType::Pool {
-            // SAFETY: SharedType::Pool guarantees the concrete type
-            // stored behind this `dyn SharedInner` is `PoolInner`.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const PoolInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<PoolInner>()
     }
 }
 
@@ -2958,35 +2956,37 @@ mod tests {
     }
 
     /// Pins the contract that `try_reserve_budget` / `release_budget`
-    /// propagate per-slot growth into `SharedRegistry::total_bytes`.
-    /// Counterpart to `map_set_grows_registry_total_bytes` / `channel_
-    /// send_recv_track_registry_total_bytes` — exercises the same
-    /// `adjust_mem_bytes` plumbing via `track_slot_delta`.
+    /// propagate per-slot growth through `adjust_mem_bytes` via
+    /// `track_slot_delta`. Counterpart to `map_set_grows_registry_
+    /// entry_bytes` / `channel_send_recv_track_registry_entry_bytes`.
+    ///
+    /// Asserts against `Entry::mem_bytes`, not registry-global
+    /// `total_bytes` — see `SharedRegistry::total_bytes` for why.
     #[test]
-    fn pool_reserve_release_track_registry_total_bytes() {
+    fn pool_reserve_release_track_registry_entry_bytes() {
         let reg = ensure_registry();
         let id = register_pool(8);
         let entry = reg.lookup(id).expect("pool was just inserted");
         let pool = (*entry.inner).as_any_pool().expect("downcast");
 
-        let baseline = reg.total_bytes();
+        let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for _ in 0..4 {
             assert!(pool.try_reserve_budget());
         }
-        let grown = reg.total_bytes();
+        let grown = entry.mem_bytes.load(Ordering::Relaxed);
         assert_eq!(
             grown - baseline,
-            (4 * POOL_PER_SLOT_BYTES) as u64,
-            "total_bytes must grow by 4 × POOL_PER_SLOT_BYTES"
+            (4 * POOL_PER_SLOT_BYTES) as usize,
+            "entry mem_bytes must grow by 4 × POOL_PER_SLOT_BYTES"
         );
 
         for _ in 0..4 {
             pool.release_budget();
         }
         assert_eq!(
-            reg.total_bytes(),
+            entry.mem_bytes.load(Ordering::Relaxed),
             baseline,
-            "total_bytes must return to baseline after symmetric releases"
+            "entry mem_bytes must return to baseline after symmetric releases"
         );
 
         reg.release(id);

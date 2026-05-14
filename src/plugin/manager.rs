@@ -115,7 +115,7 @@ impl PluginManager {
         // is a simple linear scan. Called once after every plugin has had a
         // chance to register its prefixes.
         self.internal_route_prefixes
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            .sort_by_key(|p| std::cmp::Reverse(p.0.len()));
 
         Ok(())
     }
@@ -700,7 +700,7 @@ mod tests {
         ));
         manager
             .internal_route_prefixes
-            .sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+            .sort_by_key(|p| std::cmp::Reverse(p.0.len()));
         let headers = http::HeaderMap::new();
         let req = PluginInternalRequest {
             method: &http::Method::GET,

@@ -136,6 +136,9 @@ impl SharedInner for OnceInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Once
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         self.value.get().cloned().unwrap_or(SharedValue::Null)
     }
@@ -155,17 +158,7 @@ pub trait SharedInnerOnceExt {
 
 impl SharedInnerOnceExt for dyn SharedInner {
     fn as_any_once(&self) -> Option<&OnceInner> {
-        if self.type_tag() == SharedType::Once {
-            // SAFETY: SharedType::Once guarantees the concrete type is OnceInner.
-            // Casting a `*const dyn SharedInner` fat pointer to `*const OnceInner`
-            // yields the data pointer, which is the address of the OnceInner
-            // allocation. Sound as long as SharedType::Once is only ever used with
-            // OnceInner — enforced by the sole insertion site in
-            // oxphp_shared_once_create.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const OnceInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<OnceInner>()
     }
 }
 

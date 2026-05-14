@@ -59,6 +59,9 @@ impl SharedInner for MutexInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Mutex
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         self.try_snapshot()
     }
@@ -75,12 +78,7 @@ pub trait SharedInnerMutexExt {
 
 impl SharedInnerMutexExt for dyn SharedInner {
     fn as_any_mutex(&self) -> Option<&MutexInner> {
-        if self.type_tag() == SharedType::Mutex {
-            // SAFETY: SharedType::Mutex guarantees the inner is MutexInner.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const MutexInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<MutexInner>()
     }
 }
 

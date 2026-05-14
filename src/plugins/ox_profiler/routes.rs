@@ -161,7 +161,7 @@ impl ProfilerRouter {
             .filter(|l| !l.trim().is_empty())
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
-        runs.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+        runs.sort_by_key(|r| std::cmp::Reverse(r.timestamp_ms));
         let total = runs.len();
         let page: Vec<_> = runs.into_iter().skip(offset).take(limit).collect();
         let body = serde_json::json!({

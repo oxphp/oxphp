@@ -3311,11 +3311,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             id_map.swap_remove(winner_idx);
             cancel_map.swap_remove(winner_idx);
             drop(rxs.swap_remove(winner_idx)); // already consumed via poll
-            for ((id, cancelled), rx) in id_map
-                .into_iter()
-                .zip(cancel_map.into_iter())
-                .zip(rxs.into_iter())
-            {
+            for ((id, cancelled), rx) in id_map.into_iter().zip(cancel_map).zip(rxs) {
                 store_promise(id, rx, cancelled);
             }
 
@@ -3378,11 +3374,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             // (the per-promise block_on budget). Tracked via
             // async_tasks_stranded so the stall risk shows up in metrics.
             let stranded_count = rxs.len() as u64;
-            for ((id, rx), cancelled) in id_map
-                .into_iter()
-                .zip(rxs.into_iter())
-                .zip(cancel_map.into_iter())
-            {
+            for ((id, rx), cancelled) in id_map.into_iter().zip(rxs).zip(cancel_map) {
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                 stash_stranded(id, rx, cancelled);
             }
@@ -3461,7 +3453,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 for ((taken_id, rx), cancelled) in id_vec
                     .iter()
                     .copied()
-                    .zip(rxs.into_iter())
+                    .zip(rxs)
                     .zip(cancel_vec.iter().cloned())
                 {
                     store_promise(taken_id, rx, cancelled);
@@ -3483,7 +3475,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             for ((id, rx), cancelled) in id_vec
                 .iter()
                 .copied()
-                .zip(rxs.into_iter())
+                .zip(rxs)
                 .zip(cancel_vec.iter().cloned())
             {
                 store_promise(id, rx, cancelled);
@@ -3618,11 +3610,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             // hold exactly the still-pending non-winner non-rejected entries
             // (race_fut swap_removed both rejected and the winning entry
             // before returning).
-            for ((id, rx), cancelled) in id_vec
-                .into_iter()
-                .zip(rxs.into_iter())
-                .zip(cancel_vec.into_iter())
-            {
+            for ((id, rx), cancelled) in id_vec.into_iter().zip(rxs).zip(cancel_vec) {
                 store_promise(id, rx, cancelled);
             }
             cleanup_promise(winner_id);
@@ -3664,11 +3652,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             // instead of running to completion.
             let pending_ids: Vec<i64> = id_vec.iter().map(|&id| id as i64).collect();
             let stranded_count = pending_ids.len() as u64;
-            for ((id, rx), cancelled) in id_vec
-                .into_iter()
-                .zip(rxs.into_iter())
-                .zip(cancel_vec.into_iter())
-            {
+            for ((id, rx), cancelled) in id_vec.into_iter().zip(rxs).zip(cancel_vec) {
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                 stash_stranded(id, rx, cancelled);
             }

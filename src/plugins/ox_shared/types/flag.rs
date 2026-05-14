@@ -50,6 +50,9 @@ impl SharedInner for FlagInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Flag
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         SharedValue::Bool(self.test())
     }
@@ -190,15 +193,7 @@ pub trait SharedInnerFlagExt {
 
 impl SharedInnerFlagExt for dyn SharedInner {
     fn as_any_flag(&self) -> Option<&FlagInner> {
-        if self.type_tag() == SharedType::Flag {
-            // SAFETY: type_tag() == Flag guarantees the concrete type is
-            // FlagInner. Sound as long as SharedType::Flag is only ever used
-            // with FlagInner — enforced by the sole insertion site in
-            // oxphp_shared_flag_create.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const FlagInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<FlagInner>()
     }
 }
 
