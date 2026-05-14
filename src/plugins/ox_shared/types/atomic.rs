@@ -66,6 +66,9 @@ impl SharedInner for AtomicInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Atomic
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         SharedValue::Long(self.load(Ordering::SeqCst))
     }
@@ -82,29 +85,13 @@ impl SharedInner for AtomicInner {
 // Helper trait for downcasting `Arc<dyn SharedInner>` to `&AtomicInner`.
 // Implemented on `dyn SharedInner` (not `+ Send + Sync`) to match `Entry.inner`'s
 // actual trait-object type.
-//
-// NOTE: this mirrors the pre-existing fat-pointer-cast pattern used by every
-// other Shared\* type (`SharedInnerCounterExt`, `SharedInnerChannelExt`, etc.).
-// The idiomatic alternative is to add `fn as_any(&self) -> &dyn Any` on the
-// `SharedInner` trait and use `Any::downcast_ref`; that's a worthwhile cleanup
-// across the whole module but out of scope for the Atomic introduction.
 pub trait SharedInnerAtomicExt {
     fn as_any_atomic(&self) -> Option<&AtomicInner>;
 }
 
 impl SharedInnerAtomicExt for dyn SharedInner {
     fn as_any_atomic(&self) -> Option<&AtomicInner> {
-        if self.type_tag() == SharedType::Atomic {
-            // SAFETY: type_tag() == Atomic guarantees the concrete type is
-            // AtomicInner. Casting a `*const dyn SharedInner` fat pointer to
-            // `*const AtomicInner` yields the data pointer, which is the
-            // address of the AtomicInner allocation. Sound as long as
-            // SharedType::Atomic is only ever used with AtomicInner — enforced
-            // by the sole insertion site in oxphp_shared_atomic_create.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const AtomicInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<AtomicInner>()
     }
 }
 

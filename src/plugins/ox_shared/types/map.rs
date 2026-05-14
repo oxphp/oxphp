@@ -656,6 +656,10 @@ impl SharedInner for MapInner {
         SharedType::Map
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn debug_snapshot(&self) -> SharedValue {
         // Per spec §mem_bytes: key count exposed as Long for
         // /__ox_shared/entry — users see entry.type_specific.key_count.
@@ -1646,24 +1650,14 @@ pub unsafe extern "C" fn oxphp_shared_map_update_many(
 }
 
 /// Downcast helper mirroring `SharedInnerCounterExt` — used by the FFI
-/// functions above. Sound because `SharedType::Map` is only ever paired
-/// with a `MapInner` allocation at the sole `oxphp_shared_map_create`
-/// insertion site.
+/// functions above.
 pub trait SharedInnerMapExt {
     fn as_any_map(&self) -> Option<&MapInner>;
 }
 
 impl SharedInnerMapExt for dyn SharedInner {
     fn as_any_map(&self) -> Option<&MapInner> {
-        if self.type_tag() == SharedType::Map {
-            // SAFETY: type_tag() == Map guarantees concrete type == MapInner
-            // (insertion-site invariant). Casting a `*const dyn SharedInner`
-            // to `*const MapInner` yields the data half of the fat pointer,
-            // which is the address of the MapInner allocation.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const MapInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<MapInner>()
     }
 }
 
@@ -3624,32 +3618,37 @@ mod tests {
     }
 
     /// Pins the contract that `Map::set` propagates per-entry growth
-    /// into the registry's `total_bytes` accounting. Without dynamic
-    /// updates, an empty Map's `Entry::mem_bytes` stays frozen at
-    /// insert-time, so an attacker that pushes thousands of entries
-    /// can grow the container far past `OX_SHARED_MAX_BYTES` while the
-    /// operator's gauges show the original 128 B base footprint.
+    /// into the registry's byte accounting. Without dynamic updates,
+    /// an empty Map's `Entry::mem_bytes` stays frozen at insert-time,
+    /// so an attacker that pushes thousands of entries can grow the
+    /// container far past `OX_SHARED_MAX_BYTES` while the operator's
+    /// gauges show the original 128 B base footprint.
+    ///
+    /// Asserts against `Entry::mem_bytes`, not registry-global
+    /// `total_bytes` — see `SharedRegistry::total_bytes` for why.
     #[test]
-    fn map_set_grows_registry_total_bytes() {
+    fn map_set_grows_registry_entry_bytes() {
         let reg = ensure_registry();
         let (map_arc, map_id) = bootstrap_map(reg, None);
         let m = (*map_arc).as_any_map().unwrap();
 
-        let baseline = reg.total_bytes();
+        let entry = reg.lookup(map_id).expect("entry present after insert");
+
+        let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for i in 0..32u64 {
             m.set(k(&format!("key{i:03}")), SharedValue::Long(i as i64))
                 .unwrap();
         }
-        let grown = reg.total_bytes();
+        let grown = entry.mem_bytes.load(Ordering::Relaxed);
 
         assert!(
             grown > baseline,
-            "total_bytes ({grown}) must exceed baseline ({baseline}) after 32 set()s"
+            "entry mem_bytes ({grown}) must exceed baseline ({baseline}) after 32 set()s"
         );
 
         // Each entry contributes ≥ 64 (slot) + 16 (key) + 6 (key.len for
         // "keyNNN") + 8 (Long value) = 94 B. Lower-bound the growth.
-        let min_growth = 32 * 94;
+        let min_growth: usize = 32 * 94;
         assert!(
             grown - baseline >= min_growth,
             "growth ({}) below conservative lower bound ({min_growth})",
@@ -3661,9 +3660,9 @@ mod tests {
             m.remove(&format!("key{i:03}"));
         }
         assert_eq!(
-            reg.total_bytes(),
+            entry.mem_bytes.load(Ordering::Relaxed),
             baseline,
-            "total_bytes must return to baseline after symmetric removes"
+            "entry mem_bytes must return to baseline after symmetric removes"
         );
 
         m.clear();

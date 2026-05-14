@@ -146,8 +146,15 @@ impl std::fmt::Debug for Entry {
     }
 }
 
-pub trait SharedInner: Send + Sync + 'static {
+pub trait SharedInner: std::any::Any + Send + Sync + 'static {
     fn type_tag(&self) -> SharedType;
+
+    /// Upcast to `&dyn Any` so callers can `downcast_ref` to the concrete
+    /// `*Inner` type. This is the soundness-safe replacement for casting the
+    /// `dyn SharedInner` fat pointer to a thin `*const ConcreteInner`: a
+    /// `TypeId` mismatch yields `None` instead of a read at a wrong offset.
+    fn as_any(&self) -> &dyn std::any::Any;
+
     fn debug_snapshot(&self) -> SharedValue;
     fn mem_bytes(&self) -> usize;
     fn on_drop(&self) {}
@@ -201,6 +208,15 @@ impl SharedRegistry {
         self.total_entries.load(Ordering::Relaxed)
     }
 
+    /// Registry-wide sum of every entry's `mem_bytes`.
+    ///
+    /// This is shared mutable state: under a parallel test run, entries
+    /// created by *other* tests mutate it concurrently. A test that
+    /// needs an exact byte delta from a single operation must therefore
+    /// read the relevant `Entry::mem_bytes` instead — that counter is
+    /// touched only by the entity owning the id, so the delta is
+    /// deterministic. See the `*_track_registry_entry_bytes` tests in
+    /// the type modules for the pattern.
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes.load(Ordering::Relaxed)
     }
@@ -222,6 +238,17 @@ impl SharedRegistry {
         type_tag: SharedType,
         inner: Arc<dyn SharedInner>,
     ) -> Result<SharedId, SharedError> {
+        // The caller passes `type_tag` separately from `inner`; they must
+        // agree, otherwise downcasts via `as_any().downcast_ref()` would
+        // silently return `None` for a value that is actually present.
+        debug_assert_eq!(
+            type_tag,
+            inner.type_tag(),
+            "type_tag mismatch: caller passed {:?}, inner reports {:?}",
+            type_tag,
+            inner.type_tag()
+        );
+
         // Inner content + per-entry overhead (storage chain around the
         // inner value — see ENTRY_FIXED_OVERHEAD doc). Saturating-add
         // keeps the arithmetic robust against a pathological inner that
@@ -537,6 +564,9 @@ mod tests {
         fn type_tag(&self) -> SharedType {
             SharedType::Counter
         }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         fn debug_snapshot(&self) -> SharedValue {
             SharedValue::Null
         }
@@ -577,6 +607,15 @@ mod tests {
         assert_eq!(reg.type_tag(id), Some(SharedType::Counter));
         let e = reg.lookup(id).unwrap();
         assert_eq!(e.type_tag, SharedType::Counter);
+    }
+
+    #[test]
+    #[should_panic(expected = "type_tag mismatch")]
+    fn insert_rejects_type_tag_mismatch() {
+        // TestInner::type_tag() reports Counter; inserting it under a
+        // different tag must trip the debug_assert in `insert`.
+        let reg = fresh_registry();
+        let _ = reg.insert(SharedType::Atomic, Arc::new(TestInner { bytes: 8 }));
     }
 
     #[test]

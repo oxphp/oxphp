@@ -828,6 +828,9 @@ impl SharedInner for ChannelInner {
     fn type_tag(&self) -> SharedType {
         SharedType::Channel
     }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     fn debug_snapshot(&self) -> SharedValue {
         SharedValue::Long(self.pending() as i64)
     }
@@ -852,18 +855,7 @@ pub trait SharedInnerChannelExt {
 
 impl SharedInnerChannelExt for dyn SharedInner {
     fn as_any_channel(&self) -> Option<&ChannelInner> {
-        if self.type_tag() == SharedType::Channel {
-            // SAFETY: SharedType::Channel guarantees the concrete type
-            // is ChannelInner. Casting a `*const dyn SharedInner` fat
-            // pointer to `*const ChannelInner` yields the data pointer,
-            // which is the address of the ChannelInner allocation. Sound
-            // as long as SharedType::Channel is only ever used with
-            // ChannelInner — enforced by the sole insertion site in
-            // oxphp_shared_channel_create.
-            Some(unsafe { &*(self as *const dyn SharedInner as *const ChannelInner) })
-        } else {
-            None
-        }
+        self.as_any().downcast_ref::<ChannelInner>()
     }
 }
 
@@ -3468,12 +3460,14 @@ mod tests {
     }
 
     /// Pins the contract that `try_send` / `try_recv` propagate per-
-    /// payload growth into `SharedRegistry::total_bytes`. Counterpart
-    /// to `map_set_grows_registry_total_bytes` in map.rs — exercises
-    /// the same `adjust_mem_bytes` plumbing via the Channel's
-    /// `bump_pending` / `drop_pending` helpers.
+    /// payload growth through `adjust_mem_bytes` via the Channel's
+    /// `bump_pending` / `drop_pending` helpers. Counterpart to
+    /// `map_set_grows_registry_entry_bytes` in map.rs.
+    ///
+    /// Asserts against `Entry::mem_bytes`, not registry-global
+    /// `total_bytes` — see `SharedRegistry::total_bytes` for why.
     #[test]
-    fn channel_send_recv_track_registry_total_bytes() {
+    fn channel_send_recv_track_registry_entry_bytes() {
         ensure_test_registry();
         let reg = registry();
 
@@ -3484,15 +3478,17 @@ mod tests {
         let ch = (*inner).as_any_channel().expect("downcast");
         ch.bind_id(id);
 
-        let baseline = reg.total_bytes();
+        let entry = reg.lookup(id).expect("entry present after insert");
+
+        let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for i in 0..4u8 {
             ch.try_send(vec![i]).expect("buffer has room");
         }
-        let grown = reg.total_bytes();
+        let grown = entry.mem_bytes.load(Ordering::Relaxed);
         assert_eq!(
             grown - baseline,
-            (4 * CHANNEL_PER_PAYLOAD_BYTES) as u64,
-            "total_bytes must grow by 4 × CHANNEL_PER_PAYLOAD_BYTES"
+            (4 * CHANNEL_PER_PAYLOAD_BYTES) as usize,
+            "entry mem_bytes must grow by 4 × CHANNEL_PER_PAYLOAD_BYTES"
         );
 
         for _ in 0..4 {
@@ -3501,9 +3497,9 @@ mod tests {
                 .expect("not closed-and-empty");
         }
         assert_eq!(
-            reg.total_bytes(),
+            entry.mem_bytes.load(Ordering::Relaxed),
             baseline,
-            "total_bytes must return to baseline after symmetric recvs"
+            "entry mem_bytes must return to baseline after symmetric recvs"
         );
 
         reg.release(id);

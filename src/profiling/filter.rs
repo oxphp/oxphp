@@ -211,6 +211,10 @@ fn resolve_one_scope(
                     spec.sample_rate = Some(1.0);
                 }
             }
+            // The `not(php)` arm body is a lone `if`, which clippy wants
+            // hoisted to a match guard; the `php` arm body is far larger,
+            // so a guard cannot be expressed across both cfg variants.
+            #[allow(clippy::collapsible_match)]
             ATTR_TAG => {
                 #[cfg(feature = "php")]
                 {

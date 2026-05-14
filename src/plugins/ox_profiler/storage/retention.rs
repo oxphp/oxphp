@@ -82,7 +82,7 @@ async fn sweep_once(
     }
 
     // Sort newest first; keep the head, drop the tail.
-    entries.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp_ms));
     let drop_tail: Vec<RunMeta> = entries.split_off(retention_count);
 
     // Rewrite index.json atomically — write tmp, rename over.
