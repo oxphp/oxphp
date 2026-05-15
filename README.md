@@ -353,6 +353,8 @@ All settings are via environment variables — no config files required.
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) |
 
+> **Note:** Invalid or out-of-range `OTEL_TRACES_SAMPLER_ARG` values are clamped to `[0.0, 1.0]` and logged at warn level. Unknown `OTEL_TRACES_SAMPLER` values fall back to `parentbased_traceidratio` and are logged.
+
 ### APM (`plugin-apm` feature)
 
 | Variable | Default | Description |

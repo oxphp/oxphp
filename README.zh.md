@@ -354,6 +354,8 @@ flowchart LR
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样器：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 采样比率（0.0-1.0） |
 
+> **注意：** 无效或超出范围的 `OTEL_TRACES_SAMPLER_ARG` 值会被钳制到 `[0.0, 1.0]` 并在 warn 级别记录日志。未知的 `OTEL_TRACES_SAMPLER` 值会回退到 `parentbased_traceidratio` 并记录日志。
+
 ### APM（`plugin-apm` 特性）
 
 | 变量 | 默认值 | 描述 |

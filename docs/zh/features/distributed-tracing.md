@@ -49,6 +49,8 @@ OTel 插件是编译时特性（`plugin-otel`）。启用时会自动设置 `TRA
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样策略：`always_on`、`always_off`、`traceidratio`、`parentbased_always_on`、`parentbased_always_off`、`parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 基于比例的采样器的采样率（0.0–1.0） |
 
+> **注意：** 无效或超出范围的 `OTEL_TRACES_SAMPLER_ARG` 值会被钳制到 `[0.0, 1.0]` 并在 warn 级别记录日志。未知的 `OTEL_TRACES_SAMPLER` 值会回退到 `parentbased_traceidratio` 并记录日志。
+
 ### APM 插件
 
 APM 插件是编译时特性（`plugin-apm`），依赖于 OTel 插件。它增加了自动插桩、`#[OxPHP\Apm\Trace]` 装饰器和 PHP 追踪 SDK。
@@ -466,7 +468,7 @@ OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.1   # 采样 10% 的追踪
 ```
 
-基于父级的采样意味着：如果传入请求携带已采样的追踪，则无论采样率如何都会被采样。在 OxPHP 发起的新追踪按配置的采样率进行采样。
+基于父级的采样意味着：如果传入请求携带已采样的追踪，则无论采样率如何都会被采样。在 OxPHP 发起的新追踪按配置的采样率进行采样。如果 `OTEL_TRACES_SAMPLER` 设置为未知值，OxPHP 会记录警告并回退到 `parentbased_traceidratio`。
 
 ## 参见
 

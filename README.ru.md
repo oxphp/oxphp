@@ -354,6 +354,8 @@ flowchart LR
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Семплер: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Коэффициент семплирования (0.0–1.0) |
 
+> **Примечание:** Невалидные значения и значения вне диапазона `OTEL_TRACES_SAMPLER_ARG` приводятся к `[0.0, 1.0]` и логируются на уровне warn. Неизвестные значения `OTEL_TRACES_SAMPLER` откатываются к `parentbased_traceidratio` и логируются.
+
 ### APM (feature `plugin-apm`)
 
 | Переменная | По умолчанию | Описание |
