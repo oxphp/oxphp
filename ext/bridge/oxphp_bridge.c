@@ -2607,8 +2607,9 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv);
 
 /* Forward declarations for Shared\* wrapper helpers (tag 7).
  * Full definitions live near the bottom of this file alongside
- * oxphp_is_shareable. Rust FFI exports (oxphp_shared_retain/release/
- * is_alive) are used by those helpers and by the serializer itself.
+ * oxphp_is_shareable. The Rust-side FFI exports below provide the
+ * pointer-based handle lifecycle used by the serializer and by
+ * cross-thread (de)serialization.
  *
  * Weak linkage: the bridge library is also dlopen()'d by a bare `php`
  * CLI invocation (via /usr/local/etc/php/conf.d/extension.ini), with
@@ -2618,14 +2619,16 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv);
  * call sites below are guarded by NULL checks or by semantic
  * invariants (cross-thread serialization only runs from oxphp's Rust
  * workers, never from CLI). */
-extern int oxphp_shared_retain(uint64_t id) __attribute__((weak));
-extern int oxphp_shared_release(uint64_t id) __attribute__((weak));
+extern const void *oxphp_shared_handle_clone(const void *entry_ptr) __attribute__((weak));
+extern void        oxphp_shared_handle_drop(const void *entry_ptr) __attribute__((weak));
+extern uint64_t    oxphp_shared_entry_id(const void *entry_ptr) __attribute__((weak));
+extern const void *oxphp_shared_handle_from_id(uint64_t id) __attribute__((weak));
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
-                                   uint64_t *out_shared_id);
+                                   const void **out_entry_ptr);
 int oxphp_shared_wrapper_new(zval *out,
                              uint8_t type_tag,
-                             uint64_t shared_id);
+                             const void *entry_ptr);
 
 static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
     if (portbuf_ensure(b, 16) != 0) return -1;
@@ -2700,29 +2703,30 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
                 portbuf_u8(b, 0);
                 break;
             }
-            uint8_t  type_tag;
-            uint64_t shared_id;
-            if (oxphp_plugin_get_shared_handle((zval *)zv, &type_tag, &shared_id) != 0) {
+            uint8_t     type_tag;
+            const void *entry_ptr;
+            if (oxphp_plugin_get_shared_handle((zval *)zv, &type_tag, &entry_ptr) != 0) {
                 /* Uninitialised or broken wrapper — serialize as null. */
                 portbuf_u8(b, 0);
                 break;
             }
-            if (portbuf_ensure(b, 1 + 1 + 8) != 0) return -1;
-            portbuf_u8(b, 7);
-            portbuf_u8(b, type_tag);
-            /* write shared_id (u64 host-endian — memcpy preserves host layout;
-             * serializer is intra-host only, all workers share endianness). */
-            memcpy(b->data + b->len, &shared_id, 8);
-            b->len += 8;
-            /* Sender-side retain; balanced by deserializer-side release.
-             * Weak-linked — if the oxphp Rust binary isn't in the process
-             * there is nothing to retain against; serialize as null. */
-            if (oxphp_shared_retain == NULL) {
-                b->len -= (1 + 1 + 8); /* roll back tag+type+id */
+            /* Need the wire id. If the Rust binary is absent (bare CLI
+             * dlopen), entry_id is unresolved — serialize as null. */
+            if (oxphp_shared_entry_id == NULL) {
                 portbuf_u8(b, 0);
                 break;
             }
-            oxphp_shared_retain(shared_id);
+            uint64_t shared_id = oxphp_shared_entry_id(entry_ptr);
+            if (portbuf_ensure(b, 1 + 1 + 8) != 0) return -1;
+            portbuf_u8(b, 7);
+            portbuf_u8(b, type_tag);
+            /* shared_id: u64 host-endian — intra-host transient buffer. */
+            memcpy(b->data + b->len, &shared_id, 8);
+            b->len += 8;
+            /* No sender-side retain: the source PHP object is alive for
+             * the whole serialization, so its Arc keeps the Weak in the
+             * registry upgradable. The receiver gets its own strong ref
+             * via oxphp_shared_handle_from_id. */
             break;
         }
         default:
@@ -2871,20 +2875,30 @@ static int portrd_deser_zval(portrd_t *r, zval *out) {
             uint64_t shared_id;
             if (portrd_u8(r, &type_tag) != 0) return -1;
             if (portrd_u64(r, &shared_id) != 0) return -1;
-            if (oxphp_shared_wrapper_new(out, type_tag, shared_id) != 0) {
-                /* Entry evicted between send and recv (rare) — release
-                 * sender-side retain and leave null. */
-                if (oxphp_shared_release != NULL) {
-                    oxphp_shared_release(shared_id);
+            /* Resolve the wire id to a fresh strong ref. NULL means the
+             * entry died in the transfer window — a correct StaleHandle,
+             * deserialize as null. Also NULL if the Rust binary is
+             * absent (weak-linked symbol unresolved). */
+            const void *entry_ptr = NULL;
+            if (oxphp_shared_handle_from_id != NULL) {
+                entry_ptr = oxphp_shared_handle_from_id(shared_id);
+            }
+            if (entry_ptr == NULL) {
+                ZVAL_NULL(out);
+                break;
+            }
+            if (oxphp_shared_wrapper_new(out, type_tag, entry_ptr) != 0) {
+                /* Could not build the wrapper — drop the strong ref
+                 * handle_from_id handed us, leave null. */
+                if (oxphp_shared_handle_drop != NULL) {
+                    oxphp_shared_handle_drop(entry_ptr);
                 }
                 ZVAL_NULL(out);
                 break;
             }
-            /* Balance the sender-side retain. Receiver's wrapper retain
-             * was done inside oxphp_shared_wrapper_new. */
-            if (oxphp_shared_release != NULL) {
-                oxphp_shared_release(shared_id);
-            }
+            /* On success, oxphp_shared_wrapper_new moved `entry_ptr`
+             * into the new wrapper's handle storage — do NOT drop it
+             * here. */
             break;
         }
         default:
@@ -4767,52 +4781,39 @@ int oxphp_async_synthetic_promise_cancel(int64_t id)
  *  Shared wrapper cross-thread helpers
  *  Used by portbuf_ser_zval (tag 7) and portrd_deser_zval (tag 7)
  *  to cross a Shared\* object between threads. SharedHandle is
- *  #[repr(C)] in Rust so reading offsets 0 (u64 id) and 8 (u8 tag)
- *  is well-defined.
+ *  #[repr(C)] in Rust so reading offsets 0 (*const Entry) and 8
+ *  (u8 type_tag) is well-defined.
  * ═══════════════════════════════════════════════════════════ */
 
-/* Extern declarations for Rust FFI exports (registry.rs). Weak for
- * the same reason as the earlier declarations — see the comment
- * above oxphp_shared_retain's first declaration near line 2268. */
-extern int oxphp_shared_retain(uint64_t id) __attribute__((weak));
-extern int oxphp_shared_release(uint64_t id) __attribute__((weak));
-extern int oxphp_shared_is_alive(uint64_t id) __attribute__((weak));
-/* Returns NUL-terminated PHP class FQN for a SharedType tag, or NULL
- * for unknown tags. Static-lifetime — never free. Single source of
- * truth for the tag→class mapping is `SharedType` in registry.rs. */
+/* See the forward-declared externs near the serializer. Only the
+ * tag→FQN mapping needs re-declaring at this site. */
 extern const char *oxphp_shared_class_name(uint8_t type_tag) __attribute__((weak));
 
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
-                                   uint64_t *out_shared_id) {
+                                   const void **out_entry_ptr) {
     if (!obj || Z_TYPE_P(obj) != IS_OBJECT) return -1;
     if (!oxphp_is_shareable((void *)obj)) return -1;
     oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(obj));
     if (intern == NULL || intern->rust_data == NULL) return -1;
-    /* SharedHandle layout: u64 shared_id at 0, u8 type_tag at 8 */
+    /* SharedHandle layout: *const Entry at offset 0, u8 type_tag at 8 */
     unsigned char *storage = (unsigned char *)intern->rust_data;
-    uint64_t sid;
-    memcpy(&sid, storage, sizeof(uint64_t));
+    const void *eptr;
+    memcpy(&eptr, storage, sizeof(const void *));
     uint8_t tt = storage[8];
-    if (sid == 0) return -1; /* uninitialised wrapper */
-    *out_shared_id = sid;
+    if (eptr == NULL) return -1; /* uninitialised wrapper */
+    *out_entry_ptr = eptr;
     *out_type_tag  = tt;
     return 0;
 }
 
-int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
-    if (!out) return -1;
-    /* Weak-linked — if the oxphp Rust binary is absent the shared
-     * registry does not exist, so no id can be alive. */
-    if (oxphp_shared_is_alive == NULL) return -1;
-    if (!oxphp_shared_is_alive(shared_id)) return -1;
+int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr) {
+    if (!out || entry_ptr == NULL) return -1;
 
-    /* Look up the PHP class_entry by type_tag. The Rust registry
-     * (SharedType::php_class_cstr) is the single source of truth.
-     * Weak-linked: in a bare PHP CLI dlopen() the Rust binary is
-     * absent, so the symbol resolves to NULL and we fail closed.
-     * Cross-thread tag-7 deserialization only runs from oxphp's Rust
-     * workers anyway, where the symbol is always present. */
+    /* Look up the PHP class_entry by type_tag. Weak-linked: in a bare
+     * PHP CLI dlopen() the Rust binary is absent and the symbol is
+     * NULL — fail closed. Cross-thread tag-7 deserialization only runs
+     * from oxphp's Rust workers, where the symbol is always present. */
     if (oxphp_shared_class_name == NULL) return -1;
     const char *fqn = oxphp_shared_class_name(type_tag);
     if (fqn == NULL) return -1; /* unknown type tag */
@@ -4821,11 +4822,10 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
     zend_string_release(cname);
     if (ce == NULL) return -1;
 
-    /* object_init_ex invokes the class's create_object handler
-     * (→ oxphp_plugin_create_object → storage_factory) but does NOT
-     * run __construct. Storage is populated with a fresh SharedHandle
-     * { shared_id: 0, type_tag: ... } by the factory; we overwrite
-     * shared_id with the transferred value below. */
+    /* object_init_ex runs the create_object handler (→ storage_factory)
+     * but NOT __construct. The factory populates a fresh SharedHandle
+     * { entry_ptr: NULL, type_tag: ... }; we overwrite entry_ptr with
+     * the transferred strong-ref pointer below. */
     if (object_init_ex(out, ce) != SUCCESS) return -1;
 
     oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(out));
@@ -4834,17 +4834,12 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, uint64_t shared_id) {
         return -1;
     }
     unsigned char *storage = (unsigned char *)intern->rust_data;
-    memcpy(storage, &shared_id, sizeof(uint64_t));
+    /* The caller (tag-7 deserializer) obtained `entry_ptr` from
+     * oxphp_shared_handle_from_id, which already incremented the strong
+     * count. Move it into the wrapper's handle — the wrapper's
+     * SharedHandle::drop will balance it. */
+    memcpy(storage, &entry_ptr, sizeof(const void *));
     storage[8] = type_tag;
-
-    /* Receiver-side retain. Receiver's Drop will release.
-     * oxphp_shared_is_alive above already short-circuits to -1 when
-     * the weak-linked registry is absent, so reaching this point
-     * implies the retain symbol is also resolved. Kept explicit for
-     * local readability. */
-    if (oxphp_shared_retain != NULL) {
-        oxphp_shared_retain(shared_id);
-    }
     return 0;
 }
 
