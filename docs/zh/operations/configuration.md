@@ -147,7 +147,7 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry Span 导出。自动设置 `TRACE_CONTEXT=true` |
+| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry Span 导出。自动设置 `TRACE_CONTEXT=true`。布尔——参见[布尔值](#布尔值) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc` 或 `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317`（gRPC）或 `http://localhost:4318`（HTTP） | OTLP 收集器端点 |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |

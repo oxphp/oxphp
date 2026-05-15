@@ -147,7 +147,7 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
-| `OTEL_ENABLED` | `false` | Включить экспорт спанов OpenTelemetry. Автоматически устанавливает `TRACE_CONTEXT=true` |
+| `OTEL_ENABLED` | `false` | Включить экспорт спанов OpenTelemetry. Автоматически устанавливает `TRACE_CONTEXT=true`. Булева — см. [Булевы значения](#булевы-значения) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Протокол экспорта: `grpc` или `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) или `http://localhost:4318` (HTTP) | Эндпоинт OTLP-коллектора |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Таймаут экспорта в миллисекундах |

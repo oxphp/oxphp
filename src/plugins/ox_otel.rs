@@ -201,7 +201,7 @@ impl Plugin for OtelPlugin {
         if !self.enabled {
             tracing::info!(
                 plugin = "otel",
-                "OTel plugin disabled (OTEL_ENABLED != true)"
+                "OTel plugin disabled (OTEL_ENABLED is falsy or unset)"
             );
             ctx.expose_config("enabled", false);
             return Ok(());
