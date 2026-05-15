@@ -46,23 +46,75 @@ impl OtelPlugin {
         }
     }
 
+    /// Parses `OTEL_TRACES_SAMPLER_ARG` with OTEL-spec-compliant validation.
+    /// Invalid input is logged via `tracing::warn!` and falls back to safe defaults.
+    fn parse_sampler_arg() -> f64 {
+        let raw = match std::env::var("OTEL_TRACES_SAMPLER_ARG") {
+            Ok(v) => v,
+            Err(_) => return 1.0,
+        };
+
+        let parsed: f64 = match raw.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!(
+                    plugin = "otel",
+                    value = %raw,
+                    "invalid OTEL_TRACES_SAMPLER_ARG (parse error); defaulting to 1.0"
+                );
+                return 1.0;
+            }
+        };
+
+        if parsed.is_nan() {
+            tracing::warn!(
+                plugin = "otel",
+                "OTEL_TRACES_SAMPLER_ARG is NaN; defaulting to 1.0"
+            );
+            return 1.0;
+        }
+        if parsed < 0.0 {
+            tracing::warn!(
+                plugin = "otel",
+                value = parsed,
+                "OTEL_TRACES_SAMPLER_ARG below 0.0; clamped to 0.0"
+            );
+            return 0.0;
+        }
+        if parsed > 1.0 {
+            tracing::warn!(
+                plugin = "otel",
+                value = parsed,
+                "OTEL_TRACES_SAMPLER_ARG above 1.0; clamped to 1.0"
+            );
+            return 1.0;
+        }
+        parsed
+    }
+
     /// Build the sampler from `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`.
     fn build_sampler() -> Sampler {
-        let sampler_name = std::env::var("OTEL_TRACES_SAMPLER")
+        let sampler_arg = Self::parse_sampler_arg();
+        let raw_name = std::env::var("OTEL_TRACES_SAMPLER")
             .unwrap_or_else(|_| "parentbased_traceidratio".to_string());
-        let sampler_arg: f64 = std::env::var("OTEL_TRACES_SAMPLER_ARG")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1.0);
 
-        match sampler_name.as_str() {
+        match raw_name.as_str() {
             "always_on" => Sampler::AlwaysOn,
             "always_off" => Sampler::AlwaysOff,
             "traceidratio" => Sampler::TraceIdRatioBased(sampler_arg),
-            // parentbased_traceidratio (default) and parentbased_always_on/off
             "parentbased_always_on" => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
             "parentbased_always_off" => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
-            _ => Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(sampler_arg))),
+            "parentbased_traceidratio" => {
+                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(sampler_arg)))
+            }
+            other => {
+                tracing::warn!(
+                    plugin = "otel",
+                    value = %other,
+                    "unknown OTEL_TRACES_SAMPLER; falling back to parentbased_traceidratio"
+                );
+                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(sampler_arg)))
+            }
         }
     }
 
@@ -719,6 +771,86 @@ mod tests {
         assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 0.5).abs() < f64::EPSILON));
         std::env::remove_var("OTEL_TRACES_SAMPLER");
         std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_parse_error_falls_back_to_one() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "not-a-number");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_above_one_is_clamped() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "2.5");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_below_zero_is_clamped() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "-0.5");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_nan_falls_back_to_one() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "NaN");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_zero_passes_through() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "0.0");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_arg_one_passes_through() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
+        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "1.0");
+        let sampler = OtelPlugin::build_sampler();
+        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+    }
+
+    #[test]
+    fn test_build_sampler_unknown_name_falls_back() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("OTEL_TRACES_SAMPLER", "garbage_value_xyz");
+        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let sampler = OtelPlugin::build_sampler();
+        // Unknown name falls back to parentbased_traceidratio. The inner Sampler
+        // is wrapped in Box<dyn ShouldSample> and cannot be downcast, so we only
+        // assert on the outer variant — the inner arg (1.0 by default) is
+        // exercised by the other tests in this module.
+        assert!(matches!(sampler, Sampler::ParentBased(_)));
+        std::env::remove_var("OTEL_TRACES_SAMPLER");
     }
 
     #[test]

@@ -158,6 +158,8 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Стратегия семплирования: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Коэффициент семплирования (0.0–1.0) для семплеров на основе коэффициента |
 
+> **Примечание:** Невалидные значения и значения вне диапазона `OTEL_TRACES_SAMPLER_ARG` приводятся к `[0.0, 1.0]` и логируются на уровне warn. Неизвестные значения `OTEL_TRACES_SAMPLER` откатываются к `parentbased_traceidratio` и логируются.
+
 ## APM
 
 | Переменная | По умолчанию | Описание |

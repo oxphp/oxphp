@@ -49,6 +49,8 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 | `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampling strategy: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) for ratio-based samplers |
 
+> **Note:** Invalid or out-of-range `OTEL_TRACES_SAMPLER_ARG` values are clamped to `[0.0, 1.0]` and logged at warn level. Unknown `OTEL_TRACES_SAMPLER` values fall back to `parentbased_traceidratio` and are logged.
+
 ### APM Plugin
 
 The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel plugin. It adds automatic instrumentation, the `#[OxPHP\Apm\Trace]` decorator, and the PHP tracing SDK.
@@ -466,7 +468,7 @@ OTEL_TRACES_SAMPLER=parentbased_traceidratio
 OTEL_TRACES_SAMPLER_ARG=0.1   # Sample 10% of traces
 ```
 
-Parent-based sampling means that if an incoming request carries a sampled trace, it will always be sampled regardless of the ratio. New traces started at OxPHP are sampled at the configured rate.
+Parent-based sampling means that if an incoming request carries a sampled trace, it will always be sampled regardless of the ratio. New traces started at OxPHP are sampled at the configured rate. If `OTEL_TRACES_SAMPLER` is set to an unknown value, OxPHP logs a warning and falls back to `parentbased_traceidratio`.
 
 ## See Also
 
