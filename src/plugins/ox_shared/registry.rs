@@ -981,4 +981,174 @@ mod tests {
         assert_eq!(reg.total_bytes(), 0);
         drop(arc);
     }
+
+    /// `*const Entry` is not `Send` by default. The stress tests below
+    /// move raw entry pointers into worker threads via this newtype —
+    /// the underlying `Arc::into_raw` pointer is `Send` because
+    /// `Entry: Send + Sync` and the strong-ref it represents is
+    /// independent of any one thread.
+    #[derive(Copy, Clone)]
+    struct EntryPtr(*const Entry);
+    unsafe impl Send for EntryPtr {}
+
+    impl EntryPtr {
+        /// Consume the wrapper and yield the inner pointer. Used inside
+        /// `move ||` thread closures: Rust 2021 disjoint capture would
+        /// otherwise project `self.0` and capture only the raw pointer
+        /// (not Send) rather than the whole `EntryPtr` (Send).
+        fn raw(self) -> *const Entry {
+            self.0
+        }
+    }
+
+    /// Test inner whose `on_drop` bumps a shared counter, so a test
+    /// can observe exactly when the `Entry` is freed.
+    struct DropCountInner {
+        on_drop_calls: &'static AtomicU64,
+    }
+
+    impl SharedInner for DropCountInner {
+        fn type_tag(&self) -> SharedType {
+            SharedType::Counter
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn debug_snapshot(&self) -> SharedValue {
+            SharedValue::Null
+        }
+        fn mem_bytes(&self) -> usize {
+            0
+        }
+        fn on_drop(&self) {
+            self.on_drop_calls.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Many threads clone and drop strong refs to one entry via the
+    /// `oxphp_shared_handle_clone` / `oxphp_shared_handle_drop` FFI.
+    /// The entry must be freed exactly once, and only after the last
+    /// strong ref drops — never while a clone is outstanding.
+    #[test]
+    fn handle_clone_drop_balance() {
+        use std::sync::Barrier;
+
+        let on_drop_calls: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
+        let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
+        let entry = reg
+            .insert(
+                SharedType::Counter,
+                Arc::new(DropCountInner { on_drop_calls }),
+            )
+            .unwrap();
+        let id = entry.id;
+        let base_ptr = EntryPtr(Arc::into_raw(entry)); // creating-wrapper strong ref
+
+        const THREADS: usize = 16;
+        const ITERS: usize = 1_000;
+        let barrier = std::sync::Arc::new(Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let p = base_ptr;
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let raw = p.raw();
+                for _ in 0..ITERS {
+                    // SAFETY: raw is a live Arc::into_raw ptr held by
+                    // the main thread for the whole test.
+                    let cloned = unsafe { oxphp_shared_handle_clone(raw) };
+                    assert!(!cloned.is_null());
+                    unsafe { oxphp_shared_handle_drop(cloned) };
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // All clones balanced; the entry is still alive (base_ptr ref).
+        assert_eq!(on_drop_calls.load(Ordering::Relaxed), 0);
+        assert!(reg.lookup(id).is_ok());
+
+        // Drop the last strong ref — entry frees now, exactly once.
+        unsafe { oxphp_shared_handle_drop(base_ptr.raw()) };
+        assert_eq!(on_drop_calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Races `oxphp_shared_handle_from_id` (receiver side of a tag-7
+    /// transfer) against the drop of the source entry's last strong
+    /// ref. Every outcome must be either a valid strong pointer or a
+    /// clean NULL — never a use-after-free.
+    ///
+    /// Uses `fresh_registry()` (the global path), not `new_for_test`,
+    /// because `oxphp_shared_handle_from_id` reads the global REGISTRY
+    /// static.
+    #[test]
+    fn tag7_transfer_race_is_clean() {
+        use std::sync::Barrier;
+
+        let reg = fresh_registry();
+        const ITERS: usize = 5_000;
+
+        for _ in 0..ITERS {
+            let entry = reg
+                .insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
+                .unwrap();
+            let id = entry.id;
+            let src_ptr = EntryPtr(Arc::into_raw(entry));
+
+            let barrier = std::sync::Arc::new(Barrier::new(2));
+            let b1 = std::sync::Arc::clone(&barrier);
+            let b2 = std::sync::Arc::clone(&barrier);
+
+            let t_drop = std::thread::spawn(move || {
+                let raw = src_ptr.raw();
+                b1.wait();
+                // SAFETY: raw is a live Arc::into_raw ptr, dropped once.
+                unsafe { oxphp_shared_handle_drop(raw) };
+            });
+            let t_recv = std::thread::spawn(move || {
+                b2.wait();
+                let got = oxphp_shared_handle_from_id(id);
+                if !got.is_null() {
+                    // Got a strong ref — it must be a valid Entry.
+                    // SAFETY: handle_from_id returned a live Arc::into_raw ptr.
+                    let e = unsafe { &*got };
+                    assert_eq!(e.magic, ENTRY_MAGIC, "handle_from_id returned freed Entry");
+                    assert_eq!(e.id, id);
+                    unsafe { oxphp_shared_handle_drop(got) };
+                }
+            });
+
+            t_drop.join().unwrap();
+            t_recv.join().unwrap();
+        }
+    }
+
+    /// After the last strong ref to an entry drops, `Entry::drop` must
+    /// have removed the `Weak` index entry and decremented both totals
+    /// by exactly that entry's contribution.
+    #[test]
+    fn entry_drop_self_deregisters() {
+        let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
+        let entry = reg
+            .insert(SharedType::Counter, Arc::new(TestInner { bytes: 64 }))
+            .unwrap();
+        let id = entry.id;
+        let booked = 64 + ENTRY_FIXED_OVERHEAD as u64;
+
+        assert_eq!(reg.total_entries(), 1);
+        assert_eq!(reg.total_bytes(), booked);
+        assert!(reg.lookup(id).is_ok());
+
+        drop(entry); // last strong ref → Entry::drop
+
+        assert!(
+            reg.lookup(id).is_err(),
+            "Weak index entry must be gone after Entry::drop"
+        );
+        assert_eq!(reg.total_entries(), 0, "total_entries decremented");
+        assert_eq!(reg.total_bytes(), 0, "total_bytes decremented");
+    }
 }
