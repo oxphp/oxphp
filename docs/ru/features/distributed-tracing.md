@@ -38,7 +38,7 @@ OxPHP поддерживает распространение W3C Trace Context,
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `OTEL_ENABLED` | `false` | Включить плагин OpenTelemetry. Установите `true` или `1` |
+| `OTEL_ENABLED` | `false` | Включить плагин OpenTelemetry. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Протокол экспорта: `grpc` или `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) или `http://localhost:4318` (HTTP) | Конечная точка OTLP-коллектора |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Тайм-аут экспорта в миллисекундах |

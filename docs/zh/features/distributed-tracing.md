@@ -38,7 +38,7 @@ OTel 插件是编译时特性（`plugin-otel`）。启用时会自动设置 `TRA
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
-| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry 插件。设置为 `true` 或 `1` |
+| `OTEL_ENABLED` | `false` | 启用 OpenTelemetry 插件。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc` 或 `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317`（gRPC）或 `http://localhost:4318`（HTTP） | OTLP 收集器端点 |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |

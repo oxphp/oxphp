@@ -38,7 +38,7 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_ENABLED` | `false` | Enable the OpenTelemetry plugin. Set to `true` or `1` |
+| `OTEL_ENABLED` | `false` | Enable the OpenTelemetry plugin. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
