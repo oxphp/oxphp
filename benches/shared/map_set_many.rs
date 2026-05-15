@@ -42,7 +42,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
-use oxphp::plugins::ox_shared::registry::{init_registry, registry};
+use oxphp::plugins::ox_shared::registry::{init_registry, Entry};
 use oxphp::plugins::ox_shared::types::map::{
     oxphp_shared_map_clear, oxphp_shared_map_create, oxphp_shared_map_set,
     oxphp_shared_map_set_many,
@@ -96,7 +96,6 @@ fn build_batch_payload(n: usize) -> Vec<u8> {
 
 fn bench_map_set_many_vs_single(c: &mut Criterion) {
     ensure_registry();
-    let reg = registry();
     let mut group = c.benchmark_group("map_set_batch");
 
     for &n in &[10usize, 100, 1_000] {
@@ -105,7 +104,7 @@ fn bench_map_set_many_vs_single(c: &mut Criterion) {
 
         // Path A: N FFI crossings, each with its own portbuf payload.
         group.bench_with_input(BenchmarkId::new("N_ffi_sets", n), &n, |b, _| {
-            let mut id: u64 = 0;
+            let mut id: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_map_create(0, &mut id) };
             assert_eq!(rc, 0);
             b.iter(|| {
@@ -115,14 +114,14 @@ fn bench_map_set_many_vs_single(c: &mut Criterion) {
                     };
                     assert_eq!(rc, 0);
                 }
-                oxphp_shared_map_clear(id);
+                unsafe { oxphp_shared_map_clear(id) };
             });
-            reg.release(id);
+            unsafe { oxphp::plugins::ox_shared::registry::oxphp_shared_handle_drop(id) };
         });
 
         // Path B: single FFI crossing with the whole batch.
         group.bench_with_input(BenchmarkId::new("setMany_one_ffi", n), &n, |b, _| {
-            let mut id: u64 = 0;
+            let mut id: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_map_create(0, &mut id) };
             assert_eq!(rc, 0);
             b.iter(|| {
@@ -137,9 +136,9 @@ fn bench_map_set_many_vs_single(c: &mut Criterion) {
                 };
                 assert_eq!(rc, 0);
                 assert_eq!(inserted as usize, n);
-                oxphp_shared_map_clear(id);
+                unsafe { oxphp_shared_map_clear(id) };
             });
-            reg.release(id);
+            unsafe { oxphp::plugins::ox_shared::registry::oxphp_shared_handle_drop(id) };
         });
     }
 

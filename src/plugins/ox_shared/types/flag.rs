@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
-use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
 pub struct FlagInner {
@@ -70,84 +70,112 @@ impl SharedInner for FlagInner {
 // ─── FFI ──────────────────────────────────────────────────────────────
 
 /// # Safety
-/// `out_id` must be valid for writes of `u64` if non-null.
+/// `out_ptr` must be valid for writes of `*const Entry` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_create(initial: c_int, out_id: *mut u64) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id is null");
+pub unsafe extern "C" fn oxphp_shared_flag_create(
+    initial: c_int,
+    out_ptr: *mut *const Entry,
+) -> c_int {
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
         let reg = registry();
         let inner = Arc::new(FlagInner::new(initial != 0));
-        let id = reg.insert(SharedType::Flag, inner)?;
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Flag, inner)?;
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_test(id: u64, out: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_flag_test(entry_ptr: *const Entry, out: *mut c_int) -> c_int {
     if out.is_null() {
         set_last_error("out is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer — the calling PHP wrapper holds a
+        // strong ref through it.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_test on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let v = inner.test();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = v as c_int };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_set(id: u64, out_prev: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_flag_set(
+    entry_ptr: *const Entry,
+    out_prev: *mut c_int,
+) -> c_int {
     if out_prev.is_null() {
         set_last_error("out_prev is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_flag_test.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_set on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.set();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_clear(id: u64, out_prev: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_flag_clear(
+    entry_ptr: *const Entry,
+    out_prev: *mut c_int,
+) -> c_int {
     if out_prev.is_null() {
         set_last_error("out_prev is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_flag_test.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_clear on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.clear();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_swapped` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_flag_cas(
-    id: u64,
+    entry_ptr: *const Entry,
     expect: c_int,
     new_val: c_int,
     out_swapped: *mut c_int,
@@ -156,22 +184,27 @@ pub unsafe extern "C" fn oxphp_shared_flag_cas(
         set_last_error("out_swapped is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_flag_test.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_cas on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let swapped = inner.cas(expect != 0, new_val != 0);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_flag_exchange(
-    id: u64,
+    entry_ptr: *const Entry,
     new_val: c_int,
     out_prev: *mut c_int,
 ) -> c_int {
@@ -179,12 +212,16 @@ pub unsafe extern "C" fn oxphp_shared_flag_exchange(
         set_last_error("out_prev is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_flag_test.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_exchange on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
         let prev = inner.exchange(new_val != 0);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
     })
@@ -231,8 +268,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             } else {
                 false
             };
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_flag_create(initial as c_int, &mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_flag_create(initial as c_int, &mut out_ptr) };
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
@@ -241,7 +278,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 });
             }
             let handle = call.storage_mut::<SharedHandle>()?;
-            handle.shared_id = out_id;
+            handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Flag as u8;
             Ok(())
         })
@@ -250,7 +287,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_test(handle.shared_id, &mut out) };
+            let rc = unsafe { oxphp_shared_flag_test(handle.entry_ptr, &mut out) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(out != 0);
             Ok(())
@@ -260,7 +297,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_set(handle.shared_id, &mut prev) };
+            let rc = unsafe { oxphp_shared_flag_set(handle.entry_ptr, &mut prev) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(prev != 0);
             Ok(())
@@ -270,7 +307,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_clear(handle.shared_id, &mut prev) };
+            let rc = unsafe { oxphp_shared_flag_clear(handle.entry_ptr, &mut prev) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(prev != 0);
             Ok(())
@@ -286,7 +323,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let mut swapped: c_int = 0;
             let rc = unsafe {
                 oxphp_shared_flag_cas(
-                    handle.shared_id,
+                    handle.entry_ptr,
                     expect as c_int,
                     new as c_int,
                     &mut swapped,
@@ -304,7 +341,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let new = call.arg_bool(0)?;
             let mut prev: c_int = 0;
             let rc =
-                unsafe { oxphp_shared_flag_exchange(handle.shared_id, new as c_int, &mut prev) };
+                unsafe { oxphp_shared_flag_exchange(handle.entry_ptr, new as c_int, &mut prev) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(prev != 0);
             Ok(())
@@ -320,7 +357,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            call.ret_long(handle.shared_id as i64);
+            let id = unsafe {
+                crate::plugins::ox_shared::registry::oxphp_shared_entry_id(handle.entry_ptr)
+            };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;

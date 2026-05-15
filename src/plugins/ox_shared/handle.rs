@@ -1,49 +1,72 @@
 //! SharedHandle — per-instance storage attached to every Shared\*
 //! PHP wrapper via ClassBuilder::with_storage().
 
-use crate::plugins::ox_shared::registry::SharedType;
+use crate::plugins::ox_shared::registry::{Entry, SharedType};
+use std::sync::Arc;
 
-/// Stored inside every Shared\* PHP object via with_storage. The
+/// Stored inside every Shared\* PHP object via `with_storage`. The
 /// wrapper has NO user-visible PHP properties — just this opaque slot.
-// NOTE: Copy is incompatible with Drop. Clone is preserved so
-// ClassBuilder::with_storage_clone (used when `__clone` throws — Part D/E/F)
-// can still compile against the handle, though the clone path is never
-// actually taken at runtime.
+///
+/// `entry_ptr` is `Arc::into_raw(Arc<Entry>)`: the wrapper owns one
+/// strong reference to the registry `Entry`. `Drop` reconstitutes the
+/// `Arc` and drops it; when it is the last strong ref, `Entry::drop`
+/// self-deregisters from the registry.
 //
-// #[repr(C)] guarantees the field layout is stable for C-side access from
+// #[repr(C)] keeps the field layout stable for C-side access from
 // `oxphp_plugin_get_shared_handle` / `oxphp_shared_wrapper_new`, which
-// read shared_id at offset 0 (u64) and type_tag at offset 8 (u8). The
-// tag-7 cross-thread serializer relies on this.
+// read `entry_ptr` at offset 0 (pointer-width) and `type_tag` at
+// offset 8 (u8). The tag-7 cross-thread serializer relies on this.
+//
+// Clone is preserved so ClassBuilder::with_storage_clone (used when
+// `__clone` throws) still compiles; the clone path is never taken at
+// runtime, but if it were it would `Arc::increment_strong_count`.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SharedHandle {
-    pub shared_id: u64, // offset 0, 8 bytes — 0 means "uninitialised wrapper"
-    pub type_tag: u8,   // offset 8, 1 byte
+    pub entry_ptr: *const Entry, // offset 0 — NULL means "uninitialised wrapper"
+    pub type_tag: u8,            // offset 8
 }
+
+// SAFETY: `entry_ptr` is `Arc::into_raw` of an `Arc<Entry>`, and
+// `Entry: Send + Sync`. The handle owns exactly one strong ref, so
+// moving it between threads is sound — identical to moving an
+// `Arc<Entry>`.
+unsafe impl Send for SharedHandle {}
+unsafe impl Sync for SharedHandle {}
 
 impl SharedHandle {
     pub fn new(type_tag: SharedType) -> Self {
         Self {
-            shared_id: 0, // populated by __construct
+            entry_ptr: std::ptr::null(), // populated by __construct
             type_tag: type_tag as u8,
         }
     }
 
     pub fn is_initialized(&self) -> bool {
-        self.shared_id != 0
+        !self.entry_ptr.is_null()
+    }
+}
+
+impl Clone for SharedHandle {
+    fn clone(&self) -> Self {
+        if !self.entry_ptr.is_null() {
+            // SAFETY: entry_ptr is a live Arc::into_raw pointer.
+            unsafe { Arc::increment_strong_count(self.entry_ptr) };
+        }
+        Self {
+            entry_ptr: self.entry_ptr,
+            type_tag: self.type_tag,
+        }
     }
 }
 
 impl Drop for SharedHandle {
     fn drop(&mut self) {
-        // When the PHP wrapper is freed, decrement the registry refcount.
-        // This is the only place `release` is called from the Rust-owned
-        // wrapper side; external C code MAY also call it for manual refcount
-        // management, but the common path runs here.
-        if self.shared_id != 0 {
-            if let Some(reg) = crate::plugins::ox_shared::registry::REGISTRY.get() {
-                reg.release(self.shared_id);
-            }
+        if !self.entry_ptr.is_null() {
+            // SAFETY: entry_ptr came from Arc::into_raw in the type
+            // constructor (or oxphp_shared_handle_from_id). Reconstitute
+            // and drop exactly once — this handle owns one strong ref.
+            unsafe { drop(Arc::from_raw(self.entry_ptr)) };
         }
     }
 }
@@ -55,7 +78,7 @@ mod tests {
     #[test]
     fn handle_starts_uninitialised() {
         let h = SharedHandle::new(SharedType::Counter);
-        assert_eq!(h.shared_id, 0);
+        assert!(h.entry_ptr.is_null());
         assert!(!h.is_initialized());
         assert_eq!(h.type_tag, SharedType::Counter as u8);
     }

@@ -16,8 +16,8 @@ use crate::plugins::ox_shared::error::{
     ffi_entry, read_last_error_message, set_last_error, SharedError,
 };
 use crate::plugins::ox_shared::handle::SharedHandle;
-use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
-use crate::plugins::ox_shared::value::{portbuf_to_sv, sv_to_portbuf, SharedValue};
+use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
+use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned, sv_to_portbuf, SharedValue};
 
 /// Per-mutex storage. `state` is parking_lot::Mutex so try_lock_for
 /// is available. `poisoned` is split out for lock-free is_poisoned().
@@ -86,58 +86,82 @@ impl SharedInnerMutexExt for dyn SharedInner {
 
 /// # Safety
 /// `initial_buf` must be valid for reads of `initial_len` bytes encoding
-/// a SharedValue in portbuf format. `out_id` must be valid for writes.
+/// a SharedValue in portbuf format. `out_ptr` must be valid for writes of
+/// `*const Entry` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_mutex_create(
     initial_buf: *const u8,
     initial_len: usize,
-    out_id: *mut u64,
+    out_ptr: *mut *const Entry,
 ) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id null");
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
+        let reg = registry();
         let initial = if initial_buf.is_null() || initial_len == 0 {
             SharedValue::Null
         } else {
             let bytes = unsafe { std::slice::from_raw_parts(initial_buf, initial_len) };
-            portbuf_to_sv(bytes)?
+            let raw = portbuf_to_sv(bytes)?;
+            raw_to_owned(raw, reg)?
         };
-        let reg = registry();
-        let id = reg.insert(SharedType::Mutex, Arc::new(MutexInner::new(initial)))?;
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Mutex, Arc::new(MutexInner::new(initial)))?;
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of c_int.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_mutex_is_poisoned(id: u64, out: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_mutex_is_poisoned(
+    entry_ptr: *const Entry,
+    out: *mut c_int,
+) -> c_int {
     if out.is_null() {
         set_last_error("out null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "oxphp_shared_mutex_is_poisoned on freed Entry"
+        );
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
         let p = inner.is_poisoned();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = p as c_int };
         Ok(())
     })
 }
 
+/// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 #[no_mangle]
-pub extern "C" fn oxphp_shared_mutex_clear_poison(id: u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_mutex_clear_poison(entry_ptr: *const Entry) -> c_int {
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_mutex_is_poisoned.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "oxphp_shared_mutex_clear_poison on freed Entry"
+        );
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
         inner.clear_poison();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         Ok(())
     })
 }
@@ -153,11 +177,12 @@ use crate::plugins::ox_shared::reentrancy::{push_held, MutexPopGuard};
 /// `>0` = milliseconds. See `timeout::parse_timeout`.
 ///
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `callable` must be a valid PHP zval*. `out_ret_buf`/`out_ret_len`
 /// must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_mutex_with(
-    id: u64,
+    entry_ptr: *const Entry,
     callable: *mut std::ffi::c_void,
     timeout_ms: i64,
     out_ret_buf: *mut *mut u8,
@@ -167,6 +192,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         set_last_error("out pointers null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe {
         *out_ret_buf = std::ptr::null_mut();
         *out_ret_len = 0;
@@ -175,8 +203,13 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
     ffi_entry(|| {
         use crate::bridge::ffi;
 
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_mutex_is_poisoned.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "oxphp_shared_mutex_with on freed Entry"
+        );
+        let id = entry.id;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
 
         if inner.is_poisoned() {
@@ -287,7 +320,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 if did_mutate != 0 && !new_state_buf.is_null() && new_state_len > 0 {
                     let new_bytes =
                         unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
-                    match portbuf_to_sv(new_bytes) {
+                    match portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
                         Ok(new_sv) => {
                             *guard = new_sv;
                         }
@@ -307,7 +341,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
                 }
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
@@ -318,7 +352,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 if !new_state_buf.is_null() && new_state_len > 0 {
                     let new_bytes =
                         unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
-                    if let Ok(new_sv) = portbuf_to_sv(new_bytes) {
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
                         *guard = new_sv;
                     }
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
@@ -326,7 +362,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
             }
@@ -351,7 +387,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
 /// See `oxphp_shared_mutex_with`.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
-    id: u64,
+    entry_ptr: *const Entry,
     callable: *mut std::ffi::c_void,
     out_ret_buf: *mut *mut u8,
     out_ret_len: *mut usize,
@@ -359,6 +395,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
     if out_ret_buf.is_null() || out_ret_len.is_null() {
         set_last_error("out pointers null");
         return SharedError::Generic.code();
+    }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
     }
     unsafe {
         *out_ret_buf = std::ptr::null_mut();
@@ -368,8 +407,13 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
     ffi_entry(|| {
         use crate::bridge::ffi;
 
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_mutex_is_poisoned.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "oxphp_shared_mutex_try_with on freed Entry"
+        );
+        let id = entry.id;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
 
         if inner.is_poisoned() {
@@ -434,7 +478,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 if did_mutate != 0 && !new_state_buf.is_null() && new_state_len > 0 {
                     let new_bytes =
                         unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
-                    if let Ok(new_sv) = portbuf_to_sv(new_bytes) {
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
                         *guard = new_sv;
                     }
                 }
@@ -445,7 +491,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
                 }
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
@@ -455,7 +501,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
             }
@@ -505,29 +551,30 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             };
 
             let bytes = sv_to_portbuf(&initial_sv);
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_mutex_create(bytes.as_ptr(), bytes.len(), &mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc =
+                unsafe { oxphp_shared_mutex_create(bytes.as_ptr(), bytes.len(), &mut out_ptr) };
             super::counter::counter_rc_to_result(rc)?;
 
             let h = call.storage_mut::<SharedHandle>()?;
-            h.shared_id = out_id;
+            h.entry_ptr = out_ptr;
             h.type_tag = SharedType::Mutex as u8;
             Ok(())
         })
         .method("isPoisoned")
         .returns(PhpType::Bool)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_mutex_is_poisoned(id, &mut out) };
+            let rc = unsafe { oxphp_shared_mutex_is_poisoned(entry_ptr, &mut out) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(out != 0);
             Ok(())
         })
         .method("clearPoison")
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
-            let rc = oxphp_shared_mutex_clear_poison(id);
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let rc = unsafe { oxphp_shared_mutex_clear_poison(entry_ptr) };
             super::counter::counter_rc_to_result(rc)?;
             Ok(())
         })
@@ -538,14 +585,20 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             use crate::bridge::ffi;
 
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let callable_zv = unsafe { call.raw_arg_ptr(0) };
             let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             let mut ret_buf: *mut u8 = std::ptr::null_mut();
             let mut ret_len: usize = 0;
             let rc = unsafe {
-                oxphp_shared_mutex_with(id, callable_zv, timeout_ms, &mut ret_buf, &mut ret_len)
+                oxphp_shared_mutex_with(
+                    entry_ptr,
+                    callable_zv,
+                    timeout_ms,
+                    &mut ret_buf,
+                    &mut ret_len,
+                )
             };
             if rc != 0 {
                 if !ret_buf.is_null() {
@@ -564,7 +617,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 call.ret_null();
             } else {
                 let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
-                match portbuf_to_sv(bytes) {
+                let entry: &Entry = unsafe { &*entry_ptr };
+                match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
                     Ok(sv) => write_value_to_retval(call, &sv)?,
                     Err(_) => call.ret_null(),
                 }
@@ -578,12 +632,13 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             use crate::bridge::ffi;
 
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let callable_zv = unsafe { call.raw_arg_ptr(0) };
             let mut ret_buf: *mut u8 = std::ptr::null_mut();
             let mut ret_len: usize = 0;
-            let rc =
-                unsafe { oxphp_shared_mutex_try_with(id, callable_zv, &mut ret_buf, &mut ret_len) };
+            let rc = unsafe {
+                oxphp_shared_mutex_try_with(entry_ptr, callable_zv, &mut ret_buf, &mut ret_len)
+            };
 
             // Timeout → null; the spec treats tryWith contention as
             // "couldn't acquire" not an exception.
@@ -608,7 +663,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 call.ret_null();
             } else {
                 let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
-                match portbuf_to_sv(bytes) {
+                let entry: &Entry = unsafe { &*entry_ptr };
+                match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
                     Ok(sv) => write_value_to_retval(call, &sv)?,
                     Err(_) => call.ret_null(),
                 }
@@ -627,7 +683,9 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            call.ret_long(h.shared_id as i64);
+            let id =
+                unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(h.entry_ptr) };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;

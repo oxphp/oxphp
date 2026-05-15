@@ -16,7 +16,7 @@ use crate::plugin::types::{MagicMethod, PhpType};
 use crate::plugin::{PhpError, PluginContext, PluginError};
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
 use crate::plugins::ox_shared::handle::SharedHandle;
-use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
 // Per-thread set of Once ids currently inside `init(factory)` on
@@ -165,35 +165,49 @@ impl SharedInnerOnceExt for dyn SharedInner {
 // ─── FFI ──────────────────────────────────────────────────────────────
 
 /// # Safety
-/// `out_id` must be valid for writes of u64 if non-null.
+/// `out_ptr` must be valid for writes of `*const Entry` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_once_create(out_id: *mut u64) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id null");
+pub unsafe extern "C" fn oxphp_shared_once_create(out_ptr: *mut *const Entry) -> c_int {
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
         let reg = registry();
-        let id = reg.insert(SharedType::Once, Arc::new(OnceInner::new()))?;
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Once, Arc::new(OnceInner::new()))?;
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of c_int if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_once_is_initialized(id: u64, out: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_once_is_initialized(
+    entry_ptr: *const Entry,
+    out: *mut c_int,
+) -> c_int {
     if out.is_null() {
         set_last_error("out null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer — the calling PHP wrapper holds a
+        // strong ref through it.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "oxphp_shared_once_is_initialized on freed Entry"
+        );
         let inner = entry.inner.as_any_once().ok_or(SharedError::Type)?;
         let init = inner.is_initialized();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = init as c_int };
         Ok(())
     })
@@ -217,20 +231,25 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         })
         .method("__construct")
         .handler(|call| {
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_once_create(&mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_once_create(&mut out_ptr) };
             super::counter::counter_rc_to_result(rc)?;
             let h = call.storage_mut::<SharedHandle>()?;
-            h.shared_id = out_id;
+            h.entry_ptr = out_ptr;
             h.type_tag = SharedType::Once as u8;
             Ok(())
         })
         .method("get")
         .returns(PhpType::Mixed)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
-            let reg = registry();
-            let entry = reg.lookup(id).map_err(|e| err_to_phperr(e, id))?;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            if entry_ptr.is_null() {
+                return Err(err_to_phperr(SharedError::StaleHandle, 0));
+            }
+            // SAFETY: entry_ptr non-null and, per the handle contract, a
+            // live Arc::into_raw pointer.
+            let entry: &Entry = unsafe { &*entry_ptr };
+            debug_assert_eq!(entry.magic, ENTRY_MAGIC, "Once::get on freed Entry");
             let inner = entry
                 .inner
                 .as_any_once()
@@ -239,15 +258,15 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 Some(v) => write_value_to_retval(call, &v)?,
                 None => call.ret_null(),
             }
-            reg.record_op(&entry);
+            entry.registry.record_op(entry);
             Ok(())
         })
         .method("isInitialized")
         .returns(PhpType::Bool)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_once_is_initialized(id, &mut out) };
+            let rc = unsafe { oxphp_shared_once_is_initialized(entry_ptr, &mut out) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(out != 0);
             Ok(())
@@ -256,9 +275,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .param("value", PhpType::Mixed)
         .returns(PhpType::Bool)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
-            let reg = registry();
-            let entry = reg.lookup(id).map_err(|e| err_to_phperr(e, id))?;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            if entry_ptr.is_null() {
+                return Err(err_to_phperr(SharedError::StaleHandle, 0));
+            }
+            // SAFETY: entry_ptr non-null and, per the handle contract, a
+            // live Arc::into_raw pointer.
+            let entry: &Entry = unsafe { &*entry_ptr };
+            debug_assert_eq!(entry.magic, ENTRY_MAGIC, "Once::trySet on freed Entry");
             let inner = entry
                 .inner
                 .as_any_once()
@@ -267,7 +291,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             // Read argument as a SharedValue (scalar-only).
             let sv = read_arg_as_shared_value(call, 0)?;
             let winner = inner.try_set(sv);
-            reg.record_op(&entry);
+            entry.registry.record_op(entry);
             call.ret_bool(winner);
             Ok(())
         })
@@ -276,17 +300,22 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .returns(PhpType::Mixed)
         .handler(|call| {
             use crate::bridge::ffi;
-            use crate::plugins::ox_shared::value::portbuf_to_sv;
+            use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned};
 
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            if entry_ptr.is_null() {
+                return Err(err_to_phperr(SharedError::StaleHandle, 0));
+            }
+            // SAFETY: entry_ptr non-null and, per the handle contract, a
+            // live Arc::into_raw pointer.
+            let entry: &Entry = unsafe { &*entry_ptr };
+            debug_assert_eq!(entry.magic, ENTRY_MAGIC, "Once::init on freed Entry");
+            let id = entry.id;
 
             // Reentrance guard BEFORE taking the init_lock.
             push_once_held(id).map_err(|e| err_to_phperr(e, id))?;
             let _pop = OncePopGuard(id);
 
-            // Look up the Once entry.
-            let reg = registry();
-            let entry = reg.lookup(id).map_err(|e| err_to_phperr(e, id))?;
             let inner = entry
                 .inner
                 .as_any_once()
@@ -295,7 +324,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             // Fast path: already initialised; write cached value, skip factory.
             if let Some(v) = inner.get() {
                 write_value_to_retval(call, &v)?;
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 return Ok(());
             }
 
@@ -310,7 +339,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 match rc {
                     x if x == ffi::OXPHP_SHARED_INVOKE_OK => {
                         let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
-                        let sv = portbuf_to_sv(bytes);
+                        let sv =
+                            portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry));
                         unsafe { ffi::oxphp_portable_free(out_buf) };
                         sv
                     }
@@ -335,7 +365,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             match sv {
                 Ok(v) => {
                     write_value_to_retval(call, &v)?;
-                    reg.record_op(&entry);
+                    entry.registry.record_op(entry);
                     Ok(())
                 }
                 Err(SharedError::Generic) => {
@@ -357,7 +387,9 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            call.ret_long(h.shared_id as i64);
+            let id =
+                unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(h.entry_ptr) };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;

@@ -119,11 +119,20 @@ pub fn read_last_error_message() -> String {
 
 /// FFI wrapper that runs `body` inside `catch_unwind` and translates
 /// errors into status codes per SharedError::code.
+///
+/// `body` is wrapped in `AssertUnwindSafe`: a `Shared\*` FFI entrypoint
+/// holds a `*const Entry` (and through it `&Entry`), which is not
+/// `UnwindSafe` because `Entry` reaches `DashMap` interior mutability
+/// and `dyn SharedInner`. The assertion is sound here — a panic caught
+/// at this boundary is converted to an error status code and the
+/// process continues; there is no observable half-mutated invariant a
+/// later observer could witness, which is exactly the contract
+/// `AssertUnwindSafe` documents.
 pub fn ffi_entry<F>(body: F) -> c_int
 where
-    F: FnOnce() -> Result<(), SharedError> + std::panic::UnwindSafe,
+    F: FnOnce() -> Result<(), SharedError>,
 {
-    match std::panic::catch_unwind(body) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
             if LAST_ERROR.with(|c| c.borrow().is_empty()) {

@@ -75,7 +75,9 @@ fn bench_pool_uncontested_cycle(c: &mut Criterion) {
             1,
             Duration::from_secs(300),
         ));
-    let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+    let arc = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+    let id = arc.id;
+    let entry_ptr = Arc::into_raw(arc);
     {
         let pool = (*inner).as_any_pool().expect("Pool");
         pool.bind_id(id);
@@ -88,15 +90,15 @@ fn bench_pool_uncontested_cycle(c: &mut Criterion) {
         b.iter(|| {
             let mut slot: *mut c_void = std::ptr::null_mut();
             let mut owner: u64 = 0;
-            let rc = unsafe { oxphp_shared_pool_acquire(id, 0, &mut slot, &mut owner) };
+            let rc = unsafe { oxphp_shared_pool_acquire(entry_ptr, 0, &mut slot, &mut owner) };
             assert_eq!(rc, 0);
-            let rc = unsafe { oxphp_shared_pool_release(id, slot, owner) };
+            let rc = unsafe { oxphp_shared_pool_release(entry_ptr, slot, owner) };
             assert_eq!(rc, 0);
         });
     });
 
     worker_liveness::unregister_worker();
-    reg.release(id);
+    unsafe { oxphp::plugins::ox_shared::registry::oxphp_shared_handle_drop(entry_ptr) };
 }
 
 criterion_group!(benches, bench_pool_uncontested_cycle);

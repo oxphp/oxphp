@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::plugins::ox_shared::error::{
     ffi_entry, read_last_error_message, set_last_error, SharedError,
 };
-use crate::plugins::ox_shared::registry::{registry, SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
 pub struct CounterInner {
@@ -68,46 +68,59 @@ impl SharedInner for CounterInner {
 // ─── FFI ──────────────────────────────────────────────────────────────
 
 /// # Safety
-/// `out_id` must be valid for writes of `u64` if non-null.
+/// `out_ptr` must be valid for writes of `*const Entry` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_create(initial: i64, out_id: *mut u64) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id is null");
+pub unsafe extern "C" fn oxphp_shared_counter_create(
+    initial: i64,
+    out_ptr: *mut *const Entry,
+) -> c_int {
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
         let reg = registry();
         let inner = Arc::new(CounterInner::new(initial));
-        let id = reg.insert(SharedType::Counter, inner)?;
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Counter, inner)?;
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of `i64` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_get(id: u64, out: *mut i64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_counter_get(entry_ptr: *const Entry, out: *mut i64) -> c_int {
     if out.is_null() {
         set_last_error("out is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer — the calling PHP wrapper holds a
+        // strong ref through it.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_get on freed Entry");
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let v = inner.get();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
+        // SAFETY: out checked non-null above.
         unsafe { *out = v };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `i64` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_counter_swap(
-    id: u64,
+    entry_ptr: *const Entry,
     new_val: i64,
     out_prev: *mut i64,
 ) -> c_int {
@@ -115,42 +128,58 @@ pub unsafe extern "C" fn oxphp_shared_counter_swap(
         set_last_error("out_prev is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_counter_get.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_swap on freed Entry");
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let prev = inner.swap(new_val);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
+        // SAFETY: out_prev checked non-null above.
         unsafe { *out_prev = prev };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_new` must be valid for writes of `i64` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_add(id: u64, delta: i64, out_new: *mut i64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_counter_add(
+    entry_ptr: *const Entry,
+    delta: i64,
+    out_new: *mut i64,
+) -> c_int {
     if out_new.is_null() {
         set_last_error("out_new is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_counter_get.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_add on freed Entry");
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let new_val = inner.add(delta);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
+        // SAFETY: out_new checked non-null above.
         unsafe { *out_new = new_val };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_new` must be valid for writes of `i64`. `deltas` must be valid for
 /// reads of `n` `i64` values when `n > 0`.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
-    id: u64,
+    entry_ptr: *const Entry,
     deltas: *const i64,
     n: usize,
     out_new: *mut i64,
@@ -159,9 +188,13 @@ pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
         set_last_error("null argument");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_counter_get.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_add_batch on freed Entry");
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
         let slice = if n == 0 {
             &[][..]
@@ -169,7 +202,8 @@ pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
             unsafe { std::slice::from_raw_parts(deltas, n) }
         };
         let new_val = inner.add_batch(slice);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
+        // SAFETY: out_new checked non-null above.
         unsafe { *out_new = new_val };
         Ok(())
     })
@@ -219,8 +253,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             } else {
                 0
             };
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_counter_create(initial, &mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_counter_create(initial, &mut out_ptr) };
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
@@ -229,7 +263,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 });
             }
             let handle = call.storage_mut::<SharedHandle>()?;
-            handle.shared_id = out_id;
+            handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Counter as u8;
             Ok(())
         })
@@ -238,7 +272,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let mut out: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_get(handle.shared_id, &mut out) };
+            let rc = unsafe { oxphp_shared_counter_get(handle.entry_ptr, &mut out) };
             counter_rc_to_result(rc)?;
             call.ret_long(out);
             Ok(())
@@ -254,7 +288,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 1
             };
             let mut new_val: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_add(handle.shared_id, by, &mut new_val) };
+            let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, by, &mut new_val) };
             counter_rc_to_result(rc)?;
             call.ret_long(new_val);
             Ok(())
@@ -270,7 +304,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 1
             };
             let mut new_val: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_add(handle.shared_id, -by, &mut new_val) };
+            let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, -by, &mut new_val) };
             counter_rc_to_result(rc)?;
             call.ret_long(new_val);
             Ok(())
@@ -282,7 +316,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let delta = call.arg_long(0)?;
             let mut new_val: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_add(handle.shared_id, delta, &mut new_val) };
+            let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, delta, &mut new_val) };
             counter_rc_to_result(rc)?;
             call.ret_long(new_val);
             Ok(())
@@ -291,7 +325,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .param("deltas", PhpType::Array)
         .returns(PhpType::Int)
         .handler(|call| {
-            let handle_id = call.storage::<SharedHandle>()?.shared_id;
+            let handle_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut deltas: Vec<i64> = Vec::new();
             call.arg_array_foreach(0, |_key, val| {
                 if val.val_type() == ValType::Long {
@@ -301,7 +335,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let mut new_val: i64 = 0;
             let rc = unsafe {
                 oxphp_shared_counter_add_batch(
-                    handle_id,
+                    handle_ptr,
                     deltas.as_ptr(),
                     deltas.len(),
                     &mut new_val,
@@ -316,7 +350,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_swap(handle.shared_id, 0, &mut prev) };
+            let rc = unsafe { oxphp_shared_counter_swap(handle.entry_ptr, 0, &mut prev) };
             counter_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -332,7 +366,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            call.ret_long(handle.shared_id as i64);
+            let id = unsafe {
+                crate::plugins::ox_shared::registry::oxphp_shared_entry_id(handle.entry_ptr)
+            };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;

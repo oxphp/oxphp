@@ -1,7 +1,7 @@
 //! SharedRegistry — process-global entry store. Arc-refcount lifecycle.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -44,6 +44,13 @@ pub type SharedId = u64;
 /// scalar entries (200 B booked per insert instead of ~16 B). See the
 /// `CHANGELOG.md` Migration section for the recommended cap retune.
 pub const ENTRY_FIXED_OVERHEAD: usize = 200;
+
+/// Sentinel written into `Entry::magic` at construction and overwritten
+/// with `0xDEAD_BEEF` in `Entry::drop`. FFI entrypoints `debug_assert`
+/// against it to turn a use-after-free (handle dereferenced after the
+/// backing `Arc` was dropped) into an explicit panic in debug builds.
+/// Zero-cost in release.
+pub const ENTRY_MAGIC: u32 = 0x0570_5048; // arbitrary fixed marker
 
 #[repr(u8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
@@ -118,31 +125,57 @@ impl SharedType {
     }
 }
 
-/// Each `Entry` in the registry is explicitly reference-counted via
-/// `ext_refcount`. `insert` seeds it at 1 (for the creating wrapper);
-/// `retain`/`release` atomically bump/drop it. When it reaches 0 the
-/// entry is evicted from the DashMap. Arc<Entry> clones from lookup()
-/// provide short-lived strong refs during FFI calls but are NOT the
-/// primary lifetime anchor — without explicit retain, an entry can be
-/// freed as soon as all wrapper Drops run.
+/// A registry entry. Its lifetime is governed by a single mechanism:
+/// the `Arc<Entry>` strong count. The PHP wrapper's `SharedHandle`
+/// holds one strong reference via `Arc::into_raw`; `retain`/`release`
+/// are now `Arc` clone/drop. The registry's `entries` map holds only a
+/// `Weak<Entry>`, so it never anchors the entry. When the last strong
+/// `Arc` drops, `Entry::drop` self-deregisters from the registry.
 pub struct Entry {
+    /// `ENTRY_MAGIC` while alive; `0xDEAD_BEEF` after `Drop` has run.
+    pub magic: u32,
     pub id: SharedId,
     pub type_tag: SharedType,
     pub inner: Arc<dyn SharedInner>,
     pub created_at: Instant,
     pub ops: AtomicU64,
     pub mem_bytes: AtomicUsize,
-    pub ext_refcount: AtomicU64,
+    /// Back-reference to the owning registry, set in `insert`. Used by
+    /// `Drop` to self-deregister. `&'static` because the production
+    /// registry lives in a `OnceLock` static; `new_for_test` leaks its
+    /// registry via `Box::leak` so test entries also get a `'static`
+    /// reference. An `Entry` must never outlive its registry.
+    pub(crate) registry: &'static SharedRegistry,
 }
 
 impl std::fmt::Debug for Entry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Entry")
+            .field("magic", &format_args!("{:#010x}", self.magic))
             .field("id", &self.id)
             .field("type_tag", &self.type_tag)
             .field("ops", &self.ops.load(Ordering::Relaxed))
             .field("mem_bytes", &self.mem_bytes.load(Ordering::Relaxed))
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Entry {
+    /// Runs when the last `Arc<Entry>` is dropped. Self-deregisters
+    /// from the owning registry: poisons `magic`, fires
+    /// `inner.on_drop()`, removes the `Weak` index entry, and adjusts
+    /// the registry totals. This is the single point where an entry
+    /// leaves the registry — there is no longer an `ext_refcount` /
+    /// `release` path.
+    fn drop(&mut self) {
+        self.magic = 0xDEAD_BEEF;
+        self.inner.on_drop();
+        self.registry.entries.remove(&self.id);
+        self.registry.total_entries.fetch_sub(1, Ordering::Relaxed);
+        self.registry.total_bytes.fetch_sub(
+            self.mem_bytes.load(Ordering::Relaxed) as u64,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -171,7 +204,12 @@ pub trait SharedInner: std::any::Any + Send + Sync + 'static {
 }
 
 pub struct SharedRegistry {
-    entries: DashMap<SharedId, Arc<Entry>>,
+    /// Pure id index — holds `Weak`, never keeps an `Entry` alive. The
+    /// `Arc<Entry>` lifetime anchor lives in the PHP wrapper's handle.
+    /// Used only by tag-7 cross-thread transfer (`lookup`) and shutdown
+    /// enumeration (`drain`, `iter_entries`). NOT touched on the FFI
+    /// hot path.
+    entries: DashMap<SharedId, Weak<Entry>>,
     next_id: AtomicI64,
     total_bytes: AtomicU64,
     total_entries: AtomicU64,
@@ -225,19 +263,25 @@ impl SharedRegistry {
         self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Insert a new entry. Returns the SharedId.
-    /// Fails with CapacityExceeded if hard caps would be breached.
+    /// Insert a new entry. Returns the strong `Arc<Entry>` — the caller
+    /// owns the entry's lifetime and moves it into the PHP handle via
+    /// `Arc::into_raw`. Fails with CapacityExceeded if hard caps would
+    /// be breached.
     ///
     /// Reserves capacity via `fetch_add` and rolls back on cap-miss
     /// (Tokio-style semaphore pattern). A concurrent burst may briefly
     /// observe `total_*` above the configured cap (for the duration of
     /// the failing thread's rollback — sub-µs); the post-condition
     /// `total_* <= max_*` is preserved.
+    ///
+    /// Takes `&'static self` so the created `Entry` can store a
+    /// `&'static` back-reference to this registry for `Drop`-time
+    /// self-deregistration.
     pub fn insert(
-        &self,
+        &'static self,
         type_tag: SharedType,
         inner: Arc<dyn SharedInner>,
-    ) -> Result<SharedId, SharedError> {
+    ) -> Result<Arc<Entry>, SharedError> {
         // The caller passes `type_tag` separately from `inner`; they must
         // agree, otherwise downcasts via `as_any().downcast_ref()` would
         // silently return `None` for a value that is actually present.
@@ -285,24 +329,31 @@ impl SharedRegistry {
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) as u64;
         let entry = Arc::new(Entry {
+            magic: ENTRY_MAGIC,
             id,
             type_tag,
             inner,
             created_at: Instant::now(),
             ops: AtomicU64::new(0),
             mem_bytes: AtomicUsize::new(mem),
-            // Seeded at 1 for the creating wrapper; its Drop will call release().
-            ext_refcount: AtomicU64::new(1),
+            registry: self,
         });
-        self.entries.insert(id, entry);
-        Ok(id)
+        // The map holds only a Weak — it never anchors the Entry. The
+        // returned Arc is the sole strong ref; the caller moves it into
+        // the PHP handle via Arc::into_raw.
+        self.entries.insert(id, Arc::downgrade(&entry));
+        Ok(entry)
     }
 
-    /// Look up an entry; returns StaleHandle if missing.
+    /// Resolve an id to a strong `Arc<Entry>`. Used **only** on the
+    /// tag-7 cross-thread deserialize path and in tests — never on the
+    /// in-process FFI hot path, which dereferences the handle pointer
+    /// directly. Returns `StaleHandle` if the id is unknown or the
+    /// entry's last `Arc` has already dropped (a dead `Weak`).
     pub fn lookup(&self, id: SharedId) -> Result<Arc<Entry>, SharedError> {
         self.entries
             .get(&id)
-            .map(|r| Arc::clone(&r))
+            .and_then(|w| w.upgrade())
             .ok_or(SharedError::StaleHandle)
     }
 
@@ -347,7 +398,7 @@ impl SharedRegistry {
         if delta == 0 {
             return;
         }
-        let Some(e) = self.entries.get(&id) else {
+        let Some(e) = self.entries.get(&id).and_then(|w| w.upgrade()) else {
             return;
         };
         if delta > 0 {
@@ -370,99 +421,21 @@ impl SharedRegistry {
         }
     }
 
-    /// Retain: atomically increment the entry's ext_refcount. Returns
-    /// the new count, or -1 if the entry does not exist or its
-    /// refcount already reached zero (a concurrent `release` has
-    /// committed to eviction).
-    ///
-    /// Plain `fetch_add` is unsafe here: between a concurrent
-    /// `release`'s `fetch_sub` returning 1 and its `entries.remove`,
-    /// the entry is still in the map but already destined to die.
-    /// A naive retain in that window would resurrect it (bump 0 → 1)
-    /// and leave a phantom external reference no future release can
-    /// drain. CAS-loop refuses to bump from zero.
-    pub fn retain(&self, id: SharedId) -> i32 {
-        let Some(e) = self.entries.get(&id) else {
-            return -1;
-        };
-        let mut cur = e.ext_refcount.load(Ordering::Acquire);
-        loop {
-            if cur == 0 {
-                return -1;
-            }
-            // AcqRel on success: `ext_refcount` is the entry's lifecycle
-            // guard, not a metric. The Acquire half pairs with the Release
-            // in `release`'s `fetch_sub` so a retained entry observes every
-            // prior holder's writes; the Release half publishes this retain
-            // to the thread that will eventually evict. Acquire on failure
-            // re-reads a coherent `cur` for the next CAS attempt.
-            match e.ext_refcount.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return (cur + 1) as i32,
-                Err(actual) => cur = actual,
-            }
-        }
-    }
-
-    /// Release: atomically decrement ext_refcount. If it reaches 0 the
-    /// entry is evicted from the registry (on_drop fires, totals adjust).
-    /// Returns the new count, or -1 if the entry does not exist.
-    pub fn release(&self, id: SharedId) -> i32 {
-        // AcqRel: the Release half publishes this thread's writes to whoever
-        // drops the last ref; the Acquire half ensures the thread that sees
-        // `prev == 1` observes every other holder's writes before it runs
-        // `on_drop` and evicts. Stronger than Arc's Release + Acquire-fence
-        // pattern (the fence is folded into the RMW), kept uniform with
-        // `retain` so the refcount has one consistent ordering story.
-        let prev = match self.entries.get(&id) {
-            Some(e) => e.ext_refcount.fetch_sub(1, Ordering::AcqRel),
-            None => return -1,
-        };
-        if prev == 1 {
-            if let Some((_, entry)) = self.entries.remove(&id) {
-                entry.inner.on_drop();
-                self.total_entries.fetch_sub(1, Ordering::Relaxed);
-                self.total_bytes.fetch_sub(
-                    entry.mem_bytes.load(Ordering::Relaxed) as u64,
-                    Ordering::Relaxed,
-                );
-            }
-            return 0;
-        }
-        (prev - 1) as i32
-    }
-
+    /// Enumerate every live entry. Dead `Weak`s (an `Entry` mid-drop)
+    /// are filtered out via `upgrade()`. Consumers: introspection /
+    /// observability.
     pub fn iter_entries(&self) -> impl Iterator<Item = Arc<Entry>> + '_ {
-        self.entries.iter().map(|r| Arc::clone(r.value()))
-    }
-
-    pub fn is_alive(&self, id: SharedId) -> bool {
-        self.entries.contains_key(&id)
-    }
-
-    pub fn type_tag(&self, id: SharedId) -> Option<SharedType> {
-        self.entries.get(&id).map(|e| e.type_tag)
-    }
-
-    /// Peek at the external refcount of an entry. Returns `None` if the
-    /// entry does not exist. Used by tests that verify retain/release
-    /// balance; not a contract surface.
-    pub fn ext_refcount(&self, id: SharedId) -> Option<u64> {
-        self.entries
-            .get(&id)
-            .map(|e| e.ext_refcount.load(Ordering::Acquire))
+        self.entries.iter().filter_map(|w| w.value().upgrade())
     }
 
     /// Drain: wake blocked ops, mark shutting-down.
     /// No-op for atomic types because they don't block.
     pub fn drain(&self) {
         self.shutting_down.store(true, Ordering::Release);
-        for e in self.entries.iter() {
-            e.inner.on_shutdown_notify();
+        for w in self.entries.iter() {
+            if let Some(entry) = w.value().upgrade() {
+                entry.inner.on_shutdown_notify();
+            }
         }
     }
 }
@@ -485,38 +458,6 @@ pub extern "C" fn oxphp_shared_registry_init() -> c_int {
     })
 }
 
-#[no_mangle]
-pub extern "C" fn oxphp_shared_retain(id: u64) -> c_int {
-    ffi_entry(|| {
-        if let Some(reg) = REGISTRY.get() {
-            Ok::<_, SharedError>(reg.retain(id))
-        } else {
-            Err(SharedError::Generic)
-        }
-        .map(|_| ())
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn oxphp_shared_release(id: u64) -> c_int {
-    ffi_entry(|| {
-        if let Some(reg) = REGISTRY.get() {
-            reg.release(id);
-            Ok(())
-        } else {
-            Err(SharedError::Generic)
-        }
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn oxphp_shared_is_alive(id: u64) -> c_int {
-    match REGISTRY.get() {
-        Some(reg) => reg.is_alive(id) as c_int,
-        None => 0,
-    }
-}
-
 /// Returns the NUL-terminated PHP class FQN for a `SharedType` tag, or
 /// `NULL` for an unknown tag. The pointer is to a `&'static CStr` and is
 /// valid for the lifetime of the process — caller must NOT free it.
@@ -533,13 +474,76 @@ pub extern "C" fn oxphp_shared_class_name(type_tag: u8) -> *const c_char {
     }
 }
 
+/// Clone the handle's strong reference. Given a live `entry_ptr`
+/// (`Arc::into_raw` pointer), bumps the strong count and returns the
+/// same pointer — the caller now owns an additional strong ref and
+/// must balance it with `oxphp_shared_handle_drop`. Returns NULL if
+/// `entry_ptr` is NULL.
+///
+/// # Safety
+/// `entry_ptr` must be NULL or a pointer obtained from `Arc::into_raw`
+/// on an `Arc<Entry>` that is still alive.
 #[no_mangle]
-pub extern "C" fn oxphp_shared_type_tag(id: u64) -> u8 {
-    REGISTRY
-        .get()
-        .and_then(|r| r.type_tag(id))
-        .map(|t| t as u8)
-        .unwrap_or(0)
+pub unsafe extern "C" fn oxphp_shared_handle_clone(entry_ptr: *const Entry) -> *const Entry {
+    if entry_ptr.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: caller guarantees entry_ptr is a live Arc::into_raw ptr.
+    unsafe { Arc::increment_strong_count(entry_ptr) };
+    entry_ptr
+}
+
+/// Drop one strong reference owned via `entry_ptr`. Reconstitutes the
+/// `Arc` and drops it; when it is the last strong ref, `Entry::drop`
+/// self-deregisters. No-op on NULL.
+///
+/// # Safety
+/// `entry_ptr` must be NULL or a pointer obtained from `Arc::into_raw`
+/// that has not already been passed to this function. Double-free is
+/// undefined behaviour — see the contract note in `oxphp_bridge.h`.
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_shared_handle_drop(entry_ptr: *const Entry) {
+    if entry_ptr.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees a live, not-yet-dropped Arc::into_raw ptr.
+    unsafe { drop(Arc::from_raw(entry_ptr)) };
+}
+
+/// Read the registry id of the entry behind `entry_ptr`. Used by the
+/// tag-7 serializer to write the wire id. Returns 0 on NULL (0 is
+/// never a valid id — `next_id` starts at 1).
+///
+/// # Safety
+/// `entry_ptr` must be NULL or a live `Arc::into_raw` pointer.
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_shared_entry_id(entry_ptr: *const Entry) -> u64 {
+    if entry_ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees a live Arc::into_raw ptr; the Entry is
+    // alive because the caller holds a strong ref through it.
+    let entry = unsafe { &*entry_ptr };
+    debug_assert_eq!(
+        entry.magic, ENTRY_MAGIC,
+        "oxphp_shared_entry_id on freed Entry"
+    );
+    entry.id
+}
+
+/// Resolve a wire id (tag-7 deserialize) to a fresh strong reference.
+/// Looks the id up in the `Weak` index and upgrades it; returns an
+/// `Arc::into_raw` pointer the receiving handle owns, or NULL if the
+/// entry died in the transfer window (a correct `StaleHandle`).
+#[no_mangle]
+pub extern "C" fn oxphp_shared_handle_from_id(id: u64) -> *const Entry {
+    match REGISTRY.get() {
+        Some(reg) => match reg.lookup(id) {
+            Ok(arc) => Arc::into_raw(arc),
+            Err(_) => std::ptr::null(),
+        },
+        None => std::ptr::null(),
+    }
 }
 
 #[no_mangle]
@@ -555,18 +559,19 @@ pub extern "C" fn oxphp_shared_total_bytes() -> u64 {
 #[cfg(test)]
 impl SharedRegistry {
     /// Build a standalone registry that is **not** registered with the
-    /// global `OnceLock`. Use this in unit tests that need to exercise
-    /// behaviour parametrised on `SharedConfig` — the global registry
-    /// can only be initialised once per process.
-    pub(crate) fn new_for_test(config: SharedConfig) -> Self {
-        SharedRegistry {
+    /// global `OnceLock`, leaked to `'static` so `Entry::registry` can
+    /// hold a `&'static` reference. Use in unit tests that need to
+    /// exercise behaviour parametrised on `SharedConfig`. The leak is
+    /// intentional and bounded — test processes are short-lived.
+    pub(crate) fn new_for_test(config: SharedConfig) -> &'static SharedRegistry {
+        Box::leak(Box::new(SharedRegistry {
             entries: DashMap::with_capacity(16),
             next_id: AtomicI64::new(1),
             total_bytes: AtomicU64::new(0),
             total_entries: AtomicU64::new(0),
             config,
             shutting_down: AtomicBool::new(false),
-        }
+        }))
     }
 }
 
@@ -619,11 +624,12 @@ mod tests {
     #[test]
     fn insert_and_lookup() {
         let reg = fresh_registry();
-        let id = reg
+        let arc = reg
             .insert(SharedType::Counter, Arc::new(TestInner { bytes: 16 }))
             .unwrap();
-        assert!(reg.is_alive(id));
-        assert_eq!(reg.type_tag(id), Some(SharedType::Counter));
+        let id = arc.id;
+        assert!(reg.lookup(id).is_ok());
+        assert_eq!(arc.type_tag, SharedType::Counter);
         let e = reg.lookup(id).unwrap();
         assert_eq!(e.type_tag, SharedType::Counter);
     }
@@ -648,7 +654,10 @@ mod tests {
     fn total_counts_track() {
         let reg = fresh_registry();
         let before = reg.total_entries();
-        let _id = reg
+        // Hold the Arc<Entry> for the assertion — without it, the entry
+        // would self-deregister on drop and total_entries would not
+        // advance.
+        let _arc = reg
             .insert(SharedType::Counter, Arc::new(TestInner { bytes: 16 }))
             .unwrap();
         assert_eq!(reg.total_entries(), before + 1);
@@ -732,105 +741,25 @@ mod tests {
 
         // metrics_enabled = false ⇒ ops stays at 0.
         let reg = SharedRegistry::new_for_test(make_config(false));
-        let id = reg
+        let entry = reg
             .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
             .expect("insert succeeds");
-        let entry = reg.lookup(id).expect("entry exists");
         reg.record_op(&entry);
         assert_eq!(entry.ops.load(Ordering::Relaxed), 0);
 
         // metrics_enabled = true ⇒ ops increments.
         let reg = SharedRegistry::new_for_test(make_config(true));
-        let id = reg
+        let entry = reg
             .insert(SharedType::Atomic, Arc::new(AtomicInner::new(0)))
             .expect("insert succeeds");
-        let entry = reg.lookup(id).expect("entry exists");
         reg.record_op(&entry);
         assert_eq!(entry.ops.load(Ordering::Relaxed), 1);
     }
 
-    /// Pins the invariant that `retain` MUST NOT raise `ext_refcount`
-    /// from 0 to 1. Hitting 0 means a concurrent `release` already
-    /// committed to eviction; a successful retain there would
-    /// resurrect an entry that the registry is about to drop and
-    /// leave a phantom external reference no future `release` can
-    /// balance (entries.get later returns None).
-    ///
-    /// The race is timing-dependent, so this is a stress test:
-    /// thousands of insert/release-vs-retain races, asserting zero
-    /// resurrections at the end.
-    #[test]
-    fn retain_does_not_resurrect_after_release_to_zero() {
-        use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
-        use std::sync::atomic::AtomicU64 as StdAtomicU64;
-        use std::sync::Arc as StdArc;
-        use std::sync::Barrier;
-
-        // Standalone registry with generous caps so 5k iterations
-        // don't trip the default 100-entry limit when retain wins
-        // the race (entry leaks until both threads drain).
-        let reg = StdArc::new(SharedRegistry::new_for_test(SharedConfig {
-            enabled: true,
-            max_entries: 1_000_000,
-            max_bytes: 1 << 30,
-            soft_limit_ratio: 0.7,
-            metrics_enabled: false,
-            introspection_enabled: false,
-            introspection_preview_enabled: false,
-            cycle_detect_depth: 16,
-            cycle_detect_edges: 10_000,
-            shutdown_timeout_seconds: 5.0,
-            poison_strict: false,
-            lock_diagnostics: LockDiagnosticsLevel::Off,
-            lock_poll_interval_ms: 100,
-            preview_string_limit: 256,
-            preview_array_limit: 20,
-        }));
-        let resurrections = StdArc::new(StdAtomicU64::new(0));
-        let iters = 5_000;
-
-        for _ in 0..iters {
-            let id = reg
-                .insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
-                .unwrap();
-
-            let barrier = StdArc::new(Barrier::new(2));
-            let reg_r = StdArc::clone(&reg);
-            let reg_a = StdArc::clone(&reg);
-            let b1 = StdArc::clone(&barrier);
-            let b2 = StdArc::clone(&barrier);
-            let resurrections_t = StdArc::clone(&resurrections);
-
-            let t_release = std::thread::spawn(move || {
-                b1.wait();
-                reg_r.release(id);
-            });
-            let t_retain = std::thread::spawn(move || {
-                b2.wait();
-                let rc = reg_a.retain(id);
-                // rc == 1 means retain just bumped ext_refcount from 0 to 1
-                // — i.e. resurrected an entry release() was committing to
-                // evict.
-                if rc == 1 {
-                    resurrections_t.fetch_add(1, Ordering::Relaxed);
-                }
-                // Balance a successful retain so total_entries drains
-                // and the next iteration doesn't fight capacity caps.
-                if rc > 0 {
-                    reg_a.release(id);
-                }
-            });
-
-            t_release.join().unwrap();
-            t_retain.join().unwrap();
-        }
-
-        assert_eq!(
-            resurrections.load(Ordering::Relaxed),
-            0,
-            "retain resurrected an entry that release() drove to ext_refcount=0"
-        );
-    }
+    // The previous `retain_does_not_resurrect_after_release_to_zero`
+    // stress test is deleted: with `Arc<Entry>` as the sole lifetime
+    // mechanism, retain/release became `Arc::clone` / `drop` and the
+    // resurrection race no longer exists as a class.
 
     fn capped_config(max_entries: usize, max_bytes: u64) -> SharedConfig {
         use crate::plugins::ox_shared::config::LockDiagnosticsLevel;
@@ -880,15 +809,19 @@ mod tests {
             }));
         }
 
-        let mut oks = 0usize;
+        // Collect the returned `Arc<Entry>`s into a Vec to keep their
+        // strong refs alive until the `total_entries` assertion below —
+        // dropping an `Arc<Entry>` triggers self-deregistration.
+        let mut held: Vec<Arc<Entry>> = Vec::new();
         let mut errs = 0usize;
         for h in handles {
             match h.join().unwrap() {
-                Ok(_) => oks += 1,
+                Ok(arc) => held.push(arc),
                 Err(SharedError::CapacityExceeded) => errs += 1,
                 Err(other) => panic!("unexpected error: {other:?}"),
             }
         }
+        let oks = held.len();
 
         assert_eq!(oks, CAP, "exactly CAP inserts must succeed");
         assert_eq!(errs, THREADS - CAP, "the rest must hit CapacityExceeded");
@@ -897,6 +830,7 @@ mod tests {
             CAP,
             "total_entries must not overshoot the cap after rollbacks"
         );
+        drop(held);
     }
 
     /// Same shape, but constrains `max_bytes` instead of `max_entries`.
@@ -933,12 +867,13 @@ mod tests {
             }));
         }
 
-        let mut oks = 0usize;
+        let mut held: Vec<Arc<Entry>> = Vec::new();
         for h in handles {
-            if h.join().unwrap().is_ok() {
-                oks += 1;
+            if let Ok(arc) = h.join().unwrap() {
+                held.push(arc);
             }
         }
+        let oks = held.len();
 
         let expected_oks = (CAP_BYTES / PER_ENTRY) as usize;
         assert_eq!(
@@ -956,6 +891,7 @@ mod tests {
             expected_oks,
             "total_entries must match successful inserts (bytes-cap rollback also drops entries)"
         );
+        drop(held);
     }
 
     /// Pins the contract that `insert` books `ENTRY_FIXED_OVERHEAD` in
@@ -968,7 +904,10 @@ mod tests {
     fn insert_books_fixed_overhead() {
         let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
         assert_eq!(reg.total_bytes(), 0);
-        reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
+        // Hold the Arc — otherwise the entry self-deregisters and
+        // total_bytes returns to 0 before the assert.
+        let _arc = reg
+            .insert(SharedType::Counter, Arc::new(TestInner { bytes: 8 }))
             .unwrap();
         assert_eq!(
             reg.total_bytes(),
@@ -994,9 +933,13 @@ mod tests {
         let cap = N * ENTRY_FIXED_OVERHEAD as u64;
         let reg = SharedRegistry::new_for_test(capped_config(1_000, cap));
 
+        // Collect the Arcs so the entries stay alive for the cap check.
+        let mut held: Vec<Arc<Entry>> = Vec::new();
         for i in 0..N {
-            reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
-                .unwrap_or_else(|e| panic!("insert {i}/{N} must succeed: {e:?}"));
+            held.push(
+                reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
+                    .unwrap_or_else(|e| panic!("insert {i}/{N} must succeed: {e:?}")),
+            );
         }
         assert_eq!(reg.total_bytes(), cap);
         assert_eq!(reg.total_entries(), N);
@@ -1011,6 +954,7 @@ mod tests {
             "rolled-back insert must leave total_bytes untouched"
         );
         assert_eq!(reg.total_entries(), N);
+        drop(held);
     }
 
     /// Pins the contract that `adjust_mem_bytes` keeps `total_bytes`
@@ -1019,9 +963,10 @@ mod tests {
     #[test]
     fn adjust_mem_bytes_tracks_growth_and_shrink() {
         let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
-        let id = reg
+        let arc = reg
             .insert(SharedType::Counter, Arc::new(TestInner { bytes: 0 }))
             .unwrap();
+        let id = arc.id;
         let baseline = reg.total_bytes();
 
         reg.adjust_mem_bytes(id, 320);
@@ -1034,5 +979,6 @@ mod tests {
         // not wrap.
         reg.adjust_mem_bytes(id, -(i64::from(u32::MAX) as isize));
         assert_eq!(reg.total_bytes(), 0);
+        drop(arc);
     }
 }

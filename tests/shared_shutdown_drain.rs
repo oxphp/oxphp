@@ -43,7 +43,7 @@ fn blocked_recv_wakes_on_drain_with_none() {
     let reg = registry::registry();
 
     let ch_inner = Arc::new(ChannelInner::new(4));
-    let id = reg
+    let entry = reg
         .insert(SharedType::Channel, ch_inner.clone())
         .expect("insert");
 
@@ -77,7 +77,8 @@ fn blocked_recv_wakes_on_drain_with_none() {
     );
 
     // Cleanup so the registry state doesn't bleed into sibling tests.
-    reg.release(id);
+    // Dropping the last Arc<Entry> self-deregisters via Entry::Drop.
+    drop(entry);
 }
 
 #[test]
@@ -89,7 +90,7 @@ fn blocked_send_wakes_on_drain_with_closed() {
     // Fill the channel so the next send blocks.
     ch_inner.try_send(vec![1]).expect("initial send");
 
-    let id = reg
+    let entry = reg
         .insert(SharedType::Channel, ch_inner.clone())
         .expect("insert");
 
@@ -117,5 +118,5 @@ fn blocked_send_wakes_on_drain_with_closed() {
         "wake_latency {wake_latency:?} exceeds 250ms"
     );
 
-    reg.release(id);
+    drop(entry);
 }
