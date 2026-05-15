@@ -55,9 +55,9 @@ APM 插件是编译时特性（`plugin-apm`），依赖于 OTel 插件。它增�
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
-| `OTEL_APM_ENABLED` | `false` | 启用 APM：自动插桩、错误捕获、PHP SDK。需要 `OTEL_ENABLED=true` |
+| `OTEL_APM_ENABLED` | `false` | 启用 APM：自动插桩、错误捕获、PHP SDK。需要 `OTEL_ENABLED=true`。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此阈值的查询会在其 span 上标记 `oxphp.db.slow=true` |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 在 `db.params` span 属性中记录绑定参数 |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 在 `db.params` span 属性中记录绑定参数。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
 
 ## PHP 中的 Trace Context
 
