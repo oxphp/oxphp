@@ -316,7 +316,7 @@ impl Plugin for ApmPlugin {
         if !self.enabled {
             tracing::info!(
                 plugin = "apm",
-                "APM plugin disabled (OTEL_APM_ENABLED != true)"
+                "APM plugin disabled (OTEL_APM_ENABLED is falsy or unset)"
             );
             ctx.expose_config("enabled", false);
 

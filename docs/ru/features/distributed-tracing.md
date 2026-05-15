@@ -55,9 +55,9 @@ OxPHP поддерживает распространение W3C Trace Context,
 
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
-| `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментацию, захват ошибок, PHP SDK. Требует `OTEL_ENABLED=true` |
+| `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментацию, захват ошибок, PHP SDK. Требует `OTEL_ENABLED=true`. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленного запроса в миллисекундах. Запросы свыше этого значения получают атрибут `oxphp.db.slow=true` на своих спанах |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params` |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params`. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
 
 ## Контекст трассировки в PHP
 

@@ -55,9 +55,9 @@ The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true` |
+| `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true`. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Queries above this get `oxphp.db.slow=true` on their spans |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 
 ## Trace Context in PHP
 
