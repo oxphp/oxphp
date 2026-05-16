@@ -1127,6 +1127,16 @@ mod tests {
 
             t_drop.join().unwrap();
             t_recv.join().unwrap();
+            // Each iteration self-cleans: both threads end up dropping
+            // their strong ref (t_drop always; t_recv only if it won the
+            // upgrade), so the last drop fires Entry::drop which removes
+            // the Weak from `entries` and decrements totals. No explicit
+            // cleanup needed — unlike tests that hold Arc<Entry>s through
+            // a Channel/Map state machine, see shared_shutdown_drain.rs.
+            // A baseline-relative `total_entries` assertion would be
+            // unsound here: cargo runs unit tests in parallel and a
+            // sibling test inserting into the same global REGISTRY would
+            // cause false positives.
         }
     }
 
