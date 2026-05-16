@@ -447,12 +447,11 @@ curl http://localhost:9090/metrics
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
 | ~~**Built-in PHP Profiler**~~ | ✅ 已实现 — `plugin-profiler` 特性：按请求性能分析，支持 xhprof/speedscope/pprof/collapsed 格式，PHP SDK，属性触发，内存 LRU + 磁盘保留，HTTP 推送至 xhgui，`/__profiler/` 内部路由，Prometheus 指标 — 参见 [性能分析](docs/zh/features/profiling.md) |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |
-| **Non-Docker Install** | 通过系统包管理器（apt、brew 等）原生安装 |
+| **Non-Docker Install** | *(探索性)* 通过系统包管理器（apt、brew 等）原生安装 |
 | **HTTP/3** | 基于 QUIC 的 HTTP/3 支持 |
 | **HTTP 103 Early Hints** | 发送 `103 Early Hints` 响应，允许客户端在最终响应前预加载资源 |
 | **Ecosystem Plugins** | 扩展插件系统：更多生命周期钩子、更丰富的 PHP API，以及第三方插件作者文档 |
 | ~~**Shared Async Runtime**~~ | ✅ 已实现 — 同一个异步运行时同时驱动 HTTP 服务器和 `oxphp_async()` / `oxphp_async_await()`，支持超时、结果传递和竞速协调 |
-| **gRPC Server** | *(探索性)* 替代服务器模式 —— gRPC 而非 HTTP；高度不确定，可能不会实现 |
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
 | ~~**Fiber Multiplexing**~~ | ✅ 已实现 — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` / `oxphp_usleep()` 和 `oxphp_async_await()` 协作式让出 Fiber |
 | **Diagnostics** | 生产诊断工具：检查操作系统限制（ulimit、TCP backlog、epoll/kqueue、容器设置），识别性能瓶颈（工作队列深度、锁竞争、GC/内存分配压力、ZTS 统计），并给出针对性的可操作建议 |
