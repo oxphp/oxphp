@@ -25,13 +25,17 @@ pub type SharedId = u64;
 /// | Per-allocation malloc prologue (×3 allocs) | ~48            |
 /// | **Total**                                  | **184–216**    |
 ///
-/// 200 sits in the middle of that structural breakdown. **The number
-/// is a static accounting estimate, NOT measured against a heap
-/// profiler** — calibrating against heaptrack / `jemalloc_stats_print`
-/// / `mi_stats_print` on a target platform (glibc, musl, macOS) is a
-/// nice-to-have follow-up that would tighten the bound, but adds CI
+/// 200 is a consciously conservative pick inside the 184–216 B
+/// structural range — closer to the upper edge than the middle so
+/// that allocator quirks (bucket-size rounding under glibc/musl,
+/// per-thread arena headers, mimalloc segment metadata amortised
+/// across many entries) stay accounted for under the cap rather than
+/// leaking out over it. **The number is a static accounting estimate, NOT
+/// measured against a heap profiler** — calibrating against heaptrack
+/// / `jemalloc_stats_print` / `mi_stats_print` on a target platform is
+/// a nice-to-have follow-up that would tighten the bound, but adds CI
 /// dependencies. For now the doc and the code are honest about being
-/// a guess inside a known range.
+/// a conservative estimate inside a known range.
 ///
 /// Treat `max_bytes` as a grace-cap, not a precise RSS budget. Operators
 /// should still cap the container at the orchestrator level (cgroups,
