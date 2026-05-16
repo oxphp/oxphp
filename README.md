@@ -445,12 +445,11 @@ curl http://localhost:9090/metrics
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
 | ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/en/features/profiling.md) |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |
-| **Non-Docker Install** | Native installation via system package managers (apt, brew, etc.) |
+| **Non-Docker Install** | *(speculative)* Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |
 | **HTTP 103 Early Hints** | Send `103 Early Hints` responses to allow clients to preload resources before the final response |
 | **Ecosystem Plugins** | Expanded plugin system: more lifecycle hooks, richer PHP API, and documentation for third-party plugin authors |
 | ~~**Shared Async Runtime**~~ | ✅ Implemented — the same async runtime powers both the HTTP server and `oxphp_async()` / `oxphp_async_await()` with timeouts, result delivery, and race coordination |
-| **gRPC Server** | *(speculative)* An alternative server mode — gRPC instead of HTTP; very uncertain, may not happen |
 | ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |
 | ~~**Fiber Multiplexing**~~ | ✅ Implemented — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` / `oxphp_usleep()` and `oxphp_async_await()` yield the fiber cooperatively |
 | **Diagnostics** | Production doctor: checks OS limits (ulimit, TCP backlog, epoll/kqueue, container settings), identifies performance bottlenecks (worker queue depth, lock contention, GC/alloc pressure, ZTS stats), and gives specific actionable recommendations |
