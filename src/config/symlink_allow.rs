@@ -123,6 +123,16 @@ impl SymlinkAllowList {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Test-only constructor that lets a test inject the "current user"
+    /// instead of resolving it via libc. Not part of the public API.
+    #[cfg(test)]
+    pub(crate) fn from_env_with_user(
+        canonical_root: &Path,
+        current_user: Option<&str>,
+    ) -> Result<Self, BoxError> {
+        Self::from_env_inner(canonical_root, current_user)
+    }
 }
 
 fn current_username() -> Option<String> {
@@ -282,6 +292,72 @@ pub(crate) mod tests {
                 );
             });
         }
+    }
+
+    fn first_home_dir() -> Option<std::path::PathBuf> {
+        std::fs::read_dir("/home")
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.is_dir())
+    }
+
+    #[test]
+    fn home_other_user_rejected() {
+        let Some(some_home) = first_home_dir() else {
+            return;
+        };
+        let canonical = std::fs::canonicalize(&some_home).unwrap();
+        with_env(Some(canonical.to_str().unwrap()), || {
+            let root = TempDir::new().unwrap();
+            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+            let err = SymlinkAllowList::from_env_with_user(
+                &canonical_root,
+                Some("__oxphp_sentinel_user__"),
+            )
+            .expect_err("other user's home must be rejected");
+            assert!(
+                err.to_string().contains("home"),
+                "error should mention home, got: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn home_current_user_accepted() {
+        let Some(some_home) = first_home_dir() else {
+            return;
+        };
+        let canonical = std::fs::canonicalize(&some_home).unwrap();
+        let user = canonical
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        with_env(Some(canonical.to_str().unwrap()), || {
+            let root = TempDir::new().unwrap();
+            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+            let list =
+                SymlinkAllowList::from_env_with_user(&canonical_root, Some(&user))
+                    .expect("matching user must be accepted");
+            assert!(list.allows(&canonical));
+        });
+    }
+
+    #[test]
+    fn home_unknown_user_rejects_all_home_entries() {
+        let Some(some_home) = first_home_dir() else {
+            return;
+        };
+        let canonical = std::fs::canonicalize(&some_home).unwrap();
+        with_env(Some(canonical.to_str().unwrap()), || {
+            let root = TempDir::new().unwrap();
+            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+            let err = SymlinkAllowList::from_env_with_user(&canonical_root, None)
+                .expect_err("unknown user must reject all /home/*");
+            assert!(err.to_string().contains("home"));
+        });
     }
 
     #[test]
