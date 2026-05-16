@@ -163,4 +163,41 @@ pub(crate) mod tests {
             assert!(list.allows(&target_canonical.join("nested/file.txt")));
         });
     }
+
+    #[test]
+    fn relative_entry_resolves_against_canonical_root() {
+        let project = TempDir::new().unwrap();
+        let project_canonical = std::fs::canonicalize(project.path()).unwrap();
+
+        std::fs::create_dir(project_canonical.join("public")).unwrap();
+        std::fs::create_dir(project_canonical.join("storage")).unwrap();
+        let document_root = std::fs::canonicalize(project_canonical.join("public")).unwrap();
+        let storage_canonical =
+            std::fs::canonicalize(project_canonical.join("storage")).unwrap();
+
+        with_env(Some("../storage"), || {
+            let list = SymlinkAllowList::from_env(&document_root).unwrap();
+            assert!(list.allows(&storage_canonical));
+            assert!(list.allows(&storage_canonical.join("uploads/x.png")));
+        });
+    }
+
+    #[test]
+    fn missing_target_returns_err() {
+        with_env(Some("/does/not/exist/anywhere/12345"), || {
+            let root = TempDir::new().unwrap();
+            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+            let err = SymlinkAllowList::from_env(&canonical_root)
+                .expect_err("missing target must error");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("/does/not/exist/anywhere/12345"),
+                "error should name the offending entry, got: {msg}"
+            );
+            assert!(
+                msg.contains("canonicalize"),
+                "error should mention canonicalize, got: {msg}"
+            );
+        });
+    }
 }
