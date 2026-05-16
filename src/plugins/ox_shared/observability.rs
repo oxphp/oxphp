@@ -218,9 +218,13 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
         }
         SharedType::Channel => {
             if let Some(ch) = e.inner.as_any_channel() {
+                let pending = ch.pending();
+                // `pending` is retained for one release as a deprecated alias
+                // of `count`; dashboards should switch before the next major.
                 json!({
                     "capacity": ch.capacity(),
-                    "pending": ch.pending(),
+                    "count": pending,
+                    "pending": pending,
                     "closed": ch.is_closed(),
                     "senders_blocked": ch.senders_blocked().load(Ordering::Relaxed),
                     "receivers_blocked": ch.receivers_blocked().load(Ordering::Relaxed),
@@ -271,8 +275,11 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
                 for (k, n) in pool.idle_by_thread() {
                     idle_by_thread.insert(k.to_string(), json!(n as u64));
                 }
+                // `size` is retained for one release as a deprecated alias of
+                // `count`; dashboards should switch before the next major.
                 json!({
                     "max_size": pool.max_size() as u64,
+                    "count": size,
                     "size": size,
                     "in_use": in_use,
                     "idle": idle,
@@ -496,7 +503,11 @@ impl PluginMetricsCollector for SharedMetricsCollector {
 
         // Per-channel metrics.
         output.push_str(
-            "# HELP oxphp_shared_channel_pending Current items buffered in each Channel.\n",
+            "# HELP oxphp_shared_channel_count Current items buffered in each Channel.\n",
+        );
+        output.push_str("# TYPE oxphp_shared_channel_count gauge\n");
+        output.push_str(
+            "# HELP oxphp_shared_channel_pending (deprecated, removed in a future release; use oxphp_shared_channel_count) Current items buffered in each Channel.\n",
         );
         output.push_str("# TYPE oxphp_shared_channel_pending gauge\n");
 
@@ -526,9 +537,12 @@ impl PluginMetricsCollector for SharedMetricsCollector {
         {
             if let Some(ch) = e.inner.as_any_channel() {
                 let id = e.id;
+                let pending = ch.pending();
                 output.push_str(&format!(
-                    "oxphp_shared_channel_pending{{channel_id=\"{id}\"}} {}\n",
-                    ch.pending()
+                    "oxphp_shared_channel_count{{channel_id=\"{id}\"}} {pending}\n"
+                ));
+                output.push_str(&format!(
+                    "oxphp_shared_channel_pending{{channel_id=\"{id}\"}} {pending}\n"
                 ));
                 output.push_str(&format!(
                     "oxphp_shared_channel_senders_blocked{{channel_id=\"{id}\"}} {}\n",
@@ -588,7 +602,11 @@ impl PluginMetricsCollector for SharedMetricsCollector {
         // Per-pool metrics. Gauges first, then the outcome + wait
         // histogram + eviction counters.
         output.push_str(
-            "# HELP oxphp_shared_pool_size Authoritative capacity gauge (in_use + idle).\n",
+            "# HELP oxphp_shared_pool_count Authoritative capacity gauge (in_use + idle).\n",
+        );
+        output.push_str("# TYPE oxphp_shared_pool_count gauge\n");
+        output.push_str(
+            "# HELP oxphp_shared_pool_size (deprecated, removed in a future release; use oxphp_shared_pool_count) Authoritative capacity gauge (in_use + idle).\n",
         );
         output.push_str("# TYPE oxphp_shared_pool_size gauge\n");
         output
@@ -622,6 +640,9 @@ impl PluginMetricsCollector for SharedMetricsCollector {
                 let idle = pool.idle_count() as u64;
                 let in_use = size.saturating_sub(idle);
                 let waiting = pool.waiting_count();
+                output.push_str(&format!(
+                    "oxphp_shared_pool_count{{pool_id=\"{id}\"}} {size}\n"
+                ));
                 output.push_str(&format!(
                     "oxphp_shared_pool_size{{pool_id=\"{id}\"}} {size}\n"
                 ));
@@ -725,6 +746,8 @@ mod tests {
 
         let ts = &v["type_specific"];
         assert_eq!(ts["capacity"], 16);
+        assert_eq!(ts["count"], 0);
+        // Deprecated alias of `count` — kept until the next major.
         assert_eq!(ts["pending"], 0);
         assert_eq!(ts["closed"], false);
         assert_eq!(ts["senders_blocked"], 0);
@@ -825,6 +848,8 @@ mod tests {
         assert_eq!(v["type"], "Pool");
         let ts = &v["type_specific"];
         assert_eq!(ts["max_size"], 4);
+        assert_eq!(ts["count"], 1);
+        // Deprecated alias of `count` — kept until the next major.
         assert_eq!(ts["size"], 1);
         assert_eq!(ts["idle"], 1);
         assert_eq!(ts["in_use"], 0);
@@ -892,10 +917,15 @@ mod tests {
         let mut output = String::new();
         SharedMetricsCollector.collect(&mut output);
 
-        // All seven metric series per spec must appear.
+        // All spec-mandated metric series must appear.
+        assert!(
+            output.contains(&format!("oxphp_shared_pool_count{{pool_id=\"{id}\"}}")),
+            "missing count gauge"
+        );
+        // Deprecated alias of `_count` — kept until the next major.
         assert!(
             output.contains(&format!("oxphp_shared_pool_size{{pool_id=\"{id}\"}}")),
-            "missing size gauge"
+            "missing deprecated size gauge"
         );
         assert!(
             output.contains(&format!("oxphp_shared_pool_in_use{{pool_id=\"{id}\"}}")),
@@ -1080,13 +1110,20 @@ mod tests {
         SharedMetricsCollector.collect(&mut out);
 
         // HELP/TYPE lines emitted exactly once regardless of channel count.
+        assert!(out.contains("# TYPE oxphp_shared_channel_count gauge\n"));
+        // Deprecated alias of `_count` — kept until the next major.
         assert!(out.contains("# TYPE oxphp_shared_channel_pending gauge\n"));
         assert!(out.contains("# TYPE oxphp_shared_channel_senders_blocked gauge\n"));
         assert!(out.contains("# TYPE oxphp_shared_channel_receivers_blocked gauge\n"));
         assert!(out.contains("# TYPE oxphp_shared_channel_items_sent_total counter\n"));
         assert!(out.contains("# TYPE oxphp_shared_channel_items_dropped_total counter\n"));
 
-        // Per-id series present for both channels.
+        // Per-id series present for both channels, on both the canonical
+        // `_count` and the deprecated `_pending` alias.
+        let count_a = format!("oxphp_shared_channel_count{{channel_id=\"{id_a}\"}} 2\n");
+        let count_b = format!("oxphp_shared_channel_count{{channel_id=\"{id_b}\"}} 0\n");
+        assert!(out.contains(&count_a), "expected {count_a:?} in\n{out}");
+        assert!(out.contains(&count_b), "expected {count_b:?} in\n{out}");
         let needle_a = format!("oxphp_shared_channel_pending{{channel_id=\"{id_a}\"}} 2\n");
         let needle_b = format!("oxphp_shared_channel_pending{{channel_id=\"{id_b}\"}} 0\n");
         assert!(out.contains(&needle_a), "expected {needle_a:?} in\n{out}");

@@ -1,6 +1,6 @@
 ---
 title: Shared\Flag
-description: Atomic boolean shared across PHP workers — kill-switches, circuit breakers, and one-shot initialisation markers with lock-free set/clear/test.
+description: Atomic boolean shared across PHP workers — kill-switches, circuit breakers, and one-shot initialisation markers with lock-free set/clear/isSet.
 ---
 
 # Shared\Flag
@@ -9,7 +9,7 @@ description: Atomic boolean shared across PHP workers — kill-switches, circuit
 
 ## Overview
 
-- **Atomic bool.** Single bit of state with `test` / `set` / `clear` / `exchange` / `compareAndSet`.
+- **Atomic bool.** Single bit of state with `isSet` / `set` / `clear` / `exchange` / `compareAndSet`.
 - **Lock-free.** All mutations are a single CPU atomic. Safe under contention.
 - **Shareable.** Instances live in the registry and can be stored inside `Shared\Map`, passed through `use` captures, etc.
 
@@ -22,7 +22,7 @@ final class Flag implements Shareable
 {
     public function __construct(bool $initial = false);
 
-    public function test(): bool;
+    public function isSet(): bool;
     public function set(): bool;                                 // returns previous
     public function clear(): bool;                               // returns previous
     public function exchange(bool $new): bool;                   // returns previous
@@ -34,7 +34,7 @@ final class Flag implements Shareable
 
 | Method          | Returns  | Use case                                                         |
 |-----------------|----------|------------------------------------------------------------------|
-| `test`          | current  | Pure read.                                                       |
+| `isSet`         | current  | Pure read.                                                       |
 | `set`           | previous | Turn on unconditionally. Previous value tells you if you won.    |
 | `clear`         | previous | Turn off unconditionally.                                        |
 | `exchange`      | previous | Swap to an explicit value; useful when toggling is conditional.  |
@@ -49,7 +49,7 @@ final class Flag implements Shareable
 $maintenance = new OxPHP\Shared\Flag();
 
 // In a request handler
-if ($maintenance->test()) {
+if ($maintenance->isSet()) {
     http_response_code(503);
     header('Retry-After: 60');
     echo 'under maintenance';

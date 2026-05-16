@@ -20,7 +20,7 @@ description: Process-wide concurrent hash-map for coordinating state across PHP 
 ```php
 namespace OxPHP\Shared;
 
-final class Map implements Shareable
+final class Map implements Shareable, \Countable
 {
     public function __construct(?int $maxEntries = null);
 
@@ -33,7 +33,7 @@ final class Map implements Shareable
     public function keys(): array;
     public function maxEntries(): ?int;
 
-    public function setIfAbsent(string $key, mixed $value): bool;
+    public function trySet(string $key, mixed $value): bool;
 
     public function setMany(array $kv): int;
     public function getMany(array $keys): array;
@@ -51,10 +51,10 @@ final class Map implements Shareable
 | `has`          | Presence check without fetching the value.                                           |
 | `remove`       | Remove a key and return its previous value (`null` when missing).                    |
 | `clear`        | Drop every entry and release the Map's hold on any nested `Shareable`.               |
-| `count`        | Current number of entries.                                                           |
+| `count`        | Current number of entries. `Countable` — `count($map)` works directly.               |
 | `keys`         | Snapshot of all keys at call time. Iteration order is undefined (shard order).       |
 | `maxEntries`   | Reports the configured cap (or `null` when unbounded).                               |
-| `setIfAbsent`  | Atomic insert-if-missing. Returns `true` when stored, `false` when the key existed.  |
+| `trySet`  | Atomic insert-if-missing. Returns `true` when stored, `false` when the key existed.  |
 | `setMany`      | Bulk insert; returns the number of pairs stored before any error.                    |
 | `getMany`      | Bulk read; missing keys come back as `null` in a keyed result array.                 |
 | `removeMany`   | Bulk remove; returns the number of keys that were actually deleted.                  |
@@ -86,7 +86,7 @@ $rpm = $config->get('rate_limit.default_rpm', 60);
 $buckets = new OxPHP\Shared\Map(maxEntries: 50_000);
 
 $key = "tenant:{$tenantId}";
-$created = $buckets->setIfAbsent($key, ['tokens' => 100, 'refill_at' => time() + 60]);
+$created = $buckets->trySet($key, ['tokens' => 100, 'refill_at' => time() + 60]);
 // If another request beat us to it, $created is false — the existing bucket wins.
 
 $state = $buckets->get($key);
@@ -198,7 +198,7 @@ All methods that can fail throw subclasses of `OxPHP\Shared\SharedException`:
 
 | Exception              | Raised by                               |
 |------------------------|-----------------------------------------|
-| `CapacityException`    | `set` / `setIfAbsent` / `setMany` past `maxEntries`. |
+| `CapacityException`    | `set` / `trySet` / `setMany` past `maxEntries`. |
 | `CycleException`       | Any write that would close a reachability cycle (`extends TypeException`). |
 | `TypeException`        | Constructor receiving non-positive `maxEntries`; non-serialisable values (closures, resources); non-string batched keys. |
 | `StaleHandleException` | Method call on a handle whose registry entry has been evicted. |

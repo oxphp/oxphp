@@ -163,11 +163,17 @@ BFS-обход исходящих ссылок `Shareable`, начинающий
 
 | Метрика                                          | Тип     | Метки         |
 |--------------------------------------------------|---------|---------------|
-| `oxphp_shared_channel_pending`                   | gauge   | `channel_id`  |
+| `oxphp_shared_channel_count`                     | gauge   | `channel_id`  |
+| `oxphp_shared_channel_pending` *(устаревшая)*    | gauge   | `channel_id`  |
 | `oxphp_shared_channel_senders_blocked`           | gauge   | `channel_id`  |
 | `oxphp_shared_channel_receivers_blocked`         | gauge   | `channel_id`  |
 | `oxphp_shared_channel_items_sent_total`          | counter | `channel_id`  |
 | `oxphp_shared_channel_items_dropped_total`       | counter | `channel_id`  |
+
+`oxphp_shared_channel_pending` — устаревшее написание
+`oxphp_shared_channel_count`; обе серии возвращают одно значение в
+течение цикла deprecation и разойдутся, когда alias будет удалён в
+одном из будущих релизов. Новые дашборды настраивайте на `_count`.
 
 ### Map
 
@@ -181,13 +187,19 @@ BFS-обход исходящих ссылок `Shareable`, начинающий
 
 | Метрика                                   | Тип       | Метки                               |
 |-------------------------------------------|-----------|-------------------------------------|
-| `oxphp_shared_pool_size`                  | gauge     | `pool_id`                           |
+| `oxphp_shared_pool_count`                 | gauge     | `pool_id`                           |
+| `oxphp_shared_pool_size` *(устаревшая)*   | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_in_use`                | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_idle`                  | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_waiting`               | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_acquire_total`         | counter   | `pool_id`                           |
 | `oxphp_shared_pool_evicted_total`         | counter   | `pool_id`, `reason`                 |
 | `oxphp_shared_pool_wait_seconds`          | histogram | `pool_id`                           |
+
+`oxphp_shared_pool_size` — устаревшее написание
+`oxphp_shared_pool_count`; обе серии возвращают одно значение в
+течение цикла deprecation и разойдутся, когда alias будет удалён в
+одном из будущих релизов. Новые дашборды настраивайте на `_count`.
 
 Метки `oxphp_shared_pool_evicted_total`: `reason=idle_timeout | manual | shutdown | dead_owner`. Метка `dead_owner` считает события chaos-reclaim.
 
@@ -201,7 +213,7 @@ Per-instance счётчики, флаги, once'ы и mutex'ы не постав
 
 ### Pool насыщен (429 с неуспешными retry)
 
-Симптомы: HTTP-вызывающие видят таймауты, `oxphp_shared_pool_waiting` растёт, `oxphp_shared_pool_size` упирается в `maxSize`.
+Симптомы: HTTP-вызывающие видят таймауты, `oxphp_shared_pool_waiting` растёт, `oxphp_shared_pool_count` упирается в `maxSize`.
 
 Проверьте:
 

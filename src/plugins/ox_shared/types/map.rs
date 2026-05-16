@@ -9,7 +9,7 @@
 //! `SharedValue`s — `SharedRefOwned::Drop` decrements the Arc.
 //!
 //! Additional layers: cycle detection, per-instance cap, atomic RMW
-//! (setIfAbsent / update / getOrSet), FFI + PHP class, and batched
+//! (trySet / update / getOrSet), FFI + PHP class, and batched
 //! ops.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -454,7 +454,7 @@ impl MapInner {
     /// (and `value` was discarded). Cycle + cap checks run before the
     /// shard lock so `Vacant` never observes a half-done retain.
     ///
-    /// PHP counterpart: `Shared\Map::setIfAbsent($key, $value): bool`.
+    /// PHP counterpart: `Shared\Map::trySet($key, $value): bool`.
     pub fn set_if_absent(&self, key: Arc<str>, value: SharedValue) -> Result<bool, SharedError> {
         let reg = REGISTRY.get();
         if let Some(reg) = reg {
@@ -1780,6 +1780,7 @@ fn deserialize_into_retval(call: &mut crate::bridge::call::NativeCall, buf: *mut
 pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Map")
         .implements("OxPHP\\Shared\\Shareable")
+        .implements("Countable")
         .with_storage(|| SharedHandle::new(SharedType::Map))
         .magic(MagicMethod::Clone)
         .handler(|_call| {
@@ -1989,15 +1990,15 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             }
             Ok(())
         })
-        // ── setIfAbsent(string $key, mixed $value): bool ───────────────
-        .method("setIfAbsent")
+        // ── trySet(string $key, mixed $value): bool ────────────────────
+        .method("trySet")
         .param("key", PhpType::String)
         .param("value", PhpType::Mixed)
         .returns(PhpType::Bool)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let key = call.arg_str(0)?.to_string();
-            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "setIfAbsent")?;
+            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "trySet")?;
 
             let mut inserted: c_int = 0;
             let rc = unsafe {
@@ -3039,7 +3040,7 @@ mod tests {
             "count",
             "keys",
             "maxEntries",
-            "setIfAbsent",
+            "trySet",
             "update",
             "getOrSet",
             "setMany",
@@ -3454,7 +3455,7 @@ mod tests {
         assert_eq!(rc, SharedError::Cycle.code());
     }
 
-    // ── atomic RMW (setIfAbsent / update / getOrSet) ──────────────
+    // ── atomic RMW (trySet / update / getOrSet) ───────────────────
 
     #[test]
     fn set_if_absent_inserts_when_vacant() {
@@ -3482,7 +3483,7 @@ mod tests {
         assert!(matches!(rc, Err(SharedError::CapacityExceeded)));
         assert_eq!(m.count(), 1);
 
-        // Existing-key setIfAbsent is cheap (no cap touched).
+        // Existing-key set_if_absent is cheap (no cap touched).
         let rc = m.set_if_absent(k("a"), SharedValue::Long(42));
         assert!(!rc.unwrap());
     }
@@ -3594,7 +3595,7 @@ mod tests {
 
     #[test]
     fn set_if_absent_retain_released_on_cycle_rejection() {
-        // Regression: cycle-rejected setIfAbsent must not leak Arc holds.
+        // Regression: cycle-rejected set_if_absent must not leak Arc holds.
         let reg = ensure_registry();
         let (a_arc, a_entry, a_id) = bootstrap_map(reg, None);
         let a = (*a_arc).as_any_map().unwrap();

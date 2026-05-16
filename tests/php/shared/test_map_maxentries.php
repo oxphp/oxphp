@@ -34,14 +34,14 @@ if ($m->count() !== 2) { echo "FAIL: count after remove\n"; exit; }
 $m->set('k4', 4);  // now fits
 if ($m->count() !== 3) { echo "FAIL: count after refill\n"; exit; }
 
-// setIfAbsent also respects cap.
+// trySet also respects cap.
 $threw = false;
 try {
-    $m->setIfAbsent('k5', 5);
+    $m->trySet('k5', 5);
 } catch (OxPHP\Shared\CapacityException $e) {
     $threw = true;
 }
-if (!$threw) { echo "FAIL: setIfAbsent must respect cap\n"; exit; }
+if (!$threw) { echo "FAIL: trySet must respect cap\n"; exit; }
 
 // Invalid maxEntries → TypeException.
 $threw = false;

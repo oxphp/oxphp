@@ -20,7 +20,7 @@ description: 用于跨 PHP 工作线程协调状态的进程级并发哈希映�
 ```php
 namespace OxPHP\Shared;
 
-final class Map implements Shareable
+final class Map implements Shareable, \Countable
 {
     public function __construct(?int $maxEntries = null);
 
@@ -33,7 +33,7 @@ final class Map implements Shareable
     public function keys(): array;
     public function maxEntries(): ?int;
 
-    public function setIfAbsent(string $key, mixed $value): bool;
+    public function trySet(string $key, mixed $value): bool;
 
     public function setMany(array $kv): int;
     public function getMany(array $keys): array;
@@ -51,10 +51,10 @@ final class Map implements Shareable
 | `has`         | 不取值的存在性检查。                                                                 |
 | `remove`      | 移除键并返回其原值（缺失时为 `null`）。                                              |
 | `clear`       | 删除每个条目并释放 Map 对嵌套 `Shareable` 的持有。                                   |
-| `count`       | 当前条目数。                                                                         |
+| `count`       | 当前条目数。实现 `Countable` — 可直接使用 `count($map)`。                            |
 | `keys`        | 调用时所有键的快照。迭代顺序未定义（分片顺序）。                                     |
 | `maxEntries`  | 报告配置的上限（未设置时为 `null`）。                                                |
-| `setIfAbsent` | 原子的「不存在则插入」。存入时返回 `true`，键已存在时返回 `false`。                  |
+| `trySet` | 原子的「不存在则插入」。存入时返回 `true`，键已存在时返回 `false`。                  |
 | `setMany`     | 批量插入；返回在出现任何错误前已存入的键值对数。                                     |
 | `getMany`     | 批量读取；缺失的键在按键结果数组中返回 `null`。                                      |
 | `removeMany`  | 批量移除；返回实际删除的键数。                                                       |
@@ -86,7 +86,7 @@ $rpm = $config->get('rate_limit.default_rpm', 60);
 $buckets = new OxPHP\Shared\Map(maxEntries: 50_000);
 
 $key = "tenant:{$tenantId}";
-$created = $buckets->setIfAbsent($key, ['tokens' => 100, 'refill_at' => time() + 60]);
+$created = $buckets->trySet($key, ['tokens' => 100, 'refill_at' => time() + 60]);
 // 若另一请求抢先了，$created 为 false —— 已有桶胜出。
 
 $state = $buckets->get($key);
@@ -198,7 +198,7 @@ $m->set('a', 99);                       // 满上限时覆写始终 OK
 
 | 异常                    | 触发场景                                |
 |-------------------------|-----------------------------------------|
-| `CapacityException`     | `set` / `setIfAbsent` / `setMany` 超出 `maxEntries`。 |
+| `CapacityException`     | `set` / `trySet` / `setMany` 超出 `maxEntries`。 |
 | `CycleException`        | 任何会闭合可达性循环的写入（`extends TypeException`）。 |
 | `TypeException`         | 构造函数接收非正 `maxEntries`；不可序列化值（闭包、资源）；批量键非字符串。 |
 | `StaleHandleException`  | 对注册表条目已被驱逐的句柄调用方法。    |

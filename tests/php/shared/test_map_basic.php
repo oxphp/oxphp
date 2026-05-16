@@ -1,7 +1,7 @@
 <?php
 /**
  * Map smoke test — construct / set / get / has / remove /
- * count / clear / keys / setIfAbsent / id / maxEntries.
+ * count / clear / keys / trySet / id / maxEntries.
  */
 
 header('Content-Type: text/plain');
@@ -24,6 +24,7 @@ $m->set('delta', null);
 $m->set('eps', true);
 
 if ($m->count() !== 5) { echo "FAIL: count after 5 sets\n"; exit; }
+if (count($m) !== 5) { echo "FAIL: Countable count(\$m)\n"; exit; }
 if ($m->get('alpha') !== 1) { echo "FAIL: get alpha\n"; exit; }
 if ($m->get('beta') !== 'hello') { echo "FAIL: get beta\n"; exit; }
 if ($m->get('gamma') !== 3.14) { echo "FAIL: get gamma\n"; exit; }
@@ -48,12 +49,12 @@ if ($m->count() !== 4) { echo "FAIL: count after remove\n"; exit; }
 // remove missing → null.
 if ($m->remove('nope') !== null) { echo "FAIL: remove missing\n"; exit; }
 
-// setIfAbsent.
-$new = $m->setIfAbsent('fresh', 42);
-if ($new !== true) { echo "FAIL: setIfAbsent new\n"; exit; }
-$again = $m->setIfAbsent('fresh', 999);
-if ($again !== false) { echo "FAIL: setIfAbsent existing\n"; exit; }
-if ($m->get('fresh') !== 42) { echo "FAIL: value preserved by setIfAbsent\n"; exit; }
+// trySet.
+$new = $m->trySet('fresh', 42);
+if ($new !== true) { echo "FAIL: trySet new\n"; exit; }
+$again = $m->trySet('fresh', 999);
+if ($again !== false) { echo "FAIL: trySet existing\n"; exit; }
+if ($m->get('fresh') !== 42) { echo "FAIL: value preserved by trySet\n"; exit; }
 
 // Array value.
 $m->set('list', ['x', 'y', 'z']);

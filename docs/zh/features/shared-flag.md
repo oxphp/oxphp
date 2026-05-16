@@ -1,6 +1,6 @@
 ---
 title: Shared\Flag
-description: 跨 PHP 工作线程共享的原子布尔值——用于终止开关、熔断器和一次性初始化标记，提供无锁的 set/clear/test。
+description: 跨 PHP 工作线程共享的原子布尔值——用于终止开关、熔断器和一次性初始化标记，提供无锁的 set/clear/isSet。
 ---
 
 # Shared\Flag
@@ -9,7 +9,7 @@ description: 跨 PHP 工作线程共享的原子布尔值——用于终止开�
 
 ## 概览
 
-- **原子 bool。** 单比特状态，支持 `test` / `set` / `clear` / `exchange` / `compareAndSet`。
+- **原子 bool。** 单比特状态，支持 `isSet` / `set` / `clear` / `exchange` / `compareAndSet`。
 - **无锁。** 所有变更都是单条 CPU 原子指令。在竞争下安全。
 - **可共享。** 实例存放在注册表中，可放入 `Shared\Map`、通过 `use` 捕获传递等。
 
@@ -22,7 +22,7 @@ final class Flag implements Shareable
 {
     public function __construct(bool $initial = false);
 
-    public function test(): bool;
+    public function isSet(): bool;
     public function set(): bool;                                 // 返回原值
     public function clear(): bool;                               // 返回原值
     public function exchange(bool $new): bool;                   // 返回原值
@@ -34,7 +34,7 @@ final class Flag implements Shareable
 
 | 方法            | 返回值    | 使用场景                                                         |
 |-----------------|-----------|------------------------------------------------------------------|
-| `test`          | 当前值    | 纯读取。                                                         |
+| `isSet`         | 当前值    | 纯读取。                                                         |
 | `set`           | 原值      | 无条件置位。原值告知你是否胜出。                                 |
 | `clear`         | 原值      | 无条件清零。                                                     |
 | `exchange`      | 原值      | 交换到显式值；条件翻转时很有用。                                 |
@@ -49,7 +49,7 @@ final class Flag implements Shareable
 $maintenance = new OxPHP\Shared\Flag();
 
 // 请求处理器中
-if ($maintenance->test()) {
+if ($maintenance->isSet()) {
     http_response_code(503);
     header('Retry-After: 60');
     echo 'under maintenance';

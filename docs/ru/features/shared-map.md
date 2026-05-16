@@ -20,7 +20,7 @@ description: Общепроцессный конкурентный hash-map дл
 ```php
 namespace OxPHP\Shared;
 
-final class Map implements Shareable
+final class Map implements Shareable, \Countable
 {
     public function __construct(?int $maxEntries = null);
 
@@ -33,7 +33,7 @@ final class Map implements Shareable
     public function keys(): array;
     public function maxEntries(): ?int;
 
-    public function setIfAbsent(string $key, mixed $value): bool;
+    public function trySet(string $key, mixed $value): bool;
 
     public function setMany(array $kv): int;
     public function getMany(array $keys): array;
@@ -51,10 +51,10 @@ final class Map implements Shareable
 | `has`          | Проверка наличия без получения значения.                                             |
 | `remove`       | Удалить ключ и вернуть его предыдущее значение (`null`, если отсутствует).            |
 | `clear`        | Сбросить каждую запись и отпустить удержание Map на любых вложенных `Shareable`.      |
-| `count`        | Текущее количество записей.                                                          |
+| `count`        | Текущее количество записей. Через `Countable` — `count($map)` работает напрямую.     |
 | `keys`         | Снимок всех ключей на момент вызова. Порядок итерации не определён (порядок шардов). |
 | `maxEntries`   | Сообщает настроенный cap (или `null`, если без ограничения).                         |
-| `setIfAbsent`  | Атомарная вставка-если-отсутствует. Возвращает `true` при сохранении, `false`, если ключ был. |
+| `trySet`  | Атомарная вставка-если-отсутствует. Возвращает `true` при сохранении, `false`, если ключ был. |
 | `setMany`      | Массовая вставка; возвращает число пар, сохранённых до любой ошибки.                  |
 | `getMany`      | Массовое чтение; отсутствующие ключи возвращаются как `null` в результирующем массиве. |
 | `removeMany`   | Массовое удаление; возвращает число фактически удалённых ключей.                      |
@@ -86,7 +86,7 @@ $rpm = $config->get('rate_limit.default_rpm', 60);
 $buckets = new OxPHP\Shared\Map(maxEntries: 50_000);
 
 $key = "tenant:{$tenantId}";
-$created = $buckets->setIfAbsent($key, ['tokens' => 100, 'refill_at' => time() + 60]);
+$created = $buckets->trySet($key, ['tokens' => 100, 'refill_at' => time() + 60]);
 // Если другой запрос опередил, $created равен false — побеждает существующий bucket.
 
 $state = $buckets->get($key);
@@ -198,7 +198,7 @@ $m->set('a', 99);                       // перезапись всегда OK 
 
 | Исключение             | Бросается                               |
 |------------------------|-----------------------------------------|
-| `CapacityException`    | `set` / `setIfAbsent` / `setMany` за пределом `maxEntries`. |
+| `CapacityException`    | `set` / `trySet` / `setMany` за пределом `maxEntries`. |
 | `CycleException`       | Любая запись, которая замкнула бы цикл достижимости (`extends TypeException`). |
 | `TypeException`        | Конструктор получает неположительный `maxEntries`; несериализуемые значения (замыкания, ресурсы); нестроковые пакетные ключи. |
 | `StaleHandleException` | Вызов метода на хэндле, чья запись реестра была вытеснена. |

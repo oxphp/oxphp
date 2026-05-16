@@ -1694,6 +1694,7 @@ pub fn register_class(
 
     ctx.register_class("OxPHP\\Shared\\Channel")
         .implements("OxPHP\\Shared\\Shareable")
+        .implements("Countable")
         .with_storage(|| SharedHandle::new(SharedType::Channel))
         .magic(MagicMethod::Clone)
         .handler(|_call| {
@@ -2278,8 +2279,8 @@ pub fn register_class(
             call.ret_bool(out != 0);
             Ok(())
         })
-        // ── pending(): int ─────────────────────────────────────────
-        .method("pending")
+        // ── count(): int ───────────────────────────────────────────
+        .method("count")
         .returns(PhpType::Int)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;

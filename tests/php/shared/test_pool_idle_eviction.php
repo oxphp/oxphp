@@ -28,7 +28,7 @@ $ha = $poolA->acquire();
 $poolA->release($ha);
 
 if ($poolA->idle() !== 1) { echo "FAIL: expected 1 idle\n"; exit; }
-if ($poolA->size() !== 1) { echo "FAIL: expected 1 size\n"; exit; }
+if ($poolA->count() !== 1) { echo "FAIL: expected 1 size\n"; exit; }
 
 // Sleep past idle_timeout. usleep is cooperative and does not yield
 // the worker thread to another request — the slot stays parked in
@@ -39,7 +39,7 @@ $evicted = $poolA->evict();
 
 if ($evicted !== 1)            { echo "FAIL: evict returned $evicted, expected 1\n"; exit; }
 if ($destroyedA !== 1)          { echo "FAIL: destroy should run once, got $destroyedA\n"; exit; }
-if ($poolA->size() !== 0)       { echo "FAIL: size should be 0 after eviction\n"; exit; }
+if ($poolA->count() !== 0)       { echo "FAIL: size should be 0 after eviction\n"; exit; }
 if ($poolA->idle() !== 0)       { echo "FAIL: idle should be 0 after eviction\n"; exit; }
 
 // ── Scenario 2: fresh slot survives evict() ────────────────────────
@@ -59,7 +59,7 @@ $evicted = $poolB->evict();
 if ($evicted !== 0)             { echo "FAIL: fresh slot must not be evicted, got $evicted\n"; exit; }
 if ($destroyedB !== 0)          { echo "FAIL: destroy must not run on fresh slot\n"; exit; }
 if ($poolB->idle() !== 1)       { echo "FAIL: fresh slot must stay idle\n"; exit; }
-if ($poolB->size() !== 1)       { echo "FAIL: fresh slot must stay counted\n"; exit; }
+if ($poolB->count() !== 1)       { echo "FAIL: fresh slot must stay counted\n"; exit; }
 
 // ── Scenario 3: evict() stops at the first fresh slot ──────────────
 // maxSize=2, two distinct resources, one aged, one fresh. evict()
@@ -86,7 +86,7 @@ $evicted = $poolC->evict();
 
 if ($evicted !== 1)            { echo "FAIL: expected exactly 1 eviction, got $evicted\n"; exit; }
 if ($destroyedC !== 1)          { echo "FAIL: exactly one destroy expected, got $destroyedC\n"; exit; }
-if ($poolC->size() !== 1)       { echo "FAIL: fresh slot survives, size should be 1\n"; exit; }
+if ($poolC->count() !== 1)       { echo "FAIL: fresh slot survives, size should be 1\n"; exit; }
 if ($poolC->idle() !== 1)       { echo "FAIL: fresh slot survives, idle should be 1\n"; exit; }
 
 echo "OK\n";

@@ -29,8 +29,8 @@ foreach ($scenarios as $label => $factory) {
     if ($caught === null) {
         echo "FAIL[$label]: non-object factory must throw TypeException\n"; exit;
     }
-    if ($pool->size() !== 0) {
-        echo "FAIL[$label]: size must refund to 0, got " . $pool->size() . "\n"; exit;
+    if ($pool->count() !== 0) {
+        echo "FAIL[$label]: size must refund to 0, got " . $pool->count() . "\n"; exit;
     }
     if ($pool->inUse() !== 0) {
         echo "FAIL[$label]: inUse must refund to 0\n"; exit;

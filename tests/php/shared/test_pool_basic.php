@@ -24,7 +24,7 @@ $pool = new OxPHP\Shared\Pool(
 );
 
 if ($pool->maxSize() !== 2) { echo "FAIL: maxSize\n"; exit; }
-if ($pool->size() !== 0)    { echo "FAIL: initial size\n"; exit; }
+if ($pool->count() !== 0)    { echo "FAIL: initial size\n"; exit; }
 if ($pool->inUse() !== 0)   { echo "FAIL: initial inUse\n"; exit; }
 if ($pool->idle() !== 0)    { echo "FAIL: initial idle\n"; exit; }
 if (!is_int($pool->id()) || $pool->id() < 1) { echo "FAIL: id\n"; exit; }
@@ -32,7 +32,8 @@ if (!is_int($pool->id()) || $pool->id() < 1) { echo "FAIL: id\n"; exit; }
 $h = $pool->acquire();
 if (!($h instanceof OxPHP\Shared\Pool\Handle)) { echo "FAIL: acquire returns Handle\n"; exit; }
 if ($minted !== 1)       { echo "FAIL: factory should run on first acquire\n"; exit; }
-if ($pool->size() !== 1) { echo "FAIL: size after acquire\n"; exit; }
+if ($pool->count() !== 1) { echo "FAIL: size after acquire\n"; exit; }
+if (count($pool) !== 1) { echo "FAIL: Countable count(\$pool)\n"; exit; }
 if ($pool->inUse() !== 1){ echo "FAIL: inUse after acquire\n"; exit; }
 if ($pool->idle() !== 0) { echo "FAIL: idle after acquire\n"; exit; }
 
@@ -43,7 +44,7 @@ if ($r->tag !== 'resource-1')  { echo "FAIL: resource identity\n"; exit; }
 $pool->release($h);
 if ($pool->inUse() !== 0) { echo "FAIL: inUse after release\n"; exit; }
 if ($pool->idle() !== 1)  { echo "FAIL: idle after release\n"; exit; }
-if ($pool->size() !== 1)  { echo "FAIL: size stable after release\n"; exit; }
+if ($pool->count() !== 1)  { echo "FAIL: size stable after release\n"; exit; }
 
 // Second acquire reuses the pooled resource — factory count unchanged.
 $h2 = $pool->acquire();

@@ -55,7 +55,21 @@ $a->compareAndSet(0, 1);
 $prev = $c->reset();
 ```
 
-**4. `OxPHP\Server\Worker` — drop the `get` prefix**
+**4. `OxPHP\Shared\*` — unified method naming**
+
+| Before                          | After                       |
+| ---                             | ---                         |
+| `$ch->pending()`                | `$ch->count()`              |
+| `$pool->size()`                 | `$pool->count()`            |
+| `$flag->test()`                 | `$flag->isSet()`            |
+| `$map->setIfAbsent($k, $v)`     | `$map->trySet($k, $v)`      |
+
+`Map`, `Channel`, and `Pool` now also implement `\Countable`, so
+`count($map)`, `count($ch)`, `count($pool)` work without calling the
+method directly. The rationale and the rules for new methods live in
+[`docs/en/features/shared-naming.md`](docs/en/features/shared-naming.md).
+
+**5. `OxPHP\Server\Worker` — drop the `get` prefix**
 
 | Before                       | After                     |
 | ---                          | ---                       |
@@ -69,7 +83,7 @@ $prev = $c->reset();
 
 `Worker::current()`, `Worker::isWorkerMode()`, `scheduleExit()`, `isExitScheduled()`, and `serve()` are unchanged.
 
-**5. Base exception class renames**
+**6. Base exception class renames**
 
 ```php
 // Before
@@ -83,7 +97,7 @@ catch (\OxPHP\Shared\SharedException $e) { ... }
 
 Subclasses (`TimeoutException`, `BorrowException`, `ClosedException`, …) keep their names — only the parent FQN changes.
 
-**6. `oxphp_request_heartbeat()` → `set_time_limit()`**
+**7. `oxphp_request_heartbeat()` → `set_time_limit()`**
 
 ```php
 // Before
@@ -95,7 +109,7 @@ set_time_limit(30);
 
 Both reset the per-request timer to N seconds from now.
 
-**7. `REQUEST_TIMEOUT_SECONDS` → `max_execution_time`**
+**8. `REQUEST_TIMEOUT_SECONDS` → `max_execution_time`**
 
 ```ini
 ; php.ini (or oxphp.ini)
@@ -104,7 +118,7 @@ max_execution_time = 30
 
 Or per-script: `set_time_limit(30);`. Drop `REQUEST_TIMEOUT_SECONDS` from your deployment manifest.
 
-**8. `sapi` key removed from `oxphp_server_info()`**
+**9. `sapi` key removed from `oxphp_server_info()`**
 
 ```php
 // Before
@@ -118,6 +132,11 @@ $sapi = php_sapi_name();              // "cli-server"
 
 - `Shared\Counter` is now a pure accumulator. `Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed — atomic-replace and compare-and-swap belong on the new `Shared\Atomic` class. `Counter::reset(int $newValue)` lost its argument; `reset()` now always returns the previous value and atomically zeroes the counter (the LongAdder `sumThenReset` pattern). For state machines, version stamps, or arbitrary atomic int storage, use `Shared\Atomic` instead.
 - `oxphp_async_await_any(array, ?float): array` was renamed to `oxphp_async_await_race(array, ?float): array`. The implementation is unchanged — first settled (success or failure) wins, as before. If your code relied on this behavior, replace the function name in-place.
+- `OxPHP\Shared\*` method naming unified across types. The renames below are mechanical (semantics and signatures unchanged), and ship without alias shims — update call sites with sed before upgrading. The rules are documented at [`docs/en/features/shared-naming.md`](docs/en/features/shared-naming.md).
+  - `Channel::pending()` → `Channel::count()`
+  - `Pool::size()` → `Pool::count()`
+  - `Flag::test()` → `Flag::isSet()`
+  - `Map::setIfAbsent($key, $value)` → `Map::trySet($key, $value)`
 
 ### Added
 
@@ -127,6 +146,8 @@ $sapi = php_sapi_name();              // "cli-server"
 - `oxphp_async_await_any(array, ?float): array` now exists with proper JavaScript `Promise.any`-style semantics: the first FULFILLED promise wins. Rejections are accumulated. If every promise rejects, throws the new `OxPHP\Async\AggregateAsyncException` carrying all errors (`getErrors()`, `getErrorMap()`, `getPromiseIds()`). On timeout, throws `OxPHP\Async\TimeoutException` with `getPartialErrors()` and `getCancelledPromiseIds()` populated.
 - `OxPHP\Async\AggregateAsyncException` (extends `AsyncException`) — new exception class. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>`.
 - `OxPHP\Async\TimeoutException::getPartialErrors(): array<int, \Throwable>` and `getCancelledPromiseIds(): list<int>` — new methods. Existing throw sites (`oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`) populate them with empty arrays; only `oxphp_async_await_any()` timeouts fill them. The cancelled-id list is an audit trail — those promises have already been signalled to cancel and their receivers stranded, so they cannot be re-awaited.
+- `OxPHP\Shared\Map`, `OxPHP\Shared\Channel`, and `OxPHP\Shared\Pool` now `implements \Countable`. `count($map)`, `count($channel)`, and `count($pool)` work directly without calling the `->count()` method. For `Pool` the count covers total live slots (in-use + idle).
+- Naming guide for `OxPHP\Shared\*` published at `docs/en/features/shared-naming.md`. New `Shared\*` primitives must follow the rules listed there (`get`/`load` for reads, `set`/`store` for writes, `count()` via `\Countable`, `is*` for boolean getters, `try*` for non-blocking attempts, `fetch*` for atomic RMW returning prev value).
 
 ### Removed
 
@@ -155,10 +176,11 @@ $sapi = php_sapi_name();              // "cli-server"
 
 - `PHP_DENY_DIRS` env var renamed to `PHP_DENY_PATHS` to reflect that values are glob patterns and may match individual `.php` files, not only directories. The legacy name remains accepted as an alias and emits a startup `WARN`; when both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS` is reported as ignored. The alias will be removed in a future release — switch to `PHP_DENY_PATHS` in your environment and orchestration configs.
 - `SHARED_SHUTDOWN_TIMEOUT_SECONDS` env var (and its `OX_SHARED_SHUTDOWN_TIMEOUT_SECONDS` alias) is deprecated and ignored. The setting never gated anything: `SharedRegistry::drain()` is synchronous — `Shared\Channel` and `Shared\Pool` wake blocked waiters via `close()` and return immediately; `Map`, `Mutex`, `Counter`, `Flag`, `Atomic`, and `Once` never block. The overall graceful-shutdown deadline is owned at server level by `DRAIN_TIMEOUT_SECONDS` (default `30s`), which waits on the connection-drain loop in `main.rs` long enough for woken PHP requests to unwind and flush. The `SharedConfig::shutdown_timeout_seconds` field is removed in this release; the env-var aliases are still accepted (with a startup `WARN`) for one release cycle and will be removed afterwards. Tune `DRAIN_TIMEOUT_SECONDS` instead.
+- `OxPHP\Shared\*` observability names trailing the renamed PHP API are emitted as deprecated aliases alongside the new names: Prometheus `oxphp_shared_channel_pending` (use `oxphp_shared_channel_count`) and `oxphp_shared_pool_size` (use `oxphp_shared_pool_count`); JSON keys `Channel.pending` and `Pool.size` at `/__ox_shared/entries/:id` (use `.count`). The deprecated `# HELP` lines are tagged so dashboards picking the metric up via help-text discovery surface the migration hint. A startup `WARN` from the `ox_shared` plugin announces the dual emission whenever introspection or metrics are enabled. The deprecated aliases will be removed in a future release — update Grafana panels, Prometheus alert rules, and any JSON consumers before upgrading. **Scrape sizing note:** during the deprecation window each `Shared\Channel` and `Shared\Pool` emits one extra gauge line (`_pending` plus `_count`, `_size` plus `_count`) carrying the same value as its canonical counterpart, so the contribution of these series to `/metrics` doubles for the duration. The extra cardinality is `1 × N_channels + 1 × N_pools` and disappears when the aliases are removed.
 
 ### Performance
 
-- Reduced per-call overhead of `Shared\*` primitive operations: the PHP wrapper now holds the registry entry directly, so the global shared-map lookup is gone from every call. Earlier in this cycle the per-call lookup count was halved (two → one) when the per-entry op counter stopped re-resolving the entry; this change removes the remaining one. The optimisation is unconditional and applies whether `ox_shared.metrics_enabled` is on or off. On a 14-core development host the per-op hot path is now within criterion noise of a raw atomic load — at 8 threads the geomean ratio between the previous and the new shape is approximately 4.7×, with the largest wins on contended read-only ops (`Atomic::load`, `Flag::test`, `Once::isInitialized`); the improvement is expected to be larger on 32–64-core hosts where the DashMap shard lock dominated.
+- Reduced per-call overhead of `Shared\*` primitive operations: the PHP wrapper now holds the registry entry directly, so the global shared-map lookup is gone from every call. Earlier in this cycle the per-call lookup count was halved (two → one) when the per-entry op counter stopped re-resolving the entry; this change removes the remaining one. The optimisation is unconditional and applies whether `ox_shared.metrics_enabled` is on or off. On a 14-core development host the per-op hot path is now within criterion noise of a raw atomic load — at 8 threads the geomean ratio between the previous and the new shape is approximately 4.7×, with the largest wins on contended read-only ops (`Atomic::load`, `Flag::isSet` — renamed from `test` later in this cycle, `Once::isInitialized`); the improvement is expected to be larger on 32–64-core hosts where the DashMap shard lock dominated.
 
 ### Fixed
 

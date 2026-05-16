@@ -19,7 +19,7 @@ description: Ограниченный MPMC-канал, разделяемый м
 ```php
 namespace OxPHP\Shared;
 
-final class Channel implements Shareable
+final class Channel implements Shareable, \Countable
 {
     public function __construct(int $capacity);
 
@@ -31,7 +31,7 @@ final class Channel implements Shareable
 
     public function close(): void;
     public function isClosed(): bool;
-    public function pending(): int;
+    public function count(): int;
 
     public function sendMany(array $values, float $timeout = 0.0): int;
     public function recvMany(int $max, float $timeout = 0.0): array;
@@ -48,7 +48,7 @@ final class Channel implements Shareable
 | `tryRecv`     | Забрать один элемент без ожидания; возвращает `null`, если пуст; бросает при closed+empty. |
 | `close`       | Пометить канал закрытым. Идемпотентно. Будит всех заблокированных отправителей/получателей. |
 | `isClosed`    | Сообщает, был ли канал закрыт.                                                       |
-| `pending`     | Ориентировочное количество буферизованных элементов прямо сейчас. Полезно для метрик/backpressure. |
+| `count`       | Ориентировочное количество буферизованных элементов прямо сейчас. Через `Countable` — `count($ch)` работает напрямую. |
 | `sendMany`    | Положить массив элементов; возвращает, сколько реально вошло до full/closed/timeout. |
 | `recvMany`    | Забрать до `$max` элементов (`0` = слить то, что буферизовано сейчас, без ожидания). |
 | `id`          | Числовой идентификатор реестра; полезен для логов и корреляции в наблюдаемости.      |
@@ -187,12 +187,13 @@ $snapshot = $ch->recvMany(0);
 
 - **`GET /__ox_shared/summary`** включает бакет `Channel` с count, bytes, ops и `pending_total`.
 - **`GET /__ox_shared/entries?type=Channel`** перечисляет записи каналов с их ID реестра.
-- **`GET /__ox_shared/entries/:id`** возвращает per-channel состояние: `capacity`, `pending`, `closed`, `senders_blocked`, `receivers_blocked`.
+- **`GET /__ox_shared/entries/:id`** возвращает per-channel состояние: `capacity`, `count`, `pending` *(устаревший alias `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
 Prometheus-экспозиция на `/metrics`:
 
 ```text
-oxphp_shared_channel_pending{channel_id="<id>"}             gauge
+oxphp_shared_channel_count{channel_id="<id>"}               gauge
+oxphp_shared_channel_pending{channel_id="<id>"}             gauge (устаревшая, alias _count)
 oxphp_shared_channel_senders_blocked{channel_id="<id>"}     gauge
 oxphp_shared_channel_receivers_blocked{channel_id="<id>"}   gauge
 oxphp_shared_channel_items_sent_total{channel_id="<id>"}    counter

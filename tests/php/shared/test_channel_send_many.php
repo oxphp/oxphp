@@ -12,10 +12,11 @@ if ($sent !== 5) {
     echo "FAIL: sendMany returned $sent, expected 5\n";
     exit;
 }
-if ($ch->pending() !== 5) {
-    echo "FAIL: pending=" . $ch->pending() . ", expected 5\n";
+if ($ch->count() !== 5) {
+    echo "FAIL: count=" . $ch->count() . ", expected 5\n";
     exit;
 }
+if (count($ch) !== 5) { echo "FAIL: Countable count(\$ch)\n"; exit; }
 
 // Drain one; the next batch should still fit fully (6 + 2 ≤ 100).
 if ($ch->recv() !== 1) {
@@ -27,8 +28,8 @@ if ($sent2 !== 2) {
     echo "FAIL: second sendMany returned $sent2, expected 2\n";
     exit;
 }
-if ($ch->pending() !== 6) {
-    echo "FAIL: pending=" . $ch->pending() . ", expected 6 (2..5 + 'a','b')\n";
+if ($ch->count() !== 6) {
+    echo "FAIL: count=" . $ch->count() . ", expected 6 (2..5 + 'a','b')\n";
     exit;
 }
 

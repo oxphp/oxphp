@@ -1,6 +1,6 @@
 ---
 title: Shared\Flag
-description: Атомарный boolean, разделяемый между PHP-воркерами — kill-switch'и, circuit breaker'ы и одноразовые маркеры инициализации с lock-free set/clear/test.
+description: Атомарный boolean, разделяемый между PHP-воркерами — kill-switch'и, circuit breaker'ы и одноразовые маркеры инициализации с lock-free set/clear/isSet.
 ---
 
 # Shared\Flag
@@ -9,7 +9,7 @@ description: Атомарный boolean, разделяемый между PHP-�
 
 ## Обзор
 
-- **Атомарный bool.** Один бит состояния с `test` / `set` / `clear` / `exchange` / `compareAndSet`.
+- **Атомарный bool.** Один бит состояния с `isSet` / `set` / `clear` / `exchange` / `compareAndSet`.
 - **Lock-free.** Все мутации — одна атомарная операция CPU. Безопасно под конкуренцией.
 - **Shareable.** Экземпляры живут в реестре и могут храниться внутри `Shared\Map`, передаваться через захваты `use` и т. д.
 
@@ -22,7 +22,7 @@ final class Flag implements Shareable
 {
     public function __construct(bool $initial = false);
 
-    public function test(): bool;
+    public function isSet(): bool;
     public function set(): bool;                                 // возвращает предыдущее
     public function clear(): bool;                               // возвращает предыдущее
     public function exchange(bool $new): bool;                   // возвращает предыдущее
@@ -34,7 +34,7 @@ final class Flag implements Shareable
 
 | Метод           | Возвращает | Применение                                                       |
 |-----------------|----------|------------------------------------------------------------------|
-| `test`          | текущее  | Чистое чтение.                                                   |
+| `isSet`         | текущее  | Чистое чтение.                                                   |
 | `set`           | предыдущее | Безусловно включить. Предыдущее значение говорит, победили ли вы. |
 | `clear`         | предыдущее | Безусловно выключить.                                            |
 | `exchange`      | предыдущее | Обмен на явное значение; полезно, когда переключение условное.   |
@@ -49,7 +49,7 @@ final class Flag implements Shareable
 $maintenance = new OxPHP\Shared\Flag();
 
 // В обработчике запроса
-if ($maintenance->test()) {
+if ($maintenance->isSet()) {
     http_response_code(503);
     header('Retry-After: 60');
     echo 'under maintenance';

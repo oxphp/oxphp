@@ -19,7 +19,7 @@ description: Bounded MPMC channel shared across PHP workers, with fiber-aware se
 ```php
 namespace OxPHP\Shared;
 
-final class Channel implements Shareable
+final class Channel implements Shareable, \Countable
 {
     public function __construct(int $capacity);
 
@@ -31,7 +31,7 @@ final class Channel implements Shareable
 
     public function close(): void;
     public function isClosed(): bool;
-    public function pending(): int;
+    public function count(): int;
 
     public function sendMany(array $values, float $timeout = 0.0): int;
     public function recvMany(int $max, float $timeout = 0.0): array;
@@ -48,7 +48,7 @@ final class Channel implements Shareable
 | `tryRecv`     | Pull one item without waiting; returns `null` when empty; throws when closed+empty.  |
 | `close`       | Mark the channel closed. Idempotent. Wakes all blocked senders/receivers.            |
 | `isClosed`    | Reports whether the channel has been closed.                                         |
-| `pending`     | Advisory count of buffered items right now. Useful for metrics/backpressure checks.  |
+| `count`       | Advisory count of buffered items right now. `Countable` — `count($ch)` works directly. |
 | `sendMany`    | Push an array of items; returns how many actually went in before full/closed/timeout.|
 | `recvMany`    | Pull up to `$max` items (`0` = drain what is currently buffered without waiting).    |
 | `id`          | Numeric registry identifier; useful for logging and observability correlation.       |
@@ -187,12 +187,13 @@ The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in
 
 - **`GET /__ox_shared/summary`** includes a `Channel` bucket with count, bytes, ops, and `pending_total`.
 - **`GET /__ox_shared/entries?type=Channel`** lists channel entries with their registry IDs.
-- **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `pending`, `closed`, `senders_blocked`, `receivers_blocked`.
+- **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
 Prometheus exposition on `/metrics`:
 
 ```text
-oxphp_shared_channel_pending{channel_id="<id>"}             gauge
+oxphp_shared_channel_count{channel_id="<id>"}               gauge
+oxphp_shared_channel_pending{channel_id="<id>"}             gauge (deprecated, alias of _count)
 oxphp_shared_channel_senders_blocked{channel_id="<id>"}     gauge
 oxphp_shared_channel_receivers_blocked{channel_id="<id>"}   gauge
 oxphp_shared_channel_items_sent_total{channel_id="<id>"}    counter
