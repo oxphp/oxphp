@@ -113,6 +113,7 @@ pub struct RouteConfig {
     mode: Mode,
     worker_route: Option<RouteResult>,
     php_deny: Option<crate::config::PhpDeny>,
+    symlink_allow: crate::config::SymlinkAllowList,
     /// Cache of resolved routes keyed by URI path. `Mutex` rather than
     /// `RwLock` because `std::sync::RwLock` wraps `pthread_rwlock_t` on
     /// Linux and is ~2–3× slower than a futex-based `Mutex` in the
@@ -174,12 +175,18 @@ impl RouteConfig {
                 panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
             });
 
+        let symlink_allow = crate::config::SymlinkAllowList::from_env(&canonical_root)
+            .unwrap_or_else(|e| {
+                panic!("Fatal: invalid SYMLINK_ALLOW_PATHS configuration: {e}");
+            });
+
         Self {
             document_root,
             canonical_root,
             mode,
             worker_route: None,
             php_deny,
+            symlink_allow,
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
@@ -338,29 +345,38 @@ impl RouteConfig {
         cache.put(uri_path.to_string(), Arc::clone(result));
     }
 
-    /// Check that a resolved path stays within the canonical document root.
-    /// Results are cached in the file cache to avoid repeated `realpath(3)`.
+    /// Check that a resolved path stays within the canonical document root
+    /// or any explicitly allowed symlink target. Results are cached in the
+    /// file cache to avoid repeated `realpath(3)`.
     async fn validate_path(&self, path: &Path, file_cache: &Arc<FileCache>) -> bool {
-        // `to_string_lossy()` returns `Cow::Borrowed` on UTF-8 paths (the
-        // common case), so the lookup is alloc-free; only the insert path
-        // takes ownership.
         let cache_key = path.to_string_lossy();
 
         if let Some(cached) = file_cache.get_canonical(&cache_key) {
             return match cached {
-                Some(canonical_path) => canonical_path.starts_with(&self.canonical_root),
+                Some(canonical_path) => self.is_path_within_allowed(&canonical_path),
                 None => true, // file didn't exist at cache time; serve() will 404
             };
         }
 
         let result = tokio::fs::canonicalize(path).await.ok();
         let valid = match &result {
-            Some(canonical_path) => canonical_path.starts_with(&self.canonical_root),
+            Some(canonical_path) => self.is_path_within_allowed(canonical_path),
             None => true,
         };
 
         file_cache.insert_canonical(cache_key.into_owned(), result);
         valid
+    }
+
+    fn is_path_within_allowed(&self, canonical_path: &Path) -> bool {
+        canonical_path.starts_with(&self.canonical_root)
+            || self.symlink_allow.allows(canonical_path)
+    }
+
+    /// Allow the static-file serve path to consult the same allow-list
+    /// without exposing the internal field.
+    pub fn symlink_allow(&self) -> &crate::config::SymlinkAllowList {
+        &self.symlink_allow
     }
 }
 
