@@ -235,7 +235,7 @@ Every `Shared\*` object is a thin PHP wrapper around a registry ID. A few rules 
 1. **Identity is the registry ID, not the PHP object.** Two handles with the same ID point at the same state. `$a->id() === $b->id()` is the equality test.
 2. **Serialisation is blocked.** `serialize($counter)` throws. The registry lives only in this process — there is nothing useful to put on the wire. Use the [migration guide](migrating-to-external-store.md) when you genuinely need to cross a process boundary.
 3. **`clone` is blocked.** For the same reason — a cloned wrapper would look distinct but share state. Construct a fresh instance if you want an independent value.
-4. **`id()` is stable until the last reference drops.** Persist it in logs, include it in trace spans, use it as the lookup key when the internal server returns an entry in [Observability](../operations/shared-observability.md).
+4. **`id()` is an opaque, per-process token.** Stable until the last reference drops; safe to log, attach to trace spans, or pass to the internal server's [Observability](../operations/shared-observability.md) endpoints inside the same process. The value is randomised at process start and carries no meaning outside this process — do not persist it to external storage, sessions, cookies, or another OxPHP worker. There is no `fromId()` constructor; an id from a foreign process resolves to nothing.
 
 ## Lifecycle
 
