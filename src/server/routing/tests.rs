@@ -590,13 +590,18 @@ async fn test_symlink_to_allowed_path_resolves() {
     fs::write(target_canonical.join("asset.txt"), "allowed asset").unwrap();
     symlink(target.path(), dir.path().join("assets")).unwrap();
 
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _env = EnvGuard::set("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
-
-    // Build RouteConfig directly — make_config() would re-acquire ENV_LOCK
-    // (and would clear SYMLINK_ALLOW_PATHS), defeating the point of this test.
-    let server_config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
-    let rc = RouteConfig::new(&server_config, None, false);
+    // Hold ENV_LOCK + EnvGuard only across RouteConfig::new — it captures
+    // the allow-list into the struct, after which env mutation is irrelevant.
+    // Releasing before the .await avoids clippy::await_holding_lock on the
+    // std::sync::Mutex guard. Build RouteConfig directly because make_config()
+    // would re-acquire ENV_LOCK and clear SYMLINK_ALLOW_PATHS.
+    let rc = {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
+        let server_config =
+            ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
+        RouteConfig::new(&server_config, None, false)
+    };
     let cache = Arc::new(FileCache::new(200));
     let res = rc.resolve_request("/assets/asset.txt", &cache).await;
     assert!(
@@ -604,8 +609,6 @@ async fn test_symlink_to_allowed_path_resolves() {
         "expected Serve for allow-listed symlink, got {:?}",
         *res
     );
-    // _env Drop restores SYMLINK_ALLOW_PATHS even if the assert panics;
-    // _lock Drop releases ENV_LOCK after env is restored.
 }
 
 // --- Route cache tests ---
