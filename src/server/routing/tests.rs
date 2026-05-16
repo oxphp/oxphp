@@ -581,11 +581,13 @@ async fn test_symlink_escape_cached_on_second_request() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_symlink_to_allowed_path_resolves() {
-    use crate::config::symlink_allow::tests::{EnvGuard, ENV_LOCK};
+    use crate::config::symlink_allow::tests::{non_blacklisted_tempdir, EnvGuard, ENV_LOCK};
     use std::os::unix::fs::symlink;
 
     let dir = setup_test_dir();
-    let target = TempDir::new().unwrap();
+    // Use non_blacklisted_tempdir() so the symlink target's canonical path
+    // doesn't land under a BLACKLIST_PREFIXES entry on Linux CI.
+    let target = non_blacklisted_tempdir();
     let target_canonical = std::fs::canonicalize(target.path()).unwrap();
     fs::write(target_canonical.join("asset.txt"), "allowed asset").unwrap();
     symlink(target.path(), dir.path().join("assets")).unwrap();

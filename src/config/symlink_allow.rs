@@ -143,6 +143,22 @@ pub(crate) mod tests {
         }
     }
 
+    /// Create a tempdir whose canonical path is guaranteed not to land under
+    /// any `BLACKLIST_PREFIXES` entry. `TempDir::new()` honours `TMPDIR` →
+    /// defaults to `/tmp` on Linux CI, which is blacklisted; allow-list tests
+    /// would then fail on Linux but pass on macOS (where `/var/folders/...`
+    /// canonicalises to `/private/var/folders/...`, outside every prefix).
+    /// Anchoring to `$CARGO_MANIFEST_DIR/target/` keeps the path under the
+    /// workspace root on both dev hosts (`/Users/...`) and GitHub runners
+    /// (`/home/runner/work/...`), neither of which is blacklisted.
+    pub(crate) fn non_blacklisted_tempdir() -> TempDir {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-symlink-allow");
+        std::fs::create_dir_all(&base).unwrap();
+        TempDir::new_in(&base).unwrap()
+    }
+
     pub(crate) fn with_env<F: FnOnce()>(value: Option<&str>, f: F) {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
@@ -192,7 +208,7 @@ pub(crate) mod tests {
 
     #[test]
     fn absolute_existing_path_is_registered() {
-        let target = TempDir::new().unwrap();
+        let target = non_blacklisted_tempdir();
         let target_canonical = std::fs::canonicalize(target.path()).unwrap();
 
         with_env(Some(target_canonical.to_str().unwrap()), || {
@@ -207,7 +223,7 @@ pub(crate) mod tests {
 
     #[test]
     fn relative_entry_resolves_against_canonical_root() {
-        let project = TempDir::new().unwrap();
+        let project = non_blacklisted_tempdir();
         let project_canonical = std::fs::canonicalize(project.path()).unwrap();
 
         std::fs::create_dir(project_canonical.join("public")).unwrap();
