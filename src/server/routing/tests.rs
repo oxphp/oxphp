@@ -598,8 +598,7 @@ async fn test_symlink_to_allowed_path_resolves() {
     let rc = {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _env = EnvGuard::set("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
-        let server_config =
-            ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
+        let server_config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
         RouteConfig::new(&server_config, None, false)
     };
     let cache = Arc::new(FileCache::new(200));
