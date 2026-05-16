@@ -673,15 +673,17 @@ mod tests {
 
     #[test]
     fn total_counts_track() {
-        let reg = fresh_registry();
-        let before = reg.total_entries();
+        // Use an isolated test-local registry so the assertion is not
+        // racy against sibling tests that insert into the global
+        // REGISTRY in parallel (cargo runs unit tests multi-threaded).
+        let reg = SharedRegistry::new_for_test(capped_config(10, 1 << 20));
         // Hold the Arc<Entry> for the assertion — without it, the entry
         // would self-deregister on drop and total_entries would not
         // advance.
         let _arc = reg
             .insert(SharedType::Counter, Arc::new(TestInner { bytes: 16 }))
             .unwrap();
-        assert_eq!(reg.total_entries(), before + 1);
+        assert_eq!(reg.total_entries(), 1);
     }
 
     #[test]
