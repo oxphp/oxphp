@@ -307,11 +307,16 @@ impl FileCache {
     }
 }
 
-/// Re-canonicalize a file path and verify it stays within the document root.
-/// Returns `false` if the path escapes the root (TOCTOU mitigation).
-async fn verify_canonical(file_path: &Path, canonical_root: &Path) -> bool {
+/// Re-canonicalize a file path and verify it stays within the document root
+/// or any allow-listed symlink target. Returns `false` if the path escapes
+/// (TOCTOU mitigation).
+async fn verify_canonical(
+    file_path: &Path,
+    canonical_root: &Path,
+    allow_list: &crate::config::SymlinkAllowList,
+) -> bool {
     match tokio::fs::canonicalize(file_path).await {
-        Ok(real) => real.starts_with(canonical_root),
+        Ok(real) => real.starts_with(canonical_root) || allow_list.allows(&real),
         Err(_) => false,
     }
 }
@@ -394,6 +399,7 @@ pub async fn serve(
     file_path: &Path,
     cache: &FileCache,
     canonical_root: &Path,
+    allow_list: &crate::config::SymlinkAllowList,
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
@@ -434,10 +440,11 @@ pub async fn serve(
     // 2. TOCTOU mitigation: re-canonicalize before reading from disk.
     //    Skip the syscall if the canonical cache already validated this path
     //    (the routing layer's validate_path() populates this cache).
-    let already_validated = cache
-        .get_canonical(&cache_key)
-        .is_some_and(|opt| opt.as_ref().is_some_and(|p| p.starts_with(canonical_root)));
-    if !already_validated && !verify_canonical(file_path, canonical_root).await {
+    let already_validated = cache.get_canonical(&cache_key).is_some_and(|opt| {
+        opt.as_ref()
+            .is_some_and(|p| p.starts_with(canonical_root) || allow_list.allows(p))
+    });
+    if !already_validated && !verify_canonical(file_path, canonical_root, allow_list).await {
         tracing::warn!(
             path = %file_path.display(),
             "TOCTOU: path escaped document root at serve time"
@@ -544,10 +551,15 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SymlinkAllowList;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    fn empty_allow() -> SymlinkAllowList {
+        SymlinkAllowList::default()
+    }
 
     /// Canonicalize the temp dir path so it matches what `verify_canonical` resolves
     /// (e.g. macOS `/var` → `/private/var` symlink).
@@ -652,6 +664,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -673,6 +686,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -695,6 +709,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -717,6 +732,7 @@ mod tests {
             &dir.path().join("nonexistent.txt"),
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -889,6 +905,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -906,6 +923,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1019,6 +1037,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=3600"),
         )
@@ -1050,6 +1069,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             None,
         )
@@ -1075,6 +1095,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1095,6 +1116,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1116,6 +1138,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1137,6 +1160,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1157,6 +1181,7 @@ mod tests {
             &file_path,
             &cache,
             &canonical_root(&dir),
+            &empty_allow(),
             &headers,
             Some("public, max-age=86400"),
         )

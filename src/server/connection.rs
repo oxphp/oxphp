@@ -331,6 +331,7 @@ async fn dispatch_request(
                 file_path,
                 &server.file_cache,
                 server.route_config.canonical_root(),
+                server.route_config.symlink_allow(),
                 &parts.headers,
                 server.static_cache_control.as_deref(),
             )
