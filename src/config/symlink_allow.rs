@@ -8,6 +8,58 @@ use std::path::{Path, PathBuf};
 
 use crate::types::BoxError;
 
+/// Paths whose exact canonical match is forbidden.
+const BLACKLIST_EXACT: &[&str] = &[
+    "/", "/etc", "/proc", "/sys", "/dev", "/var", "/home", "/tmp", "/root", "/usr",
+];
+
+/// Prefixes — a path whose canonical starts with `<prefix>/` is forbidden.
+/// Note `/var` and `/home` are intentionally not here: they are exact-only
+/// (admin may want `/var/www/...`, `/home/{current_user}/...`).
+const BLACKLIST_PREFIXES: &[&str] = &["/etc", "/proc", "/sys", "/dev", "/tmp", "/root", "/usr"];
+
+fn reject_blacklist(path: &Path, current_user: Option<&str>, raw_entry: &str) -> Result<(), BoxError> {
+    let path_str = path.to_string_lossy();
+
+    for exact in BLACKLIST_EXACT {
+        if path_str == *exact {
+            return Err(format!(
+                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} which is in the exact blacklist"
+            )
+            .into());
+        }
+    }
+
+    for prefix in BLACKLIST_PREFIXES {
+        let prefix_slash = format!("{prefix}/");
+        if path_str.starts_with(&prefix_slash) {
+            return Err(format!(
+                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} which lies under blacklisted prefix {prefix:?}"
+            )
+            .into());
+        }
+    }
+
+    if let Some(rest) = path_str.strip_prefix("/home/") {
+        let first_component = rest.split('/').next().unwrap_or("");
+        if first_component.is_empty() {
+            return Err(format!(
+                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} which is /home itself (blacklist)"
+            )
+            .into());
+        }
+        let allowed_user = current_user.unwrap_or("");
+        if allowed_user.is_empty() || first_component != allowed_user {
+            return Err(format!(
+                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} under another user's home directory (blacklist)"
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Default)]
 pub struct SymlinkAllowList {
     entries: Vec<PathBuf>,
@@ -20,7 +72,7 @@ impl SymlinkAllowList {
 
     fn from_env_inner(
         canonical_root: &Path,
-        _current_user: Option<&str>,
+        current_user: Option<&str>,
     ) -> Result<Self, BoxError> {
         let raw = std::env::var("SYMLINK_ALLOW_PATHS").unwrap_or_default();
         let trimmed = raw.trim();
@@ -33,7 +85,13 @@ impl SymlinkAllowList {
             if raw_entry.is_empty() {
                 continue;
             }
-            let lookup_path = if Path::new(raw_entry).is_absolute() {
+            let raw_path = Path::new(raw_entry);
+            let lookup_path = if raw_path.is_absolute() {
+                // Pre-canonicalize blacklist check on the admin-typed path.
+                // Required because on macOS `/etc`, `/tmp`, `/var` etc. are
+                // symlinks into `/private/...`, so a post-canonicalize check
+                // alone would let `/tmp` slip through.
+                reject_blacklist(raw_path, current_user, raw_entry)?;
                 PathBuf::from(raw_entry)
             } else {
                 canonical_root.join(raw_entry)
@@ -41,6 +99,10 @@ impl SymlinkAllowList {
             let canonical = std::fs::canonicalize(&lookup_path).map_err(|e| -> BoxError {
                 format!("SYMLINK_ALLOW_PATHS entry {raw_entry:?} canonicalize: {e}").into()
             })?;
+            // Defense-in-depth: catch symlink-target escapes (relative entry
+            // that lands in a blacklisted dir, or an absolute that points
+            // via symlink to a blacklisted canonical form).
+            reject_blacklist(&canonical, current_user, raw_entry)?;
             if !entries.contains(&canonical) {
                 tracing::info!(
                     allow_path = %canonical.display(),
@@ -199,5 +261,26 @@ pub(crate) mod tests {
                 "error should mention canonicalize, got: {msg}"
             );
         });
+    }
+
+    #[test]
+    fn exact_blacklist_rejected() {
+        let cases = ["/etc", "/var", "/usr", "/tmp"];
+        for target in cases {
+            if !std::path::Path::new(target).is_dir() {
+                continue;
+            }
+            with_env(Some(target), || {
+                let root = TempDir::new().unwrap();
+                let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+                let err = SymlinkAllowList::from_env(&canonical_root)
+                    .expect_err(&format!("{target} must be rejected"));
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("blacklist"),
+                    "error should mention blacklist for {target}, got: {msg}"
+                );
+            });
+        }
     }
 }
