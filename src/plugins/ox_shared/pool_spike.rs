@@ -57,7 +57,8 @@ fn handler_capture(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn handler_invoke(call: &mut NativeCall) -> Result<(), PhpError> {
-    use crate::plugins::ox_shared::value::{portbuf_to_sv, SharedValue};
+    use crate::plugins::ox_shared::registry::REGISTRY;
+    use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned, SharedValue};
 
     let mut captured: u64 = 0;
     let mut current: u64 = 0;
@@ -86,12 +87,21 @@ fn handler_invoke(call: &mut NativeCall) -> Result<(), PhpError> {
     }
 
     // Decode the returned portbuf into a SharedValue for inclusion in
-    // the associative array we hand back to PHP.
+    // the associative array we hand back to PHP. Resolves nested
+    // `Shared\*` references through the global registry; on a stale
+    // entry or absent registry, falls back to `Null` (this path is
+    // diagnostic, not a real container store).
     let result_sv = if buf.is_null() || len == 0 {
         SharedValue::Null
     } else {
         let slice = unsafe { std::slice::from_raw_parts(buf, len) };
-        portbuf_to_sv(slice).unwrap_or(SharedValue::Null)
+        match portbuf_to_sv(slice) {
+            Ok(raw) => match REGISTRY.get() {
+                Some(reg) => raw_to_owned(raw, reg).unwrap_or(SharedValue::Null),
+                None => SharedValue::Null,
+            },
+            Err(_) => SharedValue::Null,
+        }
     };
     if !buf.is_null() {
         unsafe { ffi::oxphp_portable_free(buf) };

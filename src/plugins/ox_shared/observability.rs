@@ -715,10 +715,10 @@ mod tests {
     fn channel_entry_json_has_type_specific() {
         ensure_test_registry();
         let reg = registry();
-        let id = reg
+        let entry = reg
             .insert(SharedType::Channel, Arc::new(ChannelInner::new(16)))
             .expect("insert channel");
-        let entry = reg.lookup(id).expect("lookup");
+        let id = entry.id;
 
         let v = entry_to_json(&entry);
         assert_eq!(v["type"], "Channel");
@@ -731,8 +731,9 @@ mod tests {
         assert_eq!(ts["senders_blocked"], 0);
         assert_eq!(ts["receivers_blocked"], 0);
 
-        // Clean up so later tests don't see a stale entry.
-        reg.release(id);
+        // Drop the strong ref so later tests don't see a stale entry —
+        // Entry::Drop self-deregisters when the last Arc dies.
+        drop(entry);
     }
 
     #[tokio::test]
@@ -773,7 +774,8 @@ mod tests {
         let reg = registry();
         let inner: Arc<dyn crate::plugins::ox_shared::registry::SharedInner> =
             Arc::new(MapInner::new(Some(100)));
-        let id = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
+        let entry = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
+        let id = entry.id;
         let concrete = (*inner).as_any_map().unwrap();
         concrete.bind_id(id);
         for i in 0..3 {
@@ -782,7 +784,6 @@ mod tests {
                 .unwrap();
         }
 
-        let entry = reg.lookup(id).unwrap();
         let v = entry_to_json(&entry);
         assert_eq!(v["type"], "Map");
         let ts = &v["type_specific"];
@@ -794,7 +795,7 @@ mod tests {
         assert_eq!(samples.len(), 3);
 
         drop(inner);
-        reg.release(id);
+        drop(entry);
     }
 
     #[test]
@@ -811,7 +812,8 @@ mod tests {
                 4,
                 Duration::from_secs(300),
             ));
-        let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let entry = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let id = entry.id;
         let pool = (*inner).as_any_pool().unwrap();
         pool.bind_id(id);
         assert!(pool.try_reserve_budget());
@@ -820,7 +822,6 @@ mod tests {
             crate::plugins::ox_shared::types::pool::current_thread_key(),
         ));
 
-        let entry = reg.lookup(id).unwrap();
         let v = entry_to_json(&entry);
         assert_eq!(v["type"], "Pool");
         let ts = &v["type_specific"];
@@ -837,7 +838,7 @@ mod tests {
         assert_eq!(by_thread.values().next().unwrap().as_u64().unwrap(), 1u64);
 
         drop(inner);
-        reg.release(id);
+        drop(entry);
     }
 
     #[test]
@@ -877,7 +878,8 @@ mod tests {
                 4,
                 Duration::from_secs(300),
             ));
-        let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let entry = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let id = entry.id;
         let pool = (*inner).as_any_pool().unwrap();
         pool.bind_id(id);
         pool.record_acquire_ok();
@@ -940,7 +942,7 @@ mod tests {
         );
 
         drop(inner);
-        reg.release(id);
+        drop(entry);
     }
 
     #[test]
@@ -970,7 +972,7 @@ mod tests {
     async fn graph_endpoint_walks_outgoing_edges() {
         use crate::plugins::ox_shared::types::counter::CounterInner;
         use crate::plugins::ox_shared::types::map::MapInner;
-        use crate::plugins::ox_shared::value::{SharedRef as SR, SharedValue as SV};
+        use crate::plugins::ox_shared::value::{SharedRefOwned, SharedValue as SV};
 
         ensure_test_registry();
         let reg = registry();
@@ -978,19 +980,18 @@ mod tests {
         // Build: Map A -> Counter C; ask graph for root=A.
         let counter: Arc<dyn crate::plugins::ox_shared::registry::SharedInner> =
             Arc::new(CounterInner::new(0));
-        let c_id = reg.insert(SharedType::Counter, counter).unwrap();
+        let c_entry = reg.insert(SharedType::Counter, counter).unwrap();
+        let c_id = c_entry.id;
 
         let a_inner: Arc<dyn crate::plugins::ox_shared::registry::SharedInner> =
             Arc::new(MapInner::new(None));
-        let a_id = reg.insert(SharedType::Map, Arc::clone(&a_inner)).unwrap();
+        let a_entry = reg.insert(SharedType::Map, Arc::clone(&a_inner)).unwrap();
+        let a_id = a_entry.id;
         let a = (*a_inner).as_any_map().unwrap();
         a.bind_id(a_id);
         a.set(
             Arc::from("c"),
-            SV::Shared(SR {
-                id: c_id,
-                type_tag: SharedType::Counter,
-            }),
+            SV::Shared(SharedRefOwned::from_arc(Arc::clone(&c_entry))),
         )
         .unwrap();
 
@@ -1018,8 +1019,8 @@ mod tests {
 
         a.clear();
         drop(a_inner);
-        reg.release(a_id);
-        reg.release(c_id);
+        drop(a_entry);
+        drop(c_entry);
     }
 
     #[test]
@@ -1031,7 +1032,8 @@ mod tests {
         let reg = registry();
         let inner: Arc<dyn crate::plugins::ox_shared::registry::SharedInner> =
             Arc::new(MapInner::new(Some(10)));
-        let id = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
+        let entry = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
+        let id = entry.id;
         let concrete = (*inner).as_any_map().unwrap();
         concrete.bind_id(id);
         concrete.set(Arc::from("a"), SV::Long(1)).unwrap();
@@ -1053,7 +1055,7 @@ mod tests {
         )));
 
         drop(inner);
-        reg.release(id);
+        drop(entry);
     }
 
     #[test]
@@ -1066,12 +1068,14 @@ mod tests {
         a.try_send(b"x".to_vec()).expect("send a");
         a.try_send(b"y".to_vec()).expect("send a2");
 
-        let id_a = reg
+        let entry_a = reg
             .insert(SharedType::Channel, a.clone())
             .expect("insert a");
-        let id_b = reg
+        let entry_b = reg
             .insert(SharedType::Channel, b.clone())
             .expect("insert b");
+        let id_a = entry_a.id;
+        let id_b = entry_b.id;
 
         let mut out = String::new();
         SharedMetricsCollector.collect(&mut out);
@@ -1092,7 +1096,7 @@ mod tests {
         let sent_a = format!("oxphp_shared_channel_items_sent_total{{channel_id=\"{id_a}\"}} 2\n");
         assert!(out.contains(&sent_a), "expected {sent_a:?} in\n{out}");
 
-        reg.release(id_a);
-        reg.release(id_b);
+        drop(entry_a);
+        drop(entry_b);
     }
 }

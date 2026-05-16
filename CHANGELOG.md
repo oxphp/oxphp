@@ -157,7 +157,7 @@ $sapi = php_sapi_name();              // "cli-server"
 
 ### Performance
 
-- Reduced per-call overhead of `Shared\*` primitive operations: one DashMap lookup per call instead of two. The optimisation is unconditional and applies whether `ox_shared.metrics_enabled` is on or off.
+- Reduced per-call overhead of `Shared\*` primitive operations: the PHP wrapper now holds the registry entry directly, so the global shared-map lookup is gone from every call. Earlier in this cycle the per-call lookup count was halved (two → one) when the per-entry op counter stopped re-resolving the entry; this change removes the remaining one. The optimisation is unconditional and applies whether `ox_shared.metrics_enabled` is on or off. On a 14-core development host the per-op hot path is now within criterion noise of a raw atomic load — at 8 threads the geomean ratio between the previous and the new shape is approximately 4.7×, with the largest wins on contended read-only ops (`Atomic::load`, `Flag::test`, `Once::isInitialized`); the improvement is expected to be larger on 32–64-core hosts where the DashMap shard lock dominated.
 
 ### Fixed
 

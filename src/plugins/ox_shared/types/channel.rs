@@ -6,7 +6,7 @@
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use crossbeam_channel::{RecvTimeoutError, SendTimeoutError, TryRecvError, TrySendError};
@@ -16,7 +16,9 @@ use tokio::sync::Notify;
 
 use crate::plugins::ox_async::synthetic::{self, PromisePayload};
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
-use crate::plugins::ox_shared::registry::{registry, SharedId, SharedInner, SharedType, REGISTRY};
+use crate::plugins::ox_shared::registry::{
+    registry, Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
+};
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::SharedValue;
 
@@ -112,6 +114,10 @@ pub struct ChannelInner {
     /// — memory tracking is then a no-op because the channel is not
     /// reachable via the registry.
     self_id: OnceLock<SharedId>,
+    /// Cached `Weak<Entry>` for the fast-path of [`track_payload_delta`].
+    /// See [`MapInner::self_entry`] for the rationale — same shape,
+    /// same fallback to the id-based slow path for test fixtures.
+    self_entry: OnceLock<Weak<Entry>>,
 }
 
 impl ChannelInner {
@@ -138,6 +144,7 @@ impl ChannelInner {
             items_sent_total: AtomicU64::new(0),
             items_dropped_total: AtomicU64::new(0),
             self_id: OnceLock::new(),
+            self_entry: OnceLock::new(),
         }
     }
 
@@ -148,6 +155,18 @@ impl ChannelInner {
     /// [`bump_pending`] / [`drop_pending`].
     pub fn bind_id(&self, id: SharedId) {
         let _ = self.self_id.set(id);
+    }
+
+    /// Bind this Channel to its registry entry. Production path: call
+    /// from the creating FFI right after `registry.insert` with
+    /// `Arc::downgrade(&entry_arc)`. Sets both id and the cached
+    /// `Weak<Entry>` that [`track_payload_delta`] uses to bypass the
+    /// DashMap shard-lock on every `bump_pending` / `drop_pending`.
+    pub fn bind_entry(&self, weak: Weak<Entry>) {
+        if let Some(arc) = weak.upgrade() {
+            let _ = self.self_id.set(arc.id);
+        }
+        let _ = self.self_entry.set(weak);
     }
 
     /// Increment `pending` by one and book one payload's worth of
@@ -191,13 +210,20 @@ impl ChannelInner {
     }
 
     fn track_payload_delta(&self, delta_count: isize) {
+        let delta = delta_count * CHANNEL_PER_PAYLOAD_BYTES;
+        if let Some(weak) = self.self_entry.get() {
+            if let Some(entry) = weak.upgrade() {
+                entry.adjust_mem_bytes(delta);
+            }
+            return;
+        }
         let Some(id) = self.self_id.get().copied() else {
             return;
         };
         let Some(reg) = REGISTRY.get() else {
             return;
         };
-        reg.adjust_mem_bytes(id, delta_count * CHANNEL_PER_PAYLOAD_BYTES);
+        reg.adjust_mem_bytes(id, delta);
     }
 
     pub fn capacity(&self) -> usize {
@@ -878,11 +904,14 @@ impl SharedInnerChannelExt for dyn SharedInner {
 /// PHP side).
 ///
 /// # Safety
-/// `out_id` must be valid for a `u64` write.
+/// `out_ptr` must be valid for writes of `*const Entry` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_create(capacity: u64, out_id: *mut u64) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id null");
+pub unsafe extern "C" fn oxphp_shared_channel_create(
+    capacity: u64,
+    out_ptr: *mut *const Entry,
+) -> c_int {
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
@@ -897,9 +926,10 @@ pub unsafe extern "C" fn oxphp_shared_channel_create(capacity: u64, out_id: *mut
         // success here is a static fact, but a downcast + `.expect`
         // makes a structural invariant look like a runtime contract).
         let typed = Arc::new(ChannelInner::new(capacity as usize));
-        let id = reg.insert(SharedType::Channel, typed.clone())?;
-        typed.bind_id(id);
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Channel, typed.clone())?;
+        typed.bind_entry(Arc::downgrade(&arc));
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
@@ -914,7 +944,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_create(capacity: u64, out_id: *mut
 /// `len == 0`). `out_success` must be valid for a `c_int` write.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_try_send(
-    id: u64,
+    entry_ptr: *const Entry,
     buf: *const u8,
     len: usize,
     out_success: *mut c_int,
@@ -927,10 +957,15 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
         set_last_error("buf null with non-zero len");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe { *out_success = 0 };
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_try_send on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let payload: Payload = if len == 0 {
@@ -941,14 +976,14 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
 
         match ch.try_send(payload) {
             Ok(()) => {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_success = 1 };
                 Ok(())
             }
             Err(TrySendErr::Full(_)) => {
                 // Not an error per FFI contract — the caller distinguishes
                 // via *out_success = 0.
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_success = 0 };
                 Ok(())
             }
@@ -975,7 +1010,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
 /// ownership of the allocation.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
-    id: u64,
+    entry_ptr: *const Entry,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
     out_state: *mut c_int,
@@ -984,20 +1019,24 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
         set_last_error("out pointers null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe {
         *out_buf = std::ptr::null_mut();
         *out_len = 0;
         *out_state = 1;
     }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_try_recv on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         match ch.try_recv() {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload)? };
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
                     *out_len = n;
@@ -1006,12 +1045,12 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
                 Ok(())
             }
             Err(TryRecvErr::WouldBlockEmpty) => {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_state = 1 };
                 Ok(())
             }
             Ok(None) => {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_state = 2 };
                 Ok(())
             }
@@ -1030,7 +1069,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
 /// `len == 0`).
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
-    id: u64,
+    entry_ptr: *const Entry,
     buf: *const u8,
     len: usize,
     timeout_ms: i64,
@@ -1039,9 +1078,16 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         set_last_error("buf null with non-zero len");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "channel_send_blocking on freed Entry"
+        );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let payload: Payload = if len == 0 {
@@ -1054,7 +1100,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         let res = ch.send_blocking(payload, wait);
         match res {
             Ok(()) => {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 Ok(())
             }
             Err(e @ SharedError::Closed) => {
@@ -1086,7 +1132,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
 /// `out_buf`, `out_len`, `out_state` must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
-    id: u64,
+    entry_ptr: *const Entry,
     timeout_ms: i64,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
@@ -1096,21 +1142,28 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         set_last_error("out pointers null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe {
         *out_buf = std::ptr::null_mut();
         *out_len = 0;
         *out_state = 2;
     }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "channel_recv_blocking on freed Entry"
+        );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let wait = parse_timeout(timeout_ms);
         match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload)? };
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
                     *out_len = n;
@@ -1119,7 +1172,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
                 Ok(())
             }
             Ok(None) => {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_state = 2 };
                 Ok(())
             }
@@ -1135,14 +1188,21 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
 /// Idempotent close. Always returns 0 — close is not an error even on
 /// an already-closed channel. Wakes parked fibers and blocked threads
 /// promptly.
+///
+/// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 #[no_mangle]
-pub extern "C" fn oxphp_shared_channel_close(id: u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_channel_close(entry_ptr: *const Entry) -> c_int {
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_close on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         ch.close();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         Ok(())
     })
 }
@@ -1152,17 +1212,24 @@ pub extern "C" fn oxphp_shared_channel_close(id: u64) -> c_int {
 /// # Safety
 /// `out` must be valid for a `c_int` write.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_is_closed(id: u64, out: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_channel_is_closed(
+    entry_ptr: *const Entry,
+    out: *mut c_int,
+) -> c_int {
     if out.is_null() {
         set_last_error("out null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_is_closed on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         let v = ch.is_closed();
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = v as c_int };
         Ok(())
     })
@@ -1173,17 +1240,24 @@ pub unsafe extern "C" fn oxphp_shared_channel_is_closed(id: u64, out: *mut c_int
 /// # Safety
 /// `out` must be valid for a `u64` write.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_pending(id: u64, out: *mut u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_channel_pending(
+    entry_ptr: *const Entry,
+    out: *mut u64,
+) -> c_int {
     if out.is_null() {
         set_last_error("out null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_pending on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
         let v = ch.pending() as u64;
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = v };
         Ok(())
     })
@@ -1207,7 +1281,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_pending(id: u64, out: *mut u64) ->
 /// of `n + 1` `usize` values. `out_sent` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_send_many(
-    id: u64,
+    entry_ptr: *const Entry,
     payloads_concat: *const u8,
     offsets: *const usize,
     n: usize,
@@ -1223,13 +1297,17 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
         set_last_error("offsets null with n > 0");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_send_many on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         if n == 0 {
-            reg.record_op(&entry);
+            entry.registry.record_op(entry);
             return Ok(());
         }
 
@@ -1260,7 +1338,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
 
         let wait = parse_timeout(timeout_ms);
         let sent = ch.send_many(payloads, wait);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_sent = sent };
         Ok(())
     })
@@ -1285,7 +1363,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
 /// valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
-    id: u64,
+    entry_ptr: *const Entry,
     max: u64,
     timeout_ms: i64,
     out_concat: *mut *mut u8,
@@ -1298,6 +1376,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
         set_last_error("out ptrs null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe {
         *out_concat = std::ptr::null_mut();
         *out_concat_len = 0;
@@ -1305,13 +1386,14 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
         *out_n = 0;
     }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_recv_many on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let wait = parse_timeout(timeout_ms);
         let items = ch.recv_many(max as usize, wait);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
 
         let n = items.len();
         if n == 0 {
@@ -1415,7 +1497,7 @@ fn spawn_fiber_timeout(promise_id: i64, timeout_ms: u64) {
 #[cfg(feature = "php")]
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_recv_fiber_register(
-    id: u64,
+    entry_ptr: *const Entry,
     timeout_ms: u64,
     out_promise_id: *mut i64,
 ) -> c_int {
@@ -1423,10 +1505,17 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_fiber_register(
         set_last_error("out_promise_id null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe { *out_promise_id = 0 };
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "channel_recv_fiber_register on freed Entry"
+        );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         // 1. Allocate synthetic promise on the PHP thread. Registers the
@@ -1443,7 +1532,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_fiber_register(
         //    `close()`.
         spawn_fiber_timeout(promise_id, timeout_ms);
 
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_promise_id = promise_id };
         Ok(())
     })
@@ -1463,7 +1552,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_fiber_register(
 #[cfg(feature = "php")]
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_channel_send_fiber_register(
-    id: u64,
+    entry_ptr: *const Entry,
     timeout_ms: u64,
     out_promise_id: *mut i64,
 ) -> c_int {
@@ -1471,17 +1560,24 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_fiber_register(
         set_last_error("out_promise_id null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     unsafe { *out_promise_id = 0 };
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_channel_try_send.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "channel_send_fiber_register on freed Entry"
+        );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let promise_id = synthetic::alloc_and_register();
         ch.register_send_waiter(promise_id);
         spawn_fiber_timeout(promise_id, timeout_ms);
 
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_promise_id = promise_id };
         Ok(())
     })
@@ -1538,22 +1634,38 @@ impl Drop for ReceiversBlockedGuard<'_> {
 // in the mock — so the stub body is dead code.
 
 #[cfg(feature = "php")]
-unsafe fn send_fiber_register_shim(id: u64, timeout_ms: u64, out: *mut i64) -> c_int {
-    unsafe { oxphp_shared_channel_send_fiber_register(id, timeout_ms, out) }
+unsafe fn send_fiber_register_shim(
+    entry_ptr: *const Entry,
+    timeout_ms: u64,
+    out: *mut i64,
+) -> c_int {
+    unsafe { oxphp_shared_channel_send_fiber_register(entry_ptr, timeout_ms, out) }
 }
 
 #[cfg(not(feature = "php"))]
-unsafe fn send_fiber_register_shim(_id: u64, _timeout_ms: u64, _out: *mut i64) -> c_int {
+unsafe fn send_fiber_register_shim(
+    _entry_ptr: *const Entry,
+    _timeout_ms: u64,
+    _out: *mut i64,
+) -> c_int {
     SharedError::Generic.code()
 }
 
 #[cfg(feature = "php")]
-unsafe fn recv_fiber_register_shim(id: u64, timeout_ms: u64, out: *mut i64) -> c_int {
-    unsafe { oxphp_shared_channel_recv_fiber_register(id, timeout_ms, out) }
+unsafe fn recv_fiber_register_shim(
+    entry_ptr: *const Entry,
+    timeout_ms: u64,
+    out: *mut i64,
+) -> c_int {
+    unsafe { oxphp_shared_channel_recv_fiber_register(entry_ptr, timeout_ms, out) }
 }
 
 #[cfg(not(feature = "php"))]
-unsafe fn recv_fiber_register_shim(_id: u64, _timeout_ms: u64, _out: *mut i64) -> c_int {
+unsafe fn recv_fiber_register_shim(
+    _entry_ptr: *const Entry,
+    _timeout_ms: u64,
+    _out: *mut i64,
+) -> c_int {
     SharedError::Generic.code()
 }
 
@@ -1605,12 +1717,12 @@ pub fn register_class(
                     code: 0,
                 });
             }
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_channel_create(cap as u64, &mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_channel_create(cap as u64, &mut out_ptr) };
             super::counter::counter_rc_to_result(rc)?;
 
             let h = call.storage_mut::<SharedHandle>()?;
-            h.shared_id = out_id;
+            h.entry_ptr = out_ptr;
             h.type_tag = SharedType::Channel as u8;
             Ok(())
         })
@@ -1619,7 +1731,7 @@ pub fn register_class(
         .param("value", PhpType::Mixed)
         .returns(PhpType::Bool)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
 
             // Serialize the zval argument to a portbuf (C owns the buffer).
             let arg_ptr = unsafe { call.raw_arg_ptr(0) };
@@ -1640,7 +1752,7 @@ pub fn register_class(
             }
 
             let mut success: c_int = 0;
-            let rc = unsafe { oxphp_shared_channel_try_send(id, buf, len, &mut success) };
+            let rc = unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
             if !buf.is_null() {
                 unsafe { bridge_ffi::oxphp_portable_free(buf) };
             }
@@ -1659,7 +1771,7 @@ pub fn register_class(
         .param("value", PhpType::Mixed)
         .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             // Serialize value → portbuf once; reuse across retry loop on fiber path.
@@ -1707,7 +1819,8 @@ pub fn register_class(
                 loop {
                     // Fast attempt.
                     let mut success: c_int = 0;
-                    let rc = unsafe { oxphp_shared_channel_try_send(id, buf, len, &mut success) };
+                    let rc =
+                        unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
                     if rc == SharedError::Closed.code() {
                         unsafe { bridge_ffi::oxphp_portable_free(buf) };
                         return Err(PhpError::Exception {
@@ -1760,8 +1873,9 @@ pub fn register_class(
                     // to false above so this branch is unreachable at runtime,
                     // but rustc still compiles it — call through a small
                     // shim that has a non-php fallback returning -1.
-                    let reg_rc =
-                        unsafe { send_fiber_register_shim(id, remaining_ms, &mut promise_id) };
+                    let reg_rc = unsafe {
+                        send_fiber_register_shim(entry_ptr, remaining_ms, &mut promise_id)
+                    };
                     if reg_rc != 0 {
                         unsafe { bridge_ffi::oxphp_portable_free(buf) };
                         super::counter::counter_rc_to_result(reg_rc)?;
@@ -1847,7 +1961,8 @@ pub fn register_class(
                 }
             } else {
                 // Non-fiber path: thread-block via send_blocking.
-                let rc = unsafe { oxphp_shared_channel_send_blocking(id, buf, len, timeout_ms) };
+                let rc =
+                    unsafe { oxphp_shared_channel_send_blocking(entry_ptr, buf, len, timeout_ms) };
                 unsafe { bridge_ffi::oxphp_portable_free(buf) };
 
                 if rc == SharedError::Closed.code() {
@@ -1872,12 +1987,12 @@ pub fn register_class(
         .method("tryRecv")
         .returns(PhpType::Mixed)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out_buf: *mut u8 = std::ptr::null_mut();
             let mut out_len: usize = 0;
             let mut state: c_int = 0;
             let rc = unsafe {
-                oxphp_shared_channel_try_recv(id, &mut out_buf, &mut out_len, &mut state)
+                oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
             };
             super::counter::counter_rc_to_result(rc)?;
             match state {
@@ -1937,7 +2052,7 @@ pub fn register_class(
         .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let timeout_ms: i64 = read_timeout_arg(call, 0)?;
 
             // The fiber-suspend path uses synthetic-promise FFI that is
@@ -1960,7 +2075,7 @@ pub fn register_class(
                 let mut out_len: usize = 0;
                 let mut state: c_int = 0;
                 let try_rc = unsafe {
-                    oxphp_shared_channel_try_recv(id, &mut out_buf, &mut out_len, &mut state)
+                    oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
                 };
                 super::counter::counter_rc_to_result(try_rc)?;
                 match state {
@@ -2012,8 +2127,9 @@ pub fn register_class(
                 // See note on send-side for the cfg gating rationale.
                 // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
                 let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
-                let reg_rc =
-                    unsafe { recv_fiber_register_shim(id, fiber_timeout_ms, &mut promise_id) };
+                let reg_rc = unsafe {
+                    recv_fiber_register_shim(entry_ptr, fiber_timeout_ms, &mut promise_id)
+                };
                 super::counter::counter_rc_to_result(reg_rc)?;
 
                 let retval = call.retval_ptr();
@@ -2087,7 +2203,7 @@ pub fn register_class(
                 let mut state: c_int = 0;
                 let rc = unsafe {
                     oxphp_shared_channel_recv_blocking(
-                        id,
+                        entry_ptr,
                         timeout_ms,
                         &mut out_buf,
                         &mut out_len,
@@ -2146,8 +2262,8 @@ pub fn register_class(
         // ── close(): void ──────────────────────────────────────────
         .method("close")
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
-            let rc = oxphp_shared_channel_close(id);
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let rc = unsafe { oxphp_shared_channel_close(entry_ptr) };
             super::counter::counter_rc_to_result(rc)?;
             Ok(())
         })
@@ -2155,9 +2271,9 @@ pub fn register_class(
         .method("isClosed")
         .returns(PhpType::Bool)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_channel_is_closed(id, &mut out) };
+            let rc = unsafe { oxphp_shared_channel_is_closed(entry_ptr, &mut out) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_bool(out != 0);
             Ok(())
@@ -2166,9 +2282,9 @@ pub fn register_class(
         .method("pending")
         .returns(PhpType::Int)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out: u64 = 0;
-            let rc = unsafe { oxphp_shared_channel_pending(id, &mut out) };
+            let rc = unsafe { oxphp_shared_channel_pending(entry_ptr, &mut out) };
             super::counter::counter_rc_to_result(rc)?;
             call.ret_long(out as i64);
             Ok(())
@@ -2186,7 +2302,7 @@ pub fn register_class(
         .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Int)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let timeout_ms: i64 = read_timeout_arg(call, 1)?;
 
             // Fast path: empty array → 0 sent, no FFI round-trip.
@@ -2236,7 +2352,7 @@ pub fn register_class(
 
             let mut sent: u64 = 0;
             let rc = unsafe {
-                oxphp_shared_channel_send_many(id, concat, offsets, n, timeout_ms, &mut sent)
+                oxphp_shared_channel_send_many(entry_ptr, concat, offsets, n, timeout_ms, &mut sent)
             };
             unsafe {
                 if !concat.is_null() {
@@ -2261,7 +2377,7 @@ pub fn register_class(
         .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Array)
         .handler(|call| {
-            let id = call.storage::<SharedHandle>()?.shared_id;
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
             let timeout_ms: i64 = read_timeout_arg(call, 1)?;
@@ -2272,7 +2388,7 @@ pub fn register_class(
             let mut n: u64 = 0;
             let rc = unsafe {
                 oxphp_shared_channel_recv_many(
-                    id,
+                    entry_ptr,
                     max,
                     timeout_ms,
                     &mut concat,
@@ -2351,7 +2467,9 @@ pub fn register_class(
                     code: 0,
                 });
             }
-            call.ret_long(h.shared_id as i64);
+            let id =
+                unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(h.entry_ptr) };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;
@@ -2942,27 +3060,32 @@ mod tests {
     /// entries across tests and hit `max_entries` / `max_bytes` caps —
     /// `registry.rs` tests init with `max_bytes = 1024` (16 channels
     /// worth), and test ordering is non-deterministic.
-    struct TestChannel(u64);
+    struct TestChannel(*const Entry);
 
     impl TestChannel {
         fn new(capacity: u64) -> Self {
             ensure_test_registry();
-            let mut id: u64 = 0;
-            let rc = unsafe { oxphp_shared_channel_create(capacity, &mut id) };
+            let mut ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_channel_create(capacity, &mut ptr) };
             assert_eq!(rc, 0, "create failed with rc={rc}");
-            assert!(id != 0);
-            Self(id)
+            assert!(!ptr.is_null());
+            Self(ptr)
+        }
+
+        fn entry(&self) -> *const Entry {
+            self.0
         }
 
         fn id(&self) -> u64 {
-            self.0
+            unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(self.0) }
         }
     }
 
     impl Drop for TestChannel {
         fn drop(&mut self) {
-            let reg = crate::plugins::ox_shared::registry::registry();
-            reg.release(self.0);
+            // SAFETY: self.0 was produced by oxphp_shared_channel_create
+            // (= Arc::into_raw) and is dropped exactly once here.
+            unsafe { crate::plugins::ox_shared::registry::oxphp_shared_handle_drop(self.0) };
         }
     }
 
@@ -2978,12 +3101,12 @@ mod tests {
     #[test]
     fn ffi_create_zero_capacity_errors() {
         ensure_test_registry();
-        let mut id: u64 = 0;
-        let rc = unsafe { oxphp_shared_channel_create(0, &mut id) };
+        let mut ptr: *const Entry = std::ptr::null();
+        let rc = unsafe { oxphp_shared_channel_create(0, &mut ptr) };
         assert_eq!(rc, SharedError::Type.code());
-        // Registry must not have a fresh entry bound to this id — id
-        // remained 0 so any lookup would fail anyway, but double-check.
-        assert_eq!(id, 0);
+        // Registry must not have a fresh entry bound to this pointer —
+        // create() left it NULL on the error path.
+        assert!(ptr.is_null());
     }
 
     #[test]
@@ -2993,7 +3116,7 @@ mod tests {
         let payload = [1u8, 2, 3];
         let mut success: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), payload.len(), &mut success)
+            oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), payload.len(), &mut success)
         };
         assert_eq!(rc, 0);
         assert_eq!(success, 1);
@@ -3002,7 +3125,7 @@ mod tests {
         let mut out_len: usize = 0;
         let mut state: c_int = 1;
         let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.id(), &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 0);
@@ -3018,14 +3141,15 @@ mod tests {
 
         let first = [0xAAu8];
         let mut success: c_int = 0;
-        let rc = unsafe { oxphp_shared_channel_try_send(ch.id(), first.as_ptr(), 1, &mut success) };
+        let rc =
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), first.as_ptr(), 1, &mut success) };
         assert_eq!(rc, 0);
         assert_eq!(success, 1);
 
         let second = [0xBBu8];
         let mut success2: c_int = 99;
         let rc =
-            unsafe { oxphp_shared_channel_try_send(ch.id(), second.as_ptr(), 1, &mut success2) };
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), second.as_ptr(), 1, &mut success2) };
         assert_eq!(rc, 0, "Full is not an error — rc must stay 0");
         assert_eq!(success2, 0);
     }
@@ -3033,12 +3157,12 @@ mod tests {
     #[test]
     fn ffi_try_send_on_closed_returns_closed() {
         let ch = TestChannel::new(4);
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
 
         let payload = [9u8];
         let mut success: c_int = 1;
         let rc =
-            unsafe { oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), 1, &mut success) };
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), 1, &mut success) };
         assert_eq!(rc, SharedError::Closed.code());
     }
 
@@ -3050,7 +3174,7 @@ mod tests {
         let mut out_len: usize = 99;
         let mut state: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.id(), &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 1);
@@ -3061,13 +3185,13 @@ mod tests {
     #[test]
     fn ffi_try_recv_closed_empty_state_2() {
         let ch = TestChannel::new(4);
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 99;
         let mut state: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.id(), &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 2);
@@ -3077,8 +3201,8 @@ mod tests {
     #[test]
     fn ffi_close_is_idempotent() {
         let ch = TestChannel::new(4);
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
     }
 
     #[test]
@@ -3087,14 +3211,14 @@ mod tests {
 
         let mut out: c_int = 99;
         assert_eq!(
-            unsafe { oxphp_shared_channel_is_closed(ch.id(), &mut out) },
+            unsafe { oxphp_shared_channel_is_closed(ch.entry(), &mut out) },
             0
         );
         assert_eq!(out, 0);
 
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
         assert_eq!(
-            unsafe { oxphp_shared_channel_is_closed(ch.id(), &mut out) },
+            unsafe { oxphp_shared_channel_is_closed(ch.entry(), &mut out) },
             0
         );
         assert_eq!(out, 1);
@@ -3109,7 +3233,7 @@ mod tests {
             let mut success: c_int = 0;
             assert_eq!(
                 unsafe {
-                    oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), 1, &mut success)
+                    oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), 1, &mut success)
                 },
                 0
             );
@@ -3118,7 +3242,7 @@ mod tests {
 
         let mut out: u64 = 99;
         assert_eq!(
-            unsafe { oxphp_shared_channel_pending(ch.id(), &mut out) },
+            unsafe { oxphp_shared_channel_pending(ch.entry(), &mut out) },
             0
         );
         assert_eq!(out, 2);
@@ -3129,7 +3253,8 @@ mod tests {
         let ch = TestChannel::new(4);
 
         let payload = [42u8];
-        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), payload.as_ptr(), 1, 100) };
+        let rc =
+            unsafe { oxphp_shared_channel_send_blocking(ch.entry(), payload.as_ptr(), 1, 100) };
         assert_eq!(rc, 0);
     }
 
@@ -3140,12 +3265,12 @@ mod tests {
         let first = [1u8];
         let mut success: c_int = 0;
         assert_eq!(
-            unsafe { oxphp_shared_channel_try_send(ch.id(), first.as_ptr(), 1, &mut success) },
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), first.as_ptr(), 1, &mut success) },
             0
         );
 
         let second = [2u8];
-        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), second.as_ptr(), 1, 50) };
+        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.entry(), second.as_ptr(), 1, 50) };
         assert_eq!(rc, SharedError::Timeout.code());
     }
 
@@ -3156,7 +3281,7 @@ mod tests {
         let payload = [7u8, 8, 9];
         let mut success: c_int = 0;
         assert_eq!(
-            unsafe { oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), 3, &mut success) },
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), 3, &mut success) },
             0
         );
 
@@ -3164,7 +3289,13 @@ mod tests {
         let mut out_len: usize = 0;
         let mut state: c_int = 2;
         let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(ch.id(), 100, &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_recv_blocking(
+                ch.entry(),
+                100,
+                &mut out_buf,
+                &mut out_len,
+                &mut state,
+            )
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 0);
@@ -3177,13 +3308,19 @@ mod tests {
     #[test]
     fn ffi_recv_blocking_closed_empty_state_2() {
         let ch = TestChannel::new(4);
-        assert_eq!(oxphp_shared_channel_close(ch.id()), 0);
+        assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 99;
         let mut state: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(ch.id(), -1, &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_recv_blocking(
+                ch.entry(),
+                -1,
+                &mut out_buf,
+                &mut out_len,
+                &mut state,
+            )
         };
         assert_eq!(rc, 0);
         assert_eq!(state, 2);
@@ -3198,7 +3335,13 @@ mod tests {
         let mut out_len: usize = 0;
         let mut state: c_int = 0;
         let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(ch.id(), 50, &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_recv_blocking(
+                ch.entry(),
+                50,
+                &mut out_buf,
+                &mut out_len,
+                &mut state,
+            )
         };
         assert_eq!(rc, SharedError::Timeout.code());
     }
@@ -3228,9 +3371,10 @@ mod tests {
         let ch = TestChannel::new(1);
         let first = [1u8];
         let mut success: c_int = 0;
-        let _ = unsafe { oxphp_shared_channel_try_send(ch.id(), first.as_ptr(), 1, &mut success) };
+        let _ =
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), first.as_ptr(), 1, &mut success) };
         let second = [2u8];
-        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), second.as_ptr(), 1, 0) };
+        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.entry(), second.as_ptr(), 1, 0) };
         assert_eq!(rc, SharedError::Timeout.code());
     }
 
@@ -3268,7 +3412,7 @@ mod tests {
         let ch = TestChannel::new(4);
         let payload = [0xCCu8];
         // timeout_ms == 0 → Wait::Try; channel has vacancy → must succeed.
-        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.id(), payload.as_ptr(), 1, 0) };
+        let rc = unsafe { oxphp_shared_channel_send_blocking(ch.entry(), payload.as_ptr(), 1, 0) };
         assert_eq!(rc, 0, "expected 0 (success), got {rc}");
     }
 
@@ -3278,7 +3422,7 @@ mod tests {
         let payload = [0xDDu8];
         let mut success: c_int = 0;
         let _ =
-            unsafe { oxphp_shared_channel_try_send(ch.id(), payload.as_ptr(), 1, &mut success) };
+            unsafe { oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), 1, &mut success) };
         assert_eq!(success, 1);
 
         let mut out_buf: *mut u8 = std::ptr::null_mut();
@@ -3286,7 +3430,13 @@ mod tests {
         let mut state: c_int = 1;
         // timeout_ms == 0 → Wait::Try; channel has an item → must return it.
         let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(ch.id(), 0, &mut out_buf, &mut out_len, &mut state)
+            oxphp_shared_channel_recv_blocking(
+                ch.entry(),
+                0,
+                &mut out_buf,
+                &mut out_len,
+                &mut state,
+            )
         };
         assert_eq!(rc, 0, "expected 0, got {rc}");
         assert_eq!(state, 0, "expected state=0 (item), got {state}");
@@ -3394,6 +3544,7 @@ mod tests {
     async fn ffi_recv_fiber_register_resolves_on_send() {
         let ch_handle = TestChannel::new(4);
         let id = ch_handle.id();
+        let entry_ptr = ch_handle.entry();
 
         let (pid, rx) = synthetic::alloc();
         // Scope the entry lookup so the Arc<Entry> is not held across
@@ -3409,8 +3560,9 @@ mod tests {
         // a production-shaped entry point.
         let send_payload = [0xABu8, 0xCD];
         let mut success: c_int = 0;
-        let rc =
-            unsafe { oxphp_shared_channel_try_send(id, send_payload.as_ptr(), 2, &mut success) };
+        let rc = unsafe {
+            oxphp_shared_channel_try_send(entry_ptr, send_payload.as_ptr(), 2, &mut success)
+        };
         assert_eq!(rc, 0);
         assert_eq!(success, 1);
 
@@ -3426,12 +3578,13 @@ mod tests {
     async fn ffi_send_fiber_register_resolves_on_slot_free() {
         let ch_handle = TestChannel::new(1);
         let id = ch_handle.id();
+        let entry_ptr = ch_handle.entry();
 
         // Fill the channel so a send-waiter can park.
         let payload = [1u8];
         let mut success: c_int = 0;
         assert_eq!(
-            unsafe { oxphp_shared_channel_try_send(id, payload.as_ptr(), 1, &mut success) },
+            unsafe { oxphp_shared_channel_try_send(entry_ptr, payload.as_ptr(), 1, &mut success) },
             0
         );
         assert_eq!(success, 1);
@@ -3446,8 +3599,9 @@ mod tests {
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;
         let mut state: c_int = 1;
-        let rc =
-            unsafe { oxphp_shared_channel_try_recv(id, &mut out_buf, &mut out_len, &mut state) };
+        let rc = unsafe {
+            oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
+        };
         assert_eq!(rc, 0);
         assert_eq!(state, 0);
         unsafe { free_out(out_buf) };
@@ -3472,13 +3626,12 @@ mod tests {
         let reg = registry();
 
         let inner: Arc<dyn SharedInner> = Arc::new(ChannelInner::new(8));
-        let id = reg
+        let entry = reg
             .insert(SharedType::Channel, Arc::clone(&inner))
             .expect("registry insert should succeed");
+        let id = entry.id;
         let ch = (*inner).as_any_channel().expect("downcast");
         ch.bind_id(id);
-
-        let entry = reg.lookup(id).expect("entry present after insert");
 
         let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for i in 0..4u8 {
@@ -3502,6 +3655,6 @@ mod tests {
             "entry mem_bytes must return to baseline after symmetric recvs"
         );
 
-        reg.release(id);
+        drop(entry);
     }
 }

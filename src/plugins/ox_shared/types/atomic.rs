@@ -3,7 +3,7 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use crate::plugins::ox_shared::registry::{SharedInner, SharedType};
+use crate::plugins::ox_shared::registry::{Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
 pub struct AtomicInner {
@@ -128,60 +128,84 @@ fn ordering_from_u8(v: u8) -> Ordering {
 }
 
 /// # Safety
-/// `out_id` must be valid for writes of `u64` if non-null.
+/// `out_ptr` must be valid for writes of `*const Entry` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_atomic_create(initial: i64, out_id: *mut u64) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id is null");
+pub unsafe extern "C" fn oxphp_shared_atomic_create(
+    initial: i64,
+    out_ptr: *mut *const Entry,
+) -> c_int {
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return SharedError::Generic.code();
     }
     ffi_entry(|| {
         let reg = registry();
         let inner = Arc::new(AtomicInner::new(initial));
-        let id = reg.insert(SharedType::Atomic, inner)?;
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Atomic, inner)?;
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of `i64` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_atomic_load(id: u64, order: u8, out: *mut i64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_atomic_load(
+    entry_ptr: *const Entry,
+    order: u8,
+    out: *mut i64,
+) -> c_int {
     if out.is_null() {
         set_last_error("out is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer — the calling PHP wrapper holds a
+        // strong ref through it.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "atomic_load on freed Entry");
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         let v = inner.load(ordering_from_u8(order));
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out = v };
         Ok(())
     })
 }
 
 /// # Safety
-/// `id` must reference a live registry entry.
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_atomic_store(id: u64, value: i64, order: u8) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_atomic_store(
+    entry_ptr: *const Entry,
+    value: i64,
+    order: u8,
+) -> c_int {
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_atomic_load.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "atomic_store on freed Entry");
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         inner.store(value, ordering_from_u8(order));
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `i64` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_atomic_swap(
-    id: u64,
+    entry_ptr: *const Entry,
     value: i64,
     order: u8,
     out_prev: *mut i64,
@@ -190,22 +214,27 @@ pub unsafe extern "C" fn oxphp_shared_atomic_swap(
         set_last_error("out_prev is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_atomic_load.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "atomic_swap on freed Entry");
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         let prev = inner.swap(value, ordering_from_u8(order));
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_prev = prev };
         Ok(())
     })
 }
 
 /// # Safety
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_swapped` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_atomic_cas(
-    id: u64,
+    entry_ptr: *const Entry,
     expect: i64,
     new_val: i64,
     success: u8,
@@ -216,9 +245,13 @@ pub unsafe extern "C" fn oxphp_shared_atomic_cas(
         set_last_error("out_swapped is null");
         return SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let reg = registry();
-        let entry = reg.lookup(id)?;
+        // SAFETY: see oxphp_shared_atomic_load.
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "atomic_cas on freed Entry");
         let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
         let swapped = inner.compare_and_set(
             expect,
@@ -226,7 +259,7 @@ pub unsafe extern "C" fn oxphp_shared_atomic_cas(
             ordering_from_u8(success),
             ordering_from_u8(failure),
         );
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
@@ -235,10 +268,11 @@ pub unsafe extern "C" fn oxphp_shared_atomic_cas(
 macro_rules! atomic_fetch_ffi {
     ($fn_name:ident, $method:ident) => {
         /// # Safety
+        /// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
         /// `out_prev` must be valid for writes of `i64` if non-null.
         #[no_mangle]
         pub unsafe extern "C" fn $fn_name(
-            id: u64,
+            entry_ptr: *const Entry,
             delta: i64,
             order: u8,
             out_prev: *mut i64,
@@ -247,12 +281,19 @@ macro_rules! atomic_fetch_ffi {
                 set_last_error("out_prev is null");
                 return SharedError::Generic.code();
             }
+            if entry_ptr.is_null() {
+                return SharedError::StaleHandle.code();
+            }
             ffi_entry(|| {
-                let reg = registry();
-                let entry = reg.lookup(id)?;
+                // SAFETY: see oxphp_shared_atomic_load.
+                let entry: &Entry = unsafe { &*entry_ptr };
+                debug_assert_eq!(
+                    entry.magic, ENTRY_MAGIC,
+                    concat!(stringify!($fn_name), " on freed Entry")
+                );
                 let inner = entry.inner.as_any_atomic().ok_or(SharedError::Type)?;
                 let prev = inner.$method(delta, ordering_from_u8(order));
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe { *out_prev = prev };
                 Ok(())
             })
@@ -400,8 +441,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             } else {
                 0
             };
-            let mut out_id: u64 = 0;
-            let rc = unsafe { oxphp_shared_atomic_create(initial, &mut out_id) };
+            let mut out_ptr: *const Entry = std::ptr::null();
+            let rc = unsafe { oxphp_shared_atomic_create(initial, &mut out_ptr) };
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
@@ -410,7 +451,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 });
             }
             let handle = call.storage_mut::<SharedHandle>()?;
-            handle.shared_id = out_id;
+            handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Atomic as u8;
             Ok(())
         })
@@ -422,7 +463,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             validate_ordering_for_load(order)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut out: i64 = 0;
-            let rc = unsafe { oxphp_shared_atomic_load(handle.shared_id, order, &mut out) };
+            let rc = unsafe { oxphp_shared_atomic_load(handle.entry_ptr, order, &mut out) };
             atomic_rc_to_result(rc)?;
             call.ret_long(out);
             Ok(())
@@ -436,7 +477,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let order = read_order_arg(call, 1)?;
             validate_ordering_for_store(order)?;
             let handle = call.storage::<SharedHandle>()?;
-            let rc = unsafe { oxphp_shared_atomic_store(handle.shared_id, value, order) };
+            let rc = unsafe { oxphp_shared_atomic_store(handle.entry_ptr, value, order) };
             atomic_rc_to_result(rc)?;
             Ok(())
         })
@@ -449,7 +490,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let order = read_order_arg(call, 1)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_atomic_swap(handle.shared_id, value, order, &mut prev) };
+            let rc = unsafe { oxphp_shared_atomic_swap(handle.entry_ptr, value, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -470,7 +511,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let mut swapped: c_int = 0;
             let rc = unsafe {
                 oxphp_shared_atomic_cas(
-                    handle.shared_id,
+                    handle.entry_ptr,
                     expect,
                     new_val,
                     success,
@@ -492,7 +533,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
             let rc =
-                unsafe { oxphp_shared_atomic_fetch_add(handle.shared_id, delta, order, &mut prev) };
+                unsafe { oxphp_shared_atomic_fetch_add(handle.entry_ptr, delta, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -507,7 +548,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
             let rc =
-                unsafe { oxphp_shared_atomic_fetch_sub(handle.shared_id, delta, order, &mut prev) };
+                unsafe { oxphp_shared_atomic_fetch_sub(handle.entry_ptr, delta, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -522,7 +563,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
             let rc =
-                unsafe { oxphp_shared_atomic_fetch_and(handle.shared_id, mask, order, &mut prev) };
+                unsafe { oxphp_shared_atomic_fetch_and(handle.entry_ptr, mask, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -537,7 +578,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
             let rc =
-                unsafe { oxphp_shared_atomic_fetch_or(handle.shared_id, mask, order, &mut prev) };
+                unsafe { oxphp_shared_atomic_fetch_or(handle.entry_ptr, mask, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -552,7 +593,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: i64 = 0;
             let rc =
-                unsafe { oxphp_shared_atomic_fetch_xor(handle.shared_id, mask, order, &mut prev) };
+                unsafe { oxphp_shared_atomic_fetch_xor(handle.entry_ptr, mask, order, &mut prev) };
             atomic_rc_to_result(rc)?;
             call.ret_long(prev);
             Ok(())
@@ -568,7 +609,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            call.ret_long(handle.shared_id as i64);
+            let id = unsafe {
+                crate::plugins::ox_shared::registry::oxphp_shared_entry_id(handle.entry_ptr)
+            };
+            call.ret_long(id as i64);
             Ok(())
         })
         .build()?;
@@ -688,34 +732,37 @@ mod tests {
     fn ffi_create_load_store_round_trip() {
         ensure_registry();
 
-        let mut id: u64 = 0;
-        let rc = unsafe { oxphp_shared_atomic_create(100, &mut id) };
+        let mut entry_ptr: *const Entry = std::ptr::null();
+        let rc = unsafe { oxphp_shared_atomic_create(100, &mut entry_ptr) };
         assert_eq!(rc, 0);
-        assert!(id > 0);
+        assert!(!entry_ptr.is_null());
 
         let mut out: i64 = 0;
         let rc = unsafe {
-            oxphp_shared_atomic_load(id, 4 /* SeqCst */, &mut out)
+            oxphp_shared_atomic_load(entry_ptr, 4 /* SeqCst */, &mut out)
         };
         assert_eq!(rc, 0);
         assert_eq!(out, 100);
 
-        let rc = unsafe { oxphp_shared_atomic_store(id, 7, 4) };
+        let rc = unsafe { oxphp_shared_atomic_store(entry_ptr, 7, 4) };
         assert_eq!(rc, 0);
 
         let mut prev: i64 = 0;
-        let rc = unsafe { oxphp_shared_atomic_swap(id, 99, 4, &mut prev) };
+        let rc = unsafe { oxphp_shared_atomic_swap(entry_ptr, 99, 4, &mut prev) };
         assert_eq!(rc, 0);
         assert_eq!(prev, 7);
 
         let mut swapped: c_int = 0;
-        let rc = unsafe { oxphp_shared_atomic_cas(id, 99, 200, 4, 4, &mut swapped) };
+        let rc = unsafe { oxphp_shared_atomic_cas(entry_ptr, 99, 200, 4, 4, &mut swapped) };
         assert_eq!(rc, 0);
         assert_eq!(swapped, 1);
 
         let mut prev_add: i64 = 0;
-        let rc = unsafe { oxphp_shared_atomic_fetch_add(id, 5, 4, &mut prev_add) };
+        let rc = unsafe { oxphp_shared_atomic_fetch_add(entry_ptr, 5, 4, &mut prev_add) };
         assert_eq!(rc, 0);
         assert_eq!(prev_add, 200);
+
+        // Reconstitute and drop the strong ref `create` handed out.
+        unsafe { drop(Arc::from_raw(entry_ptr)) };
     }
 }

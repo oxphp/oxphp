@@ -1,11 +1,29 @@
 //! SharedValue — the internal value type stored inside Shared\*
 //! containers. Supports scalars plus Array + Shared nesting (used by
 //! Map).
+//!
+//! Lifetime model for nested `Shared\*` references:
+//! - `SharedValue::Shared(SharedRefOwned)` owns an `Arc<Entry>` via
+//!   `entry_ptr` (an `Arc::into_raw` pointer). `Clone` increments the
+//!   strong count; `Drop` reconstitutes the `Arc` and drops it. This
+//!   makes lifetime automatic — moving a `SharedValue` into a
+//!   container transfers the Arc with it; dropping the `SharedValue`
+//!   releases the nested entry.
+//! - `SharedRef { id, type_tag }` is a 16-byte `Copy` view used by
+//!   walkers (cycle detection, observability/graph endpoints). It does
+//!   not affect lifetime.
+//! - The portbuf wire codec is split into a pure decoder
+//!   (`portbuf_to_sv` → `SharedValueRaw`) and an explicit registry
+//!   resolution step (`raw_to_owned(raw, &SharedRegistry) →
+//!   SharedValue`). Callers do both steps in succession; the codec
+//!   itself never touches the registry.
 
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::registry::{SharedId, SharedRegistry, SharedType};
+use crate::plugins::ox_shared::registry::{Entry, SharedId, SharedRegistry, SharedType};
 
+/// Container payload. The lifetime-bearing form of a value; safe to
+/// store inside `Shared\Map` / `Shared\Mutex` / `Shared\Once`.
 #[derive(Clone, Debug)]
 pub enum SharedValue {
     Null,
@@ -14,10 +32,8 @@ pub enum SharedValue {
     Double(f64),
     String(Arc<str>),
     Bytes(Arc<[u8]>),
-    #[allow(dead_code)]
     Array(Arc<SharedArray>),
-    #[allow(dead_code)]
-    Shared(SharedRef),
+    Shared(SharedRefOwned),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -26,67 +42,104 @@ pub struct SharedArray {
     pub str_keyed: Vec<(Arc<str>, SharedValue)>,
 }
 
+/// Cheap, non-owning view of a nested `Shared\*` reference. Used by
+/// walkers (cycle detection, observability/graph endpoint) and as the
+/// `Shared` payload of [`SharedValueRaw`] before registry resolution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SharedRef {
     pub id: SharedId,
     pub type_tag: SharedType,
 }
 
-/// Push every `SharedValue::Shared` reachable from `sv` into `out`.
+/// Owning handle to an `Entry`, embedded inside
+/// `SharedValue::Shared`. Holds a strong `Arc<Entry>` reference as an
+/// `Arc::into_raw` pointer so the nested entry stays alive for as
+/// long as the enclosing `SharedValue` does.
+///
+/// `Clone` calls `Arc::increment_strong_count`; `Drop` reconstitutes
+/// the `Arc` via `Arc::from_raw` and drops it. `id` and `type_tag` are
+/// mirrored from the `Entry` so [`as_view`](Self::as_view) and the
+/// portbuf serializer can avoid a pointer dereference.
+pub struct SharedRefOwned {
+    entry_ptr: *const Entry,
+    pub id: SharedId,
+    pub type_tag: SharedType,
+}
+
+impl SharedRefOwned {
+    /// Consume a strong `Arc<Entry>` and produce an owning handle. The
+    /// strong count is **not** bumped — this transfers the input ref
+    /// into the new `SharedRefOwned`.
+    pub fn from_arc(arc: Arc<Entry>) -> Self {
+        let id = arc.id;
+        let type_tag = arc.type_tag;
+        let entry_ptr = Arc::into_raw(arc);
+        Self {
+            entry_ptr,
+            id,
+            type_tag,
+        }
+    }
+
+    /// Cheap projection for walker buffers and observability.
+    pub fn as_view(&self) -> SharedRef {
+        SharedRef {
+            id: self.id,
+            type_tag: self.type_tag,
+        }
+    }
+}
+
+impl Clone for SharedRefOwned {
+    fn clone(&self) -> Self {
+        // SAFETY: `entry_ptr` was produced by `Arc::into_raw` and is
+        // still alive (this `SharedRefOwned` holds one strong count).
+        unsafe { Arc::increment_strong_count(self.entry_ptr) };
+        Self {
+            entry_ptr: self.entry_ptr,
+            id: self.id,
+            type_tag: self.type_tag,
+        }
+    }
+}
+
+impl Drop for SharedRefOwned {
+    fn drop(&mut self) {
+        // SAFETY: `entry_ptr` was produced by `Arc::into_raw` for the
+        // strong ref this `SharedRefOwned` owns. Reconstituting and
+        // dropping balances that `into_raw`.
+        unsafe { drop(Arc::from_raw(self.entry_ptr)) };
+    }
+}
+
+impl std::fmt::Debug for SharedRefOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRefOwned")
+            .field("id", &self.id)
+            .field("type_tag", &self.type_tag)
+            .finish()
+    }
+}
+
+// `SharedRefOwned` carries a raw pointer to an `Entry`, which is
+// `Send + Sync` (its interior atomics + `Arc<dyn SharedInner: Send +
+// Sync>` make it so). The pointer behaves like an `Arc<Entry>`.
+unsafe impl Send for SharedRefOwned {}
+unsafe impl Sync for SharedRefOwned {}
+
+/// Push every `SharedRef` view reachable from `sv` into `out`.
 /// Recurses into `SharedValue::Array`. Used by the Map cycle-check
-/// to extract roots before calling the walker, and by
-/// `MapInner::children` to expose outgoing edges to the walker.
+/// to extract roots and by `MapInner::children` to expose outgoing
+/// edges to the walker.
 pub fn collect_shared_refs(sv: &SharedValue, out: &mut Vec<SharedRef>) {
     match sv {
-        SharedValue::Shared(r) => out.push(*r),
+        SharedValue::Shared(r) => out.push(r.as_view()),
         SharedValue::Array(a) => {
             for v in &a.int_keyed {
                 collect_shared_refs(v, out);
             }
             for (_, v) in &a.str_keyed {
                 collect_shared_refs(v, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Walk every `SharedValue::Shared` in the value tree and call
-/// `reg.retain(id)`. Containers call this before storing a value so the
-/// nested Shareable stays alive for as long as the container holds it.
-/// Arrays are recursed into; scalars are zero-cost.
-///
-/// Spec: 02-value-model.md §Nested `Shared\*` (SharedValue::Shared).
-pub fn sv_retain_nested(sv: &SharedValue, reg: &SharedRegistry) {
-    match sv {
-        SharedValue::Shared(r) => {
-            reg.retain(r.id);
-        }
-        SharedValue::Array(a) => {
-            for v in &a.int_keyed {
-                sv_retain_nested(v, reg);
-            }
-            for (_, v) in &a.str_keyed {
-                sv_retain_nested(v, reg);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Symmetric to [`sv_retain_nested`]. Containers call this when they
-/// drop a stored value and give up their hold on the nested Shareable.
-pub fn sv_release_nested(sv: &SharedValue, reg: &SharedRegistry) {
-    match sv {
-        SharedValue::Shared(r) => {
-            reg.release(r.id);
-        }
-        SharedValue::Array(a) => {
-            for v in &a.int_keyed {
-                sv_release_nested(v, reg);
-            }
-            for (_, v) in &a.str_keyed {
-                sv_release_nested(v, reg);
             }
         }
         _ => {}
@@ -129,6 +182,37 @@ impl SharedValue {
 //          key_type 0 = index key → u64 LE index
 //          key_type 1 = string key → u32 LE klen + bytes
 //   7  = shared ref → u8 type_tag + u64 LE shared_id
+//
+// The codec is split into:
+//   sv_to_portbuf(&SharedValue) -> Vec<u8>       (serialize from owned)
+//   portbuf_to_sv(&[u8]) -> SharedValueRaw       (pure decode — no registry)
+//   raw_to_owned(SharedValueRaw, &SharedRegistry) -> SharedValue
+//                                                (explicit lookup step)
+//
+// Callers that need a lifetime-bearing `SharedValue` from raw bytes do
+// both steps in succession.
+
+/// Raw, lifetime-free output of `portbuf_to_sv`. Identical in shape to
+/// [`SharedValue`] except that the `Shared` variant carries a
+/// non-owning [`SharedRef`] view — no `Arc<Entry>` is produced. Convert
+/// to `SharedValue` via [`raw_to_owned`].
+#[derive(Clone, Debug)]
+pub enum SharedValueRaw {
+    Null,
+    Bool(bool),
+    Long(i64),
+    Double(f64),
+    String(Arc<str>),
+    Bytes(Arc<[u8]>),
+    Array(Arc<SharedArrayRaw>),
+    Shared(SharedRef),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SharedArrayRaw {
+    pub int_keyed: Vec<SharedValueRaw>,
+    pub str_keyed: Vec<(Arc<str>, SharedValueRaw)>,
+}
 
 /// Serialise a `SharedValue` into the portbuf wire format.
 /// Byte-for-byte compatible with the C-side `portbuf_ser_zval`
@@ -188,11 +272,13 @@ fn sv_write(sv: &SharedValue, b: &mut Vec<u8>) {
     }
 }
 
-/// Deserialise a `SharedValue` from the portbuf wire format.
-/// Returns the first complete value in the buffer; extra bytes are ignored.
+/// Deserialise a `SharedValueRaw` from the portbuf wire format.
+/// Returns the first complete value in the buffer; extra bytes are
+/// ignored. Pure: does not access the registry. Convert to an owning
+/// `SharedValue` via [`raw_to_owned`].
 pub fn portbuf_to_sv(
     buf: &[u8],
-) -> Result<SharedValue, crate::plugins::ox_shared::error::SharedError> {
+) -> Result<SharedValueRaw, crate::plugins::ox_shared::error::SharedError> {
     let mut pos = 0usize;
     sv_read(buf, &mut pos)
 }
@@ -200,9 +286,8 @@ pub fn portbuf_to_sv(
 fn sv_read(
     buf: &[u8],
     pos: &mut usize,
-) -> Result<SharedValue, crate::plugins::ox_shared::error::SharedError> {
+) -> Result<SharedValueRaw, crate::plugins::ox_shared::error::SharedError> {
     use crate::plugins::ox_shared::error::SharedError;
-    use crate::plugins::ox_shared::registry::SharedType;
 
     fn read_u8(buf: &[u8], pos: &mut usize) -> Result<u8, SharedError> {
         if *pos >= buf.len() {
@@ -245,22 +330,22 @@ fn sv_read(
 
     let tag = read_u8(buf, pos)?;
     Ok(match tag {
-        0 => SharedValue::Null,
-        1 => SharedValue::Bool(true),
-        2 => SharedValue::Bool(false),
-        3 => SharedValue::Long(read_i64_le(buf, pos)?),
-        4 => SharedValue::Double(read_f64_le(buf, pos)?),
+        0 => SharedValueRaw::Null,
+        1 => SharedValueRaw::Bool(true),
+        2 => SharedValueRaw::Bool(false),
+        3 => SharedValueRaw::Long(read_i64_le(buf, pos)?),
+        4 => SharedValueRaw::Double(read_f64_le(buf, pos)?),
         5 => {
             let len = read_u32_le(buf, pos)? as usize;
             let bytes = read_bytes(buf, pos, len)?;
             match std::str::from_utf8(bytes) {
-                Ok(s) => SharedValue::String(Arc::from(s)),
-                Err(_) => SharedValue::Bytes(Arc::from(bytes)),
+                Ok(s) => SharedValueRaw::String(Arc::from(s)),
+                Err(_) => SharedValueRaw::Bytes(Arc::from(bytes)),
             }
         }
         6 => {
             let count = read_u32_le(buf, pos)? as usize;
-            let mut arr = SharedArray::default();
+            let mut arr = SharedArrayRaw::default();
             for _ in 0..count {
                 let key_type = read_u8(buf, pos)?;
                 if key_type == 1 {
@@ -275,15 +360,57 @@ fn sv_read(
                     arr.int_keyed.push(val);
                 }
             }
-            SharedValue::Array(Arc::new(arr))
+            SharedValueRaw::Array(Arc::new(arr))
         }
         7 => {
             let tt_byte = read_u8(buf, pos)?;
             let id = read_u64_le(buf, pos)?;
             let type_tag = SharedType::from_tag(tt_byte).ok_or(SharedError::Type)?;
-            SharedValue::Shared(SharedRef { id, type_tag })
+            SharedValueRaw::Shared(SharedRef { id, type_tag })
         }
         _ => return Err(SharedError::Type),
+    })
+}
+
+/// Walk a [`SharedValueRaw`] tree and resolve every `Shared(SharedRef)`
+/// node into `SharedValue::Shared(SharedRefOwned)` by looking up the
+/// entry in `reg`. Returns [`SharedError::StaleHandle`] if any nested
+/// reference points to an entry that has already dropped (the receiver
+/// lost the cross-thread race; this is a clean error, not a bug).
+///
+/// Scalars and arrays are converted recursively. Arrays are unwrapped
+/// from `Arc<SharedArrayRaw>` and rebuilt as `Arc<SharedArray>` — the
+/// raw and owned variants do not share storage.
+pub fn raw_to_owned(
+    raw: SharedValueRaw,
+    reg: &SharedRegistry,
+) -> Result<SharedValue, crate::plugins::ox_shared::error::SharedError> {
+    Ok(match raw {
+        SharedValueRaw::Null => SharedValue::Null,
+        SharedValueRaw::Bool(b) => SharedValue::Bool(b),
+        SharedValueRaw::Long(v) => SharedValue::Long(v),
+        SharedValueRaw::Double(v) => SharedValue::Double(v),
+        SharedValueRaw::String(s) => SharedValue::String(s),
+        SharedValueRaw::Bytes(b) => SharedValue::Bytes(b),
+        SharedValueRaw::Array(a) => {
+            // SharedArrayRaw is owned via Arc; try to unwrap, but if
+            // shared, clone the contents.
+            let arr_raw = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            let mut arr = SharedArray::default();
+            arr.int_keyed.reserve(arr_raw.int_keyed.len());
+            for v in arr_raw.int_keyed {
+                arr.int_keyed.push(raw_to_owned(v, reg)?);
+            }
+            arr.str_keyed.reserve(arr_raw.str_keyed.len());
+            for (k, v) in arr_raw.str_keyed {
+                arr.str_keyed.push((k, raw_to_owned(v, reg)?));
+            }
+            SharedValue::Array(Arc::new(arr))
+        }
+        SharedValueRaw::Shared(r) => {
+            let arc = reg.lookup(r.id)?;
+            SharedValue::Shared(SharedRefOwned::from_arc(arc))
+        }
     })
 }
 
@@ -312,6 +439,25 @@ mod tests {
     }
 
     // ── portbuf round-trip tests ──────────────────────────────────────────
+    //
+    // These tests cover the scalar + array path. None of them encode a
+    // `Shared` variant — that path is exercised in `map.rs` /
+    // `mutex.rs` integration tests which build a real `SharedRegistry`
+    // and resolve via `raw_to_owned`. Here we compare the
+    // `SharedValueRaw` decode output against an expected raw value
+    // structurally.
+
+    fn sv_to_raw_scalar(sv: &SharedValue) -> SharedValueRaw {
+        match sv {
+            SharedValue::Null => SharedValueRaw::Null,
+            SharedValue::Bool(b) => SharedValueRaw::Bool(*b),
+            SharedValue::Long(v) => SharedValueRaw::Long(*v),
+            SharedValue::Double(v) => SharedValueRaw::Double(*v),
+            SharedValue::String(s) => SharedValueRaw::String(Arc::clone(s)),
+            SharedValue::Bytes(b) => SharedValueRaw::Bytes(Arc::clone(b)),
+            _ => panic!("sv_to_raw_scalar: not a scalar"),
+        }
+    }
 
     #[test]
     fn portbuf_roundtrip_scalars() {
@@ -326,7 +472,8 @@ mod tests {
         ] {
             let bytes = sv_to_portbuf(&sv);
             let decoded = portbuf_to_sv(&bytes).unwrap();
-            assert_eq!(format!("{sv:?}"), format!("{decoded:?}"));
+            let expected = sv_to_raw_scalar(&sv);
+            assert_eq!(format!("{expected:?}"), format!("{decoded:?}"));
         }
     }
 
@@ -340,7 +487,15 @@ mod tests {
         let sv = SharedValue::Array(Arc::new(arr));
         let bytes = sv_to_portbuf(&sv);
         let decoded = portbuf_to_sv(&bytes).unwrap();
-        assert_eq!(format!("{sv:?}"), format!("{decoded:?}"));
+        // Expected raw — structurally identical with scalar leaves.
+        let mut arr_raw = SharedArrayRaw::default();
+        arr_raw.int_keyed.push(SharedValueRaw::Long(10));
+        arr_raw.int_keyed.push(SharedValueRaw::Long(20));
+        arr_raw
+            .str_keyed
+            .push((Arc::from("key"), SharedValueRaw::String(Arc::from("val"))));
+        let expected = SharedValueRaw::Array(Arc::new(arr_raw));
+        assert_eq!(format!("{expected:?}"), format!("{decoded:?}"));
     }
 
     #[test]

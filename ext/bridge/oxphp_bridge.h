@@ -1742,16 +1742,22 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  * SharedRegistry. Used by the portable serializer's tag-7 path to
  * transfer Shared\* instances across worker threads in oxphp_async.
  *
- * oxphp_plugin_get_shared_handle: reads the SharedHandle { u64 shared_id,
- *   u8 type_tag } stored inside the custom-object's rust_data slot.
- *   Returns 0 on success, negative on non-shareable / uninitialised.
+ * oxphp_plugin_get_shared_handle: reads the SharedHandle
+ *   { *const Entry entry_ptr, u8 type_tag } stored in a Shared\*
+ *   wrapper's intern storage. Returns 0 and fills the out-params on
+ *   success, -1 for a non-object / non-shareable / uninitialised
+ *   wrapper.
  *
  * oxphp_shared_wrapper_new: constructs a fresh Shared\* wrapper bound
- *   to an existing registry entry (identified by shared_id) and calls
- *   oxphp_shared_retain on behalf of the receiver. Caller is expected
- *   to balance the sender-side retain with oxphp_shared_release.
- *   Returns 0 on success, negative if the entry is no longer alive or
- *   the type_tag is not supported yet.
+ *   to an existing registry entry. On success it MOVES the caller's
+ *   strong-ref `entry_ptr` into the new wrapper's handle storage; the
+ *   caller must NOT drop it afterwards. On failure (-1) the caller
+ *   still owns `entry_ptr` and must release it via
+ *   oxphp_shared_handle_drop.
+ *
+ * CONTRACT — oxphp_shared_handle_drop must be called EXACTLY ONCE per
+ * strong reference. Calling it twice on the same pointer, or on a
+ * pointer already moved into a wrapper, is undefined behaviour.
  *
  * Both helpers take `zval *`, so their declarations live inside the
  * `#ifdef PHP_H` block; callers are C units that include php.h.
@@ -1759,10 +1765,10 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
 #ifdef PHP_H
 int oxphp_plugin_get_shared_handle(zval *obj,
                                    uint8_t *out_type_tag,
-                                   uint64_t *out_shared_id);
+                                   const void **out_entry_ptr);
 int oxphp_shared_wrapper_new(zval *out,
                              uint8_t type_tag,
-                             uint64_t shared_id);
+                             const void *entry_ptr);
 
 /* ─── Synchronous closure-invoke shims ─────────────────
  * See oxphp_bridge.c for full contract.

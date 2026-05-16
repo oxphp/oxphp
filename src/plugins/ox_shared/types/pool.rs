@@ -31,12 +31,14 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
-use crate::plugins::ox_shared::registry::{SharedId, SharedInner, SharedType, REGISTRY};
+use crate::plugins::ox_shared::registry::{
+    Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
+};
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 
@@ -145,6 +147,10 @@ pub struct PoolInner {
 
     closed: AtomicBool,
     self_id: OnceLock<SharedId>,
+    /// Cached `Weak<Entry>` for the fast-path of [`track_size_delta`].
+    /// See [`MapInner::self_entry`] for the rationale — same shape,
+    /// same fallback to the id-based slow path for test fixtures.
+    self_entry: OnceLock<Weak<Entry>>,
 
     // ── Observability counters ──────────────────────────────
     //
@@ -210,6 +216,7 @@ impl PoolInner {
             destroy_fcc,
             closed: AtomicBool::new(false),
             self_id: OnceLock::new(),
+            self_entry: OnceLock::new(),
             acquire_ok_total: AtomicU64::new(0),
             acquire_timeout_total: AtomicU64::new(0),
             acquire_closed_total: AtomicU64::new(0),
@@ -231,6 +238,18 @@ impl PoolInner {
 
     pub fn bind_id(&self, id: SharedId) {
         let _ = self.self_id.set(id);
+    }
+
+    /// Bind this Pool to its registry entry. Production path: call from
+    /// the creating FFI right after `registry.insert` with
+    /// `Arc::downgrade(&entry_arc)`. Sets both id and the cached
+    /// `Weak<Entry>` that [`track_size_delta`] uses to bypass the
+    /// DashMap shard-lock on every `try_reserve_budget` / refund.
+    pub fn bind_entry(&self, weak: Weak<Entry>) {
+        if let Some(arc) = weak.upgrade() {
+            let _ = self.self_id.set(arc.id);
+        }
+        let _ = self.self_entry.set(weak);
     }
 
     pub fn self_id(&self) -> Option<SharedId> {
@@ -307,13 +326,20 @@ impl PoolInner {
     }
 
     fn track_slot_delta(&self, delta_count: isize) {
+        let delta = delta_count * POOL_PER_SLOT_BYTES;
+        if let Some(weak) = self.self_entry.get() {
+            if let Some(entry) = weak.upgrade() {
+                entry.adjust_mem_bytes(delta);
+            }
+            return;
+        }
         let Some(id) = self.self_id.get().copied() else {
             return;
         };
         let Some(reg) = REGISTRY.get() else {
             return;
         };
-        reg.adjust_mem_bytes(id, delta_count * POOL_PER_SLOT_BYTES);
+        reg.adjust_mem_bytes(id, delta);
     }
 
     /// Increment the current thread's in-flight counter. Called from
@@ -853,28 +879,25 @@ use crate::bridge::ffi;
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error};
 use crate::plugins::ox_shared::registry::registry;
 
-/// Resolve an id to `&PoolInner`. Returns `Err(Type)` if the id
-/// belongs to a different Shared type. The returned `Arc<Entry>`
-/// keeps the inner alive for the caller's borrow lifetime.
-fn lookup_pool(
-    id: SharedId,
-) -> Result<
-    (
-        &'static crate::plugins::ox_shared::registry::SharedRegistry,
-        Arc<crate::plugins::ox_shared::registry::Entry>,
-    ),
-    crate::plugins::ox_shared::error::SharedError,
-> {
-    let reg = registry();
-    let entry = reg.lookup(id)?;
+/// Resolve a live `Entry` pointer to `&Entry`. Returns `Err(Type)` if
+/// the entry belongs to a different Shared type. The caller must have
+/// already null-checked `entry_ptr`.
+fn lookup_pool<'a>(
+    entry_ptr: *const Entry,
+) -> Result<&'a Entry, crate::plugins::ox_shared::error::SharedError> {
+    // SAFETY: `entry_ptr` is non-null (checked by the caller) and, per
+    // the handle contract, a live `Arc::into_raw` pointer — the calling
+    // PHP wrapper holds a strong ref through it.
+    let entry: &Entry = unsafe { &*entry_ptr };
+    debug_assert_eq!(entry.magic, ENTRY_MAGIC, "lookup_pool on freed Entry");
     if entry.type_tag != SharedType::Pool {
         set_last_error(format!(
-            "id {id} is not a Shared\\Pool (tag={:?})",
-            entry.type_tag
+            "id {} is not a Shared\\Pool (tag={:?})",
+            entry.id, entry.type_tag
         ));
         return Err(crate::plugins::ox_shared::error::SharedError::Type);
     }
-    Ok((reg, entry))
+    Ok(entry)
 }
 
 /// Create a new `Shared\Pool`. The factory callable is captured via
@@ -886,18 +909,18 @@ fn lookup_pool(
 ///
 /// # Safety
 /// `factory_callable_zval` must be a valid PHP callable zval; the
-/// C bridge checks via `zend_fcall_info_init`. `out_id` must be
-/// valid for a `u64` write.
+/// C bridge checks via `zend_fcall_info_init`. `out_ptr` must be
+/// valid for writes of `*const Entry`.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_create(
     factory_callable_zval: *mut std::ffi::c_void,
     destroy_callable_zval: *mut std::ffi::c_void,
     max_size: u64,
     idle_timeout_s: f64,
-    out_id: *mut u64,
+    out_ptr: *mut *const Entry,
 ) -> c_int {
-    if out_id.is_null() {
-        set_last_error("out_id is null");
+    if out_ptr.is_null() {
+        set_last_error("out_ptr is null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
     if factory_callable_zval.is_null() {
@@ -944,9 +967,10 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
             idle_timeout,
         ));
         let reg = registry();
-        let id = reg.insert(SharedType::Pool, typed.clone())?;
-        typed.bind_id(id);
-        unsafe { *out_id = id };
+        let arc = reg.insert(SharedType::Pool, typed.clone())?;
+        typed.bind_entry(Arc::downgrade(&arc));
+        // SAFETY: out_ptr checked non-null above.
+        unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
     })
 }
@@ -968,7 +992,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
 /// `out_slot_zv_heap` and `out_owner_tid` must be valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_acquire(
-    id: u64,
+    entry_ptr: *const Entry,
     timeout_ms: i64,
     out_slot_zv_heap: *mut *mut std::ffi::c_void,
     out_owner_tid: *mut u64,
@@ -977,13 +1001,16 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
         set_last_error("out params must be non-null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
     unsafe {
         *out_slot_zv_heap = std::ptr::null_mut();
         *out_owner_tid = 0;
     }
 
     ffi_entry(|| {
-        let (reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1016,7 +1043,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
 
             // 1. Local idle.
             if let Some(slot) = pool.try_acquire_local() {
-                reg.record_op(&entry);
+                entry.registry.record_op(entry);
                 unsafe {
                     *out_slot_zv_heap = slot.resource;
                     *out_owner_tid = slot.owner;
@@ -1036,7 +1063,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                 let rc =
                     unsafe { ffi::oxphp_pool_factory_invoke(pool.factory_fcc(), &mut slot_heap) };
                 if rc == 0 {
-                    reg.record_op(&entry);
+                    entry.registry.record_op(entry);
                     unsafe {
                         *out_slot_zv_heap = slot_heap;
                         *out_owner_tid = current_thread_key();
@@ -1122,7 +1149,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
 /// pool's acquire path (not forged, not from a different pool).
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_release(
-    id: u64,
+    entry_ptr: *const Entry,
     slot_zv_heap: *mut std::ffi::c_void,
     owner_tid: u64,
 ) -> c_int {
@@ -1130,9 +1157,12 @@ pub unsafe extern "C" fn oxphp_shared_pool_release(
         set_last_error("slot_zv_heap is null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
 
     ffi_entry(|| {
-        let (reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1146,7 +1176,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_release(
         // lands on the original minting thread.
         pool.untrack_released(owner_tid);
         pool.release(slot);
-        reg.record_op(&entry);
+        entry.registry.record_op(entry);
         Ok(())
     })
 }
@@ -1162,7 +1192,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_release(
 /// `body_callable_zv` and `user_out_zv` must be valid PHP zvals.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_with(
-    id: u64,
+    entry_ptr: *const Entry,
     timeout_ms: i64,
     body_callable_zv: *mut std::ffi::c_void,
     user_out_zv: *mut std::ffi::c_void,
@@ -1171,11 +1201,15 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
         set_last_error("body/out must be non-null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
 
     // Step 1: acquire. Bubble errors directly.
     let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_ms, &mut slot_heap, &mut owner) };
+    let rc =
+        unsafe { oxphp_shared_pool_acquire(entry_ptr, timeout_ms, &mut slot_heap, &mut owner) };
     if rc != 0 {
         return rc;
     }
@@ -1185,7 +1219,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
 
     // Step 3: release — never skipped. `with()`'s contract is
     // resource-safe even on body throw.
-    let release_rc = unsafe { oxphp_shared_pool_release(id, slot_heap, owner) };
+    let release_rc = unsafe { oxphp_shared_pool_release(entry_ptr, slot_heap, owner) };
 
     if body_rc == -2 {
         // Body threw; EG(exception) is set. Caller must propagate.
@@ -1213,9 +1247,15 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
 /// # Safety
 /// `out_evicted` must be valid for a `u64` write if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_pool_evict(id: u64, out_evicted: *mut u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_pool_evict(
+    entry_ptr: *const Entry,
+    out_evicted: *mut u64,
+) -> c_int {
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let (_reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1240,13 +1280,16 @@ pub unsafe extern "C" fn oxphp_shared_pool_evict(id: u64, out_evicted: *mut u64)
 /// Each non-null out pointer must be valid for a `u64` write.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_pool_stats(
-    id: u64,
+    entry_ptr: *const Entry,
     out_in_use: *mut u64,
     out_idle: *mut u64,
     out_waiting: *mut u64,
 ) -> c_int {
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let (_reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1269,13 +1312,19 @@ pub unsafe extern "C" fn oxphp_shared_pool_stats(
 /// # Safety
 /// `out_size` must be valid for a `u64` write.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_pool_size(id: u64, out_size: *mut u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_pool_size(
+    entry_ptr: *const Entry,
+    out_size: *mut u64,
+) -> c_int {
     if out_size.is_null() {
         set_last_error("out_size is null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let (_reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1290,13 +1339,19 @@ pub unsafe extern "C" fn oxphp_shared_pool_size(id: u64, out_size: *mut u64) -> 
 /// # Safety
 /// `out_max` must be valid for a `u64` write.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_pool_max_size(id: u64, out_max: *mut u64) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_pool_max_size(
+    entry_ptr: *const Entry,
+    out_max: *mut u64,
+) -> c_int {
     if out_max.is_null() {
         set_last_error("out_max is null");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
+    if entry_ptr.is_null() {
+        return crate::plugins::ox_shared::error::SharedError::StaleHandle.code();
+    }
     ffi_entry(|| {
-        let (_reg, entry) = lookup_pool(id)?;
+        let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
@@ -1564,14 +1619,14 @@ fn pool_construct(call: &mut NativeCall) -> Result<(), PhpError> {
         300.0
     };
 
-    let mut out_id: u64 = 0;
+    let mut out_ptr: *const Entry = std::ptr::null();
     let rc = unsafe {
         oxphp_shared_pool_create(
             factory_zv,
             destroy_zv,
             max_size as u64,
             idle_timeout_s,
-            &mut out_id,
+            &mut out_ptr,
         )
     };
     if rc != 0 {
@@ -1579,12 +1634,12 @@ fn pool_construct(call: &mut NativeCall) -> Result<(), PhpError> {
     }
 
     let handle = call.storage_mut::<crate::plugins::ox_shared::handle::SharedHandle>()?;
-    handle.shared_id = out_id;
+    handle.entry_ptr = out_ptr;
     handle.type_tag = SharedType::Pool as u8;
     Ok(())
 }
 
-fn pool_get_id(call: &NativeCall) -> Result<u64, PhpError> {
+fn pool_get_entry_ptr(call: &NativeCall) -> Result<*const Entry, PhpError> {
     let handle = call.storage::<crate::plugins::ox_shared::handle::SharedHandle>()?;
     if !handle.is_initialized() {
         return Err(PhpError::Exception {
@@ -1593,19 +1648,24 @@ fn pool_get_id(call: &NativeCall) -> Result<u64, PhpError> {
             code: 0,
         });
     }
-    Ok(handle.shared_id)
+    Ok(handle.entry_ptr)
 }
 
 fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let timeout_ms: i64 = read_timeout_arg(call, 0)?;
 
     let mut slot_heap: *mut c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_ms, &mut slot_heap, &mut owner) };
+    let rc =
+        unsafe { oxphp_shared_pool_acquire(entry_ptr, timeout_ms, &mut slot_heap, &mut owner) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::acquire"));
     }
+
+    // The Handle wrapper and the C bridge identify the pool by its
+    // registry id; derive it from the entry pointer.
+    let id = unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(entry_ptr) };
 
     // Wrap (slot_heap, owner) in a Shared\Pool\Handle. The C bridge
     // allocates the object into retval and populates rust_data.
@@ -1614,7 +1674,7 @@ fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
     if rc_alloc != 0 {
         // Could not construct the Handle — route the slot back so
         // we don't leak it, then surface the error.
-        let _ = unsafe { oxphp_shared_pool_release(id, slot_heap, owner) };
+        let _ = unsafe { oxphp_shared_pool_release(entry_ptr, slot_heap, owner) };
         return Err(PhpError::Exception {
             class: "OxPHP\\Shared\\SharedException".to_string(),
             message: "Shared\\Pool::acquire: could not allocate Handle wrapper \
@@ -1627,7 +1687,8 @@ fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
+    let id = unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(entry_ptr) };
     let handle_zv = unsafe { call.raw_arg_ptr(0) };
     if handle_zv.is_null() {
         return Err(PhpError::Exception {
@@ -1660,7 +1721,7 @@ fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
         });
     }
 
-    let rc = unsafe { oxphp_shared_pool_release(id, slot_heap, owner_tid) };
+    let rc = unsafe { oxphp_shared_pool_release(entry_ptr, slot_heap, owner_tid) };
     // Clear the storage regardless of release rc — avoids
     // double-release in Drop if release succeeded; on failure the
     // slot is already leaked by design (dead owner path).
@@ -1672,10 +1733,10 @@ fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_with(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let body_zv = unsafe { call.raw_arg_ptr(0) };
     let timeout_ms: i64 = read_timeout_arg(call, 1)?;
-    let rc = unsafe { oxphp_shared_pool_with(id, timeout_ms, body_zv, call.retval_ptr()) };
+    let rc = unsafe { oxphp_shared_pool_with(entry_ptr, timeout_ms, body_zv, call.retval_ptr()) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::with"));
     }
@@ -1683,9 +1744,9 @@ fn pool_with(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_evict(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let mut evicted: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_evict(id, &mut evicted) };
+    let rc = unsafe { oxphp_shared_pool_evict(entry_ptr, &mut evicted) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::evict"));
     }
@@ -1694,9 +1755,9 @@ fn pool_evict(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_size(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let mut size: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_size(id, &mut size) };
+    let rc = unsafe { oxphp_shared_pool_size(entry_ptr, &mut size) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::size"));
     }
@@ -1705,11 +1766,11 @@ fn pool_size(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_stats_field(call: &mut NativeCall, which: StatsField) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let mut in_use: u64 = 0;
     let mut idle: u64 = 0;
     let mut waiting: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_stats(id, &mut in_use, &mut idle, &mut waiting) };
+    let rc = unsafe { oxphp_shared_pool_stats(entry_ptr, &mut in_use, &mut idle, &mut waiting) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::stats"));
     }
@@ -1739,9 +1800,9 @@ fn pool_waiting(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_max_size_method(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
     let mut max: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_max_size(id, &mut max) };
+    let rc = unsafe { oxphp_shared_pool_max_size(entry_ptr, &mut max) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::maxSize"));
     }
@@ -1750,7 +1811,8 @@ fn pool_max_size_method(call: &mut NativeCall) -> Result<(), PhpError> {
 }
 
 fn pool_id_method(call: &mut NativeCall) -> Result<(), PhpError> {
-    let id = pool_get_id(call)?;
+    let entry_ptr = pool_get_entry_ptr(call)?;
+    let id = unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(entry_ptr) };
     call.ret_long(id as i64);
     Ok(())
 }
@@ -2637,8 +2699,12 @@ mod tests {
 
     /// Insert a Pool directly into the registry, bypassing the FFI's
     /// factory fcc setup — tests exercise the Rust-side bookkeeping
-    /// path without a live libphp.
-    fn register_pool(max: usize) -> SharedId {
+    /// path without a live libphp. Returns the `Arc::into_raw` pointer
+    /// the FFI expects; tests must call `oxphp_shared_handle_drop` (or
+    /// reclaim via `Arc::from_raw`) when done to balance the strong
+    /// count. For the simple per-test usage below, the leak is bounded
+    /// by the test runner's process lifetime.
+    fn register_pool(max: usize) -> *const Entry {
         let reg = ensure_registry();
         let inner: Arc<dyn SharedInner> = Arc::new(PoolInner::new(
             std::ptr::null_mut(),
@@ -2646,20 +2712,27 @@ mod tests {
             max,
             Duration::from_secs(300),
         ));
-        let id = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let arc = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let id = arc.id;
         (*inner).as_any_pool().expect("just inserted").bind_id(id);
-        id
+        Arc::into_raw(arc)
     }
 
     #[test]
     fn ffi_create_rejects_null_factory() {
         ensure_registry();
-        let mut id: u64 = 0;
+        let mut ptr: *const Entry = std::ptr::null();
         let rc = unsafe {
-            oxphp_shared_pool_create(std::ptr::null_mut(), std::ptr::null_mut(), 8, 60.0, &mut id)
+            oxphp_shared_pool_create(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                8,
+                60.0,
+                &mut ptr,
+            )
         };
         assert_eq!(rc, SharedError::Type.code());
-        assert_eq!(id, 0);
+        assert!(ptr.is_null());
     }
 
     #[test]
@@ -2669,11 +2742,11 @@ mod tests {
         // before reaching the bridge (mock would fail differently).
         #[allow(clippy::manual_dangling_ptr)]
         let sentinel = 0x1 as *mut std::ffi::c_void;
-        let mut id: u64 = 0;
+        let mut ptr: *const Entry = std::ptr::null();
         let rc =
-            unsafe { oxphp_shared_pool_create(sentinel, std::ptr::null_mut(), 0, 60.0, &mut id) };
+            unsafe { oxphp_shared_pool_create(sentinel, std::ptr::null_mut(), 0, 60.0, &mut ptr) };
         assert_eq!(rc, SharedError::Type.code());
-        assert_eq!(id, 0);
+        assert!(ptr.is_null());
     }
 
     #[test]
@@ -2703,27 +2776,33 @@ mod tests {
     #[test]
     fn ffi_stats_on_wrong_type_errors() {
         let reg = ensure_registry();
-        // Insert a Counter and try to read Pool stats on it.
-        let counter_id = reg
+        // Insert a Counter and pass its handle to Pool stats — the
+        // type-tag check fires before any pool-specific logic.
+        let counter_arc = reg
             .insert(
                 SharedType::Counter,
                 Arc::new(crate::plugins::ox_shared::types::counter::CounterInner::new(0)),
             )
             .unwrap();
+        let counter_ptr = Arc::into_raw(counter_arc);
         let mut in_use: u64 = 0;
         let mut idle: u64 = 0;
         let mut waiting: u64 = 0;
         let rc =
-            unsafe { oxphp_shared_pool_stats(counter_id, &mut in_use, &mut idle, &mut waiting) };
+            unsafe { oxphp_shared_pool_stats(counter_ptr, &mut in_use, &mut idle, &mut waiting) };
         assert_eq!(rc, SharedError::Type.code());
+        // SAFETY: reclaim the strong ref we leaked via into_raw above.
+        unsafe { drop(Arc::from_raw(counter_ptr)) };
     }
 
     #[test]
     fn ffi_stats_on_stale_errors() {
         ensure_registry();
+        // A NULL `entry_ptr` is the new "stale" sentinel — the FFI
+        // shape no longer carries an integer id that could be made up.
         let rc = unsafe {
             oxphp_shared_pool_stats(
-                999_999_999,
+                std::ptr::null(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
@@ -2745,7 +2824,9 @@ mod tests {
     fn ffi_acquire_on_closed_pool_errors() {
         let id = register_pool(2);
         // Flip the closed flag before acquiring.
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         entry.inner.as_any_pool().unwrap().close();
 
         let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
@@ -2760,7 +2841,9 @@ mod tests {
         // Pre-populate idle on the current thread so acquire returns
         // from the fast path — no factory call, no C bridge needed.
         let id = register_pool(2);
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         let pool = entry.inner.as_any_pool().unwrap();
         assert!(pool.try_reserve_budget());
         let sentinel = 0xBABE_0042 as *mut std::ffi::c_void;
@@ -2777,7 +2860,9 @@ mod tests {
     #[test]
     fn ffi_release_routes_back_to_owner_idle() {
         let id = register_pool(2);
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         let pool = entry.inner.as_any_pool().unwrap();
         assert!(pool.try_reserve_budget());
         let sentinel = 0xBABE_0043 as *mut std::ffi::c_void;
@@ -2808,7 +2893,9 @@ mod tests {
         // an unregistered key takes the dead-owner inline-destroy
         // path (covered by `release_cross_thread_dead_owner_destroys_inline`).
         let id = register_pool(1);
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         let pool = entry.inner.as_any_pool().unwrap();
         assert!(pool.try_reserve_budget());
 
@@ -2827,7 +2914,9 @@ mod tests {
     #[test]
     fn ffi_acquire_times_out_when_budget_full_and_empty() {
         let id = register_pool(1);
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         let pool = entry.inner.as_any_pool().unwrap();
         // Exhaust budget without populating idle. On host (mock bridge)
         // the factory would fail, but with budget already full we reach
@@ -2861,7 +2950,9 @@ mod tests {
         //   acquire+release cycle = ~136ns  → ~37× under 5μs budget.
         let id = register_pool(1);
         crate::plugins::ox_shared::worker_liveness::register_worker();
-        let entry = registry().lookup(id).unwrap();
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of this test.
+        let entry: &Entry = unsafe { &*id };
         let pool = entry.inner.as_any_pool().unwrap();
         assert!(pool.try_reserve_budget());
         let sentinel = 0xBABE_0044 as *mut std::ffi::c_void;
@@ -2917,9 +3008,12 @@ mod tests {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         let id = register_pool(2);
-        let pool = registry().lookup(id).unwrap().inner.as_any_pool().unwrap() as *const PoolInner;
-        // SAFETY: the Arc is held by the registry for the duration
-        // of the test; we don't outlive it.
+        // SAFETY: `id` is the `Arc::into_raw` pointer; the strong ref
+        // it represents is held by `register_pool`'s leak. The Entry
+        // outlives this test.
+        let entry: &Entry = unsafe { &*id };
+        let pool = entry.inner.as_any_pool().unwrap() as *const PoolInner;
+        // SAFETY: the Arc is held for the duration of the test.
         let pool: &'static PoolInner = unsafe { &*pool };
 
         let worker = thread::spawn(move || {
@@ -2964,9 +3058,11 @@ mod tests {
     /// `total_bytes` — see `SharedRegistry::total_bytes` for why.
     #[test]
     fn pool_reserve_release_track_registry_entry_bytes() {
-        let reg = ensure_registry();
+        ensure_registry();
         let id = register_pool(8);
-        let entry = reg.lookup(id).expect("pool was just inserted");
+        // SAFETY: `id` is `Arc::into_raw`; the strong ref is held for
+        // the test's lifetime by `register_pool`'s deliberate leak.
+        let entry: &Entry = unsafe { &*id };
         let pool = (*entry.inner).as_any_pool().expect("downcast");
 
         let baseline = entry.mem_bytes.load(Ordering::Relaxed);
@@ -2988,7 +3084,5 @@ mod tests {
             baseline,
             "entry mem_bytes must return to baseline after symmetric releases"
         );
-
-        reg.release(id);
     }
 }
