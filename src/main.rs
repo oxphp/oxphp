@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod logging;
+mod startup_identity;
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -37,6 +38,10 @@ fn main() -> Result<(), types::BoxError> {
     // structured. Guard held in main() so the non-blocking writer drains on
     // normal shutdown and the tokio runtime panic path alike.
     let _log_guard = logging::init()?;
+
+    // Log effective uid/gid + supplementary groups before anything else, so
+    // a "running as root" warning shows up before the rest of the startup.
+    startup_identity::log_startup_identity();
 
     let mut config = Arc::new(match config::Config::from_env() {
         Ok(c) => c,
