@@ -377,7 +377,6 @@ flowchart LR
 | `SHARED_CYCLE_DETECT_EDGES` | `10000` | Макс. число рёбер на одну проверку (защита от плотных графов) |
 | `SHARED_INTROSPECTION_ENABLED` | `true` | Переключатель JSON-эндпоинтов `/__ox_shared/*` на внутреннем сервере |
 | `SHARED_METRICS_ENABLED` | `true` | Переключатель Prometheus-серий `oxphp_shared_*` |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Макс. время дренажа Channel/Pool при graceful shutdown |
 
 ---
 

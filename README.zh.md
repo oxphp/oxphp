@@ -377,7 +377,6 @@ flowchart LR
 | `SHARED_CYCLE_DETECT_EDGES` | `10000` | 单次循环检查最多遍历的边数（防御稠密图） |
 | `SHARED_INTROSPECTION_ENABLED` | `true` | 内部服务器上 `/__ox_shared/*` JSON 端点开关 |
 | `SHARED_METRICS_ENABLED` | `true` | `oxphp_shared_*` Prometheus 指标系列开关 |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | 优雅关闭时 Channel/Pool 排空的最大等待时间 |
 
 ---
 

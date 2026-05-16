@@ -314,7 +314,6 @@ $queue->send(['url' => $_POST['url']]);
 | `SHARED_PREVIEW_STRING_LIMIT`    | 256     | Обрезка каждой строки в превью.                                        |
 | `SHARED_INTROSPECTION_ENABLED`   | true    | Переключает API `/__ox_shared/*`.                                      |
 | `SHARED_METRICS_ENABLED`         | true    | Переключает Prometheus-экспозицию `oxphp_shared_*`.                    |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS`| 5.0     | Максимум ожидания заблокированных отправителей/получателей/вызовов пула при остановке сервера. |
 
 ## Когда не использовать
 

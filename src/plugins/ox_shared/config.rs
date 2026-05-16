@@ -15,7 +15,6 @@ pub struct SharedConfig {
     pub introspection_preview_enabled: bool,
     pub cycle_detect_depth: usize,
     pub cycle_detect_edges: usize,
-    pub shutdown_timeout_seconds: f32,
     pub poison_strict: bool,
     pub lock_diagnostics: LockDiagnosticsLevel,
     pub lock_poll_interval_ms: u64,
@@ -32,6 +31,31 @@ pub enum LockDiagnosticsLevel {
 
 impl SharedConfig {
     pub fn from_ctx(ctx: &PluginContext) -> Result<Self, PluginError> {
+        // Deprecated env var: surface a warning only on the documented
+        // public form (`SHARED_*`) and the plugin-prefixed fallback
+        // (`OX_SHARED_*`). The bare-key tier of `shared_env` is the
+        // last-resort fallback for active settings and was never part of
+        // the deprecation's documented surface, so don't false-positive
+        // operators who set an unrelated `SHUTDOWN_TIMEOUT_SECONDS` for
+        // some other piece of software.
+        //
+        // Value is ignored either way — `SharedRegistry::drain` is
+        // synchronous, and the overall shutdown deadline is owned by the
+        // connection-drain loop in `main.rs` (`DRAIN_TIMEOUT_SECONDS`).
+        let deprecated_name = if std::env::var("SHARED_SHUTDOWN_TIMEOUT_SECONDS").is_ok() {
+            Some("SHARED_SHUTDOWN_TIMEOUT_SECONDS")
+        } else if ctx.config_prefixed("SHUTDOWN_TIMEOUT_SECONDS").is_some() {
+            Some("OX_SHARED_SHUTDOWN_TIMEOUT_SECONDS")
+        } else {
+            None
+        };
+        if let Some(name) = deprecated_name {
+            tracing::warn!(
+                env_var = %name,
+                "{name} is deprecated and ignored; graceful shutdown is bounded by DRAIN_TIMEOUT_SECONDS"
+            );
+        }
+
         Ok(Self {
             enabled: shared_bool(ctx, "ENABLED", true)?,
             max_entries: parse_usize(shared_value(ctx, "MAX_ENTRIES"), 100_000),
@@ -42,7 +66,6 @@ impl SharedConfig {
             introspection_preview_enabled: shared_bool(ctx, "INTROSPECTION_PREVIEW_ENABLED", true)?,
             cycle_detect_depth: parse_usize(shared_value(ctx, "CYCLE_DETECT_DEPTH"), 16),
             cycle_detect_edges: parse_usize(shared_value(ctx, "CYCLE_DETECT_EDGES"), 10_000),
-            shutdown_timeout_seconds: parse_f32(shared_value(ctx, "SHUTDOWN_TIMEOUT_SECONDS"), 5.0),
             poison_strict: shared_bool(ctx, "POISON_STRICT", false)?,
             lock_diagnostics: parse_lock_diag(shared_value(ctx, "LOCK_DIAGNOSTICS")),
             lock_poll_interval_ms: parse_u64(shared_value(ctx, "LOCK_POLL_INTERVAL_MS"), 100),
