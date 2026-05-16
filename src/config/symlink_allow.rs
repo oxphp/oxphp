@@ -109,6 +109,33 @@ pub(crate) mod tests {
 
     pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// RAII helper for tests that mutate a single env var. Restores the
+    /// previous value (set / unset) on Drop, including during a panic
+    /// unwind — so an `assert!` after construction stays free of
+    /// manual save/restore dancing. Tests that need this for
+    /// `SYMLINK_ALLOW_PATHS` should hold `ENV_LOCK` for the same scope.
+    pub(crate) struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     pub(crate) fn with_env<F: FnOnce()>(value: Option<&str>, f: F) {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
