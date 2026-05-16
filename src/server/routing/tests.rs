@@ -556,6 +556,40 @@ async fn test_symlink_escape_cached_on_second_request() {
     assert!(cached.is_some(), "Canonical path should be cached");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlink_to_allowed_path_resolves() {
+    use std::os::unix::fs::symlink;
+
+    let dir = setup_test_dir();
+    let target = TempDir::new().unwrap();
+    let target_canonical = std::fs::canonicalize(target.path()).unwrap();
+    fs::write(target_canonical.join("asset.txt"), "allowed asset").unwrap();
+    symlink(target.path(), dir.path().join("assets")).unwrap();
+
+    let _g = crate::config::symlink_allow::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
+    std::env::set_var("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
+
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+    let res = rc.resolve_request("/assets/asset.txt", &cache).await;
+
+    // Restore env before any potential panic from the assertion.
+    let assertion_passed = matches!(*res, RouteResult::Serve(_));
+    match prev {
+        Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
+        None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
+    }
+    assert!(
+        assertion_passed,
+        "expected Serve for allow-listed symlink, got {:?}",
+        *res
+    );
+}
+
 // --- Route cache tests ---
 
 #[tokio::test]
