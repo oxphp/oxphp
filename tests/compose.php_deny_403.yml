@@ -1,4 +1,4 @@
-# PHP_DENY_DIRS with explicit 403 status fallback.
+# PHP_DENY_PATHS with explicit 403 status fallback.
 # Same fixture as php_deny, but PHP_DENY_FALLBACK=403 — denied PHP requests
 # return HTTP 403 instead of the default 404.
 #
@@ -22,7 +22,7 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      PHP_DENY_DIRS: /uploads/**
+      PHP_DENY_PATHS: /uploads/**
       PHP_DENY_FALLBACK: "403"
     volumes:
       - ./fixtures/php_deny/public:/var/www/html/public

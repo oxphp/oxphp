@@ -1,4 +1,4 @@
-# PHP_DENY_DIRS is inert when INDEX_FILE is set (Framework mode).
+# PHP_DENY_PATHS is inert when INDEX_FILE is set (Framework mode).
 # The server logs a startup warning and disables the deny-list. Any request
 # — including /uploads/shell.php — is rewritten to the front controller
 # (index.php). The fixture's index.php asserts the absence of
@@ -25,7 +25,7 @@ services:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
       INDEX_FILE: index.php
-      PHP_DENY_DIRS: /uploads/**
+      PHP_DENY_PATHS: /uploads/**
     volumes:
       - ./fixtures/php_deny/public:/var/www/html/public
       - ./php:/var/www/html/public/tests

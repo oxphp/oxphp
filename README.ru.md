@@ -332,10 +332,10 @@ flowchart LR
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Максимум ожидающих асинхронных задач в очереди; задачи отклоняются при заполнении |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
-| `PHP_DENY_DIRS` | *(не задано)* | Glob-паттерны директорий, в которых выполнение PHP запрещено. Только режим Traditional. Пример: `/uploads/**,/cache/**` |
-| `PHP_DENY_FALLBACK` | `404` | HTTP-код (400–599) или путь к PHP-скрипту-фолбэку. При совпадении с `PHP_DENY_DIRS` возвращается статус (с опциональным кастомным HTML из `ERROR_PAGES_DIR`) либо выполняется фолбэк-скрипт с `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` в `$_SERVER` |
+| `PHP_DENY_PATHS` | *(не задано)* | Glob-паттерны (файлы или директории), в которых выполнение PHP запрещено. Только режим Traditional. Пример: `/uploads/**,/cache/**,/admin/legacy.php` |
+| `PHP_DENY_FALLBACK` | `404` | HTTP-код (400–599) или путь к PHP-скрипту-фолбэку. При совпадении с `PHP_DENY_PATHS` возвращается статус (с опциональным кастомным HTML из `ERROR_PAGES_DIR`) либо выполняется фолбэк-скрипт с `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` в `$_SERVER` |
 
-> **Устаревшие переменные** (всё ещё парсятся, со startup `WARN`): `INDEX_FILE` → используйте `ENTRY_FILE`. `WORKER_FILE` → используйте `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. Старые формы будут удалены в одном из будущих релизов.
+> **Устаревшие переменные** (всё ещё парсятся, со startup `WARN`): `INDEX_FILE` → используйте `ENTRY_FILE`. `WORKER_FILE` → используйте `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. `PHP_DENY_DIRS` → используйте `PHP_DENY_PATHS`. Старые формы будут удалены в одном из будущих релизов.
 
 > **Булевы значения** (регистронезависимо, лишние пробелы обрезаются): truthy = `on` / `true` / `1` / `yes`; falsy = `off` / `false` / `0` / `no`. Любое непустое значение вне этого набора — например, опечатки вроде `ture` — приводит к ошибке на старте с указанием имени переменной. Незаданная переменная или пустое присваивание (`FOO=`) откатывается к значению по умолчанию, поэтому подстановки Docker Compose / Kubernetes вида `FOO=${FOO}` работают корректно, когда переменная хоста отсутствует.
 
@@ -378,17 +378,6 @@ flowchart LR
 | `SHARED_INTROSPECTION_ENABLED` | `true` | Переключатель JSON-эндпоинтов `/__ox_shared/*` на внутреннем сервере |
 | `SHARED_METRICS_ENABLED` | `true` | Переключатель Prometheus-серий `oxphp_shared_*` |
 | `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Макс. время дренажа Channel/Pool при graceful shutdown |
-
-### Защита унаследованных PHP-приложений
-
-`PHP_DENY_DIRS` закрывает доступные для записи публичные подкаталоги в режиме Traditional — типичную поверхность атаки для залитых PHP-шеллов (WordPress, старые CMS).
-
-```bash
-# Блокируем выполнение PHP в доступных для записи публичных подкаталогах унаследованного приложения.
-export PHP_DENY_DIRS=/uploads/**,/cache/**,/tmp/**
-export PHP_DENY_FALLBACK=403
-# По желанию: в паре с ERROR_PAGES_DIR=/var/errors для кастомной 403.html
-```
 
 ---
 

@@ -81,7 +81,7 @@ pub struct ScriptRequest {
     /// Set from `Forwarded: host=` or `X-Forwarded-Host` header.
     pub forwarded_host: Option<String>,
     /// Metadata for `$_SERVER['OXPHP_DENIED_*']` population — set only when
-    /// this request was routed here by the `PHP_DENY_DIRS` fallback.
+    /// this request was routed here by the `PHP_DENY_PATHS` fallback.
     /// Boxed behind `Arc` so the field stays 8 bytes when `None` (the
     /// dominant case) and the rare-path clone is one atomic increment
     /// instead of three String clones.

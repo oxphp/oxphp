@@ -1,4 +1,4 @@
 # profile: php_deny_framework
-# description: PHP_DENY_DIRS is inert when INDEX_FILE is set (Framework mode)
+# description: PHP_DENY_PATHS is inert when INDEX_FILE is set (Framework mode)
 
 php_deny/test_deny_framework_inert >> /uploads/shell.php | GET | | 200 |

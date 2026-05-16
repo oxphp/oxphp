@@ -1099,7 +1099,7 @@ mod php_deny_integration {
         let (_dir, cache, rc) = setup(
             &[("uploads/shell.php", b"<?php echo 'pwned';")],
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             None,
@@ -1113,7 +1113,7 @@ mod php_deny_integration {
         let (_dir, cache, rc) = setup(
             &[("uploads/shell.php", b"<?php echo 'pwned';")],
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("403")),
             ],
             None,
@@ -1127,7 +1127,7 @@ mod php_deny_integration {
         let (_dir, cache, rc) = setup(
             &[], // no file on disk
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             None,
@@ -1142,7 +1142,7 @@ mod php_deny_integration {
         let (_dir, cache, rc) = setup(
             &[("uploads/image.png", b"\x89PNG")],
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             None,
@@ -1159,7 +1159,7 @@ mod php_deny_integration {
                 ("_security/denied.php", b"<?php http_response_code(404);"),
             ],
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("/_security/denied.php")),
             ],
             None,

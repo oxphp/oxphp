@@ -1,4 +1,4 @@
-# PHP_DENY_DIRS with default 404 fallback.
+# PHP_DENY_PATHS with default 404 fallback.
 # Traditional routing; a deny pattern blocks direct execution of PHP files
 # under /uploads. Static assets under the same directory are unaffected.
 #
@@ -22,7 +22,7 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      PHP_DENY_DIRS: /uploads/**
+      PHP_DENY_PATHS: /uploads/**
     volumes:
       - ./fixtures/php_deny/public:/var/www/html/public
       - ./php:/var/www/html/public/tests
