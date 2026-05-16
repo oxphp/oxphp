@@ -18,7 +18,11 @@ const BLACKLIST_EXACT: &[&str] = &[
 /// (admin may want `/var/www/...`, `/home/{current_user}/...`).
 const BLACKLIST_PREFIXES: &[&str] = &["/etc", "/proc", "/sys", "/dev", "/tmp", "/root", "/usr"];
 
-fn reject_blacklist(path: &Path, current_user: Option<&str>, raw_entry: &str) -> Result<(), BoxError> {
+fn reject_blacklist(
+    path: &Path,
+    current_user: Option<&str>,
+    raw_entry: &str,
+) -> Result<(), BoxError> {
     let path_str = path.to_string_lossy();
 
     for exact in BLACKLIST_EXACT {
@@ -70,10 +74,7 @@ impl SymlinkAllowList {
         Self::from_env_inner(canonical_root, current_username().as_deref())
     }
 
-    fn from_env_inner(
-        canonical_root: &Path,
-        current_user: Option<&str>,
-    ) -> Result<Self, BoxError> {
+    fn from_env_inner(canonical_root: &Path, current_user: Option<&str>) -> Result<Self, BoxError> {
         let raw = std::env::var("SYMLINK_ALLOW_PATHS").unwrap_or_default();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -244,8 +245,7 @@ pub(crate) mod tests {
         std::fs::create_dir(project_canonical.join("public")).unwrap();
         std::fs::create_dir(project_canonical.join("storage")).unwrap();
         let document_root = std::fs::canonicalize(project_canonical.join("public")).unwrap();
-        let storage_canonical =
-            std::fs::canonicalize(project_canonical.join("storage")).unwrap();
+        let storage_canonical = std::fs::canonicalize(project_canonical.join("storage")).unwrap();
 
         with_env(Some("../storage"), || {
             let list = SymlinkAllowList::from_env(&document_root).unwrap();
@@ -259,8 +259,8 @@ pub(crate) mod tests {
         with_env(Some("/does/not/exist/anywhere/12345"), || {
             let root = TempDir::new().unwrap();
             let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-            let err = SymlinkAllowList::from_env(&canonical_root)
-                .expect_err("missing target must error");
+            let err =
+                SymlinkAllowList::from_env(&canonical_root).expect_err("missing target must error");
             let msg = err.to_string();
             assert!(
                 msg.contains("/does/not/exist/anywhere/12345"),
@@ -329,18 +329,12 @@ pub(crate) mod tests {
             return;
         };
         let canonical = std::fs::canonicalize(&some_home).unwrap();
-        let user = canonical
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string();
+        let user = canonical.file_name().unwrap().to_str().unwrap().to_string();
         with_env(Some(canonical.to_str().unwrap()), || {
             let root = TempDir::new().unwrap();
             let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-            let list =
-                SymlinkAllowList::from_env_with_user(&canonical_root, Some(&user))
-                    .expect("matching user must be accepted");
+            let list = SymlinkAllowList::from_env_with_user(&canonical_root, Some(&user))
+                .expect("matching user must be accepted");
             assert!(list.allows(&canonical));
         });
     }
