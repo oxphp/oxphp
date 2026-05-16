@@ -283,4 +283,43 @@ pub(crate) mod tests {
             });
         }
     }
+
+    #[test]
+    fn prefix_blacklist_rejected() {
+        // Pick samples whose raw path is under a blacklisted prefix. The
+        // pre-canonicalize check handles these on macOS where the canonical
+        // would otherwise land under /private/.
+        let samples: &[(&str, &str)] = &[
+            ("/etc", "/etc/hosts"),
+            ("/usr", "/usr/bin"),
+            ("/tmp", "/tmp"),
+        ];
+        let mut tested = false;
+        for (prefix, sample) in samples {
+            if !std::path::Path::new(sample).is_dir() && !std::path::Path::new(sample).is_file() {
+                continue;
+            }
+            // Skip cases where the raw sample equals the prefix exactly
+            // — that's exact-blacklist territory, covered elsewhere.
+            if sample == prefix {
+                continue;
+            }
+            with_env(Some(sample), || {
+                let root = TempDir::new().unwrap();
+                let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+                let err = SymlinkAllowList::from_env(&canonical_root)
+                    .expect_err(&format!("{sample} must be rejected"));
+                let msg = err.to_string();
+                assert!(
+                    msg.contains(prefix) || msg.contains("blacklist"),
+                    "error should mention {prefix} or blacklist, got: {msg}"
+                );
+            });
+            tested = true;
+        }
+        assert!(
+            tested,
+            "no suitable prefix-blacklist sample exists on this host"
+        );
+    }
 }
