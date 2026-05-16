@@ -185,7 +185,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429 — 参见 [限流](docs/zh/features/rate-limiting.md)
 - **自定义错误页面** — 启动时预加载，热路径零 I/O — 参见 [错误页](docs/zh/features/error-pages.md)
 - **优雅关闭** — 在 SIGTERM/SIGINT 后，进行中的请求会在 `DRAIN_TIMEOUT_SECONDS` 内排空 — 参见 [优雅关闭](docs/zh/operations/graceful-shutdown.md)
-- **路径穿越防护** — 包含符号链接逃逸检测
+- **路径穿越防护** — 包含符号链接逃逸检测；可选 [外部符号链接目标允许列表](docs/zh/security/symlink-allow-paths.md)（Laravel `storage:link`、共享资源卷）
 - **受信任代理** — 通过 CIDR 信任从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP — 参见 [受信任代理](docs/zh/security/trusted-proxies.md)
 - **dot-path 阻止** — 对隐藏文件（`.env`、`.git/`）返回 404，`.well-known` 例外（RFC 8615） — 参见 [dot-path 阻止](docs/zh/security/dot-path-blocking.md)
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
@@ -332,6 +332,7 @@ flowchart LR
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 队列中允许的最大待处理异步任务数；队列满时拒绝任务 |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
+| `SYMLINK_ALLOW_PATHS` | *（未设置）* | 逗号分隔的路径（绝对或相对于 `DOCUMENT_ROOT`），符号链接可解析至这些目标。默认为空时，符号链接目标必须留在 `DOCUMENT_ROOT` 内。参见 [符号链接允许路径](docs/zh/security/symlink-allow-paths.md) |
 | `PHP_DENY_PATHS` | *（未设置）* | 禁止执行 PHP 的路径 glob 模式（文件或目录）。仅限传统模式。示例：`/uploads/**,/cache/**,/admin/legacy.php` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP 状态码（400–599）或指向 PHP 回退脚本的路径。命中 `PHP_DENY_PATHS` 时返回该状态码（可与 `ERROR_PAGES_DIR` 中的自定义 HTML 配合），或在 `$_SERVER` 中携带 `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` 执行回退脚本 |
 

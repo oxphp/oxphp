@@ -69,6 +69,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [Блокировка dot-путей](security/dot-path-blocking.md) — автоматическая блокировка скрытых файлов и директорий (`.env`, `.git/`, `.htaccess`)
 - [Доверенные прокси](security/trusted-proxies.md) — извлечение реального IP клиента из `Forwarded` (RFC 7239) и `X-Forwarded-*` заголовков при работе за обратным прокси
 - [Deny-лист выполнения PHP](security/php-deny.md) — блокировка выполнения `.php` на доступных для записи путях (например, `/uploads/**` или отдельные унаследованные скрипты) для защиты от залитых шеллов
+- [Разрешённые цели симлинков](security/symlink-allow-paths.md) — opt-in allow-list для целей симлинков вне `DOCUMENT_ROOT`; поддержка Laravel-style `storage:link` и общих томов ассетов без ослабления базовой защиты от symlink-escape
 
 ## PHP
 

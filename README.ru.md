@@ -185,7 +185,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **Ограничение частоты запросов по IP** с заголовками `X-RateLimit-*` и ответами 429 — см. [Rate limiting](docs/ru/features/rate-limiting.md)
 - **Пользовательские страницы ошибок** — загружаются при старте, без I/O на горячем пути — см. [Страницы ошибок](docs/ru/features/error-pages.md)
 - **Graceful shutdown** — запросы в обработке завершаются в течение `DRAIN_TIMEOUT_SECONDS` при SIGTERM/SIGINT — см. [Плавная остановка](docs/ru/operations/graceful-shutdown.md)
-- **Защита от path traversal** с обнаружением выхода за пределы через символические ссылки
+- **Защита от path traversal** с обнаружением выхода за пределы через симлинки — opt-in [allow-list для внешних целей симлинков](docs/ru/security/symlink-allow-paths.md) (Laravel `storage:link`, общие тома ассетов)
 - **Доверенные прокси** — извлечение реального IP клиента из `Forwarded` (RFC 7239) и `X-Forwarded-*` заголовков с CIDR-доверием — см. [Доверенные прокси](docs/ru/security/trusted-proxies.md)
 - **Блокировка dot-path** — возвращает 404 для скрытых файлов (`.env`, `.git/`) с исключением `.well-known` (RFC 8615) — см. [Блокировка dot-path](docs/ru/security/dot-path-blocking.md)
 - **Запуск в контейнере без прав root** от имени www-data (UID 82)
@@ -332,6 +332,7 @@ flowchart LR
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Максимум ожидающих асинхронных задач в очереди; задачи отклоняются при заполнении |
 | `TRACE_CONTEXT` | `false` | Пропуск контекста W3C Trace Context (`traceparent`/`tracestate`). Автоматически включается при `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(не задано)* | Доверенные прокси (CIDR): `10.0.0.0/8,172.16.0.0/12` или `private` (все RFC-1918). Извлечение реального IP из `Forwarded`/`X-Forwarded-*` заголовков |
+| `SYMLINK_ALLOW_PATHS` | *(не задано)* | Пути через запятую (абсолютные или относительные от `DOCUMENT_ROOT`), на которые могут указывать симлинки. По умолчанию = цели симлинков должны оставаться внутри `DOCUMENT_ROOT`. См. [Разрешённые цели симлинков](docs/ru/security/symlink-allow-paths.md) |
 | `PHP_DENY_PATHS` | *(не задано)* | Glob-паттерны (файлы или директории), в которых выполнение PHP запрещено. Только режим Traditional. Пример: `/uploads/**,/cache/**,/admin/legacy.php` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP-код (400–599) или путь к PHP-скрипту-фолбэку. При совпадении с `PHP_DENY_PATHS` возвращается статус (с опциональным кастомным HTML из `ERROR_PAGES_DIR`) либо выполняется фолбэк-скрипт с `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` в `$_SERVER` |
 

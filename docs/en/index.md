@@ -69,6 +69,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Dot-Path Blocking](security/dot-path-blocking.md) — automatic blocking of hidden files and directories (`.env`, `.git/`, `.htaccess`)
 - [Trusted Proxies](security/trusted-proxies.md) — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust
 - [PHP Execution Deny-List](security/php-deny.md) — block `.php` execution at writable public paths (e.g. `/uploads/**`, or specific legacy scripts) to defeat uploaded-shell attacks on legacy apps
+- [Symlink Allow Paths](security/symlink-allow-paths.md) — opt-in allow-list for symlink targets outside `DOCUMENT_ROOT`; supports Laravel-style `storage:link` and shared asset volumes without weakening the default symlink-escape protection
 
 ## PHP
 
