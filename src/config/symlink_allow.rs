@@ -19,7 +19,7 @@ impl SymlinkAllowList {
     }
 
     fn from_env_inner(
-        _canonical_root: &Path,
+        canonical_root: &Path,
         _current_user: Option<&str>,
     ) -> Result<Self, BoxError> {
         let raw = std::env::var("SYMLINK_ALLOW_PATHS").unwrap_or_default();
@@ -33,14 +33,29 @@ impl SymlinkAllowList {
             if raw_entry.is_empty() {
                 continue;
             }
-            // Future tasks will resolve & validate `raw_entry` here.
-            let _ = raw_entry;
+            let lookup_path = if Path::new(raw_entry).is_absolute() {
+                PathBuf::from(raw_entry)
+            } else {
+                canonical_root.join(raw_entry)
+            };
+            let canonical = std::fs::canonicalize(&lookup_path).map_err(|e| -> BoxError {
+                format!("SYMLINK_ALLOW_PATHS entry {raw_entry:?} canonicalize: {e}").into()
+            })?;
+            if !entries.contains(&canonical) {
+                tracing::info!(
+                    allow_path = %canonical.display(),
+                    "SYMLINK_ALLOW_PATHS entry registered"
+                );
+                entries.push(canonical);
+            }
         }
         Ok(Self { entries })
     }
 
-    pub fn allows(&self, _canonical_path: &Path) -> bool {
-        false
+    pub fn allows(&self, canonical_path: &Path) -> bool {
+        self.entries
+            .iter()
+            .any(|e| canonical_path == e || canonical_path.starts_with(e))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -131,6 +146,21 @@ pub(crate) mod tests {
             let canonical_root = std::fs::canonicalize(root.path()).unwrap();
             let list = SymlinkAllowList::from_env(&canonical_root).unwrap();
             assert!(list.is_empty());
+        });
+    }
+
+    #[test]
+    fn absolute_existing_path_is_registered() {
+        let target = TempDir::new().unwrap();
+        let target_canonical = std::fs::canonicalize(target.path()).unwrap();
+
+        with_env(Some(target_canonical.to_str().unwrap()), || {
+            let root = TempDir::new().unwrap();
+            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+            let list = SymlinkAllowList::from_env(&canonical_root).unwrap();
+            assert!(!list.is_empty());
+            assert!(list.allows(&target_canonical));
+            assert!(list.allows(&target_canonical.join("nested/file.txt")));
         });
     }
 }
