@@ -176,6 +176,21 @@ impl Drop for Entry {
         self.inner.on_drop();
         self.registry.entries.remove(&self.id);
         self.registry.total_entries.fetch_sub(1, Ordering::Relaxed);
+        // Invariant (paired with `SharedRegistry::adjust_mem_bytes`):
+        // `mem_bytes` is the exact amount this entry contributed to
+        // `total_bytes` over its lifetime — booked at `insert` time
+        // (`inner.mem_bytes() + ENTRY_FIXED_OVERHEAD`) and kept in sync
+        // by container types (`Map::set`, `Channel::send`,
+        // `Pool::try_reserve_budget`) through symmetric ±N
+        // `adjust_mem_bytes` calls. `adjust_mem_bytes`'s negative path
+        // uses `saturating_sub` on both `Entry::mem_bytes` and
+        // `total_bytes`, so a stale or duplicate undercount cannot drag
+        // `mem_bytes` below zero — by the time `Drop` runs, the load
+        // here always matches an amount actually present in
+        // `total_bytes`. The plain `fetch_sub` is therefore safe; it
+        // would wrap only under a real accounting bug (over-shrink not
+        // caught by the saturating clamp), which would also trip the
+        // `mem_bytes` self-consistency tests in this module.
         self.registry.total_bytes.fetch_sub(
             self.mem_bytes.load(Ordering::Relaxed) as u64,
             Ordering::Relaxed,
