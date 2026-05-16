@@ -493,6 +493,15 @@ pub unsafe extern "C" fn oxphp_shared_handle_clone(entry_ptr: *const Entry) -> *
         return std::ptr::null();
     }
     // SAFETY: caller guarantees entry_ptr is a live Arc::into_raw ptr.
+    // Read magic first so a UAF on the strong-count fetch_add surfaces as
+    // a clean debug panic instead of silently corrupting somebody else's
+    // counter — same guard pattern as `oxphp_shared_entry_id` and the
+    // per-type FFI ops.
+    let entry = unsafe { &*entry_ptr };
+    debug_assert_eq!(
+        entry.magic, ENTRY_MAGIC,
+        "oxphp_shared_handle_clone on freed Entry"
+    );
     unsafe { Arc::increment_strong_count(entry_ptr) };
     entry_ptr
 }
@@ -511,6 +520,14 @@ pub unsafe extern "C" fn oxphp_shared_handle_drop(entry_ptr: *const Entry) {
         return;
     }
     // SAFETY: caller guarantees a live, not-yet-dropped Arc::into_raw ptr.
+    // Read magic before reconstituting the Arc so a UAF/double-drop is
+    // caught as a clean debug panic instead of corrupting an unrelated
+    // allocation through the decrement path.
+    let entry = unsafe { &*entry_ptr };
+    debug_assert_eq!(
+        entry.magic, ENTRY_MAGIC,
+        "oxphp_shared_handle_drop on freed Entry"
+    );
     unsafe { drop(Arc::from_raw(entry_ptr)) };
 }
 
