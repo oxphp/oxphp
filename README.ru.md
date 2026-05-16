@@ -185,7 +185,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **Ограничение частоты запросов по IP** с заголовками `X-RateLimit-*` и ответами 429 — см. [Rate limiting](docs/ru/features/rate-limiting.md)
 - **Пользовательские страницы ошибок** — загружаются при старте, без I/O на горячем пути — см. [Страницы ошибок](docs/ru/features/error-pages.md)
 - **Graceful shutdown** — запросы в обработке завершаются в течение `DRAIN_TIMEOUT_SECONDS` при SIGTERM/SIGINT — см. [Плавная остановка](docs/ru/operations/graceful-shutdown.md)
-- **Защита от path traversal** с обнаружением выхода за пределы через симлинки — opt-in [allow-list для внешних целей симлинков](docs/ru/security/symlink-allow-paths.md) (Laravel `storage:link`, общие тома ассетов)
+- **Защита от path traversal** — обнаружение выхода за пределы через симлинки — см. [Разрешённые цели симлинков](docs/ru/security/symlink-allow-paths.md)
 - **Доверенные прокси** — извлечение реального IP клиента из `Forwarded` (RFC 7239) и `X-Forwarded-*` заголовков с CIDR-доверием — см. [Доверенные прокси](docs/ru/security/trusted-proxies.md)
 - **Блокировка dot-path** — возвращает 404 для скрытых файлов (`.env`, `.git/`) с исключением `.well-known` (RFC 8615) — см. [Блокировка dot-path](docs/ru/security/dot-path-blocking.md)
 - **Запуск в контейнере без прав root** от имени www-data (UID 82)

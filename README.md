@@ -185,7 +185,7 @@ Full guide: [Profiling](docs/en/features/profiling.md).
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/en/features/rate-limiting.md)
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/en/features/error-pages.md)
 - **Graceful shutdown** — in-flight requests drain within `DRAIN_TIMEOUT_SECONDS` on SIGTERM/SIGINT — see [Graceful shutdown](docs/en/operations/graceful-shutdown.md)
-- **Path traversal protection** with symlink escape detection — opt-in [allow-list for external symlink targets](docs/en/security/symlink-allow-paths.md) (Laravel `storage:link`, shared asset volumes)
+- **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/en/security/symlink-allow-paths.md)
 - **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/en/security/trusted-proxies.md)
 - **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/en/security/dot-path-blocking.md)
 - **Non-root container** execution as www-data (UID 82)

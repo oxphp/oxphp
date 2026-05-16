@@ -185,7 +185,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **基于 IP 的限流** — 携带 `X-RateLimit-*` 响应头，超限返回 429 — 参见 [限流](docs/zh/features/rate-limiting.md)
 - **自定义错误页面** — 启动时预加载，热路径零 I/O — 参见 [错误页](docs/zh/features/error-pages.md)
 - **优雅关闭** — 在 SIGTERM/SIGINT 后，进行中的请求会在 `DRAIN_TIMEOUT_SECONDS` 内排空 — 参见 [优雅关闭](docs/zh/operations/graceful-shutdown.md)
-- **路径穿越防护** — 包含符号链接逃逸检测；可选 [外部符号链接目标允许列表](docs/zh/security/symlink-allow-paths.md)（Laravel `storage:link`、共享资源卷）
+- **路径穿越防护** — 符号链接逃逸检测 — 参见 [符号链接允许路径](docs/zh/security/symlink-allow-paths.md)
 - **受信任代理** — 通过 CIDR 信任从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP — 参见 [受信任代理](docs/zh/security/trusted-proxies.md)
 - **dot-path 阻止** — 对隐藏文件（`.env`、`.git/`）返回 404，`.well-known` 例外（RFC 8615） — 参见 [dot-path 阻止](docs/zh/security/dot-path-blocking.md)
 - **非 root 容器**运行 — 以 www-data（UID 82）身份执行
