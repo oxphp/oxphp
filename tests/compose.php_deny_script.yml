@@ -1,4 +1,4 @@
-# PHP_DENY_DIRS with a PHP-script fallback.
+# PHP_DENY_PATHS with a PHP-script fallback.
 # Denied requests are rewritten to /_security/denied.php, which can read
 # OXPHP_DENIED_PATH and OXPHP_DENIED_PATTERN from $_SERVER and emit its own
 # response body (TestCase JSON in this fixture).
@@ -23,7 +23,7 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      PHP_DENY_DIRS: /uploads/**
+      PHP_DENY_PATHS: /uploads/**
       PHP_DENY_FALLBACK: /_security/denied.php
     volumes:
       - ./fixtures/php_deny/public:/var/www/html/public

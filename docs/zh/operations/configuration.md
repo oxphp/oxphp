@@ -105,8 +105,8 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 |------|--------|------|
 | `FRAME_OPTIONS` | `DENY` | 点击劫持防护。`DENY` 禁止所有框架嵌入，`SAMEORIGIN` 允许同源嵌入，`off` 关闭（适用于通过自定义 CSP 管理框架策略的场景）。同时设置 `X-Frame-Options` 和 `Content-Security-Policy: frame-ancestors` |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任的反向代理网络（逗号分隔 CIDR 或 `private`）。设置后，OxPHP 使用 rightmost-non-trusted 算法从 `Forwarded`（[RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)）或 `X-Forwarded-For` 中提取真实客户端 IP。同时处理 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 以设置 `$_SERVER['HTTPS']`、`REQUEST_SCHEME`、`SERVER_NAME` 和 `SERVER_PORT`。未设置 = 功能禁用 |
-| `PHP_DENY_DIRS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**`）。仅在直接文件映射模式（未设置 `ENTRY_FILE`）下生效 —— 若同时设置了 `ENTRY_FILE`，会在启动时发出警告并忽略，因为前端控制器、SPA 与 Worker 模式都已通过单一受信脚本路由所有请求。匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。参见 [PHP 执行拒绝名单](../security/php-deny-dirs.md) |
-| `PHP_DENY_FALLBACK` | `404` | 命中 `PHP_DENY_DIRS` 时返回什么。可以是 HTTP 状态码 `400`–`599`（与 `ERROR_PAGES_DIR` 配合可自定义 HTML），也可以是以 `/` 开头、指向 `DOCUMENT_ROOT` 内 PHP 回退脚本的 URI 路径。脚本在 `$_SERVER` 中接收 `OXPHP_DENIED_PATH` 与 `OXPHP_DENIED_PATTERN`。启动时严格校验：文件必须存在、规范化路径必须位于 `DOCUMENT_ROOT` 内，且脚本自身不得命中 `PHP_DENY_DIRS`（防止循环） |
+| `PHP_DENY_PATHS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**,/admin/legacy.php`）。模式可以指向整个目录，也可以指向单个文件。仅在直接文件映射模式（未设置 `ENTRY_FILE`）下生效 —— 若同时设置了 `ENTRY_FILE`，会在启动时发出警告并忽略，因为前端控制器、SPA 与 Worker 模式都已通过单一受信脚本路由所有请求。匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。旧名称 `PHP_DENY_DIRS` 作为已弃用别名仍被接受，启动时输出 `WARN`。参见 [PHP 执行拒绝名单](../security/php-deny.md) |
+| `PHP_DENY_FALLBACK` | `404` | 命中 `PHP_DENY_PATHS` 时返回什么。可以是 HTTP 状态码 `400`–`599`（与 `ERROR_PAGES_DIR` 配合可自定义 HTML），也可以是以 `/` 开头、指向 `DOCUMENT_ROOT` 内 PHP 回退脚本的 URI 路径。脚本在 `$_SERVER` 中接收 `OXPHP_DENIED_PATH` 与 `OXPHP_DENIED_PATTERN`。启动时严格校验：文件必须存在、规范化路径必须位于 `DOCUMENT_ROOT` 内，且脚本自身不得命中 `PHP_DENY_PATHS`（防止循环） |
 
 特殊值 `private` 展开为所有 RFC-1918 私有网络、回环和链路本地地址（IPv4 和 IPv6）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10`。
 

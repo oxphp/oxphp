@@ -66,7 +66,7 @@ pub enum RouteResult {
     /// `path_info` is always `None` — the original URI lives in
     /// `denied_meta.path` so it is not duplicated.
     /// `denied_meta` is `Some` only when this `Execute` is the PHP-script
-    /// fallback for a `PHP_DENY_DIRS` match — drives `$_SERVER` enrichment.
+    /// fallback for a `PHP_DENY_PATHS` match — drives `$_SERVER` enrichment.
     /// `Arc` keeps the variant 8-byte-tagged in the common (None) case and
     /// turns the rare-path clone into one atomic increment.
     Execute(
@@ -78,7 +78,7 @@ pub enum RouteResult {
     Serve(PathBuf),
     /// File not found.
     NotFound,
-    /// Request was blocked by `PHP_DENY_DIRS` with an HTTP-status fallback.
+    /// Request was blocked by `PHP_DENY_PATHS` with an HTTP-status fallback.
     /// `ErrorPagesHandler` may substitute a body. Kept as a dedicated variant
     /// (not a generic `StatusCode`) so `connection.rs` can count denials
     /// without guessing about the source of the status code.
@@ -316,7 +316,7 @@ impl RouteConfig {
         };
 
         let arc = Arc::new(result);
-        // Skip the route cache for `PHP_DENY_DIRS` results. Both `Denied`
+        // Skip the route cache for `PHP_DENY_PATHS` results. Both `Denied`
         // and `Execute(_, _, Some(_))` are produced from attacker-controlled
         // URIs with effectively unbounded cardinality — caching them would
         // let an attacker spraying random `/uploads/{nonce}.php` evict hot

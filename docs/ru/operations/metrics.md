@@ -84,7 +84,7 @@ curl http://localhost:9090/metrics
 | Метрика | Тип | Описание |
 |--------|-----|---------|
 | `oxphp_rate_limited_total` | counter | Запросы, отклонённые ограничителем частоты (вернул 429) |
-| `oxphp_php_deny_total` | counter | Запросы, заблокированные `PHP_DENY_DIRS` (выполнение `.php` запрещено). См. [Deny-лист выполнения PHP](../security/php-deny-dirs.md) |
+| `oxphp_php_deny_total` | counter | Запросы, заблокированные `PHP_DENY_PATHS` (выполнение `.php` запрещено). См. [Deny-лист выполнения PHP](../security/php-deny.md) |
 
 ## Метрики кэша статических файлов
 

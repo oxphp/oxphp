@@ -135,7 +135,7 @@ impl TraditionalRouter {
     }
 
     pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
-        // PHP_DENY_DIRS check — runs *before* disk I/O so we never leak
+        // PHP_DENY_PATHS check — runs *before* disk I/O so we never leak
         // existence info via timing. Only applied in Traditional mode; the
         // router itself is Traditional-specific.
         if let Some(deny) = ctx.php_deny {
@@ -143,7 +143,7 @@ impl TraditionalRouter {
                 tracing::info!(
                     path = %sanitized,
                     pattern = %pattern,
-                    "PHP execution denied by PHP_DENY_DIRS"
+                    "PHP execution denied by PHP_DENY_PATHS"
                 );
                 return match deny.fallback() {
                     crate::config::DenyFallback::Status(code) => RouteResult::Denied(*code),

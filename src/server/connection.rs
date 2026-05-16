@@ -570,7 +570,7 @@ async fn dispatch_request(
             PhpExecData::default(),
         ),
         RouteResult::Denied(code) => {
-            // `Denied` is emitted exclusively by the `PHP_DENY_DIRS`
+            // `Denied` is emitted exclusively by the `PHP_DENY_PATHS`
             // status-fallback path in `routing/traditional.rs`, so the
             // metric increment here is source-specific by construction.
             server.metrics.php_denied();

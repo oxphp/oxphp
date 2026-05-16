@@ -1,8 +1,8 @@
 //! PHP execution deny-list for Traditional routing mode.
 //!
-//! Matches sanitized URI paths against a `GlobSet` built from `PHP_DENY_DIRS`
+//! Matches sanitized URI paths against a `GlobSet` built from `PHP_DENY_PATHS`
 //! and produces a `DenyFallback` (HTTP status or PHP script redirect) when
-//! a request would otherwise execute PHP inside a denied directory.
+//! a request would otherwise execute PHP inside a denied path.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ thread_local! {
     static MATCH_BUF: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-/// What to return when a request matches `PHP_DENY_DIRS`.
+/// What to return when a request matches `PHP_DENY_PATHS`.
 #[derive(Debug, Clone)]
 pub enum DenyFallback {
     /// Respond with a bare HTTP status (`ErrorPagesHandler` may substitute a body).
@@ -44,7 +44,7 @@ pub enum DenyFallback {
 pub struct DeniedMeta {
     /// Original sanitized URI (no leading `/`).
     pub path: String,
-    /// Matched glob pattern from `PHP_DENY_DIRS`.
+    /// Matched glob pattern from `PHP_DENY_PATHS`.
     pub pattern: String,
     /// URI-form of the fallback script (`/_security/denied.php`). Precomputed
     /// at config time from the canonical root — avoids a `strip_prefix` at
@@ -62,24 +62,28 @@ pub struct PhpDeny {
 }
 
 impl PhpDeny {
-    /// Parse from environment. Returns `Ok(None)` when `PHP_DENY_DIRS` is unset
-    /// or empty. Returns `Err` for malformed input. Emits a warn-and-disable
-    /// path when an `entry_file` is configured — front-controller, SPA, and
-    /// worker modes route every request through one trusted script, so
-    /// arbitrary `.php` files in denied dirs cannot be invoked directly.
+    /// Parse from environment. Returns `Ok(None)` when `PHP_DENY_PATHS` is
+    /// unset or empty. Returns `Err` for malformed input. Emits a
+    /// warn-and-disable path when an `entry_file` is configured —
+    /// front-controller, SPA, and worker modes route every request through
+    /// one trusted script, so arbitrary `.php` files in denied paths cannot
+    /// be invoked directly.
+    ///
+    /// `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup
+    /// warning. When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS`
+    /// is reported as ignored.
     pub fn from_env(
         document_root: &Path,
         entry_file: Option<&Path>,
     ) -> Result<Option<Self>, BoxError> {
-        let raw = std::env::var("PHP_DENY_DIRS").unwrap_or_default();
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Ok(None);
-        }
+        let (raw, source) = match Self::resolve_env_source() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         if entry_file.is_some() {
             tracing::warn!(
-                "PHP_DENY_DIRS is set but ENTRY_FILE is also set — feature is direct-mapping-only, ignoring PHP_DENY_DIRS"
+                "{source} is set but ENTRY_FILE is also set — feature is direct-mapping-only, ignoring {source}"
             );
             return Ok(None);
         }
@@ -100,12 +104,12 @@ impl PhpDeny {
             let glob = globset::GlobBuilder::new(p)
                 .literal_separator(true)
                 .build()
-                .map_err(|e| -> BoxError { format!("PHP_DENY_DIRS pattern {p:?}: {e}").into() })?;
+                .map_err(|e| -> BoxError { format!("{source} pattern {p:?}: {e}").into() })?;
             builder.add(glob);
         }
         let matcher = builder
             .build()
-            .map_err(|e| -> BoxError { format!("PHP_DENY_DIRS build: {e}").into() })?;
+            .map_err(|e| -> BoxError { format!("{source} build: {e}").into() })?;
 
         let fallback_raw = std::env::var("PHP_DENY_FALLBACK").unwrap_or_else(|_| "404".to_string());
         let fallback = parse_fallback(&fallback_raw, document_root, &matcher, &patterns)?;
@@ -138,6 +142,37 @@ impl PhpDeny {
 
     pub fn fallback(&self) -> &DenyFallback {
         &self.fallback
+    }
+
+    /// Pick the active env var and emit a deprecation warning when the
+    /// legacy `PHP_DENY_DIRS` alias is used.
+    ///
+    /// Precedence: `PHP_DENY_PATHS` (non-empty) > `PHP_DENY_DIRS` (non-empty).
+    /// When both are set non-empty, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS`
+    /// is reported as ignored — values are *not* merged to avoid surprising
+    /// operators who set the new variable expecting it to be authoritative.
+    fn resolve_env_source() -> Option<(String, &'static str)> {
+        let new_raw = std::env::var("PHP_DENY_PATHS").unwrap_or_default();
+        let new_trim = new_raw.trim();
+        let old_raw = std::env::var("PHP_DENY_DIRS").unwrap_or_default();
+        let old_trim = old_raw.trim();
+
+        match (new_trim.is_empty(), old_trim.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some((new_trim.to_string(), "PHP_DENY_PATHS")),
+            (true, false) => {
+                tracing::warn!(
+                    "PHP_DENY_DIRS is deprecated, use PHP_DENY_PATHS instead — the alias will be removed in a future release"
+                );
+                Some((old_trim.to_string(), "PHP_DENY_DIRS"))
+            }
+            (false, false) => {
+                tracing::warn!(
+                    "PHP_DENY_PATHS and PHP_DENY_DIRS are both set — PHP_DENY_PATHS wins, PHP_DENY_DIRS is ignored (the deprecated alias)"
+                );
+                Some((new_trim.to_string(), "PHP_DENY_PATHS"))
+            }
+        }
     }
 }
 
@@ -200,7 +235,7 @@ fn parse_fallback(
         .into());
     }
 
-    // Anti-loop: fallback script itself must not match PHP_DENY_DIRS.
+    // Anti-loop: fallback script itself must not match PHP_DENY_PATHS.
     let fallback_rel = canonical
         .strip_prefix(&canonical_root)
         .unwrap_or(&canonical)
@@ -318,6 +353,19 @@ mod tests {
 
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Defense-in-depth: snapshot+clear PHP_DENY_PATHS and PHP_DENY_DIRS
+        // unconditionally so an inherited shell value can't poison a test
+        // that omits them from `vars`. Tests opt in by re-setting them.
+        let deny_keys = ["PHP_DENY_PATHS", "PHP_DENY_DIRS"];
+        let deny_prev: Vec<(String, Option<String>)> = deny_keys
+            .iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        for k in &deny_keys {
+            std::env::remove_var(k);
+        }
+
         let prev: Vec<(String, Option<String>)> = vars
             .iter()
             .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
@@ -330,6 +378,12 @@ mod tests {
         }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         for (k, prev_val) in prev {
+            match prev_val {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+        for (k, prev_val) in deny_prev {
             match prev_val {
                 Some(v) => std::env::set_var(&k, v),
                 None => std::env::remove_var(&k),
@@ -351,7 +405,7 @@ mod tests {
     #[test]
     fn env_unset_returns_none() {
         with_env(
-            &[("PHP_DENY_DIRS", None), ("PHP_DENY_FALLBACK", None)],
+            &[("PHP_DENY_PATHS", None), ("PHP_DENY_FALLBACK", None)],
             || {
                 let dir = TempDir::new().unwrap();
                 let deny = PhpDeny::from_env(dir.path(), None).unwrap();
@@ -363,7 +417,7 @@ mod tests {
     #[test]
     fn env_empty_returns_none() {
         with_env(
-            &[("PHP_DENY_DIRS", Some("")), ("PHP_DENY_FALLBACK", None)],
+            &[("PHP_DENY_PATHS", Some("")), ("PHP_DENY_FALLBACK", None)],
             || {
                 let dir = TempDir::new().unwrap();
                 let deny = PhpDeny::from_env(dir.path(), None).unwrap();
@@ -376,7 +430,7 @@ mod tests {
     fn env_with_entry_file_warns_and_disables() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             || {
@@ -392,7 +446,7 @@ mod tests {
     fn env_default_fallback_is_404_status() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             || {
@@ -407,7 +461,7 @@ mod tests {
     fn env_fallback_status_403() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("403")),
             ],
             || {
@@ -422,7 +476,7 @@ mod tests {
     fn env_fallback_status_out_of_range_errors() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("399")),
             ],
             || {
@@ -432,7 +486,7 @@ mod tests {
         );
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("600")),
             ],
             || {
@@ -448,7 +502,7 @@ mod tests {
         let doc_root = dir.path().to_string_lossy().into_owned();
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("/_security/denied.php")),
             ],
             || {
@@ -469,7 +523,7 @@ mod tests {
     fn env_fallback_script_missing_errors() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("/does/not/exist.php")),
             ],
             || {
@@ -485,7 +539,7 @@ mod tests {
         let doc_root = dir.path().to_string_lossy().into_owned();
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("/uploads/denied.php")),
             ],
             || {
@@ -501,7 +555,7 @@ mod tests {
         with_env(
             &[
                 // Unclosed character class → glob parse error
-                ("PHP_DENY_DIRS", Some("/uploads/[abc")),
+                ("PHP_DENY_PATHS", Some("/uploads/[abc")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             || {
@@ -515,12 +569,64 @@ mod tests {
     fn env_malformed_fallback_errors() {
         with_env(
             &[
-                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", Some("banana")),
             ],
             || {
                 let dir = TempDir::new().unwrap();
                 assert!(PhpDeny::from_env(dir.path(), None).is_err());
+            },
+        );
+    }
+
+    // --- Deprecated `PHP_DENY_DIRS` alias ---
+
+    #[test]
+    fn deprecated_dirs_alias_still_works() {
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", None),
+                ("PHP_DENY_DIRS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            || {
+                let dir = TempDir::new().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                assert_eq!(deny.matches("uploads/shell.php"), Some("uploads/**"));
+            },
+        );
+    }
+
+    #[test]
+    fn deprecated_dirs_alias_empty_is_unset() {
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", None),
+                ("PHP_DENY_DIRS", Some("")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            || {
+                let dir = TempDir::new().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), None).unwrap();
+                assert!(deny.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn paths_wins_when_both_set() {
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_DIRS", Some("/cache/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            || {
+                let dir = TempDir::new().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                // PHP_DENY_PATHS wins → /uploads/** is active, /cache/** is not.
+                assert_eq!(deny.matches("uploads/x.php"), Some("uploads/**"));
+                assert_eq!(deny.matches("cache/x.php"), None);
             },
         );
     }

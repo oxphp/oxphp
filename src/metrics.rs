@@ -157,7 +157,7 @@ pub struct Metrics {
     /// Requests rejected by rate limiter (429).
     rate_limited_total: AtomicU64,
 
-    /// Requests denied by PHP_DENY_DIRS.
+    /// Requests denied by PHP_DENY_PATHS.
     php_deny_total: AtomicU64,
 
     /// Static file cache hits and misses.
@@ -749,7 +749,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_php_deny_total Requests blocked by PHP_DENY_DIRS."
+            "# HELP oxphp_php_deny_total Requests blocked by PHP_DENY_PATHS."
         );
         let _ = writeln!(out, "# TYPE oxphp_php_deny_total counter");
         let _ = writeln!(

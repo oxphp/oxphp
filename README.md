@@ -331,10 +331,10 @@ All settings are via environment variables — no config files required.
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
-| `PHP_DENY_DIRS` | *(unset)* | Glob patterns of directories where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**` |
-| `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_DIRS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
+| `PHP_DENY_PATHS` | *(unset)* | Glob patterns (files or directories) where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**,/admin/legacy.php` |
+| `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_PATHS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
 
-> **Deprecated env vars** (still parsed, with a startup `WARN`): `INDEX_FILE` → use `ENTRY_FILE`. `WORKER_FILE` → use `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. The legacy forms will be removed in a future release.
+> **Deprecated env vars** (still parsed, with a startup `WARN`): `INDEX_FILE` → use `ENTRY_FILE`. `WORKER_FILE` → use `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. `PHP_DENY_DIRS` → use `PHP_DENY_PATHS`. The legacy forms will be removed in a future release.
 
 > **Boolean values** (case-insensitive, trimmed): truthy = `on` / `true` / `1` / `yes`; falsy = `off` / `false` / `0` / `no`. Any non-empty value outside that set — typos like `ture` — fails fast at startup with an error naming the variable. An unset variable or empty assignment (`FOO=`) falls back to the default, so Docker Compose / Kubernetes substitutions like `FOO=${FOO}` work cleanly when the host variable is missing.
 
@@ -377,17 +377,6 @@ All settings are via environment variables — no config files required.
 | `SHARED_INTROSPECTION_ENABLED` | `true` | Toggle the `/__ox_shared/*` JSON endpoints on the internal server |
 | `SHARED_METRICS_ENABLED` | `true` | Toggle the `oxphp_shared_*` Prometheus series |
 | `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Max time to drain Channel/Pool entries on graceful shutdown |
-
-### Hardening legacy PHP apps
-
-`PHP_DENY_DIRS` locks down writable public subdirectories in Traditional routing mode — the typical attack surface for uploaded PHP shells (WordPress, older CMSes).
-
-```bash
-# Block PHP execution in writable public subdirs of a legacy PHP app.
-export PHP_DENY_DIRS=/uploads/**,/cache/**,/tmp/**
-export PHP_DENY_FALLBACK=403
-# Optional: pair with ERROR_PAGES_DIR=/var/errors for a custom 403.html
-```
 
 ---
 

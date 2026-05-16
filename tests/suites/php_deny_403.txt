@@ -1,4 +1,4 @@
 # profile: php_deny_403
-# description: PHP_DENY_DIRS with explicit 403 fallback
+# description: PHP_DENY_PATHS with explicit 403 fallback
 
 php_deny/test_deny_status_403 >> /uploads/shell.php | GET | | 403 |
