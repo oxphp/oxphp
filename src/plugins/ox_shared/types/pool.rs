@@ -31,7 +31,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -147,6 +147,10 @@ pub struct PoolInner {
 
     closed: AtomicBool,
     self_id: OnceLock<SharedId>,
+    /// Cached `Weak<Entry>` for the fast-path of [`track_size_delta`].
+    /// See [`MapInner::self_entry`] for the rationale — same shape,
+    /// same fallback to the id-based slow path for test fixtures.
+    self_entry: OnceLock<Weak<Entry>>,
 
     // ── Observability counters ──────────────────────────────
     //
@@ -212,6 +216,7 @@ impl PoolInner {
             destroy_fcc,
             closed: AtomicBool::new(false),
             self_id: OnceLock::new(),
+            self_entry: OnceLock::new(),
             acquire_ok_total: AtomicU64::new(0),
             acquire_timeout_total: AtomicU64::new(0),
             acquire_closed_total: AtomicU64::new(0),
@@ -233,6 +238,18 @@ impl PoolInner {
 
     pub fn bind_id(&self, id: SharedId) {
         let _ = self.self_id.set(id);
+    }
+
+    /// Bind this Pool to its registry entry. Production path: call from
+    /// the creating FFI right after `registry.insert` with
+    /// `Arc::downgrade(&entry_arc)`. Sets both id and the cached
+    /// `Weak<Entry>` that [`track_size_delta`] uses to bypass the
+    /// DashMap shard-lock on every `try_reserve_budget` / refund.
+    pub fn bind_entry(&self, weak: Weak<Entry>) {
+        if let Some(arc) = weak.upgrade() {
+            let _ = self.self_id.set(arc.id);
+        }
+        let _ = self.self_entry.set(weak);
     }
 
     pub fn self_id(&self) -> Option<SharedId> {
@@ -309,13 +326,20 @@ impl PoolInner {
     }
 
     fn track_slot_delta(&self, delta_count: isize) {
+        let delta = delta_count * POOL_PER_SLOT_BYTES;
+        if let Some(weak) = self.self_entry.get() {
+            if let Some(entry) = weak.upgrade() {
+                entry.adjust_mem_bytes(delta);
+            }
+            return;
+        }
         let Some(id) = self.self_id.get().copied() else {
             return;
         };
         let Some(reg) = REGISTRY.get() else {
             return;
         };
-        reg.adjust_mem_bytes(id, delta_count * POOL_PER_SLOT_BYTES);
+        reg.adjust_mem_bytes(id, delta);
     }
 
     /// Increment the current thread's in-flight counter. Called from
@@ -944,7 +968,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
         ));
         let reg = registry();
         let arc = reg.insert(SharedType::Pool, typed.clone())?;
-        typed.bind_id(arc.id);
+        typed.bind_entry(Arc::downgrade(&arc));
         // SAFETY: out_ptr checked non-null above.
         unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())

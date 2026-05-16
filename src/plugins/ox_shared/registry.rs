@@ -198,6 +198,44 @@ impl Drop for Entry {
     }
 }
 
+impl Entry {
+    /// Direct-path counterpart of [`SharedRegistry::adjust_mem_bytes`]:
+    /// mutates `self.mem_bytes` and `self.registry.total_bytes` without
+    /// any registry lookup. Used by container types (`MapInner`,
+    /// `ChannelInner`, `PoolInner`) that hold a cached `Weak<Entry>` and
+    /// can reach the entry without paying the DashMap shard-lock cost
+    /// per mutation.
+    ///
+    /// Same contract as the registry shim: negative deltas saturate at
+    /// zero on both atomics, so a stale or duplicate undercount cannot
+    /// wrap either counter; the global cap is enforced only at `insert`
+    /// time and is not re-checked here.
+    pub fn adjust_mem_bytes(&self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        if delta > 0 {
+            let d = delta as usize;
+            self.mem_bytes.fetch_add(d, Ordering::Relaxed);
+            self.registry
+                .total_bytes
+                .fetch_add(d as u64, Ordering::Relaxed);
+        } else {
+            let d = delta.unsigned_abs();
+            let _ = self
+                .mem_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(d))
+                });
+            let _ = self.registry.total_bytes.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |cur| Some(cur.saturating_sub(d as u64)),
+            );
+        }
+    }
+}
+
 pub trait SharedInner: std::any::Any + Send + Sync + 'static {
     fn type_tag(&self) -> SharedType;
 
@@ -400,6 +438,13 @@ impl SharedRegistry {
     /// from reality as the container grows. Positive `delta` for adds,
     /// negative for removes; `0` is a no-op.
     ///
+    /// **Slow path** — performs a DashMap shard-locked lookup +
+    /// `Weak::upgrade` to reach the entry. Production container
+    /// mutators that cache a `Weak<Entry>` should prefer
+    /// [`Entry::adjust_mem_bytes`] directly: same accounting contract,
+    /// no registry lookup. This shim remains for callers that have only
+    /// an id (legacy test fixtures, observability tooling).
+    ///
     /// Best-effort, never fails:
     /// - Unknown id is silently ignored. Callers are container methods
     ///   running under their own shard lock; a vanished registry entry
@@ -420,24 +465,7 @@ impl SharedRegistry {
         let Some(e) = self.entries.get(&id).and_then(|w| w.upgrade()) else {
             return;
         };
-        if delta > 0 {
-            let d = delta as usize;
-            e.mem_bytes.fetch_add(d, Ordering::Relaxed);
-            self.total_bytes.fetch_add(d as u64, Ordering::Relaxed);
-        } else {
-            let d = delta.unsigned_abs();
-            // saturating_sub + fetch_update on AtomicUsize: clamp at 0.
-            let _ = e
-                .mem_bytes
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                    Some(cur.saturating_sub(d))
-                });
-            let _ = self
-                .total_bytes
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                    Some(cur.saturating_sub(d as u64))
-                });
-        }
+        e.adjust_mem_bytes(delta);
     }
 
     /// Enumerate every live entry. Dead `Weak`s (an `Entry` mid-drop)

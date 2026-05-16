@@ -13,7 +13,7 @@
 //! ops.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use dashmap::DashMap;
 
@@ -68,6 +68,13 @@ pub struct MapInner {
     /// tests that skip registry insertion) — cycle detection is then
     /// a no-op because nothing in the registry can reach this Map.
     self_id: OnceLock<SharedId>,
+    /// Cached `Weak<Entry>` bound by the creating FFI path via
+    /// [`MapInner::bind_entry`]. Lets [`track_map_delta`] skip the
+    /// DashMap shard-locked lookup that [`SharedRegistry::adjust_mem_bytes`]
+    /// would otherwise do — one `Weak::upgrade` is enough to reach the
+    /// entry and call [`Entry::adjust_mem_bytes`] directly. Falls back
+    /// to the id-based slow path when this isn't bound (test fixtures).
+    self_entry: OnceLock<Weak<Entry>>,
 }
 
 impl MapInner {
@@ -77,6 +84,7 @@ impl MapInner {
             max_entries,
             count: AtomicUsize::new(0),
             self_id: OnceLock::new(),
+            self_entry: OnceLock::new(),
         }
     }
 
@@ -91,16 +99,38 @@ impl MapInner {
         let _ = self.self_id.set(id);
     }
 
+    /// Bind this Map to its registry entry. Production path: call this
+    /// from the creating FFI right after `registry.insert` with
+    /// `Arc::downgrade(&entry_arc)`. Sets both the id (from the upgrade)
+    /// and the cached `Weak<Entry>` that [`track_map_delta`] uses to
+    /// bypass the DashMap shard-lock on every mutation.
+    pub fn bind_entry(&self, weak: Weak<Entry>) {
+        if let Some(arc) = weak.upgrade() {
+            let _ = self.self_id.set(arc.id);
+        }
+        let _ = self.self_entry.set(weak);
+    }
+
     pub fn self_id(&self) -> Option<SharedId> {
         self.self_id.get().copied()
     }
 
-    /// Adjust the registry's accounted memory by `delta`. No-op when
-    /// the Map is not yet registered (`bind_id` not called) or when
-    /// the global registry has been torn down. See
-    /// [`SharedRegistry::adjust_mem_bytes`] for the best-effort contract.
+    /// Adjust the registry's accounted memory by `delta`. Fast path
+    /// uses the cached `Weak<Entry>` to call
+    /// [`Entry::adjust_mem_bytes`] directly (one `Weak::upgrade`, no
+    /// DashMap lookup). Falls back to the id-based slow path through
+    /// the registry for fixtures that only ran [`bind_id`]. No-op when
+    /// the Map is not yet registered or the global registry has been
+    /// torn down. See [`SharedRegistry::adjust_mem_bytes`] for the
+    /// best-effort contract.
     fn track_map_delta(&self, delta: isize) {
         if delta == 0 {
+            return;
+        }
+        if let Some(weak) = self.self_entry.get() {
+            if let Some(entry) = weak.upgrade() {
+                entry.adjust_mem_bytes(delta);
+            }
             return;
         }
         let Some(id) = self.self_id.get().copied() else {
@@ -755,7 +785,7 @@ pub unsafe extern "C" fn oxphp_shared_map_create(
         // a runtime check makes the API look more dynamic than it is.
         let typed = Arc::new(MapInner::new(max));
         let arc = reg.insert(SharedType::Map, typed.clone())?;
-        typed.bind_id(arc.id);
+        typed.bind_entry(Arc::downgrade(&arc));
         // SAFETY: out_ptr checked non-null above.
         unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
