@@ -314,7 +314,6 @@ $queue->send(['url' => $_POST['url']]);
 | `SHARED_PREVIEW_STRING_LIMIT`   | 256     | 预览时每个字符串的截断长度。                                         |
 | `SHARED_INTROSPECTION_ENABLED`  | true    | 开关 `/__ox_shared/*` API。                                          |
 | `SHARED_METRICS_ENABLED`        | true    | 开关 `oxphp_shared_*` Prometheus 曝露。                              |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS`| 5.0    | 服务器停止时等待阻塞发送者/接收者/池调用者的最长时间。               |
 
 ## 何时不宜使用
 

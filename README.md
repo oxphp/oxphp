@@ -376,7 +376,6 @@ All settings are via environment variables — no config files required.
 | `SHARED_CYCLE_DETECT_EDGES` | `10000` | Max edges walked per cycle check (guard against dense graphs) |
 | `SHARED_INTROSPECTION_ENABLED` | `true` | Toggle the `/__ox_shared/*` JSON endpoints on the internal server |
 | `SHARED_METRICS_ENABLED` | `true` | Toggle the `oxphp_shared_*` Prometheus series |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS` | `5.0` | Max time to drain Channel/Pool entries on graceful shutdown |
 
 ---
 

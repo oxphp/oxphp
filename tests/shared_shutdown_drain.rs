@@ -28,7 +28,6 @@ fn ensure_registry_initialised() {
         introspection_preview_enabled: false,
         cycle_detect_depth: 16,
         cycle_detect_edges: 10_000,
-        shutdown_timeout_seconds: 5.0,
         poison_strict: false,
         lock_diagnostics: LockDiagnosticsLevel::Off,
         lock_poll_interval_ms: 100,

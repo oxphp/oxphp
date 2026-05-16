@@ -314,7 +314,6 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 | `SHARED_PREVIEW_STRING_LIMIT`   | 256     | Per-string truncation in previews.                                    |
 | `SHARED_INTROSPECTION_ENABLED`  | true    | Toggles the `/__ox_shared/*` API.                                     |
 | `SHARED_METRICS_ENABLED`        | true    | Toggles the `oxphp_shared_*` Prometheus exposition.                   |
-| `SHARED_SHUTDOWN_TIMEOUT_SECONDS`| 5.0    | Max wait for blocked senders/receivers/pool callers at server stop.   |
 
 ## When not to use
 

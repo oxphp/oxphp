@@ -476,7 +476,15 @@ impl SharedRegistry {
     }
 
     /// Drain: wake blocked ops, mark shutting-down.
-    /// No-op for atomic types because they don't block.
+    ///
+    /// Synchronous and bounded — every `on_shutdown_notify` implementation
+    /// returns immediately (Channel/Pool call `close()` which wakes
+    /// waiters via `Notify`/condvar; Map/Mutex/Counter/Flag/Atomic/Once
+    /// are no-ops because they never block). There is no per-Shared
+    /// timeout; the overall graceful-shutdown deadline lives at server
+    /// level (`DRAIN_TIMEOUT_SECONDS`, default 30s), which already waits
+    /// on the connection-drain loop in `main.rs` long enough for woken
+    /// PHP requests to unwind their exception and flush their response.
     pub fn drain(&self) {
         self.shutting_down.store(true, Ordering::Release);
         for w in self.entries.iter() {
@@ -674,7 +682,6 @@ mod tests {
             introspection_preview_enabled: true,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10000,
-            shutdown_timeout_seconds: 5.0,
             poison_strict: false,
             lock_diagnostics: crate::plugins::ox_shared::config::LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
@@ -797,7 +804,6 @@ mod tests {
             introspection_preview_enabled: true,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
-            shutdown_timeout_seconds: 5.0,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
@@ -839,7 +845,6 @@ mod tests {
             introspection_preview_enabled: false,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
-            shutdown_timeout_seconds: 5.0,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
