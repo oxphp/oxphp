@@ -12,8 +12,9 @@ use crate::types::BoxError;
 ///
 /// The set is intentionally a hard-coded minimum — typing `/etc` should
 /// never accidentally widen the attack surface. Admins running in a
-/// high-paranoia deployment cannot extend the list at runtime; the
-/// trade-off is documented in `.internal/adr/0025-symlink-allow-paths-policy.md`.
+/// high-paranoia deployment cannot extend the list at runtime; that is
+/// a deliberate trade-off favoring a predictable security floor over
+/// per-deployment flexibility.
 const BLACKLIST_EXACT: &[&str] = &[
     "/", "/etc", "/proc", "/sys", "/dev", "/var", "/home", "/tmp", "/root", "/usr", "/srv",
 ];
