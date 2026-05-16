@@ -285,13 +285,45 @@ pub fn registry() -> &'static SharedRegistry {
 pub fn init_registry(config: SharedConfig) {
     let reg = SharedRegistry {
         entries: DashMap::with_capacity(128),
-        next_id: AtomicI64::new(1),
+        next_id: AtomicI64::new(random_id_seed()),
         total_bytes: AtomicU64::new(0),
         total_entries: AtomicU64::new(0),
         config,
         shutting_down: AtomicBool::new(false),
     };
     REGISTRY.set(reg).ok();
+}
+
+/// Initial value for `next_id`. Production seeds it from `getrandom` so
+/// PHP code can't observe a monotonic 1, 2, 3, … sequence and
+/// accidentally treat the id as a stable, persistable handle — it
+/// remains an opaque per-process token. The seed fits in the low 32
+/// bits, leaving ~2^63 of head-room in `AtomicI64` before the `id as
+/// i64` cast in the `Shared\*::id()` PHP-wrappers (`types/atomic.rs`,
+/// `types/counter.rs`, …) could flip sign — far beyond any realistic
+/// per-process entry count.
+///
+/// Guarantees `seed >= 1` so the first id emitted by `fetch_add(1)`
+/// does not collide with `0`, which `oxphp_shared_entry_id` returns
+/// for a NULL pointer and the tag-7 deserialiser treats as the
+/// `StaleHandle` sentinel.
+///
+/// On the unlikely path where `getrandom` fails (seccomp/sandbox with
+/// the syscall blocked), we log a warning and fall back to `1` —
+/// behaviour matches pre-randomisation builds, so the registry remains
+/// functional, but the opacity property is lost and operators see the
+/// degradation in logs.
+fn random_id_seed() -> i64 {
+    let mut buf = [0u8; 4];
+    if let Err(err) = getrandom::fill(&mut buf) {
+        tracing::warn!(
+            error = %err,
+            "getrandom failed seeding Shared\\* registry id; falling back to monotonic counter from 1 (id-opacity hardening disabled)"
+        );
+        return 1;
+    }
+    let raw = u32::from_le_bytes(buf) as i64;
+    raw.max(1)
 }
 
 impl SharedRegistry {
@@ -583,8 +615,12 @@ pub unsafe extern "C" fn oxphp_shared_handle_drop(entry_ptr: *const Entry) {
 }
 
 /// Read the registry id of the entry behind `entry_ptr`. Used by the
-/// tag-7 serializer to write the wire id. Returns 0 on NULL (0 is
-/// never a valid id — `next_id` starts at 1).
+/// tag-7 serializer to write the wire id, and exposed to PHP through
+/// the `id()` method on every `Shared\*` wrapper. The id is an opaque
+/// per-process token — `random_id_seed` ensures it is not a monotonic
+/// counter, so callers can't treat it as a stable handle across
+/// processes. Returns 0 on NULL (0 is never a valid id — the seed is
+/// always `>= 1`).
 ///
 /// # Safety
 /// `entry_ptr` must be NULL or a live `Arc::into_raw` pointer.
