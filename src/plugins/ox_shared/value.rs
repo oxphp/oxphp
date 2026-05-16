@@ -88,13 +88,6 @@ impl SharedRefOwned {
             type_tag: self.type_tag,
         }
     }
-
-    /// Borrow the underlying `Entry` pointer. Used by tag-7 / wrapper
-    /// construction paths that need to hand the pointer to FFI.
-    #[allow(dead_code)]
-    pub fn entry_ptr(&self) -> *const Entry {
-        self.entry_ptr
-    }
 }
 
 impl Clone for SharedRefOwned {
