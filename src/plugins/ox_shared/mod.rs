@@ -105,6 +105,17 @@ impl Plugin for SharedPlugin {
         if cfg.metrics_enabled {
             ctx.register_metrics(observability::SharedMetricsCollector);
         }
+        if cfg.introspection_enabled || cfg.metrics_enabled {
+            tracing::warn!(
+                plugin = "ox_shared",
+                "Deprecated Shared\\* observability names emitted alongside the new \
+                 ones: Prometheus `oxphp_shared_channel_pending` (use `_count`), \
+                 `oxphp_shared_pool_size` (use `_count`); JSON keys \
+                 `Channel.pending` and `Pool.size` (use `.count`). The deprecated \
+                 aliases will be removed in a future release — update dashboards \
+                 and alerts before upgrading."
+            );
+        }
 
         tracing::info!(
             plugin = "ox_shared",

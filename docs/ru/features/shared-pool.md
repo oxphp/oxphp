@@ -23,7 +23,7 @@ Pool даёт каждому потоку PHP-воркера свою полос
 ```php
 namespace OxPHP\Shared;
 
-final class Pool implements Shareable
+final class Pool implements Shareable, \Countable
 {
     public function __construct(
         callable  $factory,
@@ -37,7 +37,7 @@ final class Pool implements Shareable
     public function release(Pool\Handle $handle): void;
     public function with(callable $body, float $timeout = 0.0): mixed;
 
-    public function size(): int;
+    public function count(): int;
     public function inUse(): int;
     public function idle(): int;
     public function waiting(): int;
@@ -60,7 +60,7 @@ final class Handle
 | `acquire`      | `Handle` | Взять ресурс; блокирует до `$timeout`. `0.0` использует default. |
 | `release`      | void     | Вернуть хэндл в пул. Идемпотентно в пределах жизни хэндла; двойной release отклоняется. |
 | `with`         | mixed    | Захват + release в скоупе вокруг замыкания. Возвращаемое значение замыкания пробрасывается. Предпочтительнее ручного `acquire`/`release`. |
-| `size`         | int      | Текущее число слотов (in-use + idle) по всем потокам.            |
+| `count`        | int      | Текущее число слотов (in-use + idle) по всем потокам. Через `Countable` — `count($pool)` работает напрямую. |
 | `inUse`        | int      | Слоты, выданные сейчас.                                           |
 | `idle`         | int      | Слоты, лежащие в per-thread очередях.                             |
 | `waiting`      | int      | Захваты, припаркованные в ожидании свободного слота.              |
@@ -184,8 +184,8 @@ Idle-слоты вытесняются фоновым планировщиком
 | Состояние на момент вызова                  | Результат                                     |
 |---------------------------------------------|----------------------------------------------|
 | Idle-слот в локальной очереди потока        | Переиспользован сразу, фабрика не вызвана.   |
-| Нет idle-слотов, но `size() < maxSize`      | Фабрика выполняется, чеканится новый слот.   |
-| `size() == maxSize` и все слоты `inUse`     | Блокирует до `timeout`, затем `TimeoutException`. |
+| Нет idle-слотов, но `count() < maxSize`     | Фабрика выполняется, чеканится новый слот.   |
+| `count() == maxSize` и все слоты `inUse`    | Блокирует до `timeout`, затем `TimeoutException`. |
 
 Передача `0.0` в `timeout` использует `$defaultAcquireTimeout` (по умолчанию 5 с). Чтобы ждать бесконечно, передайте очень большое число — намеренно нет «infinite»-сентинела, поскольку пул, дедлокающийся в вечном ожидании, диагностировать сложнее, чем тот, который таймаутится и бросает.
 
@@ -205,10 +205,11 @@ Idle-слоты вытесняются фоновым планировщиком
 
 Полную экскурсию см. в [Shared Observability](../operations/shared-observability.md). Краткие отсылки:
 
-- `GET /__ox_shared/entry?id=N` показывает `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_timeout_ms }`.
+- `GET /__ox_shared/entry?id=N` показывает `{ type: "Pool", count, size, in_use, idle, waiting, max_size, idle_timeout_ms }` — `size` устаревший alias `count`.
 - `GET /__ox_shared/summary` считает экземпляры Pool и агрегированные `waiting_total`, `evicted_total`.
 - Prometheus-метрики per pool:
-  - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, всего слотов.
+  - `oxphp_shared_pool_count{pool_id="…"}`           — gauge, всего слотов.
+  - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, **устаревший alias** `_count`; будет удалён в одном из будущих релизов.
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.
   - `oxphp_shared_pool_idle{pool_id="…"}`            — gauge.
   - `oxphp_shared_pool_waiting{pool_id="…"}`         — gauge, захваты в очереди.

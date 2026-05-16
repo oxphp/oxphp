@@ -282,7 +282,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             handle.type_tag = SharedType::Flag as u8;
             Ok(())
         })
-        .method("test")
+        .method("isSet")
         .returns(PhpType::Bool)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;

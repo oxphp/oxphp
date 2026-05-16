@@ -23,7 +23,7 @@ A Pool gives each PHP worker thread its own lane of ready-to-use resources, enfo
 ```php
 namespace OxPHP\Shared;
 
-final class Pool implements Shareable
+final class Pool implements Shareable, \Countable
 {
     public function __construct(
         callable  $factory,
@@ -37,7 +37,7 @@ final class Pool implements Shareable
     public function release(Pool\Handle $handle): void;
     public function with(callable $body, float $timeout = 0.0): mixed;
 
-    public function size(): int;
+    public function count(): int;
     public function inUse(): int;
     public function idle(): int;
     public function waiting(): int;
@@ -60,7 +60,7 @@ final class Handle
 | `acquire`      | `Handle` | Check out a resource; blocks up to `$timeout`. `0.0` uses default. |
 | `release`      | void     | Return a handle to the pool. Idempotent within the handle's lifetime; double-release is rejected. |
 | `with`         | mixed    | Scope-guarded acquire + release around a closure. The closure's return value is passed through. Preferred over manual `acquire`/`release`. |
-| `size`         | int      | Current slot count (in-use + idle) across all threads.            |
+| `count`        | int      | Current slot count (in-use + idle) across all threads. `Countable` — `count($pool)` works directly. |
 | `inUse`        | int      | Slots currently handed out.                                       |
 | `idle`         | int      | Slots sitting in per-thread queues.                               |
 | `waiting`      | int      | Acquires parked waiting for a free slot.                          |
@@ -184,8 +184,8 @@ Tune `idleTimeout` to the cost of recreation:
 | State at call time                          | Result                                       |
 |---------------------------------------------|----------------------------------------------|
 | Idle slot in the local thread's queue       | Reused immediately, factory is not called.   |
-| No idle slot, but `size() < maxSize`        | Factory runs, a new slot is minted.          |
-| `size() == maxSize` and all slots `inUse`   | Block up to `timeout`, then `TimeoutException`. |
+| No idle slot, but `count() < maxSize`       | Factory runs, a new slot is minted.          |
+| `count() == maxSize` and all slots `inUse`  | Block up to `timeout`, then `TimeoutException`. |
 
 Passing `0.0` for `timeout` uses `$defaultAcquireTimeout` (default 5 s). To wait indefinitely, pass a very large number — there is deliberately no "infinite" sentinel, since a pool that deadlocks waiting forever is harder to diagnose than one that times out and throws.
 
@@ -205,10 +205,11 @@ Exceptions thrown inside the factory propagate to the `acquire()` caller unchang
 
 See [Shared Observability](../operations/shared-observability.md) for the full tour. Quick references:
 
-- `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_timeout_ms }`.
+- `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", count, size, in_use, idle, waiting, max_size, idle_timeout_ms }` — `size` is a deprecated alias of `count`.
 - `GET /__ox_shared/summary` counts Pool instances and aggregate `waiting_total`, `evicted_total`.
 - Prometheus metrics per pool:
-  - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, total slots.
+  - `oxphp_shared_pool_count{pool_id="…"}`           — gauge, total slots.
+  - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, **deprecated alias** of `_count`; removed in a future release.
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.
   - `oxphp_shared_pool_idle{pool_id="…"}`            — gauge.
   - `oxphp_shared_pool_waiting{pool_id="…"}`         — gauge, queued acquires.

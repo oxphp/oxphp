@@ -31,7 +31,7 @@ $id2 = $h2->get()->id;
 $pool->release($h1);
 $pool->release($h2);
 
-if ($pool->size() !== 2) { echo "FAIL: expected size 2, got " . $pool->size() . "\n"; exit; }
+if ($pool->count() !== 2) { echo "FAIL: expected size 2, got " . $pool->count() . "\n"; exit; }
 if ($pool->idle() !== 2) { echo "FAIL: expected idle 2, got " . $pool->idle() . "\n"; exit; }
 if (count($destroyed) !== 0) { echo "FAIL: destroy must not run before drop\n"; exit; }
 

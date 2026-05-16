@@ -74,7 +74,7 @@ oxphp_worker(function () use ($pools, $destroyed, $count) {
     printf(
         "ok pool=%d size=%d in_use=%d idle=%d waiting=%d destroyed=%d\n",
         $which,
-        $pool->size(),
+        $pool->count(),
         $pool->inUse(),
         $pool->idle(),
         $pool->waiting(),

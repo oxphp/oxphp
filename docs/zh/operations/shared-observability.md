@@ -163,11 +163,16 @@ JSON 端点和 `/metrics` 都会在该地址可达。无需额外配置。
 
 | 指标                                              | 类型    | 标签           |
 |--------------------------------------------------|---------|---------------|
-| `oxphp_shared_channel_pending`                   | gauge   | `channel_id`  |
+| `oxphp_shared_channel_count`                     | gauge   | `channel_id`  |
+| `oxphp_shared_channel_pending` *(已弃用)*        | gauge   | `channel_id`  |
 | `oxphp_shared_channel_senders_blocked`           | gauge   | `channel_id`  |
 | `oxphp_shared_channel_receivers_blocked`         | gauge   | `channel_id`  |
 | `oxphp_shared_channel_items_sent_total`          | counter | `channel_id`  |
 | `oxphp_shared_channel_items_dropped_total`       | counter | `channel_id`  |
+
+`oxphp_shared_channel_pending` 是 `oxphp_shared_channel_count` 的旧
+拼写；在 deprecation 周期内两条序列携带相同的值，并在未来某个发布
+移除别名时分离。新仪表盘请配置 `_count`。
 
 ### Map
 
@@ -181,13 +186,18 @@ JSON 端点和 `/metrics` 都会在该地址可达。无需额外配置。
 
 | 指标                                        | 类型       | 标签                                  |
 |---------------------------------------------|-----------|---------------------------------------|
-| `oxphp_shared_pool_size`                    | gauge     | `pool_id`                             |
+| `oxphp_shared_pool_count`                   | gauge     | `pool_id`                             |
+| `oxphp_shared_pool_size` *(已弃用)*         | gauge     | `pool_id`                             |
 | `oxphp_shared_pool_in_use`                  | gauge     | `pool_id`                             |
 | `oxphp_shared_pool_idle`                    | gauge     | `pool_id`                             |
 | `oxphp_shared_pool_waiting`                 | gauge     | `pool_id`                             |
 | `oxphp_shared_pool_acquire_total`           | counter   | `pool_id`                             |
 | `oxphp_shared_pool_evicted_total`           | counter   | `pool_id`, `reason`                   |
 | `oxphp_shared_pool_wait_seconds`            | histogram | `pool_id`                             |
+
+`oxphp_shared_pool_size` 是 `oxphp_shared_pool_count` 的旧拼写；在
+deprecation 周期内两条序列携带相同的值，并在未来某个发布移除别名
+时分离。新仪表盘请配置 `_count`。
 
 `oxphp_shared_pool_evicted_total` 标签：`reason=idle_timeout | manual | shutdown | dead_owner`。`dead_owner` 标签计数混沌回收时的事件。
 
@@ -201,7 +211,7 @@ JSON 端点和 `/metrics` 都会在该地址可达。无需额外配置。
 
 ### Pool 已饱和（429 与重试相继失败）
 
-症状：HTTP 调用方看到超时，`oxphp_shared_pool_waiting` 攀升，`oxphp_shared_pool_size` 钉在 `maxSize`。
+症状：HTTP 调用方看到超时，`oxphp_shared_pool_waiting` 攀升，`oxphp_shared_pool_count` 钉在 `maxSize`。
 
 检查：
 

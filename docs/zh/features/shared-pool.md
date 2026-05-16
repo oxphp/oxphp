@@ -23,7 +23,7 @@ Pool 给每个 PHP 工作线程一条专属的就绪资源车道，强制整个�
 ```php
 namespace OxPHP\Shared;
 
-final class Pool implements Shareable
+final class Pool implements Shareable, \Countable
 {
     public function __construct(
         callable  $factory,
@@ -37,7 +37,7 @@ final class Pool implements Shareable
     public function release(Pool\Handle $handle): void;
     public function with(callable $body, float $timeout = 0.0): mixed;
 
-    public function size(): int;
+    public function count(): int;
     public function inUse(): int;
     public function idle(): int;
     public function waiting(): int;
@@ -60,7 +60,7 @@ final class Handle
 | `acquire`      | `Handle`  | 取出一个资源；最多阻塞 `$timeout`。`0.0` 使用默认值。             |
 | `release`      | void      | 把句柄归还给池。在句柄生命周期内幂等；重复释放会被拒绝。          |
 | `with`         | mixed     | 围绕闭包做作用域守护的获取 + 释放。闭包返回值会被透传。优先于手动 `acquire`/`release`。 |
-| `size`         | int       | 当前所有线程上的槽数（在用 + 空闲）。                             |
+| `count`        | int       | 当前所有线程上的槽数（在用 + 空闲）。实现 `Countable` — 可直接使用 `count($pool)`。 |
 | `inUse`        | int       | 当前已被取出的槽数。                                              |
 | `idle`         | int       | 在按线程队列中坐等的槽数。                                        |
 | `waiting`      | int       | 因等待空闲槽而被挂起的获取数。                                    |
@@ -184,8 +184,8 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 | 调用时状态                                  | 结果                                         |
 |---------------------------------------------|----------------------------------------------|
 | 本线程队列中存在空闲槽                      | 立即复用，工厂不会被调用。                   |
-| 无空闲槽，但 `size() < maxSize`             | 工厂运行，铸造新槽。                         |
-| `size() == maxSize` 且所有槽 `inUse`        | 最多阻塞 `timeout`，随后抛 `TimeoutException`。 |
+| 无空闲槽，但 `count() < maxSize`            | 工厂运行，铸造新槽。                         |
+| `count() == maxSize` 且所有槽 `inUse`       | 最多阻塞 `timeout`，随后抛 `TimeoutException`。 |
 
 `timeout` 传 `0.0` 会使用 `$defaultAcquireTimeout`（默认 5 秒）。要无限等待，请传一个非常大的数字——故意没有「无限」哨兵值，因为永远死等的池比超时抛异常的池更难诊断。
 
@@ -205,10 +205,11 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 
 完整内容请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
 
-- `GET /__ox_shared/entry?id=N` 暴露 `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_timeout_ms }`。
+- `GET /__ox_shared/entry?id=N` 暴露 `{ type: "Pool", count, size, in_use, idle, waiting, max_size, idle_timeout_ms }` —— `size` 是 `count` 的已弃用别名。
 - `GET /__ox_shared/summary` 统计 Pool 实例和聚合的 `waiting_total`、`evicted_total`。
 - 每池 Prometheus 指标：
-  - `oxphp_shared_pool_size{pool_id="…"}`            —— 仪表，槽总数。
+  - `oxphp_shared_pool_count{pool_id="…"}`           —— 仪表，槽总数。
+  - `oxphp_shared_pool_size{pool_id="…"}`            —— 仪表，**已弃用别名** `_count`；将于未来某个发布移除。
   - `oxphp_shared_pool_in_use{pool_id="…"}`          —— 仪表。
   - `oxphp_shared_pool_idle{pool_id="…"}`            —— 仪表。
   - `oxphp_shared_pool_waiting{pool_id="…"}`         —— 仪表，排队的获取数。

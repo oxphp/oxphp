@@ -38,11 +38,11 @@ $hb = $poolB->acquire();
 $bTag = $hb->get()->tag;
 $poolB->release($hb);
 
-if ($poolA->size() !== 1 || $poolA->idle() !== 1) {
-    echo "FAIL: poolA bookkeeping: size=" . $poolA->size() . " idle=" . $poolA->idle() . "\n"; exit;
+if ($poolA->count() !== 1 || $poolA->idle() !== 1) {
+    echo "FAIL: poolA bookkeeping: size=" . $poolA->count() . " idle=" . $poolA->idle() . "\n"; exit;
 }
-if ($poolB->size() !== 1 || $poolB->idle() !== 1) {
-    echo "FAIL: poolB bookkeeping: size=" . $poolB->size() . " idle=" . $poolB->idle() . "\n"; exit;
+if ($poolB->count() !== 1 || $poolB->idle() !== 1) {
+    echo "FAIL: poolB bookkeeping: size=" . $poolB->count() . " idle=" . $poolB->idle() . "\n"; exit;
 }
 
 // Drop A only. destroy must fire for A's resource; B untouched.
@@ -51,7 +51,7 @@ unset($poolA);
 if (count($destroyedA) !== 1)       { echo "FAIL: A destroy count wrong: " . count($destroyedA) . "\n"; exit; }
 if ($destroyedA[0] !== $aTag)       { echo "FAIL: A destroyed wrong tag\n"; exit; }
 if (count($destroyedB) !== 0)       { echo "FAIL: B destroy must not fire from A drop\n"; exit; }
-if ($poolB->size() !== 1)           { echo "FAIL: poolB size must stay 1\n"; exit; }
+if ($poolB->count() !== 1)           { echo "FAIL: poolB size must stay 1\n"; exit; }
 
 // Now drop B.
 unset($poolB);

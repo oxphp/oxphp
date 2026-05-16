@@ -163,11 +163,17 @@ All metrics are exposed at `GET /metrics` alongside the core server metrics.
 
 | Metric                                           | Type    | Labels        |
 |--------------------------------------------------|---------|---------------|
-| `oxphp_shared_channel_pending`                   | gauge   | `channel_id`  |
+| `oxphp_shared_channel_count`                     | gauge   | `channel_id`  |
+| `oxphp_shared_channel_pending` *(deprecated)*    | gauge   | `channel_id`  |
 | `oxphp_shared_channel_senders_blocked`           | gauge   | `channel_id`  |
 | `oxphp_shared_channel_receivers_blocked`         | gauge   | `channel_id`  |
 | `oxphp_shared_channel_items_sent_total`          | counter | `channel_id`  |
 | `oxphp_shared_channel_items_dropped_total`       | counter | `channel_id`  |
+
+`oxphp_shared_channel_pending` is the legacy spelling of
+`oxphp_shared_channel_count`; both series carry the same value during
+the deprecation window and will diverge when the alias is removed in
+a future release. Wire new dashboards against `_count`.
 
 ### Map
 
@@ -181,13 +187,19 @@ All metrics are exposed at `GET /metrics` alongside the core server metrics.
 
 | Metric                                    | Type      | Labels                              |
 |-------------------------------------------|-----------|-------------------------------------|
-| `oxphp_shared_pool_size`                  | gauge     | `pool_id`                           |
+| `oxphp_shared_pool_count`                 | gauge     | `pool_id`                           |
+| `oxphp_shared_pool_size` *(deprecated)*   | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_in_use`                | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_idle`                  | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_waiting`               | gauge     | `pool_id`                           |
 | `oxphp_shared_pool_acquire_total`         | counter   | `pool_id`                           |
 | `oxphp_shared_pool_evicted_total`         | counter   | `pool_id`, `reason`                 |
 | `oxphp_shared_pool_wait_seconds`          | histogram | `pool_id`                           |
+
+`oxphp_shared_pool_size` is the legacy spelling of
+`oxphp_shared_pool_count`; both series carry the same value during
+the deprecation window and will diverge when the alias is removed in
+a future release. Wire new dashboards against `_count`.
 
 `oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | manual | shutdown | dead_owner`. The `dead_owner` label counts reclaim-on-panic events.
 
@@ -201,7 +213,7 @@ Per-instance counters, flags, onces, and mutexes do not ship individual metric s
 
 ### Pool is saturated (429s with retries failing)
 
-Symptoms: HTTP callers see timeouts, `oxphp_shared_pool_waiting` climbs, `oxphp_shared_pool_size` is pinned at `maxSize`.
+Symptoms: HTTP callers see timeouts, `oxphp_shared_pool_waiting` climbs, `oxphp_shared_pool_count` is pinned at `maxSize`.
 
 Check:
 

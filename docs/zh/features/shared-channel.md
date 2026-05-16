@@ -19,7 +19,7 @@ description: 跨 PHP 工作线程的有界 MPMC 通道，send 和 recv 感知 fi
 ```php
 namespace OxPHP\Shared;
 
-final class Channel implements Shareable
+final class Channel implements Shareable, \Countable
 {
     public function __construct(int $capacity);
 
@@ -31,7 +31,7 @@ final class Channel implements Shareable
 
     public function close(): void;
     public function isClosed(): bool;
-    public function pending(): int;
+    public function count(): int;
 
     public function sendMany(array $values, float $timeout = 0.0): int;
     public function recvMany(int $max, float $timeout = 0.0): array;
@@ -48,7 +48,7 @@ final class Channel implements Shareable
 | `tryRecv`     | 不等待拉取一个条目；为空时返回 `null`；已关闭且为空时抛异常。                        |
 | `close`       | 标记通道为已关闭。幂等。唤醒所有被阻塞的发送者/接收者。                              |
 | `isClosed`    | 报告通道是否已关闭。                                                                 |
-| `pending`     | 当前缓冲项数的参考值。对指标/背压检查有用。                                          |
+| `count`       | 当前缓冲项数的参考值。实现 `Countable` — 可直接使用 `count($ch)`。                  |
 | `sendMany`    | 推送数组条目；返回在满/关闭/超时前实际放入的数量。                                   |
 | `recvMany`    | 拉取最多 `$max` 个条目（`0` 表示不等待、排空当前缓冲）。                             |
 | `id`          | 注册表数字标识符；便于日志与可观测性关联。                                           |
@@ -187,12 +187,13 @@ $snapshot = $ch->recvMany(0);
 
 - **`GET /__ox_shared/summary`** 包含 `Channel` 分桶，含 count、bytes、ops 和 `pending_total`。
 - **`GET /__ox_shared/entries?type=Channel`** 列出通道条目及其注册表 ID。
-- **`GET /__ox_shared/entries/:id`** 返回按通道的状态：`capacity`、`pending`、`closed`、`senders_blocked`、`receivers_blocked`。
+- **`GET /__ox_shared/entries/:id`** 返回按通道的状态：`capacity`、`count`、`pending`（已弃用别名 `count`）、`closed`、`senders_blocked`、`receivers_blocked`。
 
 `/metrics` 上的 Prometheus 曝露：
 
 ```text
-oxphp_shared_channel_pending{channel_id="<id>"}             gauge
+oxphp_shared_channel_count{channel_id="<id>"}               gauge
+oxphp_shared_channel_pending{channel_id="<id>"}             gauge（已弃用，_count 的别名）
 oxphp_shared_channel_senders_blocked{channel_id="<id>"}     gauge
 oxphp_shared_channel_receivers_blocked{channel_id="<id>"}   gauge
 oxphp_shared_channel_items_sent_total{channel_id="<id>"}    counter

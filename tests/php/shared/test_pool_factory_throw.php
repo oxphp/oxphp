@@ -39,7 +39,7 @@ if ($caught->getMessage() !== 'factory-bomb #1') {
     echo "FAIL: wrong message: " . $caught->getMessage() . "\n"; exit;
 }
 
-if ($pool->size() !== 0)   { echo "FAIL: size must refund to 0, got " . $pool->size() . "\n"; exit; }
+if ($pool->count() !== 0)   { echo "FAIL: size must refund to 0, got " . $pool->count() . "\n"; exit; }
 if ($pool->inUse() !== 0)  { echo "FAIL: inUse must refund to 0, got " . $pool->inUse() . "\n"; exit; }
 if ($pool->idle() !== 0)   { echo "FAIL: idle must stay 0\n"; exit; }
 

@@ -1103,7 +1103,7 @@ namespace OxPHP\Shared {
         public function __construct(bool $initial = false) {}
 
         /** Current value. */
-        public function test(): bool {}
+        public function isSet(): bool {}
 
         /** Atomically set to true, returning the previous value. */
         public function set(): bool {}
@@ -1221,7 +1221,7 @@ namespace OxPHP\Shared {
      *
      * @link docs/en/features/shared-channel.md
      */
-    final class Channel implements Shareable
+    final class Channel implements Shareable, \Countable
     {
         /** @param int $capacity Maximum queued values (>= 1). */
         public function __construct(int $capacity) {}
@@ -1243,7 +1243,7 @@ namespace OxPHP\Shared {
         /**
          * Non-blocking receive. Returns null if the channel is empty (open),
          * or throws ClosedException if the channel is closed and drained.
-         * Use `pending()` to distinguish an empty channel from a stored `null` value.
+         * Use `count()` to distinguish an empty channel from a stored `null` value.
          *
          * @throws ClosedException If the channel was closed and drained.
          */
@@ -1266,8 +1266,8 @@ namespace OxPHP\Shared {
         /** Whether the channel is closed. */
         public function isClosed(): bool {}
 
-        /** Current number of queued values. */
-        public function pending(): int {}
+        /** Current number of queued values. Implements `Countable`. */
+        public function count(): int {}
 
         /**
          * Batched send. Returns the number of values actually accepted
@@ -1305,7 +1305,7 @@ namespace OxPHP\Shared {
      *
      * @link docs/en/features/shared-map.md
      */
-    final class Map implements Shareable
+    final class Map implements Shareable, \Countable
     {
         /**
          * @param int|null $maxEntries Per-instance size cap, or null for unlimited
@@ -1335,7 +1335,7 @@ namespace OxPHP\Shared {
         /** Remove all entries. */
         public function clear(): int {}
 
-        /** Number of entries currently stored. */
+        /** Number of entries currently stored. Implements `Countable`. */
         public function count(): int {}
 
         /**
@@ -1352,7 +1352,7 @@ namespace OxPHP\Shared {
          * Set `$value` iff the key was absent. Returns true on insert,
          * false if the key already existed.
          */
-        public function setIfAbsent(string $key, mixed $value): bool {}
+        public function trySet(string $key, mixed $value): bool {}
 
         /**
          * Atomically update a value with `$fn(mixed $old): mixed`. Returns
@@ -1411,7 +1411,7 @@ namespace OxPHP\Shared {
      *
      * @link docs/en/features/shared-pool.md
      */
-    final class Pool implements Shareable
+    final class Pool implements Shareable, \Countable
     {
         /**
          * @param callable      $factory     Called to create a pooled resource. Receives no arguments.
@@ -1452,8 +1452,8 @@ namespace OxPHP\Shared {
         /** Force-evict idle slots now. Returns the number of slots evicted. */
         public function evict(): int {}
 
-        /** Total live slots (in-use + idle). */
-        public function size(): int {}
+        /** Total live slots (in-use + idle). Implements `Countable`. */
+        public function count(): int {}
 
         /** Slots currently checked out by callers. */
         public function inUse(): int {}

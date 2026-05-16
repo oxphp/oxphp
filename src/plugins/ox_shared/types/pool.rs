@@ -569,7 +569,7 @@ impl PoolInner {
     // ── observability helpers ─────────────────────────────────────────
 
     /// Authoritative capacity gauge: `in_use + idle`. This is what
-    /// the PHP `size()` method returns.
+    /// the PHP `count()` method returns.
     pub fn size(&self) -> u64 {
         self.size.load(Ordering::Acquire)
     }
@@ -1307,7 +1307,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_stats(
     })
 }
 
-/// `$pool->size()` — `in_use + idle` across every thread.
+/// `$pool->count()` — `in_use + idle` across every thread.
 ///
 /// # Safety
 /// `out_size` must be valid for a `u64` write.
@@ -1518,6 +1518,7 @@ fn handle_get(call: &mut NativeCall) -> Result<(), PhpError> {
 fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Pool")
         .implements("OxPHP\\Shared\\Shareable")
+        .implements("Countable")
         .with_storage(|| crate::plugins::ox_shared::handle::SharedHandle::new(SharedType::Pool))
         .magic(MagicMethod::Clone)
         .handler(|_call| Err(throw_clone_forbidden()))
@@ -1550,8 +1551,8 @@ fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .method("evict")
         .returns(PhpType::Int)
         .handler(pool_evict)
-        // size(): int
-        .method("size")
+        // count(): int — total live slots (in-use + idle), implements Countable
+        .method("count")
         .returns(PhpType::Int)
         .handler(pool_size)
         // inUse(): int
@@ -1759,7 +1760,7 @@ fn pool_size(call: &mut NativeCall) -> Result<(), PhpError> {
     let mut size: u64 = 0;
     let rc = unsafe { oxphp_shared_pool_size(entry_ptr, &mut size) };
     if rc != 0 {
-        return Err(pool_rc_to_phperr(rc, "Shared\\Pool::size"));
+        return Err(pool_rc_to_phperr(rc, "Shared\\Pool::count"));
     }
     call.ret_long(size as i64);
     Ok(())
