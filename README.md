@@ -185,7 +185,7 @@ Full guide: [Profiling](docs/en/features/profiling.md).
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/en/features/rate-limiting.md)
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/en/features/error-pages.md)
 - **Graceful shutdown** — in-flight requests drain within `DRAIN_TIMEOUT_SECONDS` on SIGTERM/SIGINT — see [Graceful shutdown](docs/en/operations/graceful-shutdown.md)
-- **Path traversal protection** with symlink escape detection
+- **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/en/security/symlink-allow-paths.md)
 - **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/en/security/trusted-proxies.md)
 - **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/en/security/dot-path-blocking.md)
 - **Non-root container** execution as www-data (UID 82)
@@ -331,6 +331,7 @@ All settings are via environment variables — no config files required.
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |
 | `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
+| `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated paths (absolute or relative to `DOCUMENT_ROOT`) that symlinks may resolve to. Default empty = symlink targets must stay inside `DOCUMENT_ROOT`. See [Symlink allow paths](docs/en/security/symlink-allow-paths.md) |
 | `PHP_DENY_PATHS` | *(unset)* | Glob patterns (files or directories) where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**,/admin/legacy.php` |
 | `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_PATHS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
 

@@ -69,6 +69,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [点路径拦截](security/dot-path-blocking.md) — 自动拦截隐藏文件和目录（`.env`、`.git/`、`.htaccess`）
 - [受信任代理](security/trusted-proxies.md) — 从 `Forwarded`（RFC 7239）和 `X-Forwarded-*` 头中提取真实客户端 IP、协议和主机名
 - [PHP 执行拒绝名单](security/php-deny.md) — 阻止可写公共路径（如 `/uploads/**`，或具体的遗留脚本）的 `.php` 执行，抵御遗留应用的上传 shell 攻击
+- [符号链接允许路径](security/symlink-allow-paths.md) — 针对 `DOCUMENT_ROOT` 外符号链接目标的 opt-in 允许列表；在不削弱默认符号链接逃逸防护的前提下支持 Laravel 风格 `storage:link` 和共享资源卷
 
 ## PHP
 

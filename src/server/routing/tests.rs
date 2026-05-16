@@ -19,10 +19,32 @@ fn setup_test_dir() -> TempDir {
     dir
 }
 
+/// Construct a `RouteConfig` for tests with a guaranteed-empty
+/// `SYMLINK_ALLOW_PATHS`. Routing tests that don't care about the
+/// allow-list want to see strict default symlink-escape behaviour,
+/// regardless of whether a concurrent test in the `symlink_allow`
+/// module has the env var set inside its `with_env` window.
+///
+/// We acquire the shared `ENV_LOCK`, snapshot+clear the env var,
+/// construct, then restore — same pattern as `php_deny::tests::with_env`.
+/// Tests that *do* need the env var set (e.g.
+/// `test_symlink_to_allowed_path_resolves`) build `RouteConfig` directly
+/// while holding the lock themselves; calling this helper while already
+/// holding the lock would deadlock.
 fn make_config(dir: &Path, entry_file: Option<&str>) -> RouteConfig {
+    let _lock = crate::config::symlink_allow::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
+    std::env::remove_var("SYMLINK_ALLOW_PATHS");
     let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.to_path_buf());
     let entry_path = entry_file.map(|name| dir.join(name));
-    RouteConfig::new(&config, entry_path.as_deref(), false)
+    let rc = RouteConfig::new(&config, entry_path.as_deref(), false);
+    match prev {
+        Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
+        None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
+    }
+    rc
 }
 
 /// Test helper that mirrors the dot-path screen inside `resolve_request`:
@@ -554,6 +576,40 @@ async fn test_symlink_escape_cached_on_second_request() {
     let escaped_path = dir.path().join("escape/secret.txt");
     let cached = cache.get_canonical(&escaped_path.to_string_lossy());
     assert!(cached.is_some(), "Canonical path should be cached");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_symlink_to_allowed_path_resolves() {
+    use crate::config::symlink_allow::tests::{non_blacklisted_tempdir, EnvGuard, ENV_LOCK};
+    use std::os::unix::fs::symlink;
+
+    let dir = setup_test_dir();
+    // Use non_blacklisted_tempdir() so the symlink target's canonical path
+    // doesn't land under a BLACKLIST_PREFIXES entry on Linux CI.
+    let target = non_blacklisted_tempdir();
+    let target_canonical = std::fs::canonicalize(target.path()).unwrap();
+    fs::write(target_canonical.join("asset.txt"), "allowed asset").unwrap();
+    symlink(target.path(), dir.path().join("assets")).unwrap();
+
+    // Hold ENV_LOCK + EnvGuard only across RouteConfig::new — it captures
+    // the allow-list into the struct, after which env mutation is irrelevant.
+    // Releasing before the .await avoids clippy::await_holding_lock on the
+    // std::sync::Mutex guard. Build RouteConfig directly because make_config()
+    // would re-acquire ENV_LOCK and clear SYMLINK_ALLOW_PATHS.
+    let rc = {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::set("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
+        let server_config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
+        RouteConfig::new(&server_config, None, false)
+    };
+    let cache = Arc::new(FileCache::new(200));
+    let res = rc.resolve_request("/assets/asset.txt", &cache).await;
+    assert!(
+        matches!(*res, RouteResult::Serve(_)),
+        "expected Serve for allow-listed symlink, got {:?}",
+        *res
+    );
 }
 
 // --- Route cache tests ---

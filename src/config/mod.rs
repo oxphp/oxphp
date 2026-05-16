@@ -2,6 +2,7 @@ mod env_bool;
 mod php_deny;
 mod proxy;
 mod server;
+pub(crate) mod symlink_allow;
 mod workers;
 
 use std::fmt;
@@ -13,6 +14,7 @@ pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
 pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny};
 pub use proxy::TrustedProxyConfig;
 pub use server::ServerConfig;
+pub use symlink_allow::SymlinkAllowList;
 pub use workers::{parse_php_workers, WorkerMode};
 
 /// Access log verbosity level.
