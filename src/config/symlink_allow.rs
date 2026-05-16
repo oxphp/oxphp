@@ -15,14 +15,10 @@ const BLACKLIST_EXACT: &[&str] = &[
 
 /// Prefixes — a path whose canonical starts with `<prefix>/` is forbidden.
 /// Note `/var` and `/home` are intentionally not here: they are exact-only
-/// (admin may want `/var/www/...`, `/home/{current_user}/...`).
+/// (admin may want `/var/www/...` or `/home/<any>/...`).
 const BLACKLIST_PREFIXES: &[&str] = &["/etc", "/proc", "/sys", "/dev", "/tmp", "/root", "/usr"];
 
-fn reject_blacklist(
-    path: &Path,
-    current_user: Option<&str>,
-    raw_entry: &str,
-) -> Result<(), BoxError> {
+fn reject_blacklist(path: &Path, raw_entry: &str) -> Result<(), BoxError> {
     let path_str = path.to_string_lossy();
 
     for exact in BLACKLIST_EXACT {
@@ -44,23 +40,6 @@ fn reject_blacklist(
         }
     }
 
-    if let Some(rest) = path_str.strip_prefix("/home/") {
-        let first_component = rest.split('/').next().unwrap_or("");
-        if first_component.is_empty() {
-            return Err(format!(
-                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} which is /home itself (blacklist)"
-            )
-            .into());
-        }
-        let allowed_user = current_user.unwrap_or("");
-        if allowed_user.is_empty() || first_component != allowed_user {
-            return Err(format!(
-                "SYMLINK_ALLOW_PATHS entry {raw_entry:?} matches {path_str:?} under another user's home directory (blacklist)"
-            )
-            .into());
-        }
-    }
-
     Ok(())
 }
 
@@ -71,10 +50,6 @@ pub struct SymlinkAllowList {
 
 impl SymlinkAllowList {
     pub fn from_env(canonical_root: &Path) -> Result<Self, BoxError> {
-        Self::from_env_inner(canonical_root, current_username().as_deref())
-    }
-
-    fn from_env_inner(canonical_root: &Path, current_user: Option<&str>) -> Result<Self, BoxError> {
         let raw = std::env::var("SYMLINK_ALLOW_PATHS").unwrap_or_default();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -92,7 +67,7 @@ impl SymlinkAllowList {
                 // Required because on macOS `/etc`, `/tmp`, `/var` etc. are
                 // symlinks into `/private/...`, so a post-canonicalize check
                 // alone would let `/tmp` slip through.
-                reject_blacklist(raw_path, current_user, raw_entry)?;
+                reject_blacklist(raw_path, raw_entry)?;
                 PathBuf::from(raw_entry)
             } else {
                 canonical_root.join(raw_entry)
@@ -103,7 +78,7 @@ impl SymlinkAllowList {
             // Defense-in-depth: catch symlink-target escapes (relative entry
             // that lands in a blacklisted dir, or an absolute that points
             // via symlink to a blacklisted canonical form).
-            reject_blacklist(&canonical, current_user, raw_entry)?;
+            reject_blacklist(&canonical, raw_entry)?;
             if !entries.contains(&canonical) {
                 tracing::info!(
                     allow_path = %canonical.display(),
@@ -123,47 +98,6 @@ impl SymlinkAllowList {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
-    }
-
-    /// Test-only constructor that lets a test inject the "current user"
-    /// instead of resolving it via libc. Not part of the public API.
-    #[cfg(test)]
-    pub(crate) fn from_env_with_user(
-        canonical_root: &Path,
-        current_user: Option<&str>,
-    ) -> Result<Self, BoxError> {
-        Self::from_env_inner(canonical_root, current_user)
-    }
-}
-
-fn current_username() -> Option<String> {
-    use std::ffi::CStr;
-    use std::mem::MaybeUninit;
-
-    let mut pwd: MaybeUninit<libc::passwd> = MaybeUninit::uninit();
-    let mut buf = [0u8; 1024];
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-
-    let rc = unsafe {
-        libc::getpwuid_r(
-            libc::geteuid(),
-            pwd.as_mut_ptr(),
-            buf.as_mut_ptr() as *mut libc::c_char,
-            buf.len(),
-            &mut result,
-        )
-    };
-
-    if rc != 0 || result.is_null() {
-        return None;
-    }
-
-    unsafe {
-        let pwd = pwd.assume_init();
-        if pwd.pw_name.is_null() {
-            return None;
-        }
-        CStr::from_ptr(pwd.pw_name).to_str().ok().map(String::from)
     }
 }
 
@@ -294,63 +228,48 @@ pub(crate) mod tests {
         }
     }
 
-    fn first_home_dir() -> Option<std::path::PathBuf> {
-        std::fs::read_dir("/home")
-            .ok()?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .find(|p| p.is_dir())
-    }
-
     #[test]
-    fn home_other_user_rejected() {
-        let Some(some_home) = first_home_dir() else {
+    fn home_subdirectory_accepted() {
+        // /home itself stays in the exact blacklist, but /home/<anyone>/...
+        // is allowed (no per-user restriction). Use a tempdir under /home
+        // when /home is writable; otherwise fall back to any existing
+        // /home/<X> entry; otherwise skip.
+        let candidate: Option<std::path::PathBuf> = if std::path::Path::new("/home").is_dir() {
+            // Try to use the first existing /home/<X> dir.
+            std::fs::read_dir("/home")
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .find(|p| p.is_dir())
+        } else {
+            None
+        };
+        let Some(home_sub) = candidate else {
             return;
         };
-        let canonical = std::fs::canonicalize(&some_home).unwrap();
+        let canonical = std::fs::canonicalize(&home_sub).unwrap();
         with_env(Some(canonical.to_str().unwrap()), || {
             let root = TempDir::new().unwrap();
             let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-            let err = SymlinkAllowList::from_env_with_user(
-                &canonical_root,
-                Some("__oxphp_sentinel_user__"),
-            )
-            .expect_err("other user's home must be rejected");
-            assert!(
-                err.to_string().contains("home"),
-                "error should mention home, got: {err}"
-            );
-        });
-    }
-
-    #[test]
-    fn home_current_user_accepted() {
-        let Some(some_home) = first_home_dir() else {
-            return;
-        };
-        let canonical = std::fs::canonicalize(&some_home).unwrap();
-        let user = canonical.file_name().unwrap().to_str().unwrap().to_string();
-        with_env(Some(canonical.to_str().unwrap()), || {
-            let root = TempDir::new().unwrap();
-            let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-            let list = SymlinkAllowList::from_env_with_user(&canonical_root, Some(&user))
-                .expect("matching user must be accepted");
+            let list =
+                SymlinkAllowList::from_env(&canonical_root).expect("/home/<any> must be accepted");
             assert!(list.allows(&canonical));
         });
     }
 
     #[test]
-    fn home_unknown_user_rejects_all_home_entries() {
-        let Some(some_home) = first_home_dir() else {
+    fn bare_home_rejected() {
+        if !std::path::Path::new("/home").is_dir() {
             return;
-        };
-        let canonical = std::fs::canonicalize(&some_home).unwrap();
-        with_env(Some(canonical.to_str().unwrap()), || {
+        }
+        with_env(Some("/home"), || {
             let root = TempDir::new().unwrap();
             let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-            let err = SymlinkAllowList::from_env_with_user(&canonical_root, None)
-                .expect_err("unknown user must reject all /home/*");
-            assert!(err.to_string().contains("home"));
+            let err = SymlinkAllowList::from_env(&canonical_root)
+                .expect_err("/home itself must be rejected");
+            assert!(err.to_string().contains("blacklist"));
         });
     }
 

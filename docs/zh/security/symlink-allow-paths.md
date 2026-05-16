@@ -68,13 +68,7 @@ SYMLINK_ALLOW_PATHS=../storage/app/public
 /etc   /proc   /sys   /dev   /tmp   /root   /usr
 ```
 
-注意 `/var` 和 `/home` 只在精确匹配时被拒 — `/var/www/storage` 或 `/var/lib/myapp/uploads` 可能是合理的管理员选择。每个条目检查两次：一次针对管理员输入的原始路径（防止 macOS 风格的 `/etc -> /private/etc` 通过 `realpath` 洗掉黑名单），一次针对规范化后的形式（对符号链接目标逃逸的纵深防御）。
-
-### `/home/{user}` 规则
-
-`/home/X` 下的条目仅当 `X` 等于进程的有效用户名（通过 `geteuid(2)` + `getpwuid_r(3)` 解析）时才被接受。其他 `/home/X` 都被拒。若用户名无法解析（被精简的容器没有 `/etc/passwd`），所有 `/home/*` 条目都被拒 — fail-closed。
-
-在以 `root`、`www-data` 或 `nobody` 运行的生产容器中，这个规则通常会屏蔽所有 `/home/*` 条目，这就是预期效果。改用 `/opt/...`、`/var/lib/...` 或项目根下的路径。
+注意 `/var` 和 `/home` 只在精确匹配时被拒 — 裸 `/home` 会被拒绝，但 `/home/<任何>/...` 是被允许的，与 `/var/www/storage` 或 `/var/lib/myapp/uploads` 同理。每个条目检查两次：一次针对管理员输入的原始路径（防止 macOS 风格的 `/etc -> /private/etc` 通过 `realpath` 洗掉黑名单），一次针对规范化后的形式（对符号链接目标逃逸的纵深防御）。
 
 ## 启动失败模式
 

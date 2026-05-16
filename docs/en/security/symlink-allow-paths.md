@@ -68,13 +68,7 @@ A small set of paths can never appear in `SYMLINK_ALLOW_PATHS` — typos and mis
 /etc   /proc   /sys   /dev   /tmp   /root   /usr
 ```
 
-Note that `/var` and `/home` are exact-only — you may legitimately want `/var/www/storage` or `/var/lib/myapp/uploads`. Entries are checked twice: once against the raw admin-supplied path (so that macOS-style `/etc -> /private/etc` cannot launder a blacklisted path through `realpath`), once against the canonical form (defense-in-depth for symlink-target escapes).
-
-### `/home/{user}` Rule
-
-Entries under `/home/X` are accepted only when `X` matches the effective process username (resolved via `geteuid(2)` + `getpwuid_r(3)`). Any other `/home/X` is refused. If the username cannot be resolved (stripped container without `/etc/passwd`), all `/home/*` entries are refused — failing closed.
-
-In production containers running as `root`, `www-data`, or `nobody`, this typically blocks every `/home/*` entry, which is the intended outcome. Use `/opt/...`, `/var/lib/...`, or paths under your project root instead.
+Note that `/var` and `/home` are exact-only — bare `/home` is rejected, but `/home/<any>/...` is allowed, just as `/var/www/storage` or `/var/lib/myapp/uploads` are allowed. Entries are checked twice: once against the raw admin-supplied path (so that macOS-style `/etc -> /private/etc` cannot launder a blacklisted path through `realpath`), once against the canonical form (defense-in-depth for symlink-target escapes).
 
 ## Failure Modes
 
