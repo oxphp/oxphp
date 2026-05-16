@@ -59,7 +59,7 @@ SYMLINK_ALLOW_PATHS=../storage/app/public
 **精确匹配禁止：**
 
 ```
-/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr
+/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr   /srv
 ```
 
 **作为前缀禁止**（条目位于这些目录下）：
@@ -68,7 +68,9 @@ SYMLINK_ALLOW_PATHS=../storage/app/public
 /etc   /proc   /sys   /dev   /tmp   /root   /usr
 ```
 
-注意 `/var` 和 `/home` 只在精确匹配时被拒 — 裸 `/home` 会被拒绝，但 `/home/<任何>/...` 是被允许的，与 `/var/www/storage` 或 `/var/lib/myapp/uploads` 同理。每个条目检查两次：一次针对管理员输入的原始路径（防止 macOS 风格的 `/etc -> /private/etc` 通过 `realpath` 洗掉黑名单），一次针对规范化后的形式（对符号链接目标逃逸的纵深防御）。
+注意 `/var`、`/home` 和 `/srv` 只在精确匹配时被拒 — 裸 `/srv` 会被拒绝，但 `/srv/myapp/storage` 是被允许的，与 `/var/www/storage` 或 `/home/<任何>/...` 同理。每个条目检查两次：一次针对管理员输入的原始路径（防止 macOS 风格的 `/etc -> /private/etc` 通过 `realpath` 洗掉黑名单），一次针对规范化后的形式（对符号链接目标逃逸的纵深防御）。
+
+黑名单本身是硬编码的 — 没有可扩展它的环境变量。默认值是抓住"输错路径"级错误的保守最低限度；需要更严格策略的管理员应在外层叠加（文件系统权限、容器挂载限制、AppArmor/SELinux 策略）。
 
 ## 启动失败模式
 

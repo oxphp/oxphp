@@ -59,7 +59,7 @@ A small set of paths can never appear in `SYMLINK_ALLOW_PATHS` — typos and mis
 **Forbidden as exact match:**
 
 ```
-/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr
+/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr   /srv
 ```
 
 **Forbidden as prefix** (entry lies under one of these directories):
@@ -68,7 +68,9 @@ A small set of paths can never appear in `SYMLINK_ALLOW_PATHS` — typos and mis
 /etc   /proc   /sys   /dev   /tmp   /root   /usr
 ```
 
-Note that `/var` and `/home` are exact-only — bare `/home` is rejected, but `/home/<any>/...` is allowed, just as `/var/www/storage` or `/var/lib/myapp/uploads` are allowed. Entries are checked twice: once against the raw admin-supplied path (so that macOS-style `/etc -> /private/etc` cannot launder a blacklisted path through `realpath`), once against the canonical form (defense-in-depth for symlink-target escapes).
+Note that `/var`, `/home`, and `/srv` are exact-only — bare `/srv` is rejected, but `/srv/myapp/storage` is allowed, just as `/var/www/storage` and `/home/<any>/...` are allowed. Entries are checked twice: once against the raw admin-supplied path (so that macOS-style `/etc -> /private/etc` cannot launder a blacklisted path through `realpath`), once against the canonical form (defense-in-depth for symlink-target escapes).
+
+The blacklist itself is hardcoded — there is no env var to extend it. The default is the conservative minimum that catches typo-level mistakes; admins who need stricter policies should layer them outside (filesystem permissions, container mount restrictions, AppArmor/SELinux profiles).
 
 ## Failure Modes
 

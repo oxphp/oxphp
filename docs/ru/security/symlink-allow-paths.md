@@ -59,7 +59,7 @@ SYMLINK_ALLOW_PATHS=../storage/app/public
 **Запрещены как полное совпадение:**
 
 ```
-/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr
+/   /etc   /proc   /sys   /dev   /var   /home   /tmp   /root   /usr   /srv
 ```
 
 **Запрещены как префикс** (запись лежит под одной из этих директорий):
@@ -68,7 +68,9 @@ SYMLINK_ALLOW_PATHS=../storage/app/public
 /etc   /proc   /sys   /dev   /tmp   /root   /usr
 ```
 
-Обратите внимание: `/var` и `/home` блокируются только как точное совпадение — голый `/home` отвергается, но `/home/<любой>/...` разрешён, точно так же как `/var/www/storage` или `/var/lib/myapp/uploads`. Записи проверяются дважды: один раз против сырого пути, который указал админ (чтобы macOS-style `/etc -> /private/etc` не пропустил blacklisted-путь через `realpath`), один раз против канонической формы (defense-in-depth от symlink-target escape).
+Обратите внимание: `/var`, `/home` и `/srv` блокируются только как точное совпадение — голый `/srv` отвергается, но `/srv/myapp/storage` разрешён, как и `/var/www/storage` или `/home/<любой>/...`. Записи проверяются дважды: один раз против сырого пути, который указал админ (чтобы macOS-style `/etc -> /private/etc` не пропустил blacklisted-путь через `realpath`), один раз против канонической формы (defense-in-depth от symlink-target escape).
+
+Сам blacklist захардкожен — env-vars для расширения нет. Дефолт это консервативный минимум, отсекающий очевидные ошибки уровня "опечатался". Админам, которым нужны более строгие политики, стоит навешивать их слоями снаружи (права на файловой системе, ограничения mount'ов в контейнере, AppArmor/SELinux профили).
 
 ## Сценарии падения старта
 

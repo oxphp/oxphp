@@ -9,13 +9,19 @@ use std::path::{Path, PathBuf};
 use crate::types::BoxError;
 
 /// Paths whose exact canonical match is forbidden.
+///
+/// The set is intentionally a hard-coded minimum — typing `/etc` should
+/// never accidentally widen the attack surface. Admins running in a
+/// high-paranoia deployment cannot extend the list at runtime; the
+/// trade-off is documented in `.internal/adr/0025-symlink-allow-paths-policy.md`.
 const BLACKLIST_EXACT: &[&str] = &[
-    "/", "/etc", "/proc", "/sys", "/dev", "/var", "/home", "/tmp", "/root", "/usr",
+    "/", "/etc", "/proc", "/sys", "/dev", "/var", "/home", "/tmp", "/root", "/usr", "/srv",
 ];
 
 /// Prefixes — a path whose canonical starts with `<prefix>/` is forbidden.
-/// Note `/var` and `/home` are intentionally not here: they are exact-only
-/// (admin may want `/var/www/...` or `/home/<any>/...`).
+/// Note `/var`, `/home`, and `/srv` are intentionally not here: they are
+/// exact-only because admins routinely allow paths underneath them
+/// (`/var/www/...`, `/home/<any>/...`, `/srv/<service>/...`).
 const BLACKLIST_PREFIXES: &[&str] = &["/etc", "/proc", "/sys", "/dev", "/tmp", "/root", "/usr"];
 
 fn reject_blacklist(path: &Path, raw_entry: &str) -> Result<(), BoxError> {
@@ -236,7 +242,9 @@ pub(crate) mod tests {
 
     #[test]
     fn exact_blacklist_rejected() {
-        let cases = ["/etc", "/var", "/usr", "/tmp"];
+        // /srv is included; it's standard FHS but absent on macOS hosts,
+        // so the case is silently skipped when the directory is missing.
+        let cases = ["/etc", "/var", "/usr", "/tmp", "/srv"];
         for target in cases {
             if !std::path::Path::new(target).is_dir() {
                 continue;
