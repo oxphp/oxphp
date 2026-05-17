@@ -1126,7 +1126,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
 ///
 /// Blocking timeout is NOT expressed via state — it returns
 /// `SharedError::Timeout` (-7) as a hard error so the PHP wrapper can
-/// throw `TimeoutException` instead of returning null.
+/// emit a `RecvResult::Timeout` variant instead of returning a value.
 ///
 /// # Safety
 /// `out_buf`, `out_len`, `out_state` must be valid for writes.
@@ -1675,10 +1675,12 @@ unsafe fn recv_fiber_register_shim(
 ///
 /// Exposed PHP surface:
 ///   __construct(int $capacity)
-///   send(mixed $value, ?float $timeout = null): void  [fiber-aware]
-///   trySend(mixed $value): bool
-///   recv(?float $timeout = null): mixed               [fiber-aware]
-///   tryRecv(): mixed
+///   send(mixed $value): SendResult                    [forever or fiber-cancel]
+///   sendTimeout(mixed $value, int $ms): SendResult    [bounded]
+///   trySend(mixed $value): SendResult                 [non-blocking]
+///   recv(): RecvResult                                [forever or fiber-cancel]
+///   recvTimeout(int $ms): RecvResult                  [bounded]
+///   tryRecv(): RecvResult                             [non-blocking]
 ///   close(): void
 ///   isClosed(): bool
 ///   pending(): int
@@ -1691,6 +1693,8 @@ pub fn register_class(
     use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
     use crate::plugin::PhpError;
     use crate::plugins::ox_shared::handle::SharedHandle;
+    use crate::plugins::ox_shared::results::{self, RecvKind, SendKind};
+    use crate::plugins::ox_shared::types::timeout::read_positive_ms_arg;
 
     ctx.register_class("OxPHP\\Shared\\Channel")
         .implements("OxPHP\\Shared\\Shareable")
@@ -1727,266 +1731,52 @@ pub fn register_class(
             h.type_tag = SharedType::Channel as u8;
             Ok(())
         })
-        // ── trySend(value): bool ────────────────────────────────────
+        // ── trySend(value): SendResult ──────────────────────────────
+        //   Non-blocking. Returns SendResult::Ok / Full / Closed.
         .method("trySend")
         .param("value", PhpType::Mixed)
-        .returns(PhpType::Bool)
+        .returns(PhpType::Object)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-
-            // Serialize the zval argument to a portbuf (C owns the buffer).
-            let arg_ptr = unsafe { call.raw_arg_ptr(0) };
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let ser_rc = unsafe {
-                bridge_ffi::oxphp_portable_serialize(arg_ptr as *const _, 1, &mut buf, &mut len)
-            };
-            if ser_rc != 0 {
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\TypeException".into(),
-                    message: "trySend: value is not serializable (e.g. closure, resource)".into(),
-                    code: 0,
-                });
-            }
-
+            let buf_owner = serialize_arg(call, 0, "trySend")?;
+            let (buf, len) = buf_owner.parts();
             let mut success: c_int = 0;
             let rc = unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
-            if !buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(buf) };
-            }
+            drop(buf_owner);
 
-            // Spec: "Non-blocking send. Returns false if full or closed."
             if rc == SharedError::Closed.code() {
-                call.ret_bool(false);
-                return Ok(());
+                return results::write_send(call, SendKind::Closed);
             }
             super::counter::counter_rc_to_result(rc)?;
-            call.ret_bool(success != 0);
-            Ok(())
+            let kind = if success != 0 {
+                SendKind::Ok
+            } else {
+                SendKind::Full
+            };
+            results::write_send(call, kind)
         })
-        // ── send(value, timeout=null): void ─────────────────────────
+        // ── send(value): SendResult ─────────────────────────────────
+        //   Forever (or fiber-cancel). Returns SendResult::Ok or Closed.
+        //   A fiber cancellation (Async\AsyncException) is propagated as
+        //   an exception — it is NOT mapped to SendResult::Closed.
         .method("send")
         .param("value", PhpType::Mixed)
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
+        .returns(PhpType::Object)
+        .handler(|call| invoke_channel_send(call, -1))
+        // ── sendTimeout(value, int $ms): SendResult ─────────────────
+        //   Bounded. $ms > 0 enforced. Returns Ok / Full / Timeout / Closed.
+        .method("sendTimeout")
+        .param("value", PhpType::Mixed)
+        .param("ms", PhpType::Int)
+        .returns(PhpType::Object)
         .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
-
-            // Serialize value → portbuf once; reuse across retry loop on fiber path.
-            let arg_ptr = unsafe { call.raw_arg_ptr(0) };
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let ser_rc = unsafe {
-                bridge_ffi::oxphp_portable_serialize(arg_ptr as *const _, 1, &mut buf, &mut len)
-            };
-            if ser_rc != 0 {
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\TypeException".into(),
-                    message: "send: value is not serializable (e.g. closure, resource)".into(),
-                    code: 0,
-                });
-            }
-
-            // The fiber-suspend path uses synthetic-promise FFI that is
-            // gated behind `feature = "php"` (PROMISE_MAP lives on PHP
-            // worker threads). Without `php`, force `in_fiber = false` so
-            // we always take the thread-blocking branch — matches the
-            // mock `oxphp_bridge_in_fiber` returning 0 anyway.
-            #[cfg(feature = "php")]
-            let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
-            #[cfg(not(feature = "php"))]
-            let in_fiber = false;
-
-            if in_fiber {
-                // Fiber path: try_send → on full, register send-waiter and
-                // suspend via fiber_await. Waker resolves with:
-                //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
-                //   - Cancelled    → Async\AsyncException          (fiber_rc == -1)
-                //   - Closed       → ClosedException propagated    (fiber_rc == -1)
-                let deadline = match parse_timeout(timeout_ms) {
-                    Wait::Forever => None,
-                    Wait::Bounded(d) => Some(std::time::Instant::now() + d),
-                    // Wait::Try is bailed inside the loop after the first try_send;
-                    // it never reaches deadline consumption.
-                    Wait::Try => unreachable!("Wait::Try is bailed in the loop body"),
-                };
-
-                loop {
-                    // Fast attempt.
-                    let mut success: c_int = 0;
-                    let rc =
-                        unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
-                    if rc == SharedError::Closed.code() {
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                        return Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\ClosedException".into(),
-                            message: "channel closed".into(),
-                            code: 0,
-                        });
-                    }
-                    if rc == 0 && success != 0 {
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                        return Ok(());
-                    }
-                    if rc != 0 {
-                        // Some other FFI error (e.g. stale handle).
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                        return Err(map_channel_rc(rc));
-                    }
-
-                    // Channel full → check for non-blocking semantics first.
-                    if matches!(parse_timeout(timeout_ms), Wait::Try) {
-                        // One try_send already ran above and found the channel
-                        // full. Non-blocking: bail with TimeoutException.
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                        return Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\TimeoutException".into(),
-                            message: "send timed out".into(),
-                            code: 0,
-                        });
-                    }
-
-                    // Park until a slot frees.
-                    let remaining_ms: u64 = if let Some(d) = deadline {
-                        let r = d.saturating_duration_since(std::time::Instant::now());
-                        if r.is_zero() {
-                            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                            return Err(PhpError::Exception {
-                                class: "OxPHP\\Shared\\TimeoutException".into(),
-                                message: "send timed out".into(),
-                                code: 0,
-                            });
-                        }
-                        r.as_millis() as u64
-                    } else {
-                        0
-                    };
-
-                    let mut promise_id: i64 = 0;
-                    // `oxphp_shared_channel_send_fiber_register` is gated by
-                    // `feature = "php"`. Without `php`, `in_fiber` is forced
-                    // to false above so this branch is unreachable at runtime,
-                    // but rustc still compiles it — call through a small
-                    // shim that has a non-php fallback returning -1.
-                    let reg_rc = unsafe {
-                        send_fiber_register_shim(entry_ptr, remaining_ms, &mut promise_id)
-                    };
-                    if reg_rc != 0 {
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                        super::counter::counter_rc_to_result(reg_rc)?;
-                    }
-
-                    // Suspend fiber. Timeout is handled by spawn_fiber_timeout
-                    // in the FFI register path (via synthetic::cancel), so we
-                    // pass 0.0 here — the SAPI fiber_await ignores this arg
-                    // anyway (see oxphp_fiber_suspend_for_await in ext/oxphp_sapi.c).
-                    let retval = call.retval_ptr();
-                    let fiber_rc =
-                        unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
-
-                    match fiber_rc {
-                        // Waker resolved with Value(empty) → slot free, retry.
-                        0 => continue,
-                        // Exception pending — inspect.
-                        -1 => {
-                            let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
-                            unsafe {
-                                bridge_ffi::oxphp_exception_get(
-                                    &mut cls_ptr,
-                                    std::ptr::null_mut(),
-                                    std::ptr::null_mut(),
-                                );
-                            }
-                            let is_async_cancel = if cls_ptr.is_null() {
-                                false
-                            } else {
-                                let cls =
-                                    unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                                cls == "OxPHP\\Async\\AsyncException"
-                            };
-                            if is_async_cancel {
-                                // Cancelled (timeout or close-side cancel).
-                                unsafe { bridge_ffi::oxphp_exception_clear() };
-                                if deadline
-                                    .map(|d| std::time::Instant::now() >= d)
-                                    .unwrap_or(false)
-                                {
-                                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\TimeoutException".into(),
-                                        message: "send timed out".into(),
-                                        code: 0,
-                                    });
-                                }
-                                // Else: spurious cancel → loop and retry.
-                                continue;
-                            }
-                            // Other exception (e.g. ClosedException) —
-                            // leave it pending; the plugin framework will
-                            // surface EG(exception) on Err(Custom).
-                            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                            return Err(PhpError::Custom(
-                                "send: fiber waker raised exception".into(),
-                            ));
-                        }
-                        // Direct fiber-layer timeout (should be rare given
-                        // the synthetic::cancel path, but handle it).
-                        -2 => {
-                            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                            return Err(PhpError::Exception {
-                                class: "OxPHP\\Shared\\TimeoutException".into(),
-                                message: "send timed out".into(),
-                                code: 0,
-                            });
-                        }
-                        other => {
-                            // rc=1 means "not in oxphp fiber"; we only land
-                            // here when in_fiber == true, so the SAPI predicate
-                            // and `oxphp_current_fiber` disagree — a logic bug
-                            // worth crashing on in dev. Release builds degrade
-                            // to a Custom error so the worker stays up.
-                            debug_assert!(
-                                other != 1,
-                                "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
-                            );
-                            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                            return Err(PhpError::Custom(format!("send: fiber_await rc={other}")));
-                        }
-                    }
-                }
-            } else {
-                // Non-fiber path: thread-block via send_blocking.
-                let rc =
-                    unsafe { oxphp_shared_channel_send_blocking(entry_ptr, buf, len, timeout_ms) };
-                unsafe { bridge_ffi::oxphp_portable_free(buf) };
-
-                if rc == SharedError::Closed.code() {
-                    return Err(PhpError::Exception {
-                        class: "OxPHP\\Shared\\ClosedException".into(),
-                        message: "channel closed".into(),
-                        code: 0,
-                    });
-                }
-                if rc == SharedError::Timeout.code() {
-                    return Err(PhpError::Exception {
-                        class: "OxPHP\\Shared\\TimeoutException".into(),
-                        message: "send timed out".into(),
-                        code: 0,
-                    });
-                }
-                super::counter::counter_rc_to_result(rc)?;
-                Ok(())
-            }
+            let ms = read_positive_ms_arg(call, 1)?;
+            invoke_channel_send(call, ms)
         })
-        // ── tryRecv(): mixed ────────────────────────────────────────
+        // ── tryRecv(): RecvResult ───────────────────────────────────
+        //   Non-blocking. Returns RecvResult::Ok(value) / Empty / Closed.
         .method("tryRecv")
-        .returns(PhpType::Mixed)
+        .returns(PhpType::Object)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out_buf: *mut u8 = std::ptr::null_mut();
@@ -1998,45 +1788,23 @@ pub fn register_class(
             super::counter::counter_rc_to_result(rc)?;
             match state {
                 0 => {
-                    // Got an item — deserialize directly into retval.
-                    let retval = call.retval_ptr();
-                    let des_rc = unsafe {
-                        bridge_ffi::oxphp_portable_deserialize(
-                            out_buf,
-                            out_len,
-                            1,
-                            retval as *mut _,
-                        )
-                    };
+                    let r = results::write_recv_ok(call, out_buf, out_len);
                     if !out_buf.is_null() {
                         unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
                     }
-                    if des_rc != 0 {
-                        return Err(PhpError::Custom(format!(
-                            "tryRecv: deserialize failed rc={des_rc}"
-                        )));
-                    }
-                    Ok(())
+                    r
                 }
                 1 => {
-                    // Empty, open — return null per spec.
                     if !out_buf.is_null() {
                         unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
                     }
-                    call.ret_null();
-                    Ok(())
+                    results::write_recv(call, RecvKind::Empty)
                 }
                 2 => {
-                    // Closed + empty — throw ClosedException per spec
-                    // (tryRecv is stricter than recv, which returns null).
                     if !out_buf.is_null() {
                         unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
                     }
-                    Err(PhpError::Exception {
-                        class: "OxPHP\\Shared\\ClosedException".into(),
-                        message: "channel closed".into(),
-                        code: 0,
-                    })
+                    results::write_recv(call, RecvKind::Closed)
                 }
                 other => {
                     if !out_buf.is_null() {
@@ -2048,217 +1816,23 @@ pub fn register_class(
                 }
             }
         })
-        // ── recv(timeout=null): mixed ───────────────────────────────
+        // ── recv(): RecvResult ──────────────────────────────────────
+        //   Forever (or fiber-cancel). Returns RecvResult::Ok(value) or
+        //   Closed. A fiber cancellation (Async\AsyncException) is
+        //   propagated as an exception — it is NOT mapped to
+        //   RecvResult::Closed.
         .method("recv")
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
-        .returns(PhpType::Mixed)
+        .returns(PhpType::Object)
+        .handler(|call| invoke_channel_recv(call, -1))
+        // ── recvTimeout(int $ms): RecvResult ────────────────────────
+        //   Bounded. $ms > 0 enforced. Returns Ok(value) / Empty /
+        //   Timeout / Closed.
+        .method("recvTimeout")
+        .param("ms", PhpType::Int)
+        .returns(PhpType::Object)
         .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let timeout_ms: i64 = read_timeout_arg(call, 0)?;
-
-            // The fiber-suspend path uses synthetic-promise FFI that is
-            // gated behind `feature = "php"` (PROMISE_MAP lives on PHP
-            // worker threads). Without `php`, force `in_fiber = false` so
-            // we always take the thread-blocking branch — matches the
-            // mock `oxphp_bridge_in_fiber` returning 0 anyway.
-            #[cfg(feature = "php")]
-            let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
-            #[cfg(not(feature = "php"))]
-            let in_fiber = false;
-
-            if in_fiber {
-                // Fiber path: try_recv once first, then register recv-waiter
-                // and suspend via fiber_await if the channel is empty.
-                // This matches the blocking-path FFI which always attempts
-                // once before returning Timeout, so recv($v, 0.0) on a
-                // non-empty channel succeeds rather than spuriously returning null.
-                let mut out_buf: *mut u8 = std::ptr::null_mut();
-                let mut out_len: usize = 0;
-                let mut state: c_int = 0;
-                let try_rc = unsafe {
-                    oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
-                };
-                super::counter::counter_rc_to_result(try_rc)?;
-                match state {
-                    0 => {
-                        // Got an item — deserialize directly into retval.
-                        let retval = call.retval_ptr();
-                        let des_rc = unsafe {
-                            bridge_ffi::oxphp_portable_deserialize(
-                                out_buf,
-                                out_len,
-                                1,
-                                retval as *mut _,
-                            )
-                        };
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        if des_rc != 0 {
-                            return Err(PhpError::Custom(format!(
-                                "recv: deserialize failed rc={des_rc}"
-                            )));
-                        }
-                        return Ok(());
-                    }
-                    2 => {
-                        // Closed + empty — return null per recv spec.
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        call.ret_null();
-                        return Ok(());
-                    }
-                    _ => {
-                        // state == 1: WouldBlockEmpty. Check for non-blocking
-                        // semantics before parking.
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        if matches!(parse_timeout(timeout_ms), Wait::Try) {
-                            // One try_recv already ran and found the channel
-                            // empty. Non-blocking: return null per recv spec.
-                            call.ret_null();
-                            return Ok(());
-                        }
-                    }
-                }
-
-                let mut promise_id: i64 = 0;
-                // See note on send-side for the cfg gating rationale.
-                // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
-                let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
-                let reg_rc = unsafe {
-                    recv_fiber_register_shim(entry_ptr, fiber_timeout_ms, &mut promise_id)
-                };
-                super::counter::counter_rc_to_result(reg_rc)?;
-
-                let retval = call.retval_ptr();
-                // Pass 0.0 for timeout — synthetic::cancel handles it.
-                let fiber_rc =
-                    unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
-
-                match fiber_rc {
-                    // 0 = waker resolved with Value → retval written by
-                    // await_dispatch_callback. Done.
-                    0 => Ok(()),
-                    // -1 = exception pending. Cancelled (Async\AsyncException)
-                    // translates to null per spec; other exceptions propagate.
-                    -1 => {
-                        let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
-                        unsafe {
-                            bridge_ffi::oxphp_exception_get(
-                                &mut cls_ptr,
-                                std::ptr::null_mut(),
-                                std::ptr::null_mut(),
-                            );
-                        }
-                        let is_async_cancel = if cls_ptr.is_null() {
-                            false
-                        } else {
-                            let cls =
-                                unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                            cls == "OxPHP\\Async\\AsyncException"
-                        };
-                        if is_async_cancel {
-                            unsafe { bridge_ffi::oxphp_exception_clear() };
-                            // Spec: recv returns null on any non-item outcome
-                            // (timeout, close, shutdown). See
-                            // 24-type-channel.md:34-38 and the idiomatic
-                            // `while (($x = $ch->recv(60)) !== null)` loop
-                            // pattern. Asymmetric with send, which throws
-                            // TimeoutException.
-                            call.ret_null();
-                            Ok(())
-                        } else {
-                            // Non-Async exception — let the plugin framework
-                            // surface the pending EG(exception).
-                            Err(PhpError::Custom(
-                                "recv: fiber waker raised exception".into(),
-                            ))
-                        }
-                    }
-                    -2 => {
-                        // Spec: recv returns null on timeout (including
-                        // SAPI-layer timeout). See 24-type-channel.md:34-38.
-                        call.ret_null();
-                        Ok(())
-                    }
-                    other => {
-                        // rc=1 means "not in oxphp fiber"; we only land here
-                        // when in_fiber == true, so the SAPI predicate and
-                        // `oxphp_current_fiber` disagree — a logic bug worth
-                        // crashing on in dev. Release builds degrade to a
-                        // Custom error so the worker stays up.
-                        debug_assert!(
-                            other != 1,
-                            "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
-                        );
-                        Err(PhpError::Custom(format!("recv: fiber_await rc={other}")))
-                    }
-                }
-            } else {
-                // Thread-block path.
-                let mut out_buf: *mut u8 = std::ptr::null_mut();
-                let mut out_len: usize = 0;
-                let mut state: c_int = 0;
-                let rc = unsafe {
-                    oxphp_shared_channel_recv_blocking(
-                        entry_ptr,
-                        timeout_ms,
-                        &mut out_buf,
-                        &mut out_len,
-                        &mut state,
-                    )
-                };
-                if rc == SharedError::Timeout.code() {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    // Spec: recv returns null on timeout (asymmetric with
-                    // send, which throws TimeoutException). See
-                    // 24-type-channel.md:34-38.
-                    call.ret_null();
-                    return Ok(());
-                }
-                super::counter::counter_rc_to_result(rc)?;
-                match state {
-                    0 => {
-                        let retval = call.retval_ptr();
-                        let des_rc = unsafe {
-                            bridge_ffi::oxphp_portable_deserialize(
-                                out_buf,
-                                out_len,
-                                1,
-                                retval as *mut _,
-                            )
-                        };
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        if des_rc != 0 {
-                            return Err(PhpError::Custom(format!(
-                                "recv: deserialize failed rc={des_rc}"
-                            )));
-                        }
-                        Ok(())
-                    }
-                    2 => {
-                        // Closed + empty or shutdown — return null per spec.
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        call.ret_null();
-                        Ok(())
-                    }
-                    other => {
-                        if !out_buf.is_null() {
-                            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                        }
-                        Err(PhpError::Custom(format!("recv: unexpected state {other}")))
-                    }
-                }
-            }
+            let ms = read_positive_ms_arg(call, 0)?;
+            invoke_channel_recv(call, ms)
         })
         // ── close(): void ──────────────────────────────────────────
         .method("close")
@@ -2488,7 +2062,7 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         -3 => "OxPHP\\Shared\\TypeException",
         -4 => "OxPHP\\Shared\\CapacityException",
         -6 => "OxPHP\\Shared\\ClosedException",
-        -7 => "OxPHP\\Shared\\TimeoutException",
+        -7 => "OxPHP\\Shared\\OperationTimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
         _ => "OxPHP\\Shared\\SharedException",
     };
@@ -2496,6 +2070,428 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         class: class.to_string(),
         message: String::new(),
         code: 0,
+    }
+}
+
+/// RAII wrapper for a portbuf serialized from a single PHP zval. Owns
+/// the malloc'd buffer; `Drop` calls `oxphp_portable_free` so every
+/// early return path in send/recv stays leak-free without manual
+/// bookkeeping.
+struct PortbufOwner(*mut u8, usize);
+
+impl PortbufOwner {
+    fn parts(&self) -> (*mut u8, usize) {
+        (self.0, self.1)
+    }
+}
+
+impl Drop for PortbufOwner {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { crate::bridge::ffi::oxphp_portable_free(self.0) };
+        }
+    }
+}
+
+/// Serialize one PHP argument (at index `idx`) into a portbuf. On
+/// serialization failure (closure / resource / circular) returns a
+/// `TypeException` whose message embeds the method name for clarity.
+fn serialize_arg(
+    call: &crate::bridge::call::NativeCall,
+    idx: u32,
+    method_name: &str,
+) -> Result<PortbufOwner, crate::plugin::PhpError> {
+    let arg_ptr = unsafe { call.raw_arg_ptr(idx) };
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let ser_rc = unsafe {
+        crate::bridge::ffi::oxphp_portable_serialize(arg_ptr as *const _, 1, &mut buf, &mut len)
+    };
+    if ser_rc != 0 {
+        if !buf.is_null() {
+            unsafe { crate::bridge::ffi::oxphp_portable_free(buf) };
+        }
+        return Err(crate::plugin::PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".into(),
+            message: format!("{method_name}: value is not serializable (e.g. closure, resource)"),
+            code: 0,
+        });
+    }
+    Ok(PortbufOwner(buf, len))
+}
+
+/// Body shared by `send()` and `sendTimeout()`. `timeout_ms` is the
+/// wire-format timeout: `-1` = forever (fiber-cancel only), `> 0` =
+/// bounded. The non-blocking case is a separate `trySend` handler and
+/// is not reachable here.
+///
+/// Returns a `SendResult` written into the retval slot. Errors only
+/// surface when an FFI call fails for non-Closed/Timeout reasons or
+/// when the fiber waker raised an unexpected exception (e.g. a
+/// non-`Async\AsyncException`) — those propagate as `PhpError` so the
+/// plugin framework surfaces the pending EG(exception).
+#[allow(clippy::too_many_lines)]
+fn invoke_channel_send(
+    call: &mut crate::bridge::call::NativeCall,
+    timeout_ms: i64,
+) -> Result<(), crate::plugin::PhpError> {
+    use crate::bridge::ffi as bridge_ffi;
+    use crate::plugin::PhpError;
+    use crate::plugins::ox_shared::handle::SharedHandle;
+    use crate::plugins::ox_shared::results::{self, SendKind};
+
+    let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+    let buf_owner = serialize_arg(call, 0, "send")?;
+    let (buf, len) = buf_owner.parts();
+
+    // The fiber-suspend path uses synthetic-promise FFI that is gated
+    // behind `feature = "php"` (PROMISE_MAP lives on PHP worker
+    // threads). Without `php`, force `in_fiber = false` so we always
+    // take the thread-blocking branch — matches the mock
+    // `oxphp_bridge_in_fiber` returning 0 anyway.
+    #[cfg(feature = "php")]
+    let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
+    #[cfg(not(feature = "php"))]
+    let in_fiber = false;
+
+    if in_fiber {
+        // Fiber path: try_send → on full, register send-waiter and
+        // suspend via fiber_await. Waker resolves with:
+        //   - Value(empty) → "slot free; retry try_send"   (fiber_rc == 0)
+        //   - Cancelled    → Async\AsyncException          (fiber_rc == -1)
+        //   - Closed       → ClosedException propagated    (fiber_rc == -1)
+        let deadline = match parse_timeout(timeout_ms) {
+            Wait::Forever => None,
+            Wait::Bounded(d) => Some(std::time::Instant::now() + d),
+            // Wait::Try is unreachable: trySend is a separate handler.
+            Wait::Try => unreachable!("Wait::Try unreachable from send/sendTimeout"),
+        };
+
+        loop {
+            // Fast attempt.
+            let mut success: c_int = 0;
+            let rc = unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
+            if rc == SharedError::Closed.code() {
+                return results::write_send(call, SendKind::Closed);
+            }
+            if rc == 0 && success != 0 {
+                return results::write_send(call, SendKind::Ok);
+            }
+            if rc != 0 {
+                // Some other FFI error (e.g. stale handle).
+                return Err(map_channel_rc(rc));
+            }
+
+            // Park until a slot frees.
+            let remaining_ms: u64 = if let Some(d) = deadline {
+                let r = d.saturating_duration_since(std::time::Instant::now());
+                if r.is_zero() {
+                    return results::write_send(call, SendKind::Timeout);
+                }
+                r.as_millis() as u64
+            } else {
+                0
+            };
+
+            let mut promise_id: i64 = 0;
+            // `oxphp_shared_channel_send_fiber_register` is gated by
+            // `feature = "php"`. Without `php`, `in_fiber` is forced to
+            // false above so this branch is unreachable at runtime, but
+            // rustc still compiles it — call through a small shim that
+            // has a non-php fallback returning -1.
+            let reg_rc =
+                unsafe { send_fiber_register_shim(entry_ptr, remaining_ms, &mut promise_id) };
+            if reg_rc != 0 {
+                super::counter::counter_rc_to_result(reg_rc)?;
+            }
+
+            // Suspend fiber. Timeout is handled by spawn_fiber_timeout
+            // in the FFI register path (via synthetic::cancel), so we
+            // pass 0.0 here — the SAPI fiber_await ignores this arg
+            // anyway (see oxphp_fiber_suspend_for_await in ext/oxphp_sapi.c).
+            let retval = call.retval_ptr();
+            let fiber_rc = unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
+
+            match fiber_rc {
+                // Waker resolved with Value(empty) → slot free, retry.
+                0 => continue,
+                // Exception pending — inspect.
+                -1 => {
+                    let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
+                    unsafe {
+                        bridge_ffi::oxphp_exception_get(
+                            &mut cls_ptr,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    let is_async_cancel = if cls_ptr.is_null() {
+                        false
+                    } else {
+                        let cls = unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
+                        cls == "OxPHP\\Async\\AsyncException"
+                    };
+                    if is_async_cancel {
+                        // Bounded send: deadline fired → swallow the
+                        // Async\AsyncException and return Timeout.
+                        if timeout_ms > 0
+                            && deadline
+                                .map(|d| std::time::Instant::now() >= d)
+                                .unwrap_or(false)
+                        {
+                            unsafe { bridge_ffi::oxphp_exception_clear() };
+                            return results::write_send(call, SendKind::Timeout);
+                        }
+                        // Forever-mode send: caller cancelled the fiber;
+                        // propagate the AsyncException — do NOT clear it,
+                        // do NOT map to Closed. The framework re-raises.
+                        if timeout_ms < 0 {
+                            return Err(PhpError::Custom("send: fiber cancelled".into()));
+                        }
+                        // Spurious cancel before deadline (e.g. a
+                        // pre-deadline wake we treat as transient) →
+                        // clear and retry the loop.
+                        unsafe { bridge_ffi::oxphp_exception_clear() };
+                        continue;
+                    }
+                    // Other exception (e.g. ClosedException raised by the
+                    // waker on close-side cancel) — leave it pending; the
+                    // plugin framework will surface EG(exception).
+                    return Err(PhpError::Custom(
+                        "send: fiber waker raised exception".into(),
+                    ));
+                }
+                // Direct fiber-layer timeout (should be rare given the
+                // synthetic::cancel path, but handle it).
+                -2 => {
+                    return results::write_send(call, SendKind::Timeout);
+                }
+                other => {
+                    // rc=1 means "not in oxphp fiber"; we only land here
+                    // when in_fiber == true, so the SAPI predicate and
+                    // `oxphp_current_fiber` disagree — a logic bug worth
+                    // crashing on in dev. Release builds degrade to a
+                    // Custom error so the worker stays up.
+                    debug_assert!(
+                        other != 1,
+                        "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
+                    );
+                    return Err(PhpError::Custom(format!("send: fiber_await rc={other}")));
+                }
+            }
+        }
+    } else {
+        // Non-fiber path: thread-block via send_blocking.
+        let rc = unsafe { oxphp_shared_channel_send_blocking(entry_ptr, buf, len, timeout_ms) };
+
+        if rc == SharedError::Closed.code() {
+            return results::write_send(call, SendKind::Closed);
+        }
+        if rc == SharedError::Timeout.code() {
+            return results::write_send(call, SendKind::Timeout);
+        }
+        super::counter::counter_rc_to_result(rc)?;
+        results::write_send(call, SendKind::Ok)
+    }
+}
+
+/// Body shared by `recv()` and `recvTimeout()`. `timeout_ms` is the
+/// wire-format timeout: `-1` = forever (fiber-cancel only), `> 0` =
+/// bounded. The non-blocking case is a separate `tryRecv` handler.
+///
+/// Returns a `RecvResult` written into the retval slot.
+#[allow(clippy::too_many_lines)]
+fn invoke_channel_recv(
+    call: &mut crate::bridge::call::NativeCall,
+    timeout_ms: i64,
+) -> Result<(), crate::plugin::PhpError> {
+    use crate::bridge::ffi as bridge_ffi;
+    use crate::plugin::PhpError;
+    use crate::plugins::ox_shared::handle::SharedHandle;
+    use crate::plugins::ox_shared::results::{self, RecvKind};
+
+    let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+
+    // The fiber-suspend path uses synthetic-promise FFI that is gated
+    // behind `feature = "php"` (PROMISE_MAP lives on PHP worker
+    // threads). Without `php`, force `in_fiber = false` so we always
+    // take the thread-blocking branch — matches the mock
+    // `oxphp_bridge_in_fiber` returning 0 anyway.
+    #[cfg(feature = "php")]
+    let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
+    #[cfg(not(feature = "php"))]
+    let in_fiber = false;
+
+    if in_fiber {
+        // Fiber path: try_recv once first, then register recv-waiter and
+        // suspend via fiber_await if the channel is empty. Matches the
+        // blocking-path FFI which always attempts once before returning
+        // Timeout, so recvTimeout($ms) on a non-empty channel succeeds
+        // rather than spuriously timing out.
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut state: c_int = 0;
+        let try_rc = unsafe {
+            oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
+        };
+        super::counter::counter_rc_to_result(try_rc)?;
+        match state {
+            0 => {
+                let r = results::write_recv_ok(call, out_buf, out_len);
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                return r;
+            }
+            2 => {
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                return results::write_recv(call, RecvKind::Closed);
+            }
+            _ => {
+                // state == 1: WouldBlockEmpty. Free defensively before
+                // parking; Wait::Try is unreachable (tryRecv is its own
+                // handler).
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                if matches!(parse_timeout(timeout_ms), Wait::Try) {
+                    unreachable!("Wait::Try unreachable from recv/recvTimeout");
+                }
+            }
+        }
+
+        let mut promise_id: i64 = 0;
+        // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
+        let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
+        let reg_rc =
+            unsafe { recv_fiber_register_shim(entry_ptr, fiber_timeout_ms, &mut promise_id) };
+        super::counter::counter_rc_to_result(reg_rc)?;
+
+        // The await may write a value-class object directly via the
+        // waker dispatcher; we capture that into a temporary zval and
+        // then transcribe into a RecvResult::Ok payload below.
+        let retval = call.retval_ptr();
+        let fiber_rc = unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
+
+        let deadline_hit = timeout_ms > 0;
+
+        match fiber_rc {
+            0 => {
+                // Waker resolved with Value → retval holds the raw value.
+                // We need to wrap it in RecvResult::Ok, but write_recv_ok
+                // expects a serialized buffer. The fastest fix: serialize
+                // the retval, then re-deserialize into the wrapper. This
+                // is a hot-path penalty but preserves correctness for the
+                // fiber path (a follow-up could add a "wrap-in-place"
+                // helper if profiling shows it matters).
+                let retval = call.retval_ptr();
+                let mut buf: *mut u8 = std::ptr::null_mut();
+                let mut len: usize = 0;
+                let ser_rc = unsafe {
+                    bridge_ffi::oxphp_portable_serialize(retval as *const _, 1, &mut buf, &mut len)
+                };
+                if ser_rc != 0 {
+                    if !buf.is_null() {
+                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                    }
+                    return Err(PhpError::Custom(format!(
+                        "recv: failed to wrap fiber result rc={ser_rc}"
+                    )));
+                }
+                let r = results::write_recv_ok(call, buf, len);
+                if !buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                }
+                r
+            }
+            -1 => {
+                let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
+                unsafe {
+                    bridge_ffi::oxphp_exception_get(
+                        &mut cls_ptr,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                    );
+                }
+                let is_async_cancel = if cls_ptr.is_null() {
+                    false
+                } else {
+                    let cls = unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
+                    cls == "OxPHP\\Async\\AsyncException"
+                };
+                if is_async_cancel {
+                    if deadline_hit {
+                        // Bounded recv: deadline fired → swallow the
+                        // Async\AsyncException and return Timeout.
+                        unsafe { bridge_ffi::oxphp_exception_clear() };
+                        return results::write_recv(call, RecvKind::Timeout);
+                    }
+                    // Forever recv: caller cancelled the fiber. Per
+                    // spec, propagate the AsyncException — do NOT map to
+                    // RecvResult::Closed.
+                    return Err(PhpError::Custom("recv: fiber cancelled".into()));
+                }
+                // Non-Async exception — let the framework surface it.
+                Err(PhpError::Custom(
+                    "recv: fiber waker raised exception".into(),
+                ))
+            }
+            -2 => {
+                // Direct fiber-layer timeout.
+                results::write_recv(call, RecvKind::Timeout)
+            }
+            other => {
+                debug_assert!(
+                    other != 1,
+                    "fiber_await rc=1 in fiber path — oxphp_bridge_in_fiber lied",
+                );
+                Err(PhpError::Custom(format!("recv: fiber_await rc={other}")))
+            }
+        }
+    } else {
+        // Thread-block path.
+        let mut out_buf: *mut u8 = std::ptr::null_mut();
+        let mut out_len: usize = 0;
+        let mut state: c_int = 0;
+        let rc = unsafe {
+            oxphp_shared_channel_recv_blocking(
+                entry_ptr,
+                timeout_ms,
+                &mut out_buf,
+                &mut out_len,
+                &mut state,
+            )
+        };
+        if rc == SharedError::Timeout.code() {
+            if !out_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+            }
+            return results::write_recv(call, RecvKind::Timeout);
+        }
+        super::counter::counter_rc_to_result(rc)?;
+        match state {
+            0 => {
+                let r = results::write_recv_ok(call, out_buf, out_len);
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                r
+            }
+            2 => {
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                results::write_recv(call, RecvKind::Closed)
+            }
+            other => {
+                if !out_buf.is_null() {
+                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+                }
+                Err(PhpError::Custom(format!("recv: unexpected state {other}")))
+            }
+        }
     }
 }
 

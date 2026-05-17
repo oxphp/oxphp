@@ -1820,7 +1820,27 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             .as_ref()
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null());
-        let flags = class.modifiers.bits() as u32;
+        // Translate plugin-builder `Modifiers` bits into Zend `ce_flags`
+        // bits. The C side ORs `flags` directly into `cls_ce->ce_flags`,
+        // so the wire value must use Zend's encoding, not ours. Notably
+        // Modifiers::FINAL is 0x02 which collides with ZEND_ACC_TRAIT —
+        // forwarding the raw bits would mark every `.final_()` class as
+        // a trait and break instantiation with "Cannot instantiate trait".
+        let mods = class.modifiers;
+        let mut flags: u32 = 0;
+        // ZEND_ACC_FINAL = 1 << 5 (zend_compile.h).
+        if mods.contains(crate::plugin::types::Modifiers::FINAL) {
+            flags |= 1 << 5;
+        }
+        // ZEND_ACC_EXPLICIT_ABSTRACT_CLASS = 1 << 6.
+        if mods.contains(crate::plugin::types::Modifiers::ABSTRACT) {
+            flags |= 1 << 6;
+        }
+        // ZEND_ACC_READONLY_CLASS = 1 << 16 (PHP 8.2+).
+        if mods.contains(crate::plugin::types::Modifiers::READONLY) {
+            flags |= 1 << 16;
+        }
+        // STATIC is meaningless on a class; ignore.
 
         unsafe {
             let handle =
