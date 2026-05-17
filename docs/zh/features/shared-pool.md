@@ -137,7 +137,7 @@ $doc = $parsers->with(fn ($p) => $p->parse($body));
 <?php
 try {
     $h = $pool->acquire(timeout: 0.1);    // 100ms
-} catch (OxPHP\Shared\TimeoutException $e) {
+} catch (OxPHP\Shared\OperationTimeoutException $e) {
     // 池已饱和——优雅降级
     http_response_code(503);
     header('Retry-After: 1');
@@ -185,7 +185,7 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 |---------------------------------------------|----------------------------------------------|
 | 本线程队列中存在空闲槽                      | 立即复用，工厂不会被调用。                   |
 | 无空闲槽，但 `count() < maxSize`            | 工厂运行，铸造新槽。                         |
-| `count() == maxSize` 且所有槽 `inUse`       | 最多阻塞 `timeout`，随后抛 `TimeoutException`。 |
+| `count() == maxSize` 且所有槽 `inUse`       | 最多阻塞 `timeout`，随后抛 `OperationTimeoutException`。 |
 
 `timeout` 传 `0.0` 会使用 `$defaultAcquireTimeout`（默认 5 秒）。要无限等待，请传一个非常大的数字——故意没有「无限」哨兵值，因为永远死等的池比超时抛异常的池更难诊断。
 
@@ -193,7 +193,7 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 
 | 异常                     | 触发场景                                                             |
 |-------------------------|----------------------------------------------------------------------|
-| `TimeoutException`      | `acquire` 超过 `$timeout` 仍无空闲槽。                               |
+| `OperationTimeoutException` | `acquire` 超过 `$timeout` 仍无空闲槽。继承 `Async\AsyncException`。 |
 | `CapacityException`     | 即便预算核对后，创建仍会突破 `maxSize`（罕见）。                     |
 | `TypeException`         | 非正 `maxSize`、工厂返回非 PHP 对象等。                              |
 | `StaleHandleException`  | 对注册表条目已被驱逐的句柄、或对已经被释放的 `Pool\Handle` 调用方法。 |

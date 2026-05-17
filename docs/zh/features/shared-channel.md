@@ -1,18 +1,18 @@
 ---
 title: Shared\Channel
-description: 跨 PHP 工作线程的有界 MPMC 通道，send 和 recv 感知 fiber，适用于协作式生产者/消费者流水线。
+description: 跨 PHP 工作线程的有界 MPMC 通道，send 和 recv 感知 fiber，返回类型化的 Result 值以便显式分派。
 ---
 
 # Shared\Channel
 
-`OxPHP\Shared\Channel` 是一个有界的多生产者多消费者通道，存放于共享注册表中，对进程内每个 PHP 工作线程都可见。当请求处理器和后台工作线程——或两个工作线程——需要按 FIFO 顺序交换工作项时，就用它。在 fiber 内部，`send` 和 `recv` 会协作式挂起，底层工作线程因此保持空闲以处理其他请求。
+`OxPHP\Shared\Channel` 是一个有界的多生产者多消费者通道，存放于共享注册表中，对进程内每个 PHP 工作线程都可见。当请求处理器和后台工作线程——或两个工作线程——需要按 FIFO 顺序交换工作项时，就用它。在 fiber 内部，阻塞调用会协作式挂起，底层工作线程因此保持空闲以处理其他请求。
 
 ## 概览
 
-- **有界。** 容量在构造时固定。队列已满时 `send` 阻塞或挂起；`trySend` 返回 `false`。
+- **有界。** 容量在构造时固定。队列已满时 `send` 阻塞（或挂起 fiber）；`trySend` 不等待便给出结果。
 - **MPMC。** 允许任意数量的发送者和接收者跨线程工作。交付是 FIFO。
-- **感知 fiber。** 在开启异步池的 Worker 模式下，`send`/`recv` 会挂起 fiber 而不是阻塞工作线程。传统模式下则阻塞 OS 线程。
-- **由注册表支撑。** 通道跨越请求边界存活，并按 ID 共享。关闭会传播给所有持有者。
+- **感知 fiber。** 在开启异步池的 Worker 模式下，阻塞变体会挂起 fiber 而非 OS 线程。传统模式下则阻塞 OS 线程。
+- **类型化结果。** 每次 send/recv 都返回 [`Channel\SendResult`](#api-参考) / [`Channel\RecvResult`](#api-参考)——closed / full / timeout 对扇出分派器来说是正常结果，因此它们以 Result 变体而非异常的形式呈现。
 
 ## API 参考
 
@@ -23,108 +23,164 @@ final class Channel implements Shareable, \Countable
 {
     public function __construct(int $capacity);
 
-    public function send(mixed $value, float $timeout = 0.0): void;
-    public function trySend(mixed $value): bool;
+    // ── Receive ──
+    public function tryRecv(): Channel\RecvResult;                  // 非阻塞
+    public function recv(): Channel\RecvResult;                     // 永久等待 / fiber-cancel
+    public function recvTimeout(int $ms): Channel\RecvResult;       // 有界 ($ms > 0)
 
-    public function recv(float $timeout = 0.0): mixed;
-    public function tryRecv(): mixed;
+    // ── Send ──
+    public function trySend(mixed $value): Channel\SendResult;
+    public function send(mixed $value): Channel\SendResult;
+    public function sendTimeout(mixed $value, int $ms): Channel\SendResult;
 
-    public function close(): void;
+    // ── Batch ──
+    public function sendMany(array $values, int $ms): int;          // 部分计数，不抛
+    public function recvMany(int $max, int $ms): array;             // 部分数组，不抛
+
+    // ── Lifecycle ──
+    public function close(): bool;
     public function isClosed(): bool;
     public function count(): int;
-
-    public function sendMany(array $values, float $timeout = 0.0): int;
-    public function recvMany(int $max, float $timeout = 0.0): array;
-
     public function id(): int;
 }
+
+namespace OxPHP\Shared\Channel;
+
+enum RecvStatus { case Ok; case Empty; case Timeout; case Closed; }
+enum SendStatus { case Ok; case Full;  case Timeout; case Closed; }
+
+final class RecvResult {
+    public function isOk(): bool;
+    public function isEmpty(): bool;
+    public function isTimeout(): bool;
+    public function isClosed(): bool;
+    public function value(): mixed;                // 非 Ok 时抛 SharedException
+    public function valueOr(mixed $default): mixed;
+    public function status(): RecvStatus;
+}
+
+final class SendResult {
+    public function isOk(): bool;
+    public function isFull(): bool;
+    public function isTimeout(): bool;
+    public function isClosed(): bool;
+    public function status(): SendStatus;
+}
 ```
 
-| 方法          | 使用场景                                                                             |
-|---------------|--------------------------------------------------------------------------------------|
-| `send`        | 推送一个条目，最多等待（或 fiber 挂起）`$timeout` 直到有空间。                       |
-| `trySend`     | 不等待推送一个条目；队列满或已关闭时返回 `false`。                                   |
-| `recv`        | 拉取一个条目，最多等待 `$timeout`。已关闭且为空或超时时返回 `null`。                 |
-| `tryRecv`     | 不等待拉取一个条目；为空时返回 `null`；已关闭且为空时抛异常。                        |
-| `close`       | 标记通道为已关闭。幂等。唤醒所有被阻塞的发送者/接收者。                              |
-| `isClosed`    | 报告通道是否已关闭。                                                                 |
-| `count`       | 当前缓冲项数的参考值。实现 `Countable` — 可直接使用 `count($ch)`。                  |
-| `sendMany`    | 推送数组条目；返回在满/关闭/超时前实际放入的数量。                                   |
-| `recvMany`    | 拉取最多 `$max` 个条目（`0` 表示不等待、排空当前缓冲）。                             |
-| `id`          | 注册表数字标识符；便于日志与可观测性关联。                                           |
+## Wait 策略
 
-## 选择 send/recv 变体
+每个方向都有三种方法变体——后缀编码 wait 策略：
 
-阻塞与非阻塞对在**返回什么与抛什么**上不同，且这种差异是刻意不对称的。
+| 后缀          | 行为                                                                  |
+|---------------|-----------------------------------------------------------------------|
+| `try*`        | 非阻塞。无法继续时报告 `Empty` / `Full`。                             |
+| (裸名)        | 永久阻塞，或直到 request fiber 被取消。                              |
+| `*Timeout`    | 有界等待。`$ms` 必须 `> 0`——「永远」与「非阻塞」请使用其他形式。     |
 
-| 结果                 | `send(v, t)`         | `trySend(v)` | `recv(t)`        | `tryRecv()`           |
-|----------------------|----------------------|--------------|------------------|-----------------------|
-| 成功                 | 返回 `void`          | `true`       | 条目             | 条目                  |
-| 满 / 空，未关闭       | 最多等待 `t`          | `false`      | 最多等待 `t`     | `null`                |
-| 超时                 | `TimeoutException`   | —            | `null`           | —                     |
-| 已关闭（空接收）      | `ClosedException`    | `false`      | `null`           | `ClosedException`     |
-| 已关闭（仍有条目）    | `ClosedException`    | `false`      | 返回条目         | 返回条目              |
+`$ms` 对 `recvTimeout` / `sendTimeout` / `sendMany` / `recvMany` **始终是正整数毫秒**。零、负数、非 int 与缺失都会在桥层抛出 `OxPHP\Shared\TypeException`——该约束从方法体迁出，让三分法自解释。
 
-两个值得记住的结果：
+### 每个方法可达的结果变体
 
-1. **`recv` 在「已关闭且为空」时永不抛异常。** 它返回 `null`。循环必须做 null 检查。
-2. **`recv` 在超时时也返回 `null`**，而 `send` 会抛 `TimeoutException`。如果需要区分「没人及时发送」与「通道已关闭」，请在 `null` 接收后检查 `isClosed()`。
+`SendResult::Full` 与 `RecvResult::Empty` 仅由非阻塞 `try*` 调用产生——阻塞变体要么取到槽/项，要么用尽预算，此时结果为 `Timeout` 而非 `Full` / `Empty`。完整可达性矩阵：
+
+| 方法            | `Ok` | `Full` / `Empty` | `Timeout` | `Closed` |
+|-----------------|------|------------------|-----------|----------|
+| `trySend`       | ✓    | `Full` ✓         | —         | ✓        |
+| `send`          | ✓    | —                | —         | ✓        |
+| `sendTimeout`   | ✓    | —                | ✓         | ✓        |
+| `tryRecv`       | ✓    | `Empty` ✓        | —         | ✓        |
+| `recv`          | ✓    | —                | —         | ✓        |
+| `recvTimeout`   | ✓    | —                | ✓         | ✓        |
+
+对阻塞调用的返回结果做 `isFull()` / `isEmpty()` 检查属于死代码。下面的 `match` 示例将这些分支保留为 `unreachable` 注释，以便读者一眼看到这种非对称。
+
+## Result 分派
+
+`RecvResult` 与 `SendResult` 携带一个 `status()` 判别值，外加（仅 `RecvResult`）一个负载。两种等价写法：
 
 ```php
-<?php
-$ch = new OxPHP\Shared\Channel(4);
+use OxPHP\Shared\Channel;
+use OxPHP\Shared\Channel\RecvStatus;
 
-// 非阻塞探测。
-if (!$ch->trySend('job-1')) {
-    // 队列已满；丢弃、重试或实施背压。
+$ch = new Channel(capacity: 64);
+
+// 布尔访问器——只关心单一结果时简洁。
+$result = $ch->tryRecv();
+if ($result->isOk()) {
+    process($result->value());
+} elseif ($result->isEmpty()) {
+    backoff();
+} else {
+    break; // closed
 }
 
-// 带截止时间的阻塞发送。
-try {
-    $ch->send('job-2', timeout: 1.0);
-} catch (OxPHP\Shared\TimeoutException $e) {
-    // 1 秒内没有消费者接收。
-} catch (OxPHP\Shared\ClosedException $e) {
-    // 等待期间通道被关闭。
-}
+// 穷尽 match——穷尽性检查能捕获新变体。
+$r = $ch->recvTimeout(1500);
+match ($r->status()) {
+    RecvStatus::Ok      => process($r->value()),
+    RecvStatus::Timeout => $logger->debug('idle'),
+    RecvStatus::Closed  => break,
+    RecvStatus::Empty   => /* unreachable: 只有 tryRecv 返回 Empty */ ,
+};
+
+// 对称的 send 侧分派——仅 Ok / Timeout / Closed 可达。
+use OxPHP\Shared\Channel\SendStatus;
+$s = $ch->sendTimeout($value, 1500);
+match ($s->status()) {
+    SendStatus::Ok      => /* 已交付 */ ,
+    SendStatus::Timeout => $logger->debug('backpressure'),
+    SendStatus::Closed  => break,
+    SendStatus::Full    => /* unreachable: 只有 trySend 返回 Full */ ,
+};
+
+// 安全访问器——永不抛异常。
+$value = $ch->tryRecv()->valueOr('fallback');
 ```
+
+`RecvResult::value()` 在非 Ok 变体上调用时会抛出 `OxPHP\Shared\SharedException`——请先用 `isOk()` / `valueOr()` / `status()`。这是有意为之：它将「忘记检查 isOk」这一 bug 转为响亮的失败，而不是悄无声息的 `null`。
 
 ## Fiber 与阻塞行为
 
 同一次方法调用的行为会因 PHP 当前是否运行在 fiber 中而不同：
 
-- **在 fiber 内**（Worker 模式 + `oxphp_async(...)`）：`send` / `recv` 分配一个合成 Promise，在通道上注册一个唤醒者，并挂起 fiber。工作线程回到调度器、继续处理其他 fiber，直到通道通知唤醒者。
-- **不在 fiber 内**（传统模式，或非异步调用路径）：`send` / `recv` 通过 `crossbeam_channel` 阻塞 OS 工作线程。该线程在调用返回前不会运行其他工作。
+- **在 fiber 内**（Worker 模式 + `oxphp_async(...)`）：阻塞变体（`send`、`recv`、`sendTimeout`、`recvTimeout`）分配一个合成 Promise，在通道上注册一个唤醒者，并挂起 fiber。工作线程回到调度器、继续处理其他 fiber，直到通道通知唤醒者。
+- **不在 fiber 内**（传统模式，或非异步调用路径）：阻塞变体通过 `crossbeam_channel` 阻塞 OS 工作线程。该线程在调用返回前不会运行其他工作。
 
 传统模式仍然提供通道语义——只是用一个被阻塞的线程作为代价。对任何依赖等待的流水线，推荐部署 Worker 模式。
 
 ```php
 <?php
-// 传统模式：此 recv 最多阻塞工作线程 2 秒。
+// 传统模式：此 recvTimeout 最多阻塞工作线程 2 秒。
 $ch = new OxPHP\Shared\Channel(16);
-$item = $ch->recv(timeout: 2.0);
+$r = $ch->recvTimeout(2000);
 
 // Worker 模式：用 oxphp_async 包裹，recv 将协作式挂起。
 oxphp_worker(function () use ($ch) {
     $consumer = oxphp_async(function () use ($ch) {
-        while (($item = $ch->recv(timeout: 5.0)) !== null) {
-            process($item);
+        for (;;) {
+            $r = $ch->recvTimeout(5000);
+            if ($r->isOk()) { process($r->value()); continue; }
+            if ($r->isClosed()) { break; }
+            // 超时——继续等待。
         }
     });
     oxphp_async_await($consumer);
 });
 ```
 
+Fiber 取消（请求中止、SAPI 层截止时间到期）仍以 `OxPHP\Async\AsyncException` 形式呈现——它**不会**转译为 `RecvResult::Closed`。通道并未关闭；是运行时取消了你。视情况重抛或捕获。
+
 ## 关闭语义
 
 `close()` 是幂等的——再次调用是空操作。关闭之后：
 
-- `send` / `sendMany` 抛 `ClosedException`。
-- `trySend` 返回 `false`。
-- `recv` 继续排空缓冲项，然后在为空时返回 `null`。
-- `tryRecv` 返回缓冲项，为空时抛 `ClosedException`。
+- `send`、`sendTimeout`、`trySend` 返回 `SendResult::Closed`。
+- `sendMany` 返回关闭前实际接受的数量（已关闭则为 `0`）。
+- `recv`、`recvTimeout`、`tryRecv` 继续将缓冲项作为 `RecvResult::Ok($value)` 返回，排空后返回 `RecvResult::Closed`。
+- `recvMany` 返回能排空的项，可能是空数组。
 - `isClosed()` 返回 `true`。
-- 被阻塞的发送者以 `ClosedException` 唤醒；被阻塞的接收者以 `null` 唤醒。
+- 被阻塞的发送者以 `SendResult::Closed` 唤醒；被阻塞的接收者以 `RecvResult::Closed` 唤醒。
 
 ```php
 <?php
@@ -134,28 +190,27 @@ $ch->send('two');
 $ch->close();
 
 // 排空剩余项。
-while (($item = $ch->recv()) !== null) {
-    echo $item, "\n"; // one, two
+for (;;) {
+    $r = $ch->recv();
+    if ($r->isClosed()) { break; }
+    echo $r->value(), "\n"; // one, two
 }
 
-// 后续发送被拒绝。
-try {
-    $ch->send('three');
-} catch (OxPHP\Shared\ClosedException $e) {
-    // 预期
-}
+// 后续发送不抛异常地报告 Closed。
+$result = $ch->send('three');
+assert($result->isClosed());
 ```
 
-优雅关闭流水线的模式是：生产者停止、生产侧调用 `close()`，消费者在 `while (($item = $ch->recv()) !== null)` 循环中排空并自然退出。
+优雅关闭流水线的模式：生产者停止，生产侧调用 `close()`，消费者在 `for (;;) { $r = $ch->recv(); if ($r->isClosed()) break; … }` 循环中排空并自然退出。任何消费者都不会错把缺失负载当成 `null`——变体本身就携带这一信号。
 
 ## 关停时排空
 
 当 OxPHP 进程关停时，`OxPHP\Shared` 注册表会对每个条目调用 `close()`，包括通道。从 PHP 角度看这与显式 `close()` 相同：
 
-- 被阻塞的 `recv` 调用返回 `null`。
-- 被阻塞的 `send` 调用抛 `ClosedException`。
+- 被阻塞的 `recv*` 调用返回 `RecvResult::Closed`。
+- 被阻塞的 `send*` 调用返回 `SendResult::Closed`。
 
-> **始终对 `recv` 做 null 检查。** 把返回当作非空的调用者会在关停时或任何其他持有者关闭通道时崩溃。标准写法是 `while (($item = $ch->recv(timeout: T)) !== null) { ... }`。
+> 始终检查 Result 变体。把 `recv()->value()` 当作总是安全的调用方会在关停或任何其他持有者关闭通道时抛出 `SharedException`。
 
 ## 批量操作
 
@@ -165,21 +220,19 @@ try {
 <?php
 $ch = new OxPHP\Shared\Channel(1024);
 
-// 一次发送数组；返回实际缓冲的数量。
-$sent = $ch->sendMany([1, 2, 3, 4, 5]);   // 5
+// 发送数组；返回实际接受的数量。
+$sent = $ch->sendMany([1, 2, 3, 4, 5], 100);  // 100ms 预算内 5 个
 
 // 在 100ms 截止时间内拉取最多 10 项。
-$batch = $ch->recvMany(10, 0.1);
-
-// max = 0 表示「排空当前缓冲，不等待」。
-$snapshot = $ch->recvMany(0);
+$batch = $ch->recvMany(10, 100);
 ```
 
 值得注意的语义：
 
-- 在已关闭的通道上 `sendMany` 返回 `0`（不抛异常）。它不会发送部分批次。
-- `recvMany(0)` 永不阻塞。它返回当前缓冲的内容。
-- 部分返回是正常的：若在接收期间超时到达，调用会返回已经拿到的条目。
+- 两个批量方法在超时或批中关闭时**返回部分结果**——绝不抛异常。请检查 int / 数组长度以判断部分进展。
+- `sendMany` 在已关闭的通道上返回 `0`。
+- `recvMany` 在 closed+empty 时返回 `[]`。
+- `$ms` 必须 `> 0`。没有「排空当前缓冲」重载——若该模式重要，请在紧凑循环中调用 `tryRecv()`；待真实调用点出现时再加专用批量变体。
 
 ## 可观测性
 
@@ -206,16 +259,16 @@ oxphp_shared_channel_items_dropped_total{channel_id="<id>"} counter
 
 ### HTTP 生产者、异步消费者
 
-在通道上暴露一个队列，并把工作者运行在异步池内：
-
 ```php
 <?php
-// worker.php（Worker 引导）
 $work = new OxPHP\Shared\Channel(256);
 
 $consumer = oxphp_async(function () use ($work) {
-    while (($job = $work->recv(timeout: 30.0)) !== null) {
-        process_job($job);
+    for (;;) {
+        $r = $work->recvTimeout(30000);
+        if ($r->isOk()) { process_job($r->value()); continue; }
+        if ($r->isClosed()) { break; }
+        // 超时——做健康检查，然后继续等待。
     }
 });
 
@@ -235,8 +288,10 @@ $ch = new OxPHP\Shared\Channel(1024);
 
 for ($i = 0; $i < 4; $i++) {
     oxphp_async(function () use ($ch, $i) {
-        while (($job = $ch->recv(timeout: 60.0)) !== null) {
-            handle($i, $job);
+        for (;;) {
+            $r = $ch->recvTimeout(60000);
+            if ($r->isOk()) { handle($i, $r->value()); continue; }
+            if ($r->isClosed()) { break; }
         }
     });
 }
@@ -248,22 +303,33 @@ for ($i = 0; $i < 4; $i++) {
 
 ```php
 <?php
-if (!$ch->trySend($event)) {
+if ($ch->trySend($event)->isFull()) {
     increment_dropped_metric();
 }
 ```
 
 ## 陷阱
 
-- **`timeout = 0.0` 表示无限等待**，而不是「立即返回」。需要非阻塞探测请用 `trySend` / `tryRecv`。这与 `oxphp_async_await` 语义一致。
+- **`recvTimeout(0)` 是 TypeException，不是「非阻塞」。** 非阻塞请用 `tryRecv()`。专门的方法名消除了旧 `?float $timeout` 带来的 timeout 重载歧义。
 - **值必须是可共享的。** 标量、`null`、以及可共享值的嵌套数组都允许。传入非 `Shared\*` 实例的对象会在 send 时抛出 `TypeException`。
-- **禁止 clone。** `clone $channel` 会抛异常；请通过闭包 `use` 传递通道——`oxphp_async(function () use ($ch) { ... })`——这样两侧看到同一个注册表条目。
-- **始终对 `recv` 做 null 检查。** 把返回当作非空会在关停、另一持有者关闭通道和超时时崩溃。
-- **超时与关闭的歧义。** `recv` 两种情况都返回 `null`。若需要区分，请在 `null` 返回后调用 `isClosed()`。
+- **禁止 clone。** `clone $channel` 会抛 `SharedException`；请通过闭包 `use` 传递通道——`oxphp_async(function () use ($ch) { ... })`——这样两侧看到同一个注册表条目。
+- **在非 Ok 上调用 `value()` 会抛异常。** 这是特性而非缺陷——它把「忘记检查 isOk」的错误转为响亮失败。若 default 确实合适，请用 `valueOr($default)`。
+- **Fiber 取消以异常形式传播**，而不是 Result 变体。被请求取消打断的 `recv()` 会抛 `OxPHP\Async\AsyncException`。自身关闭的通道仍然产出 `RecvResult::Closed`。
 - **被取消等待者的在途负载。** 如果许多 fiber 在 `send` / `recv` 上等待并在其负载即将穿越时被取消，该负载可能保持被引用直到下次唤醒。保持等待者数量有界（例如用 `Shared\Counter` 或通道容量信号量限制并发）。
+
+## 从旧 API 迁移
+
+| 之前                                                                | 现在                                                                   |
+|---------------------------------------------------------------------|------------------------------------------------------------------------|
+| `$ch->tryRecv()` → 空时 `null`，关闭时抛 `ClosedException`          | `$ch->tryRecv()` → `RecvResult::Empty` / `Closed`                       |
+| `$ch->recv($secs)` → 超时/关闭时 `null`                             | `$ch->recv()`（永远）/ `$ch->recvTimeout($ms)` → `RecvResult`           |
+| `$ch->trySend($v): bool`                                            | `$ch->trySend($v): SendResult`                                          |
+| `$ch->send($v, $secs): bool`（抛 TimeoutException/ClosedException） | `$ch->send($v)` / `$ch->sendTimeout($v, $ms)` → `SendResult`            |
+| `$ch->sendMany($vs, $secs)`（部分成功时抛 TimeoutException）        | `$ch->sendMany($vs, $ms): int`（部分计数，不抛异常）                    |
+| `?float $timeout`（秒，允许 NaN/INF）                               | `int $ms`（毫秒，必须 `> 0`）                                            |
 
 ## 相关特性
 
-- [Worker 模式](worker-mode.md) —— fiber 挂起式 `send` / `recv` 的前置条件。
+- [Worker 模式](worker-mode.md) —— fiber 挂起式阻塞变体的前置条件。
 - [异步 Promise](async-promises.md) —— `oxphp_async()` 闭包是把 `Channel` 交给后台 fiber 的常规方式。
 - [Fiber 多路复用](fiber-multiplexing.md) —— 阐述挂起如何在通道操作等待时让工作线程继续产出。

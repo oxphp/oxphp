@@ -1,18 +1,18 @@
 ---
 title: Shared\Channel
-description: Ограниченный MPMC-канал, разделяемый между PHP-воркерами, с fiber-aware send и recv для кооперативных producer/consumer пайплайнов.
+description: Ограниченный MPMC-канал, разделяемый между PHP-воркерами, с fiber-aware send и recv, возвращающими типизированные Result-значения для явной диспетчеризации.
 ---
 
 # Shared\Channel
 
-`OxPHP\Shared\Channel` — это ограниченный multi-producer multi-consumer канал, живущий в общем реестре и видимый каждому PHP-воркеру в процессе. Используйте его, когда обработчик запроса и фоновый воркер — или два воркера — должны обмениваться элементами работы в порядке FIFO. Внутри файбера `send` и `recv` кооперативно приостанавливаются, так что нижележащий поток воркера остаётся свободным для обработки других запросов.
+`OxPHP\Shared\Channel` — это ограниченный multi-producer multi-consumer канал, живущий в общем реестре и видимый каждому PHP-воркеру в процессе. Используйте его, когда обработчик запроса и фоновый воркер — или два воркера — должны обмениваться элементами работы в порядке FIFO. Внутри файбера блокирующие вызовы кооперативно приостанавливаются, так что нижележащий поток воркера остаётся свободным для обработки других запросов.
 
 ## Обзор
 
-- **Ограниченный.** Ёмкость фиксируется при конструировании. Когда полон, `send` блокирует или приостанавливает; `trySend` возвращает `false`.
+- **Ограниченный.** Ёмкость фиксируется при конструировании. Когда полон, `send` блокирует (или приостанавливает файбер); `trySend` сообщает результат без ожидания.
 - **MPMC.** Произвольное число отправителей и получателей между потоками. Доставка FIFO.
-- **Fiber-aware.** В worker mode с async-пулом `send`/`recv` приостанавливают файбер вместо блокировки потока воркера. В традиционном режиме блокируют OS-поток.
-- **Подкреплён реестром.** Каналы переживают границы запросов и разделяются по ID. Close распространяется на всех держателей.
+- **Fiber-aware.** В worker mode с async-пулом блокирующие варианты приостанавливают файбер вместо OS-потока. В традиционном режиме блокируют OS-поток.
+- **Типизированный результат.** Каждый send/recv возвращает [`Channel\SendResult`](#Справочник-api) / [`Channel\RecvResult`](#Справочник-api) — closed / full / timeout это нормальные исходы для fan-out диспетчеров, поэтому они представлены вариантами результата, а не исключениями.
 
 ## Справочник API
 
@@ -23,108 +23,164 @@ final class Channel implements Shareable, \Countable
 {
     public function __construct(int $capacity);
 
-    public function send(mixed $value, float $timeout = 0.0): void;
-    public function trySend(mixed $value): bool;
+    // ── Receive ──
+    public function tryRecv(): Channel\RecvResult;                  // non-blocking
+    public function recv(): Channel\RecvResult;                     // ждать вечно / fiber-cancel
+    public function recvTimeout(int $ms): Channel\RecvResult;       // ограниченное ($ms > 0)
 
-    public function recv(float $timeout = 0.0): mixed;
-    public function tryRecv(): mixed;
+    // ── Send ──
+    public function trySend(mixed $value): Channel\SendResult;
+    public function send(mixed $value): Channel\SendResult;
+    public function sendTimeout(mixed $value, int $ms): Channel\SendResult;
 
-    public function close(): void;
+    // ── Batch ──
+    public function sendMany(array $values, int $ms): int;          // частичный счёт, без throw
+    public function recvMany(int $max, int $ms): array;             // частичный массив, без throw
+
+    // ── Lifecycle ──
+    public function close(): bool;
     public function isClosed(): bool;
     public function count(): int;
-
-    public function sendMany(array $values, float $timeout = 0.0): int;
-    public function recvMany(int $max, float $timeout = 0.0): array;
-
     public function id(): int;
 }
+
+namespace OxPHP\Shared\Channel;
+
+enum RecvStatus { case Ok; case Empty; case Timeout; case Closed; }
+enum SendStatus { case Ok; case Full;  case Timeout; case Closed; }
+
+final class RecvResult {
+    public function isOk(): bool;
+    public function isEmpty(): bool;
+    public function isTimeout(): bool;
+    public function isClosed(): bool;
+    public function value(): mixed;                // бросает SharedException, если не Ok
+    public function valueOr(mixed $default): mixed;
+    public function status(): RecvStatus;
+}
+
+final class SendResult {
+    public function isOk(): bool;
+    public function isFull(): bool;
+    public function isTimeout(): bool;
+    public function isClosed(): bool;
+    public function status(): SendStatus;
+}
 ```
 
-| Метод         | Применение                                                                           |
-|---------------|--------------------------------------------------------------------------------------|
-| `send`        | Положить один элемент, ожидая (или приостанавливая файбер) до `$timeout` свободного места. |
-| `trySend`     | Положить один элемент без ожидания; возвращает `false`, если полон или закрыт.       |
-| `recv`        | Забрать один элемент, ожидая до `$timeout`. Возвращает `null` при closed+empty или таймауте. |
-| `tryRecv`     | Забрать один элемент без ожидания; возвращает `null`, если пуст; бросает при closed+empty. |
-| `close`       | Пометить канал закрытым. Идемпотентно. Будит всех заблокированных отправителей/получателей. |
-| `isClosed`    | Сообщает, был ли канал закрыт.                                                       |
-| `count`       | Ориентировочное количество буферизованных элементов прямо сейчас. Через `Countable` — `count($ch)` работает напрямую. |
-| `sendMany`    | Положить массив элементов; возвращает, сколько реально вошло до full/closed/timeout. |
-| `recvMany`    | Забрать до `$max` элементов (`0` = слить то, что буферизовано сейчас, без ожидания). |
-| `id`          | Числовой идентификатор реестра; полезен для логов и корреляции в наблюдаемости.      |
+## Wait-политики
 
-## Выбор между вариантами send/recv
+Для каждого направления есть три варианта метода — суффикс кодирует wait-политику:
 
-Блокирующие и неблокирующие пары различаются в **том, что они возвращают, и в том, что они бросают**, и поведение намеренно асимметрично.
+| Суффикс       | Поведение                                                            |
+|---------------|----------------------------------------------------------------------|
+| `try*`        | Non-blocking. Сообщает `Empty` / `Full`, если вызов не может продолжиться. |
+| (голое имя)   | Ждать вечно или пока request fiber не будет отменён.                 |
+| `*Timeout`    | Ограниченное ожидание. `$ms` обязан быть `> 0` — для «вечно» и «без ожидания» используйте другие формы. |
 
-| Исход               | `send(v, t)`         | `trySend(v)` | `recv(t)`       | `tryRecv()`           |
-|---------------------|----------------------|--------------|------------------|-----------------------|
-| Успех               | возвращает `void`    | `true`       | элемент          | элемент               |
-| Полон / пуст, открыт | ждёт до `t`          | `false`      | ждёт до `t`      | `null`                |
-| Таймаут             | `TimeoutException`   | —            | `null`           | —                     |
-| Закрыт (empty recv) | `ClosedException`    | `false`      | `null`           | `ClosedException`     |
-| Закрыт (ещё есть элементы) | `ClosedException` | `false`    | возвращает элемент | возвращает элемент  |
+`$ms` — **всегда положительное целое в миллисекундах** для `recvTimeout` / `sendTimeout` / `sendMany` / `recvMany`. Ноль, отрицательные, не-int и отсутствующие значения поднимают `OxPHP\Shared\TypeException` на бридже — это ограничение вынесено из тела метода, чтобы трихотомия была самодокументирующейся.
 
-Два следствия стоит запомнить:
+### Достижимые варианты результата по методам
 
-1. **`recv` никогда не бросает на closed+empty.** Он возвращает `null`. Циклы должны проверять на null.
-2. **`recv` также возвращает `null` на таймаут**, тогда как `send` бросает `TimeoutException`. Если нужно отличить «никто не отправил вовремя» от «канал закрыт», проверьте `isClosed()` после `null`-recv.
+`SendResult::Full` и `RecvResult::Empty` эмитятся только non-blocking `try*`-вызовами — блокирующий вариант либо получает слот/элемент, либо исчерпывает бюджет, и тогда результат — `Timeout`, а не `Full` / `Empty`. Полная матрица достижимости:
+
+| Метод           | `Ok` | `Full` / `Empty` | `Timeout` | `Closed` |
+|-----------------|------|------------------|-----------|----------|
+| `trySend`       | ✓    | `Full` ✓         | —         | ✓        |
+| `send`          | ✓    | —                | —         | ✓        |
+| `sendTimeout`   | ✓    | —                | ✓         | ✓        |
+| `tryRecv`       | ✓    | `Empty` ✓        | —         | ✓        |
+| `recv`          | ✓    | —                | —         | ✓        |
+| `recvTimeout`   | ✓    | —                | ✓         | ✓        |
+
+Проверки `isFull()` / `isEmpty()` на результате блокирующего вызова — мёртвый код. `match`-примеры ниже оставляют эти ветви с комментариями `unreachable`, чтобы читатель сразу увидел асимметрию.
+
+## Диспетчеризация результата
+
+`RecvResult` и `SendResult` несут дискриминант `status()` плюс (только для `RecvResult`) полезную нагрузку. Две эквивалентные идиомы:
 
 ```php
-<?php
-$ch = new OxPHP\Shared\Channel(4);
+use OxPHP\Shared\Channel;
+use OxPHP\Shared\Channel\RecvStatus;
 
-// Неблокирующая проверка.
-if (!$ch->trySend('job-1')) {
-    // Очередь полна; сбросить, повторить или применить backpressure.
+$ch = new Channel(capacity: 64);
+
+// Boolean-аксессоры — кратко, когда важен только один исход.
+$result = $ch->tryRecv();
+if ($result->isOk()) {
+    process($result->value());
+} elseif ($result->isEmpty()) {
+    backoff();
+} else {
+    break; // closed
 }
 
-// Блокирующий send с дедлайном.
-try {
-    $ch->send('job-2', timeout: 1.0);
-} catch (OxPHP\Shared\TimeoutException $e) {
-    // Ни один потребитель не подхватил за 1 с.
-} catch (OxPHP\Shared\ClosedException $e) {
-    // Канал закрыли, пока мы ждали.
-}
+// Исчерпывающий match — проверка исчерпываемости ловит новые варианты.
+$r = $ch->recvTimeout(1500);
+match ($r->status()) {
+    RecvStatus::Ok      => process($r->value()),
+    RecvStatus::Timeout => $logger->debug('idle'),
+    RecvStatus::Closed  => break,
+    RecvStatus::Empty   => /* unreachable: только tryRecv возвращает Empty */ ,
+};
+
+// Симметричная диспетчеризация на send-стороне — достижимы только Ok / Timeout / Closed.
+use OxPHP\Shared\Channel\SendStatus;
+$s = $ch->sendTimeout($value, 1500);
+match ($s->status()) {
+    SendStatus::Ok      => /* доставлено */ ,
+    SendStatus::Timeout => $logger->debug('backpressure'),
+    SendStatus::Closed  => break,
+    SendStatus::Full    => /* unreachable: только trySend возвращает Full */ ,
+};
+
+// Безопасный аксессор — никогда не бросает.
+$value = $ch->tryRecv()->valueOr('fallback');
 ```
+
+`RecvResult::value()` бросает `OxPHP\Shared\SharedException`, если вызван на не-Ok варианте — сначала используйте `isOk()` / `valueOr()` / `status()`. Это сделано намеренно: ошибка «забыл проверить isOk» превращается в громкий сбой, а не в тихий `null`.
 
 ## Поведение fiber vs блокирующее
 
 Одни и те же вызовы методов ведут себя по-разному в зависимости от того, выполняется ли PHP сейчас внутри файбера:
 
-- **Внутри файбера** (worker mode + `oxphp_async(...)`): `send` / `recv` выделяют синтетический promise, регистрируют waker в канале и приостанавливают файбер. Поток воркера возвращается к планировщику и обрабатывает другие файберы, пока канал не уведомит waker.
-- **Вне файбера** (традиционный режим или неасинхронный путь вызова): `send` / `recv` блокируют OS-поток воркера через `crossbeam_channel`. Никакая другая работа на этом потоке не выполняется до возврата.
+- **Внутри файбера** (worker mode + `oxphp_async(...)`): блокирующие варианты (`send`, `recv`, `sendTimeout`, `recvTimeout`) выделяют синтетический promise, регистрируют waker в канале и приостанавливают файбер. Поток воркера возвращается к планировщику и обрабатывает другие файберы, пока канал не уведомит waker.
+- **Вне файбера** (традиционный режим или неасинхронный путь вызова): блокирующие варианты блокируют OS-поток воркера через `crossbeam_channel`. Никакая другая работа на этом потоке не выполняется до возврата.
 
 Традиционный режим всё равно получает семантику канала — он просто платит заблокированным потоком. Worker mode — рекомендуемый способ развёртывания для любого пайплайна, опирающегося на ожидание.
 
 ```php
 <?php
-// Традиционный режим: этот recv блокирует поток воркера до 2 секунд.
+// Традиционный режим: этот recvTimeout блокирует поток воркера до 2 секунд.
 $ch = new OxPHP\Shared\Channel(16);
-$item = $ch->recv(timeout: 2.0);
+$r = $ch->recvTimeout(2000);
 
 // Worker mode: обернуть в oxphp_async, и recv приостанавливается кооперативно.
 oxphp_worker(function () use ($ch) {
     $consumer = oxphp_async(function () use ($ch) {
-        while (($item = $ch->recv(timeout: 5.0)) !== null) {
-            process($item);
+        for (;;) {
+            $r = $ch->recvTimeout(5000);
+            if ($r->isOk()) { process($r->value()); continue; }
+            if ($r->isClosed()) { break; }
+            // Timeout — продолжаем ждать.
         }
     });
     oxphp_async_await($consumer);
 });
 ```
 
+Отмена файбера (abort запроса, истёкший дедлайн на уровне SAPI) всё равно всплывает как `OxPHP\Async\AsyncException` — она **не** транслируется в `RecvResult::Closed`. Канал не закрывался; вас отменил рантайм. Перебрасывайте или ловите по обстоятельствам.
+
 ## Семантика close
 
 `close()` идемпотентен — второй вызов — no-op. После close:
 
-- `send` / `sendMany` бросают `ClosedException`.
-- `trySend` возвращает `false`.
-- `recv` продолжает сливать буферизованные элементы, затем возвращает `null`, когда пуст.
-- `tryRecv` возвращает буферизованные элементы, затем бросает `ClosedException` на пустом.
+- `send`, `sendTimeout`, `trySend` возвращают `SendResult::Closed`.
+- `sendMany` возвращает число, реально принятое до close (`0`, если уже закрыт).
+- `recv`, `recvTimeout`, `tryRecv` продолжают сливать буферизованные элементы как `RecvResult::Ok($value)`, затем возвращают `RecvResult::Closed`, когда пуст.
+- `recvMany` возвращает элементы, которые смог слить, возможно пустой массив.
 - `isClosed()` возвращает `true`.
-- Заблокированные отправители просыпаются с `ClosedException`; заблокированные получатели просыпаются с `null`.
+- Заблокированные отправители просыпаются с `SendResult::Closed`; заблокированные получатели — с `RecvResult::Closed`.
 
 ```php
 <?php
@@ -134,28 +190,27 @@ $ch->send('two');
 $ch->close();
 
 // Сливаем остатки.
-while (($item = $ch->recv()) !== null) {
-    echo $item, "\n"; // one, two
+for (;;) {
+    $r = $ch->recv();
+    if ($r->isClosed()) { break; }
+    echo $r->value(), "\n"; // one, two
 }
 
-// Дальнейшие send отклоняются.
-try {
-    $ch->send('three');
-} catch (OxPHP\Shared\ClosedException $e) {
-    // ожидаемо
-}
+// Дальнейшие send возвращают Closed без исключения.
+$result = $ch->send('three');
+assert($result->isClosed());
 ```
 
-Паттерн для graceful-остановки пайплайна: producers останавливаются, сторона producer вызывает `close()`, consumers сливают в цикле `while (($item = $ch->recv()) !== null)` и естественно выходят.
+Паттерн для graceful-остановки пайплайна: producers останавливаются, сторона producer вызывает `close()`, consumers сливают в цикле `for (;;) { $r = $ch->recv(); if ($r->isClosed()) break; … }` и естественно выходят. Ни один consumer не увидит `null`-payload по ошибке — вариант несёт этот сигнал явно.
 
 ## Слив при shutdown
 
 Когда процесс OxPHP останавливается, реестр `OxPHP\Shared` вызывает `close()` на каждой записи, включая каналы. С точки зрения PHP это выглядит идентично явному `close()`:
 
-- Заблокированные вызовы `recv` возвращают `null`.
-- Заблокированные вызовы `send` бросают `ClosedException`.
+- Заблокированные вызовы `recv*` возвращают `RecvResult::Closed`.
+- Заблокированные вызовы `send*` возвращают `SendResult::Closed`.
 
-> **Всегда проверяйте `recv` на null.** Вызывающий, трактующий возврат как non-null, упадёт при shutdown или когда другой держатель закроет канал. Стандартная идиома — `while (($item = $ch->recv(timeout: T)) !== null) { ... }`.
+> Всегда проверяйте вариант результата. Вызывающий, считающий `recv()->value()` всегда безопасным, бросит `SharedException` при shutdown или когда другой держатель закроет канал.
 
 ## Пакетные операции
 
@@ -165,21 +220,19 @@ try {
 <?php
 $ch = new OxPHP\Shared\Channel(1024);
 
-// Отправить массив одним вызовом; возвращает, сколько реально буферизовано.
-$sent = $ch->sendMany([1, 2, 3, 4, 5]);   // 5
+// Отправить массив; возвращает, сколько реально принято.
+$sent = $ch->sendMany([1, 2, 3, 4, 5], 100);  // 5 в пределах бюджета 100 мс
 
 // Слить до 10 элементов с дедлайном 100 мс.
-$batch = $ch->recvMany(10, 0.1);
-
-// max = 0 означает «слить то, что сейчас буферизовано, без ожидания».
-$snapshot = $ch->recvMany(0);
+$batch = $ch->recvMany(10, 100);
 ```
 
 Семантика, которую стоит отметить:
 
-- `sendMany` на закрытом канале возвращает `0` (без исключения). Он не отправляет частичный пакет.
-- `recvMany(0)` никогда не блокирует. Возвращает то, что сейчас буферизовано.
-- Частичный возврат — нормально: если таймаут истекает во время приёма, вызов возвращает элементы, которые уже получил.
+- Оба пакетных метода **возвращают частичный результат** при таймауте или при close посреди пакета — никогда исключение. Проверяйте длину int / массива, чтобы обнаружить частичный прогресс.
+- `sendMany` на уже закрытом канале возвращает `0`.
+- `recvMany` на closed+empty возвращает `[]`.
+- `$ms` обязан быть `> 0`. Перегрузки «слить то, что буферизовано» нет — вызывайте `tryRecv()` в плотном цикле, если паттерн важен; добавим отдельный batch-вариант, когда появится реальный callsite.
 
 ## Наблюдаемость
 
@@ -206,16 +259,16 @@ oxphp_shared_channel_items_dropped_total{channel_id="<id>"} counter
 
 ### HTTP-producer, async-consumer
 
-Выставите очередь на канале и запустите воркер внутри async-пула:
-
 ```php
 <?php
-// worker.php (бутстрап воркера)
 $work = new OxPHP\Shared\Channel(256);
 
 $consumer = oxphp_async(function () use ($work) {
-    while (($job = $work->recv(timeout: 30.0)) !== null) {
-        process_job($job);
+    for (;;) {
+        $r = $work->recvTimeout(30000);
+        if ($r->isOk()) { process_job($r->value()); continue; }
+        if ($r->isClosed()) { break; }
+        // Timeout — health-check и продолжаем ждать.
     }
 });
 
@@ -235,8 +288,10 @@ $ch = new OxPHP\Shared\Channel(1024);
 
 for ($i = 0; $i < 4; $i++) {
     oxphp_async(function () use ($ch, $i) {
-        while (($job = $ch->recv(timeout: 60.0)) !== null) {
-            handle($i, $job);
+        for (;;) {
+            $r = $ch->recvTimeout(60000);
+            if ($r->isOk()) { handle($i, $r->value()); continue; }
+            if ($r->isClosed()) { break; }
         }
     });
 }
@@ -244,26 +299,37 @@ for ($i = 0; $i < 4; $i++) {
 
 ### Ограниченный пайплайн с backpressure
 
-Использование `trySend` плюс счётчика сбросов позволяет producer'у сбрасывать нагрузку вместо блокировки при перегрузке:
+`trySend` плюс счётчик сбросов позволяет producer'у сбрасывать нагрузку вместо блокировки при перегрузке:
 
 ```php
 <?php
-if (!$ch->trySend($event)) {
+if ($ch->trySend($event)->isFull()) {
     increment_dropped_metric();
 }
 ```
 
 ## Подводные камни
 
-- **`timeout = 0.0` означает ждать бесконечно**, а не «вернуться немедленно». Используйте `trySend` / `tryRecv` для неблокирующих проверок. Это соответствует семантике `oxphp_async_await`.
+- **`recvTimeout(0)` — это TypeException, а не «без блокировки».** Для non-blocking используйте `tryRecv()`. Отдельные имена методов убрали неоднозначность timeout-перегрузки, которая была у старого `?float $timeout`.
 - **Значения должны быть shareable.** Скаляры, `null` и вложенные массивы shareable-объектов разрешены. Передача объекта, который не является экземпляром `Shared\*`, поднимает `TypeException` при send.
-- **Clone запрещён.** `clone $channel` бросает; передавайте канал через `use` замыкания — `oxphp_async(function () use ($ch) { ... })` — чтобы обе стороны видели одну и ту же запись реестра.
-- **Всегда проверяйте `recv` на null.** Трактовка возврата как non-null ломается при shutdown, когда другой держатель закрывает канал, и при таймауте.
-- **Неоднозначность таймаута vs close.** `recv` возвращает `null` для обоих. Если нужно их различить, вызывайте `isClosed()` после `null`-возврата.
-- **Отменённые ожидающие с in-flight пэйлоадом.** Если много файберов ждут на `send` / `recv` и отменяются, когда их пэйлоад уже почти перешёл, пэйлоад может остаться со ссылкой до следующего пробуждения. Держите число ожидающих ограниченным (например, кэпайте конкуренцию через `Shared\Counter` или семафор из channel-capacity).
+- **Clone запрещён.** `clone $channel` бросает `SharedException`; передавайте канал через `use` замыкания — `oxphp_async(function () use ($ch) { ... })` — чтобы обе стороны видели одну и ту же запись реестра.
+- **`value()` на не-Ok бросает.** Это фича, а не баг — она превращает ошибку «забыл проверить isOk» в громкий сбой. Используйте `valueOr($default)`, если default действительно подходит.
+- **Отмена файбера всплывает как исключение**, а не вариант Result. `recv()`, прерванный отменой запроса, поднимает `OxPHP\Async\AsyncException`. Каналы, закрытые сами по себе, по-прежнему дают `RecvResult::Closed`.
+- **Отменённые ожидающие с in-flight payload.** Если много файберов ждут на `send` / `recv` и отменяются, когда их payload почти перешёл, payload может остаться со ссылкой до следующего пробуждения. Держите число ожидающих ограниченным (например, кэпайте конкурентность через `Shared\Counter` или семафор из channel-capacity).
+
+## Миграция со старого API
+
+| Было                                                                | Стало                                                                  |
+|---------------------------------------------------------------------|------------------------------------------------------------------------|
+| `$ch->tryRecv()` → `null` при empty, бросает `ClosedException`      | `$ch->tryRecv()` → `RecvResult::Empty` / `Closed`                       |
+| `$ch->recv($secs)` → `null` при timeout/close                       | `$ch->recv()` (вечно) / `$ch->recvTimeout($ms)` → `RecvResult`          |
+| `$ch->trySend($v): bool`                                            | `$ch->trySend($v): SendResult`                                          |
+| `$ch->send($v, $secs): bool` (бросает TimeoutException/ClosedException) | `$ch->send($v)` / `$ch->sendTimeout($v, $ms)` → `SendResult`        |
+| `$ch->sendMany($vs, $secs)` (бросает TimeoutException при частичном) | `$ch->sendMany($vs, $ms): int` (частичный счёт, без throw)             |
+| `?float $timeout` (секунды, NaN/INF допускались)                    | `int $ms` (миллисекунды, обязан быть `> 0`)                            |
 
 ## Связанные возможности
 
-- [Worker Mode](worker-mode.md) — предпосылка для fiber-приостанавливающих `send` / `recv`.
+- [Worker Mode](worker-mode.md) — предпосылка для fiber-приостанавливающих блокирующих вариантов.
 - [Async Promises](async-promises.md) — замыкание `oxphp_async()` — обычный способ передать `Channel` фоновому файберу.
 - [Fiber Multiplexing](fiber-multiplexing.md) — объясняет, как приостановка держит поток воркера продуктивным, пока операции канала ждут.
