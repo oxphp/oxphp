@@ -670,8 +670,24 @@ impl ArgBuilder {
 }
 
 /// Sizeof(zval) — 16 on all 64-bit PHP 8.x builds. Verified at runtime via
-/// `oxphp_zval_size()` in debug builds (see `debug_assert_zval_size`).
-const ZVAL_SIZE: usize = 16;
+/// `oxphp_zval_size()` in debug builds (see [`debug_assert_zval_size`]).
+pub(crate) const ZVAL_SIZE: usize = 16;
+
+/// Runtime sanity check that the linked PHP build still uses a 16-byte zval.
+/// No-op in release; loud panic in debug if the assumption breaks (a future
+/// PHP layout change would otherwise silently corrupt every fixed-buffer
+/// zval slot in the bridge — `ZvalSlot([u8; 16])`, the `[0u8; ZVAL_SIZE]`
+/// allocations in handlers, the `ArgBuilder` stride, etc.).
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn debug_assert_zval_size() {
+    debug_assert_eq!(
+        unsafe { super::ffi::oxphp_zval_size() },
+        ZVAL_SIZE,
+        "PHP zval layout changed: sizeof(zval) is no longer {ZVAL_SIZE}. \
+         Update ZVAL_SIZE, ZvalSlot, and every fixed-buffer site in the bridge."
+    );
+}
 
 /// Owned result from `call_php` — calls `zval_ptr_dtor` on drop to prevent
 /// refcounted value leaks (strings, arrays, objects).

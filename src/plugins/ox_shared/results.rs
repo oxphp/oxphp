@@ -236,8 +236,13 @@ pub(crate) fn write_recv_ok(
         );
     }
     // Deserialize value_buf into a stack-resident temporary zval, copy
-    // into the property slot, then dtor the temporary.
-    let mut tmp = [0u8; 16];
+    // into the property slot, then dtor the temporary. Buffer size is
+    // bound to the bridge's ZVAL_SIZE const (16 on all current PHP 8.x
+    // 64-bit builds); the debug assertion above verifies the linked
+    // PHP runtime agrees, so a future layout change panics loudly in
+    // debug instead of corrupting silently in release.
+    crate::bridge::call::debug_assert_zval_size();
+    let mut tmp = [0u8; crate::bridge::call::ZVAL_SIZE];
     let tmp_ptr = tmp.as_mut_ptr() as *mut std::ffi::c_void;
     let des_rc =
         unsafe { bridge_ffi::oxphp_portable_deserialize(value_buf, value_len, 1, tmp_ptr) };
