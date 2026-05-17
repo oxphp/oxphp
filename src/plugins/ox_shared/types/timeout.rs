@@ -6,13 +6,15 @@
 //!   - `> 0`                        — bounded wait of exactly that many milliseconds
 //!
 //! [`parse_timeout`] converts the wire value to [`Wait`].
-//! [`read_timeout_arg`] reads the legacy PHP `?float $timeout = null` argument
-//! and converts it to the wire value. Scheduled for removal once Channel and
-//! Mutex migrate to the per-method `*Timeout(int $ms)` variants.
 //! [`read_positive_ms_arg`] reads a PHP `int $ms` argument (`> 0` required),
-//! used by the new `*Timeout` methods. Raises `TypeException` on absent / zero
-//! / negative / non-int input — the trichotomy (`try*` / forever / `*Timeout`)
-//! moves those edge cases to dedicated methods.
+//! used by every `*Timeout` method on Shared\Channel and Shared\Mutex (and
+//! any future primitive that adopts the trichotomous `try*` / forever /
+//! `*Timeout` convention). Raises `TypeException` on absent / zero / negative
+//! / non-int input.
+//! [`read_timeout_arg`] reads the legacy PHP `?float $timeout = null` argument
+//! and converts it to the wire value. Retained for [`super::pool::Pool`] (its
+//! `acquire`/`tryAcquire` keep the original signature until that primitive
+//! migrates). New code MUST use [`read_positive_ms_arg`].
 
 use std::time::Duration;
 
