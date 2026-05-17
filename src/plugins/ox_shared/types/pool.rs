@@ -1450,7 +1450,7 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
         -3 => "OxPHP\\Shared\\TypeException",
         -4 => "OxPHP\\Shared\\CapacityException",
         -6 => "OxPHP\\Shared\\ClosedException",
-        -7 => "OxPHP\\Shared\\TimeoutException",
+        -7 => "OxPHP\\Shared\\OperationTimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
         _ => "OxPHP\\Shared\\SharedException",
     };
