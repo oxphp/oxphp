@@ -33,14 +33,14 @@ $h1 = $pool->acquire();
 $h2 = $pool->acquire();
 
 // Third acquire with a short timeout must hit the wait-for-release
-// path and return TimeoutException → acquire_total{timeout} += 1.
+// path and return OperationTimeoutException → acquire_total{timeout} += 1.
 $caught_timeout = false;
 try {
     $pool->acquire(0.05);
-} catch (\OxPHP\Shared\TimeoutException $e) {
+} catch (\OxPHP\Shared\OperationTimeoutException $e) {
     $caught_timeout = true;
 }
-if (!$caught_timeout) { echo "FAIL: expected TimeoutException\n"; exit; }
+if (!$caught_timeout) { echo "FAIL: expected OperationTimeoutException\n"; exit; }
 
 $pool->release($h1);
 $pool->release($h2);

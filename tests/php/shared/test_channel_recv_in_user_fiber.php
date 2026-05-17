@@ -20,7 +20,7 @@ $ch = new OxPHP\Shared\Channel(1);
 $ch->send('x');
 
 $f = new Fiber(function () use ($ch) {
-    echo $ch->recv() . "\n";
+    echo $ch->recv()->value() . "\n";
 });
 $f->start();
 

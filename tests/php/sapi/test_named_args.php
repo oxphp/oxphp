@@ -6,13 +6,16 @@ $t = new TestCase('named_args', 'sapi');
 
 $ch = new OxPHP\Shared\Channel(1);
 
-$rm = new ReflectionMethod($ch, 'send');
+// sendTimeout exposes the int $ms parameter by name (Channel::send is
+// the no-timeout variant under the new Result API).
+$rm = new ReflectionMethod($ch, 'sendTimeout');
 $names = array_map(fn($p) => $p->getName(), $rm->getParameters());
-$t->assertSame('send param 0 name', $names[0] ?? null, 'value');
-$t->assertSame('send param 1 name', $names[1] ?? null, 'timeout');
+$t->assertSame('sendTimeout param 0 name', $names[0] ?? null, 'value');
+$t->assertSame('sendTimeout param 1 name', $names[1] ?? null, 'ms');
 
 // Functional: must accept named arg without throwing.
-$ch->send('x', timeout: 0.0);
-$t->assertSame('value passed through', $ch->recv(), 'x');
+$result = $ch->sendTimeout('x', ms: 50);
+$t->assertSame('sendTimeout returns Ok', $result->isOk(), true);
+$t->assertSame('value passed through', $ch->recv()->value(), 'x');
 
 $t->done();

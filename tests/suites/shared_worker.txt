@@ -5,3 +5,5 @@ shared/test_channel_fiber_producer_consumer
 shared/test_channel_shutdown_drain
 shared/test_counter_cross_thread
 shared/test_atomic_cross_thread
+shared/test_mutex_contention
+shared/test_mutex_with_lock_timeout

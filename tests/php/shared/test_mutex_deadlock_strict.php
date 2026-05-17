@@ -10,10 +10,10 @@ $b = new OxPHP\Shared\Mutex(0);
 
 $p1 = oxphp_async(function() use ($a, $b) {
     try {
-        $a->with(function() use ($b) {
+        $a->withLockTimeout(function() use ($b) {
             usleep(300000); // 300 ms — give the 50 ms poll multiple windows
-            $b->with(fn() => 1, 5.0);
-        }, 5.0);
+            $b->withLockTimeout(fn() => 1, 5000);
+        }, 5000);
     } catch (OxPHP\Shared\DeadlockException $e) {
         return 'dl1';
     }
@@ -22,10 +22,10 @@ $p1 = oxphp_async(function() use ($a, $b) {
 
 $p2 = oxphp_async(function() use ($a, $b) {
     try {
-        $b->with(function() use ($a) {
+        $b->withLockTimeout(function() use ($a) {
             usleep(300000);
-            $a->with(fn() => 1, 5.0);
-        }, 5.0);
+            $a->withLockTimeout(fn() => 1, 5000);
+        }, 5000);
     } catch (OxPHP\Shared\DeadlockException $e) {
         return 'dl2';
     }

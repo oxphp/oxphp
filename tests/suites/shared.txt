@@ -39,3 +39,7 @@ shared/test_mutex_timeout_contract
 shared/test_pool_timeout_contract
 shared/test_pool_perf
 shared/test_pool_observability
+shared/test_channel_recv_result
+shared/test_channel_send_result
+shared/test_channel_recv_status_match
+shared/test_shared_cross_plugin_catch

@@ -1,6 +1,6 @@
 <?php
 /**
- * Channel — close(), then send → ClosedException.
+ * Channel — close(), then send → SendResult::Closed (no exception).
  * close() is idempotent (second call is a no-op).
  */
 header('Content-Type: text/plain');
@@ -11,13 +11,8 @@ $ch->send(1);
 $ch->close();
 $ch->close(); // idempotent — second close must not throw
 
-$threw = false;
-try {
-    $ch->send(2);
-} catch (OxPHP\Shared\ClosedException $e) {
-    $threw = true;
-}
-if (!$threw) { echo "FAIL: send on closed must throw ClosedException\n"; exit; }
+$result = $ch->send(2);
+if (!$result->isClosed()) { echo "FAIL: send on closed channel must report Closed\n"; exit; }
 
 // Channel should still report closed
 if (!$ch->isClosed()) { echo "FAIL: isClosed() should be true after close\n"; exit; }

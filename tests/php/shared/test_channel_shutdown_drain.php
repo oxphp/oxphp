@@ -16,11 +16,13 @@ if (!oxphp_is_worker()) {
 $ch = new OxPHP\Shared\Channel(1);
 $ch->send('pre-close'); // fill so future send would block
 
-// Consumer: will block on recv; we expect null after the delayed close.
+// Consumer: will block on recv; we expect RecvResult::Closed after the
+// delayed close. Encode the outcome as a plain string so the async return
+// channel does not have to ferry a Shared\* object across threads.
 $consumer = oxphp_async(function () use ($ch) {
     $ch->recv(); // drain 'pre-close'
-    $second = $ch->recv(); // blocks; close should wake it with null
-    return $second;
+    $r = $ch->recv(); // blocks; close should wake it with Closed
+    return $r->status()->name;
 });
 
 // Simulate drain: from another fiber, after a short delay, close.
@@ -31,10 +33,10 @@ $closer = oxphp_async(function () use ($ch) {
 });
 
 oxphp_async_await($closer);
-$result = oxphp_async_await($consumer);
+$status = oxphp_async_await($consumer);
 
-if ($result !== null) {
-    echo "FAIL: blocked recv after close should return null, got " . var_export($result, true) . "\n";
+if ($status !== 'Closed') {
+    echo "FAIL: blocked recv after close should be Closed, status=" . var_export($status, true) . "\n";
     exit;
 }
 
