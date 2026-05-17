@@ -1887,6 +1887,47 @@ int oxphp_shared_pool_handle_read(void *handle_zv,
                                    void **out_slot_zv_heap);
 void oxphp_shared_pool_handle_clear(void *handle_zv);
 
+/* ─── Generic PHP object construction helpers ─────────────────────────────
+ *
+ * Used by value-typed return classes such as
+ * `OxPHP\Shared\Channel\RecvResult` / `SendResult` (and any future class
+ * whose handler needs to construct a PHP object from a Rust FFI handler
+ * and stamp a few declared properties on it).
+ *
+ *  oxphp_bridge_make_object:
+ *      Look up `cls_fqn` by name and run `object_init_ex` into `out`.
+ *      Returns 0 on success, -1 if the class is not registered or
+ *      object_init fails. `out` must be a writable 16-byte zval slot.
+ *
+ *  oxphp_bridge_object_set_property_long / _zval:
+ *      Set a declared property by name on the constructed object.
+ *      `_zval` copies the value via zend_update_property semantics
+ *      (refcount handled by Zend). Both return 0 on success, -1 if
+ *      `obj` is not an object zval.
+ *
+ *  oxphp_bridge_get_enum_case:
+ *      Resolve `cls_fqn::case_name` to its singleton enum-case object
+ *      and write it into `out` as an `IS_OBJECT` zval. Returns 0 on
+ *      success, -1 if the enum class or case is not registered.
+ *
+ * Pointers are `void *` so Rust FFI declarations don't need to
+ * forward-declare `zval`. Callers must pass valid zval-shaped (16-byte)
+ * storage. */
+int oxphp_bridge_make_object(void *out, const char *cls_fqn, size_t cls_len);
+int oxphp_bridge_object_set_property_long(void *obj,
+                                          const char *name,
+                                          size_t name_len,
+                                          long val);
+int oxphp_bridge_object_set_property_zval(void *obj,
+                                          const char *name,
+                                          size_t name_len,
+                                          void *src);
+int oxphp_bridge_get_enum_case(void *out,
+                               const char *cls_fqn,
+                               size_t cls_len,
+                               const char *case_name,
+                               size_t case_len);
+
 #ifdef __cplusplus
 }
 #endif
