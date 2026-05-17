@@ -19,7 +19,7 @@ use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
 use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
 use crate::plugins::ox_shared::value::SharedValue;
 
 /// Approximate per-pending-payload footprint booked against
@@ -1690,7 +1690,7 @@ pub fn register_class(
     ctx: &mut crate::plugin::PluginContext,
 ) -> Result<(), crate::plugin::PluginError> {
     use crate::bridge::ffi as bridge_ffi;
-    use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
+    use crate::plugin::types::{MagicMethod, PhpType};
     use crate::plugin::PhpError;
     use crate::plugins::ox_shared::handle::SharedHandle;
     use crate::plugins::ox_shared::results::{self, RecvKind, SendKind};
@@ -1864,21 +1864,21 @@ pub fn register_class(
             call.ret_long(out as i64);
             Ok(())
         })
-        // ── sendMany(values, timeout=null): int ────────────────────
+        // ── sendMany(values, int $ms): int ─────────────────────────
         //
         // Serializes each array element to its own portbuf via the C
         // helper `oxphp_iter_array_to_portbufs`, then deposits them
         // one-by-one through the `oxphp_shared_channel_send_many` FFI.
-        // Returns the count actually sent per the spec's "how many
-        // were actually sent before full/closed/timeout" contract —
-        // closed/timeout are NOT raised as exceptions.
+        // `$ms` must be `> 0` (bounded wait per batch). Returns the
+        // count actually sent — closed/timeout end the batch early
+        // and surface as a partial count, never as an exception.
         .method("sendMany")
         .param("values", PhpType::Array)
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
+        .param("ms", PhpType::Int)
         .returns(PhpType::Int)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
+            let timeout_ms: i64 = read_positive_ms_arg(call, 1)?;
 
             // Fast path: empty array → 0 sent, no FFI round-trip.
             let count = call.arg_array_count(0).unwrap_or(0);
@@ -1937,25 +1937,30 @@ pub fn register_class(
                     bridge_ffi::oxphp_portable_free(offsets as *mut u8);
                 }
             }
+            if rc == SharedError::Timeout.code() || rc == SharedError::Closed.code() {
+                call.ret_long(sent as i64);
+                return Ok(());
+            }
             super::counter::counter_rc_to_result(rc)?;
             call.ret_long(sent as i64);
             Ok(())
         })
-        // ── recvMany(max, timeout=null): array ─────────────────────
+        // ── recvMany(int $max, int $ms): array ─────────────────────
         //
-        // `max == 0`    → drain all currently-buffered items at once.
-        // `timeout > 0` → block up to that many seconds collecting at most `max`.
-        // `timeout null`→ block until `max` collected or channel closes (forever).
-        // `timeout 0.0` → drain whatever is immediately available, return at once.
+        // `$max == 0` → drain all currently-buffered items at once.
+        // `$ms > 0`   → block up to that many milliseconds collecting at most `$max`.
+        //
+        // Returns a (possibly partial / possibly empty) array on
+        // timeout or channel close — never throws for those cases.
         .method("recvMany")
         .param("max", PhpType::Int)
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
+        .param("ms", PhpType::Int)
         .returns(PhpType::Array)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
-            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
+            let timeout_ms: i64 = read_positive_ms_arg(call, 1)?;
 
             let mut concat: *mut u8 = std::ptr::null_mut();
             let mut concat_len: usize = 0;
