@@ -35,7 +35,7 @@ final class Mutex implements Shareable
 }
 ```
 
-The closure signature is `function (mixed &$value): mixed` — `$value` is passed by reference, so you mutate it in place and any normal return value is also forwarded to the caller of `withLock` / `tryWithLock` / `withLockTimeout`.
+The closure signature is `function (mixed &$value): mixed` — `$value` is passed by reference, so you mutate it in place. The closure's normal return value is forwarded to the caller of `withLock` / `tryWithLock` / `withLockTimeout`, but **the return is restricted to scalars and `null`** (string, int, float, bool, byte-string, null). Returning an array or a `Shared\*` instance raises `OxPHP\Shared\TypeException`. To bubble structured state up to the caller, either mutate `&$value` in place and re-read it after the call, or stage what you need in a `use (&$captured)` variable. Lifting this restriction is tracked separately.
 
 | Method                | Behaviour                                                       |
 |-----------------------|-----------------------------------------------------------------|
@@ -71,7 +71,18 @@ $stats->withLock(function (array &$s) use ($responseBytes) {
 });
 ```
 
-Another worker reading `$stats->withLock(fn (array &$s) => $s)` either sees both fields updated or neither — never the bumped `hits` without the matching `bytes`.
+Another worker observing the value reads both fields in a single critical section:
+
+```php
+$snapshot = ['hits' => 0, 'bytes' => 0];
+$stats->withLock(function (array &$s) use (&$snapshot) {
+    $snapshot = $s;
+});
+// $snapshot sees both fields from the same update or neither — never the
+// bumped 'hits' without the matching 'bytes'. (We capture through use(&$x)
+// because the closure's own return is currently scalar-only — see the
+// closure-signature note above.)
+```
 
 ### Non-blocking probe + degrade
 
@@ -102,10 +113,14 @@ try {
 <?php
 use OxPHP\Shared\{Mutex, OperationTimeoutException};
 
-$cache = new Mutex(null);
+$counter = new Mutex(0);
 
 try {
-    $result = $cache->withLockTimeout(function ($c) { /* ... */ return $c; }, ms: 5000);
+    // Return value is scalar — int $next — so the closure return is forwarded.
+    $next = $counter->withLockTimeout(function (int &$c) {
+        $c += 1;
+        return $c;
+    }, ms: 5000);
 } catch (OperationTimeoutException) {
     // Someone else held the lock longer than 5s.
 }
@@ -149,6 +164,7 @@ try {
 - **The closure runs with the lock held.** Keep it short. Do not call `sleep`, do not block on network I/O, do not re-enter other Shared\* types that could call back into this mutex.
 - **PHP throws no longer corrupt the lock.** This is a deliberate change from the previous Poisoned-on-any-throw policy: the partial mutation policy is now "caller is responsible for restoring invariants". If you need a non-mutating try-compute pattern, do it outside the mutex and call `withLock` only to commit the final value.
 - **Stored value is scalar-ish.** Strings, ints, floats, booleans, `null`, and nested arrays of those work. Objects, closures, and resources raise `TypeException`.
+- **Closure return is also scalar-only — *for now*.** The stored value can be an array (mutate it via `&$value`), but the closure's own *return* path supports only string/int/float/bool/null/byte-string. Returning an array or `Shared\*` instance raises `OxPHP\Shared\TypeException`. Workaround: capture into a `use (&$x)` variable, or read the state through a follow-up `withLock` that returns a scalar projection.
 - **Reentry on the same thread throws `DeadlockException`.** Use a different mutex or restructure the code — same-thread re-entry is a bug, not a feature.
 - **Fiber cancellation propagates as `Async\AsyncException`.** A `withLock` interrupted by request cancellation raises that exception; the lock is released cleanly.
 
@@ -194,7 +210,7 @@ See [Shared Observability](../operations/shared-observability.md). Quick referen
 | `Shared\TimeoutException`                           | `Shared\OperationTimeoutException` (now extends `Async\AsyncException`)        |
 | `DeadlockException extends Shared\TimeoutException` | `DeadlockException extends Async\AsyncException`                               |
 
-The closure signature also changed from `function (mixed $value): mixed` (return-to-commit) to `function (mixed &$value): mixed` (by-ref mutation, normal return is the closure's value, not the new state). If the closure returns nothing, the stored value keeps whatever the by-ref mutation left in it.
+The closure signature also changed from `function (mixed $value): mixed` (return-to-commit) to `function (mixed &$value): mixed` (by-ref mutation, normal return is the closure's value, not the new state). If the closure returns nothing, the stored value keeps whatever the by-ref mutation left in it. **One pre-existing limitation carries forward**: the closure's *return* value must be scalar (string / int / float / bool / null / byte-string) — returning an array or `Shared\*` instance throws `OxPHP\Shared\TypeException`. The stored value can still be an array; mutate it through `&$value` and use `use (&$x)` to bubble structured data up.
 
 ## Related
 
