@@ -2385,12 +2385,20 @@ fn invoke_channel_recv(
         match fiber_rc {
             0 => {
                 // Waker resolved with Value → retval holds the raw value.
-                // We need to wrap it in RecvResult::Ok, but write_recv_ok
-                // expects a serialized buffer. The fastest fix: serialize
-                // the retval, then re-deserialize into the wrapper. This
-                // is a hot-path penalty but preserves correctness for the
-                // fiber path (a follow-up could add a "wrap-in-place"
-                // helper if profiling shows it matters).
+                // We must wrap it in RecvResult::Ok, but write_recv_ok
+                // expects a serialised buffer (it's also called from the
+                // non-fiber path where the buffer arrives pre-serialised
+                // from oxphp_shared_channel_recv_blocking). The cheapest
+                // correctness fix: portbuf-serialise the retval here and
+                // hand it back to write_recv_ok, which deserialises into
+                // RecvResult.__value. That's a serialise→deserialise→copy
+                // round-trip on every fiber recv-success — fine for low
+                // throughput, but on fan-in dispatchers a wrap-in-place
+                // helper (object_init_ex(retval, RecvResult); ZVAL_COPY
+                // payload into __value; set __status) would skip both
+                // portbuf passes. Tracked: profile a fan-in benchmark to
+                // confirm the round-trip shows up before designing the
+                // C primitive.
                 let retval = call.retval_ptr();
                 let mut buf: *mut u8 = std::ptr::null_mut();
                 let mut len: usize = 0;
