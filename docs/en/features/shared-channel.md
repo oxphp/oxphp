@@ -80,6 +80,21 @@ Every direction has three method variants — the suffix encodes the wait policy
 
 `$ms` is **always a positive integer of milliseconds** for `recvTimeout` / `sendTimeout` / `sendMany` / `recvMany`. Zero, negative, non-int, and absent values raise `OxPHP\Shared\TypeException` at the bridge — that constraint moved out of the method body so the trichotomy is self-documenting.
 
+### Reachable result variants per method
+
+`SendResult::Full` and `RecvResult::Empty` are emitted only by the non-blocking `try*` calls — a blocking variant either acquires the slot/item or runs out of budget, in which case the result is `Timeout`, not `Full` / `Empty`. The full reachability matrix:
+
+| Method          | `Ok` | `Full` / `Empty` | `Timeout` | `Closed` |
+|-----------------|------|------------------|-----------|----------|
+| `trySend`       | ✓    | `Full` ✓         | —         | ✓        |
+| `send`          | ✓    | —                | —         | ✓        |
+| `sendTimeout`   | ✓    | —                | ✓         | ✓        |
+| `tryRecv`       | ✓    | `Empty` ✓        | —         | ✓        |
+| `recv`          | ✓    | —                | —         | ✓        |
+| `recvTimeout`   | ✓    | —                | ✓         | ✓        |
+
+`isFull()` / `isEmpty()` checks on a result from a blocking call are dead code. The `match` examples below leave those arms as `unreachable`-comments to make the asymmetry obvious to readers.
+
 ## Result dispatch
 
 `RecvResult` and `SendResult` carry a `status()` discriminant plus (for `RecvResult` only) a payload. Two equivalent idioms:
@@ -107,6 +122,16 @@ match ($r->status()) {
     RecvStatus::Timeout => $logger->debug('idle'),
     RecvStatus::Closed  => break,
     RecvStatus::Empty   => /* unreachable: only tryRecv returns Empty */ ,
+};
+
+// Symmetric send-side dispatch — only Ok / Timeout / Closed are reachable.
+use OxPHP\Shared\Channel\SendStatus;
+$s = $ch->sendTimeout($value, 1500);
+match ($s->status()) {
+    SendStatus::Ok      => /* delivered */ ,
+    SendStatus::Timeout => $logger->debug('backpressure'),
+    SendStatus::Closed  => break,
+    SendStatus::Full    => /* unreachable: only trySend returns Full */ ,
 };
 
 // Safe accessor — never throws.
