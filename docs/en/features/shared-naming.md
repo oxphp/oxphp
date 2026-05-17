@@ -44,39 +44,45 @@ muscle memory comes from.
 
 ### 4. Boolean-getter — `is*()` prefix
 
-`Channel::isClosed()`, `Mutex::isPoisoned()`, `Once::isInitialized()`,
-`Flag::isSet()`.
+`Channel::isClosed()`, `Once::isInitialized()`, `Flag::isSet()`.
 
 No bare verbs (`test`, `check`) and no domain-specific names
-(`poisoned`, `closed`). The `is` prefix marks a pure read of a
-boolean property.
+(`closed`). The `is` prefix marks a pure read of a boolean property.
 
-### 5. Fallible attempt — `try*()` prefix
+`Mutex` does **not** expose `isCorrupted()` — corruption is sticky,
+non-recoverable, and surfaced via `CorruptedMutexException` on the
+next acquire. There's nothing useful to do with the probe other than
+re-acquire and catch.
 
-`Channel::trySend()`, `Channel::tryRecv()`, `Mutex::tryWith()`,
-`Map::trySet()`.
+### 5. Wait-policy trichotomy — `try*` / bare / `*Timeout`
 
-Semantics: an operation that can legitimately fail — because the
-blocking variant would have to wait, because a logical precondition
-is not met, or because capacity is exhausted — and reports the
-failure as a `bool` / `null` return value instead of raising an
-exception. Use `try*` whenever the caller must distinguish "did not
-succeed" from "succeeded" without going through `try`/`catch`.
+Blocking primitives (Channel, Mutex) express the **wait policy**
+through the method name, not through an overloaded `?float $timeout`
+argument:
 
-Two distinct sub-meanings live under the same prefix; both are
-intentional and match Rust stdlib usage:
+| Suffix       | Behaviour                                                     | Examples                                                  |
+|--------------|---------------------------------------------------------------|-----------------------------------------------------------|
+| `try*`       | Non-blocking; reports the failure variant immediately.        | `Channel::trySend`, `Channel::tryRecv`, `Mutex::tryWithLock` |
+| (bare name)  | Block forever (or until the request fiber is cancelled).      | `Channel::send`, `Channel::recv`, `Mutex::withLock`       |
+| `*Timeout`   | Bounded wait. Takes a mandatory `int $ms > 0`.                | `Channel::sendTimeout`, `Channel::recvTimeout`, `Mutex::withLockTimeout` |
 
-- **Non-blocking variant of a blocking op.** `trySend` / `tryRecv` /
-  `tryWith` are equivalent to the blocking variant with a zero
-  deadline (would-block → `false` / `null`, no `TimeoutException`).
-  Parallel to `mpsc::Sender::try_send`, `Mutex::try_lock`.
+The trichotomy moves three ambiguous policies (`null` = forever, `0`
+= try, positive = bounded) out of one parameter and into three
+methods with self-documenting names. The `$ms` argument on `*Timeout`
+methods is **strictly positive** — zero, negative, non-int, and
+absent values raise `OxPHP\Shared\TypeException` at the bridge.
+
+`try*` shares one further sub-meaning that predates the trichotomy:
+
 - **Conditional-success op.** `Map::trySet` succeeds only when the
   key was absent; collision → `false`, no exception. Parallel to
   `HashMap::try_insert`.
 
-The unifying invariant: `try*` returns rather than throws. Do not
-invent alternative names (`setIfAbsent`, `lockNonblocking`,
-`pushIfRoom`).
+The unifying invariant for `try*`: it either returns a value-typed
+Result (Channel) or throws a `ContentionException` (Mutex). It never
+returns `null` to encode "did not succeed" — that was the old
+API and produced the null-coalescing ambiguity the trichotomy
+eliminates.
 
 ### 6. Compare-and-swap — `compareAndSet()`
 
@@ -136,7 +142,9 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 | Number of elements          | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
 | Has key / has element       | `has($key): bool`        | `Map::has`                              |
 | Boolean property            | `is*(): bool`            | `Flag::isSet`, `Channel::isClosed`      |
-| Fallible attempt            | `try*()`                 | `Channel::trySend`, `Map::trySet`       |
+| Non-blocking wait           | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
+| Forever wait                | bare verb                | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
+| Bounded wait                | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
 | Swap, return prev           | `swap()` / `exchange()`  | `Atomic::swap`, `Flag::exchange`        |
 | Atomic RMW, return prev     | `fetch*()`               | `Atomic::fetchAdd`                      |
@@ -155,8 +163,12 @@ When proposing a new primitive, fill out this checklist before merging:
   `\Countable` and exposes `count(): int`.
 - [ ] Read methods are `get` or `load` (atomic only).
 - [ ] Boolean getters use the `is*` prefix.
-- [ ] Fallible variants (non-blocking, conditional-success, capacity)
-  use the `try*` prefix and return `bool` / `null` instead of throwing.
+- [ ] Wait-policy variants follow the `try*` / bare / `*Timeout(int $ms)`
+  trichotomy. The `*Timeout` variant takes `int $ms > 0` and rejects
+  zero / negative / non-int input with `TypeException`. Conditional-
+  success ops (`Map::trySet`) keep the `try*` prefix and may still
+  return `bool`; new wait-policy `try*` methods return either a value-
+  typed Result or throw a domain exception — never `null`-to-encode.
 - [ ] No `len`, `size`, `pending`, `test`, `setIfAbsent`, or other
   ad-hoc names.
 - [ ] Domain-specific verbs (`evict`, `drain`, `flush`, etc.) appear

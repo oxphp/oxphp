@@ -14,6 +14,7 @@ pub mod observability;
 pub mod pool_spike;
 pub mod reentrancy;
 pub mod registry;
+pub mod results;
 pub mod types;
 pub mod value;
 pub mod worker_liveness;
@@ -53,6 +54,11 @@ impl Plugin for SharedPlugin {
         // Register all exception classes (even those thrown by later phases,
         // so user `catch` blocks compile against the full hierarchy from v1).
         exceptions::register_all(ctx)?;
+
+        // Channel\RecvResult / SendResult / RecvStatus / SendStatus.
+        // Registered before any Shared type whose methods reference these
+        // FQNs in their return-type metadata.
+        results::register_all(ctx)?;
 
         // Register the Shared\Ordering enum first — Shared\Atomic methods
         // accept it as a parameter, so its FQN must resolve at class

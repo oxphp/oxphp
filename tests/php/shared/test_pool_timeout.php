@@ -1,7 +1,7 @@
 <?php
 /**
  * Pool timeout — budget full + nothing to release →
- * TimeoutException with the configured wait.
+ * OperationTimeoutException with the configured wait.
  *
  * Single-thread request: we hold one handle, then try to acquire
  * a second one past the budget. Since there's no other thread to
@@ -25,12 +25,12 @@ try {
     // 0.15s budget — short enough to keep the test fast, long
     // enough that we don't tick below Condvar wake granularity.
     $pool->acquire(0.15);
-} catch (\OxPHP\Shared\TimeoutException $e) {
+} catch (\OxPHP\Shared\OperationTimeoutException $e) {
     $caught = true;
 }
 $elapsed = microtime(true) - $start;
 
-if (!$caught)        { echo "FAIL: expected TimeoutException, got none\n"; exit; }
+if (!$caught)        { echo "FAIL: expected OperationTimeoutException, got none\n"; exit; }
 if ($elapsed < 0.12) { echo "FAIL: returned too fast ({$elapsed}s)\n"; exit; }
 if ($elapsed > 0.40) { echo "FAIL: returned too slow ({$elapsed}s)\n"; exit; }
 

@@ -20,28 +20,28 @@ $pool = new OxPHP\Shared\Pool(
 $held = $pool->acquire();
 if (!$held instanceof OxPHP\Shared\Pool\Handle) { echo "FAIL: acquire() must return Handle\n"; exit; }
 
-// 0.0 = try → acquire on saturated pool throws TimeoutException without blocking.
+// 0.0 = try → acquire on saturated pool throws OperationTimeoutException without blocking.
 $start = microtime(true);
 $threw = false;
 try {
     $pool->acquire(0.0);
-} catch (OxPHP\Shared\TimeoutException $e) {
+} catch (OxPHP\Shared\OperationTimeoutException $e) {
     $threw = true;
 }
 $elapsed = microtime(true) - $start;
-if (!$threw) { echo "FAIL: acquire(0.0) on saturated must throw TimeoutException\n"; exit; }
+if (!$threw) { echo "FAIL: acquire(0.0) on saturated must throw OperationTimeoutException\n"; exit; }
 if ($elapsed >= 0.05) { echo "FAIL: acquire(0.0) must be immediate, elapsed=$elapsed\n"; exit; }
 
-// Positive timeout on saturated pool also throws TimeoutException after the budget.
+// Positive timeout on saturated pool also throws OperationTimeoutException after the budget.
 $start = microtime(true);
 $threw = false;
 try {
     $pool->acquire(0.05); // 50ms budget
-} catch (OxPHP\Shared\TimeoutException $e) {
+} catch (OxPHP\Shared\OperationTimeoutException $e) {
     $threw = true;
 }
 $elapsed = microtime(true) - $start;
-if (!$threw) { echo "FAIL: acquire(0.05) on saturated must throw TimeoutException\n"; exit; }
+if (!$threw) { echo "FAIL: acquire(0.05) on saturated must throw OperationTimeoutException\n"; exit; }
 if ($elapsed < 0.04) { echo "FAIL: acquire(0.05) must wait at least ~50ms, elapsed=$elapsed\n"; exit; }
 if ($elapsed >= 1.0) { echo "FAIL: acquire(0.05) must time out under 1s, elapsed=$elapsed\n"; exit; }
 

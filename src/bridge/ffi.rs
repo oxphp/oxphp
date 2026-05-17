@@ -137,6 +137,38 @@ extern "C" {
         result: *mut c_void,
     ) -> c_int;
 
+    // ── Object construction helpers ──
+    //
+    // Used by Rust handlers for value-typed return classes
+    // (e.g. OxPHP\Shared\Channel\RecvResult / SendResult) to build a
+    // PHP object directly into a retval slot and stamp private
+    // properties on it. See ext/bridge/oxphp_bridge.h for the
+    // contract.
+    pub fn oxphp_bridge_make_object(
+        out: *mut c_void,
+        cls_fqn: *const c_char,
+        cls_len: usize,
+    ) -> c_int;
+    pub fn oxphp_bridge_object_set_property_long(
+        obj: *mut c_void,
+        name: *const c_char,
+        name_len: usize,
+        val: i64,
+    ) -> c_int;
+    pub fn oxphp_bridge_object_set_property_zval(
+        obj: *mut c_void,
+        name: *const c_char,
+        name_len: usize,
+        src: *mut c_void,
+    ) -> c_int;
+    pub fn oxphp_bridge_get_enum_case(
+        out: *mut c_void,
+        cls_fqn: *const c_char,
+        cls_len: usize,
+        case_name: *const c_char,
+        case_len: usize,
+    ) -> c_int;
+
     // ── Zval lifecycle ──
     pub fn oxphp_zval_dtor(zv: *mut c_void);
     pub fn oxphp_zval_addref(zv: *mut c_void);

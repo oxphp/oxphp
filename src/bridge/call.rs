@@ -311,6 +311,67 @@ impl<'a> NativeCall<'a> {
         f(&mut builder);
     }
 
+    // ── Property access on `$this` ──
+
+    /// Read a declared `int` property of `$this`. Returns 0 if `$this` is
+    /// null, the property does not exist, or it is unset / null in storage.
+    /// Used by value-typed return classes (RecvResult / SendResult) to
+    /// decode their `__status` discriminant.
+    pub fn read_long_property(&self, name: &str) -> Result<i64, PhpError> {
+        let this = self.this_zval;
+        if this.is_null() {
+            return Ok(0);
+        }
+        if name.as_bytes().contains(&0) {
+            return Err(PhpError::Custom("property name contains NUL".into()));
+        }
+        // Stack-bounded null-terminated copy (property names are short).
+        if name.len() >= 64 {
+            return Err(PhpError::Custom("property name too long".into()));
+        }
+        let mut buf = [0u8; 64];
+        buf[..name.len()].copy_from_slice(name.as_bytes());
+        let prop = unsafe { ffi::oxphp_object_read_property(this, buf.as_ptr() as *const _) };
+        if prop.is_null() || unsafe { ffi::oxphp_zval_is_null_or_unset(prop) } != 0 {
+            return Ok(0);
+        }
+        Ok(unsafe { ffi::oxphp_val_long(prop) })
+    }
+
+    /// Copy a declared property of `$this` into the retval. If `$this` is
+    /// null or the property is unset / null, the retval is set to PHP null.
+    pub fn copy_property_to_retval(&mut self, name: &str) -> Result<(), PhpError> {
+        let this = self.this_zval;
+        if this.is_null() {
+            self.ret_null();
+            return Ok(());
+        }
+        if name.as_bytes().contains(&0) {
+            return Err(PhpError::Custom("property name contains NUL".into()));
+        }
+        if name.len() >= 64 {
+            return Err(PhpError::Custom("property name too long".into()));
+        }
+        let mut buf = [0u8; 64];
+        buf[..name.len()].copy_from_slice(name.as_bytes());
+        let prop = unsafe { ffi::oxphp_object_read_property(this, buf.as_ptr() as *const _) };
+        if prop.is_null() || unsafe { ffi::oxphp_zval_is_null_or_unset(prop) } != 0 {
+            self.ret_null();
+            return Ok(());
+        }
+        unsafe { ffi::oxphp_zval_copy_to_retval(prop, self.retval) };
+        Ok(())
+    }
+
+    /// Copy the argument at `idx` into the retval (ZVAL_COPY semantics).
+    /// Used by `valueOr($default)` to return `$default` unchanged.
+    pub fn copy_arg_to_retval(&mut self, idx: u32) -> Result<(), PhpError> {
+        self.check_idx(idx)?;
+        let src = unsafe { self.raw_arg_ptr(idx) };
+        unsafe { ffi::oxphp_zval_copy_to_retval(src, self.retval) };
+        Ok(())
+    }
+
     /// Call a PHP function by name. Arguments are built via `ArgBuilder`.
     pub fn call_php(
         &self,
@@ -609,8 +670,24 @@ impl ArgBuilder {
 }
 
 /// Sizeof(zval) — 16 on all 64-bit PHP 8.x builds. Verified at runtime via
-/// `oxphp_zval_size()` in debug builds (see `debug_assert_zval_size`).
-const ZVAL_SIZE: usize = 16;
+/// `oxphp_zval_size()` in debug builds (see [`debug_assert_zval_size`]).
+pub(crate) const ZVAL_SIZE: usize = 16;
+
+/// Runtime sanity check that the linked PHP build still uses a 16-byte zval.
+/// No-op in release; loud panic in debug if the assumption breaks (a future
+/// PHP layout change would otherwise silently corrupt every fixed-buffer
+/// zval slot in the bridge — `ZvalSlot([u8; 16])`, the `[0u8; ZVAL_SIZE]`
+/// allocations in handlers, the `ArgBuilder` stride, etc.).
+#[inline]
+#[allow(dead_code)]
+pub(crate) fn debug_assert_zval_size() {
+    debug_assert_eq!(
+        unsafe { super::ffi::oxphp_zval_size() },
+        ZVAL_SIZE,
+        "PHP zval layout changed: sizeof(zval) is no longer {ZVAL_SIZE}. \
+         Update ZVAL_SIZE, ZvalSlot, and every fixed-buffer site in the bridge."
+    );
+}
 
 /// Owned result from `call_php` — calls `zval_ptr_dtor` on drop to prevent
 /// refcounted value leaks (strings, arrays, objects).
@@ -628,6 +705,22 @@ impl OwnedResult {
             ptr: &self.slot as *const ZvalSlot as *mut c_void,
             _marker: PhantomData,
         }
+    }
+
+    /// Move the 16-byte zval payload into `dst` (a writable zval slot) and
+    /// suppress the destructor on self — ownership of any refcounted PHP
+    /// value (string / array / object) transfers to whatever now owns `dst`.
+    ///
+    /// # Safety
+    /// `dst` must point to a writable zval-shaped slot (16 bytes, 8-byte
+    /// aligned). Any existing contents of `dst` are overwritten without
+    /// being dropped — call `oxphp_zval_dtor` on `dst` first if it might
+    /// hold a refcounted value.
+    pub fn write_into(self, dst: *mut c_void) {
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.slot.0.as_ptr(), dst as *mut u8, self.slot.0.len());
+        }
+        std::mem::forget(self);
     }
 }
 

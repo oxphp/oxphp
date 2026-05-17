@@ -5447,3 +5447,62 @@ void oxphp_shared_pool_handle_clear(void *handle_zv) {
     void *null_ptr = NULL;
     memcpy(storage + 16, &null_ptr, sizeof(void *));
 }
+
+/* ═══════════════════════════════════════════════════════════
+ *  Generic PHP object construction helpers
+ *  See oxphp_bridge.h for the contract. Used by Rust handlers
+ *  for value-typed return classes (RecvResult / SendResult).
+ * ═══════════════════════════════════════════════════════════ */
+
+int oxphp_bridge_make_object(void *out, const char *cls_fqn, size_t cls_len) {
+    if (!out || !cls_fqn || cls_len == 0) return -1;
+    zend_string *name = zend_string_init(cls_fqn, cls_len, 0);
+    zend_class_entry *ce = zend_lookup_class(name);
+    zend_string_release(name);
+    if (!ce) return -1;
+    if (object_init_ex((zval *)out, ce) != SUCCESS) return -1;
+    return 0;
+}
+
+int oxphp_bridge_object_set_property_long(void *obj,
+                                          const char *name,
+                                          size_t name_len,
+                                          long val) {
+    if (!obj) return -1;
+    zval *z = (zval *)obj;
+    if (Z_TYPE_P(z) != IS_OBJECT) return -1;
+    zend_update_property_long(Z_OBJCE_P(z), Z_OBJ_P(z), name, name_len, (zend_long)val);
+    return 0;
+}
+
+int oxphp_bridge_object_set_property_zval(void *obj,
+                                          const char *name,
+                                          size_t name_len,
+                                          void *src) {
+    if (!obj || !src) return -1;
+    zval *z = (zval *)obj;
+    if (Z_TYPE_P(z) != IS_OBJECT) return -1;
+    zend_update_property(Z_OBJCE_P(z), Z_OBJ_P(z), name, name_len, (zval *)src);
+    return 0;
+}
+
+int oxphp_bridge_get_enum_case(void *out,
+                               const char *cls_fqn,
+                               size_t cls_len,
+                               const char *case_name,
+                               size_t case_len) {
+    if (!out || !cls_fqn || cls_len == 0 || !case_name || case_len == 0) return -1;
+    zend_string *cname = zend_string_init(cls_fqn, cls_len, 0);
+    zend_class_entry *ce = zend_lookup_class(cname);
+    zend_string_release(cname);
+    if (!ce) return -1;
+    zend_string *case_str = zend_string_init(case_name, case_len, 0);
+    zend_object *case_obj = zend_enum_get_case(ce, case_str);
+    zend_string_release(case_str);
+    if (!case_obj) return -1;
+    /* Enum cases are process-global singletons; bump refcount so the
+     * caller's zval owns one strong reference (zval_ptr_dtor will balance). */
+    GC_ADDREF(case_obj);
+    ZVAL_OBJ((zval *)out, case_obj);
+    return 0;
+}

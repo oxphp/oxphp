@@ -46,39 +46,46 @@ API независимо от того, из какого языка взяла�
 
 ### 4. Boolean-геттер — префикс `is*()`
 
-`Channel::isClosed()`, `Mutex::isPoisoned()`, `Once::isInitialized()`,
-`Flag::isSet()`.
+`Channel::isClosed()`, `Once::isInitialized()`, `Flag::isSet()`.
 
 Никаких голых глаголов (`test`, `check`) и доменных имён
-(`poisoned`, `closed`). Префикс `is` отмечает чистое чтение
+(`closed`). Префикс `is` отмечает чистое чтение
 boolean-свойства.
 
-### 5. Fallible-операция — префикс `try*()`
+`Mutex` намеренно **не** предоставляет `isCorrupted()` — порча
+sticky, невосстановима и всплывает через `CorruptedMutexException`
+на следующем захвате. Никакого полезного действия по результату
+проверки, кроме повторного захвата и catch, нет.
 
-`Channel::trySend()`, `Channel::tryRecv()`, `Mutex::tryWith()`,
-`Map::trySet()`.
+### 5. Wait-policy трихотомия — `try*` / голое имя / `*Timeout`
 
-Семантика: операция, которая может законно не выполниться — потому
-что блокирующий вариант пришлось бы ждать, потому что не выполнено
-логическое предусловие, или потому что исчерпана capacity — и
-сообщает о неудаче возвращаемым `bool` / `null` вместо исключения.
-Используйте `try*`, когда вызывающая сторона должна отличать «не
-удалось» от «удалось» без `try`/`catch`.
+Блокирующие примитивы (Channel, Mutex) выражают **wait policy**
+через имя метода, а не через перегруженный аргумент `?float $timeout`:
 
-Под одним префиксом живут два разных под-смысла; оба намеренные и
-совпадают с использованием `try_*` в Rust stdlib:
+| Суффикс       | Поведение                                                     | Примеры                                                  |
+|---------------|---------------------------------------------------------------|-----------------------------------------------------------|
+| `try*`        | Non-blocking; сразу сообщает вариант неудачи.                 | `Channel::trySend`, `Channel::tryRecv`, `Mutex::tryWithLock` |
+| (голое имя)   | Ждать вечно (или пока request fiber не будет отменён).        | `Channel::send`, `Channel::recv`, `Mutex::withLock`       |
+| `*Timeout`    | Ограниченное ожидание. Принимает обязательный `int $ms > 0`.   | `Channel::sendTimeout`, `Channel::recvTimeout`, `Mutex::withLockTimeout` |
 
-- **Non-blocking вариант блокирующей операции.** `trySend` / `tryRecv`
-  / `tryWith` эквивалентны блокирующему варианту с нулевым
-  дедлайном (would-block → `false` / `null`, без `TimeoutException`).
-  Параллель: `mpsc::Sender::try_send`, `Mutex::try_lock`.
+Трихотомия выносит три неоднозначные политики (`null` = вечно, `0`
+= try, положительное = ограниченное) из одного параметра в три
+метода с самодокументирующимися именами. Аргумент `$ms` в `*Timeout`-
+методах **строго положительный** — ноль, отрицательные значения,
+non-int и отсутствие поднимают `OxPHP\Shared\TypeException` на
+бридже.
+
+`try*` несёт ещё один под-смысл, существовавший до трихотомии:
+
 - **Conditional-success операция.** `Map::trySet` успешен только
   если ключ отсутствовал; коллизия → `false`, без исключения.
   Параллель: `HashMap::try_insert`.
 
-Объединяющий инвариант: `try*` возвращает значение, а не бросает
-исключение. Не изобретайте альтернативных имён (`setIfAbsent`,
-`lockNonblocking`, `pushIfRoom`).
+Объединяющий инвариант для `try*`: он либо возвращает Result со
+значением (Channel), либо бросает `ContentionException` (Mutex). Он
+никогда не возвращает `null`, чтобы закодировать «не удалось» — это
+был старый API и порождал ту самую null-coalescing неоднозначность,
+которую трихотомия устраняет.
 
 ### 6. Compare-and-swap — `compareAndSet()`
 
@@ -140,7 +147,9 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
 | Количество элементов        | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
 | Наличие ключа/элемента      | `has($key): bool`        | `Map::has`                              |
 | Boolean-свойство            | `is*(): bool`            | `Flag::isSet`, `Channel::isClosed`      |
-| Fallible-операция           | `try*()`                 | `Channel::trySend`, `Map::trySet`       |
+| Non-blocking ожидание       | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
+| Бесконечное ожидание        | голый глагол             | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
+| Ограниченное ожидание       | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
 | Замена с возвратом prev     | `swap()` / `exchange()`  | `Atomic::swap`, `Flag::exchange`        |
 | Atomic RMW, возврат prev    | `fetch*()`               | `Atomic::fetchAdd`                      |
@@ -159,9 +168,13 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
   `\Countable` и предоставляет `count(): int`.
 - [ ] Методы чтения — `get` или `load` (только для атомиков).
 - [ ] Boolean-геттеры используют префикс `is*`.
-- [ ] Fallible-варианты (non-blocking, conditional-success, capacity)
-  используют префикс `try*` и возвращают `bool` / `null` вместо
-  исключения.
+- [ ] Wait-policy варианты следуют трихотомии `try*` / голое имя /
+  `*Timeout(int $ms)`. Вариант `*Timeout` принимает `int $ms > 0` и
+  отклоняет ноль / отрицательные / non-int значения через
+  `TypeException`. Conditional-success операции (`Map::trySet`)
+  сохраняют префикс `try*` и могут возвращать `bool`; новые
+  wait-policy `try*`-методы возвращают либо Result со значением,
+  либо бросают доменное исключение — никогда `null`-в-роли-кода.
 - [ ] Никаких `len`, `size`, `pending`, `test`, `setIfAbsent` и других
   ad-hoc имён.
 - [ ] Доменные глаголы (`evict`, `drain`, `flush` и т. п.) появляются

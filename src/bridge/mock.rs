@@ -207,6 +207,49 @@ pub unsafe fn oxphp_call_php_native(
     -1 // always fails in mock
 }
 
+// ── Object construction helpers (mock) ──
+//
+// Host tests cannot construct PHP objects — these always fail so that
+// any handler calling them on the host treats the call as unsupported
+// and bails. Property setters are no-ops (return success) so handlers
+// that ignore the rc compile-time-clean.
+
+pub unsafe fn oxphp_bridge_make_object(
+    _out: *mut c_void,
+    _cls_fqn: *const c_char,
+    _cls_len: usize,
+) -> c_int {
+    -1
+}
+
+pub unsafe fn oxphp_bridge_object_set_property_long(
+    _obj: *mut c_void,
+    _name: *const c_char,
+    _name_len: usize,
+    _val: i64,
+) -> c_int {
+    0
+}
+
+pub unsafe fn oxphp_bridge_object_set_property_zval(
+    _obj: *mut c_void,
+    _name: *const c_char,
+    _name_len: usize,
+    _src: *mut c_void,
+) -> c_int {
+    0
+}
+
+pub unsafe fn oxphp_bridge_get_enum_case(
+    _out: *mut c_void,
+    _cls_fqn: *const c_char,
+    _cls_len: usize,
+    _case_name: *const c_char,
+    _case_len: usize,
+) -> c_int {
+    -1
+}
+
 // ── Zval lifecycle ──
 
 pub unsafe fn oxphp_zval_dtor(_zv: *mut c_void) {}

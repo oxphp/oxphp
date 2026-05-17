@@ -1027,10 +1027,18 @@ namespace OxPHP\Shared {
      *  * `INF`            — forever.
      *  * `NaN` / negative — `OxPHP\Shared\TypeException`.
      *
-     * Blocking methods on Mutex, Pool, and `Channel::send` / `sendMany` raise
-     * `OxPHP\Shared\TimeoutException` on deadline expiry. `Channel::recv` and
-     * `recvMany` instead return `null` / a partial array on timeout — recv
-     * is intentionally asymmetric with send.
+     * NOTE: this convention is preserved for {@see Pool::acquire} /
+     * {@see Pool::with} (deferred migration). Channel and Mutex moved to a
+     * trichotomous API in 0.x — they no longer take `?float $timeout`:
+     *
+     *  * Channel: `try*` / bare / `*Timeout(int $ms)`; results returned via
+     *    {@see Channel\RecvResult} / {@see Channel\SendResult}.
+     *  * Mutex:   `withLock` / `tryWithLock` / `withLockTimeout(int $ms)`;
+     *    contention and timeout throw {@see ContentionException} /
+     *    {@see OperationTimeoutException}.
+     *
+     * Pool blocking acquire raises {@see OperationTimeoutException} on
+     * deadline expiry.
      */
 
     /**
@@ -1167,13 +1175,26 @@ namespace OxPHP\Shared {
     }
 
     /**
-     * Poisoning mutex guarding a stored value.
+     * Cross-thread mutual exclusion guarding a stored value.
      *
-     * If the callable passed to `with()` / `tryWith()` throws, the mutex
-     * becomes poisoned and further acquisitions throw
-     * {@see PoisonedException} until `clearPoison()` is called — this
-     * prevents callers from reading a value left in an inconsistent
-     * half-updated state.
+     * Three method variants encode the wait policy explicitly:
+     *
+     *   - {@see withLock()}        — block until acquired (forever, or
+     *     fiber cancellation).
+     *   - {@see tryWithLock()}     — non-blocking; throws
+     *     {@see ContentionException} if the lock is held.
+     *   - {@see withLockTimeout()} — bounded wait; throws
+     *     {@see OperationTimeoutException} on deadline.
+     *
+     * If the callable throws an ordinary PHP exception, the lock is
+     * released and the exception propagates — the mutex is NOT corrupted
+     * (partial mutation is acceptable; caller is responsible for invariant
+     * restoration).
+     *
+     * If a Rust panic crosses the FFI boundary (a server bug), the mutex
+     * enters a sticky corrupted state and every subsequent acquisition
+     * throws {@see CorruptedMutexException}. There is no API to clear
+     * corruption — discard the instance and create a new one.
      *
      * @link docs/en/features/shared-mutex.md
      */
@@ -1182,30 +1203,38 @@ namespace OxPHP\Shared {
         /** @param mixed $initial Starting value. */
         public function __construct(mixed $initial = null) {}
 
-        /** Whether the mutex is in a poisoned state. */
-        public function isPoisoned(): bool {}
-
-        /** Clear the poisoned state so `with()` can acquire again. */
-        public function clearPoison(): bool {}
-
         /**
-         * Acquire the lock, invoke `$fn` with the stored value (mutable by
+         * Acquire the lock (waiting forever, or until the request fiber
+         * is cancelled), invoke `$fn` with the stored value (mutable by
          * reference), and release. Returns `$fn`'s return value.
          *
-         * See the namespace-level timeout convention for `$timeout` semantics.
-         *
-         * @throws TimeoutException  On timeout.
-         * @throws PoisonedException If the mutex was poisoned.
+         * @throws CorruptedMutexException If a prior closure invocation
+         *         crashed via Rust panic and left the mutex unusable.
+         * @throws DeadlockException If a wait-for cycle is detected.
          */
-        public function with(callable $fn, ?float $timeout = null): mixed {}
+        public function withLock(callable $fn): mixed {}
 
         /**
-         * Non-blocking variant of `with()`. Returns null without invoking
-         * `$fn` if the lock is contended.
+         * Non-blocking variant of {@see withLock()}.
          *
-         * @throws PoisonedException If the mutex was poisoned.
+         * @throws ContentionException If the lock is currently held.
+         * @throws CorruptedMutexException If the mutex is unusable.
          */
-        public function tryWith(callable $fn): mixed {}
+        public function tryWithLock(callable $fn): mixed {}
+
+        /**
+         * Bounded-wait variant of {@see withLock()}.
+         *
+         * @param int $ms Wait budget in milliseconds. Must be `> 0` — use
+         *                {@see withLock()} for forever or
+         *                {@see tryWithLock()} for non-blocking.
+         *
+         * @throws OperationTimeoutException If the deadline expires.
+         * @throws CorruptedMutexException If the mutex is unusable.
+         * @throws DeadlockException If a wait-for cycle is detected.
+         * @throws TypeException If `$ms` is not a positive int.
+         */
+        public function withLockTimeout(callable $fn, int $ms): mixed {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1215,9 +1244,22 @@ namespace OxPHP\Shared {
      * Bounded multi-producer / multi-consumer queue with fiber-aware
      * blocking send / recv.
      *
-     * When the channel is full, `send()` suspends the calling fiber; when
-     * empty, `recv()` suspends. Outside a fiber the calls block the worker
-     * thread. Use Channel for fan-out/fan-in work pipelines across workers.
+     * Two return-style conventions live side-by-side:
+     *
+     *   - **Channel produces results** via {@see Channel\RecvResult} /
+     *     {@see Channel\SendResult}. Closed / full / timeout are NORMAL
+     *     outcomes for channels (fan-out dispatchers see them daily),
+     *     so they appear as result variants — no exceptions in the hot path.
+     *
+     *   - **Mutex throws** on contention / timeout. The asymmetry is
+     *     deliberate: long-held contention is a design smell for mutexes,
+     *     but routine for channels.
+     *
+     * Three wait policies per direction:
+     *
+     *   - `try*`        non-blocking
+     *   - (bare)        block forever (or until the request fiber is cancelled)
+     *   - `*Timeout`    bounded wait, `int $ms > 0`
      *
      * @link docs/en/features/shared-channel.md
      */
@@ -1226,41 +1268,63 @@ namespace OxPHP\Shared {
         /** @param int $capacity Maximum queued values (>= 1). */
         public function __construct(int $capacity) {}
 
-        /**
-         * Non-blocking send. Returns false if the channel is full or closed.
-         */
-        public function trySend(mixed $value): bool {}
+        // ── Receive ────────────────────────────────────────────────
+
+        /** Non-blocking receive. Returns Ok / Empty / Closed. */
+        public function tryRecv(): Channel\RecvResult {}
+
+        /** Block until a value arrives or the channel closes. */
+        public function recv(): Channel\RecvResult {}
 
         /**
-         * Blocking send. See the namespace-level timeout convention for
-         * `$timeout` semantics.
+         * Bounded receive.
          *
-         * @throws TimeoutException On timeout.
-         * @throws ClosedException  If the channel was closed.
+         * @param int $ms Wait budget in milliseconds. Must be `> 0`.
+         * @throws TypeException If `$ms` is not a positive int.
          */
-        public function send(mixed $value, ?float $timeout = null): bool {}
+        public function recvTimeout(int $ms): Channel\RecvResult {}
+
+        // ── Send ───────────────────────────────────────────────────
+
+        /** Non-blocking send. Returns Ok / Full / Closed. */
+        public function trySend(mixed $value): Channel\SendResult {}
+
+        /** Block until a slot frees or the channel closes. */
+        public function send(mixed $value): Channel\SendResult {}
 
         /**
-         * Non-blocking receive. Returns null if the channel is empty (open),
-         * or throws ClosedException if the channel is closed and drained.
-         * Use `count()` to distinguish an empty channel from a stored `null` value.
+         * Bounded send.
          *
-         * @throws ClosedException If the channel was closed and drained.
+         * @param int $ms Wait budget in milliseconds. Must be `> 0`.
+         * @throws TypeException If `$ms` is not a positive int.
          */
-        public function tryRecv(): mixed {}
+        public function sendTimeout(mixed $value, int $ms): Channel\SendResult {}
+
+        // ── Batch ──────────────────────────────────────────────────
 
         /**
-         * Blocking receive. See the namespace-level timeout convention for
-         * `$timeout` semantics.
+         * Send up to N values within a deadline. Returns the count
+         * actually accepted. Never throws on full / closed / timeout —
+         * use the return value to detect partial progress.
          *
-         * Returns null on timeout (asymmetric with send, which throws
-         * TimeoutException). Does not throw TimeoutException.
-         *
-         * @throws ClosedException If the channel was closed and drained.
+         * @param int $ms Wait budget in milliseconds. Must be `> 0`.
+         * @throws TypeException If `$ms` is not a positive int.
          */
-        public function recv(?float $timeout = null): mixed {}
+        public function sendMany(array $values, int $ms): int {}
 
-        /** Close the channel. Subsequent sends fail; pending recvs drain remaining values then throw. */
+        /**
+         * Receive up to `$max` values within a deadline. Returns a
+         * partial array (possibly empty) on timeout or close.
+         *
+         * @param int $ms Wait budget in milliseconds. Must be `> 0`.
+         * @return array<int, mixed>
+         * @throws TypeException If `$ms` is not a positive int.
+         */
+        public function recvMany(int $max, int $ms): array {}
+
+        // ── Lifecycle ──────────────────────────────────────────────
+
+        /** Close the channel. Subsequent sends produce SendResult::Closed. */
         public function close(): bool {}
 
         /** Whether the channel is closed. */
@@ -1268,28 +1332,6 @@ namespace OxPHP\Shared {
 
         /** Current number of queued values. Implements `Countable`. */
         public function count(): int {}
-
-        /**
-         * Batched send. Returns the number of values actually accepted
-         * before the channel became full / closed or the timeout expired.
-         *
-         * See the namespace-level timeout convention for `$timeout` semantics.
-         *
-         * @throws TimeoutException On timeout.
-         */
-        public function sendMany(array $values, ?float $timeout = null): int {}
-
-        /**
-         * Batched receive. Drains up to `$max` values, blocking only for
-         * the first one up to `$timeout` seconds. Returns a partial array
-         * (possibly empty) on timeout — does not throw TimeoutException
-         * (asymmetric with send).
-         *
-         * See the namespace-level timeout convention for `$timeout` semantics.
-         *
-         * @return array<int, mixed>
-         */
-        public function recvMany(int $max, ?float $timeout = null): array {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1407,7 +1449,7 @@ namespace OxPHP\Shared {
      *
      * Factory runs lazily on first acquire; destroy (if provided) runs
      * on slot eviction or pool shutdown. `maxSize` is a hard budget —
-     * acquire blocks (or fails with `TimeoutException`) once reached.
+     * acquire blocks (or fails with `OperationTimeoutException`) once reached.
      *
      * @link docs/en/features/shared-pool.md
      */
@@ -1431,7 +1473,7 @@ namespace OxPHP\Shared {
          *
          * See the namespace-level timeout convention for `$timeout` semantics.
          *
-         * @throws TimeoutException If the pool is saturated.
+         * @throws OperationTimeoutException If the pool is saturated.
          */
         public function acquire(?float $timeout = null): Pool\Handle {}
 
@@ -1445,7 +1487,7 @@ namespace OxPHP\Shared {
          *
          * See the namespace-level timeout convention for `$timeout` semantics.
          *
-         * @throws TimeoutException If the pool is saturated.
+         * @throws OperationTimeoutException If the pool is saturated.
          */
         public function with(callable $body, ?float $timeout = null): mixed {}
 
@@ -1474,16 +1516,19 @@ namespace OxPHP\Shared {
     // ── Exception hierarchy ─────────────────────────────────────
     //
     //   \Exception
+    //     ├── OxPHP\Async\AsyncException
+    //     │    ├── OxPHP\Shared\OperationTimeoutException
+    //     │    ├── OxPHP\Shared\ContentionException
+    //     │    └── OxPHP\Shared\DeadlockException
     //     └── OxPHP\Shared\SharedException
     //          ├── StaleHandleException
     //          ├── TypeException
     //          │    └── CycleException
     //          ├── CapacityException
-    //          ├── ClosedException
-    //          ├── PoisonedException
-    //          ├── TimeoutException
-    //          │    └── DeadlockException
-    //          └── UninitializedException
+    //          ├── ClosedException             (deprecated; Pool only)
+    //          ├── PoisonedException           (deprecated; Once only)
+    //          ├── UninitializedException
+    //          └── CorruptedMutexException
 
     /** Base class for every Shared\* exception. */
     class SharedException extends \Exception {}
@@ -1500,20 +1545,113 @@ namespace OxPHP\Shared {
     /** Container is full and cannot accept a new entry. */
     class CapacityException extends SharedException {}
 
-    /** Channel was closed and cannot send / drained on recv. */
+    /**
+     * @deprecated Pool::acquire on a closed pool. Removed once Pool
+     *             migrates to a Result-style API.
+     */
     class ClosedException extends SharedException {}
 
-    /** Mutex was poisoned by a previous callback throwing mid-update. */
+    /**
+     * @deprecated Once initializer panicked. Removed once Once migrates
+     *             to a Result-style API.
+     */
     class PoisonedException extends SharedException {}
-
-    /** Operation exceeded its wait budget. */
-    class TimeoutException extends SharedException {}
-
-    /** Reentrant / cross-thread wait would deadlock — extends TimeoutException. */
-    class DeadlockException extends TimeoutException {}
 
     /** Access to a Once before it was initialised. */
     class UninitializedException extends SharedException {}
+
+    /**
+     * Mutex acquisition failed because a prior closure invocation
+     * crashed via Rust panic and left the mutex unusable. There is
+     * no recovery API — discard the instance.
+     */
+    class CorruptedMutexException extends SharedException {}
+
+    /**
+     * Bounded wait on a Shared\* primitive exceeded its deadline.
+     * Thrown by {@see Channel::recvTimeout} — wait, no: channels
+     * return RecvResult/SendResult variants — only thrown by
+     * {@see Mutex::withLockTimeout} and {@see Pool::acquire}.
+     *
+     * Extends {@see \OxPHP\Async\AsyncException} so a single
+     * `catch (AsyncException)` sweeps both Shared\* timeouts and
+     * Async\* await timeouts.
+     */
+    class OperationTimeoutException extends \OxPHP\Async\AsyncException {}
+
+    /**
+     * Non-blocking acquisition found the lock held. Thrown by
+     * {@see Mutex::tryWithLock}.
+     */
+    class ContentionException extends \OxPHP\Async\AsyncException {}
+
+    /**
+     * Wait-for cycle detected during a Mutex acquisition. Extends
+     * {@see \OxPHP\Async\AsyncException} (was a child of the removed
+     * Shared\TimeoutException in earlier releases).
+     */
+    class DeadlockException extends \OxPHP\Async\AsyncException {}
+}
+
+namespace OxPHP\Shared\Channel {
+
+    /** Discriminant for {@see RecvResult}. */
+    enum RecvStatus
+    {
+        case Ok;
+        case Empty;
+        case Timeout;
+        case Closed;
+    }
+
+    /** Discriminant for {@see SendResult}. */
+    enum SendStatus
+    {
+        case Ok;
+        case Full;
+        case Timeout;
+        case Closed;
+    }
+
+    /**
+     * Result of {@see \OxPHP\Shared\Channel::tryRecv()} / `recv()` /
+     * `recvTimeout()`. Use the `isX()` accessors or `status()` with an
+     * exhaustive `match` to dispatch.
+     */
+    final class RecvResult
+    {
+        public function isOk(): bool {}
+        public function isEmpty(): bool {}
+        public function isTimeout(): bool {}
+        public function isClosed(): bool {}
+
+        /**
+         * Payload when {@see isOk()}, otherwise throws.
+         *
+         * @throws \OxPHP\Shared\SharedException If called on a non-Ok variant.
+         */
+        public function value(): mixed {}
+
+        /** Payload when {@see isOk()}, else `$default`. Never throws. */
+        public function valueOr(mixed $default): mixed {}
+
+        /** Discriminant for exhaustive `match` dispatch. */
+        public function status(): RecvStatus {}
+    }
+
+    /**
+     * Result of {@see \OxPHP\Shared\Channel::trySend()} / `send()` /
+     * `sendTimeout()`. No payload — only a discriminant.
+     */
+    final class SendResult
+    {
+        public function isOk(): bool {}
+        public function isFull(): bool {}
+        public function isTimeout(): bool {}
+        public function isClosed(): bool {}
+
+        public function status(): SendStatus {}
+    }
 }
 
 namespace OxPHP\Shared\Pool {

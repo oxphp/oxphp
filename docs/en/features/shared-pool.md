@@ -137,7 +137,7 @@ $doc = $parsers->with(fn ($p) => $p->parse($body));
 <?php
 try {
     $h = $pool->acquire(timeout: 0.1);    // 100ms
-} catch (OxPHP\Shared\TimeoutException $e) {
+} catch (OxPHP\Shared\OperationTimeoutException $e) {
     // Pool saturated — degrade gracefully
     http_response_code(503);
     header('Retry-After: 1');
@@ -185,7 +185,7 @@ Tune `idleTimeout` to the cost of recreation:
 |---------------------------------------------|----------------------------------------------|
 | Idle slot in the local thread's queue       | Reused immediately, factory is not called.   |
 | No idle slot, but `count() < maxSize`       | Factory runs, a new slot is minted.          |
-| `count() == maxSize` and all slots `inUse`  | Block up to `timeout`, then `TimeoutException`. |
+| `count() == maxSize` and all slots `inUse`  | Block up to `timeout`, then `OperationTimeoutException`. |
 
 Passing `0.0` for `timeout` uses `$defaultAcquireTimeout` (default 5 s). To wait indefinitely, pass a very large number — there is deliberately no "infinite" sentinel, since a pool that deadlocks waiting forever is harder to diagnose than one that times out and throws.
 
@@ -193,7 +193,7 @@ Passing `0.0` for `timeout` uses `$defaultAcquireTimeout` (default 5 s). To wait
 
 | Exception                | Raised by                                                            |
 |--------------------------|----------------------------------------------------------------------|
-| `TimeoutException`       | `acquire` exceeded `$timeout` without a free slot.                   |
+| `OperationTimeoutException` | `acquire` exceeded `$timeout` without a free slot. Extends `Async\AsyncException`. |
 | `CapacityException`      | Creation would breach `maxSize` despite budget reconciliation (rare). |
 | `TypeException`          | Non-positive `maxSize`, factory return is not a PHP object, etc.     |
 | `StaleHandleException`   | Method call on a handle whose registry entry was evicted, or on a `Pool\Handle` that was already released. |

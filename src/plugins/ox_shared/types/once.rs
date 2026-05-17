@@ -405,7 +405,7 @@ fn err_to_phperr(e: SharedError, _id: u64) -> PhpError {
         SharedError::CapacityExceeded => "OxPHP\\Shared\\CapacityException",
         SharedError::Uninitialized => "OxPHP\\Shared\\UninitializedException",
         SharedError::Deadlock => "OxPHP\\Shared\\DeadlockException",
-        SharedError::Timeout => "OxPHP\\Shared\\TimeoutException",
+        SharedError::Timeout => "OxPHP\\Shared\\OperationTimeoutException",
         SharedError::Poisoned => "OxPHP\\Shared\\PoisonedException",
         SharedError::Closed => "OxPHP\\Shared\\ClosedException",
         SharedError::Cycle => "OxPHP\\Shared\\CycleException",

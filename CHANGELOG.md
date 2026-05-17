@@ -130,6 +130,21 @@ $sapi = php_sapi_name();              // "cli-server"
 
 ### Breaking changes
 
+- **`Shared\Channel` and `Shared\Mutex` adopt a trichotomous wait-policy API.** The single overloaded `?float $timeout` argument was replaced with three explicit methods per direction — `try*` for non-blocking, the bare verb for forever, and `*Timeout(int $ms)` for bounded — and the return shape moved from mixed/null/bool to value-typed Result classes (Channel) or exception-style (Mutex). No alias shims. Mechanical migration:
+
+  | Was | Is |
+  |---|---|
+  | `$ch->trySend($v): bool` | `$ch->trySend($v): SendResult` (`isOk` / `isFull` / `isClosed`) |
+  | `$ch->send($v, ?float $timeout = null)` (throws `TimeoutException` / `ClosedException`) | `$ch->send($v): SendResult` (forever) / `$ch->sendTimeout($v, int $ms): SendResult` |
+  | `$ch->tryRecv(): mixed` (`null` on empty, throws on closed) | `$ch->tryRecv(): RecvResult` (`isOk` / `isEmpty` / `isClosed`; `value()` / `valueOr($d)`) |
+  | `$ch->recv(?float $timeout = null): mixed` (`null` on timeout or closed) | `$ch->recv(): RecvResult` (forever) / `$ch->recvTimeout(int $ms): RecvResult` |
+  | `$ch->sendMany($vs, ?float $timeout = null): int` (throws `TimeoutException` on partial) | `$ch->sendMany($vs, int $ms): int` (partial count, no throw on timeout/close) |
+  | `$ch->recvMany($max, ?float $timeout = null): array` | `$ch->recvMany($max, int $ms): array` |
+  | `$m->with($fn, ?float $timeout = null): mixed` | `$m->withLock($fn): mixed` / `$m->withLockTimeout($fn, int $ms): mixed` |
+  | `$m->tryWith($fn): mixed` (`null` on contention) | `$m->tryWithLock($fn): mixed` (throws `ContentionException`) |
+  | `$m->isPoisoned()`, `$m->clearPoison()` | removed; PHP throws no longer corrupt the mutex |
+
+  Timeout parameters on the `*Timeout` methods are `int $ms (> 0)` in milliseconds, not `?float $seconds` — zero, negative, non-int, and absent values raise `OxPHP\Shared\TypeException` (use `try*` or the bare verb for those policies). The Channel `RecvResult` `value()` accessor throws `OxPHP\Shared\SharedException` if called on a non-Ok variant; use `isOk()` / `valueOr()` / `status()` to dispatch. The Mutex closure signature changed from `function ($value): mixed` (return-to-commit) to `function (&$value): mixed` (by-ref mutation; the return value becomes the caller's return value). `Shared\TimeoutException` is removed — `OperationTimeoutException` (now under `Async\AsyncException`) replaces it for `withLockTimeout` and the Pool-saturated path; `Shared\PoisonedException` and `Shared\ClosedException` remain registered but are deprecated and only thrown by the still-unmigrated `Shared\Once` / `Shared\Pool`. `Shared\DeadlockException` is reparented from `Shared\TimeoutException` to `Async\AsyncException`, so a single `catch (Async\AsyncException)` now sweeps every concurrency outcome across Shared\* and Async\*.
 - `Shared\Counter` is now a pure accumulator. `Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed — atomic-replace and compare-and-swap belong on the new `Shared\Atomic` class. `Counter::reset(int $newValue)` lost its argument; `reset()` now always returns the previous value and atomically zeroes the counter (the LongAdder `sumThenReset` pattern). For state machines, version stamps, or arbitrary atomic int storage, use `Shared\Atomic` instead.
 - `oxphp_async_await_any(array, ?float): array` was renamed to `oxphp_async_await_race(array, ?float): array`. The implementation is unchanged — first settled (success or failure) wins, as before. If your code relied on this behavior, replace the function name in-place.
 - `OxPHP\Shared\*` method naming unified across types. The renames below are mechanical (semantics and signatures unchanged), and ship without alias shims — update call sites with sed before upgrading. The rules are documented at [`docs/en/features/shared-naming.md`](docs/en/features/shared-naming.md).
@@ -140,6 +155,11 @@ $sapi = php_sapi_name();              // "cli-server"
 
 ### Added
 
+- `OxPHP\Shared\Channel\RecvResult` and `OxPHP\Shared\Channel\SendResult` — value-typed returns for the new Channel API. `RecvResult` accessors: `isOk`, `isEmpty`, `isTimeout`, `isClosed`, `value` (throws `SharedException` on non-Ok), `valueOr($default)`, `status(): RecvStatus`. `SendResult` is payload-free: `isOk`, `isFull`, `isTimeout`, `isClosed`, `status(): SendStatus`. Closed / full / timeout are normal outcomes for fan-out dispatchers, so they appear as result variants instead of exceptions on the hot path.
+- `OxPHP\Shared\Channel\RecvStatus` and `OxPHP\Shared\Channel\SendStatus` — unbacked enums for exhaustive `match` dispatch on the Result discriminant.
+- `OxPHP\Shared\OperationTimeoutException` (extends `OxPHP\Async\AsyncException`) — thrown by `Mutex::withLockTimeout` and `Pool::acquire` on deadline expiry. Cross-plugin parent makes a single `catch (Async\AsyncException)` sweep both Shared\* timeouts and Async\* await timeouts.
+- `OxPHP\Shared\ContentionException` (extends `OxPHP\Async\AsyncException`) — thrown by `Mutex::tryWithLock` when the lock is held.
+- `OxPHP\Shared\CorruptedMutexException` (extends `OxPHP\Shared\SharedException`) — thrown on every subsequent `Mutex::withLock*` call after a prior Rust panic crossed the FFI boundary inside the closure. Sticky, non-recoverable — discard the instance and create a new one.
 - `Shared\Atomic` — generic int64 atomic primitive. Methods: `load`, `store`, `swap`, `compareAndSet`, `fetchAdd`, `fetchSub`, `fetchAnd`, `fetchOr`, `fetchXor`. Each accepts an optional `Shared\Ordering` parameter (default `Ordering::SeqCst`). `fetch*` returns the previous value (Rust convention), in deliberate contrast to `Counter::add` which returns the new value.
 - `Shared\Ordering` — backed-int enum with `Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`. Maps one-to-one to `std::sync::atomic::Ordering`.
 - `Shared\InvalidOrderingException` (extends `Shared\SharedException`) — thrown when an `Atomic` operation receives a memory ordering invalid for that operation (e.g. `store(Ordering::Acquire)`, `compareAndSet(_, _, _, Ordering::Release)`).
@@ -151,6 +171,10 @@ $sapi = php_sapi_name();              // "cli-server"
 
 ### Removed
 
+- `OxPHP\Shared\TimeoutException` class. The exception was a `SharedException` sibling thrown by `Channel::send`/`sendMany`, `Mutex::with`/`withLock` timed variants, and `Pool::acquire`. The new replacement is `OxPHP\Shared\OperationTimeoutException` (now under `OxPHP\Async\AsyncException`); Channel's `*Timeout` methods return `RecvResult::Timeout` / `SendResult::Timeout` instead of throwing. `catch (OxPHP\Shared\TimeoutException)` clauses must be updated — there is no `class_alias` shim.
+- `Shared\Mutex::isPoisoned()`, `Shared\Mutex::clearPoison()`. Public poison observability and recovery were removed: the underlying behaviour they exposed never gave the caller useful work to do (corruption is now sticky and always a server bug; PHP throws no longer corrupt the lock at all). Catch `OxPHP\Shared\CorruptedMutexException` and discard the instance instead.
+- `Shared\Mutex::with($fn, ?float $timeout)` and `Shared\Mutex::tryWith($fn)`. Use `withLock` / `withLockTimeout($fn, int $ms)` / `tryWithLock` instead.
+- `Shared\Channel::send($v, ?float $timeout)`, `Channel::recv(?float $timeout)`, `Channel::sendMany(..., ?float $timeout)`, `Channel::recvMany(..., ?float $timeout)`. The float-seconds timeout parameter is gone everywhere on Channel. Use `sendTimeout($v, int $ms)` / `recvTimeout(int $ms)` for bounded waits, and pass the bare verbs (`send($v)` / `recv()`) for forever. The batch methods now take a mandatory `int $ms (> 0)` and return partial results without throwing on timeout or mid-batch close.
 - `REQUEST_TIMEOUT_SECONDS` env var. Use `max_execution_time` in `php.ini` (or `set_time_limit($seconds)` per script) instead.
 - `oxphp_request_heartbeat($time)` PHP function. Use `set_time_limit($seconds)` instead — both reset the per-request timer to N seconds from now.
 - `oxphp_bridge_set_deadline` / `_get_deadline` / `_is_deadline_expired` C exports from the bridge.

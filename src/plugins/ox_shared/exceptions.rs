@@ -1,19 +1,28 @@
 //! Register all Shared\* exception classes at plugin init.
 //!
-//! Hierarchy (11 classes: 1 base + 10 subclasses):
+//! Hierarchy (13 classes total — 10 Shared\* + 3 Shared\* extending Async\*):
 //!
 //!   \Exception
-//!     └── OxPHP\Shared\SharedException      (1)
-//!          ├── StaleHandleException          (2)
-//!          ├── TypeException                 (3)
-//!          │    └── CycleException           (4)  Map::set would form a cycle
-//!          ├── CapacityException             (5)
-//!          ├── ClosedException               (6)
-//!          ├── PoisonedException             (7)
-//!          ├── TimeoutException              (8)
-//!          │    └── DeadlockException        (9)
-//!          ├── UninitializedException        (10) access before first set()
-//!          └── InvalidOrderingException      (11) Atomic op got a memory ordering invalid for that op
+//!     ├── OxPHP\Async\AsyncException                  (registered by ox_async plugin)
+//!     │    ├── OxPHP\Shared\OperationTimeoutException  recvTimeout / sendTimeout / withLockTimeout
+//!     │    ├── OxPHP\Shared\ContentionException        tryWithLock contention
+//!     │    └── OxPHP\Shared\DeadlockException          reentrant / wait-for-cycle
+//!     └── OxPHP\Shared\SharedException
+//!          ├── StaleHandleException
+//!          ├── TypeException
+//!          │    └── CycleException                     Map::set would form a cycle
+//!          ├── CapacityException
+//!          ├── ClosedException                         DEPRECATED — still thrown by Pool;
+//!          │                                            removed once Pool migrates
+//!          ├── PoisonedException                       DEPRECATED — still thrown by Once;
+//!          │                                            removed once Once migrates
+//!          ├── UninitializedException
+//!          ├── InvalidOrderingException                Atomic op got an invalid memory ordering
+//!          └── CorruptedMutexException                 Rust panic crossed FFI; mutex unusable
+//!
+//! Cross-plugin coupling: the three Shared\* classes that extend
+//! Async\AsyncException require the ox_async plugin's exceptions
+//! to be registered before ox_shared::init runs.
 
 use crate::plugin::{PluginContext, PluginError};
 
@@ -23,33 +32,45 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .extends("Exception")
         .build()?;
 
-    // Direct subclasses.
+    // Direct subclasses of SharedException.
+    // NOTE: ClosedException + PoisonedException are deprecated but kept
+    // because Shared\Once and Shared\Pool still throw them. They are
+    // scheduled for removal once those primitives migrate to the new
+    // result/exception model.
     for child in [
         "OxPHP\\Shared\\StaleHandleException",
         "OxPHP\\Shared\\TypeException",
         "OxPHP\\Shared\\CapacityException",
         "OxPHP\\Shared\\ClosedException",
         "OxPHP\\Shared\\PoisonedException",
-        "OxPHP\\Shared\\TimeoutException",
         "OxPHP\\Shared\\UninitializedException",
         "OxPHP\\Shared\\InvalidOrderingException",
+        "OxPHP\\Shared\\CorruptedMutexException",
     ] {
         ctx.register_class(child)
             .extends("OxPHP\\Shared\\SharedException")
             .build()?;
     }
 
-    // CycleException extends TypeException (review decision v3 — a cycle
-    // is a value-shape violation at the storage slot).
+    // CycleException extends TypeException (a cycle is a value-shape
+    // violation at the storage slot).
     ctx.register_class("OxPHP\\Shared\\CycleException")
         .extends("OxPHP\\Shared\\TypeException")
         .build()?;
 
-    // DeadlockException extends TimeoutException (so catch(TimeoutException)
-    // handles both).
-    ctx.register_class("OxPHP\\Shared\\DeadlockException")
-        .extends("OxPHP\\Shared\\TimeoutException")
-        .build()?;
+    // Cross-plugin: OperationTimeoutException, ContentionException, and
+    // DeadlockException extend Async\AsyncException so `catch (AsyncException)`
+    // sweeps every concurrency-related condition across the Shared\* and
+    // Async\* surfaces.
+    for child in [
+        "OxPHP\\Shared\\OperationTimeoutException",
+        "OxPHP\\Shared\\ContentionException",
+        "OxPHP\\Shared\\DeadlockException",
+    ] {
+        ctx.register_class(child)
+            .extends("OxPHP\\Async\\AsyncException")
+            .build()?;
+    }
 
     Ok(())
 }
@@ -104,9 +125,34 @@ mod tests {
     }
 
     #[test]
-    fn all_eleven_classes_registered() {
+    fn all_thirteen_classes_registered() {
         let classes = run_register();
-        assert_eq!(classes.len(), 11);
+        // 1 base (SharedException) + 8 direct children + CycleException
+        // + 3 AsyncException children = 13.
+        assert_eq!(classes.len(), 13);
+        let fqns: Vec<&str> = classes.iter().map(|c| c.fqn.as_str()).collect();
+        for required in [
+            "OxPHP\\Shared\\SharedException",
+            "OxPHP\\Shared\\StaleHandleException",
+            "OxPHP\\Shared\\TypeException",
+            "OxPHP\\Shared\\CycleException",
+            "OxPHP\\Shared\\CapacityException",
+            "OxPHP\\Shared\\ClosedException",
+            "OxPHP\\Shared\\PoisonedException",
+            "OxPHP\\Shared\\UninitializedException",
+            "OxPHP\\Shared\\InvalidOrderingException",
+            "OxPHP\\Shared\\CorruptedMutexException",
+            "OxPHP\\Shared\\OperationTimeoutException",
+            "OxPHP\\Shared\\ContentionException",
+            "OxPHP\\Shared\\DeadlockException",
+        ] {
+            assert!(fqns.contains(&required), "missing class: {required}");
+        }
+        // The pre-refactor Shared\TimeoutException MUST be gone.
+        assert!(
+            !fqns.contains(&"OxPHP\\Shared\\TimeoutException"),
+            "Shared\\TimeoutException should have been removed"
+        );
     }
 
     #[test]
@@ -133,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn deadlock_extends_timeout() {
+    fn deadlock_extends_async_exception() {
         let classes = run_register();
         let dl = classes
             .iter()
@@ -141,7 +187,38 @@ mod tests {
             .unwrap();
         assert_eq!(
             dl.parent.as_deref(),
-            Some("OxPHP\\Shared\\TimeoutException")
+            Some("OxPHP\\Async\\AsyncException"),
+            "DeadlockException must reparent to Async\\AsyncException (was Shared\\TimeoutException)"
         );
+    }
+
+    #[test]
+    fn operation_timeout_extends_async_exception() {
+        let classes = run_register();
+        let ot = classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Shared\\OperationTimeoutException")
+            .unwrap();
+        assert_eq!(ot.parent.as_deref(), Some("OxPHP\\Async\\AsyncException"));
+    }
+
+    #[test]
+    fn contention_extends_async_exception() {
+        let classes = run_register();
+        let c = classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Shared\\ContentionException")
+            .unwrap();
+        assert_eq!(c.parent.as_deref(), Some("OxPHP\\Async\\AsyncException"));
+    }
+
+    #[test]
+    fn corrupted_mutex_extends_shared_exception() {
+        let classes = run_register();
+        let cm = classes
+            .iter()
+            .find(|c| c.fqn == "OxPHP\\Shared\\CorruptedMutexException")
+            .unwrap();
+        assert_eq!(cm.parent.as_deref(), Some("OxPHP\\Shared\\SharedException"));
     }
 }

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_positive_ms_arg, Wait};
 
 use parking_lot::Mutex;
 
@@ -20,30 +20,27 @@ use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedTy
 use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned, sv_to_portbuf, SharedValue};
 
 /// Per-mutex storage. `state` is parking_lot::Mutex so try_lock_for
-/// is available. `poisoned` is split out for lock-free is_poisoned().
+/// is available. `corrupted` is split out for lock-free is_corrupted();
+/// it is sticky — once set, there is no public API to clear it.
 pub struct MutexInner {
     pub(crate) state: Mutex<SharedValue>,
-    poisoned: AtomicBool,
+    corrupted: AtomicBool,
 }
 
 impl MutexInner {
     pub fn new(initial: SharedValue) -> Self {
         Self {
             state: Mutex::new(initial),
-            poisoned: AtomicBool::new(false),
+            corrupted: AtomicBool::new(false),
         }
     }
 
-    pub fn is_poisoned(&self) -> bool {
-        self.poisoned.load(Ordering::Acquire)
+    pub fn is_corrupted(&self) -> bool {
+        self.corrupted.load(Ordering::Acquire)
     }
 
-    pub fn mark_poisoned(&self) {
-        self.poisoned.store(true, Ordering::Release);
-    }
-
-    pub fn clear_poison(&self) {
-        self.poisoned.store(false, Ordering::Release);
+    pub fn mark_corrupted(&self) {
+        self.corrupted.store(true, Ordering::Release);
     }
 
     /// Snapshot the current state — non-blocking; returns Null if contended.
@@ -114,58 +111,6 @@ pub unsafe extern "C" fn oxphp_shared_mutex_create(
     })
 }
 
-/// # Safety
-/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-/// `out` must be valid for writes of c_int.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_mutex_is_poisoned(
-    entry_ptr: *const Entry,
-    out: *mut c_int,
-) -> c_int {
-    if out.is_null() {
-        set_last_error("out null");
-        return SharedError::Generic.code();
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        // SAFETY: entry_ptr non-null and, per the handle contract, a
-        // live Arc::into_raw pointer.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(
-            entry.magic, ENTRY_MAGIC,
-            "oxphp_shared_mutex_is_poisoned on freed Entry"
-        );
-        let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
-        let p = inner.is_poisoned();
-        entry.registry.record_op(entry);
-        unsafe { *out = p as c_int };
-        Ok(())
-    })
-}
-
-/// # Safety
-/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_mutex_clear_poison(entry_ptr: *const Entry) -> c_int {
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        // SAFETY: see oxphp_shared_mutex_is_poisoned.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(
-            entry.magic, ENTRY_MAGIC,
-            "oxphp_shared_mutex_clear_poison on freed Entry"
-        );
-        let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
-        inner.clear_poison();
-        entry.registry.record_op(entry);
-        Ok(())
-    })
-}
-
 use crate::plugins::ox_shared::reentrancy::{push_held, MutexPopGuard};
 
 /// Invoke the closure under the mutex with bounded wait. The closure
@@ -203,7 +148,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
     ffi_entry(|| {
         use crate::bridge::ffi;
 
-        // SAFETY: see oxphp_shared_mutex_is_poisoned.
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer.
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(
             entry.magic, ENTRY_MAGIC,
@@ -212,9 +158,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         let id = entry.id;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
 
-        if inner.is_poisoned() {
-            set_last_error("mutex poisoned by prior Rust panic");
-            return Err(SharedError::Poisoned);
+        if inner.is_corrupted() {
+            set_last_error("mutex corrupted by prior Rust panic");
+            return Err(SharedError::Panicked);
         }
 
         // Reentrancy check BEFORE acquire; RAII pop on every exit.
@@ -234,19 +180,19 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
 
         let acquired = match parse_timeout(timeout_ms) {
             Wait::Forever => {
-                // Block until acquired, poisoned, or cycle-broken. Poll with a
-                // 100ms quantum so poison + cycle-break signals can progress.
-                // The `waiter` guard is held alive across iterations — its Drop
-                // only fires on early-return error paths or when promoted via
-                // `promote_to_holder` after acquisition.
+                // Block until acquired, corrupted, or cycle-broken. Poll with a
+                // 100ms quantum so corruption + cycle-break signals can
+                // progress. The `waiter` guard is held alive across
+                // iterations — its Drop only fires on early-return error paths
+                // or when promoted via `promote_to_holder` after acquisition.
                 loop {
                     if let Some(g) = inner.state.try_lock_for(Duration::from_millis(100)) {
                         break Some(g);
                     }
-                    if inner.poisoned.load(Ordering::Acquire) {
-                        set_last_error("Mutex::with: poisoned during wait");
+                    if inner.corrupted.load(Ordering::Acquire) {
+                        set_last_error("Mutex::with: corrupted during wait");
                         drop(waiter);
-                        return Err(SharedError::Poisoned);
+                        return Err(SharedError::Panicked);
                     }
                     // Mirror the bounded path's None-branch cycle detection: a
                     // break signal targeted at this thread must abort the wait.
@@ -277,8 +223,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
             }
         };
 
-        if inner.is_poisoned() {
-            return Err(SharedError::Poisoned);
+        if inner.is_corrupted() {
+            return Err(SharedError::Panicked);
         }
 
         let state_bytes = sv_to_portbuf(&guard);
@@ -290,7 +236,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         let mut did_mutate: c_int = 0;
 
         // Wrap the engine call in catch_unwind — a Rust panic during
-        // invocation must poison the mutex (sticky) before propagating.
+        // invocation must mark the mutex corrupted (sticky) before
+        // propagating.
         let invoke_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             ffi::oxphp_shared_invoke_byref_1_portbuf(
                 callable,
@@ -306,7 +253,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
 
         match invoke_result {
             Err(_panic) => {
-                inner.mark_poisoned();
+                inner.mark_corrupted();
                 if !new_state_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
                 }
@@ -380,8 +327,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
     })
 }
 
-/// Non-blocking try-acquire. Status: 0 → success, -7 → contended
-/// (caller returns null), -5 → poisoned, -3 → not a Mutex, -2 → stale.
+/// Non-blocking try-acquire. Status: 0 → success, -7 → contended,
+/// -99 → corrupted, -3 → not a Mutex, -2 → stale.
 ///
 /// # Safety
 /// See `oxphp_shared_mutex_with`.
@@ -407,7 +354,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
     ffi_entry(|| {
         use crate::bridge::ffi;
 
-        // SAFETY: see oxphp_shared_mutex_is_poisoned.
+        // SAFETY: entry_ptr non-null and, per the handle contract, a
+        // live Arc::into_raw pointer.
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(
             entry.magic, ENTRY_MAGIC,
@@ -416,8 +364,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
         let id = entry.id;
         let inner = entry.inner.as_any_mutex().ok_or(SharedError::Type)?;
 
-        if inner.is_poisoned() {
-            return Err(SharedError::Poisoned);
+        if inner.is_corrupted() {
+            set_last_error("mutex corrupted by prior Rust panic");
+            return Err(SharedError::Panicked);
         }
 
         push_held(id)?;
@@ -432,13 +381,14 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
             }
             None => {
                 drop(waiter);
-                set_last_error("mutex contended; tryWith returning null");
+                set_last_error("mutex contended; tryWithLock returning ContentionException");
                 return Err(SharedError::Timeout);
             }
         };
 
-        if inner.is_poisoned() {
-            return Err(SharedError::Poisoned);
+        if inner.is_corrupted() {
+            set_last_error("mutex corrupted by prior Rust panic");
+            return Err(SharedError::Panicked);
         }
 
         let state_bytes = sv_to_portbuf(&guard);
@@ -464,14 +414,14 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
 
         match invoke_result {
             Err(_) => {
-                inner.mark_poisoned();
+                inner.mark_corrupted();
                 if !new_state_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
                 }
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                set_last_error("Rust panic inside Mutex::tryWith closure invocation");
+                set_last_error("Rust panic inside Mutex::tryWithLock closure invocation");
                 Err(SharedError::Panicked)
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_OK => {
@@ -495,6 +445,21 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
+                // Mirror oxphp_shared_mutex_with's PHP_THREW branch: closure
+                // mutated state by-ref before throwing, partial mutation is
+                // documented as "acceptable; caller responsible for invariant
+                // restoration". The C shim already serialised the post-throw
+                // state into new_state_buf — apply it here so tryWithLock
+                // and withLock have symmetric mutation visibility.
+                if !new_state_buf.is_null() && new_state_len > 0 {
+                    let new_bytes =
+                        unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
+                        *guard = new_sv;
+                    }
+                }
                 if !new_state_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
                 }
@@ -512,7 +477,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 if !ret_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(ret_buf) };
                 }
-                set_last_error("Mutex::tryWith: arg is not a valid callable");
+                set_last_error("Mutex::tryWithLock: arg is not a valid callable");
                 Err(SharedError::Type)
             }
         }
@@ -535,6 +500,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 code: 0,
             })
         })
+        // ── __construct(mixed $initial = null) ──────────────────────
         .method("__construct")
         .optional_param("initial", PhpType::Mixed, PhpValue::Null)
         .handler(|call| {
@@ -561,117 +527,32 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             h.type_tag = SharedType::Mutex as u8;
             Ok(())
         })
-        .method("isPoisoned")
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_mutex_is_poisoned(entry_ptr, &mut out) };
-            super::counter::counter_rc_to_result(rc)?;
-            call.ret_bool(out != 0);
-            Ok(())
-        })
-        .method("clearPoison")
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let rc = unsafe { oxphp_shared_mutex_clear_poison(entry_ptr) };
-            super::counter::counter_rc_to_result(rc)?;
-            Ok(())
-        })
-        .method("with")
-        .param("fn", PhpType::Callable)
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
-        .returns(PhpType::Mixed)
-        .handler(|call| {
-            use crate::bridge::ffi;
-
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let callable_zv = unsafe { call.raw_arg_ptr(0) };
-            let timeout_ms: i64 = read_timeout_arg(call, 1)?;
-
-            let mut ret_buf: *mut u8 = std::ptr::null_mut();
-            let mut ret_len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_mutex_with(
-                    entry_ptr,
-                    callable_zv,
-                    timeout_ms,
-                    &mut ret_buf,
-                    &mut ret_len,
-                )
-            };
-            if rc != 0 {
-                if !ret_buf.is_null() {
-                    unsafe { ffi::oxphp_portable_free(ret_buf) };
-                }
-                // SharedError::Generic (-1) when closure threw — EG(exception)
-                // is already set; return a generic PhpError so the plugin
-                // wrapper doesn't overwrite it.
-                if rc == SharedError::Generic.code() {
-                    return Err(PhpError::Custom("Mutex::with closure threw".into()));
-                }
-                return Err(mutex_rc_to_phperr(rc));
-            }
-
-            if ret_buf.is_null() || ret_len == 0 {
-                call.ret_null();
-            } else {
-                let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
-                let entry: &Entry = unsafe { &*entry_ptr };
-                match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
-                    Ok(sv) => write_value_to_retval(call, &sv)?,
-                    Err(_) => call.ret_null(),
-                }
-                unsafe { ffi::oxphp_portable_free(ret_buf) };
-            }
-            Ok(())
-        })
-        .method("tryWith")
+        // ── withLock(callable $fn): mixed ───────────────────────────
+        //   Forever (or fiber-cancel). Throws on contention only if
+        //   the request fiber is cancelled (OperationTimeoutException
+        //   from the SAPI layer or AsyncException directly).
+        .method("withLock")
         .param("fn", PhpType::Callable)
         .returns(PhpType::Mixed)
+        .handler(|call| invoke_mutex_with(call, /* timeout_ms = */ -1))
+        // ── tryWithLock(callable $fn): mixed ────────────────────────
+        //   Non-blocking. Throws ContentionException if the lock is held.
+        .method("tryWithLock")
+        .param("fn", PhpType::Callable)
+        .returns(PhpType::Mixed)
+        .handler(invoke_mutex_try_with)
+        // ── withLockTimeout(callable $fn, int $ms): mixed ───────────
+        //   Bounded. $ms > 0 enforced. Throws OperationTimeoutException
+        //   on deadline expiry, DeadlockException on wait-for-cycle.
+        .method("withLockTimeout")
+        .param("fn", PhpType::Callable)
+        .param("ms", PhpType::Int)
+        .returns(PhpType::Mixed)
         .handler(|call| {
-            use crate::bridge::ffi;
-
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let callable_zv = unsafe { call.raw_arg_ptr(0) };
-            let mut ret_buf: *mut u8 = std::ptr::null_mut();
-            let mut ret_len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_mutex_try_with(entry_ptr, callable_zv, &mut ret_buf, &mut ret_len)
-            };
-
-            // Timeout → null; the spec treats tryWith contention as
-            // "couldn't acquire" not an exception.
-            if rc == SharedError::Timeout.code() {
-                if !ret_buf.is_null() {
-                    unsafe { ffi::oxphp_portable_free(ret_buf) };
-                }
-                call.ret_null();
-                return Ok(());
-            }
-            if rc != 0 {
-                if !ret_buf.is_null() {
-                    unsafe { ffi::oxphp_portable_free(ret_buf) };
-                }
-                if rc == SharedError::Generic.code() {
-                    return Err(PhpError::Custom("Mutex::tryWith closure threw".into()));
-                }
-                return Err(mutex_rc_to_phperr(rc));
-            }
-
-            if ret_buf.is_null() || ret_len == 0 {
-                call.ret_null();
-            } else {
-                let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
-                let entry: &Entry = unsafe { &*entry_ptr };
-                match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
-                    Ok(sv) => write_value_to_retval(call, &sv)?,
-                    Err(_) => call.ret_null(),
-                }
-                unsafe { ffi::oxphp_portable_free(ret_buf) };
-            }
-            Ok(())
+            let ms = read_positive_ms_arg(call, 1)?;
+            invoke_mutex_with(call, ms)
         })
+        // ── id(): int ───────────────────────────────────────────────
         .method("id")
         .returns(PhpType::Int)
         .handler(|call| {
@@ -693,15 +574,112 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     Ok(())
 }
 
+fn invoke_mutex_with(
+    call: &mut crate::bridge::call::NativeCall,
+    timeout_ms: i64,
+) -> Result<(), PhpError> {
+    use crate::bridge::ffi;
+
+    let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+    let callable_zv = unsafe { call.raw_arg_ptr(0) };
+
+    let mut ret_buf: *mut u8 = std::ptr::null_mut();
+    let mut ret_len: usize = 0;
+    let rc = unsafe {
+        oxphp_shared_mutex_with(
+            entry_ptr,
+            callable_zv,
+            timeout_ms,
+            &mut ret_buf,
+            &mut ret_len,
+        )
+    };
+    if rc != 0 {
+        if !ret_buf.is_null() {
+            unsafe { ffi::oxphp_portable_free(ret_buf) };
+        }
+        // SharedError::Generic (-1) when closure threw — EG(exception)
+        // is already set; return a generic PhpError so the plugin
+        // wrapper doesn't overwrite it.
+        if rc == SharedError::Generic.code() {
+            return Err(PhpError::Custom("Mutex::withLock closure threw".into()));
+        }
+        return Err(mutex_rc_to_phperr(rc));
+    }
+
+    if ret_buf.is_null() || ret_len == 0 {
+        call.ret_null();
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
+        let entry: &Entry = unsafe { &*entry_ptr };
+        match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
+            Ok(sv) => write_value_to_retval(call, &sv)?,
+            Err(_) => call.ret_null(),
+        }
+        unsafe { ffi::oxphp_portable_free(ret_buf) };
+    }
+    Ok(())
+}
+
+fn invoke_mutex_try_with(call: &mut crate::bridge::call::NativeCall) -> Result<(), PhpError> {
+    use crate::bridge::ffi;
+
+    let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+    let callable_zv = unsafe { call.raw_arg_ptr(0) };
+    let mut ret_buf: *mut u8 = std::ptr::null_mut();
+    let mut ret_len: usize = 0;
+    let rc =
+        unsafe { oxphp_shared_mutex_try_with(entry_ptr, callable_zv, &mut ret_buf, &mut ret_len) };
+
+    // Contention path: the underlying try_with returns SharedError::Timeout
+    // when the lock is held by another thread. Translate to the new
+    // ContentionException — distinct from OperationTimeoutException
+    // because the user did not pass a timeout budget.
+    if rc == SharedError::Timeout.code() {
+        if !ret_buf.is_null() {
+            unsafe { ffi::oxphp_portable_free(ret_buf) };
+        }
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\ContentionException".into(),
+            message: "Mutex::tryWithLock: lock is held".into(),
+            code: 0,
+        });
+    }
+    if rc != 0 {
+        if !ret_buf.is_null() {
+            unsafe { ffi::oxphp_portable_free(ret_buf) };
+        }
+        if rc == SharedError::Generic.code() {
+            return Err(PhpError::Custom("Mutex::tryWithLock closure threw".into()));
+        }
+        return Err(mutex_rc_to_phperr(rc));
+    }
+
+    if ret_buf.is_null() || ret_len == 0 {
+        call.ret_null();
+    } else {
+        let bytes = unsafe { std::slice::from_raw_parts(ret_buf, ret_len) };
+        let entry: &Entry = unsafe { &*entry_ptr };
+        match portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, entry.registry)) {
+            Ok(sv) => write_value_to_retval(call, &sv)?,
+            Err(_) => call.ret_null(),
+        }
+        unsafe { ffi::oxphp_portable_free(ret_buf) };
+    }
+    Ok(())
+}
+
 fn mutex_rc_to_phperr(rc: c_int) -> PhpError {
     let class = match rc {
         -2 => "OxPHP\\Shared\\StaleHandleException",
         -3 => "OxPHP\\Shared\\TypeException",
         -4 => "OxPHP\\Shared\\CapacityException",
-        -5 => "OxPHP\\Shared\\PoisonedException",
-        -7 => "OxPHP\\Shared\\TimeoutException",
+        // Timeout from withLockTimeout's bounded wait → OperationTimeoutException.
+        -7 => "OxPHP\\Shared\\OperationTimeoutException",
         -8 => "OxPHP\\Shared\\DeadlockException",
         -10 => "OxPHP\\Shared\\UninitializedException",
+        // -99 = Rust panic crossed FFI → corrupted mutex.
+        -99 => "OxPHP\\Shared\\CorruptedMutexException",
         _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
@@ -738,13 +716,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn poison_round_trip() {
+    fn corruption_round_trip() {
         let m = MutexInner::new(SharedValue::Long(10));
-        assert!(!m.is_poisoned());
-        m.mark_poisoned();
-        assert!(m.is_poisoned());
-        m.clear_poison();
-        assert!(!m.is_poisoned());
+        assert!(!m.is_corrupted());
+        m.mark_corrupted();
+        assert!(m.is_corrupted());
+        // No clear path — corruption is sticky by design.
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <?php
 /**
  * Channel — after close, recv drains remaining buffered items
- * before returning null.
+ * before returning RecvResult::Closed.
  */
 header('Content-Type: text/plain');
 
@@ -11,18 +11,14 @@ $ch->send('two');
 $ch->send('three');
 $ch->close();
 
-if ($ch->recv() !== 'one')   { echo "FAIL: expected 'one'\n"; exit; }
-if ($ch->recv() !== 'two')   { echo "FAIL: expected 'two'\n"; exit; }
-if ($ch->recv() !== 'three') { echo "FAIL: expected 'three'\n"; exit; }
-if ($ch->recv() !== null)    { echo "FAIL: expected null after drain\n"; exit; }
+if ($ch->recv()->value() !== 'one')   { echo "FAIL: expected 'one'\n"; exit; }
+if ($ch->recv()->value() !== 'two')   { echo "FAIL: expected 'two'\n"; exit; }
+if ($ch->recv()->value() !== 'three') { echo "FAIL: expected 'three'\n"; exit; }
 
-// Subsequent tryRecv on closed+empty must throw ClosedException
-$threw = false;
-try {
-    $ch->tryRecv();
-} catch (OxPHP\Shared\ClosedException $e) {
-    $threw = true;
-}
-if (!$threw) { echo "FAIL: tryRecv on closed+empty must throw ClosedException\n"; exit; }
+$r = $ch->recv();
+if (!$r->isClosed()) { echo "FAIL: expected RecvResult::Closed after drain\n"; exit; }
+
+$r2 = $ch->tryRecv();
+if (!$r2->isClosed()) { echo "FAIL: tryRecv on closed+empty must be Closed\n"; exit; }
 
 echo "OK\n";

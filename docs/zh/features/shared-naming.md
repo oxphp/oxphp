@@ -41,34 +41,39 @@ count($pool);  // 全部活跃槽（in-use + idle）
 
 ### 4. 布尔 getter — `is*()` 前缀
 
-`Channel::isClosed()`、`Mutex::isPoisoned()`、`Once::isInitialized()`、
-`Flag::isSet()`。
+`Channel::isClosed()`、`Once::isInitialized()`、`Flag::isSet()`。
 
-不使用裸动词（`test`、`check`），也不使用领域专有名（`poisoned`、
-`closed`）。`is` 前缀标记对布尔属性的纯读取。
+不使用裸动词（`test`、`check`），也不使用领域专有名
+（`closed`）。`is` 前缀标记对布尔属性的纯读取。
 
-### 5. 可能失败的尝试 — `try*()` 前缀
+`Mutex` 故意**不**提供 `isCorrupted()` —— 损坏是 sticky、不可恢复
+的，并通过下一次获取时抛出的 `CorruptedMutexException` 暴露。除了
+再次获取并 catch，对该探测结果没有其他有用的操作。
 
-`Channel::trySend()`、`Channel::tryRecv()`、`Mutex::tryWith()`、
-`Map::trySet()`。
+### 5. Wait-policy 三分法 — `try*` / 裸名 / `*Timeout`
 
-语义：一个可能合理失败的操作 —— 因为阻塞变体需要等待、因为某个
-逻辑前置条件不满足，或者因为容量耗尽 —— 并通过返回 `bool` /
-`null` 而非抛出异常来报告失败。当调用方必须区分「未成功」与
-「成功」但又不想走 `try`/`catch` 时，请使用 `try*`。
+阻塞原语（Channel、Mutex）通过方法**名**而非重载的 `?float $timeout`
+参数来表达 **wait policy**：
 
-同一前缀下并存两种不同的子语义；两者都是有意为之，并与 Rust
-stdlib 的 `try_*` 用法一致：
+| 后缀          | 行为                                                          | 示例                                                     |
+|---------------|---------------------------------------------------------------|----------------------------------------------------------|
+| `try*`        | 非阻塞；立即报告失败变体。                                    | `Channel::trySend`、`Channel::tryRecv`、`Mutex::tryWithLock` |
+| (裸名)        | 永久阻塞（或直到 request fiber 被取消）。                     | `Channel::send`、`Channel::recv`、`Mutex::withLock`       |
+| `*Timeout`    | 有界等待。接受强制的 `int $ms > 0`。                          | `Channel::sendTimeout`、`Channel::recvTimeout`、`Mutex::withLockTimeout` |
 
-- **阻塞操作的非阻塞变体。** `trySend` / `tryRecv` / `tryWith` 等
-  价于零截止期的阻塞变体（will-block → `false` / `null`，不抛
-  `TimeoutException`）。对应 `mpsc::Sender::try_send`、
-  `Mutex::try_lock`。
+三分法把三种含糊的策略（`null` = 永久、`0` = try、正数 = 有界）从
+一个参数里挪到三个名字自解释的方法上。`*Timeout` 方法的 `$ms` 参数
+**严格为正** —— 零、负数、非 int 和缺失都会在桥层抛出
+`OxPHP\Shared\TypeException`。
+
+`try*` 还携带一个早于三分法就存在的子语义：
+
 - **条件性成功操作。** `Map::trySet` 仅在键缺失时成功；冲突
   → `false`，不抛异常。对应 `HashMap::try_insert`。
 
-统一的不变量：`try*` 返回值而非抛出异常。不要发明替代名
-（`setIfAbsent`、`lockNonblocking`、`pushIfRoom`）。
+`try*` 的统一不变量：它要么返回带值的 Result（Channel），要么抛出
+`ContentionException`（Mutex）。它从不用 `null` 来编码「未成功」 ——
+那是旧 API 的做法，会带来三分法所要消除的 null-coalescing 歧义。
 
 ### 6. Compare-and-swap — `compareAndSet()`
 
@@ -125,7 +130,9 @@ stdlib 的 `try_*` 用法一致：
 | 元素数量                    | `count(): int`           | `Map::count`、`Channel::count`、`Pool::count` |
 | 键/元素存在性               | `has($key): bool`        | `Map::has`                              |
 | 布尔属性                    | `is*(): bool`            | `Flag::isSet`、`Channel::isClosed`      |
-| 可能失败的尝试              | `try*()`                 | `Channel::trySend`、`Map::trySet`       |
+| 非阻塞等待                  | `try*()`                 | `Channel::trySend`、`Mutex::tryWithLock`、`Map::trySet` |
+| 永久等待                    | 裸动词                   | `Channel::send`、`Channel::recv`、`Mutex::withLock`     |
+| 有界等待                    | `*Timeout(int $ms)`      | `Channel::sendTimeout`、`Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
 | 替换并返回 prev             | `swap()` / `exchange()`  | `Atomic::swap`、`Flag::exchange`        |
 | 原子 RMW，返回 prev         | `fetch*()`               | `Atomic::fetchAdd`                      |
@@ -143,8 +150,11 @@ stdlib 的 `try_*` 用法一致：
   `count(): int`。
 - [ ] 读取方法为 `get` 或 `load`（仅原子）。
 - [ ] 布尔 getter 使用 `is*` 前缀。
-- [ ] 可能失败的变体（非阻塞、条件性成功、容量）使用 `try*` 前缀，
-  并返回 `bool` / `null` 而非抛出异常。
+- [ ] Wait-policy 变体遵循 `try*` / 裸名 / `*Timeout(int $ms)` 三分
+  法。`*Timeout` 变体接受 `int $ms > 0`，并以 `TypeException` 拒绝
+  零 / 负数 / 非 int 输入。条件性成功操作（`Map::trySet`）保留
+  `try*` 前缀，仍可返回 `bool`；新的 wait-policy `try*` 方法要么
+  返回带值的 Result，要么抛出领域异常 —— 永远不用 `null`-编码。
 - [ ] 不出现 `len`、`size`、`pending`、`test`、`setIfAbsent` 等
   临时命名。
 - [ ] 领域专有动词（`evict`、`drain`、`flush` 等）仅在速查表中没有
