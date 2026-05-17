@@ -445,6 +445,21 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 Ok(())
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
+                // Mirror oxphp_shared_mutex_with's PHP_THREW branch: closure
+                // mutated state by-ref before throwing, partial mutation is
+                // documented as "acceptable; caller responsible for invariant
+                // restoration". The C shim already serialised the post-throw
+                // state into new_state_buf — apply it here so tryWithLock
+                // and withLock have symmetric mutation visibility.
+                if !new_state_buf.is_null() && new_state_len > 0 {
+                    let new_bytes =
+                        unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
+                        *guard = new_sv;
+                    }
+                }
                 if !new_state_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
                 }
