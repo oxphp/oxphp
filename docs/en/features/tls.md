@@ -38,6 +38,29 @@ If only one of `TLS_CERT` or `TLS_KEY` is provided, TLS is not enabled and the s
 | ALPN protocols | `h2` (HTTP/2) and `http/1.1`, negotiated in that order |
 | Client certificates | Not supported (no mutual TLS) |
 
+## HTTP/2
+
+OxPHP serves HTTP/2 and HTTP/1.1 on the same port. The protocol is chosen per connection — there is no setting to turn HTTP/2 on or off:
+
+- **Over TLS**, the protocol is negotiated during the handshake via ALPN. OxPHP advertises `h2` then `http/1.1`, so HTTP/2-capable clients get HTTP/2 and everyone else falls back to HTTP/1.1 transparently.
+- **Without TLS (h2c)**, OxPHP detects the HTTP/2 connection preface and serves cleartext HTTP/2 to clients that connect with prior knowledge (e.g. `curl --http2-prior-knowledge`). Clients that don't speak HTTP/2 keep using HTTP/1.1 on the same port. (The `Upgrade: h2c` handshake is not used — HTTP/2 over cleartext requires prior knowledge.)
+
+HTTP/2 flow-control windows are raised above the protocol defaults — 8 MB per connection and 4 MB per stream, versus the 64 KB default — to avoid stalls on typical PHP responses, which are usually larger than one default window.
+
+PHP sees the negotiated protocol in `$_SERVER['SERVER_PROTOCOL']` (`"HTTP/2"` or `"HTTP/1.1"`).
+
+### Verify
+
+```bash
+# HTTP/2 over TLS (negotiated via ALPN)
+curl -k --http2 -I https://localhost/
+
+# Cleartext HTTP/2 (h2c, prior knowledge)
+curl --http2-prior-knowledge -I http://localhost/
+```
+
+Look for `HTTP/2 200` in the response line.
+
 ## Supported Key Types
 
 The private key file must contain a single PEM-encoded key in one of the following formats:

@@ -38,6 +38,29 @@ TLS 握手发生在任何 HTTP 处理之前：
 | ALPN 协议 | `h2`（HTTP/2）和 `http/1.1`，按此顺序协商 |
 | 客户端证书 | 不支持（无双向 TLS） |
 
+## HTTP/2
+
+OxPHP 在同一端口上同时提供 HTTP/2 和 HTTP/1.1。协议按每个连接选择——没有开关用于启用或禁用 HTTP/2：
+
+- **基于 TLS** 时，协议在握手期间通过 ALPN 协商。OxPHP 先通告 `h2`，再通告 `http/1.1`，因此支持 HTTP/2 的客户端获得 HTTP/2，其他客户端则透明回退到 HTTP/1.1。
+- **无 TLS（h2c）** 时，OxPHP 识别 HTTP/2 连接前言，并向以先验知识（prior knowledge）连接的客户端（例如 `curl --http2-prior-knowledge`）提供明文 HTTP/2。不支持 HTTP/2 的客户端在同一端口上继续使用 HTTP/1.1。（不使用 `Upgrade: h2c` 握手——明文 HTTP/2 需要先验知识。）
+
+HTTP/2 的流控窗口被提升到高于协议默认值——每连接 8 MB、每流 4 MB，而默认值为 64 KB——以避免在典型的 PHP 响应（通常大于一个默认窗口）上出现停顿。
+
+PHP 在 `$_SERVER['SERVER_PROTOCOL']` 中看到协商后的协议（`"HTTP/2"` 或 `"HTTP/1.1"`）。
+
+### 验证
+
+```bash
+# 基于 TLS 的 HTTP/2（通过 ALPN 协商）
+curl -k --http2 -I https://localhost/
+
+# 明文 HTTP/2（h2c，先验知识）
+curl --http2-prior-knowledge -I http://localhost/
+```
+
+在响应行中查找 `HTTP/2 200`。
+
 ## 支持的密钥类型
 
 私钥文件必须包含以下格式之一的单个 PEM 编码密钥：
