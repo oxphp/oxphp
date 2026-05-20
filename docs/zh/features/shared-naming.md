@@ -1,3 +1,8 @@
+---
+title: Shared\* 命名约定
+description: OxPHP\Shared\* 并发 API 的命名约定 —— 每个共享原语都遵循的规范方法词汇（get/set、try*/timeout 等待策略、is*、fetch*、compareAndSet）。
+---
+
 # `OxPHP\Shared\*` 命名约定
 
 `OxPHP\Shared\*` 命名空间是应用级并发 API：`Atomic`、`Counter`、

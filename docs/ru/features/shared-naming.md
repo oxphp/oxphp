@@ -1,3 +1,8 @@
+---
+title: Naming-конвенции Shared\*
+description: Конвенции именования для API конкурентности OxPHP\Shared\* — канонический словарь методов (get/set, политики ожидания try*/timeout, is*, fetch*, compareAndSet), которому следует каждый общий примитив.
+---
+
 # Naming-конвенции `OxPHP\Shared\*`
 
 Пространство имён `OxPHP\Shared\*` — это API конкурентности уровня

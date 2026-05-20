@@ -1,3 +1,8 @@
+---
+title: Shared\* Naming Conventions
+description: Naming conventions for the OxPHP\Shared\* concurrency API — the canonical method vocabulary (get/set, try*/timeout wait policies, is*, fetch*, compareAndSet) that every shared primitive follows.
+---
+
 # `OxPHP\Shared\*` Naming Conventions
 
 The `OxPHP\Shared\*` namespace is the application-level concurrency API:
