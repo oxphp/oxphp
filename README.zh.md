@@ -138,7 +138,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - 当规模超出承载时，请参阅 [迁移到外部存储](docs/zh/features/migrating-to-external-store.md)
 
 ### HTTP 与网络
-- **HTTP/1.1 + HTTP/2** 自动协议协商（h2c）
+- **HTTP/1.1 + HTTP/2 同端口** —— 协议按每个连接自动检测：明文上基于先验知识（prior knowledge）的 h2c，或 TLS 下通过 ALPN 协商的 `h2`，并透明回退到 HTTP/1.1。流控窗口针对典型 PHP 响应大小做了调优 —— 参见 [HTTP/2](docs/zh/features/tls.md#http2)
 - **TLS 1.3** 支持 ALPN —— HTTP/2 和 HTTP/1.1 均可通过 TLS 运行 — 参见 [TLS](docs/zh/features/tls.md)
 - **3 种路由模式** — Traditional（文件映射 + 始终启用 PATH_INFO）、Framework（重写到 `index.php`，`PATH_INFO=$request_uri`）、SPA（无扩展名路径返回 `index.html`，缺失资源硬 404）。每种模式都对应熟悉的 nginx `try_files` 配置 — 参见 [路由](docs/zh/features/routing.md)
 - **SSE 流式传输** — 通过自动检测 `Content-Type: text/event-stream` 或 `oxphp_stream_flush()` 实现 —— 与 Fiber 多路复用协作运行 — 参见 [Server-Sent Events](docs/zh/features/sse.md)

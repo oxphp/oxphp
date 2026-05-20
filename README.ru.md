@@ -138,7 +138,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - Когда перерастёте, см. [Миграция на внешнее хранилище](docs/ru/features/migrating-to-external-store.md)
 
 ### HTTP и сетевое взаимодействие
-- **HTTP/1.1 + HTTP/2** с автоматическим определением протокола (h2c)
+- **HTTP/1.1 + HTTP/2 на одном порту** — протокол определяется автоматически для каждого соединения: h2c по prior-knowledge поверх незашифрованного соединения или `h2` через ALPN под TLS, с прозрачным откатом на HTTP/1.1. Окна управления потоком подобраны под типичные размеры PHP-ответов — см. [HTTP/2](docs/ru/features/tls.md#http2)
 - **TLS 1.3** с ALPN — HTTP/2 и HTTP/1.1 поверх TLS — см. [TLS](docs/ru/features/tls.md)
 - **3 режима маршрутизации** — Traditional (отображение файлов + всегда-on PATH_INFO), Framework (rewrite на `index.php` с `PATH_INFO=$request_uri`), SPA (`index.html` для путей без расширения, жёсткий 404 для отсутствующих ассетов). Каждый режим воспроизводит знакомую конфигурацию nginx `try_files` — см. [Маршрутизация](docs/ru/features/routing.md)
 - **Потоковая передача SSE** через автоопределение `Content-Type: text/event-stream` или `oxphp_stream_flush()` — кооперативная с мультиплексированием файберов — см. [Server-Sent Events](docs/ru/features/sse.md)
