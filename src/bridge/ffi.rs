@@ -421,13 +421,6 @@ extern "C" {
         owner_tid: u64,
         slot_zv_heap: *mut c_void,
     ) -> c_int;
-    pub fn oxphp_shared_pool_handle_read(
-        handle_zv: *mut c_void,
-        out_pool_id: *mut u64,
-        out_owner_tid: *mut u64,
-        out_slot_zv_heap: *mut *mut c_void,
-    ) -> c_int;
-    pub fn oxphp_shared_pool_handle_clear(handle_zv: *mut c_void);
 
     // Async fatal error capture
     pub fn oxphp_bridge_capture_fatal(msg: *const c_char, len: usize);

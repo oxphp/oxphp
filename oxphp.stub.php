@@ -1019,26 +1019,23 @@ namespace OxPHP\Shared {
     /**
      * # Timeout convention (Shared\*)
      *
-     * Every wait method in `OxPHP\Shared\` accepts `?float $timeout = null`:
+     * Every bounded-wait method in `OxPHP\Shared\` follows the same
+     * trichotomy — there is no `?float $timeout`:
      *
-     *  * `null`           — wait forever.
-     *  * `0.0`            — try (immediate, do not block).
-     *  * positive         — seconds to wait.
-     *  * `INF`            — forever.
-     *  * `NaN` / negative — `OxPHP\Shared\TypeException`.
+     *  * a bare method ({@see Pool::acquire}, {@see Mutex::withLock},
+     *    {@see Channel::recv}) waits **forever**;
+     *  * a `try*` method ({@see Pool::tryAcquire}, {@see Channel::tryRecv})
+     *    is **non-blocking**;
+     *  * a `*Timeout(int $ms)` method ({@see Pool::acquireTimeout},
+     *    {@see Mutex::withLockTimeout}, {@see Channel::recvTimeout}) waits a
+     *    **bounded** number of milliseconds. `$ms` must be `> 0`, otherwise
+     *    {@see TypeException}.
      *
-     * NOTE: this convention is preserved for {@see Pool::acquire} /
-     * {@see Pool::with} (deferred migration). Channel and Mutex moved to a
-     * trichotomous API in 0.x — they no longer take `?float $timeout`:
-     *
-     *  * Channel: `try*` / bare / `*Timeout(int $ms)`; results returned via
-     *    {@see Channel\RecvResult} / {@see Channel\SendResult}.
-     *  * Mutex:   `withLock` / `tryWithLock` / `withLockTimeout(int $ms)`;
-     *    contention and timeout throw {@see ContentionException} /
-     *    {@see OperationTimeoutException}.
-     *
-     * Pool blocking acquire raises {@see OperationTimeoutException} on
-     * deadline expiry.
+     * Where an outcome is *expected*, it is returned as an object rather than
+     * thrown: Channel uses {@see Channel\RecvResult} / {@see Channel\SendResult};
+     * {@see Pool::tryAcquire} returns `null` on a saturated pool. A bounded
+     * wait that expires raises {@see OperationTimeoutException}, which extends
+     * {@see \OxPHP\Async\AsyncException} — NOT {@see SharedException}.
      */
 
     /**
@@ -1447,67 +1444,62 @@ namespace OxPHP\Shared {
      * Bounded object pool with per-thread slot affinity and idle-timeout
      * eviction.
      *
-     * Factory runs lazily on first acquire; destroy (if provided) runs
-     * on slot eviction or pool shutdown. `maxSize` is a hard budget —
-     * acquire blocks (or fails with `OperationTimeoutException`) once reached.
+     * Factory runs lazily on first acquire; destroy (if provided) runs on
+     * slot eviction or pool shutdown. `maxSize` is a hard budget — once it
+     * is reached, acquire waits for a free slot (see the namespace-level
+     * timeout convention).
      *
      * @link docs/en/features/shared-pool.md
      */
-    final class Pool implements Shareable, \Countable
+    final class Pool implements Shareable
     {
         /**
-         * @param callable      $factory     Called to create a pooled resource. Receives no arguments.
-         * @param callable|null $destroy     Called with the resource on eviction/shutdown.
-         * @param int           $maxSize     Hard budget of live slots (default 32).
-         * @param float         $idleTimeout Seconds of inactivity before a slot is evicted (default 300).
+         * @param callable      $factory       Creates a pooled resource. Receives no arguments; must return an object.
+         * @param callable|null $destroy       Called with the resource on eviction/shutdown.
+         * @param int           $maxSize       Hard budget of live slots; must be > 0 (default 32).
+         * @param int           $idleTimeoutMs Idle ms before a slot is eligible for eviction; 0 disables eviction (default 300_000).
          */
         public function __construct(
             callable $factory,
             ?callable $destroy = null,
             int $maxSize = 32,
-            float $idleTimeout = 300.0,
+            int $idleTimeoutMs = 300_000,
         ) {}
 
-        /**
-         * Acquire a slot. Returns a Handle scoped to the current thread.
-         *
-         * See the namespace-level timeout convention for `$timeout` semantics.
-         *
-         * @throws OperationTimeoutException If the pool is saturated.
-         */
-        public function acquire(?float $timeout = null): Pool\Handle {}
+        /** Acquire a slot, waiting forever. Always returns a Handle. */
+        public function acquire(): Pool\Handle {}
 
-        /** Release a handle back to the pool. Idempotent once per handle. */
-        public function release(Pool\Handle $handle): void {}
+        /** Non-blocking acquire. Returns a Handle, or null if the pool is saturated. */
+        public function tryAcquire(): ?Pool\Handle {}
 
         /**
-         * Scope-guarded acquire + release. Invokes `$body($resource)` with
-         * the pooled value and returns whatever it returns, releasing even
-         * on exception.
+         * Acquire a slot within a bounded budget.
          *
-         * See the namespace-level timeout convention for `$timeout` semantics.
-         *
-         * @throws OperationTimeoutException If the pool is saturated.
+         * @throws OperationTimeoutException On deadline expiry (extends Async\AsyncException, NOT SharedException).
+         * @throws TypeException If `$ms <= 0`.
          */
-        public function with(callable $body, ?float $timeout = null): mixed {}
+        public function acquireTimeout(int $ms): Pool\Handle {}
 
-        /** Force-evict idle slots now. Returns the number of slots evicted. */
+        /**
+         * Scope-guard: acquire (forever), invoke `$body($resource)` with the
+         * raw pooled resource, and release the slot afterward — even if
+         * `$body` throws. Returns whatever `$body` returns.
+         */
+        public function with(callable $body): mixed {}
+
+        /**
+         * Scope-guard with a bounded acquire budget.
+         *
+         * @throws OperationTimeoutException On deadline expiry.
+         * @throws TypeException If `$ms <= 0`.
+         */
+        public function withTimeout(callable $body, int $ms): mixed {}
+
+        /** Point-in-time snapshot of pool counters. */
+        public function stats(): Pool\Stats {}
+
+        /** Force-evict all idle slots reachable from this worker now. Returns the count. */
         public function evict(): int {}
-
-        /** Total live slots (in-use + idle). Implements `Countable`. */
-        public function count(): int {}
-
-        /** Slots currently checked out by callers. */
-        public function inUse(): int {}
-
-        /** Idle slots ready to acquire. */
-        public function idle(): int {}
-
-        /** Callers currently blocked in `acquire()`. */
-        public function waiting(): int {}
-
-        /** Configured hard budget. */
-        public function maxSize(): int {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1525,7 +1517,7 @@ namespace OxPHP\Shared {
     //          ├── TypeException
     //          │    └── CycleException
     //          ├── CapacityException
-    //          ├── ClosedException             (deprecated; Pool only)
+    //          ├── ClosedException             (Channel / Once close paths)
     //          ├── PoisonedException           (deprecated; Once only)
     //          ├── UninitializedException
     //          └── CorruptedMutexException
@@ -1546,8 +1538,10 @@ namespace OxPHP\Shared {
     class CapacityException extends SharedException {}
 
     /**
-     * @deprecated Pool::acquire on a closed pool. Removed once Pool
-     *             migrates to a Result-style API.
+     * A receive/send was attempted on a closed {@see Channel}, or a closed
+     * {@see Once} was accessed. (Pool surfaces this only on the internal
+     * shutdown-drain path; it is not part of Pool's user-facing surface,
+     * since Pool has no `close()`.)
      */
     class ClosedException extends SharedException {}
 
@@ -1568,14 +1562,15 @@ namespace OxPHP\Shared {
     class CorruptedMutexException extends SharedException {}
 
     /**
-     * Bounded wait on a Shared\* primitive exceeded its deadline.
-     * Thrown by {@see Channel::recvTimeout} — wait, no: channels
-     * return RecvResult/SendResult variants — only thrown by
-     * {@see Mutex::withLockTimeout} and {@see Pool::acquire}.
+     * A bounded wait on a Shared\* primitive exceeded its deadline. Thrown
+     * by {@see Mutex::withLockTimeout}, {@see Pool::acquireTimeout} and
+     * {@see Pool::withTimeout}. (Channel's bounded receives/sends report a
+     * timeout via {@see Channel\RecvResult} / {@see Channel\SendResult}
+     * instead of throwing.)
      *
      * Extends {@see \OxPHP\Async\AsyncException} so a single
-     * `catch (AsyncException)` sweeps both Shared\* timeouts and
-     * Async\* await timeouts.
+     * `catch (AsyncException)` sweeps both Shared\* timeouts and Async\*
+     * await timeouts. Note it does NOT extend {@see SharedException}.
      */
     class OperationTimeoutException extends \OxPHP\Async\AsyncException {}
 
@@ -1661,19 +1656,62 @@ namespace OxPHP\Shared\Pool {
      *
      * Clone is forbidden. `get()` returns the pooled value owned by this
      * acquire — no copy is made, and the slot is exclusive to the acquiring
-     * thread until destruction or explicit release via
-     * {@see \OxPHP\Shared\Pool::release()} returns it to the pool.
+     * thread. The slot returns to the pool automatically when the Handle is
+     * destroyed (RAII, including stack unwind on exception), or earlier via
+     * {@see release()}.
      *
-     * @internal Produced by {@see \OxPHP\Shared\Pool::acquire()}; never constructed directly.
+     * @internal Produced by {@see \OxPHP\Shared\Pool::acquire()} /
+     *           {@see \OxPHP\Shared\Pool::tryAcquire()} /
+     *           {@see \OxPHP\Shared\Pool::acquireTimeout()}; never constructed directly.
      */
     final class Handle
     {
         /**
          * The pooled resource. Always call inside the acquiring thread.
          *
-         * @throws \OxPHP\Shared\SharedException If the handle has already been released.
+         * @throws \OxPHP\Shared\StaleHandleException If the handle has already been released.
          */
         public function get(): mixed {}
+
+        /**
+         * Return the slot to the pool now, before scope end. Idempotent: a
+         * second call (or a `__destruct` after an explicit release) is a
+         * no-op.
+         */
+        public function release(): void {}
+    }
+
+    /**
+     * Immutable snapshot of {@see \OxPHP\Shared\Pool} counters, returned by
+     * {@see \OxPHP\Shared\Pool::stats()}. The volatile trio
+     * (`inUse()`/`idle()`/`waiting()`) is captured as one point-in-time
+     * sample: `idle` is read once and `inUse` is derived from it, so
+     * `size() === inUse() + idle()` holds for the object. The counters are
+     * not lock-coupled across the pool, so the snapshot is point-in-time,
+     * not atomic.
+     *
+     * Counters are exposed as accessor methods — the snapshot is immutable and
+     * holds no public state.
+     */
+    final class Stats
+    {
+        /** Slots currently checked out. */
+        public function inUse(): int {}
+
+        /** Free slots ready to hand out. */
+        public function idle(): int {}
+
+        /** Callers blocked in `acquire`. */
+        public function waiting(): int {}
+
+        /** Live slots: `inUse() + idle()`. */
+        public function size(): int {}
+
+        /** Configured hard budget. */
+        public function maxSize(): int {}
+
+        /** `inUse() / maxSize()`, or `0.0` when `maxSize()` is 0. */
+        public function utilization(): float {}
     }
 }
 

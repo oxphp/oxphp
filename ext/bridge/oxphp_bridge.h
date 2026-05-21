@@ -1881,11 +1881,6 @@ int oxphp_shared_pool_handle_alloc(void *out_zv,
                                     uint64_t pool_id,
                                     uint64_t owner_tid,
                                     void *slot_zv_heap);
-int oxphp_shared_pool_handle_read(void *handle_zv,
-                                   uint64_t *out_pool_id,
-                                   uint64_t *out_owner_tid,
-                                   void **out_slot_zv_heap);
-void oxphp_shared_pool_handle_clear(void *handle_zv);
 
 /* ─── Generic PHP object construction helpers ─────────────────────────────
  *

@@ -669,6 +669,10 @@ impl PluginMetricsCollector for SharedMetricsCollector {
                     "oxphp_shared_pool_acquire_total{{pool_id=\"{id}\",result=\"closed\"}} {}\n",
                     pool.acquire_closed_total()
                 ));
+                output.push_str(&format!(
+                    "oxphp_shared_pool_acquire_total{{pool_id=\"{id}\",result=\"saturated\"}} {}\n",
+                    pool.acquire_saturated_total()
+                ));
 
                 // wait_seconds histogram (cumulative buckets + sum + count).
                 let (cum, sum_s, count) = pool.wait_histogram_snapshot();
@@ -908,6 +912,7 @@ mod tests {
         pool.bind_id(id);
         pool.record_acquire_ok();
         pool.record_acquire_timeout();
+        pool.record_acquire_saturated();
         pool.record_wait(std::time::Duration::from_millis(5));
         pool.record_evicted(
             2,
@@ -950,6 +955,12 @@ mod tests {
                 "oxphp_shared_pool_acquire_total{{pool_id=\"{id}\",result=\"timeout\"}} 1"
             )),
             "missing acquire timeout counter"
+        );
+        assert!(
+            output.contains(&format!(
+                "oxphp_shared_pool_acquire_total{{pool_id=\"{id}\",result=\"saturated\"}} 1"
+            )),
+            "missing acquire saturated counter"
         );
         assert!(
             output.contains(&format!(

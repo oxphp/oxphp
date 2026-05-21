@@ -5403,51 +5403,6 @@ int oxphp_shared_pool_handle_alloc(void *out_zv,
     return 0;
 }
 
-/* Read the three storage fields from a Handle zval. Returns 0 on
- * success, -1 if the zval is not an object, not a Handle, or its
- * storage was cleared (slot_zv_heap == NULL). */
-int oxphp_shared_pool_handle_read(void *handle_zv,
-                                   uint64_t *out_pool_id,
-                                   uint64_t *out_owner_tid,
-                                   void **out_slot_zv_heap) {
-    if (!handle_zv || !out_pool_id || !out_owner_tid || !out_slot_zv_heap) return -1;
-    zval *zv = (zval *)handle_zv;
-    if (Z_TYPE_P(zv) != IS_OBJECT) return -1;
-
-    zend_class_entry *ce = oxphp_pool_handle_ce_lookup();
-    if (!ce || Z_OBJCE_P(zv) != ce) return -1;
-
-    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(zv));
-    if (!intern || !intern->rust_data) return -1;
-
-    unsigned char *storage = (unsigned char *)intern->rust_data;
-    memcpy(out_pool_id,       storage,       sizeof(uint64_t));
-    memcpy(out_owner_tid,     storage + 8,   sizeof(uint64_t));
-    memcpy(out_slot_zv_heap,  storage + 16,  sizeof(void *));
-    if (*out_slot_zv_heap == NULL) return -1; /* already released */
-    return 0;
-}
-
-/* Zero the slot_zv_heap field after an explicit release. The
- * Rust-side Drop on PoolHandleStorage treats NULL as "nothing to
- * do", which makes double-release and acquire→release→<scope end>
- * both safe. */
-void oxphp_shared_pool_handle_clear(void *handle_zv) {
-    if (!handle_zv) return;
-    zval *zv = (zval *)handle_zv;
-    if (Z_TYPE_P(zv) != IS_OBJECT) return;
-
-    zend_class_entry *ce = oxphp_pool_handle_ce_lookup();
-    if (!ce || Z_OBJCE_P(zv) != ce) return;
-
-    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(zv));
-    if (!intern || !intern->rust_data) return;
-
-    unsigned char *storage = (unsigned char *)intern->rust_data;
-    void *null_ptr = NULL;
-    memcpy(storage + 16, &null_ptr, sizeof(void *));
-}
-
 /* ═══════════════════════════════════════════════════════════
  *  Generic PHP object construction helpers
  *  See oxphp_bridge.h for the contract. Used by Rust handlers

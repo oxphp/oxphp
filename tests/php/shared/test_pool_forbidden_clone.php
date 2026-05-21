@@ -30,6 +30,6 @@ try {
 }
 if (!$threwHandle) { echo "FAIL: clone Handle must throw Shared\\SharedException\n"; exit; }
 
-$pool->release($h);
+$h->release();
 
 echo "OK\n";
