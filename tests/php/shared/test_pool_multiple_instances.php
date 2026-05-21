@@ -32,17 +32,19 @@ if ($poolA->id() === $poolB->id()) { echo "FAIL: pool ids must differ\n"; exit; 
 // acquire+release keeps the slot count at 1).
 $ha = $poolA->acquire();
 $aTag = $ha->get()->tag;
-$poolA->release($ha);
+$ha->release();
 
 $hb = $poolB->acquire();
 $bTag = $hb->get()->tag;
-$poolB->release($hb);
+$hb->release();
 
-if ($poolA->count() !== 1 || $poolA->idle() !== 1) {
-    echo "FAIL: poolA bookkeeping: size=" . $poolA->count() . " idle=" . $poolA->idle() . "\n"; exit;
+$sa = $poolA->stats();
+if ($sa->size() !== 1 || $sa->idle() !== 1) {
+    echo "FAIL: poolA bookkeeping: size={$sa->size()} idle={$sa->idle()}\n"; exit;
 }
-if ($poolB->count() !== 1 || $poolB->idle() !== 1) {
-    echo "FAIL: poolB bookkeeping: size=" . $poolB->count() . " idle=" . $poolB->idle() . "\n"; exit;
+$sb = $poolB->stats();
+if ($sb->size() !== 1 || $sb->idle() !== 1) {
+    echo "FAIL: poolB bookkeeping: size={$sb->size()} idle={$sb->idle()}\n"; exit;
 }
 
 // Drop A only. destroy must fire for A's resource; B untouched.
@@ -51,7 +53,7 @@ unset($poolA);
 if (count($destroyedA) !== 1)       { echo "FAIL: A destroy count wrong: " . count($destroyedA) . "\n"; exit; }
 if ($destroyedA[0] !== $aTag)       { echo "FAIL: A destroyed wrong tag\n"; exit; }
 if (count($destroyedB) !== 0)       { echo "FAIL: B destroy must not fire from A drop\n"; exit; }
-if ($poolB->count() !== 1)           { echo "FAIL: poolB size must stay 1\n"; exit; }
+if ($poolB->stats()->size() !== 1)     { echo "FAIL: poolB size must stay 1\n"; exit; }
 
 // Now drop B.
 unset($poolB);

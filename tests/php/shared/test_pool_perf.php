@@ -19,9 +19,9 @@ header('Content-Type: text/plain');
 
 $pool = new OxPHP\Shared\Pool(
     fn(): object => new stdClass(),
-    null,    // destroy
-    1,       // maxSize
-    300.0,   // idleTimeout
+    null,      // destroy
+    1,         // maxSize
+    300_000,   // idleTimeoutMs
 );
 
 // Warm up both paths — first-call cost is dominated by one-off
@@ -29,7 +29,7 @@ $pool = new OxPHP\Shared\Pool(
 // the pool's steady-state overhead we want to measure.
 for ($i = 0; $i < 1000; $i++) {
     $h = $pool->acquire();
-    $pool->release($h);
+    $h->release();
 }
 $factory = fn(): object => new stdClass();
 for ($i = 0; $i < 1000; $i++) {
@@ -43,7 +43,7 @@ $N = 20_000;
 $t0 = hrtime(true);
 for ($i = 0; $i < $N; $i++) {
     $h = $pool->acquire();
-    $pool->release($h);
+    $h->release();
 }
 $pool_ns = (int) ((hrtime(true) - $t0) / $N);
 

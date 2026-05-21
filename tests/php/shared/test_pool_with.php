@@ -21,8 +21,9 @@ $ret = $pool->with(function (object $r): int {
     return 42;
 });
 if ($ret !== 42)            { echo "FAIL: with() returns body's result, got " . var_export($ret, true) . "\n"; exit; }
-if ($pool->inUse() !== 0)   { echo "FAIL: with() must release on success\n"; exit; }
-if ($pool->idle() !== 1)    { echo "FAIL: slot should be idle after with()\n"; exit; }
+$s = $pool->stats();
+if ($s->inUse() !== 0)   { echo "FAIL: with() must release on success\n"; exit; }
+if ($s->idle() !== 1)    { echo "FAIL: slot should be idle after with()\n"; exit; }
 
 // Second with() reuses the slot (factory runs once total).
 $pool->with(function (object $r): void {
@@ -41,6 +42,6 @@ try {
     }
 }
 if (!$caught) { echo "FAIL: with() must propagate body throw\n"; exit; }
-if ($pool->inUse() !== 0) { echo "FAIL: with() must release even on body throw\n"; exit; }
+if ($pool->stats()->inUse() !== 0) { echo "FAIL: with() must release even on body throw\n"; exit; }
 
 echo "OK\n";

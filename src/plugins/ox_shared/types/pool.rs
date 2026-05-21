@@ -39,7 +39,7 @@ use dashmap::DashMap;
 use crate::plugins::ox_shared::registry::{
     Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
-use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_timeout_arg, Wait};
+use crate::plugins::ox_shared::types::timeout::{parse_timeout, read_positive_ms_arg, Wait};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 
 /// Approximate per-slot footprint booked against `total_bytes` on
@@ -159,6 +159,10 @@ pub struct PoolInner {
     acquire_ok_total: AtomicU64,
     acquire_timeout_total: AtomicU64,
     acquire_closed_total: AtomicU64,
+    /// Non-blocking `tryAcquire` calls that found the pool saturated.
+    /// Distinct from `acquire_timeout_total` (no wait elapsed) so a
+    /// backpressure poll loop is not mistaken for real wait-timeouts.
+    acquire_saturated_total: AtomicU64,
     evicted_idle_total: AtomicU64,
     evicted_manual_total: AtomicU64,
     evicted_shutdown_total: AtomicU64,
@@ -220,6 +224,7 @@ impl PoolInner {
             acquire_ok_total: AtomicU64::new(0),
             acquire_timeout_total: AtomicU64::new(0),
             acquire_closed_total: AtomicU64::new(0),
+            acquire_saturated_total: AtomicU64::new(0),
             evicted_idle_total: AtomicU64::new(0),
             evicted_manual_total: AtomicU64::new(0),
             evicted_shutdown_total: AtomicU64::new(0),
@@ -513,6 +518,36 @@ impl PoolInner {
         count
     }
 
+    /// Drain **all** idle slots from the current thread's own deque,
+    /// regardless of age. Backs the manual `$pool->evict()` escape hatch
+    /// (e.g. a downstream service restarted — flush idle resources so the
+    /// next acquire mints fresh ones). The background idle-timeout
+    /// scheduler keeps using [`PoolInner::evict_stale_on_current_thread`]
+    /// for age-based policy; this method ignores `idle_timeout` entirely.
+    ///
+    /// Like its stale counterpart it touches only the caller's deque —
+    /// cross-thread `$destroy` is unsafe under the per-thread affinity
+    /// model — and runs `destroy_slot` outside the deque lock.
+    pub fn evict_all_on_current_thread(&self, reason: EvictReason) -> u64 {
+        let me = current_thread_key();
+        let Some(shard) = self.idle.get(&me) else {
+            return 0;
+        };
+        let mut popped = Vec::new();
+        {
+            let mut deque = shard.lock().unwrap_or_else(|poison| poison.into_inner());
+            while let Some(slot) = deque.pop_front() {
+                popped.push(slot);
+            }
+        }
+        let count = popped.len() as u64;
+        for slot in popped {
+            self.destroy_slot(slot);
+        }
+        self.record_evicted(count, reason);
+        count
+    }
+
     /// Block the calling thread until another thread releases a slot
     /// or `remaining` elapses. Returns `true` if woken (possibly
     /// spuriously — caller must re-check conditions), `false` on
@@ -634,6 +669,13 @@ impl PoolInner {
         self.acquire_closed_total.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A non-blocking `tryAcquire` found the pool saturated. Not a wait
+    /// timeout — record it separately and do not touch the wait histogram.
+    #[inline]
+    pub fn record_acquire_saturated(&self) {
+        self.acquire_saturated_total.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record an acquire wait observation into the histogram. Called
     /// with `dur = Duration::ZERO` for uncontended acquires (the
     /// ≤1ms bucket absorbs those).
@@ -688,6 +730,9 @@ impl PoolInner {
     }
     pub fn acquire_closed_total(&self) -> u64 {
         self.acquire_closed_total.load(Ordering::Relaxed)
+    }
+    pub fn acquire_saturated_total(&self) -> u64 {
+        self.acquire_saturated_total.load(Ordering::Relaxed)
     }
     pub fn evicted_idle_total(&self) -> u64 {
         self.evicted_idle_total.load(Ordering::Relaxed)
@@ -905,7 +950,8 @@ fn lookup_pool<'a>(
 /// and stored opaquely on the PoolInner. `destroy_callable_zval` may
 /// be null.
 ///
-/// `idle_timeout_s` ≤ 0 falls back to 300 seconds.
+/// `idle_timeout_s == 0` disables idle eviction (idle slots live until the
+/// pool is dropped). Negative values are rejected at the PHP binding layer.
 ///
 /// # Safety
 /// `factory_callable_zval` must be a valid PHP callable zval; the
@@ -950,10 +996,13 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
             }
         }
 
+        // `idle_timeout_s == 0.0` → eviction disabled: idle slots live until
+        // the pool is dropped (matches HikariCP `idleTimeout=0`). Negative
+        // values are rejected at the PHP binding layer before reaching here.
         let idle_timeout = if idle_timeout_s > 0.0 {
             Duration::from_secs_f64(idle_timeout_s)
         } else {
-            Duration::from_secs(300)
+            Duration::MAX
         };
 
         // Typed `Arc<PoolInner>` alongside the trait-object copy: lets
@@ -1117,15 +1166,26 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
             // a close-during-wait wake-up into a `Closed` result.
         };
 
-        // Record wait + outcome in one place.
-        pool.record_wait(call_start.elapsed());
+        // Record outcome in one place. A non-blocking `tryAcquire` that
+        // found the pool saturated never waited, so it is recorded as a
+        // distinct `saturated` result and skips the wait histogram —
+        // otherwise it would inflate `acquire_timeout_total` and the wait
+        // count, masking real wait-timeouts on the dashboard.
         match &result {
-            Ok(()) => pool.record_acquire_ok(),
+            Ok(()) => {
+                pool.record_wait(call_start.elapsed());
+                pool.record_acquire_ok();
+            }
+            Err(crate::plugins::ox_shared::error::SharedError::Timeout) if try_only => {
+                pool.record_acquire_saturated();
+            }
             Err(crate::plugins::ox_shared::error::SharedError::Timeout) => {
-                pool.record_acquire_timeout()
+                pool.record_wait(call_start.elapsed());
+                pool.record_acquire_timeout();
             }
             Err(crate::plugins::ox_shared::error::SharedError::Closed) => {
-                pool.record_acquire_closed()
+                pool.record_wait(call_start.elapsed());
+                pool.record_acquire_closed();
             }
             Err(_) => { /* unreachable: factory errors return early */ }
         }
@@ -1240,9 +1300,11 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
     release_rc
 }
 
-/// Idle-timeout eviction. v1 stub: returns 0 evicted. The background
-/// walker (see `eviction.rs`) destroys resources idle for longer
-/// than `idle_timeout`.
+/// Manual eviction: force-evict **all** idle slots reachable from the
+/// calling worker thread now, regardless of `idleTimeoutMs`, and return
+/// the count. The operational "flush idle now" escape hatch. The
+/// background walker (see `eviction.rs`) handles age-based eviction
+/// separately and continuously.
 ///
 /// # Safety
 /// `out_evicted` must be valid for a `u64` write if non-null.
@@ -1265,7 +1327,7 @@ pub unsafe extern "C" fn oxphp_shared_pool_evict(
         // thread, which is the owner of the slots we're reaping — no
         // cross-thread hazard. Same constraint as Shared\Pool::acquire:
         // callers must be inside a live PHP request.
-        let evicted = pool.evict_stale_on_current_thread(EvictReason::Manual);
+        let evicted = pool.evict_all_on_current_thread(EvictReason::Manual);
         if !out_evicted.is_null() {
             unsafe { *out_evicted = evicted };
         }
@@ -1273,8 +1335,11 @@ pub unsafe extern "C" fn oxphp_shared_pool_evict(
     })
 }
 
-/// Read the three gauge counters the PHP API exposes via
-/// `$pool->inUse() / ->idle() / ->waiting()`.
+/// Read the three volatile gauge counters for `Shared\Pool::stats()`
+/// (inUse / idle / waiting) as one point-in-time sample. `idle` is read
+/// once and `inUse` is derived from the same sample so the pair is
+/// internally consistent; the counters are not lock-coupled across the
+/// pool, so this is a point-in-time read, not an atomic one.
 ///
 /// # Safety
 /// Each non-null out pointer must be valid for a `u64` write.
@@ -1294,11 +1359,19 @@ pub unsafe extern "C" fn oxphp_shared_pool_stats(
             .inner
             .as_any_pool()
             .ok_or(crate::plugins::ox_shared::error::SharedError::Type)?;
+        // Sample `idle` exactly once and derive `in_use` from that same
+        // sample (rather than calling `in_use_count()`, which would read
+        // `idle` a second time). This keeps the reported (in_use, idle)
+        // pair internally consistent — in_use + idle == size for the size
+        // read here — even though the counters are not lock-coupled across
+        // the pool, so the snapshot is point-in-time, not atomic.
+        let idle = pool.idle_count();
+        let in_use = (pool.size() as usize).saturating_sub(idle);
         if !out_in_use.is_null() {
-            unsafe { *out_in_use = pool.in_use_count() as u64 };
+            unsafe { *out_in_use = in_use as u64 };
         }
         if !out_idle.is_null() {
-            unsafe { *out_idle = pool.idle_count() as u64 };
+            unsafe { *out_idle = idle as u64 };
         }
         if !out_waiting.is_null() {
             unsafe { *out_waiting = pool.waiting_count() };
@@ -1370,14 +1443,17 @@ pub unsafe extern "C" fn oxphp_shared_pool_max_size(
 // helpers — see `oxphp_bridge.c` for the canonical offsets.
 
 use crate::bridge::call::NativeCall;
-use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
+use crate::plugin::types::{MagicMethod, PhpType, PhpValue, Visibility};
 use crate::plugin::{PhpError, PluginContext, PluginError};
+
+/// FQN of the value object returned by `Shared\Pool::stats()`.
+const STATS_FQN: &str = "OxPHP\\Shared\\Pool\\Stats";
 use crate::plugins::ox_shared::error::{read_last_error_message, SharedError};
 
 /// Custom storage attached to every `Shared\Pool\Handle` instance via
-/// `with_storage`. Layout is `#[repr(C)]` so the C bridge helpers
-/// (`oxphp_shared_pool_handle_{alloc,read,clear}`) can read/write
-/// fields at fixed offsets.
+/// `with_storage`. Layout is `#[repr(C)]` so the C bridge helper
+/// `oxphp_shared_pool_handle_alloc` can write the fields at fixed
+/// offsets; reads and the released-state reset happen Rust-side.
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct PoolHandleStorage {
@@ -1396,6 +1472,41 @@ impl PoolHandleStorage {
             slot_zv_ptr: std::ptr::null_mut(),
         }
     }
+
+    /// Return the slot to its pool and mark this storage released.
+    ///
+    /// Idempotent: a null `slot_zv_ptr` is a no-op, so a second
+    /// `Handle::release()` (or a `__destruct` after an explicit release)
+    /// does nothing. If the pool entry is already gone — the owner dropped
+    /// the `Pool` while still holding a `Handle` — the slot is silently
+    /// leaked, consistent with the v1 drop-leak policy.
+    fn release_slot(&mut self) {
+        if self.slot_zv_ptr.is_null() {
+            return;
+        }
+        if let Some(reg) = crate::plugins::ox_shared::registry::REGISTRY.get() {
+            if let Ok(entry) = reg.lookup(self.pool_id) {
+                if let Some(pool) = (*entry.inner).as_any_pool() {
+                    let slot = PoolSlot::new(self.slot_zv_ptr, self.owner_tid);
+                    // Mirror `oxphp_shared_pool_release`: decrement the
+                    // in-flight counter for the slot's owner before parking
+                    // it. Acquire bumped it via `track_acquired_by_me`; if
+                    // this handle path skipped the matching untrack, the
+                    // owner's in-flight count would never fall, and a later
+                    // `reclaim_budget_for_dead_worker` (worker scale-down or
+                    // panic-respawn) would over-refund — `release_budget`
+                    // would underflow `size` (u64) and brick the pool.
+                    pool.untrack_released(self.owner_tid);
+                    pool.release(slot);
+                    // Observability parity with the FFI / with() release.
+                    entry.registry.record_op(&entry);
+                }
+            }
+        }
+        // Zero the slot so Drop / a second release() is a no-op (the
+        // `$released` guard in PHP terms).
+        self.slot_zv_ptr = std::ptr::null_mut();
+    }
 }
 
 // SAFETY: `slot_zv_ptr` is an opaque owning pointer whose lifetime
@@ -1408,24 +1519,10 @@ unsafe impl Sync for PoolHandleStorage {}
 
 impl Drop for PoolHandleStorage {
     fn drop(&mut self) {
-        // No-op if the storage was explicitly cleared by release() —
-        // slot_zv_ptr is zeroed via the C bridge's handle_clear.
-        if self.slot_zv_ptr.is_null() {
-            return;
-        }
-        // Best-effort auto-release: user let the Handle fall out of
-        // scope without calling release(). Route the slot back to the
-        // owner's idle deque. If the pool was evicted or the owner's
-        // deque is gone, we silently leak — consistent with v1's
-        // drop-leak policy (see 99-deferred.md).
-        if let Some(reg) = crate::plugins::ox_shared::registry::REGISTRY.get() {
-            if let Ok(entry) = reg.lookup(self.pool_id) {
-                if let Some(pool) = (*entry.inner).as_any_pool() {
-                    let slot = PoolSlot::new(self.slot_zv_ptr, self.owner_tid);
-                    pool.release(slot);
-                }
-            }
-        }
+        // RAII auto-release: the user let the Handle fall out of scope
+        // (including stack unwind on exception) without calling release().
+        // No-op if already released (slot_zv_ptr null).
+        self.release_slot();
     }
 }
 
@@ -1478,7 +1575,65 @@ fn throw_clone_forbidden() -> PhpError {
 /// types (Counter, Map, Channel) use.
 pub fn register_classes(ctx: &mut PluginContext) -> Result<(), PluginError> {
     register_handle_class(ctx)?;
+    register_stats_class(ctx)?;
     register_pool_class(ctx)?;
+    Ok(())
+}
+
+/// `OxPHP\Shared\Pool\Stats` — an immutable snapshot of pool counters.
+/// Mirrors `Channel\RecvResult`: the values live in private properties set
+/// once from Rust at construction, and the public surface is read-only
+/// accessor methods. There is no public mutable state, so the object is
+/// effectively immutable.
+fn register_stats_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
+    ctx.register_class(STATS_FQN)
+        .final_()
+        .property("__inUse", PhpType::Int, Visibility::Private)
+        .property("__idle", PhpType::Int, Visibility::Private)
+        .property("__waiting", PhpType::Int, Visibility::Private)
+        .property("__size", PhpType::Int, Visibility::Private)
+        .property("__maxSize", PhpType::Int, Visibility::Private)
+        .method("inUse")
+        .returns(PhpType::Int)
+        .handler(|call| stats_field(call, "__inUse"))
+        .method("idle")
+        .returns(PhpType::Int)
+        .handler(|call| stats_field(call, "__idle"))
+        .method("waiting")
+        .returns(PhpType::Int)
+        .handler(|call| stats_field(call, "__waiting"))
+        .method("size")
+        .returns(PhpType::Int)
+        .handler(|call| stats_field(call, "__size"))
+        .method("maxSize")
+        .returns(PhpType::Int)
+        .handler(|call| stats_field(call, "__maxSize"))
+        .method("utilization")
+        .returns(PhpType::Float)
+        .handler(stats_utilization)
+        .build()?;
+    Ok(())
+}
+
+/// Read one private `Pool\Stats` counter property and return it as the
+/// method result.
+fn stats_field(call: &mut NativeCall, prop: &str) -> Result<(), PhpError> {
+    let value = call.read_long_property(prop)?;
+    call.ret_long(value);
+    Ok(())
+}
+
+/// `Pool\Stats::utilization(): float` — `inUse / maxSize`, or `0.0` when
+/// `maxSize` is 0.
+fn stats_utilization(call: &mut NativeCall) -> Result<(), PhpError> {
+    let in_use = call.read_long_property("__inUse")?;
+    let max = call.read_long_property("__maxSize")?;
+    let value = if max > 0 {
+        in_use as f64 / max as f64
+    } else {
+        0.0
+    };
+    call.ret_double(value);
     Ok(())
 }
 
@@ -1493,6 +1648,15 @@ fn register_handle_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .method("get")
         .returns(PhpType::Mixed)
         .handler(handle_get)
+        // release(): void — return the slot to the pool now, before scope
+        // end. Idempotent (a second call is a no-op) and also runs on
+        // __destruct (RAII).
+        .method("release")
+        .returns(PhpType::Void)
+        .handler(|call| {
+            call.storage_mut::<PoolHandleStorage>()?.release_slot();
+            Ok(())
+        })
         .build()?;
     Ok(())
 }
@@ -1501,7 +1665,7 @@ fn handle_get(call: &mut NativeCall) -> Result<(), PhpError> {
     let storage = call.storage::<PoolHandleStorage>()?;
     if storage.slot_zv_ptr.is_null() {
         return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\SharedException".to_string(),
+            class: "OxPHP\\Shared\\StaleHandleException".to_string(),
             message: "Shared\\Pool\\Handle::get(): handle already released".to_string(),
             code: 0,
         });
@@ -1518,59 +1682,55 @@ fn handle_get(call: &mut NativeCall) -> Result<(), PhpError> {
 fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Pool")
         .implements("OxPHP\\Shared\\Shareable")
-        .implements("Countable")
         .with_storage(|| crate::plugins::ox_shared::handle::SharedHandle::new(SharedType::Pool))
         .magic(MagicMethod::Clone)
         .handler(|_call| Err(throw_clone_forbidden()))
         // __construct(callable $factory, ?callable $destroy = null,
-        //             int $maxSize = 32, float $idleTimeout = 300.0,
-        //             ?float $defaultAcquireTimeout = null)
+        //             int $maxSize = 32, int $idleTimeoutMs = 300_000)
         .method("__construct")
         .param("factory", PhpType::Callable)
         .optional_param("destroy", PhpType::Callable, PhpValue::Null)
         .optional_param("maxSize", PhpType::Int, PhpValue::Int(32))
-        .optional_param("idleTimeout", PhpType::Float, PhpValue::Float(300.0))
+        .optional_param("idleTimeoutMs", PhpType::Int, PhpValue::Int(300_000))
         .handler(pool_construct)
-        // acquire(?float $timeout = null): Shared\Pool\Handle
+        // acquire(): Shared\Pool\Handle — wait forever
         .method("acquire")
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Object)
-        .handler(pool_acquire)
-        // release(Shared\Pool\Handle $handle): void
-        .method("release")
-        .param("handle", PhpType::Object)
-        .returns(PhpType::Void)
-        .handler(pool_release)
-        // with(callable $body, ?float $timeout = null): mixed
+        .handler(|call| pool_acquire_impl(call, -1, false))
+        // tryAcquire(): ?Shared\Pool\Handle — non-blocking; null if saturated
+        .method("tryAcquire")
+        .returns(PhpType::Nullable(Box::new(PhpType::Object)))
+        .handler(|call| pool_acquire_impl(call, 0, true))
+        // acquireTimeout(int $ms): Shared\Pool\Handle — bounded wait; $ms > 0
+        .method("acquireTimeout")
+        .param("ms", PhpType::Int)
+        .returns(PhpType::Object)
+        .handler(|call| {
+            let ms = read_positive_ms_arg(call, 0)?;
+            pool_acquire_impl(call, ms, false)
+        })
+        // with(callable $body): mixed — wait forever
         .method("with")
         .param("body", PhpType::Callable)
-        .optional_param("timeout", PhpType::Float, PhpValue::Null)
         .returns(PhpType::Mixed)
-        .handler(pool_with)
-        // evict(): int — v1 stub returning 0
+        .handler(|call| pool_with_impl(call, -1))
+        // withTimeout(callable $body, int $ms): mixed — bounded wait; $ms > 0
+        .method("withTimeout")
+        .param("body", PhpType::Callable)
+        .param("ms", PhpType::Int)
+        .returns(PhpType::Mixed)
+        .handler(|call| {
+            let ms = read_positive_ms_arg(call, 1)?;
+            pool_with_impl(call, ms)
+        })
+        // evict(): int — force-evict all idle slots now; returns the count
         .method("evict")
         .returns(PhpType::Int)
         .handler(pool_evict)
-        // count(): int — total live slots (in-use + idle), implements Countable
-        .method("count")
-        .returns(PhpType::Int)
-        .handler(pool_size)
-        // inUse(): int
-        .method("inUse")
-        .returns(PhpType::Int)
-        .handler(pool_in_use)
-        // idle(): int
-        .method("idle")
-        .returns(PhpType::Int)
-        .handler(pool_idle)
-        // waiting(): int
-        .method("waiting")
-        .returns(PhpType::Int)
-        .handler(pool_waiting)
-        // maxSize(): int
-        .method("maxSize")
-        .returns(PhpType::Int)
-        .handler(pool_max_size_method)
+        // stats(): Shared\Pool\Stats — point-in-time snapshot of counters
+        .method("stats")
+        .returns(PhpType::Object)
+        .handler(pool_stats)
         // id(): int — registry id, mirrors other Shared\* types
         .method("id")
         .returns(PhpType::Int)
@@ -1614,11 +1774,20 @@ fn pool_construct(call: &mut NativeCall) -> Result<(), PhpError> {
         });
     }
 
-    let idle_timeout_s = if call.argc() > 3 {
-        call.arg_double(3).unwrap_or(300.0)
+    let idle_timeout_ms = if call.argc() > 3 {
+        call.arg_long(3).unwrap_or(300_000)
     } else {
-        300.0
+        300_000
     };
+    if idle_timeout_ms < 0 {
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".to_string(),
+            message: "idleTimeoutMs must be >= 0".to_string(),
+            code: 0,
+        });
+    }
+    // The core FFI takes seconds (f64); 0 maps to "disabled" downstream.
+    let idle_timeout_s = idle_timeout_ms as f64 / 1000.0;
 
     let mut out_ptr: *const Entry = std::ptr::null();
     let rc = unsafe {
@@ -1652,15 +1821,30 @@ fn pool_get_entry_ptr(call: &NativeCall) -> Result<*const Entry, PhpError> {
     Ok(handle.entry_ptr)
 }
 
-fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
+/// Shared implementation behind `acquire` / `tryAcquire` / `acquireTimeout`.
+///
+/// `timeout_ms`: -1 forever, 0 try, >0 bounded.
+/// `null_on_saturation`: when true (`tryAcquire`), a saturated pool yields
+/// PHP `null` instead of throwing.
+fn pool_acquire_impl(
+    call: &mut NativeCall,
+    timeout_ms: i64,
+    null_on_saturation: bool,
+) -> Result<(), PhpError> {
     let entry_ptr = pool_get_entry_ptr(call)?;
-    let timeout_ms: i64 = read_timeout_arg(call, 0)?;
 
     let mut slot_heap: *mut c_void = std::ptr::null_mut();
     let mut owner: u64 = 0;
     let rc =
         unsafe { oxphp_shared_pool_acquire(entry_ptr, timeout_ms, &mut slot_heap, &mut owner) };
     if rc != 0 {
+        // tryAcquire: a saturated pool surfaces as `SharedError::Timeout`,
+        // which is the expected non-blocking outcome — return PHP null
+        // rather than throwing.
+        if null_on_saturation && rc == SharedError::Timeout.code() {
+            call.ret_null();
+            return Ok(());
+        }
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::acquire"));
     }
 
@@ -1687,56 +1871,9 @@ fn pool_acquire(call: &mut NativeCall) -> Result<(), PhpError> {
     Ok(())
 }
 
-fn pool_release(call: &mut NativeCall) -> Result<(), PhpError> {
-    let entry_ptr = pool_get_entry_ptr(call)?;
-    let id = unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(entry_ptr) };
-    let handle_zv = unsafe { call.raw_arg_ptr(0) };
-    if handle_zv.is_null() {
-        return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\TypeException".to_string(),
-            message: "handle is required".to_string(),
-            code: 0,
-        });
-    }
-
-    let mut pool_id: u64 = 0;
-    let mut owner_tid: u64 = 0;
-    let mut slot_heap: *mut c_void = std::ptr::null_mut();
-    let rc_read = unsafe {
-        ffi::oxphp_shared_pool_handle_read(handle_zv, &mut pool_id, &mut owner_tid, &mut slot_heap)
-    };
-    if rc_read != 0 {
-        return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\TypeException".to_string(),
-            message: "argument is not a Shared\\Pool\\Handle \
-                      (or has already been released)"
-                .to_string(),
-            code: 0,
-        });
-    }
-    if pool_id != id {
-        return Err(PhpError::Exception {
-            class: "OxPHP\\Shared\\TypeException".to_string(),
-            message: "handle belongs to a different pool".to_string(),
-            code: 0,
-        });
-    }
-
-    let rc = unsafe { oxphp_shared_pool_release(entry_ptr, slot_heap, owner_tid) };
-    // Clear the storage regardless of release rc — avoids
-    // double-release in Drop if release succeeded; on failure the
-    // slot is already leaked by design (dead owner path).
-    unsafe { ffi::oxphp_shared_pool_handle_clear(handle_zv) };
-    if rc != 0 {
-        return Err(pool_rc_to_phperr(rc, "Shared\\Pool::release"));
-    }
-    Ok(())
-}
-
-fn pool_with(call: &mut NativeCall) -> Result<(), PhpError> {
+fn pool_with_impl(call: &mut NativeCall, timeout_ms: i64) -> Result<(), PhpError> {
     let entry_ptr = pool_get_entry_ptr(call)?;
     let body_zv = unsafe { call.raw_arg_ptr(0) };
-    let timeout_ms: i64 = read_timeout_arg(call, 1)?;
     let rc = unsafe { oxphp_shared_pool_with(entry_ptr, timeout_ms, body_zv, call.retval_ptr()) };
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::with"));
@@ -1755,18 +1892,7 @@ fn pool_evict(call: &mut NativeCall) -> Result<(), PhpError> {
     Ok(())
 }
 
-fn pool_size(call: &mut NativeCall) -> Result<(), PhpError> {
-    let entry_ptr = pool_get_entry_ptr(call)?;
-    let mut size: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_size(entry_ptr, &mut size) };
-    if rc != 0 {
-        return Err(pool_rc_to_phperr(rc, "Shared\\Pool::count"));
-    }
-    call.ret_long(size as i64);
-    Ok(())
-}
-
-fn pool_stats_field(call: &mut NativeCall, which: StatsField) -> Result<(), PhpError> {
+fn pool_stats(call: &mut NativeCall) -> Result<(), PhpError> {
     let entry_ptr = pool_get_entry_ptr(call)?;
     let mut in_use: u64 = 0;
     let mut idle: u64 = 0;
@@ -1775,39 +1901,61 @@ fn pool_stats_field(call: &mut NativeCall, which: StatsField) -> Result<(), PhpE
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::stats"));
     }
-    let value = match which {
-        StatsField::InUse => in_use,
-        StatsField::Idle => idle,
-        StatsField::Waiting => waiting,
-    };
-    call.ret_long(value as i64);
-    Ok(())
-}
-
-enum StatsField {
-    InUse,
-    Idle,
-    Waiting,
-}
-
-fn pool_in_use(call: &mut NativeCall) -> Result<(), PhpError> {
-    pool_stats_field(call, StatsField::InUse)
-}
-fn pool_idle(call: &mut NativeCall) -> Result<(), PhpError> {
-    pool_stats_field(call, StatsField::Idle)
-}
-fn pool_waiting(call: &mut NativeCall) -> Result<(), PhpError> {
-    pool_stats_field(call, StatsField::Waiting)
-}
-
-fn pool_max_size_method(call: &mut NativeCall) -> Result<(), PhpError> {
-    let entry_ptr = pool_get_entry_ptr(call)?;
-    let mut max: u64 = 0;
-    let rc = unsafe { oxphp_shared_pool_max_size(entry_ptr, &mut max) };
-    if rc != 0 {
-        return Err(pool_rc_to_phperr(rc, "Shared\\Pool::maxSize"));
+    let mut max_size: u64 = 0;
+    let rc2 = unsafe { oxphp_shared_pool_max_size(entry_ptr, &mut max_size) };
+    if rc2 != 0 {
+        return Err(pool_rc_to_phperr(rc2, "Shared\\Pool::stats"));
     }
-    call.ret_long(max as i64);
+    let size = in_use + idle;
+
+    // Build a Pool\Stats value object into the retval and populate its five
+    // private counters. inUse and idle came from one point-in-time sample
+    // (idle read once), so `size == inUse + idle` holds for the object; the
+    // counters are not lock-coupled across the pool, so treat the snapshot
+    // as point-in-time, not atomic.
+    let retval = call.retval_ptr();
+    let rc_make = unsafe {
+        ffi::oxphp_bridge_make_object(retval, STATS_FQN.as_ptr() as *const _, STATS_FQN.len())
+    };
+    if rc_make != 0 {
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\SharedException".to_string(),
+            message: "Shared\\Pool::stats: could not allocate Pool\\Stats".to_string(),
+            code: 0,
+        });
+    }
+    unsafe {
+        ffi::oxphp_bridge_object_set_property_long(
+            retval,
+            b"__inUse".as_ptr() as *const _,
+            "__inUse".len(),
+            in_use as i64,
+        );
+        ffi::oxphp_bridge_object_set_property_long(
+            retval,
+            b"__idle".as_ptr() as *const _,
+            "__idle".len(),
+            idle as i64,
+        );
+        ffi::oxphp_bridge_object_set_property_long(
+            retval,
+            b"__waiting".as_ptr() as *const _,
+            "__waiting".len(),
+            waiting as i64,
+        );
+        ffi::oxphp_bridge_object_set_property_long(
+            retval,
+            b"__size".as_ptr() as *const _,
+            "__size".len(),
+            size as i64,
+        );
+        ffi::oxphp_bridge_object_set_property_long(
+            retval,
+            b"__maxSize".as_ptr() as *const _,
+            "__maxSize".len(),
+            max_size as i64,
+        );
+    }
     Ok(())
 }
 
@@ -2483,17 +2631,21 @@ mod tests {
     #[test]
     fn acquire_counters_split_by_result() {
         // Counter surface matches `oxphp_shared_pool_acquire_total`'s
-        // three label values: ok / timeout / closed. Here we exercise
-        // the raw recorder methods — FFI-driven round-trips are
+        // four label values: ok / timeout / closed / saturated. Here we
+        // exercise the raw recorder methods — FFI-driven round-trips are
         // covered by the docker perf/idle tests.
         let p = inner(1);
         p.record_acquire_ok();
         p.record_acquire_ok();
         p.record_acquire_timeout();
         p.record_acquire_closed();
+        p.record_acquire_saturated();
+        p.record_acquire_saturated();
+        p.record_acquire_saturated();
         assert_eq!(p.acquire_ok_total(), 2);
         assert_eq!(p.acquire_timeout_total(), 1);
         assert_eq!(p.acquire_closed_total(), 1);
+        assert_eq!(p.acquire_saturated_total(), 3);
     }
 
     #[test]
@@ -3047,6 +3199,67 @@ mod tests {
         pool.release_budget();
         assert_eq!(pool.size(), 0);
         assert_eq!(pool.idle_count(), 0);
+    }
+
+    /// Regression: the Handle return path (`Handle::release()` / Drop →
+    /// `PoolHandleStorage::release_slot`) must decrement the in-flight
+    /// counter, exactly like the FFI `oxphp_shared_pool_release` does.
+    ///
+    /// The acquire/release/tryAcquire API returns slots only through this
+    /// path. If it skips the untrack, a worker's in-flight count grows
+    /// once per acquire and never falls; on worker exit (dynamic
+    /// scale-down or panic-respawn) `reclaim_budget_for_dead_worker`
+    /// refunds that inflated count via `release_budget`, underflowing
+    /// `size` (u64) past zero — `try_reserve_budget` then never mints
+    /// again and the pool is bricked for the process's lifetime.
+    ///
+    /// The raw `track_and_untrack_*` / `reclaim_*` tests drive the
+    /// counter methods directly and bypass `release_slot`, so they miss
+    /// this. This test goes through `release_slot` end-to-end (it needs
+    /// the global registry, which `register_pool` populates).
+    #[test]
+    fn handle_release_path_balances_in_flight() {
+        let id_ptr = register_pool(2);
+        // SAFETY: register_pool leaks the Arc<Entry>; it outlives the test.
+        let entry: &Entry = unsafe { &*id_ptr };
+        let pool_id = entry.id;
+        let pool = (*entry.inner).as_any_pool().expect("downcast");
+        let me = current_thread_key();
+
+        // Cycle 1: fresh mint (reserve budget + mark in-flight), then
+        // return the slot through the handle path.
+        assert!(pool.try_reserve_budget());
+        pool.track_acquired_by_me();
+        PoolHandleStorage {
+            pool_id,
+            owner_tid: me,
+            slot_zv_ptr: 0xCAFE_0001 as *mut std::ffi::c_void,
+        }
+        .release_slot();
+        assert_eq!(pool.idle_count(), 1, "released slot must park as idle");
+
+        // Cycle 2: local-idle hit reusing that same slot (no new budget),
+        // marked in-flight again, then returned through the handle path.
+        // Two cycles reuse one slot, so `size` stays 1 while a buggy
+        // handle path would push in-flight to 2 — more than `size`.
+        let slot = pool.try_acquire_local().expect("idle slot present");
+        pool.track_acquired_by_me();
+        PoolHandleStorage {
+            pool_id,
+            owner_tid: slot.owner,
+            slot_zv_ptr: slot.resource,
+        }
+        .release_slot();
+        assert_eq!(pool.size(), 1, "two reuse cycles must keep size at 1");
+
+        // Worker dies: every slot was cleanly released, so reclaim must
+        // refund nothing and `size` must stay 1 (no underflow).
+        let reclaimed = pool.reclaim_budget_for_dead_worker(me);
+        assert_eq!(
+            reclaimed, 0,
+            "handle release must balance in-flight; reclaim over-refunded {reclaimed}"
+        );
+        assert_eq!(pool.size(), 1, "reclaim must not underflow size");
     }
 
     /// Pins the contract that `try_reserve_budget` / `release_budget`

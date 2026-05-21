@@ -28,11 +28,12 @@ $h1 = $pool->acquire();
 $h2 = $pool->acquire();
 $id1 = $h1->get()->id;
 $id2 = $h2->get()->id;
-$pool->release($h1);
-$pool->release($h2);
+$h1->release();
+$h2->release();
 
-if ($pool->count() !== 2) { echo "FAIL: expected size 2, got " . $pool->count() . "\n"; exit; }
-if ($pool->idle() !== 2) { echo "FAIL: expected idle 2, got " . $pool->idle() . "\n"; exit; }
+$s = $pool->stats();
+if ($s->size() !== 2) { echo "FAIL: expected size 2, got {$s->size()}\n"; exit; }
+if ($s->idle() !== 2) { echo "FAIL: expected idle 2, got {$s->idle()}\n"; exit; }
 if (count($destroyed) !== 0) { echo "FAIL: destroy must not run before drop\n"; exit; }
 
 // Drop the last ref → registry drops the Pool → on_drop drains idle
@@ -56,7 +57,7 @@ $pool2 = new OxPHP\Shared\Pool(
     1,
 );
 $h = $pool2->acquire();
-$pool2->release($h);
+$h->release();
 unset($pool2); // must not crash; slot freed by zval_ptr_dtor alone
 
 echo "OK\n";

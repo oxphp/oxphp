@@ -7,14 +7,9 @@
 //!
 //! [`parse_timeout`] converts the wire value to [`Wait`].
 //! [`read_positive_ms_arg`] reads a PHP `int $ms` argument (`> 0` required),
-//! used by every `*Timeout` method on Shared\Channel and Shared\Mutex (and
-//! any future primitive that adopts the trichotomous `try*` / forever /
-//! `*Timeout` convention). Raises `TypeException` on absent / zero / negative
-//! / non-int input.
-//! [`read_timeout_arg`] reads the legacy PHP `?float $timeout = null` argument
-//! and converts it to the wire value. Retained for [`super::pool::Pool`] (its
-//! `acquire`/`tryAcquire` keep the original signature until that primitive
-//! migrates). New code MUST use [`read_positive_ms_arg`].
+//! used by every bounded-wait `*Timeout` method on Shared\Channel,
+//! Shared\Mutex and Shared\Pool. Raises `TypeException` on absent / zero /
+//! negative / non-int input. There is no float timeout path.
 
 use std::time::Duration;
 
@@ -43,52 +38,6 @@ pub(crate) fn parse_timeout(timeout_ms: i64) -> Wait {
     } else {
         Wait::Bounded(Duration::from_millis(timeout_ms as u64))
     }
-}
-
-/// Read a PHP `?float $timeout = null` argument at position `idx` and return
-/// the `i64 timeout_ms` wire value.
-///
-/// Mapping:
-/// - Arg absent or `null`        → `-1` (forever)
-/// - `INF`                       → `-1` (forever)
-/// - `NaN`                       → `TypeException`
-/// - Finite negative             → `TypeException`
-/// - `0.0` / `0`                 → `0` (try)
-/// - Positive float/int          → `round(secs * 1000)` clamped to `i64::MAX`
-/// - Non-numeric type            → `TypeException`
-#[allow(dead_code)]
-pub(crate) fn read_timeout_arg(call: &NativeCall, idx: u32) -> Result<i64, PhpError> {
-    if call.argc() <= idx {
-        return Ok(-1);
-    }
-
-    let t = call.arg_type(idx)?;
-
-    let secs: f64 = match t {
-        ValType::Null => return Ok(-1),
-        ValType::Long => call.arg_long(idx)? as f64,
-        ValType::Double => call.arg_double(idx)?,
-        _ => return Err(type_exception("$timeout must be float|int|null")),
-    };
-
-    if secs.is_nan() {
-        return Err(type_exception("$timeout must not be NaN"));
-    }
-    if secs.is_infinite() {
-        return Ok(-1);
-    }
-    if secs < 0.0 {
-        return Err(type_exception("$timeout must be non-negative or null"));
-    }
-
-    let ms = (secs * 1000.0).round();
-    let timeout_ms = if ms >= i64::MAX as f64 {
-        i64::MAX
-    } else {
-        ms as i64
-    };
-
-    Ok(timeout_ms)
 }
 
 fn type_exception(msg: &str) -> PhpError {

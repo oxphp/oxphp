@@ -1,92 +1,88 @@
 <?php
 /**
- * Idle-timeout eviction via $pool->evict().
+ * Manual eviction — `$pool->evict()` force-evicts ALL idle slots now,
+ * regardless of idleTimeoutMs, and runs $destroy for each. In-use slots
+ * are untouched.
  *
- * Exercises the synchronous eviction path end-to-end: a resource
- * sitting in the idle deque past its `idleTimeout` must be destroyed
- * when the user calls $pool->evict() on the owning thread.
- *
- * The background scheduler (src/plugins/ox_shared/eviction.rs) uses
- * the same drain primitive (`evict_stale_on_current_thread`) so a
- * passing $pool->evict() test indirectly proves the async path's
- * destroy plumbing is correct. The flag/request round-trip itself
- * is covered by Rust unit tests.
+ * This is the operational "flush idle now" escape hatch (downstream
+ * restarted → drop idle resources so the next acquire mints fresh ones).
+ * Age-based background eviction is a separate path covered by Rust unit
+ * tests in src/plugins/ox_shared/types/pool.rs.
  */
 
 header('Content-Type: text/plain');
 
-// ── Scenario 1: stale slot is destroyed by evict() ─────────────────
+// ── Scenario 1: evict() flushes an idle slot and runs $destroy ─────
 $destroyedA = 0;
 $poolA = new OxPHP\Shared\Pool(
     fn(): object => (object) ['n' => random_int(1, 1_000_000)],
     function (object $_r) use (&$destroyedA): void { $destroyedA++; },
-    2,      // maxSize
-    0.1,    // idleTimeout = 100ms
+    2,           // maxSize
+    300_000,     // idleTimeoutMs — long; evict() ignores it
 );
 
 $ha = $poolA->acquire();
-$poolA->release($ha);
+$ha->release();
 
-if ($poolA->idle() !== 1) { echo "FAIL: expected 1 idle\n"; exit; }
-if ($poolA->count() !== 1) { echo "FAIL: expected 1 size\n"; exit; }
-
-// Sleep past idle_timeout. usleep is cooperative and does not yield
-// the worker thread to another request — the slot stays parked in
-// this thread's deque.
-usleep(200_000);
+$s = $poolA->stats();
+if ($s->idle() !== 1) { echo "FAIL: expected 1 idle\n"; exit; }
+if ($s->size() !== 1) { echo "FAIL: expected 1 size\n"; exit; }
 
 $evicted = $poolA->evict();
-
 if ($evicted !== 1)            { echo "FAIL: evict returned $evicted, expected 1\n"; exit; }
 if ($destroyedA !== 1)          { echo "FAIL: destroy should run once, got $destroyedA\n"; exit; }
-if ($poolA->count() !== 0)       { echo "FAIL: size should be 0 after eviction\n"; exit; }
-if ($poolA->idle() !== 0)       { echo "FAIL: idle should be 0 after eviction\n"; exit; }
+$s = $poolA->stats();
+if ($s->size() !== 0)       { echo "FAIL: size should be 0 after eviction\n"; exit; }
+if ($s->idle() !== 0)       { echo "FAIL: idle should be 0 after eviction\n"; exit; }
 
-// ── Scenario 2: fresh slot survives evict() ────────────────────────
+// ── Scenario 2: evict() force-evicts even a freshly released slot ──
+// Unlike age-based eviction, manual evict() does not spare recently
+// released slots.
 $destroyedB = 0;
 $poolB = new OxPHP\Shared\Pool(
     fn(): object => new stdClass(),
     function (object $_r) use (&$destroyedB): void { $destroyedB++; },
     1,
-    60.0,   // idleTimeout = 60s — nothing stale in a test run
+    300_000,
 );
 
 $hb = $poolB->acquire();
-$poolB->release($hb);
+$hb->release(); // fresh idle slot, just released
 
 $evicted = $poolB->evict();
+if ($evicted !== 1)             { echo "FAIL: evict() must flush even fresh idle, got $evicted\n"; exit; }
+if ($destroyedB !== 1)          { echo "FAIL: destroy must run on the flushed slot\n"; exit; }
+$s = $poolB->stats();
+if ($s->idle() !== 0)       { echo "FAIL: idle should be 0 after evict()\n"; exit; }
+if ($s->size() !== 0)       { echo "FAIL: size should be 0 after evict()\n"; exit; }
 
-if ($evicted !== 0)             { echo "FAIL: fresh slot must not be evicted, got $evicted\n"; exit; }
-if ($destroyedB !== 0)          { echo "FAIL: destroy must not run on fresh slot\n"; exit; }
-if ($poolB->idle() !== 1)       { echo "FAIL: fresh slot must stay idle\n"; exit; }
-if ($poolB->count() !== 1)       { echo "FAIL: fresh slot must stay counted\n"; exit; }
-
-// ── Scenario 3: evict() stops at the first fresh slot ──────────────
-// maxSize=2, two distinct resources, one aged, one fresh. evict()
-// must remove only the aged one.
+// ── Scenario 3: evict() flushes ALL idle, leaves in-use untouched ──
 $destroyedC = 0;
 $poolC = new OxPHP\Shared\Pool(
     fn(): object => (object) ['id' => random_int(1, 1_000_000)],
     function (object $_r) use (&$destroyedC): void { $destroyedC++; },
-    2,
-    0.1,    // 100ms
+    3,
+    300_000,
 );
 
-// Hold both slots simultaneously so the factory mints TWO resources.
+// Mint three distinct resources by holding all three at once.
 $h1 = $poolC->acquire();
 $h2 = $poolC->acquire();
-$poolC->release($h1);
+$h3 = $poolC->acquire();
+$h1->release();
+$h2->release(); // two idle, h3 still in use
 
-usleep(200_000); // Age the first slot only.
-$poolC->release($h2); // Fresh back-of-deque slot.
-
-if ($poolC->idle() !== 2) { echo "FAIL: expected 2 idle in poolC\n"; exit; }
+$s = $poolC->stats();
+if ($s->idle() !== 2)  { echo "FAIL: expected 2 idle in poolC, got {$s->idle()}\n"; exit; }
+if ($s->inUse() !== 1) { echo "FAIL: expected 1 in-use in poolC, got {$s->inUse()}\n"; exit; }
 
 $evicted = $poolC->evict();
+if ($evicted !== 2)            { echo "FAIL: evict() must flush all 2 idle, got $evicted\n"; exit; }
+if ($destroyedC !== 2)          { echo "FAIL: two destroys expected, got $destroyedC\n"; exit; }
+$s = $poolC->stats();
+if ($s->inUse() !== 1)      { echo "FAIL: in-use slot must survive evict(), got {$s->inUse()}\n"; exit; }
+if ($s->idle() !== 0)       { echo "FAIL: all idle must be gone, got {$s->idle()}\n"; exit; }
 
-if ($evicted !== 1)            { echo "FAIL: expected exactly 1 eviction, got $evicted\n"; exit; }
-if ($destroyedC !== 1)          { echo "FAIL: exactly one destroy expected, got $destroyedC\n"; exit; }
-if ($poolC->count() !== 1)       { echo "FAIL: fresh slot survives, size should be 1\n"; exit; }
-if ($poolC->idle() !== 1)       { echo "FAIL: fresh slot survives, idle should be 1\n"; exit; }
+$h3->release();
 
 echo "OK\n";

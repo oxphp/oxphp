@@ -4,8 +4,9 @@
  *
  * Drives end-to-end behaviour required by the observability contract:
  *
- *   1. Every acquire result (ok / timeout / closed) increments
- *      `oxphp_shared_pool_acquire_total{result=...}`.
+ *   1. Every acquire result (ok / timeout / closed / saturated)
+ *      increments `oxphp_shared_pool_acquire_total{result=...}`. A
+ *      non-blocking tryAcquire miss counts as `saturated`, not `timeout`.
  *   2. A user-driven `$pool->evict()` increments
  *      `oxphp_shared_pool_evicted_total{reason="evict"}`.
  *   3. The four gauges size / in_use / idle / waiting appear
@@ -24,7 +25,7 @@ $pool = new OxPHP\Shared\Pool(
     fn(): object => new stdClass(),
     null,
     2,      // maxSize
-    0.05,   // idleTimeout = 50ms → stale slot before evict()
+    50,     // idleTimeoutMs = 50ms
 );
 $id = $pool->id();
 
@@ -36,14 +37,20 @@ $h2 = $pool->acquire();
 // path and return OperationTimeoutException → acquire_total{timeout} += 1.
 $caught_timeout = false;
 try {
-    $pool->acquire(0.05);
+    $pool->acquireTimeout(50);
 } catch (\OxPHP\Shared\OperationTimeoutException $e) {
     $caught_timeout = true;
 }
 if (!$caught_timeout) { echo "FAIL: expected OperationTimeoutException\n"; exit; }
 
-$pool->release($h1);
-$pool->release($h2);
+// Non-blocking acquire on the still-saturated pool returns null and must
+// count as `saturated`, NOT `timeout` — no wait elapsed, so it must also
+// leave the wait histogram count untouched (stays 4, asserted below).
+$miss = $pool->tryAcquire();
+if ($miss !== null) { echo "FAIL: tryAcquire on full pool must return null\n"; exit; }
+
+$h1->release();
+$h2->release();
 
 // One stale slot (after releases both are in idle; sleep past
 // idleTimeout) + explicit $pool->evict() → evicted_total{evict} += 1
@@ -52,11 +59,10 @@ $pool->release($h2);
 // go together). Use exactly one release → sleep → evict to pin the
 // expected count to 1.
 $h3 = $pool->acquire();     // reuse idle slot, bumping ok → 3
-$pool->release($h3);         // back to idle with fresh last_active
-usleep(80_000);              // past 50ms idle_timeout
+$h3->release();             // back to idle
 
 $evicted = $pool->evict();
-// Both idle slots share the same age, so both are stale and evicted.
+// evict() force-evicts all idle slots now, regardless of age.
 if ($evicted < 1) { echo "FAIL: evict returned $evicted, expected ≥ 1\n"; exit; }
 
 // Scrape /metrics from the internal server.
@@ -72,7 +78,10 @@ $must_contain = [
     "oxphp_shared_pool_acquire_total{pool_id=\"{$id}\",result=\"ok\"} 3",
     "oxphp_shared_pool_acquire_total{pool_id=\"{$id}\",result=\"timeout\"} 1",
     "oxphp_shared_pool_acquire_total{pool_id=\"{$id}\",result=\"closed\"} 0",
+    // tryAcquire on the full pool counts here, not under timeout.
+    "oxphp_shared_pool_acquire_total{pool_id=\"{$id}\",result=\"saturated\"} 1",
     // 4 acquire observations (3 ok + 1 timeout) = wait histogram count.
+    // The saturated tryAcquire miss is excluded — it never waited.
     "oxphp_shared_pool_wait_seconds_count{pool_id=\"{$id}\"} 4",
     // +Inf bucket must equal total count.
     "oxphp_shared_pool_wait_seconds_bucket{pool_id=\"{$id}\",le=\"+Inf\"} 4",

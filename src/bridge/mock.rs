@@ -937,15 +937,6 @@ pub unsafe fn oxphp_shared_pool_handle_alloc(
 ) -> c_int {
     -1
 }
-pub unsafe fn oxphp_shared_pool_handle_read(
-    _handle_zv: *mut c_void,
-    _out_pool_id: *mut u64,
-    _out_owner_tid: *mut u64,
-    _out_slot_zv_heap: *mut *mut c_void,
-) -> c_int {
-    -1
-}
-pub unsafe fn oxphp_shared_pool_handle_clear(_handle_zv: *mut c_void) {}
 
 // ── Worker class accessors (mock state) ──
 //

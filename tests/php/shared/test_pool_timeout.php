@@ -17,14 +17,14 @@ $pool = new OxPHP\Shared\Pool(
 );
 
 $held = $pool->acquire();  // Takes the only slot.
-if ($pool->inUse() !== 1) { echo "FAIL: inUse=1 expected\n"; exit; }
+if ($pool->stats()->inUse() !== 1) { echo "FAIL: inUse=1 expected\n"; exit; }
 
 $start = microtime(true);
 $caught = false;
 try {
-    // 0.15s budget — short enough to keep the test fast, long
+    // 150ms budget — short enough to keep the test fast, long
     // enough that we don't tick below Condvar wake granularity.
-    $pool->acquire(0.15);
+    $pool->acquireTimeout(150);
 } catch (\OxPHP\Shared\OperationTimeoutException $e) {
     $caught = true;
 }
@@ -35,6 +35,6 @@ if ($elapsed < 0.12) { echo "FAIL: returned too fast ({$elapsed}s)\n"; exit; }
 if ($elapsed > 0.40) { echo "FAIL: returned too slow ({$elapsed}s)\n"; exit; }
 
 // Clean up so the pool's drop path doesn't leak noisily.
-$pool->release($held);
+$held->release();
 
 echo "OK\n";

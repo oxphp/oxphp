@@ -39,9 +39,10 @@ if ($caught->getMessage() !== 'factory-bomb #1') {
     echo "FAIL: wrong message: " . $caught->getMessage() . "\n"; exit;
 }
 
-if ($pool->count() !== 0)   { echo "FAIL: size must refund to 0, got " . $pool->count() . "\n"; exit; }
-if ($pool->inUse() !== 0)  { echo "FAIL: inUse must refund to 0, got " . $pool->inUse() . "\n"; exit; }
-if ($pool->idle() !== 0)   { echo "FAIL: idle must stay 0\n"; exit; }
+$s = $pool->stats();
+if ($s->size() !== 0)   { echo "FAIL: size must refund to 0, got {$s->size()}\n"; exit; }
+if ($s->inUse() !== 0)  { echo "FAIL: inUse must refund to 0, got {$s->inUse()}\n"; exit; }
+if ($s->idle() !== 0)   { echo "FAIL: idle must stay 0\n"; exit; }
 
 // Second acquire must succeed — factory is re-invoked because no slot
 // was minted on the first attempt.
@@ -50,6 +51,6 @@ if (!($h instanceof OxPHP\Shared\Pool\Handle)) { echo "FAIL: second acquire fail
 if ($calls !== 2) { echo "FAIL: factory should have been called twice\n"; exit; }
 if ($h->get()->ok !== true) { echo "FAIL: second acquire returned wrong resource\n"; exit; }
 
-$pool->release($h);
+$h->release();
 
 echo "OK\n";
