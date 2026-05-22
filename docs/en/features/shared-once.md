@@ -9,9 +9,11 @@ description: Run-once container — exactly one worker's factory produces the va
 
 ## Overview
 
-- **Run-once across workers.** Two workers racing into `init($factory)` run the factory only on one of them; the loser waits and sees the winner's value.
-- **Memoised forever.** Once initialised, `get()` returns the value without running anything.
-- **Reentrancy-safe.** Calling `init()` on the same Once from inside its own factory throws `DeadlockException` instead of hanging.
+- **Run-once across workers.** Two workers racing into `getOrInit($factory)` run the factory on only one of them; the loser blocks and receives the winner's value.
+- **A four-state machine.** A cell is `Uninitialized`, `Pending` (a factory is running right now), `Ready`, or `Poisoned`. Read it with `status()`.
+- **No ambiguous null.** `get()` throws on an unset cell instead of returning `null`, so a stored `null` is a real value, not "missing".
+- **Reentrancy-safe.** Calling `getOrInit()` on the same Once from inside its own factory throws `DeadlockException` instead of hanging.
+- **Configurable failure policy.** By default a failed factory resets the cell so a later call can retry. Opt into `Poison` to make a failed factory disable the cell permanently.
 - **Shareable.** Instances live in the registry and travel through `use` captures and `Shared\Map` entries.
 
 ## API Reference
@@ -21,24 +23,29 @@ namespace OxPHP\Shared;
 
 final class Once implements Shareable
 {
-    public function __construct();
+    public function __construct(Once\FailureMode $onFactoryError = Once\FailureMode::Reset);
 
-    public function get(): mixed;                   // null if not yet set
-    public function isInitialized(): bool;
-    public function trySet(mixed $value): bool;     // true if this call won
-    public function init(callable $factory): mixed; // runs factory exactly once
+    public function get(): mixed;                    // throws if not Ready
+    public function status(): Once\Status;           // never throws
+    public function trySet(mixed $value): bool;      // true if this call won
+    public function getOrInit(callable $factory): mixed; // runs factory at most once
 
     public function id(): int;
 }
+
+namespace OxPHP\Shared\Once;
+
+enum Status { case Uninitialized; case Pending; case Ready; case Poisoned; }
+enum FailureMode: int { case Reset = 0; case Poison = 1; }
 ```
 
-| Method          | Returns      | Use case                                                         |
-|-----------------|--------------|------------------------------------------------------------------|
-| `get`           | value or null| Pure read; `null` if nobody has initialised yet.                 |
-| `isInitialized` | bool         | Probe without fetching the value.                                |
-| `trySet`        | winner?      | Direct value-first init when you already have the value in hand. |
-| `init`          | stored value | Factory-based init; returns the memoised value on every call.    |
-| `id`            | registry id  | Logging / observability correlation.                             |
+| Method      | Returns       | Use case                                                              |
+|-------------|---------------|----------------------------------------------------------------------|
+| `get`       | stored value  | Read a value you know is `Ready`. Throws on uninit / pending / poison.|
+| `status`    | `Once\Status` | Introspection / diagnostics. Never throws (the safe poison observer). |
+| `trySet`    | winner?       | Push-model init for a value already in hand (no side-effect resource).|
+| `getOrInit` | stored value  | Pull-model init; the canonical race-free primitive.                   |
+| `id`        | registry id   | Logging / observability correlation.                                  |
 
 ## Examples
 
@@ -49,8 +56,8 @@ final class Once implements Shareable
 $config = new OxPHP\Shared\Once();
 
 oxphp_worker(function () use ($config) {
-    $cfg = $config->init(function () {
-        // Runs in exactly one worker; everyone else sees the result.
+    $cfg = $config->getOrInit(function () {
+        // Runs in exactly one worker; everyone else blocks and sees the result.
         return json_decode(file_get_contents('/etc/myapp.json'), true);
     });
 
@@ -58,20 +65,41 @@ oxphp_worker(function () use ($config) {
 });
 ```
 
+`getOrInit()` is the cache-stampede-safe pattern: under a burst of concurrent first-touches the factory runs exactly once *when it succeeds*, and every caller — including those that lost the race — receives the winner's value. If the winning factory throws in `Reset` mode the next blocked caller becomes the initialiser and retries, so a *persistently* failing factory under load retries serially rather than fanning out in parallel. Use `Poison` mode (below) when a failure should be terminal instead.
+
+### Branch on state without triggering init
+
+```php
+<?php
+use OxPHP\Shared\Once\Status;
+
+$cfg = new OxPHP\Shared\Once();
+
+$report = match ($cfg->status()) {
+    Status::Ready        => $cfg->get(),
+    Status::Pending      => 'initialising…',
+    Status::Uninitialized => 'not started',
+    Status::Poisoned     => 'config load failed',
+};
+```
+
+`status()` is for introspection — it never triggers the factory and never throws, even on a poisoned cell. To actually obtain the value race-free, call `getOrInit()`.
+
 ### Value-first initialisation when the value is already known
 
 ```php
 <?php
 $buildSha = new OxPHP\Shared\Once();
 
-// Usually loaded from a build-time constant, not computed at runtime.
-if ($buildSha->trySet(getenv('GIT_SHA') ?: 'unknown')) {
-    // We stored it.
-}
+// A plain value with no acquisition side effects — trySet is fine here.
+$buildSha->trySet(getenv('GIT_SHA') ?: 'unknown');
 
-// Everyone reads the memoised value.
-$sha = $buildSha->get();   // never null after the first trySet above
+$sha = $buildSha->get();   // Ready after the trySet above
 ```
+
+Use `trySet()` only for values without side-effecting acquisition. For resources (connections, file handles, sockets) use `getOrInit()` instead: a `trySet()` that loses the race merely drops a plain value to the garbage collector, but a resource acquired *before* a lost race would leak.
+
+A `false` return means the cell was already `Ready` **or** `Pending` — it does *not* guarantee a later `get()` will succeed, because a `Pending` factory on another thread can still fail and reset the cell (in `Reset` mode). Don't write `if (!$o->trySet($v)) { $x = $o->get(); }`; if you need the value, call `getOrInit()`.
 
 ### Database connection bootstrap
 
@@ -79,7 +107,7 @@ $sha = $buildSha->get();   // never null after the first trySet above
 <?php
 $pool = new OxPHP\Shared\Once();
 
-$conn = $pool->init(function () {
+$conn = $pool->getOrInit(function () {
     return new PDO(getenv('DB_DSN'), getenv('DB_USER'), getenv('DB_PASS'), [
         PDO::ATTR_PERSISTENT => true,
     ]);
@@ -88,30 +116,45 @@ $conn = $pool->init(function () {
 
 For a connection pool with multiple slots, see [Shared\Pool](shared-pool.md) — `Once` gives you *one* value; `Pool` gives you N.
 
+### Fail-fast on a broken prerequisite
+
+```php
+<?php
+use OxPHP\Shared\Once\FailureMode;
+
+// If this initialisation fails, the app cannot recover — poison the cell so
+// every later access fails loudly instead of retrying a doomed factory.
+$secrets = new OxPHP\Shared\Once(onFactoryError: FailureMode::Poison);
+
+$secrets->getOrInit(fn () => loadSecretsOrThrow());
+```
+
 ## Semantics & gotchas
 
-- **`get()` returns `null` before `init()` / `trySet()` succeeds.** Distinguish "not set yet" from "set to null" using `isInitialized()`.
-- **The factory runs at most once per process.** Even if it throws, it counts as the attempt — `Once` does not retry. Wrap retryable logic inside the factory yourself.
-- **Reentrance throws.** `init()` from inside its own factory raises `DeadlockException` with the id in the message. Restructure the graph so the inner call uses a different `Once` or fetches the not-yet-stored value differently.
-- **The factory's return is serialised into shared-safe form.** Scalars and nested arrays of scalars pass through; closures, resources, and non-`Shareable` PHP objects raise `TypeException`.
+- **`get()` throws when the cell is not `Ready`.** `UninitializedException` for an empty or `Pending` cell, `PoisonedException` for a poisoned one. Use `status()` to branch without an exception, or `getOrInit()` to obtain the value safely.
+- **The factory runs at most once per successful initialisation.** Concurrent callers block on the winner; they do not run their own copy.
+- **Failure policy is set at construction, not per call.** `Reset` (default) returns the cell to `Uninitialized` on factory failure so a later call retries; `Poison` makes the cell terminally `Poisoned`. In both modes the factory's exception is re-thrown to the *current* caller.
+- **Poison is cross-thread-honest, not object-identical.** A PHP exception object cannot cross worker threads, so a poisoned cell captures the failure's class, message, and code. Later callers on any thread receive a fresh `PoisonedException` carrying that information — the same details, not the same object.
+- **Reentrance throws.** `getOrInit()` from inside its own factory raises `DeadlockException`. Restructure so the inner call uses a different `Once`.
+- **Full value range.** Scalars, arrays, and nested `Shareable` values are stored and read back. Closures, resources, and non-`Shareable` PHP objects raise `TypeException`.
 
 ## Exceptions
 
-| Exception                | Raised by                                                       |
-|--------------------------|-----------------------------------------------------------------|
-| `DeadlockException`      | `init()` called recursively on the same Once from its factory.  |
-| `TypeException`          | Factory returns a non-serialisable value (closure, resource).   |
-| `StaleHandleException`   | Any method on a handle whose registry entry was evicted.        |
-| `UninitializedException` | `id()` on a wrapper that has not finished `__construct`.        |
+| Exception                | Raised by                                                          |
+|--------------------------|-------------------------------------------------------------------|
+| `UninitializedException` | `get()` on an `Uninitialized` or `Pending` cell.                  |
+| `PoisonedException`      | `get()` / `getOrInit()` / `trySet()` on a `Poisoned` cell.        |
+| `DeadlockException`      | `getOrInit()` called recursively on the same Once from its factory.|
+| `TypeException`          | A stored value is not serialisable (closure, resource).           |
+| `StaleHandleException`   | Any method on a handle whose registry entry was evicted.          |
 
-If the factory itself throws, that exception propagates unchanged; the Once remains un-initialised and the next `init` call will retry.
+If the factory itself throws, that exception propagates unchanged to the current caller. In `Reset` mode the cell stays uninitialised and the next `getOrInit` retries; in `Poison` mode the cell becomes poisoned.
 
 ## Observability
 
 See [Shared Observability](../operations/shared-observability.md). Quick references:
 
-- `GET /__ox_shared/entry?id=N` exposes `{ initialized: bool, type: "Once" }` plus a preview of the stored value when available.
-- Prometheus `oxphp_shared_once_initialized{once_id="…"}` gauge (0 or 1).
+- `GET /__ox_shared/entry?id=N` exposes `{ status: "uninitialized" | "pending" | "ready" | "poisoned", type: "Once" }` plus a preview of the stored value when `ready`.
 
 ## When not to use
 

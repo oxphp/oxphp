@@ -23,7 +23,7 @@ PHP 约定。用于 `Map::get()`、`Counter::get()`、`Once::get()`。
 
 ### 2. 写入值 — `set()`，原子类型用 `store()`
 
-`Map::set()`、`Mutex` 通过 `with` 重置值、`Once::init()`。
+`Map::set()`、`Mutex` 通过 `with` 重置值、`Once::getOrInit()`。
 `Atomic::store($value, ?Ordering)` 与 `load` 对称，原因相同。
 
 ### 3. 元素数量 — `count(): int` + `\Countable`
@@ -46,10 +46,15 @@ count($pool);  // 全部活跃槽（in-use + idle）
 
 ### 4. 布尔 getter — `is*()` 前缀
 
-`Channel::isClosed()`、`Once::isInitialized()`、`Flag::isSet()`。
+`Channel::isClosed()`、`Flag::isSet()`。
 
 不使用裸动词（`test`、`check`），也不使用领域专有名
 （`closed`）。`is` 前缀标记对布尔属性的纯读取。
+
+状态比单个布尔更丰富的类型，用返回枚举的 `status()` 方法暴露状态，
+而非 `is*()` getter —— `Channel` 的 `RecvResult::status()` 与
+`Once::status(): Once\Status`（Uninitialized/Pending/Ready/Poisoned）
+即如此。当答案多于两种情形时，请使用 `status()`。
 
 `Mutex` 故意**不**提供 `isCorrupted()` —— 损坏是 sticky、不可恢复
 的，并通过下一次获取时抛出的 `CorruptedMutexException` 暴露。除了

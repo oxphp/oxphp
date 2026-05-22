@@ -28,7 +28,7 @@ use oxphp::plugins::ox_shared::types::flag::{
     oxphp_shared_flag_create, oxphp_shared_flag_test, FlagInner, SharedInnerFlagExt,
 };
 use oxphp::plugins::ox_shared::types::once::{
-    oxphp_shared_once_create, oxphp_shared_once_is_initialized, OnceInner, SharedInnerOnceExt,
+    oxphp_shared_once_create, OnceInner, SharedInnerOnceExt,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -94,7 +94,7 @@ fn setup_entries() -> EntryIds {
     assert_eq!(rc, 0, "counter_create failed");
     let rc = unsafe { oxphp_shared_flag_create(0, &mut flag) };
     assert_eq!(rc, 0, "flag_create failed");
-    let rc = unsafe { oxphp_shared_once_create(&mut once) };
+    let rc = unsafe { oxphp_shared_once_create(0, &mut once) };
     assert_eq!(rc, 0, "once_create failed");
 
     EntryIds {
@@ -556,7 +556,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
 }
 
 fn bench_once(c: &mut Criterion, ids: EntryIds) {
-    let mut group = c.benchmark_group("once_is_initialized");
+    let mut group = c.benchmark_group("once_state");
     let h = ids.once;
 
     let bare_single = AtomicBool::new(false);
@@ -568,10 +568,11 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
 
     group.bench_function(BenchmarkId::new("current", 1), |b| {
         b.iter(|| {
-            let mut out: std::os::raw::c_int = 0;
-            let rc = unsafe { oxphp_shared_once_is_initialized(h.ptr.raw(), &mut out) };
-            debug_assert_eq!(rc, 0);
-            criterion::black_box(out);
+            // New hot path: handlers deref the entry pointer directly and
+            // read the atomic state (the dedicated is_initialized FFI is gone).
+            let entry: &Entry = unsafe { &*h.ptr.raw() };
+            let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+            criterion::black_box(inner.state());
         });
     });
 
@@ -581,7 +582,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
             b.iter(|| {
                 let entry = reg.lookup(h.id).expect("entry exists");
                 let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                let v = inner.is_initialized();
+                let v = inner.state();
                 entry.ops.fetch_add(1, Ordering::Relaxed);
                 criterion::black_box(v);
             });
@@ -594,7 +595,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
             b.iter(|| {
                 let entry = reg.lookup(h.id).expect("entry exists");
                 let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                let v = inner.is_initialized();
+                let v = inner.state();
                 criterion::black_box(v);
             });
         });
@@ -607,7 +608,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
         group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
             b.iter(|| {
                 let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                let v = inner.is_initialized();
+                let v = inner.state();
                 entry.ops.fetch_add(1, Ordering::Relaxed);
                 criterion::black_box(v);
             });
@@ -627,10 +628,9 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
         group.bench_function(BenchmarkId::new("current", n), |b| {
             b.iter_custom(|iters| {
                 run_threads(n, iters, move || {
-                    let mut out: std::os::raw::c_int = 0;
-                    let rc = unsafe { oxphp_shared_once_is_initialized(h.ptr.raw(), &mut out) };
-                    debug_assert_eq!(rc, 0);
-                    criterion::black_box(out);
+                    let entry: &Entry = unsafe { &*h.ptr.raw() };
+                    let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
+                    criterion::black_box(inner.state());
                 })
             });
         });
@@ -640,7 +640,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
                     let reg = registry();
                     let entry = reg.lookup(h.id).expect("entry exists");
                     let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                    let v = inner.is_initialized();
+                    let v = inner.state();
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
@@ -652,7 +652,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
                     let reg = registry();
                     let entry = reg.lookup(h.id).expect("entry exists");
                     let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                    let v = inner.is_initialized();
+                    let v = inner.state();
                     criterion::black_box(v);
                 })
             });
@@ -665,7 +665,7 @@ fn bench_once(c: &mut Criterion, ids: EntryIds) {
                 let entry = std::sync::Arc::clone(&entry_v4);
                 run_threads(n, iters, move || {
                     let inner: &OnceInner = entry.inner.as_any_once().expect("type matches");
-                    let v = inner.is_initialized();
+                    let v = inner.state();
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
@@ -734,12 +734,7 @@ fn geomean(xs: &[f64]) -> Option<f64> {
     Some((log_sum / nonzero.len() as f64).exp())
 }
 
-const GROUPS: &[&str] = &[
-    "atomic_load",
-    "counter_add",
-    "flag_test",
-    "once_is_initialized",
-];
+const GROUPS: &[&str] = &["atomic_load", "counter_add", "flag_test", "once_state"];
 const VARIANTS: &[&str] = &["bare", "current", "one_lookup", "no_record_op", "raw_ptr"];
 
 fn print_summary() {

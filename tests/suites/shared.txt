@@ -47,4 +47,10 @@ shared/test_pool_observability
 shared/test_channel_recv_result
 shared/test_channel_send_result
 shared/test_channel_recv_status_match
+shared/test_once_basic
+shared/test_once_init_basic
+shared/test_once_init_factory_throws
+shared/test_once_init_reentrant
+shared/test_once_poison
+shared/test_once_full_value
 shared/test_shared_cross_plugin_catch

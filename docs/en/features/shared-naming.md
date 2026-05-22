@@ -25,7 +25,7 @@ is part of a memory-model contract distinct from a plain getter.
 
 ### 2. Write a value — `set()`, `store()` for atomics
 
-`Map::set()`, `Mutex` value reset (via `with`), `Once::init()`.
+`Map::set()`, `Mutex` value reset (via `with`), `Once::getOrInit()`.
 `Atomic::store($value, ?Ordering)` mirrors `load` for the same reason.
 
 ### 3. Number of elements — `count(): int` + `\Countable`
@@ -49,10 +49,16 @@ muscle memory comes from.
 
 ### 4. Boolean-getter — `is*()` prefix
 
-`Channel::isClosed()`, `Once::isInitialized()`, `Flag::isSet()`.
+`Channel::isClosed()`, `Flag::isSet()`.
 
 No bare verbs (`test`, `check`) and no domain-specific names
 (`closed`). The `is` prefix marks a pure read of a boolean property.
+
+A type whose state is richer than a single boolean exposes it as a
+`status()` method returning an enum instead of an `is*()` getter —
+`Channel`'s `RecvResult::status()` and `Once::status(): Once\Status`
+(Uninitialized/Pending/Ready/Poisoned) follow this. Reach for `status()`
+when the answer has more than two cases.
 
 `Mutex` does **not** expose `isCorrupted()` — corruption is sticky,
 non-recoverable, and surfaced via `CorruptedMutexException` on the

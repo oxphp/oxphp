@@ -1,4 +1,5 @@
 <?php
+// getOrInit under N concurrent workers: factory runs exactly once.
 header('Content-Type: text/plain');
 
 $o = new OxPHP\Shared\Once();
@@ -7,7 +8,7 @@ $counter = new OxPHP\Shared\Counter();
 $promises = [];
 for ($i = 0; $i < 10; $i++) {
     $promises[] = oxphp_async(function() use ($o, $counter) {
-        $v = $o->init(function() use ($counter) {
+        $v = $o->getOrInit(function() use ($counter) {
             $counter->inc();
             usleep(5000);
             return 'singleton-value';
