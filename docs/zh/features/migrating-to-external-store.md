@@ -114,7 +114,7 @@ final class RedisCounterBackend implements CounterBackend
 
 语义差异：
 
-- `Shared\Once::init(callable)` 在胜出时进程内运行工厂。在外部存储中，工厂必须幂等（两个写入者可能都运行它，只有一个值胜出），或者你需要一个领导选举的包装。
+- `Shared\Once::getOrInit(callable)` 在胜出时进程内运行工厂。在外部存储中，工厂必须幂等（两个写入者可能都运行它，只有一个值胜出），或者你需要一个领导选举的包装。
 - 重入时的 `DeadlockException` 没有外部等价物——你继承存储本身的行为，通常是无。
 
 ### `Shared\Mutex` → Redis 分布式锁

@@ -9,9 +9,11 @@ description: 一次性容器——仅一个工作线程的工厂回调产生值�
 
 ## 概览
 
-- **跨工作线程仅运行一次。** 两个工作线程同时进入 `init($factory)` 时，只有其中之一会运行工厂；落败方等待并看到胜出方的值。
-- **永远记忆。** 一旦初始化，`get()` 不再运行任何内容就返回值。
-- **可重入安全。** 从工厂内部对同一个 Once 调用 `init()` 会抛出 `DeadlockException`，而不是挂起。
+- **跨工作线程仅运行一次。** 两个工作线程同时进入 `getOrInit($factory)` 时，只有其中之一会运行工厂；落败方阻塞并收到胜出方的值。
+- **四状态机。** 一个单元处于 `Uninitialized`、`Pending`（工厂正在运行）、`Ready` 或 `Poisoned`。用 `status()` 读取。
+- **没有歧义的 null。** `get()` 在未设置的单元上抛异常，而非返回 `null`，因此存储的 `null` 是真实的值，而非「缺失」。
+- **可重入安全。** 从工厂内部对同一个 Once 调用 `getOrInit()` 会抛出 `DeadlockException`，而不是挂起。
+- **可配置的失败策略。** 默认情况下失败的工厂会重置单元，使后续调用可重试。选择 `Poison` 则让失败的工厂永久禁用该单元。
 - **可共享。** 实例存放于注册表，并通过 `use` 捕获与 `Shared\Map` 条目流转。
 
 ## API 参考
@@ -21,24 +23,29 @@ namespace OxPHP\Shared;
 
 final class Once implements Shareable
 {
-    public function __construct();
+    public function __construct(Once\FailureMode $onFactoryError = Once\FailureMode::Reset);
 
-    public function get(): mixed;                   // 未设置时为 null
-    public function isInitialized(): bool;
-    public function trySet(mixed $value): bool;     // 本次调用胜出时返回 true
-    public function init(callable $factory): mixed; // 工厂最多运行一次
+    public function get(): mixed;                    // 非 Ready 时抛异常
+    public function status(): Once\Status;           // 永不抛异常
+    public function trySet(mixed $value): bool;      // 本次调用胜出时返回 true
+    public function getOrInit(callable $factory): mixed; // 工厂最多运行一次
 
     public function id(): int;
 }
+
+namespace OxPHP\Shared\Once;
+
+enum Status { case Uninitialized; case Pending; case Ready; case Poisoned; }
+enum FailureMode: int { case Reset = 0; case Poison = 1; }
 ```
 
-| 方法            | 返回值        | 使用场景                                                         |
-|-----------------|---------------|------------------------------------------------------------------|
-| `get`           | 值或 null     | 纯读取；无人初始化时返回 `null`。                                |
-| `isInitialized` | bool          | 探测是否初始化，而不取值。                                       |
-| `trySet`        | 是否胜出      | 直接以值初始化，适合已有值在手的场景。                           |
-| `init`          | 存储的值      | 基于工厂的初始化；每次调用都返回已记忆的值。                     |
-| `id`            | 注册表 id     | 日志 / 可观测性关联。                                            |
+| 方法        | 返回值          | 使用场景                                                          |
+|-------------|-----------------|------------------------------------------------------------------|
+| `get`       | 存储的值        | 读取已知为 `Ready` 的值。在 uninit / pending / poison 上抛异常。  |
+| `status`    | `Once\Status`   | 内省 / 诊断。永不抛异常（poison 的安全观察者）。                  |
+| `trySet`    | 是否胜出        | 已有值在手的 push 式初始化（无副作用资源获取）。                  |
+| `getOrInit` | 存储的值        | pull 式初始化；规范的无竞态原语。                                 |
+| `id`        | 注册表 id       | 日志 / 可观测性关联。                                             |
 
 ## 示例
 
@@ -49,8 +56,8 @@ final class Once implements Shareable
 $config = new OxPHP\Shared\Once();
 
 oxphp_worker(function () use ($config) {
-    $cfg = $config->init(function () {
-        // 恰好在一个工作线程内运行；其他所有工作线程看到结果。
+    $cfg = $config->getOrInit(function () {
+        // 恰好在一个工作线程内运行；其他工作线程阻塞并看到结果。
         return json_decode(file_get_contents('/etc/myapp.json'), true);
     });
 
@@ -58,20 +65,41 @@ oxphp_worker(function () use ($config) {
 });
 ```
 
+`getOrInit()` 是抵御 cache-stampede 的模式：在并发首次访问的高峰下，工厂*在成功时*只运行一次，且每个调用者——包括竞态落败者——都收到胜出方的值。若胜出方的工厂在 `Reset` 模式下抛出，下一个被阻塞的调用者会成为初始化者并重试——因此在负载下*持续*失败的工厂是串行重试，而非并行铺开。若希望失败是终态，请改用 `Poison` 模式（见下文）。
+
+### 不触发初始化地按状态分支
+
+```php
+<?php
+use OxPHP\Shared\Once\Status;
+
+$cfg = new OxPHP\Shared\Once();
+
+$report = match ($cfg->status()) {
+    Status::Ready        => $cfg->get(),
+    Status::Pending      => '正在初始化…',
+    Status::Uninitialized => '尚未开始',
+    Status::Poisoned     => '配置加载失败',
+};
+```
+
+`status()` 用于内省：它永不触发工厂，也永不抛异常，即使在已中毒的单元上。要真正无竞态地取值，请调用 `getOrInit()`。
+
 ### 值已知时的值优先初始化
 
 ```php
 <?php
 $buildSha = new OxPHP\Shared\Once();
 
-// 通常来自构建期常量，而非运行时计算。
-if ($buildSha->trySet(getenv('GIT_SHA') ?: 'unknown')) {
-    // 我们存储了它。
-}
+// 一个没有获取副作用的普通值——这里用 trySet 是合适的。
+$buildSha->trySet(getenv('GIT_SHA') ?: 'unknown');
 
-// 所有人读取已记忆的值。
-$sha = $buildSha->get();   // 上面首次 trySet 之后永不为 null
+$sha = $buildSha->get();   // 上面 trySet 之后为 Ready
 ```
+
+仅对没有副作用获取的值使用 `trySet()`。对于资源（连接、文件句柄、套接字）请改用 `getOrInit()`：竞态落败的 `trySet()` 只是把普通值交给垃圾回收，而在竞态落败*之前*获取的资源会泄漏。
+
+返回 `false` 表示单元已经是 `Ready` **或** `Pending`——它*不*保证随后的 `get()` 会成功：另一线程上的 `Pending` 工厂仍可能失败并重置单元（在 `Reset` 模式下）。不要写 `if (!$o->trySet($v)) { $x = $o->get(); }`；若需要取值，请调用 `getOrInit()`。
 
 ### 数据库连接引导
 
@@ -79,7 +107,7 @@ $sha = $buildSha->get();   // 上面首次 trySet 之后永不为 null
 <?php
 $pool = new OxPHP\Shared\Once();
 
-$conn = $pool->init(function () {
+$conn = $pool->getOrInit(function () {
     return new PDO(getenv('DB_DSN'), getenv('DB_USER'), getenv('DB_PASS'), [
         PDO::ATTR_PERSISTENT => true,
     ]);
@@ -88,30 +116,45 @@ $conn = $pool->init(function () {
 
 如果需要多槽位的连接池，请见 [Shared\Pool](shared-pool.md) —— `Once` 给你*一个*值；`Pool` 给你 N 个。
 
+### 在损坏的先决条件上快速失败
+
+```php
+<?php
+use OxPHP\Shared\Once\FailureMode;
+
+// 若此初始化失败，应用无法恢复——给单元下毒，
+// 让后续每次访问都响亮地失败，而非重试注定失败的工厂。
+$secrets = new OxPHP\Shared\Once(onFactoryError: FailureMode::Poison);
+
+$secrets->getOrInit(fn () => loadSecretsOrThrow());
+```
+
 ## 语义与陷阱
 
-- **在 `init()` / `trySet()` 成功之前 `get()` 返回 `null`。** 用 `isInitialized()` 区分「尚未设置」与「已设为 null」。
-- **工厂每进程最多运行一次。** 即使抛出异常，也算作一次尝试——`Once` 不会重试。需要可重试的逻辑请在工厂内部自己包裹。
-- **可重入会抛异常。** 在工厂内部对同一个 Once 调用 `init()` 会抛出 `DeadlockException`，消息中带 id。请重构图结构，让内层调用使用不同的 `Once`，或以其他方式获取尚未存储的值。
-- **工厂的返回值会被序列化为 shared-safe 形式。** 标量和嵌套的标量数组可直接通过；闭包、资源以及非 `Shareable` 的 PHP 对象会抛出 `TypeException`。
+- **单元非 `Ready` 时 `get()` 抛异常。** 空或 `Pending` 单元抛 `UninitializedException`，已中毒单元抛 `PoisonedException`。用 `status()` 无异常地分支，或用 `getOrInit()` 安全取值。
+- **工厂在每次成功初始化中最多运行一次。** 并发调用者阻塞在胜出方上；它们不会运行自己的副本。
+- **失败策略在构造时设定，而非按调用。** `Reset`（默认）在工厂失败时把单元还原为 `Uninitialized`，使后续调用重试；`Poison` 使单元终态 `Poisoned`。两种模式下工厂的异常都会重新抛给*当前*调用者。
+- **Poison 跨线程诚实，但并非对象一致。** PHP 异常对象无法跨工作线程，因此中毒单元会捕获失败的类名、消息与代码。任意线程上的后续调用者会收到一个携带该信息的全新 `PoisonedException`——细节相同，但不是同一个对象。
+- **可重入会抛异常。** 在工厂内部对同一个 Once 调用 `getOrInit()` 会抛出 `DeadlockException`。请重构，使内层调用使用不同的 `Once`。
+- **完整的值范围。** 标量、数组以及嵌套的 `Shareable` 值都可存储并读回。闭包、资源以及非 `Shareable` 的 PHP 对象会抛出 `TypeException`。
 
 ## 异常
 
-| 异常                     | 触发场景                                                        |
-|-------------------------|-----------------------------------------------------------------|
-| `DeadlockException`     | 从工厂内部对同一 Once 递归调用 `init()`。                       |
-| `TypeException`         | 工厂返回不可序列化的值（闭包、资源）。                          |
-| `StaleHandleException`  | 对注册表条目已被驱逐的句柄调用任何方法。                        |
-| `UninitializedException`| 在尚未完成 `__construct` 的包装上调用 `id()`。                  |
+| 异常                     | 触发场景                                                          |
+|-------------------------|-------------------------------------------------------------------|
+| `UninitializedException`| 在 `Uninitialized` 或 `Pending` 单元上调用 `get()`。              |
+| `PoisonedException`     | 在 `Poisoned` 单元上调用 `get()` / `getOrInit()` / `trySet()`。   |
+| `DeadlockException`     | 从工厂内部对同一 Once 递归调用 `getOrInit()`。                    |
+| `TypeException`         | 存储的值不可序列化（闭包、资源）。                                |
+| `StaleHandleException`  | 对注册表条目已被驱逐的句柄调用任何方法。                          |
 
-如果工厂本身抛出异常，该异常原样向上传播；Once 保持未初始化状态，下次 `init` 调用会重试。
+如果工厂本身抛出异常，该异常原样向上传播给当前调用者。在 `Reset` 模式下单元保持未初始化，下次 `getOrInit` 会重试；在 `Poison` 模式下单元变为已中毒。
 
 ## 可观测性
 
 请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
 
-- `GET /__ox_shared/entry?id=N` 暴露 `{ initialized: bool, type: "Once" }`，并在可得时附带已存储值的预览。
-- Prometheus `oxphp_shared_once_initialized{once_id="…"}` 仪表（0 或 1）。
+- `GET /__ox_shared/entry?id=N` 暴露 `{ status: "uninitialized" | "pending" | "ready" | "poisoned", type: "Once" }`，并在 `ready` 时附带已存储值的预览。
 
 ## 何时不宜使用
 

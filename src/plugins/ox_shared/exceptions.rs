@@ -14,8 +14,8 @@
 //!          ├── CapacityException
 //!          ├── ClosedException                         DEPRECATED — still thrown by Pool;
 //!          │                                            removed once Pool migrates
-//!          ├── PoisonedException                       DEPRECATED — still thrown by Once;
-//!          │                                            removed once Once migrates
+//!          ├── PoisonedException                       Once Poison-mode failure
+//!          │                                            (first-class, not deprecated)
 //!          ├── UninitializedException
 //!          ├── InvalidOrderingException                Atomic op got an invalid memory ordering
 //!          └── CorruptedMutexException                 Rust panic crossed FFI; mutex unusable
@@ -33,10 +33,10 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .build()?;
 
     // Direct subclasses of SharedException.
-    // NOTE: ClosedException + PoisonedException are deprecated but kept
-    // because Shared\Once and Shared\Pool still throw them. They are
-    // scheduled for removal once those primitives migrate to the new
-    // result/exception model.
+    // NOTE: ClosedException is deprecated but kept because Shared\Pool
+    // still throws it; it is scheduled for removal once Pool migrates to
+    // the new result/exception model. PoisonedException is NOT deprecated —
+    // Shared\Once throws it as a first-class part of its Poison failure mode.
     for child in [
         "OxPHP\\Shared\\StaleHandleException",
         "OxPHP\\Shared\\TypeException",

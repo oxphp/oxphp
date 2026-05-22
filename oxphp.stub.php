@@ -1138,34 +1138,67 @@ namespace OxPHP\Shared {
      *
      * @link docs/en/features/shared-once.md
      */
+    /**
+     * @template T
+     */
     final class Once implements Shareable
     {
-        public function __construct() {}
+        /**
+         * @param Once\FailureMode $onFactoryError What happens to OTHER callers
+         *        if a `getOrInit()` factory throws. Default `Reset` (retryable);
+         *        `Poison` makes the cell terminally unusable.
+         */
+        public function __construct(
+            Once\FailureMode $onFactoryError = Once\FailureMode::Reset
+        ) {}
 
         /**
          * Returns the stored value.
          *
-         * @throws UninitializedException If `init()`/`trySet()` has not succeeded yet.
+         * @return T
+         * @throws UninitializedException If the cell is empty or a factory is
+         *         currently running (Pending) with no value published yet.
+         * @throws PoisonedException If a factory previously failed in `Poison` mode.
          */
         public function get(): mixed {}
 
-        /** Whether `init()`/`trySet()` has completed. */
-        public function isInitialized(): bool {}
+        /**
+         * State of the cell, for introspection / diagnostics. Never throws —
+         * including on a poisoned cell (this is the one safe observer of poison).
+         */
+        public function status(): Once\Status {}
 
         /**
-         * Set to `$value` iff not yet initialised. Returns true on success,
-         * false if already set.
+         * Push model: atomically store `$value` iff the cell is empty.
+         *
+         * For values WITHOUT side-effecting acquisition only. Initialise
+         * resources (handles, sockets) through `getOrInit()` — a `trySet()`
+         * that loses the race merely drops a value to GC, but a resource
+         * acquired before a lost race would orphan.
+         *
+         * @param T $value
+         * @return bool true if this call stored the value; false if the cell
+         *         was already Ready or Pending. A false on Pending does NOT
+         *         guarantee a later get() succeeds — a Reset-mode factory can
+         *         still fail and clear the cell. If you need the value back,
+         *         use getOrInit().
+         * @throws PoisonedException If the cell is poisoned.
          */
         public function trySet(mixed $value): bool {}
 
         /**
-         * Invoke `$factory` once and store its return value. If another
-         * caller is already running the factory, blocks until it finishes
-         * and returns the stored value.
+         * Pull model: return the value, or compute it exactly once. Parallel
+         * callers block on the winner and receive its value on success. If the
+         * winner's factory throws in Reset mode the next blocked caller becomes
+         * the initialiser and retries; in Poison mode the cell goes terminal.
+         * The factory's own exception is always re-thrown to the current caller.
          *
-         * @throws DeadlockException If the same thread reenters `init()`.
+         * @param callable(): T $factory
+         * @return T
+         * @throws DeadlockException If the same thread reenters `getOrInit()`.
+         * @throws PoisonedException If the cell is already poisoned.
          */
-        public function init(callable $factory): mixed {}
+        public function getOrInit(callable $factory): mixed {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1586,6 +1619,25 @@ namespace OxPHP\Shared {
      * Shared\TimeoutException in earlier releases).
      */
     class DeadlockException extends \OxPHP\Async\AsyncException {}
+}
+
+namespace OxPHP\Shared\Once {
+
+    /** State of an {@see \OxPHP\Shared\Once} cell. */
+    enum Status
+    {
+        case Uninitialized; // empty, accepts a write
+        case Pending;       // a factory is running right now (some thread)
+        case Ready;         // value published
+        case Poisoned;      // a Poison-mode factory failed — terminal
+    }
+
+    /** Policy for what a failed `getOrInit()` factory does to the cell. */
+    enum FailureMode: int
+    {
+        case Reset = 0;  // failure -> back to Uninitialized (retryable, default)
+        case Poison = 1; // failure -> Poisoned forever
+    }
 }
 
 namespace OxPHP\Shared\Channel {

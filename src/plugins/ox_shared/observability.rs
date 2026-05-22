@@ -12,6 +12,7 @@ use crate::plugin::{PluginContext, PluginError};
 use crate::plugins::ox_shared::registry::{Entry, SharedType, REGISTRY};
 use crate::plugins::ox_shared::types::channel::SharedInnerChannelExt;
 use crate::plugins::ox_shared::types::map::SharedInnerMapExt;
+use crate::plugins::ox_shared::types::once::SharedInnerOnceExt;
 use crate::plugins::ox_shared::types::pool::SharedInnerPoolExt;
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 use crate::types::{full_body, ResponseBody};
@@ -213,8 +214,20 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
             _ => Value::Null,
         },
         SharedType::Once => {
-            let init = !matches!(e.inner.debug_snapshot(), SharedValue::Null);
-            json!({"initialized": init})
+            if let Some(o) = e.inner.as_any_once() {
+                // Snapshot the state once so `status` and `initialized` stay
+                // consistent if another thread transitions the cell mid-read.
+                let st = o.state();
+                let status = match st {
+                    0 => "uninitialized",
+                    1 => "pending",
+                    2 => "ready",
+                    _ => "poisoned",
+                };
+                json!({"status": status, "initialized": st == 2})
+            } else {
+                Value::Null
+            }
         }
         SharedType::Channel => {
             if let Some(ch) = e.inner.as_any_channel() {

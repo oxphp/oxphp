@@ -114,7 +114,7 @@ Semantic gaps:
 
 Semantic gaps:
 
-- `Shared\Once::init(callable)` runs the factory in-process when it wins. In an external store the factory must be idempotent (two writers may both run it and only one value wins) or you need a leader-election wrapper.
+- `Shared\Once::getOrInit(callable)` runs the factory in-process when it wins. In an external store the factory must be idempotent (two writers may both run it and only one value wins) or you need a leader-election wrapper.
 - `DeadlockException` on reentrance has no external equivalent — you inherit whatever the store does, which is typically nothing.
 
 ### `Shared\Mutex` → Redis distributed lock

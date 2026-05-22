@@ -27,7 +27,7 @@ memory model, а не обычный геттер.
 
 ### 2. Запись значения — `set()`, для атомиков `store()`
 
-`Map::set()`, сброс значения `Mutex` через `with`, `Once::init()`.
+`Map::set()`, сброс значения `Mutex` через `with`, `Once::getOrInit()`.
 `Atomic::store($value, ?Ordering)` симметричен `load` по той же причине.
 
 ### 3. Количество элементов — `count(): int` + `\Countable`
@@ -51,11 +51,17 @@ API независимо от того, из какого языка взяла�
 
 ### 4. Boolean-геттер — префикс `is*()`
 
-`Channel::isClosed()`, `Once::isInitialized()`, `Flag::isSet()`.
+`Channel::isClosed()`, `Flag::isSet()`.
 
 Никаких голых глаголов (`test`, `check`) и доменных имён
 (`closed`). Префикс `is` отмечает чистое чтение
 boolean-свойства.
+
+Тип, чьё состояние богаче одного булева, выставляет его методом
+`status()`, возвращающим enum, а не геттером `is*()` — так сделаны
+`RecvResult::status()` у `Channel` и `Once::status(): Once\Status`
+(Uninitialized/Pending/Ready/Poisoned). Берите `status()`, когда у
+ответа больше двух вариантов.
 
 `Mutex` намеренно **не** предоставляет `isCorrupted()` — порча
 sticky, невосстановима и всплывает через `CorruptedMutexException`
