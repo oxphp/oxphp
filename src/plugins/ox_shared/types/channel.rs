@@ -2615,6 +2615,43 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
+    // OS threads: the consumer must receive every sent item with none lost or
+    // duplicated. Exercises the bounded-queue park/wake handoff under the
+    // tightest capacity, where each send must wait for a recv and vice versa.
+    #[test]
+    fn stress_concurrent_blocking_send_recv_cap1() {
+        let ch = Arc::new(ChannelInner::new(1));
+        let n: usize = 200_000;
+
+        let prod = {
+            let ch = ch.clone();
+            std::thread::spawn(move || {
+                for _ in 0..n {
+                    ch.send_blocking(vec![7u8], Wait::Forever).expect("send");
+                }
+                ch.close();
+            })
+        };
+        let cons = {
+            let ch = ch.clone();
+            std::thread::spawn(move || {
+                let mut got = 0usize;
+                loop {
+                    match ch.recv_blocking(Wait::Forever) {
+                        Ok(Some(_)) => got += 1,
+                        Ok(None) => break,
+                        Err(e) => panic!("recv err: {e:?}"),
+                    }
+                }
+                got
+            })
+        };
+        prod.join().expect("producer thread");
+        let got = cons.join().expect("consumer thread");
+        assert_eq!(got, n, "consumer must receive every sent item");
+    }
+
     #[test]
     fn capacity_fits_within_budget() {
         // 100 slots * SLOT_BYTES is far under a 1 MiB budget.
