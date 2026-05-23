@@ -3122,7 +3122,16 @@ int oxphp_closure_get_static_vars(zval *closure, HashTable **out_ht) {
         *out_ht = NULL;
         return -1;
     }
-    *out_ht = func->op_array.static_variables;
+    /* The bound use-var / static-var values live in the per-closure HT
+     * reachable via the static_variables MAP_PTR slot: zend_create_closure()
+     * dups the template into that slot and ZEND_BIND_LEXICAL writes each
+     * captured value there (see zend_closure_bind_var_ex). The direct
+     * `static_variables` field is only the compile-time template whose
+     * use-var entries are IS_UNDEF placeholders — reading it loses every
+     * captured value. Read the slot first; fall back to the template only
+     * when the slot is unset (closures with no captures at all). */
+    HashTable *bound = ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr);
+    *out_ht = bound ? bound : func->op_array.static_variables;
     return 0;
 }
 
@@ -3528,6 +3537,25 @@ int oxphp_execute_async_task(
     /* Fix up run_time_cache for this thread — the MAP_PTR offset from the
      * source thread's op_array may be invalid on the async worker's thread. */
     oxphp_fixup_run_time_cache(&func.op_array);
+
+    /* Re-init the static_variables MAP_PTR for this worker thread, pointing
+     * it at our own `static_vars`. The slot offset was memcpy'd from the
+     * source thread's op_array; on this worker thread that same offset
+     * resolves to an unrelated (foreign or stale) slot, so
+     * zend_create_closure()'s `ZEND_MAP_PTR_GET(static_variables_ptr)` returns
+     * a dangling HashTable and `zend_array_dup()`s it — a use-after-free that
+     * corrupts the heap once a captured Shared\* wrapper's refcount is
+     * mismanaged. The GET does not return NULL, so the engine's own NULL-slot
+     * fallback to op_array.static_variables never kicks in.
+     *
+     * Pointing the slot at `static_vars` makes the GET return our HT:
+     * zend_create_closure() then dups `static_vars` into a closure-owned copy
+     * that the closure frees on destruction, while the async pool retains sole
+     * ownership of the original `static_vars` and frees it exactly once after
+     * this call returns. */
+    if (static_vars) {
+        ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, static_vars);
+    }
 
     zend_create_closure(&closure, &func,
         NULL, /* scope */
