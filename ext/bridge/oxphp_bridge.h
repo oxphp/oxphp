@@ -1791,6 +1791,16 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          uint8_t **out_ret_buf,
                                          size_t *out_ret_len,
                                          int *did_mutate);
+
+/* Shared\Map::forEach — invoke $fn(key, value); 1=stop, 0=continue,
+ * <0=bad callable / deserialise failure / PHP throw. */
+int oxphp_shared_invoke_2_ret_stop(zval *callable,
+                                   int key_kind,
+                                   int64_t key_int,
+                                   const char *key_ptr,
+                                   size_t key_len,
+                                   const char *val_buf,
+                                   size_t val_len);
 #endif
 
 /* ─── Cross-thread fcc spike helpers ─────────────────────────────────────
@@ -1881,6 +1891,11 @@ int oxphp_shared_pool_handle_alloc(void *out_zv,
                                     uint64_t pool_id,
                                     uint64_t owner_tid,
                                     void *slot_zv_heap);
+
+/* Shared\Map::getMany — construct a Map\KeyCursor into out_zv and stamp
+ * state_ptr (Box::into_raw(Box<KeyCursorState>)) into its rust_data slot.
+ * Returns 0 on success, -1 if the class is unregistered / init fails. */
+int oxphp_shared_map_cursor_alloc(void *out_zv, void *state_ptr);
 
 /* ─── Generic PHP object construction helpers ─────────────────────────────
  *

@@ -269,6 +269,54 @@ impl<'a> NativeCall<'a> {
         Ok(())
     }
 
+    /// Iterate over an array argument yielding RAW string-key bytes.
+    ///
+    /// Unlike [`arg_array_foreach`](Self::arg_array_foreach), which coerces a
+    /// string key to UTF-8 (`ArrayKey::Str(&str)`), this hands the callback the
+    /// key's raw bytes so binary array keys round-trip faithfully. The callback
+    /// receives `(Some(&[u8]), 0, val)` for string keys and `(None, num_idx,
+    /// val)` for integer keys. Uses the same C entry points as
+    /// `arg_array_foreach`.
+    pub fn arg_array_foreach_raw<F>(&self, idx: u32, mut f: F) -> Result<(), PhpError>
+    where
+        F: FnMut(Option<&'a [u8]>, i64, Val<'a>),
+    {
+        self.check_idx(idx)?;
+        self.check_type(idx, ValType::Array)?;
+        let arr = unsafe { ffi::oxphp_arg_array(self.args, idx) };
+        if arr.is_null() {
+            return Err(PhpError::Custom("NULL array pointer".into()));
+        }
+
+        unsafe extern "C" fn trampoline<'a, F: FnMut(Option<&'a [u8]>, i64, Val<'a>)>(
+            key: *const u8,
+            key_len: usize,
+            num_idx: i64,
+            val: *mut c_void,
+            user_data: *mut c_void,
+        ) {
+            let f = unsafe { &mut *(user_data as *mut F) };
+            let k = if !key.is_null() && key_len > 0 {
+                Some(unsafe { std::slice::from_raw_parts(key, key_len) })
+            } else {
+                None
+            };
+            f(
+                k,
+                num_idx,
+                Val {
+                    ptr: val,
+                    _marker: PhantomData,
+                },
+            );
+        }
+
+        unsafe {
+            ffi::oxphp_array_foreach(arr, trampoline::<F>, &mut f as *mut F as *mut c_void);
+        }
+        Ok(())
+    }
+
     // ── Return value writing ──
 
     /// Return null.
@@ -391,9 +439,10 @@ impl<'a> NativeCall<'a> {
         let c_name = name_buf.as_ptr() as *const std::os::raw::c_char;
 
         // Stack-allocate for <= 8 args, heap (via global allocator / mimalloc) for more.
-        // ZvalSlot has align(8) matching zval's alignment requirement.
-        let mut stack_args: [std::mem::MaybeUninit<ZvalSlot>; 8] =
-            [const { std::mem::MaybeUninit::uninit() }; 8];
+        // ZvalSlot has align(8) matching zval's alignment requirement. Zero-init
+        // (all-zero bytes = IS_UNDEF) so any slot a builder leaves unfilled is
+        // safe to pass through zval_ptr_dtor below.
+        let mut stack_args: [ZvalSlot; 8] = [const { ZvalSlot([0u8; 16]) }; 8];
         let mut heap_args: Vec<ZvalSlot>;
 
         let args_ptr = if argc == 0 {
@@ -419,6 +468,19 @@ impl<'a> NativeCall<'a> {
         let mut result_slot = std::mem::MaybeUninit::<ZvalSlot>::uninit();
         let result_ptr = result_slot.as_mut_ptr() as *mut c_void;
         let rc = unsafe { ffi::oxphp_call_php_native(c_name, args_ptr, argc, result_ptr) };
+
+        // Release each argument zval. `zend_call_known_function` copies args
+        // into the callee frame but does NOT take ownership — the caller owns
+        // them. Without this, any refcounted arg (a `b.str` zend_string, or an
+        // object forwarded via `b.zval_copy`'s ZVAL_COPY) leaks for the rest of
+        // the request. Scalars / IS_UNDEF dtor as no-ops. Runs on both the
+        // success and failure paths (args were built either way).
+        if !args_ptr.is_null() {
+            for i in 0..argc as usize {
+                let slot = unsafe { (args_ptr as *mut u8).add(i * ZVAL_SIZE) as *mut c_void };
+                unsafe { ffi::oxphp_zval_dtor(slot) };
+            }
+        }
 
         // heap_args dropped here automatically (Vec destructor via mimalloc)
 
@@ -520,6 +582,13 @@ impl<'a> Val<'a> {
     }
     pub fn array_count(&self) -> u32 {
         unsafe { ffi::oxphp_val_array_count(self.ptr) }
+    }
+
+    /// Raw zval pointer backing this value. Valid only for the duration
+    /// of the current call. Used by FFI-heavy handlers that pass the
+    /// zval to a bridge serializer (e.g. `oxphp_portable_serialize`).
+    pub fn as_ptr(&self) -> *mut c_void {
+        self.ptr
     }
 
     /// Iterate if this is an array.
@@ -659,6 +728,21 @@ impl ArgBuilder {
     }
     pub fn str(&mut self, v: &str) {
         unsafe { ffi::oxphp_ret_str(self.next(), v.as_ptr(), v.len()) };
+    }
+
+    /// Forward an existing zval into the next argument slot by refcount
+    /// (`ZVAL_COPY`), preserving object identity. Used to pass an existing
+    /// argument (e.g. a Traversable / Generator) into a `call_php`
+    /// invocation. A deep copy is wrong here — objects (Generators are
+    /// uncloneable) would be lost — so this shares the value and bumps its
+    /// refcount; it is released when the call's argument buffer is dropped.
+    ///
+    /// # Safety
+    /// `src` must point to a valid, readable zval for the duration of
+    /// this call.
+    pub unsafe fn zval_copy(&mut self, src: *const c_void) {
+        let dst = self.next();
+        unsafe { ffi::oxphp_zval_copy_to_retval(src, dst) };
     }
 
     fn next(&mut self) -> *mut c_void {

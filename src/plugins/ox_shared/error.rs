@@ -22,6 +22,8 @@ pub enum SharedError {
     Deadlock,
     Cycle,
     Uninitialized,
+    /// Serialised value exceeds SHARED_MAX_VALUE_SIZE.
+    ValueTooLarge,
     /// Panic caught at FFI boundary (Rust bug).
     Panicked,
 }
@@ -43,6 +45,7 @@ impl SharedError {
             Self::Deadlock => -8,
             Self::Cycle => -9,
             Self::Uninitialized => -10,
+            Self::ValueTooLarge => -11,
             Self::Panicked => -99,
         }
     }
@@ -61,6 +64,7 @@ impl std::fmt::Display for SharedError {
             Self::Deadlock => write!(f, "deadlock detected"),
             Self::Cycle => write!(f, "cycle would form"),
             Self::Uninitialized => write!(f, "uninitialised wrapper"),
+            Self::ValueTooLarge => write!(f, "value exceeds size cap"),
             Self::Panicked => write!(f, "internal: Rust panic at FFI boundary"),
         }
     }
@@ -163,6 +167,7 @@ mod tests {
         assert_eq!(SharedError::Deadlock.code(), -8);
         assert_eq!(SharedError::Cycle.code(), -9);
         assert_eq!(SharedError::Uninitialized.code(), -10);
+        assert_eq!(SharedError::ValueTooLarge.code(), -11);
         assert_eq!(SharedError::Panicked.code(), -99);
     }
 

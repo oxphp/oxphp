@@ -19,7 +19,7 @@ try {
     $threw = true;
 }
 if (!$threw) { echo "FAIL: cycle must throw CycleException\n"; exit; }
-if ($b->has('a')) { echo "FAIL: b must not carry the rejected edge\n"; exit; }
+if ($b->get('a') !== null) { echo "FAIL: b must not carry the rejected edge\n"; exit; }
 
 // CycleException extends TypeException per spec 05-exceptions.md.
 $threw = false;
@@ -51,6 +51,6 @@ try {
     $threw = true;
 }
 if (!$threw) { echo "FAIL: nested-array cycle must throw\n"; exit; }
-if ($y->has('nested')) { echo "FAIL: y must not store rejected array\n"; exit; }
+if ($y->get('nested') !== null) { echo "FAIL: y must not store rejected array\n"; exit; }
 
 echo "OK\n";

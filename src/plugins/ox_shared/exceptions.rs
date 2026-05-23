@@ -1,6 +1,6 @@
 //! Register all Shared\* exception classes at plugin init.
 //!
-//! Hierarchy (13 classes total — 10 Shared\* + 3 Shared\* extending Async\*):
+//! Hierarchy (14 classes total — 11 Shared\* + 3 Shared\* extending Async\*):
 //!
 //!   \Exception
 //!     ├── OxPHP\Async\AsyncException                  (registered by ox_async plugin)
@@ -12,6 +12,7 @@
 //!          ├── TypeException
 //!          │    └── CycleException                     Map::set would form a cycle
 //!          ├── CapacityException
+//!          ├── ValueTooLargeException                  Map value over the per-value cap
 //!          ├── ClosedException                         DEPRECATED — still thrown by Pool;
 //!          │                                            removed once Pool migrates
 //!          ├── PoisonedException                       Once Poison-mode failure
@@ -41,6 +42,7 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         "OxPHP\\Shared\\StaleHandleException",
         "OxPHP\\Shared\\TypeException",
         "OxPHP\\Shared\\CapacityException",
+        "OxPHP\\Shared\\ValueTooLargeException",
         "OxPHP\\Shared\\ClosedException",
         "OxPHP\\Shared\\PoisonedException",
         "OxPHP\\Shared\\UninitializedException",
@@ -127,9 +129,9 @@ mod tests {
     #[test]
     fn all_thirteen_classes_registered() {
         let classes = run_register();
-        // 1 base (SharedException) + 8 direct children + CycleException
-        // + 3 AsyncException children = 13.
-        assert_eq!(classes.len(), 13);
+        // 1 base (SharedException) + 9 direct children + CycleException
+        // + 3 AsyncException children = 14.
+        assert_eq!(classes.len(), 14);
         let fqns: Vec<&str> = classes.iter().map(|c| c.fqn.as_str()).collect();
         for required in [
             "OxPHP\\Shared\\SharedException",
@@ -137,6 +139,7 @@ mod tests {
             "OxPHP\\Shared\\TypeException",
             "OxPHP\\Shared\\CycleException",
             "OxPHP\\Shared\\CapacityException",
+            "OxPHP\\Shared\\ValueTooLargeException",
             "OxPHP\\Shared\\ClosedException",
             "OxPHP\\Shared\\PoisonedException",
             "OxPHP\\Shared\\UninitializedException",

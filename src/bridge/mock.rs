@@ -890,6 +890,27 @@ pub unsafe fn oxphp_shared_invoke_byref_1_portbuf(
     -1
 }
 
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn oxphp_shared_invoke_2_ret_stop(
+    _callable: *mut c_void,
+    _key_kind: c_int,
+    _key_int: i64,
+    _key_ptr: *const u8,
+    _key_len: usize,
+    _val_buf: *const u8,
+    _val_len: usize,
+) -> c_int {
+    0 // host stub: continue iteration
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn oxphp_shared_map_cursor_alloc(
+    _out_zv: *mut c_void,
+    _state_ptr: *mut c_void,
+) -> c_int {
+    -1 // host cannot construct PHP objects
+}
+
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
 #[allow(dead_code)]

@@ -3048,6 +3048,7 @@ mod tests {
             introspection_preview_enabled: true,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
+            max_value_size: 1 << 20,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,

@@ -15,6 +15,9 @@ pub struct SharedConfig {
     pub introspection_preview_enabled: bool,
     pub cycle_detect_depth: usize,
     pub cycle_detect_edges: usize,
+    /// Per-value serialised size cap (bytes). A single Map/Channel value
+    /// whose portbuf encoding exceeds this throws ValueTooLargeException.
+    pub max_value_size: usize,
     pub poison_strict: bool,
     pub lock_diagnostics: LockDiagnosticsLevel,
     pub lock_poll_interval_ms: u64,
@@ -66,6 +69,7 @@ impl SharedConfig {
             introspection_preview_enabled: shared_bool(ctx, "INTROSPECTION_PREVIEW_ENABLED", true)?,
             cycle_detect_depth: parse_usize(shared_value(ctx, "CYCLE_DETECT_DEPTH"), 16),
             cycle_detect_edges: parse_usize(shared_value(ctx, "CYCLE_DETECT_EDGES"), 10_000),
+            max_value_size: parse_usize(shared_value(ctx, "MAX_VALUE_SIZE"), 1 << 20),
             poison_strict: shared_bool(ctx, "POISON_STRICT", false)?,
             lock_diagnostics: parse_lock_diag(shared_value(ctx, "LOCK_DIAGNOSTICS")),
             lock_poll_interval_ms: parse_u64(shared_value(ctx, "LOCK_POLL_INTERVAL_MS"), 100),
