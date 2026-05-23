@@ -389,6 +389,29 @@ extern "C" {
         did_mutate: *mut c_int,
     ) -> c_int;
 
+    /// Invoke `$fn(key, value)` for `Shared\Map::forEach`. The key is the
+    /// tagged tuple `(key_kind: 0=int/1=str, key_int, key_ptr, key_len)`;
+    /// the value is a portbuf buffer deserialised into a zval. Returns
+    /// `1` to STOP (callback returned `false`), `0` to continue, `<0` on
+    /// call failure (EG(exception) set on the PHP side).
+    pub fn oxphp_shared_invoke_2_ret_stop(
+        callable: *mut c_void,
+        key_kind: c_int,
+        key_int: i64,
+        key_ptr: *const u8,
+        key_len: usize,
+        val_buf: *const u8,
+        val_len: usize,
+    ) -> c_int;
+
+    /// Construct a `OxPHP\Shared\Map\KeyCursor` object into `out_zv` and
+    /// stamp `state_ptr` (a `Box::into_raw(Box<KeyCursorState>)`) into its
+    /// rust_data storage slot (offset 0). Mirrors
+    /// `oxphp_shared_pool_handle_alloc`. Returns `0` on success, `-1` if
+    /// the class is not registered / object_init_ex fails (the caller
+    /// then reclaims the box).
+    pub fn oxphp_shared_map_cursor_alloc(out_zv: *mut c_void, state_ptr: *mut c_void) -> c_int;
+
     // ── Shared\Pool bridge ───────────────────
     // See ext/bridge/oxphp_bridge.h §Shared\Pool helpers for the
     // lifetime contract. Pointers returned via out-params are

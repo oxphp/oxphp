@@ -9,3 +9,4 @@ shared/test_mutex_contention
 shared/test_mutex_with_lock_timeout
 shared/test_once_init_single_init
 shared/test_once_cross_thread
+shared/test_map_compare_and_set_concurrent

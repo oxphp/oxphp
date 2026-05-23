@@ -5010,6 +5010,70 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     return OXPHP_SHARED_INVOKE_OK;
 }
 
+/* Invoke $fn(key, value) for Shared\Map::forEach. The key is the tagged
+ * tuple (key_kind: 0=int → IS_LONG, 1=str → IS_STRING); the value is
+ * portbuf bytes deserialised into a zval on this thread. No Map lock is
+ * held across this call (the Rust side snapshots keys, releases the
+ * shard, then calls here per key).
+ *
+ * Returns 1 to STOP iteration (callback returned bool false), 0 to
+ * continue, <0 on a bad callable, a deserialise failure, or a PHP throw
+ * (EG(exception) stays set for the caller's method wrapper to surface). */
+int oxphp_shared_invoke_2_ret_stop(zval *callable,
+                                   int key_kind,
+                                   int64_t key_int,
+                                   const char *key_ptr,
+                                   size_t key_len,
+                                   const char *val_buf,
+                                   size_t val_len)
+{
+    if (!callable) return -1;
+
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        return -1;
+    }
+    if (err) efree(err);
+
+    zval args[2];
+    /* arg 0: key */
+    if (key_kind == 0) {
+        ZVAL_LONG(&args[0], (zend_long)key_int);
+    } else {
+        ZVAL_STRINGL(&args[0], key_ptr ? key_ptr : "", key_len);
+    }
+    /* arg 1: value, materialised from portbuf */
+    ZVAL_UNDEF(&args[1]);
+    if (oxphp_portable_deserialize((const uint8_t *)val_buf, val_len, 1, &args[1]) != 0) {
+        zval_ptr_dtor(&args[0]);
+        zval_ptr_dtor(&args[1]);
+        return -1;
+    }
+
+    zval ret_zv;
+    ZVAL_UNDEF(&ret_zv);
+    zend_call_known_function(fcc.function_handler,
+                             fcc.object,
+                             fcc.called_scope,
+                             &ret_zv,
+                             2, args, NULL);
+
+    zval_ptr_dtor(&args[0]);
+    zval_ptr_dtor(&args[1]);
+
+    if (EG(exception)) {
+        zval_ptr_dtor(&ret_zv);
+        return -1;
+    }
+
+    int stop = (Z_TYPE(ret_zv) == IS_FALSE) ? 1 : 0;
+    zval_ptr_dtor(&ret_zv);
+    return stop;
+}
+
 /* ═══════════════════════════════════════════════════════════
  *  Cross-thread fcc spike
  *
@@ -5400,6 +5464,41 @@ int oxphp_shared_pool_handle_alloc(void *out_zv,
     memcpy(storage,       &pool_id,       sizeof(uint64_t));
     memcpy(storage + 8,   &owner_tid,     sizeof(uint64_t));
     memcpy(storage + 16,  &slot_zv_heap,  sizeof(void *));
+    return 0;
+}
+
+/* ─── Shared\Map\KeyCursor rust_data wrapper helper ─────────────
+ * KeyCursor's storage struct (Rust `#[repr(C)] KeyCursorStorage`):
+ *   void * state  @ offset 0   (Box::into_raw(Box<KeyCursorState>))
+ * The storage_factory zero-inits the slot (state = NULL) when
+ * object_init_ex runs; this helper stamps the real state pointer. */
+static zend_class_entry *oxphp_map_cursor_ce_lookup(void) {
+    zend_string *cname = zend_string_init(
+        "OxPHP\\Shared\\Map\\KeyCursor",
+        sizeof("OxPHP\\Shared\\Map\\KeyCursor") - 1,
+        0);
+    zend_class_entry *ce = zend_lookup_class_ex(cname, NULL, 0);
+    zend_string_release(cname);
+    return ce;
+}
+
+/* Construct a KeyCursor into out_zv and stamp state_ptr into its
+ * rust_data slot (offset 0). Returns 0 on success, -1 if the class is
+ * not registered or object_init_ex fails (caller reclaims the box). */
+int oxphp_shared_map_cursor_alloc(void *out_zv, void *state_ptr) {
+    if (!out_zv) return -1;
+    zval *out = (zval *)out_zv;
+
+    zend_class_entry *ce = oxphp_map_cursor_ce_lookup();
+    if (!ce) return -1;
+    if (object_init_ex(out, ce) != SUCCESS) return -1;
+
+    oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(out));
+    if (!intern || !intern->rust_data) {
+        zval_ptr_dtor(out);
+        return -1;
+    }
+    memcpy(intern->rust_data, &state_ptr, sizeof(void *));
     return 0;
 }
 

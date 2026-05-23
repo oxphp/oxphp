@@ -61,6 +61,7 @@ fn ensure_registry() {
         introspection_preview_enabled: false,
         cycle_detect_depth: 16,
         cycle_detect_edges: 10_000,
+        max_value_size: 1 << 20,
         poison_strict: false,
         lock_diagnostics: LockDiagnosticsLevel::Off,
         lock_poll_interval_ms: 100,
@@ -109,11 +110,20 @@ fn bench_map_set_many_vs_single(c: &mut Criterion) {
             b.iter(|| {
                 for (k, v) in &singles {
                     let rc = unsafe {
-                        oxphp_shared_map_set(id, k.as_ptr(), k.len(), v.as_ptr(), v.len())
+                        oxphp_shared_map_set(
+                            id,
+                            1, // KEY_KIND_STR
+                            0,
+                            k.as_ptr(),
+                            k.len(),
+                            v.as_ptr(),
+                            v.len(),
+                        )
                     };
                     assert_eq!(rc, 0);
                 }
-                unsafe { oxphp_shared_map_clear(id) };
+                let mut removed: u64 = 0;
+                unsafe { oxphp_shared_map_clear(id, &mut removed) };
             });
             unsafe { oxphp::plugins::ox_shared::registry::oxphp_shared_handle_drop(id) };
         });
@@ -135,7 +145,8 @@ fn bench_map_set_many_vs_single(c: &mut Criterion) {
                 };
                 assert_eq!(rc, 0);
                 assert_eq!(inserted as usize, n);
-                unsafe { oxphp_shared_map_clear(id) };
+                let mut removed: u64 = 0;
+                unsafe { oxphp_shared_map_clear(id, &mut removed) };
             });
             unsafe { oxphp::plugins::ox_shared::registry::oxphp_shared_handle_drop(id) };
         });

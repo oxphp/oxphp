@@ -1,18 +1,50 @@
-//! `Shared\Map` — concurrent `Arc<str> → SharedValue` store.
+//! `Shared\Map` — concurrent `MapKey → SharedValue` store.
 //!
 //! Built on DashMap with nested-Shareable lifetime via
 //! `SharedValue::Shared(SharedRefOwned)`: every stored value carries
 //! its own strong `Arc<Entry>` for any nested `Shared\*` it points to.
 //! `set` moves the candidate value into storage (the Arc travels with
-//! it) and hands the displaced value back to the caller, who is now
-//! responsible for dropping it. `clear` and `on_drop` simply drop the
-//! `SharedValue`s — `SharedRefOwned::Drop` decrements the Arc.
+//! it). `clear` and `on_drop` simply drop the `SharedValue`s —
+//! `SharedRefOwned::Drop` decrements the Arc.
 //!
-//! Additional layers: cycle detection, per-instance cap, atomic RMW
-//! (trySet / update / getOrSet), FFI + PHP class, and batched
-//! ops.
+//! ## Null-as-absence invariant
+//!
+//! `null` is never a stored value: it is the absence sentinel across
+//! the whole surface (`get`/`swap`/`pop`/`setIfAbsent` returning null
+//! ⟺ the key was absent; `compareAndSet` treats `null` on either side
+//! as "absent"). Writing `null` throws `TypeException`. This collapses
+//! the mixed-return / `has()` apparatus exactly as
+//! `java.util.concurrent.ConcurrentHashMap` and Go `sync.Map` do.
+//!
+//! ## Keys
+//!
+//! Keys are [`MapKey`] (`int | string`), kept **disjoint** — `123` and
+//! `"123"` are different entries (no PHP key coercion).
+//!
+//! ## Counters & soft cap
+//!
+//! Entry count is tracked via **striped per-stripe counters**
+//! (`Box<[AtomicIsize]>`), summed weakly-consistently by [`count`].
+//! `maxEntries` is enforced against that sum and is therefore a **soft**
+//! ceiling: under concurrent inserts the instance may overshoot by up to
+//! ~(stripe count) before rejecting. Overwrites always succeed.
+//!
+//! ## Conditional mutation
+//!
+//! [`compare_and_set`] is the single linearisable primitive (insert /
+//! replace / remove / no-op via the `None` absence sentinel on both
+//! sides). [`swap`] / [`pop`] / [`set_if_absent`] return the prior
+//! value. There is **no callback-under-lock** path — `forEach` re-fetches
+//! each value with no shard lock held.
+//!
+//! [`MapKey`]: super::map_key::MapKey
+//! [`count`]: MapInner::count
+//! [`compare_and_set`]: MapInner::compare_and_set
+//! [`swap`]: MapInner::swap
+//! [`pop`]: MapInner::pop
+//! [`set_if_absent`]: MapInner::set_if_absent
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use dashmap::DashMap;
@@ -22,47 +54,62 @@ use crate::plugins::ox_shared::error::{read_last_error_message, set_last_error, 
 use crate::plugins::ox_shared::registry::{
     Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
+use crate::plugins::ox_shared::types::map_key::MapKey;
 use crate::plugins::ox_shared::value::{collect_shared_refs, raw_to_owned, SharedRef, SharedValue};
 
+/// Number of striped per-stripe entry counters. A power of two so the
+/// `hash % STRIPE_COUNT` mapping is cheap and well-distributed. The
+/// stripe a key lands in is a *stable* function of the key — it need
+/// not match DashMap's internal shard (correctness only requires
+/// stability; cache locality is a non-goal here). The soft-cap overshoot
+/// bound is at most this many entries under maximal write concurrency.
+const STRIPE_COUNT: usize = 32;
+
+/// Fixed key-slot cost for an `Int` key in [`map_entry_cost`]. `Str`
+/// keys instead charge their byte length (mirroring the old `&str`
+/// accounting). 8 bytes ≈ the `i64` payload.
+const INT_KEY_COST: usize = 8;
+
 /// Approximate byte-cost of a single `(key, value)` pair as accounted
-/// in [`MapInner::mem_bytes`]: 64 B shard-slot + 16 B `Arc<str>`
-/// overhead + `key.len()` + `value.mem_bytes()`. Used by mutator-site
-/// delta tracking to keep `Entry::mem_bytes` and `total_bytes` in sync
-/// with container growth without recomputing the full footprint on
-/// every op.
+/// in [`MapInner::mem_bytes`]: 64 B shard-slot + 16 B key overhead +
+/// key-size + `value.mem_bytes()`. Used by mutator-site delta tracking
+/// to keep `Entry::mem_bytes` and `total_bytes` in sync with container
+/// growth without recomputing the full footprint on every op.
 ///
 /// **Invariant — keep in sync with [`MapInner::mem_bytes`]**: the
-/// formula there is `count*64 + Σ(key.len + 16 + value.mem_bytes) + 128`.
-/// Per-entry portion (`64 + 16 + key.len + value.mem_bytes`) must match
-/// this function (and its `_parts` twin) exactly, else the delta
-/// stream and the recomputed-from-scratch baseline drift apart. The
-/// +128 base is booked separately by `SharedRegistry::insert` (it's
-/// part of the initial `inner.mem_bytes()` reported at construction)
-/// and is NOT counted here.
-fn map_entry_cost(key: &str, value: &SharedValue) -> isize {
-    map_entry_cost_parts(key.len(), value.mem_bytes())
+/// per-entry portion (`64 + 16 + key-size + value.mem_bytes`) must match
+/// the sum body there. The +128 base is booked separately by
+/// `SharedRegistry::insert` and is NOT counted here.
+fn map_entry_cost(key: &MapKey, value: &SharedValue) -> isize {
+    map_entry_cost_parts(map_key_size(key), value.mem_bytes())
 }
 
-/// Parts-shaped twin of [`map_entry_cost`] for hot loops where the key
-/// has already been moved into `DashMap::insert` and only the lengths
-/// survive. Single source of truth for the per-entry cost formula —
-/// callers that have a `&str` go through [`map_entry_cost`].
-fn map_entry_cost_parts(key_len: usize, value_mem: usize) -> isize {
-    (64 + 16 + key_len + value_mem) as isize
+/// Parts-shaped twin of [`map_entry_cost`] — single source of truth for
+/// the per-entry cost formula.
+fn map_entry_cost_parts(key_size: usize, value_mem: usize) -> isize {
+    (64 + 16 + key_size + value_mem) as isize
+}
+
+/// Size charged for a key in the mem-accounting: `Str` → byte length,
+/// `Int` → [`INT_KEY_COST`].
+fn map_key_size(key: &MapKey) -> usize {
+    match key {
+        MapKey::Int(_) => INT_KEY_COST,
+        MapKey::Str(s) => s.len(),
+    }
 }
 
 /// Rust-side storage for one `Shared\Map` instance.
 pub struct MapInner {
-    entries: DashMap<Arc<str>, SharedValue>,
+    entries: DashMap<MapKey, SharedValue>,
     /// Per-instance cap; `None` = unbounded (subject only to the global
     /// `SHARED_MAX_ENTRIES`).
     max_entries: Option<usize>,
-    /// Strict entry-count mirror of `entries.len()`. Maintained via
-    /// atomic CAS in `set` (for cap enforcement) and atomic decrement
-    /// in `remove` / reset in `clear`. DashMap's `.len()` aggregates
-    /// shard counts with no synchronisation guarantee wrt cap checks,
-    /// so we keep this parallel counter.
-    count: AtomicUsize,
+    /// Striped per-stripe entry counters (LongAdder-style). `count()`
+    /// sums them; `max_entries` checks the sum. No global hot atomic on
+    /// the write path, so writes scale across stripes. Weakly consistent:
+    /// exact when quiescent, an approximation under concurrent writes.
+    counts: Box<[AtomicIsize]>,
     /// The Map's own registry id, bound once by the creating FFI path
     /// via [`MapInner::bind_id`]. `None` before bind (or in Rust-only
     /// tests that skip registry insertion) — cycle detection is then
@@ -70,19 +117,20 @@ pub struct MapInner {
     self_id: OnceLock<SharedId>,
     /// Cached `Weak<Entry>` bound by the creating FFI path via
     /// [`MapInner::bind_entry`]. Lets [`track_map_delta`] skip the
-    /// DashMap shard-locked lookup that [`SharedRegistry::adjust_mem_bytes`]
-    /// would otherwise do — one `Weak::upgrade` is enough to reach the
-    /// entry and call [`Entry::adjust_mem_bytes`] directly. Falls back
-    /// to the id-based slow path when this isn't bound (test fixtures).
+    /// registry shard-locked lookup.
     self_entry: OnceLock<Weak<Entry>>,
 }
 
 impl MapInner {
     pub fn new(max_entries: Option<usize>) -> Self {
+        let counts = (0..STRIPE_COUNT)
+            .map(|_| AtomicIsize::new(0))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
             entries: DashMap::new(),
             max_entries,
-            count: AtomicUsize::new(0),
+            counts,
             self_id: OnceLock::new(),
             self_entry: OnceLock::new(),
         }
@@ -103,7 +151,7 @@ impl MapInner {
     /// from the creating FFI right after `registry.insert` with
     /// `Arc::downgrade(&entry_arc)`. Sets both the id (from the upgrade)
     /// and the cached `Weak<Entry>` that [`track_map_delta`] uses to
-    /// bypass the DashMap shard-lock on every mutation.
+    /// bypass the registry shard-lock on every mutation.
     pub fn bind_entry(&self, weak: Weak<Entry>) {
         if let Some(arc) = weak.upgrade() {
             let _ = self.self_id.set(arc.id);
@@ -115,14 +163,28 @@ impl MapInner {
         self.self_id.get().copied()
     }
 
-    /// Adjust the registry's accounted memory by `delta`. Fast path
-    /// uses the cached `Weak<Entry>` to call
-    /// [`Entry::adjust_mem_bytes`] directly (one `Weak::upgrade`, no
-    /// DashMap lookup). Falls back to the id-based slow path through
-    /// the registry for fixtures that only ran [`bind_id`]. No-op when
-    /// the Map is not yet registered or the global registry has been
-    /// torn down. See [`SharedRegistry::adjust_mem_bytes`] for the
-    /// best-effort contract.
+    /// Stable key → stripe index. Hashes the key with the default
+    /// hasher and folds onto `STRIPE_COUNT`. A *stable* mapping is all
+    /// that's required — it need not align with DashMap's internal shard.
+    fn stripe_index(&self, key: &MapKey) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut h);
+        (h.finish() as usize) % self.counts.len()
+    }
+
+    fn inc_count(&self, key: &MapKey) {
+        self.counts[self.stripe_index(key)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec_count(&self, key: &MapKey) {
+        self.counts[self.stripe_index(key)].fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Adjust the registry's accounted memory by `delta`. Fast path uses
+    /// the cached `Weak<Entry>`; falls back to the id-based slow path for
+    /// fixtures that only ran [`bind_id`]. No-op when the Map is not yet
+    /// registered or the registry has been torn down.
     fn track_map_delta(&self, delta: isize) {
         if delta == 0 {
             return;
@@ -142,86 +204,37 @@ impl MapInner {
         reg.adjust_mem_bytes(id, delta);
     }
 
-    /// Insert or replace. Returns the previous value, if any.
-    ///
-    /// Runs the cycle check BEFORE any mutation so a rejected insert
-    /// leaves the Map untouched and no retain counts leak. The Map's
-    /// own id must have been bound via [`bind_id`] for the check to
-    /// fire — otherwise nothing in the registry can reach this Map
-    /// and cycles are impossible.
-    ///
-    /// Ownership contract: the candidate `value` is moved into the
-    /// Map's storage on success — any `SharedValue::Shared` it carries
-    /// brings its own `Arc<Entry>` strong reference along. The
-    /// returned prev value (if any) was the Map's previously held
-    /// `SharedValue`; the caller now owns its strong references and
-    /// must drop or pass it on. The asymmetry lets FFI build a PHP
-    /// wrapper from `prev` before letting it drop.
-    ///
-    /// On cycle:
-    /// - Last-error thread-local is populated with the reachable path
-    ///   (e.g. `"cycle would form: #3 → #5 → #42"`).
-    /// - `SharedError::Cycle` is returned; the FFI layer maps this to
-    ///   `OxPHP\Shared\CycleException`.
-    ///
-    /// [`bind_id`]: MapInner::bind_id
-    pub fn set(
-        &self,
-        key: Arc<str>,
-        value: SharedValue,
-    ) -> Result<Option<SharedValue>, SharedError> {
-        let reg = REGISTRY.get();
+    // ── Shared validation helpers ──────────────────────────────────
+    //
+    // `set` / `compare_and_set` / `swap` / `set_if_absent` all funnel
+    // a candidate value through the same two checks before it enters
+    // storage: (1) cycle detection on any nested Shareable, (2) the
+    // value-type/null rejection. Factoring them here keeps the four
+    // mutators consistent (issue: value-type rejection drift).
 
-        // Pre-mutation: cycle check. Scalar values skip the walk (zero-cost).
-        if let Some(reg) = reg {
-            self.check_cycles(reg, &value)?;
+    /// Reject values that may never be stored: `null` is the absence
+    /// sentinel, never a value. Objects/closures/resources never reach
+    /// here as `SharedValue` (the portbuf codec / PHP-side serializer
+    /// rejects them earlier), but `Null` can, so guard it explicitly.
+    fn reject_unstorable(value: &SharedValue) -> Result<(), SharedError> {
+        if matches!(value, SharedValue::Null) {
+            set_last_error(
+                "Shared\\Map: null is not a storable value (null means absence; \
+                 use remove() / key absence instead)",
+            );
+            return Err(SharedError::Type);
         }
+        Ok(())
+    }
 
-        // Atomic insert path. The shard lock inside `entry(key)` serialises
-        // all writes to this key; the cap enforcement uses a separate
-        // CAS-loop on `self.count` to stay consistent across shards.
-        let new_size = value.mem_bytes() as isize;
-        let e = self.entries.entry(key);
-        match e {
-            dashmap::Entry::Occupied(mut occ) => {
-                // Replace — count unchanged, no cap check. The moved
-                // `value` carries its Arc into storage; the displaced
-                // `prev` carries its own Arc out to the caller.
-                let prev = std::mem::replace(occ.get_mut(), value);
-                self.track_map_delta(new_size - prev.mem_bytes() as isize);
-                Ok(Some(prev))
-            }
-            dashmap::Entry::Vacant(vac) => {
-                // New key — enforce per-instance cap (if set) atomically.
-                if let Some(max) = self.max_entries {
-                    if self
-                        .count
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                            if c < max {
-                                Some(c + 1)
-                            } else {
-                                None
-                            }
-                        })
-                        .is_err()
-                    {
-                        set_last_error(format!(
-                            "Shared\\Map capacity exceeded: {max}/{max} entries; \
-                             raise `new Shared\\Map(maxEntries: ...)` or remove \
-                             keys first"
-                        ));
-                        return Err(SharedError::CapacityExceeded);
-                    }
-                } else {
-                    self.count.fetch_add(1, Ordering::Relaxed);
-                }
-
-                let delta = map_entry_cost(vac.key(), &value);
-                vac.insert(value);
-                self.track_map_delta(delta);
-                Ok(None)
-            }
-        }
+    /// Run the cycle walker for every `SharedValue::Shared` reachable
+    /// from `value`. No-op if this Map has no `self_id` bound or the
+    /// registry is absent.
+    fn cycle_check(&self, value: &SharedValue) -> Result<(), SharedError> {
+        let Some(reg) = REGISTRY.get() else {
+            return Ok(());
+        };
+        self.check_cycles(reg, value)
     }
 
     /// Run the cycle walker for every `SharedValue::Shared` reachable
@@ -280,26 +293,21 @@ impl MapInner {
         Ok(())
     }
 
-    pub fn get(&self, key: &str) -> Option<SharedValue> {
-        self.entries.get(key).map(|r| r.value().clone())
-    }
+    // ── Core mutators ──────────────────────────────────────────────
 
-    /// Core single-key insert without the cycle check. Used by
-    /// [`set_many`] after a single batched cycle check covers every
-    /// value in the incoming batch — folding N per-key cycle walks
-    /// into one is the main reason the batched API outperforms
-    /// `N × set` at the PHP layer (spec §Performance target).
+    /// Insert or replace. Returns the previous value, if any.
     ///
-    /// Same ownership contract as [`set`]: caller inherits the
-    /// returned previous value's Arc.
-    fn set_without_cycle_check(
-        &self,
-        key: Arc<str>,
-        value: SharedValue,
-    ) -> Result<Option<SharedValue>, SharedError> {
+    /// Runs `reject_unstorable` + cycle check BEFORE any mutation so a
+    /// rejected insert leaves the Map untouched. The candidate `value`
+    /// is moved into storage on success — any nested `Shared` it carries
+    /// brings its own `Arc<Entry>` along. The returned prev (if any)
+    /// transfers its strong references to the caller.
+    pub fn set(&self, key: MapKey, value: SharedValue) -> Result<Option<SharedValue>, SharedError> {
+        Self::reject_unstorable(&value)?;
+        self.cycle_check(&value)?;
+
         let new_size = value.mem_bytes() as isize;
-        let e = self.entries.entry(key);
-        match e {
+        match self.entries.entry(key) {
             dashmap::Entry::Occupied(mut occ) => {
                 let prev = std::mem::replace(occ.get_mut(), value);
                 self.track_map_delta(new_size - prev.mem_bytes() as isize);
@@ -307,17 +315,10 @@ impl MapInner {
             }
             dashmap::Entry::Vacant(vac) => {
                 if let Some(max) = self.max_entries {
-                    if self
-                        .count
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                            if c < max {
-                                Some(c + 1)
-                            } else {
-                                None
-                            }
-                        })
-                        .is_err()
-                    {
+                    // Soft cap: checked against the striped sum (may
+                    // overshoot by up to STRIPE_COUNT under concurrent
+                    // inserts). Overwrites bypass this (handled above).
+                    if self.count() >= max {
                         set_last_error(format!(
                             "Shared\\Map capacity exceeded: {max}/{max} entries; \
                              raise `new Shared\\Map(maxEntries: ...)` or remove \
@@ -325,11 +326,46 @@ impl MapInner {
                         ));
                         return Err(SharedError::CapacityExceeded);
                     }
-                } else {
-                    self.count.fetch_add(1, Ordering::Relaxed);
                 }
-
                 let delta = map_entry_cost(vac.key(), &value);
+                self.inc_count(vac.key());
+                vac.insert(value);
+                self.track_map_delta(delta);
+                Ok(None)
+            }
+        }
+    }
+
+    /// Core single-key insert without the cycle check. Used by
+    /// [`set_many_batch`] after a single batched cycle check covers
+    /// every value in the incoming batch. Still runs `reject_unstorable`
+    /// + cap. Same ownership contract as [`set`].
+    fn set_without_cycle_check(
+        &self,
+        key: MapKey,
+        value: SharedValue,
+    ) -> Result<Option<SharedValue>, SharedError> {
+        Self::reject_unstorable(&value)?;
+        let new_size = value.mem_bytes() as isize;
+        match self.entries.entry(key) {
+            dashmap::Entry::Occupied(mut occ) => {
+                let prev = std::mem::replace(occ.get_mut(), value);
+                self.track_map_delta(new_size - prev.mem_bytes() as isize);
+                Ok(Some(prev))
+            }
+            dashmap::Entry::Vacant(vac) => {
+                if let Some(max) = self.max_entries {
+                    if self.count() >= max {
+                        set_last_error(format!(
+                            "Shared\\Map capacity exceeded: {max}/{max} entries; \
+                             raise `new Shared\\Map(maxEntries: ...)` or remove \
+                             keys first"
+                        ));
+                        return Err(SharedError::CapacityExceeded);
+                    }
+                }
+                let delta = map_entry_cost(vac.key(), &value);
+                self.inc_count(vac.key());
                 vac.insert(value);
                 self.track_map_delta(delta);
                 Ok(None)
@@ -339,27 +375,17 @@ impl MapInner {
 
     /// Batched insert. Runs the cycle walker **once** over every value
     /// in the batch, then replays the per-key insert loop without
-    /// re-running cycle detection. This is the shape the PHP-level
-    /// perf gate (spec §Performance target: `setMany(100) ≥ 3× 100×set`)
-    /// actually needs — PHP-engine dispatch is already amortised by the
-    /// single FFI crossing in the caller, and per-key cycle-walk
-    /// allocations are the remaining hot spot.
+    /// re-running cycle detection.
     ///
-    /// On first error (cycle, capacity, type): previously-committed
-    /// writes in this batch are kept (partial-apply, matches set_many's
-    /// documented per-key semantics); [`out_inserted`] in the FFI path
-    /// reports how many entries landed before the bail. All already-
-    /// displaced prev values are released before returning.
+    /// On first error (cycle, capacity, type) previously-committed
+    /// writes are kept (partial-apply, per-key semantics); the returned
+    /// count reports how many landed before the bail.
     pub fn set_many_batch(
         &self,
-        batch: Vec<(Arc<str>, SharedValue)>,
+        batch: Vec<(MapKey, SharedValue)>,
     ) -> Result<usize, (SharedError, usize)> {
-        let reg = REGISTRY.get();
-
         // 1. Single cycle check covering every Shared ref in the batch.
-        //    Skipped when the Map has no self_id bound or the batch is
-        //    free of Shareable values (common hot path: scalar maps).
-        if let Some(reg) = reg {
+        if let Some(reg) = REGISTRY.get() {
             if let Some(self_id) = self.self_id() {
                 let mut all_roots: Vec<SharedRef> = Vec::new();
                 for (_, v) in &batch {
@@ -404,38 +430,8 @@ impl MapInner {
             }
         }
 
-        // 2. Unbounded fast path: skip the per-key `count` CAS. Reserve
-        //    `batch.len()` slots up front with a single atomic add, then
-        //    refund overwrites (where `entries.insert` returned `Some`)
-        //    with one atomic subtract at the end. Shaves N - 2 atomic
-        //    ops — the main Rust-side win after dropping the per-key
-        //    cycle walk.
-        if self.max_entries.is_none() {
-            self.count.fetch_add(batch.len(), Ordering::Relaxed);
-            let mut overwrites: usize = 0;
-            let mut inserted = 0;
-            for (k, v) in batch {
-                let new_size = v.mem_bytes();
-                let key_len = k.len();
-                if let Some(prev) = self.entries.insert(k, v) {
-                    overwrites += 1;
-                    self.track_map_delta(new_size as isize - prev.mem_bytes() as isize);
-                    drop(prev);
-                } else {
-                    self.track_map_delta(map_entry_cost_parts(key_len, new_size));
-                }
-                inserted += 1;
-            }
-            if overwrites > 0 {
-                self.count.fetch_sub(overwrites, Ordering::Relaxed);
-            }
-            return Ok(inserted);
-        }
-
-        // 3. Capped path: fall back to the per-key helper so cap
-        //    enforcement is strict — a single optimistic reservation
-        //    would risk over-reserving vs `max_entries` when the batch
-        //    contains overwrites.
+        // 2. Per-key insert (cycle check already done). Reject + cap
+        //    still enforced per key via set_without_cycle_check.
         let mut inserted = 0;
         for (k, v) in batch {
             match self.set_without_cycle_check(k, v) {
@@ -449,34 +445,24 @@ impl MapInner {
         Ok(inserted)
     }
 
-    /// Atomic insert-if-absent. Returns `true` when the key was missing
-    /// and `value` was stored, `false` when the key already existed
-    /// (and `value` was discarded). Cycle + cap checks run before the
-    /// shard lock so `Vacant` never observes a half-done retain.
+    /// Atomic insert-if-absent. Returns the prior value (`Some`) or
+    /// `None` when the insert happened (`None` ⟺ inserted). Cycle + cap
+    /// + null checks run on the candidate before it enters storage.
     ///
-    /// PHP counterpart: `Shared\Map::trySet($key, $value): bool`.
-    pub fn set_if_absent(&self, key: Arc<str>, value: SharedValue) -> Result<bool, SharedError> {
-        let reg = REGISTRY.get();
-        if let Some(reg) = reg {
-            self.check_cycles(reg, &value)?;
-        }
+    /// PHP counterpart: `Shared\Map::setIfAbsent($key, $value): mixed`.
+    pub fn set_if_absent(
+        &self,
+        key: MapKey,
+        value: SharedValue,
+    ) -> Result<Option<SharedValue>, SharedError> {
+        Self::reject_unstorable(&value)?;
+        self.cycle_check(&value)?;
 
-        let e = self.entries.entry(key);
-        match e {
-            dashmap::Entry::Occupied(_) => Ok(false),
+        match self.entries.entry(key) {
+            dashmap::Entry::Occupied(occ) => Ok(Some(occ.get().clone())),
             dashmap::Entry::Vacant(vac) => {
                 if let Some(max) = self.max_entries {
-                    if self
-                        .count
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                            if c < max {
-                                Some(c + 1)
-                            } else {
-                                None
-                            }
-                        })
-                        .is_err()
-                    {
+                    if self.count() >= max {
                         set_last_error(format!(
                             "Shared\\Map capacity exceeded: {max}/{max} entries; \
                              raise `new Shared\\Map(maxEntries: ...)` or remove \
@@ -484,168 +470,214 @@ impl MapInner {
                         ));
                         return Err(SharedError::CapacityExceeded);
                     }
-                } else {
-                    self.count.fetch_add(1, Ordering::Relaxed);
                 }
                 let delta = map_entry_cost(vac.key(), &value);
+                self.inc_count(vac.key());
                 vac.insert(value);
                 self.track_map_delta(delta);
-                Ok(true)
-            }
-        }
-    }
-
-    /// Read-modify-write on `key`. `f` receives the current value
-    /// (or `None` if the key is absent) and returns the new value to
-    /// store — returning `None` removes the key.
-    ///
-    /// Returns the stored value (`Some`) or `None` if the key was removed
-    /// or the closure returned `None` for an absent key.
-    ///
-    /// Atomicity note: the snapshot / compute / commit sequence is not
-    /// CAS-linearised across concurrent writers on the same key — the
-    /// commit goes through the regular [`set`] / [`remove`] path, so a
-    /// racing write can interleave between the closure's observation
-    /// and the store. Single-key atomicity is guaranteed *per phase*
-    /// (shard-lock granularity), which matches standard DashMap RMW
-    /// semantics. Phase-level atomicity lets us keep the cycle check
-    /// outside the shard lock and avoid the walker-vs-DashMap deadlock
-    /// that a lock-held closure would hit for self-referencing graphs.
-    ///
-    /// PHP counterpart: `Shared\Map::update($key, $fn): mixed`.
-    ///
-    /// [`set`]: MapInner::set
-    /// [`remove`]: MapInner::remove
-    pub fn update_with<F>(&self, key: Arc<str>, f: F) -> Result<Option<SharedValue>, SharedError>
-    where
-        F: FnOnce(Option<&SharedValue>) -> Option<SharedValue>,
-    {
-        let current = self.get(&key);
-        let new_value = f(current.as_ref());
-
-        match new_value {
-            None => {
-                // Remove if present; the displaced `SharedValue`'s Arc
-                // is released when `removed` goes out of scope.
-                let _removed = self.remove(&key);
                 Ok(None)
             }
-            Some(v) => {
-                // set() covers cycle check, cap enforcement, swap. The
-                // displaced `prev` carries its own Arc and is dropped
-                // at end-of-scope here.
-                let _prev = self.set(key, v.clone())?;
-                Ok(Some(v))
+        }
+    }
+
+    /// Atomic compare-and-set — the single linearisable conditional
+    /// primitive. `None` = absence on both sides:
+    /// - `(expected=None, new=Some)` → insert iff absent
+    /// - `(expected=Some(A), new=Some(B))` → replace iff current == A
+    /// - `(expected=Some(A), new=None)` → remove iff current == A
+    /// - `(expected=None, new=None)` → no-op (returns true iff absent)
+    ///
+    /// Returns `true` iff the swap was applied. Equality is by content
+    /// (see [`sv_content_eq`]). Cycle/cap/null checks apply to the `new`
+    /// side. The whole compare+swap runs under a single shard lock
+    /// (`DashMap::entry`), so it is atomic wrt other writers on the key.
+    pub fn compare_and_set(
+        &self,
+        key: MapKey,
+        expected: Option<SharedValue>,
+        new: Option<SharedValue>,
+    ) -> Result<bool, SharedError> {
+        // Pre-validate `new` (null/unstorable + cycle). Cap is handled
+        // below under the entry lock on the insert path.
+        if let Some(v) = &new {
+            Self::reject_unstorable(v)?;
+            self.cycle_check(v)?;
+        }
+
+        match self.entries.entry(key) {
+            dashmap::Entry::Occupied(mut occ) => {
+                let matches = match &expected {
+                    Some(e) => sv_content_eq(occ.get(), e),
+                    None => false, // expected absent, but key present
+                };
+                if !matches {
+                    return Ok(false);
+                }
+                match new {
+                    Some(v) => {
+                        let new_size = v.mem_bytes() as isize;
+                        let old = std::mem::replace(occ.get_mut(), v);
+                        self.track_map_delta(new_size - old.mem_bytes() as isize);
+                        // old's Arc(s) released at end of scope.
+                    }
+                    None => {
+                        let (k, old) = occ.remove_entry();
+                        self.track_map_delta(-map_entry_cost(&k, &old));
+                        self.dec_count(&k);
+                    }
+                }
+                Ok(true)
+            }
+            dashmap::Entry::Vacant(vac) => {
+                if expected.is_some() {
+                    return Ok(false); // expected a value, found none
+                }
+                match new {
+                    None => Ok(true), // absent → absent: no-op
+                    Some(v) => {
+                        if let Some(max) = self.max_entries {
+                            if self.count() >= max {
+                                set_last_error(format!(
+                                    "Shared\\Map capacity exceeded: {max}/{max} entries; \
+                                     raise `new Shared\\Map(maxEntries: ...)` or remove \
+                                     keys first"
+                                ));
+                                return Err(SharedError::CapacityExceeded);
+                            }
+                        }
+                        let delta = map_entry_cost(vac.key(), &v);
+                        self.inc_count(vac.key());
+                        vac.insert(v);
+                        self.track_map_delta(delta);
+                        Ok(true)
+                    }
+                }
             }
         }
     }
 
-    /// Return the current value or compute-and-set via `factory`. The
-    /// factory is called only when the key is missing. On a concurrent
-    /// race where another thread inserts first, `factory`'s output is
-    /// discarded and the existing value is returned.
+    /// Overwrite and return the previous value (`None` ⟺ was absent).
+    /// Runs reject + cap + cycle check on the stored value.
     ///
-    /// PHP counterpart: `Shared\Map::getOrSet($key, $factory): mixed`.
-    pub fn get_or_set_with<F>(&self, key: Arc<str>, factory: F) -> Result<SharedValue, SharedError>
-    where
-        F: FnOnce() -> SharedValue,
-    {
-        if let Some(v) = self.get(&key) {
-            return Ok(v);
-        }
-        let candidate = factory();
-        match self.set_if_absent(Arc::clone(&key), candidate.clone())? {
-            true => Ok(candidate),
-            // Lost race: fall back to the winner's value, or to our
-            // candidate if the key disappeared again (extreme race).
-            false => Ok(self.get(&key).unwrap_or(candidate)),
+    /// PHP counterpart: `Shared\Map::swap($key, $value): mixed`.
+    pub fn swap(
+        &self,
+        key: MapKey,
+        value: SharedValue,
+    ) -> Result<Option<SharedValue>, SharedError> {
+        Self::reject_unstorable(&value)?;
+        self.cycle_check(&value)?;
+
+        let new_size = value.mem_bytes() as isize;
+        match self.entries.entry(key) {
+            dashmap::Entry::Occupied(mut occ) => {
+                let prev = std::mem::replace(occ.get_mut(), value);
+                self.track_map_delta(new_size - prev.mem_bytes() as isize);
+                Ok(Some(prev))
+            }
+            dashmap::Entry::Vacant(vac) => {
+                if let Some(max) = self.max_entries {
+                    if self.count() >= max {
+                        set_last_error(format!(
+                            "Shared\\Map capacity exceeded: {max}/{max} entries; \
+                             raise `new Shared\\Map(maxEntries: ...)` or remove \
+                             keys first"
+                        ));
+                        return Err(SharedError::CapacityExceeded);
+                    }
+                }
+                let delta = map_entry_cost(vac.key(), &value);
+                self.inc_count(vac.key());
+                vac.insert(value);
+                self.track_map_delta(delta);
+                Ok(None)
+            }
         }
     }
 
-    pub fn has(&self, key: &str) -> bool {
-        self.entries.contains_key(key)
-    }
-
-    /// Remove and return the value, if any.
-    ///
-    /// Ownership contract (symmetric with [`set`]'s return path): the
-    /// Map has dropped this key from its store; the returned
+    /// Remove and return the value (`None` ⟺ was absent). The returned
     /// `SharedValue` carries the Map's former `Arc<Entry>` strong
-    /// reference(s). The caller now owns those Arcs. FFI paths first
-    /// build a PHP wrapper from the value (cloning the Arc), then let
-    /// the local copy drop.
+    /// reference(s) — the caller now owns those Arcs.
     ///
-    /// [`set`]: MapInner::set
-    pub fn remove(&self, key: &str) -> Option<SharedValue> {
-        let removed = self.entries.remove(key).map(|(k, v)| {
+    /// PHP counterpart: `Shared\Map::pop($key): mixed`.
+    pub fn pop(&self, key: &MapKey) -> Option<SharedValue> {
+        self.entries.remove(key).map(|(k, v)| {
             self.track_map_delta(-map_entry_cost(&k, &v));
+            self.dec_count(&k);
             v
-        });
-        if removed.is_some() {
-            self.count.fetch_sub(1, Ordering::AcqRel);
-        }
-        removed
+        })
     }
 
+    pub fn get(&self, key: &MapKey) -> Option<SharedValue> {
+        self.entries.get(key).map(|r| r.value().clone())
+    }
+
+    /// Remove and discard the value. Returns whether it existed. No
+    /// value materialised for the caller.
+    ///
+    /// PHP counterpart: `Shared\Map::remove($key): bool`.
+    pub fn remove(&self, key: &MapKey) -> bool {
+        self.pop(key).is_some()
+    }
+
+    /// Weakly-consistent entry count: sum of the striped counters,
+    /// clamped to `>= 0` (a stale undercount can momentarily go
+    /// negative under concurrent remove/insert races).
     pub fn count(&self) -> usize {
-        self.count.load(Ordering::Acquire)
+        self.counts
+            .iter()
+            .map(|c| c.load(Ordering::Relaxed))
+            .sum::<isize>()
+            .max(0) as usize
     }
 
     /// Drop every entry. Each dropped `SharedValue` releases its own
-    /// nested `Arc<Entry>` refs via `SharedRefOwned::Drop`. Terminal —
-    /// there is no caller to inherit.
-    pub fn clear(&self) {
+    /// nested `Arc<Entry>` refs. Returns the number removed.
+    pub fn clear(&self) -> usize {
         let mut total_delta: isize = 0;
+        let mut removed: usize = 0;
+        // Decrement the stripe counter for each removed entry *inside* the
+        // retain closure — DashMap holds the entry's shard lock there, the
+        // same lock inserts take, so this is ordered against a concurrent
+        // `set`. A blanket `store(0)` would race: an insert that lands
+        // after retain passed its shard but before/around the reset would
+        // leave a live entry whose increment is wiped, desyncing count()
+        // permanently.
         self.entries.retain(|k, v| {
             total_delta -= map_entry_cost(k, v);
+            self.counts[self.stripe_index(k)].fetch_sub(1, Ordering::Relaxed);
+            removed += 1;
             false
         });
         self.track_map_delta(total_delta);
-        // Resync count with DashMap's post-retain view (handles races
-        // where a concurrent set slipped in during the retain walk).
-        self.count.store(self.entries.len(), Ordering::Release);
+        removed
     }
 
-    /// Keep only entries matching the predicate. For each entry the
-    /// Map drops (predicate returns `false`) the Map's hold on nested
-    /// `SharedValue::Shared` targets is released — symmetric with
-    /// [`clear`]: there is no caller to inherit the retain.
-    ///
-    /// Useful for TTL-style cleanup where the value carries its own
-    /// expiry (timestamp encoded in the value) and a background task
-    /// prunes stale entries in a single shard-walk instead of
-    /// `keys().iter().filter().for_each(|k| remove(k))` which locks
-    /// every shard twice.
-    ///
-    /// PHP counterpart: `Shared\Map::retain(fn($k, $v) => bool): int`
-    /// (returns the number of entries kept).
-    ///
-    /// [`clear`]: MapInner::clear
-    pub fn retain<F>(&self, mut f: F)
-    where
-        F: FnMut(&str, &SharedValue) -> bool,
-    {
-        let mut total_delta: isize = 0;
-        self.entries.retain(|k, v| {
-            if f(k, v) {
-                true
-            } else {
-                total_delta -= map_entry_cost(k, v);
-                false
-            }
-        });
-        self.track_map_delta(total_delta);
-        // Resync count: the predicate may have been called any number
-        // of times, and concurrent writers may have slipped in during
-        // the walk. DashMap's post-retain len() is the authoritative
-        // post-state for this Map's entries field.
-        self.count.store(self.entries.len(), Ordering::Release);
+    /// Snapshot every key into an owned `Vec<MapKey>` in a single
+    /// `entries.iter()` pass (O(n)). DashMap locks one physical shard at
+    /// a time and yields owned-clonable keys; cloning a `MapKey` is an
+    /// `i64` copy or `Arc` bump. The returned Vec holds **no value /
+    /// Shareable** — a concurrent delete frees the entry immediately —
+    /// and no lock is held once this returns, so `forEach` can re-fetch
+    /// each value and invoke PHP per key without holding any map lock.
+    pub fn all_keys(&self) -> Vec<MapKey> {
+        self.entries.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Snapshot of keys at call time. Iteration order is undefined
-    /// (DashMap's shard order); user docs flag this.
-    pub fn keys(&self) -> Vec<Arc<str>> {
-        self.entries.iter().map(|e| Arc::clone(e.key())).collect()
+    /// Sample up to `limit` keys as display strings for the
+    /// introspection endpoint. `Int` keys render as their decimal form;
+    /// iteration order is undefined (DashMap shard order). Not a public
+    /// PHP surface — observability only.
+    pub fn sample_keys(&self, limit: usize) -> Vec<String> {
+        self.entries
+            .iter()
+            .take(limit)
+            .map(|e| match e.key() {
+                MapKey::Int(i) => i.to_string(),
+                // Display only — lossy is fine for the introspection endpoint.
+                MapKey::Str(s) => String::from_utf8_lossy(s).into_owned(),
+            })
+            .collect()
     }
 }
 
@@ -659,30 +691,26 @@ impl SharedInner for MapInner {
     }
 
     fn debug_snapshot(&self) -> SharedValue {
-        // Per spec §mem_bytes: key count exposed as Long for
-        // /__ox_shared/entry — users see entry.type_specific.key_count.
         SharedValue::Long(self.count() as i64)
     }
 
     fn mem_bytes(&self) -> usize {
         // Approximate per spec §mem_bytes — documented to drift ±30%
-        // vs mallinfo. Per-entry ~64B (shard slot + Arc<str> + value
-        // discriminant) + variable key & value sizes. +128B base
+        // vs mallinfo. Per-entry ~64B + key & value sizes. +128B base
         // accounts for DashMap shard-array overhead.
         let count = self.count();
         let entries_bytes: usize = self
             .entries
             .iter()
-            .map(|e| e.key().len() + 16 + e.value().mem_bytes())
+            .map(|e| map_key_size(e.key()) + 16 + e.value().mem_bytes())
             .sum();
         count * 64 + entries_bytes + 128
     }
 
     fn on_drop(&self) {
-        // Map is being evicted from the registry. Every stored
-        // `SharedValue::Shared(SharedRefOwned)` releases its
-        // `Arc<Entry>` automatically when the DashMap drops the
-        // entry — no explicit walk needed.
+        // Map is being evicted. Every stored `SharedValue::Shared`
+        // releases its `Arc<Entry>` when the DashMap drops the entry —
+        // no explicit walk needed.
     }
 
     fn on_shutdown_notify(&self) {
@@ -690,24 +718,50 @@ impl SharedInner for MapInner {
     }
 
     fn children(&self, out: &mut Vec<SharedRef>) {
-        // Expose every Shared ref reachable from any stored value.
-        // The walker uses this to explore the reachability graph from
-        // a root candidate toward a target (another Map's self_id).
         for entry in self.entries.iter() {
             collect_shared_refs(entry.value(), out);
         }
     }
 }
 
+/// Content equality for `compareAndSet`. Scalars by value; nested
+/// `Shareable` (`SharedValue::Shared`) by registry id (monotonic, never
+/// reused — so a re-inserted entry that matches is genuinely the same
+/// live entry); strings/arrays by `sv_to_portbuf` byte equality.
+///
+/// Array equality is element-content equality over the stored
+/// representation, which keeps integer-keyed and string-keyed members in
+/// separate runs. This matches PHP `===` for the usual cases (list arrays;
+/// all-int or all-string keyed arrays), but NOT for arrays that interleave
+/// int and string keys in a specific order — e.g. `[0=>'a','x'=>'b',1=>'c']`
+/// and `[0=>'a',1=>'c','x'=>'b']` compare equal here though PHP `===`
+/// distinguishes them. This is inherent to how the Map normalises stored
+/// arrays (it would reorder them on read-back too), not a CAS-only quirk.
+fn sv_content_eq(a: &SharedValue, b: &SharedValue) -> bool {
+    use SharedValue::*;
+    match (a, b) {
+        (Null, Null) => true,
+        (Bool(x), Bool(y)) => x == y,
+        (Long(x), Long(y)) => x == y,
+        (Double(x), Double(y)) => x == y,
+        (Shared(x), Shared(y)) => x.id == y.id,
+        // Strings/Bytes/Arrays (and any cross-string/bytes pair) compare
+        // by serialised bytes. Mixed scalar pairs (e.g. Long vs Double)
+        // serialise to different tags and so compare unequal.
+        _ => sv_to_portbuf(a) == sv_to_portbuf(b),
+    }
+}
+
 // ─── FFI ──────────────────────────────────────────────────────────────────
 //
-// Signatures follow the 40-ffi-conventions.md §Batched array args decision:
-// PHP-side serialises zval → portbuf bytes via `oxphp_portable_serialize`;
-// Rust decodes with `portbuf_to_sv`. Returns travel the other direction via
-// `sv_to_portbuf` + libc::malloc; PHP frees with `oxphp_portable_free`.
+// Keys travel as a tagged tuple `(key_kind: c_int /*0=int,1=str*/,
+// key_int: i64, key_ptr, key_len)`. `decode_map_key` reconstructs a
+// `MapKey` from that tuple; every key-taking FFI fn uses it.
 //
-// Closure-driven ops (update / getOrSet) land in the next commit — they
-// need the `zend_fcall_info_cache` shim.
+// Values travel as portbuf bytes: PHP serialises zval → portbuf via
+// `oxphp_portable_serialize`; Rust decodes with `portbuf_to_sv` +
+// `raw_to_owned`. Returns travel back via `sv_to_portbuf` + libc::malloc;
+// PHP frees with `oxphp_portable_free`.
 
 use std::os::raw::c_int;
 
@@ -715,13 +769,50 @@ use crate::plugins::ox_shared::error::ffi_entry;
 use crate::plugins::ox_shared::registry::registry;
 use crate::plugins::ox_shared::value::{portbuf_to_sv, sv_to_portbuf};
 
-/// Hand a `Vec<u8>` off to C via `libc::malloc`. Mirrors the pattern in
-/// channel.rs so the C side uses a single `oxphp_portable_free` for all
-/// Rust-allocated payload buffers.
+/// Key discriminant in the FFI tagged-key tuple.
+const KEY_KIND_INT: c_int = 0;
+const KEY_KIND_STR: c_int = 1;
+
+/// Reconstruct a [`MapKey`] from the tagged FFI key tuple.
 ///
 /// # Safety
-/// On success the caller owns the returned allocation; it must be freed
-/// via `oxphp_portable_free` (which is just `libc::free` aliased).
+/// When `kind == KEY_KIND_STR`, `ptr` must be valid for reads of `len`
+/// bytes (or `len == 0`).
+unsafe fn decode_map_key(
+    kind: c_int,
+    key_int: i64,
+    ptr: *const u8,
+    len: usize,
+) -> Result<MapKey, SharedError> {
+    match kind {
+        KEY_KIND_INT => Ok(MapKey::Int(key_int)),
+        KEY_KIND_STR => {
+            // String keys are binary-safe: store the raw bytes opaquely so a
+            // non-UTF-8 PHP string key round-trips faithfully.
+            if len == 0 {
+                return Ok(MapKey::Str(Arc::from(&[][..])));
+            }
+            if ptr.is_null() {
+                set_last_error("key buffer is null with non-zero length");
+                return Err(SharedError::Generic);
+            }
+            let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+            Ok(MapKey::Str(Arc::from(slice)))
+        }
+        _ => {
+            set_last_error("invalid map key kind (expected 0=int or 1=str)");
+            Err(SharedError::Type)
+        }
+    }
+}
+
+/// Hand a `Vec<u8>` off to C via `libc::malloc`. Mirrors channel.rs so
+/// the C side uses a single `oxphp_portable_free` for all Rust-allocated
+/// payload buffers.
+///
+/// # Safety
+/// On success the caller owns the returned allocation; free via
+/// `oxphp_portable_free`.
 unsafe fn payload_to_malloc(bytes: Vec<u8>) -> Result<(*mut u8, usize), SharedError> {
     let n = bytes.len();
     if n == 0 {
@@ -738,24 +829,13 @@ unsafe fn payload_to_malloc(bytes: Vec<u8>) -> Result<(*mut u8, usize), SharedEr
     Ok((ptr, n))
 }
 
-/// Slurp a `(ptr, len)` pair into a UTF-8 `Arc<str>` key. Binary-safe
-/// (accepts any bytes); non-UTF-8 input is replaced with lossy chars.
-///
-/// # Safety
-/// `buf` must be valid for reads of `len` bytes when `len > 0`.
-unsafe fn key_from_raw(buf: *const u8, len: usize) -> Result<Arc<str>, SharedError> {
-    if len == 0 {
-        return Ok(Arc::from(""));
-    }
-    if buf.is_null() {
-        set_last_error("key buffer is null with non-zero length");
-        return Err(SharedError::Generic);
-    }
-    let slice = unsafe { std::slice::from_raw_parts(buf, len) };
-    Ok(match std::str::from_utf8(slice) {
-        Ok(s) => Arc::from(s),
-        Err(_) => Arc::from(String::from_utf8_lossy(slice).as_ref()),
-    })
+/// Decode a value portbuf slice into an owning `SharedValue`.
+fn decode_value(
+    bytes: &[u8],
+    reg: &'static crate::plugins::ox_shared::registry::SharedRegistry,
+) -> Result<SharedValue, SharedError> {
+    let raw = portbuf_to_sv(bytes)?;
+    raw_to_owned(raw, reg)
 }
 
 /// Create a new `Shared\Map`. `max_entries` ≤ 0 means unbounded.
@@ -778,11 +858,6 @@ pub unsafe extern "C" fn oxphp_shared_map_create(
             None
         };
         let reg = registry();
-        // Hold a typed `Arc<MapInner>` alongside the trait-object copy
-        // handed to the registry: lets us call `bind_id` directly
-        // without a downcast + `.expect`. The downcast would succeed by
-        // construction here, but laundering a static invariant through
-        // a runtime check makes the API look more dynamic than it is.
         let typed = Arc::new(MapInner::new(max));
         let arc = reg.insert(SharedType::Map, typed.clone())?;
         typed.bind_entry(Arc::downgrade(&arc));
@@ -817,37 +892,18 @@ pub unsafe extern "C" fn oxphp_shared_map_count(
 }
 
 /// # Safety
-/// `key` must be valid for reads of `klen` bytes (or `klen == 0`).
-/// `out` must be valid for a `c_int` write.
+/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
+/// `out_removed` must be valid for a `u64` write.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_has(
+pub unsafe extern "C" fn oxphp_shared_map_clear(
     entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
-    out: *mut c_int,
+    out_removed: *mut u64,
 ) -> c_int {
-    if out.is_null() {
-        set_last_error("out is null");
+    if out_removed.is_null() {
+        set_last_error("out_removed is null");
         return SharedError::Generic.code();
     }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_has on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
-        entry.registry.record_op(entry);
-        unsafe { *out = map.has(&k) as c_int };
-        Ok(())
-    })
-}
-
-/// # Safety
-/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_clear(entry_ptr: *const Entry) -> c_int {
+    unsafe { *out_removed = 0 };
     if entry_ptr.is_null() {
         return SharedError::StaleHandle.code();
     }
@@ -855,36 +911,40 @@ pub unsafe extern "C" fn oxphp_shared_map_clear(entry_ptr: *const Entry) -> c_in
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_clear on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        map.clear();
+        let removed = map.clear();
         entry.registry.record_op(entry);
+        unsafe { *out_removed = removed as u64 };
         Ok(())
     })
 }
 
 /// Fetch a value by key. On success writes a malloc'd portbuf buffer
 /// (callee frees via `oxphp_portable_free`). When the key is absent,
-/// `*out_missing` is set to `1` and no buffer is allocated.
+/// `*out_absent` is set to `1` and no buffer is allocated.
 ///
 /// # Safety
-/// `key` must be valid for reads of `klen` bytes (or `klen == 0`).
-/// `out_buf`, `out_len`, `out_missing` must each be valid for writes.
+/// Key tuple per `decode_map_key`. `out_buf`, `out_len`, `out_absent`
+/// must each be valid for writes.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn oxphp_shared_map_get(
     entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
-    out_missing: *mut c_int,
+    out_absent: *mut c_int,
 ) -> c_int {
-    if out_buf.is_null() || out_len.is_null() || out_missing.is_null() {
+    if out_buf.is_null() || out_len.is_null() || out_absent.is_null() {
         set_last_error("null out pointer");
         return SharedError::Generic.code();
     }
     unsafe {
         *out_buf = std::ptr::null_mut();
         *out_len = 0;
-        *out_missing = 0;
+        *out_absent = 0;
     }
     if entry_ptr.is_null() {
         return SharedError::StaleHandle.code();
@@ -893,7 +953,7 @@ pub unsafe extern "C" fn oxphp_shared_map_get(
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_get on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
         entry.registry.record_op(entry);
         match map.get(&k) {
             Some(v) => {
@@ -906,24 +966,46 @@ pub unsafe extern "C" fn oxphp_shared_map_get(
                 Ok(())
             }
             None => {
-                unsafe { *out_missing = 1 };
+                unsafe { *out_absent = 1 };
                 Ok(())
             }
         }
     })
 }
 
-/// Store `value_buf` (portbuf-encoded) under `key`. Maps `SharedError::Cycle`
-/// to status code `-9` and `SharedError::CapacityExceeded` to `-4`.
+/// Reject a value whose serialised size exceeds the configured per-value
+/// cap (`SHARED_MAX_VALUE_SIZE`, default 1 MiB). Guards against an
+/// allocation bomb from PHP-side input.
+fn enforce_value_size(
+    registry: &crate::plugins::ox_shared::registry::SharedRegistry,
+    serialized_len: usize,
+) -> Result<(), SharedError> {
+    let cap = registry.config().max_value_size;
+    if serialized_len > cap {
+        set_last_error(format!(
+            "Shared\\Map value of {serialized_len} bytes exceeds the per-value \
+             cap of {cap} bytes; raise SHARED_MAX_VALUE_SIZE or store less"
+        ));
+        return Err(SharedError::ValueTooLarge);
+    }
+    Ok(())
+}
+
+/// Store `value_buf` (portbuf-encoded) under `key`. Maps
+/// `SharedError::Cycle` to `-9`, `CapacityExceeded` to `-4`, `Type`
+/// (null/unstorable) to `-3`.
 ///
 /// # Safety
-/// `key` and `value_buf` must be valid for reads of `klen` / `vlen` bytes
-/// respectively (or their `_len` counterpart `== 0`).
+/// Key tuple per `decode_map_key`; `value_buf` valid for `vlen` bytes
+/// (or `vlen == 0`).
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn oxphp_shared_map_set(
     entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
     value_buf: *const u8,
     vlen: usize,
 ) -> c_int {
@@ -938,48 +1020,56 @@ pub unsafe extern "C" fn oxphp_shared_map_set(
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_set on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
 
+        enforce_value_size(entry.registry, vlen)?;
         let value_bytes = if vlen == 0 {
             &[][..]
         } else {
             unsafe { std::slice::from_raw_parts(value_buf, vlen) }
         };
-        let raw = portbuf_to_sv(value_bytes)?;
-        let value = raw_to_owned(raw, entry.registry)?;
+        let value = decode_value(value_bytes, entry.registry)?;
 
-        // Displaced value (if any) owns its Arc — FFI has no PHP
-        // wrapper to hand it to, so dropping here releases the
-        // Map's former hold.
         let _prev = map.set(k, value)?;
         entry.registry.record_op(entry);
         Ok(())
     })
 }
 
-/// Atomic insert-if-absent. `*out_inserted` becomes `1` when the value
-/// was stored, `0` when the key already existed.
+/// Atomic insert-if-absent. On success writes the prior value to
+/// `out_prev_buf`/`out_prev_len` (callee frees) and `*out_absent = 1`
+/// when the key was absent (i.e. the insert happened; no prev buffer).
 ///
 /// # Safety
-/// Same as `oxphp_shared_map_set`, plus `out_inserted` must be valid.
+/// Key tuple per `decode_map_key`; value valid for `vlen`. The three
+/// out pointers must be valid for writes.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn oxphp_shared_map_set_if_absent(
     entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
     value_buf: *const u8,
     vlen: usize,
-    out_inserted: *mut c_int,
+    out_prev_buf: *mut *mut u8,
+    out_prev_len: *mut usize,
+    out_absent: *mut c_int,
 ) -> c_int {
-    if out_inserted.is_null() {
-        set_last_error("out_inserted is null");
+    if out_prev_buf.is_null() || out_prev_len.is_null() || out_absent.is_null() {
+        set_last_error("null out pointer");
         return SharedError::Generic.code();
     }
     if vlen > 0 && value_buf.is_null() {
         set_last_error("value_buf null with non-zero length");
         return SharedError::Generic.code();
     }
-    unsafe { *out_inserted = 0 };
+    unsafe {
+        *out_prev_buf = std::ptr::null_mut();
+        *out_prev_len = 0;
+        *out_absent = 0;
+    }
     if entry_ptr.is_null() {
         return SharedError::StaleHandle.code();
     }
@@ -987,67 +1077,26 @@ pub unsafe extern "C" fn oxphp_shared_map_set_if_absent(
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_set_if_absent on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
+        enforce_value_size(entry.registry, vlen)?;
         let value_bytes = if vlen == 0 {
             &[][..]
         } else {
             unsafe { std::slice::from_raw_parts(value_buf, vlen) }
         };
-        let raw = portbuf_to_sv(value_bytes)?;
-        let value = raw_to_owned(raw, entry.registry)?;
-        let inserted = map.set_if_absent(k, value)?;
-        entry.registry.record_op(entry);
-        unsafe { *out_inserted = inserted as c_int };
-        Ok(())
-    })
-}
-
-/// Remove a key. When present, writes a portbuf buffer of the previous
-/// value (callee frees). When absent, sets `*out_missing = 1`.
-///
-/// # Safety
-/// All `out_*` pointers must be valid for writes. `key` per klen.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_remove(
-    entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-    out_missing: *mut c_int,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() || out_missing.is_null() {
-        set_last_error("null out pointer");
-        return SharedError::Generic.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-        *out_missing = 0;
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_remove on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
-        match map.remove(&k) {
+        let value = decode_value(value_bytes, entry.registry)?;
+        match map.set_if_absent(k, value)? {
             Some(prev) => {
-                // Serialize first (reads SharedRef view through
-                // `prev`), then drop — the Arc(s) inside `prev` are
-                // released when it goes out of scope.
                 let bytes = sv_to_portbuf(&prev);
                 drop(prev);
                 let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
                 unsafe {
-                    *out_buf = ptr;
-                    *out_len = n;
+                    *out_prev_buf = ptr;
+                    *out_prev_len = n;
                 }
             }
             None => {
-                unsafe { *out_missing = 1 };
+                unsafe { *out_absent = 1 };
             }
         }
         entry.registry.record_op(entry);
@@ -1055,14 +1104,242 @@ pub unsafe extern "C" fn oxphp_shared_map_remove(
     })
 }
 
-/// Bulk insert. `kv_buf` is a portbuf-encoded `SharedValue::Array` with
-/// the string-keyed half holding the entries. Per-key atomicity (not
-/// batch-atomic per spec §Atomic ops); bail at first error, with
-/// `*out_inserted` holding the successful count at the bail point.
+/// Overwrite and return the previous value. Writes the prior value to
+/// `out_prev_buf`/`out_prev_len` (callee frees) or sets `*out_absent = 1`
+/// when the key was absent.
 ///
 /// # Safety
-/// `kv_buf` must be valid for reads of `kv_len` bytes (or `kv_len == 0`).
-/// `out_inserted` must be valid for a `u64` write.
+/// Key tuple per `decode_map_key`; value valid for `vlen`. Out pointers
+/// valid for writes.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn oxphp_shared_map_swap(
+    entry_ptr: *const Entry,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
+    value_buf: *const u8,
+    vlen: usize,
+    out_prev_buf: *mut *mut u8,
+    out_prev_len: *mut usize,
+    out_absent: *mut c_int,
+) -> c_int {
+    if out_prev_buf.is_null() || out_prev_len.is_null() || out_absent.is_null() {
+        set_last_error("null out pointer");
+        return SharedError::Generic.code();
+    }
+    if vlen > 0 && value_buf.is_null() {
+        set_last_error("value_buf null with non-zero length");
+        return SharedError::Generic.code();
+    }
+    unsafe {
+        *out_prev_buf = std::ptr::null_mut();
+        *out_prev_len = 0;
+        *out_absent = 0;
+    }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
+    ffi_entry(|| {
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_swap on freed Entry");
+        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
+        enforce_value_size(entry.registry, vlen)?;
+        let value_bytes = if vlen == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(value_buf, vlen) }
+        };
+        let value = decode_value(value_bytes, entry.registry)?;
+        match map.swap(k, value)? {
+            Some(prev) => {
+                let bytes = sv_to_portbuf(&prev);
+                drop(prev);
+                let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
+                unsafe {
+                    *out_prev_buf = ptr;
+                    *out_prev_len = n;
+                }
+            }
+            None => {
+                unsafe { *out_absent = 1 };
+            }
+        }
+        entry.registry.record_op(entry);
+        Ok(())
+    })
+}
+
+/// Remove and return the previous value. Writes the prior value to
+/// `out_prev_buf`/`out_prev_len` (callee frees) or sets `*out_absent = 1`
+/// when the key was absent.
+///
+/// # Safety
+/// Key tuple per `decode_map_key`. Out pointers valid for writes.
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_shared_map_pop(
+    entry_ptr: *const Entry,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
+    out_prev_buf: *mut *mut u8,
+    out_prev_len: *mut usize,
+    out_absent: *mut c_int,
+) -> c_int {
+    if out_prev_buf.is_null() || out_prev_len.is_null() || out_absent.is_null() {
+        set_last_error("null out pointer");
+        return SharedError::Generic.code();
+    }
+    unsafe {
+        *out_prev_buf = std::ptr::null_mut();
+        *out_prev_len = 0;
+        *out_absent = 0;
+    }
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
+    ffi_entry(|| {
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_pop on freed Entry");
+        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
+        match map.pop(&k) {
+            Some(prev) => {
+                let bytes = sv_to_portbuf(&prev);
+                drop(prev);
+                let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
+                unsafe {
+                    *out_prev_buf = ptr;
+                    *out_prev_len = n;
+                }
+            }
+            None => {
+                unsafe { *out_absent = 1 };
+            }
+        }
+        entry.registry.record_op(entry);
+        Ok(())
+    })
+}
+
+/// Remove a key, discarding the value. `*out_existed` is `1` when the
+/// key was present, `0` otherwise. No value buffer.
+///
+/// # Safety
+/// Key tuple per `decode_map_key`. `out_existed` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn oxphp_shared_map_remove(
+    entry_ptr: *const Entry,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
+    out_existed: *mut c_int,
+) -> c_int {
+    if out_existed.is_null() {
+        set_last_error("out_existed is null");
+        return SharedError::Generic.code();
+    }
+    unsafe { *out_existed = 0 };
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
+    ffi_entry(|| {
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_remove on freed Entry");
+        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
+        let existed = map.remove(&k);
+        entry.registry.record_op(entry);
+        unsafe { *out_existed = existed as c_int };
+        Ok(())
+    })
+}
+
+/// Atomic compare-and-set. `expected_is_absent` / `new_is_absent` mark
+/// the corresponding side as the absence sentinel (PHP `null`); when
+/// set, the matching `*_buf`/`*_len` are ignored. `*out_swapped` becomes
+/// `1` iff the swap was applied.
+///
+/// # Safety
+/// Key tuple per `decode_map_key`. `expected_buf` valid for `expected_len`
+/// (when not absent); `new_buf` valid for `new_len` (when not absent).
+/// `out_swapped` valid for a write.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn oxphp_shared_map_compare_and_set(
+    entry_ptr: *const Entry,
+    key_kind: c_int,
+    key_int: i64,
+    key_ptr: *const u8,
+    key_len: usize,
+    expected_buf: *const u8,
+    expected_len: usize,
+    expected_is_absent: c_int,
+    new_buf: *const u8,
+    new_len: usize,
+    new_is_absent: c_int,
+    out_swapped: *mut c_int,
+) -> c_int {
+    if out_swapped.is_null() {
+        set_last_error("out_swapped is null");
+        return SharedError::Generic.code();
+    }
+    unsafe { *out_swapped = 0 };
+    if entry_ptr.is_null() {
+        return SharedError::StaleHandle.code();
+    }
+    ffi_entry(|| {
+        let entry: &Entry = unsafe { &*entry_ptr };
+        debug_assert_eq!(
+            entry.magic, ENTRY_MAGIC,
+            "map_compare_and_set on freed Entry"
+        );
+        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
+        let k = unsafe { decode_map_key(key_kind, key_int, key_ptr, key_len)? };
+
+        let expected = if expected_is_absent != 0 {
+            None
+        } else {
+            let bytes = if expected_len == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(expected_buf, expected_len) }
+            };
+            Some(decode_value(bytes, entry.registry)?)
+        };
+        let new = if new_is_absent != 0 {
+            None
+        } else {
+            enforce_value_size(entry.registry, new_len)?;
+            let bytes = if new_len == 0 {
+                &[][..]
+            } else {
+                unsafe { std::slice::from_raw_parts(new_buf, new_len) }
+            };
+            Some(decode_value(bytes, entry.registry)?)
+        };
+
+        let swapped = map.compare_and_set(k, expected, new)?;
+        entry.registry.record_op(entry);
+        unsafe { *out_swapped = swapped as c_int };
+        Ok(())
+    })
+}
+
+/// Bulk insert. `kv_buf` is a portbuf array of `[key, value]` 2-tuples
+/// (the shape produced by `encode_pairs_portbuf`): each outer element is
+/// a 2-element array whose `int_keyed[0]` is the key scalar (`Long` →
+/// `MapKey::Int`, `String` → `MapKey::Str`) and `int_keyed[1]` is the
+/// value. Per-key atomic; bail at first error with `*out_inserted`
+/// holding the successful count.
+///
+/// # Safety
+/// `kv_buf` valid for `kv_len` (or `kv_len == 0`). `out_inserted` valid
+/// for a `u64` write.
 #[no_mangle]
 pub unsafe extern "C" fn oxphp_shared_map_set_many(
     entry_ptr: *const Entry,
@@ -1083,6 +1360,7 @@ pub unsafe extern "C" fn oxphp_shared_map_set_many(
         return SharedError::StaleHandle.code();
     }
     ffi_entry(|| {
+        use crate::plugins::ox_shared::value::SharedValueRaw as R;
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_set_many on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
@@ -1093,27 +1371,41 @@ pub unsafe extern "C" fn oxphp_shared_map_set_many(
             unsafe { std::slice::from_raw_parts(kv_buf, kv_len) }
         };
         let raw = portbuf_to_sv(kv_bytes)?;
-        let sv = raw_to_owned(raw, entry.registry)?;
-        let arr = match sv {
-            SharedValue::Array(a) => a,
+        let arr = match raw {
+            R::Array(a) => a,
             _ => {
-                set_last_error("setMany expects an associative array");
+                set_last_error("setMany expects an array of [key, value] pairs");
                 return Err(SharedError::Type);
             }
         };
+        let arr = Arc::try_unwrap(arr).unwrap_or_else(|shared| (*shared).clone());
 
-        // Fold N per-key cycle walks into one via `set_many_batch`.
-        // On partial failure the inner helper reports how many keys
-        // landed before the bail, so the FFI contract (`out_inserted`
-        // = successful count) still holds.
-        //
-        // `Arc::unwrap_or_clone` avoids re-allocating `Arc<SharedArray>`
-        // when possible; raw_to_owned hands us a unique Arc here so the
-        // clone fast-path kicks in.
-        let pairs = Arc::try_unwrap(arr)
-            .unwrap_or_else(|shared| (*shared).clone())
-            .str_keyed;
-        match map.set_many_batch(pairs) {
+        // Each outer element is a [key, value] 2-tuple (int_keyed half).
+        let mut batch: Vec<(MapKey, SharedValue)> = Vec::with_capacity(arr.int_keyed.len());
+        for pair_raw in arr.int_keyed.into_iter() {
+            let pair = match pair_raw {
+                R::Array(p) => Arc::try_unwrap(p).unwrap_or_else(|s| (*s).clone()),
+                _ => {
+                    set_last_error("setMany pair must be a [key, value] array");
+                    return Err(SharedError::Type);
+                }
+            };
+            let mut it = pair.int_keyed.into_iter();
+            let key_raw = it.next().ok_or_else(|| {
+                set_last_error("setMany pair missing key");
+                SharedError::Type
+            })?;
+            let val_raw = it.next().ok_or_else(|| {
+                set_last_error("setMany pair missing value");
+                SharedError::Type
+            })?;
+            let key = raw_key_value_to_map_key(&key_raw)?;
+            let value = raw_to_owned(val_raw, entry.registry)?;
+            enforce_value_size(entry.registry, sv_to_portbuf(&value).len())?;
+            batch.push((key, value));
+        }
+
+        match map.set_many_batch(batch) {
             Ok(n) => {
                 unsafe { *out_inserted = n as u64 };
             }
@@ -1128,86 +1420,9 @@ pub unsafe extern "C" fn oxphp_shared_map_set_many(
     })
 }
 
-/// Bulk fetch. `keys_buf` is a portbuf `SharedValue::Array` with string
-/// values in the int-keyed half. Writes a portbuf of a keyed array with
-/// per-key results (missing keys produce `Null` entries).
-///
-/// # Safety
-/// `keys_buf` / `out_buf` / `out_len` must be valid per the usual
-/// contract.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_get_many(
-    entry_ptr: *const Entry,
-    keys_buf: *const u8,
-    keys_len: usize,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() {
-        set_last_error("null out pointer");
-        return SharedError::Generic.code();
-    }
-    if keys_len > 0 && keys_buf.is_null() {
-        set_last_error("keys_buf null with non-zero length");
-        return SharedError::Generic.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_get_many on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-
-        let keys_bytes = if keys_len == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(keys_buf, keys_len) }
-        };
-        let raw = portbuf_to_sv(keys_bytes)?;
-        let arr = match raw {
-            crate::plugins::ox_shared::value::SharedValueRaw::Array(a) => a,
-            _ => {
-                set_last_error("getMany expects an array of keys");
-                return Err(SharedError::Type);
-            }
-        };
-
-        let mut out_arr = crate::plugins::ox_shared::value::SharedArray::default();
-        for key_sv in &arr.int_keyed {
-            let key_str: Arc<str> = match key_sv {
-                crate::plugins::ox_shared::value::SharedValueRaw::String(s) => Arc::clone(s),
-                crate::plugins::ox_shared::value::SharedValueRaw::Bytes(b) => {
-                    Arc::from(String::from_utf8_lossy(b).as_ref())
-                }
-                _ => {
-                    set_last_error("getMany keys must be strings");
-                    return Err(SharedError::Type);
-                }
-            };
-            let value = map.get(&key_str).unwrap_or(SharedValue::Null);
-            out_arr.str_keyed.push((key_str, value));
-        }
-        entry.registry.record_op(entry);
-
-        let result = SharedValue::Array(Arc::new(out_arr));
-        let bytes = sv_to_portbuf(&result);
-        let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
-        unsafe {
-            *out_buf = ptr;
-            *out_len = n;
-        }
-        Ok(())
-    })
-}
-
-/// Bulk remove. `keys_buf` is a portbuf `SharedValue::Array` with string
-/// values. Writes the number of keys actually removed (missing ones
-/// don't count) into `*out_removed`.
+/// Bulk remove. `keys_buf` is a portbuf `SharedValue::Array`; each
+/// element's value is a key (long → `Int`, string → `Str`). Writes the
+/// number actually removed to `*out_removed`.
 ///
 /// # Safety
 /// Per standard conventions for out pointers + keys buffer.
@@ -1251,35 +1466,29 @@ pub unsafe extern "C" fn oxphp_shared_map_remove_many(
 
         let mut removed: u64 = 0;
         for key_sv in &arr.int_keyed {
-            let key_str: Arc<str> = match key_sv {
-                crate::plugins::ox_shared::value::SharedValueRaw::String(s) => Arc::clone(s),
-                crate::plugins::ox_shared::value::SharedValueRaw::Bytes(b) => {
-                    Arc::from(String::from_utf8_lossy(b).as_ref())
-                }
-                _ => {
-                    set_last_error("removeMany keys must be strings");
-                    return Err(SharedError::Type);
-                }
-            };
-            if let Some(_prev) = map.remove(&key_str) {
+            let k = raw_key_value_to_map_key(key_sv)?;
+            if map.remove(&k) {
                 removed += 1;
-                unsafe { *out_removed = removed };
             }
         }
         entry.registry.record_op(entry);
+        unsafe { *out_removed = removed };
         Ok(())
     })
 }
 
-/// Snapshot keys as a portbuf-encoded `SharedValue::Array` with string
-/// entries in the `int_keyed` slot (so the PHP decoder produces a dense
-/// numeric-indexed array). Iteration order is DashMap shard order (spec
-/// `25-type-map.md §Iterator semantics` documents the undefined order).
+/// Whole-map key snapshot in a single `entries.iter()` pass, serialised
+/// as a portbuf `SharedValue::Array`: every key lands in the int-keyed
+/// half (`Int` → `Long`, `Str` → `String`); the PHP decoder distinguishes
+/// by zval type. `forEach` calls this once (O(n)) and then re-fetches each
+/// value, rather than partitioning the map per stripe (which degenerated
+/// to a full scan per stripe because the logical stripes don't line up
+/// with DashMap's physical shards).
 ///
 /// # Safety
 /// `out_buf`, `out_len` must be valid for writes.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_keys(
+pub unsafe extern "C" fn oxphp_shared_map_all_keys(
     entry_ptr: *const Entry,
     out_buf: *mut *mut u8,
     out_len: *mut usize,
@@ -1297,15 +1506,15 @@ pub unsafe extern "C" fn oxphp_shared_map_keys(
     }
     ffi_entry(|| {
         let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_keys on freed Entry");
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_all_keys on freed Entry");
         let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
+
+        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
+        for k in map.all_keys() {
+            arr.int_keyed.push(map_key_to_shared_value(&k));
+        }
         entry.registry.record_op(entry);
 
-        let keys = map.keys();
-        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
-        for k in keys {
-            arr.int_keyed.push(SharedValue::String(k));
-        }
         let sv = SharedValue::Array(Arc::new(arr));
         let bytes = sv_to_portbuf(&sv);
         let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
@@ -1317,379 +1526,32 @@ pub unsafe extern "C" fn oxphp_shared_map_keys(
     })
 }
 
-// ─── Closure-driven FFI ─────────────────────────────────────────
-//
-// Uses the bridge's `oxphp_shared_invoke_*_portbuf` shims shared with
-// Mutex::with. These serialise the closure's return into portbuf
-// bytes so Rust doesn't need to touch zvals directly during
-// invocation.
-
-/// Read-modify-write. Fetches the current value (or `Null` if absent),
-/// hands it to the PHP closure, stores whatever the closure returns —
-/// `null` removes the key. Writes the stored value into `*out_buf`
-/// (portbuf-encoded; `null`/absent after removal writes an empty buffer).
-///
-/// # Safety
-/// `key` / `callable` / `out_buf` / `out_len` must be valid per usual
-/// convention. `callable` must be a `zval *` on the invoking thread.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_update(
-    entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
-    callable: *mut std::os::raw::c_void,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() {
-        set_last_error("null out pointer");
-        return SharedError::Generic.code();
+/// Encode a `MapKey` as a `SharedValue` for shard-key serialisation:
+/// `Int` → `Long`, `Str` → `String`.
+fn map_key_to_shared_value(k: &MapKey) -> SharedValue {
+    match k {
+        MapKey::Int(i) => SharedValue::Long(*i),
+        // Keys are opaque bytes — surface them as a binary-safe value.
+        MapKey::Str(s) => SharedValue::Bytes(Arc::clone(s)),
     }
-    if callable.is_null() {
-        set_last_error("callable is null");
-        return SharedError::Generic.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_update on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
-
-        // Snapshot current (or Null if absent) and serialise for the shim.
-        let current = map.get(&k).unwrap_or(SharedValue::Null);
-        let current_bytes = sv_to_portbuf(&current);
-
-        let mut new_state_buf: *mut u8 = std::ptr::null_mut();
-        let mut new_state_len: usize = 0;
-        let mut ret_buf: *mut u8 = std::ptr::null_mut();
-        let mut ret_len: usize = 0;
-        let mut did_mutate: c_int = 0;
-
-        let rc = unsafe {
-            bridge_ffi::oxphp_shared_invoke_byref_1_portbuf(
-                callable,
-                current_bytes.as_ptr(),
-                current_bytes.len(),
-                &mut new_state_buf,
-                &mut new_state_len,
-                &mut ret_buf,
-                &mut ret_len,
-                &mut did_mutate,
-            )
-        };
-        // The byref shim always writes `new_state_buf` on success;
-        // Map::update only looks at the *return value*, not the mutated
-        // arg. Free new_state_buf unconditionally.
-        if !new_state_buf.is_null() {
-            unsafe { bridge_ffi::oxphp_portable_free(new_state_buf) };
-        }
-
-        if rc == bridge_ffi::OXPHP_SHARED_INVOKE_PHP_THREW {
-            if !ret_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-            }
-            // EG(exception) is already set on PHP side — surface via
-            // Generic so the caller doesn't overwrite the engine exception.
-            set_last_error("Map::update: closure threw");
-            return Err(SharedError::Generic);
-        }
-        if rc != bridge_ffi::OXPHP_SHARED_INVOKE_OK {
-            if !ret_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-            }
-            set_last_error("Map::update: invalid callable");
-            return Err(SharedError::Type);
-        }
-
-        // Decode the closure's return.
-        let new_bytes = if ret_buf.is_null() || ret_len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(ret_buf, ret_len).to_vec() }
-        };
-        if !ret_buf.is_null() {
-            unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-        }
-        let new_value = if new_bytes.is_empty() {
-            SharedValue::Null
-        } else {
-            let raw = portbuf_to_sv(&new_bytes)?;
-            raw_to_owned(raw, entry.registry)?
-        };
-
-        // Apply: null → remove, else set. Displaced `prev` (when
-        // present) carries its own Arc; dropping releases it.
-        let stored = match new_value {
-            SharedValue::Null => {
-                let _prev = map.remove(&k);
-                SharedValue::Null
-            }
-            v => {
-                let _prev = map.set(Arc::clone(&k), v.clone())?;
-                v
-            }
-        };
-        entry.registry.record_op(entry);
-
-        // Emit the stored value as portbuf so PHP side can decode directly.
-        let out_bytes = sv_to_portbuf(&stored);
-        let (ptr, n) = unsafe { payload_to_malloc(out_bytes)? };
-        unsafe {
-            *out_buf = ptr;
-            *out_len = n;
-        }
-        Ok(())
-    })
 }
 
-/// Return the current value or compute-and-store via the factory
-/// closure. Factory is called only when the key is missing; on a
-/// concurrent race the loser's output is discarded.
-///
-/// # Safety
-/// Same as `oxphp_shared_map_update`.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_get_or_set(
-    entry_ptr: *const Entry,
-    key: *const u8,
-    klen: usize,
-    callable: *mut std::os::raw::c_void,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() {
-        set_last_error("null out pointer");
-        return SharedError::Generic.code();
-    }
-    if callable.is_null() {
-        set_last_error("callable is null");
-        return SharedError::Generic.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_get_or_set on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-        let k = unsafe { key_from_raw(key, klen)? };
-
-        // Fast path: already present.
-        if let Some(v) = map.get(&k) {
-            entry.registry.record_op(entry);
-            let bytes = sv_to_portbuf(&v);
-            let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
-            unsafe {
-                *out_buf = ptr;
-                *out_len = n;
-            }
-            return Ok(());
+/// Decode a raw key value (from `removeMany`'s key array) into a
+/// `MapKey`: `Long` → `Int`, `String`/`Bytes` → `Str`.
+fn raw_key_value_to_map_key(
+    raw: &crate::plugins::ox_shared::value::SharedValueRaw,
+) -> Result<MapKey, SharedError> {
+    use crate::plugins::ox_shared::value::SharedValueRaw as R;
+    match raw {
+        R::Long(i) => Ok(MapKey::Int(*i)),
+        // Both string and byte values become binary-safe opaque-byte keys.
+        R::String(s) => Ok(MapKey::Str(Arc::from(s.as_bytes()))),
+        R::Bytes(b) => Ok(MapKey::Str(Arc::clone(b))),
+        _ => {
+            set_last_error("map keys must be int or string");
+            Err(SharedError::Type)
         }
-
-        // Slow path: call factory.
-        let mut ret_buf: *mut u8 = std::ptr::null_mut();
-        let mut ret_len: usize = 0;
-        let rc = unsafe {
-            bridge_ffi::oxphp_shared_invoke_0_portbuf(callable, &mut ret_buf, &mut ret_len)
-        };
-        if rc == bridge_ffi::OXPHP_SHARED_INVOKE_PHP_THREW {
-            if !ret_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-            }
-            set_last_error("Map::getOrSet: factory threw");
-            return Err(SharedError::Generic);
-        }
-        if rc != bridge_ffi::OXPHP_SHARED_INVOKE_OK {
-            if !ret_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-            }
-            set_last_error("Map::getOrSet: invalid factory callable");
-            return Err(SharedError::Type);
-        }
-
-        let candidate_bytes = if ret_buf.is_null() || ret_len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(ret_buf, ret_len).to_vec() }
-        };
-        if !ret_buf.is_null() {
-            unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-        }
-        let candidate = if candidate_bytes.is_empty() {
-            SharedValue::Null
-        } else {
-            let raw = portbuf_to_sv(&candidate_bytes)?;
-            raw_to_owned(raw, entry.registry)?
-        };
-
-        let stored = match map.set_if_absent(Arc::clone(&k), candidate.clone())? {
-            true => candidate,
-            false => map.get(&k).unwrap_or(candidate),
-        };
-        entry.registry.record_op(entry);
-
-        let bytes = sv_to_portbuf(&stored);
-        let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
-        unsafe {
-            *out_buf = ptr;
-            *out_len = n;
-        }
-        Ok(())
-    })
-}
-
-/// Apply `update_with` to every key in `keys_buf`. Writes a portbuf of
-/// a keyed array (key → stored value) into `*out_buf`. Bail on first
-/// error (per-key atomic, not batch-atomic).
-///
-/// # Safety
-/// Per the usual conventions.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_map_update_many(
-    entry_ptr: *const Entry,
-    keys_buf: *const u8,
-    keys_len: usize,
-    callable: *mut std::os::raw::c_void,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() {
-        set_last_error("null out pointer");
-        return SharedError::Generic.code();
     }
-    if callable.is_null() {
-        set_last_error("callable is null");
-        return SharedError::Generic.code();
-    }
-    if keys_len > 0 && keys_buf.is_null() {
-        set_last_error("keys_buf null with non-zero length");
-        return SharedError::Generic.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "map_update_many on freed Entry");
-        let map = entry.inner.as_any_map().ok_or(SharedError::Type)?;
-
-        let keys_bytes = if keys_len == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(keys_buf, keys_len) }
-        };
-        let raw = portbuf_to_sv(keys_bytes)?;
-        let arr = match raw {
-            crate::plugins::ox_shared::value::SharedValueRaw::Array(a) => a,
-            _ => {
-                set_last_error("updateMany expects an array of keys");
-                return Err(SharedError::Type);
-            }
-        };
-
-        let mut out_arr = crate::plugins::ox_shared::value::SharedArray::default();
-        for key_sv in &arr.int_keyed {
-            let key_str: Arc<str> = match key_sv {
-                crate::plugins::ox_shared::value::SharedValueRaw::String(s) => Arc::clone(s),
-                crate::plugins::ox_shared::value::SharedValueRaw::Bytes(b) => {
-                    Arc::from(String::from_utf8_lossy(b).as_ref())
-                }
-                _ => {
-                    set_last_error("updateMany keys must be strings");
-                    return Err(SharedError::Type);
-                }
-            };
-            let current = map.get(&key_str).unwrap_or(SharedValue::Null);
-            let cur_bytes = sv_to_portbuf(&current);
-
-            let mut new_state_buf: *mut u8 = std::ptr::null_mut();
-            let mut new_state_len: usize = 0;
-            let mut ret_buf: *mut u8 = std::ptr::null_mut();
-            let mut ret_len: usize = 0;
-            let mut did_mutate: c_int = 0;
-
-            let rc = unsafe {
-                bridge_ffi::oxphp_shared_invoke_byref_1_portbuf(
-                    callable,
-                    cur_bytes.as_ptr(),
-                    cur_bytes.len(),
-                    &mut new_state_buf,
-                    &mut new_state_len,
-                    &mut ret_buf,
-                    &mut ret_len,
-                    &mut did_mutate,
-                )
-            };
-            if !new_state_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(new_state_buf) };
-            }
-            if rc == bridge_ffi::OXPHP_SHARED_INVOKE_PHP_THREW {
-                if !ret_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-                }
-                set_last_error("Map::updateMany: closure threw");
-                return Err(SharedError::Generic);
-            }
-            if rc != bridge_ffi::OXPHP_SHARED_INVOKE_OK {
-                if !ret_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-                }
-                set_last_error("Map::updateMany: invalid callable");
-                return Err(SharedError::Type);
-            }
-            let new_bytes = if ret_buf.is_null() || ret_len == 0 {
-                Vec::new()
-            } else {
-                unsafe { std::slice::from_raw_parts(ret_buf, ret_len).to_vec() }
-            };
-            if !ret_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(ret_buf) };
-            }
-            let new_value = if new_bytes.is_empty() {
-                SharedValue::Null
-            } else {
-                let raw = portbuf_to_sv(&new_bytes)?;
-                raw_to_owned(raw, entry.registry)?
-            };
-
-            let stored = match new_value {
-                SharedValue::Null => {
-                    let _prev = map.remove(&key_str);
-                    SharedValue::Null
-                }
-                v => {
-                    let _prev = map.set(Arc::clone(&key_str), v.clone())?;
-                    v
-                }
-            };
-            out_arr.str_keyed.push((key_str, stored));
-        }
-        entry.registry.record_op(entry);
-
-        let result = SharedValue::Array(Arc::new(out_arr));
-        let bytes = sv_to_portbuf(&result);
-        let (ptr, n) = unsafe { payload_to_malloc(bytes)? };
-        unsafe {
-            *out_buf = ptr;
-            *out_len = n;
-        }
-        Ok(())
-    })
 }
 
 /// Downcast helper mirroring `SharedInnerCounterExt` — used by the FFI
@@ -1711,8 +1573,10 @@ use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
 use crate::plugin::{PhpError, PluginContext, PluginError};
 use crate::plugins::ox_shared::handle::SharedHandle;
 
+/// FQN of the lazy `getMany` iterator class.
+const KEY_CURSOR_FQN: &str = "OxPHP\\Shared\\Map\\KeyCursor";
+
 /// Map `SharedError` FFI codes onto the `Shared\*` exception hierarchy.
-/// Shared across all Map FFI dispatch paths.
 fn map_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     if rc == 0 {
         return Ok(());
@@ -1723,6 +1587,7 @@ fn map_rc_to_result(rc: c_int) -> Result<(), PhpError> {
         -4 => "OxPHP\\Shared\\CapacityException",
         -9 => "OxPHP\\Shared\\CycleException",
         -10 => "OxPHP\\Shared\\UninitializedException",
+        -11 => "OxPHP\\Shared\\ValueTooLargeException",
         _ => "OxPHP\\Shared\\SharedException",
     };
     Err(PhpError::Exception {
@@ -1732,12 +1597,56 @@ fn map_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     })
 }
 
+/// Decoded PHP key argument: the tagged tuple passed to FFI key fns.
+struct KeyArg {
+    kind: c_int,
+    int: i64,
+    /// Backing storage for a string key (kept alive while the FFI call
+    /// borrows `ptr`/`len`).
+    bytes: Vec<u8>,
+}
+
+impl KeyArg {
+    fn ptr(&self) -> *const u8 {
+        self.bytes.as_ptr()
+    }
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+/// Decode the PHP key zval at arg `idx`: `IS_LONG` → Int, `IS_STRING`
+/// → Str, anything else → TypeException.
+fn decode_key_arg(call: &crate::bridge::call::NativeCall, idx: u32) -> Result<KeyArg, PhpError> {
+    use crate::bridge::types::ValType;
+    match call.arg_type(idx)? {
+        ValType::Long => Ok(KeyArg {
+            kind: KEY_KIND_INT,
+            int: call.arg_long(idx)?,
+            bytes: Vec::new(),
+        }),
+        ValType::String => {
+            let s = call.arg_bytes(idx)?;
+            Ok(KeyArg {
+                kind: KEY_KIND_STR,
+                int: 0,
+                bytes: s.to_vec(),
+            })
+        }
+        other => Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".to_string(),
+            message: format!(
+                "Shared\\Map key must be int or string, got {}",
+                crate::bridge::call::type_name(other)
+            ),
+            code: 0,
+        }),
+    }
+}
+
 /// Serialise arg `idx` (a `mixed` PHP value) to a libc-malloc'd portbuf
-/// buffer. On success, caller owns the buffer and must free with
-/// `oxphp_portable_free`.
-///
-/// Returns `TypeException` on any non-serialisable value (closures,
-/// resources, etc.) — matches the spec for `Shared\Map::set`.
+/// buffer. Caller frees with `oxphp_portable_free`. Returns
+/// `TypeException` on any non-serialisable value.
 #[allow(clippy::type_complexity)]
 fn serialize_mixed_arg(
     call: &mut crate::bridge::call::NativeCall,
@@ -1762,8 +1671,8 @@ fn serialize_mixed_arg(
     Ok((buf, len))
 }
 
-/// Inverse: deserialise `(buf, len)` portbuf into `call`'s return-value
-/// zval. Always frees `buf`. On decode failure, sets return to null.
+/// Deserialise `(buf, len)` portbuf into `call`'s return-value zval.
+/// Always frees `buf`. On decode failure, sets return to null.
 fn deserialize_into_retval(call: &mut crate::bridge::call::NativeCall, buf: *mut u8, len: usize) {
     if buf.is_null() || len == 0 {
         call.ret_null();
@@ -1777,10 +1686,31 @@ fn deserialize_into_retval(call: &mut crate::bridge::call::NativeCall, buf: *mut
     }
 }
 
+/// Reject a `null` value arg before serialising (the null-as-absence
+/// invariant). Returns `Ok(())` if the value is non-null.
+fn reject_null_value(
+    call: &crate::bridge::call::NativeCall,
+    idx: u32,
+    label: &str,
+) -> Result<(), PhpError> {
+    if call.arg_is_null(idx).unwrap_or(false) {
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".to_string(),
+            message: format!(
+                "Shared\\Map::{label}: null is not a storable value \
+                 (null means absence; use remove() instead)"
+            ),
+            code: 0,
+        });
+    }
+    Ok(())
+}
+
 pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
+    register_key_cursor_class(ctx)?;
+
     ctx.register_class("OxPHP\\Shared\\Map")
         .implements("OxPHP\\Shared\\Shareable")
-        .implements("Countable")
         .with_storage(|| SharedHandle::new(SharedType::Map))
         .magic(MagicMethod::Clone)
         .handler(|_call| {
@@ -1824,114 +1754,297 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             h.type_tag = SharedType::Map as u8;
             Ok(())
         })
-        // ── get(string $key, mixed $default = null): mixed ─────────────
+        // ── get(int|string $key): mixed ────────────────────────────────
         .method("get")
-        .param("key", PhpType::String)
-        .optional_param("default", PhpType::Mixed, PhpValue::Null)
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
         .returns(PhpType::Mixed)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?;
-            let key_bytes = key.as_bytes();
+            let key = decode_key_arg(call, 0)?;
             let mut buf: *mut u8 = std::ptr::null_mut();
             let mut len: usize = 0;
-            let mut missing: c_int = 0;
+            let mut absent: c_int = 0;
             let rc = unsafe {
                 oxphp_shared_map_get(
                     entry_ptr,
-                    key_bytes.as_ptr(),
-                    key_bytes.len(),
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
                     &mut buf,
                     &mut len,
-                    &mut missing,
+                    &mut absent,
                 )
             };
             map_rc_to_result(rc)?;
-            if missing != 0 {
-                // Forward default (present or explicit null) unchanged.
-                if call.argc() > 1 {
-                    // Copy the default zval into RETVAL via bridge's deep copy.
-                    let default_ptr = unsafe { call.raw_arg_ptr(1) };
-                    unsafe {
-                        bridge_ffi::oxphp_deep_copy_zval(
-                            call.retval_ptr() as *mut _,
-                            default_ptr as *const _,
-                        );
-                    }
-                } else {
-                    call.ret_null();
-                }
-                return Ok(());
-            }
-            deserialize_into_retval(call, buf, len);
-            Ok(())
-        })
-        // ── set(string $key, mixed $value): void ───────────────────────
-        .method("set")
-        .param("key", PhpType::String)
-        .param("value", PhpType::Mixed)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?.to_string();
-            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "set")?;
-
-            let rc =
-                unsafe { oxphp_shared_map_set(entry_ptr, key.as_ptr(), key.len(), vbuf, vlen) };
-            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
-            map_rc_to_result(rc)?;
-            call.ret_null();
-            Ok(())
-        })
-        // ── has(string $key): bool ─────────────────────────────────────
-        .method("has")
-        .param("key", PhpType::String)
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?;
-            let kb = key.as_bytes();
-            let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_map_has(entry_ptr, kb.as_ptr(), kb.len(), &mut out) };
-            map_rc_to_result(rc)?;
-            call.ret_bool(out != 0);
-            Ok(())
-        })
-        // ── remove(string $key): mixed (prev or null) ──────────────────
-        .method("remove")
-        .param("key", PhpType::String)
-        .returns(PhpType::Mixed)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?;
-            let kb = key.as_bytes();
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let mut missing: c_int = 0;
-            let rc = unsafe {
-                oxphp_shared_map_remove(
-                    entry_ptr,
-                    kb.as_ptr(),
-                    kb.len(),
-                    &mut buf,
-                    &mut len,
-                    &mut missing,
-                )
-            };
-            map_rc_to_result(rc)?;
-            if missing != 0 {
+            if absent != 0 {
                 call.ret_null();
                 return Ok(());
             }
             deserialize_into_retval(call, buf, len);
             Ok(())
         })
-        // ── clear(): void ──────────────────────────────────────────────
-        .method("clear")
+        // ── set(int|string $key, mixed $value): void ───────────────────
+        .method("set")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .param("value", PhpType::Mixed)
+        .returns(PhpType::Void)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let rc = unsafe { oxphp_shared_map_clear(entry_ptr) };
+            let key = decode_key_arg(call, 0)?;
+            reject_null_value(call, 1, "set")?;
+            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "set")?;
+            let rc = unsafe {
+                oxphp_shared_map_set(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    vbuf,
+                    vlen,
+                )
+            };
+            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
             map_rc_to_result(rc)?;
             call.ret_null();
+            Ok(())
+        })
+        // ── setIfAbsent(int|string $key, mixed $value): mixed ──────────
+        .method("setIfAbsent")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .param("value", PhpType::Mixed)
+        .returns(PhpType::Mixed)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let key = decode_key_arg(call, 0)?;
+            reject_null_value(call, 1, "setIfAbsent")?;
+            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "setIfAbsent")?;
+            let mut prev_buf: *mut u8 = std::ptr::null_mut();
+            let mut prev_len: usize = 0;
+            let mut absent: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_map_set_if_absent(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    vbuf,
+                    vlen,
+                    &mut prev_buf,
+                    &mut prev_len,
+                    &mut absent,
+                )
+            };
+            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
+            map_rc_to_result(rc)?;
+            if absent != 0 {
+                // Inserted — return null.
+                call.ret_null();
+                return Ok(());
+            }
+            deserialize_into_retval(call, prev_buf, prev_len);
+            Ok(())
+        })
+        // ── swap(int|string $key, mixed $value): mixed ─────────────────
+        .method("swap")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .param("value", PhpType::Mixed)
+        .returns(PhpType::Mixed)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let key = decode_key_arg(call, 0)?;
+            reject_null_value(call, 1, "swap")?;
+            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "swap")?;
+            let mut prev_buf: *mut u8 = std::ptr::null_mut();
+            let mut prev_len: usize = 0;
+            let mut absent: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_map_swap(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    vbuf,
+                    vlen,
+                    &mut prev_buf,
+                    &mut prev_len,
+                    &mut absent,
+                )
+            };
+            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
+            map_rc_to_result(rc)?;
+            if absent != 0 {
+                call.ret_null();
+                return Ok(());
+            }
+            deserialize_into_retval(call, prev_buf, prev_len);
+            Ok(())
+        })
+        // ── pop(int|string $key): mixed ────────────────────────────────
+        .method("pop")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .returns(PhpType::Mixed)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let key = decode_key_arg(call, 0)?;
+            let mut prev_buf: *mut u8 = std::ptr::null_mut();
+            let mut prev_len: usize = 0;
+            let mut absent: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_map_pop(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    &mut prev_buf,
+                    &mut prev_len,
+                    &mut absent,
+                )
+            };
+            map_rc_to_result(rc)?;
+            if absent != 0 {
+                call.ret_null();
+                return Ok(());
+            }
+            deserialize_into_retval(call, prev_buf, prev_len);
+            Ok(())
+        })
+        // ── remove(int|string $key): bool ──────────────────────────────
+        .method("remove")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .returns(PhpType::Bool)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let key = decode_key_arg(call, 0)?;
+            let mut existed: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_map_remove(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    &mut existed,
+                )
+            };
+            map_rc_to_result(rc)?;
+            call.ret_bool(existed != 0);
+            Ok(())
+        })
+        // ── compareAndSet(int|string $key, mixed $expected, mixed $new): bool
+        .method("compareAndSet")
+        .param("key", PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .param("expected", PhpType::Mixed)
+        .param("new", PhpType::Mixed)
+        .returns(PhpType::Bool)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let key = decode_key_arg(call, 0)?;
+
+            let expected_absent = call.arg_is_null(1).unwrap_or(true);
+            let new_absent = call.arg_is_null(2).unwrap_or(true);
+
+            let (exp_buf, exp_len) = if expected_absent {
+                (std::ptr::null_mut(), 0usize)
+            } else {
+                serialize_mixed_arg(call, 1, "compareAndSet")?
+            };
+            let (new_buf, new_len) = if new_absent {
+                (std::ptr::null_mut(), 0usize)
+            } else {
+                match serialize_mixed_arg(call, 2, "compareAndSet") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if !exp_buf.is_null() {
+                            unsafe { bridge_ffi::oxphp_portable_free(exp_buf) };
+                        }
+                        return Err(e);
+                    }
+                }
+            };
+
+            let mut swapped: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_map_compare_and_set(
+                    entry_ptr,
+                    key.kind,
+                    key.int,
+                    key.ptr(),
+                    key.len(),
+                    exp_buf,
+                    exp_len,
+                    expected_absent as c_int,
+                    new_buf,
+                    new_len,
+                    new_absent as c_int,
+                    &mut swapped,
+                )
+            };
+            if !exp_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(exp_buf) };
+            }
+            if !new_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(new_buf) };
+            }
+            map_rc_to_result(rc)?;
+            call.ret_bool(swapped != 0);
+            Ok(())
+        })
+        // ── setMany(iterable $entries): int ────────────────────────────
+        .method("setMany")
+        .param("entries", PhpType::Iterable)
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            // Materialise the iterable's key=>value pairs into a portbuf
+            // SharedValue::Array, then hand to the batched FFI.
+            let pairs = collect_iterable_pairs(call, 0)?;
+            let bytes = encode_pairs_portbuf(&pairs);
+            let mut inserted: u64 = 0;
+            let rc = unsafe {
+                oxphp_shared_map_set_many(entry_ptr, bytes.as_ptr(), bytes.len(), &mut inserted)
+            };
+            map_rc_to_result(rc)?;
+            call.ret_long(inserted as i64);
+            Ok(())
+        })
+        // ── removeMany(iterable $keys): int ────────────────────────────
+        .method("removeMany")
+        .param("keys", PhpType::Iterable)
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let keys = collect_iterable_keys(call, 0)?;
+            let bytes = encode_keys_portbuf(&keys);
+            let mut removed: u64 = 0;
+            let rc = unsafe {
+                oxphp_shared_map_remove_many(entry_ptr, bytes.as_ptr(), bytes.len(), &mut removed)
+            };
+            map_rc_to_result(rc)?;
+            call.ret_long(removed as i64);
+            Ok(())
+        })
+        // ── getMany(iterable $keys): \Iterator ─────────────────────────
+        .method("getMany")
+        .param("keys", PhpType::Iterable)
+        .returns(PhpType::Class("Iterator".to_string()))
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            construct_key_cursor(call, entry_ptr, 0)
+        })
+        // ── clear(): int ───────────────────────────────────────────────
+        .method("clear")
+        .returns(PhpType::Int)
+        .handler(|call| {
+            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
+            let mut removed: u64 = 0;
+            let rc = unsafe { oxphp_shared_map_clear(entry_ptr, &mut removed) };
+            map_rc_to_result(rc)?;
+            call.ret_long(removed as i64);
             Ok(())
         })
         // ── count(): int ───────────────────────────────────────────────
@@ -1943,20 +2056,6 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let rc = unsafe { oxphp_shared_map_count(entry_ptr, &mut c) };
             map_rc_to_result(rc)?;
             call.ret_long(c as i64);
-            Ok(())
-        })
-        // ── keys(): array ──────────────────────────────────────────────
-        .method("keys")
-        .returns(PhpType::Array)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let rc = unsafe { oxphp_shared_map_keys(entry_ptr, &mut buf, &mut len) };
-            map_rc_to_result(rc)?;
-            // The payload is a portbuf-encoded SharedValue::Array — decode
-            // straight into RETVAL (yields a dense PHP array).
-            deserialize_into_retval(call, buf, len);
             Ok(())
         })
         // ── maxEntries(): ?int ─────────────────────────────────────────
@@ -1971,9 +2070,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     code: 0,
                 });
             }
-            // SAFETY: entry_ptr is non-null and, per the handle contract,
-            // a live Arc::into_raw pointer — the PHP wrapper holds a
-            // strong ref through it.
+            // SAFETY: entry_ptr is non-null and a live Arc::into_raw
+            // pointer per the handle contract.
             let entry: &Entry = unsafe { &*entry_ptr };
             debug_assert_eq!(entry.magic, ENTRY_MAGIC, "maxEntries on freed Entry");
             let map = entry
@@ -1990,172 +2088,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             }
             Ok(())
         })
-        // ── trySet(string $key, mixed $value): bool ────────────────────
-        .method("trySet")
-        .param("key", PhpType::String)
-        .param("value", PhpType::Mixed)
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?.to_string();
-            let (vbuf, vlen) = serialize_mixed_arg(call, 1, "trySet")?;
-
-            let mut inserted: c_int = 0;
-            let rc = unsafe {
-                oxphp_shared_map_set_if_absent(
-                    entry_ptr,
-                    key.as_ptr(),
-                    key.len(),
-                    vbuf,
-                    vlen,
-                    &mut inserted,
-                )
-            };
-            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
-            map_rc_to_result(rc)?;
-            call.ret_bool(inserted != 0);
-            Ok(())
-        })
-        // ── update(string $key, callable $fn): mixed ───────────────────
-        .method("update")
-        .param("key", PhpType::String)
+        // ── forEach(callable $fn): void ────────────────────────────────
+        .method("forEach")
         .param("fn", PhpType::Callable)
-        .returns(PhpType::Mixed)
+        .returns(PhpType::Void)
         .handler(|call| {
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?.to_string();
-            let callable_zv = unsafe { call.raw_arg_ptr(1) };
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_map_update(
-                    entry_ptr,
-                    key.as_ptr(),
-                    key.len(),
-                    callable_zv,
-                    &mut buf,
-                    &mut len,
-                )
-            };
-            // Generic (-1) here means the closure threw — EG(exception)
-            // is already set; return Custom so the plugin wrapper doesn't
-            // overwrite the engine exception.
-            if rc == SharedError::Generic.code() {
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                return Err(PhpError::Custom("Map::update closure threw".into()));
-            }
-            map_rc_to_result(rc)?;
-            deserialize_into_retval(call, buf, len);
-            Ok(())
-        })
-        // ── getOrSet(string $key, callable $factory): mixed ────────────
-        .method("getOrSet")
-        .param("key", PhpType::String)
-        .param("factory", PhpType::Callable)
-        .returns(PhpType::Mixed)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let key = call.arg_str(0)?.to_string();
-            let callable_zv = unsafe { call.raw_arg_ptr(1) };
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_map_get_or_set(
-                    entry_ptr,
-                    key.as_ptr(),
-                    key.len(),
-                    callable_zv,
-                    &mut buf,
-                    &mut len,
-                )
-            };
-            if rc == SharedError::Generic.code() {
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                return Err(PhpError::Custom("Map::getOrSet factory threw".into()));
-            }
-            map_rc_to_result(rc)?;
-            deserialize_into_retval(call, buf, len);
-            Ok(())
-        })
-        // ── setMany(array $kv): int ────────────────────────────────────
-        .method("setMany")
-        .param("kv", PhpType::Array)
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let (buf, len) = serialize_mixed_arg(call, 0, "setMany")?;
-            let mut inserted: u64 = 0;
-            let rc = unsafe { oxphp_shared_map_set_many(entry_ptr, buf, len, &mut inserted) };
-            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-            map_rc_to_result(rc)?;
-            call.ret_long(inserted as i64);
-            Ok(())
-        })
-        // ── getMany(array $keys): array ────────────────────────────────
-        .method("getMany")
-        .param("keys", PhpType::Array)
-        .returns(PhpType::Array)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let (buf, len) = serialize_mixed_arg(call, 0, "getMany")?;
-            let mut out_buf: *mut u8 = std::ptr::null_mut();
-            let mut out_len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_map_get_many(entry_ptr, buf, len, &mut out_buf, &mut out_len)
-            };
-            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-            map_rc_to_result(rc)?;
-            deserialize_into_retval(call, out_buf, out_len);
-            Ok(())
-        })
-        // ── updateMany(array $keys, callable $fn): array ───────────────
-        .method("updateMany")
-        .param("keys", PhpType::Array)
-        .param("fn", PhpType::Callable)
-        .returns(PhpType::Array)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let (keys_buf, keys_len) = serialize_mixed_arg(call, 0, "updateMany")?;
-            let callable_zv = unsafe { call.raw_arg_ptr(1) };
-            let mut buf: *mut u8 = std::ptr::null_mut();
-            let mut len: usize = 0;
-            let rc = unsafe {
-                oxphp_shared_map_update_many(
-                    entry_ptr,
-                    keys_buf,
-                    keys_len,
-                    callable_zv,
-                    &mut buf,
-                    &mut len,
-                )
-            };
-            unsafe { bridge_ffi::oxphp_portable_free(keys_buf) };
-            if rc == SharedError::Generic.code() {
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                return Err(PhpError::Custom("Map::updateMany closure threw".into()));
-            }
-            map_rc_to_result(rc)?;
-            deserialize_into_retval(call, buf, len);
-            Ok(())
-        })
-        // ── removeMany(array $keys): int ───────────────────────────────
-        .method("removeMany")
-        .param("keys", PhpType::Array)
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let (buf, len) = serialize_mixed_arg(call, 0, "removeMany")?;
-            let mut removed: u64 = 0;
-            let rc = unsafe { oxphp_shared_map_remove_many(entry_ptr, buf, len, &mut removed) };
-            unsafe { bridge_ffi::oxphp_portable_free(buf) };
-            map_rc_to_result(rc)?;
-            call.ret_long(removed as i64);
+            for_each_impl(call, entry_ptr)?;
+            call.ret_null();
             Ok(())
         })
         // ── id(): int ──────────────────────────────────────────────────
@@ -2180,13 +2120,658 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     Ok(())
 }
 
+// ─── iterable marshalling helpers ──────────────────────────────────
+//
+// `setMany` / `removeMany` / `getMany` accept any PHP `iterable`. The
+// argument may be an array (fast path: `arg_array_foreach`) or a
+// Traversable (generic path). We materialise into Rust Vecs and re-encode
+// into the portbuf shapes the FFI fns expect.
+
+/// One materialised key=>value pair from an iterable.
+struct IterPair {
+    key: MapKey,
+    value: Vec<u8>, // portbuf-serialised value
+}
+
+/// Collect key=>value pairs from an `iterable` argument. Arrays use the
+/// zero-copy `arg_array_foreach`; other Traversables are materialised via
+/// PHP `iterator_to_array($it, true)`.
+fn collect_iterable_pairs(
+    call: &mut crate::bridge::call::NativeCall,
+    idx: u32,
+) -> Result<Vec<IterPair>, PhpError> {
+    use crate::bridge::call::ArrayKey;
+    use crate::bridge::types::ValType;
+
+    let mut out: Vec<IterPair> = Vec::new();
+    let mut err: Option<PhpError> = None;
+
+    // Push one materialised (key, value) pair, recording the first error.
+    let mut collect = |key: MapKey, v: &crate::bridge::call::Val| {
+        if err.is_some() {
+            return;
+        }
+        match serialize_val(v) {
+            Ok(bytes) => out.push(IterPair { key, value: bytes }),
+            Err(e) => err = Some(e),
+        }
+    };
+
+    if call.arg_type(idx)? == ValType::Array {
+        // Array fast path: keys are binary-safe (raw bytes, no UTF-8 coercion).
+        call.arg_array_foreach_raw(idx, |key_bytes, num_idx, v| {
+            let key = match key_bytes {
+                Some(b) => MapKey::Str(Arc::from(b)),
+                None => MapKey::Int(num_idx),
+            };
+            collect(key, &v);
+        })?;
+    } else {
+        // Non-array iterable: iterator_to_array($it, preserve_keys: true).
+        // This path goes through `Val::foreach`, which yields `ArrayKey` —
+        // a UTF-8-coerced string key. A non-UTF-8 Generator key therefore
+        // still coerces here; the array path above is the faithful one.
+        let src = unsafe { call.raw_arg_ptr(idx) };
+        let result = call.call_php("iterator_to_array", 2, |b| {
+            unsafe { b.zval_copy(src) };
+            b.bool(true);
+        })?;
+        result.val().foreach(|k, v| {
+            let key = match k {
+                ArrayKey::Int(i) => MapKey::Int(i),
+                ArrayKey::Str(s) => MapKey::Str(Arc::from(s.as_bytes())),
+            };
+            collect(key, &v);
+        });
+    }
+
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+/// Collect keys from an `iterable` of int|string.
+fn collect_iterable_keys(
+    call: &mut crate::bridge::call::NativeCall,
+    idx: u32,
+) -> Result<Vec<MapKey>, PhpError> {
+    use crate::bridge::call::Val;
+    use crate::bridge::types::ValType;
+
+    let mut out: Vec<MapKey> = Vec::new();
+    let mut err: Option<PhpError> = None;
+
+    let push_val = |out: &mut Vec<MapKey>, v: &Val| -> Result<(), PhpError> {
+        match v.val_type() {
+            ValType::Long => {
+                out.push(MapKey::Int(v.as_long()));
+                Ok(())
+            }
+            // String keys are binary-safe: store the raw bytes opaquely.
+            ValType::String => match v.as_bytes() {
+                Some(b) => {
+                    out.push(MapKey::Str(Arc::from(b)));
+                    Ok(())
+                }
+                None => Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\TypeException".to_string(),
+                    message: "Shared\\Map string keys could not be read".to_string(),
+                    code: 0,
+                }),
+            },
+            other => Err(PhpError::Exception {
+                class: "OxPHP\\Shared\\TypeException".to_string(),
+                message: format!(
+                    "Shared\\Map keys must be int or string, got {}",
+                    crate::bridge::call::type_name(other)
+                ),
+                code: 0,
+            }),
+        }
+    };
+
+    if call.arg_type(idx)? == ValType::Array {
+        call.arg_array_foreach(idx, |_k, v| {
+            if err.is_some() {
+                return;
+            }
+            if let Err(e) = push_val(&mut out, &v) {
+                err = Some(e);
+            }
+        })?;
+        if let Some(e) = err {
+            return Err(e);
+        }
+        return Ok(out);
+    }
+
+    // Non-array iterable.
+    let src = unsafe { call.raw_arg_ptr(idx) };
+    let result = call.call_php("iterator_to_array", 2, |b| {
+        unsafe { b.zval_copy(src) };
+        b.bool(false); // keys irrelevant for a key list
+    })?;
+    let val = result.val();
+    val.foreach(|_k, v| {
+        if err.is_some() {
+            return;
+        }
+        if let Err(e) = push_val(&mut out, &v) {
+            err = Some(e);
+        }
+    });
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(out)
+}
+
+/// Serialise a `Val` (array element / iterator value) to portbuf bytes
+/// via the bridge serializer. Rejects non-serialisable values.
+fn serialize_val(v: &crate::bridge::call::Val) -> Result<Vec<u8>, PhpError> {
+    let mut buf: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let rc = unsafe {
+        bridge_ffi::oxphp_portable_serialize(v.as_ptr() as *const _, 1, &mut buf, &mut len)
+    };
+    if rc != 0 {
+        if !buf.is_null() {
+            unsafe { bridge_ffi::oxphp_portable_free(buf) };
+        }
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".to_string(),
+            message: "Shared\\Map: value is not serialisable (closure/resource)".to_string(),
+            code: 0,
+        });
+    }
+    let bytes = if buf.is_null() || len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(buf, len).to_vec() }
+    };
+    if !buf.is_null() {
+        unsafe { bridge_ffi::oxphp_portable_free(buf) };
+    }
+    Ok(bytes)
+}
+
+/// Encode materialised `(MapKey, portbuf)` pairs into a single portbuf
+/// `SharedValue::Array` for `setMany`. Int keys go to the int-keyed half
+/// (preserving the index), string keys to the str-keyed half.
+fn encode_pairs_portbuf(pairs: &[IterPair]) -> Vec<u8> {
+    // The wire codec only carries int-keyed (dense, index-implicit) and
+    // str-keyed entries. To preserve explicit int keys we route every
+    // entry through the str-keyed half is wrong (loses int distinctness);
+    // instead build a SharedValue::Array honouring both halves and rely
+    // on the FFI decode mapping (int half → MapKey::Int(index)). Since
+    // int indices in the wire format are positional, we cannot carry an
+    // arbitrary int key through the int half. We therefore encode int
+    // keys as a tagged scalar in the str half is also wrong. So: encode
+    // the pairs directly with a small custom layout the FFI understands.
+    //
+    // Simpler & correct: serialise each (key, value) pair flat. We reuse
+    // the portbuf array shape where the int-keyed half holds VALUES at
+    // their positional index for dense int keys 0..n, and str-keyed holds
+    // string-key entries. For non-dense int keys we fall back to the
+    // str-keyed half with the decimal key string — but that would alias
+    // "123" and 123. To keep int|string distinct, build a 2-level array:
+    //   [ ['k'=>int_or_str_key, 'v'=>value], ... ]
+    // and have set_many decode each pair. Implemented below.
+    let mut buf = Vec::with_capacity(8 + pairs.len() * 16);
+    buf.push(6u8); // array tag
+    buf.extend_from_slice(&(pairs.len() as u32).to_le_bytes());
+    for (i, p) in pairs.iter().enumerate() {
+        buf.push(0u8); // index key type
+        buf.extend_from_slice(&(i as u64).to_le_bytes());
+        // value: a 2-entry array {0: key, 1: value}
+        buf.push(6u8);
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        // entry 0 (index 0): the key
+        buf.push(0u8);
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        match &p.key {
+            MapKey::Int(n) => {
+                buf.push(3u8);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            MapKey::Str(s) => {
+                buf.push(5u8);
+                let kb = &s[..];
+                buf.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                buf.extend_from_slice(kb);
+            }
+        }
+        // entry 1 (index 1): the already-serialised value (raw portbuf)
+        buf.push(0u8);
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&p.value);
+    }
+    buf
+}
+
+/// Encode keys into a portbuf `SharedValue::Array` (int-keyed half holds
+/// the key scalars) for `removeMany`.
+fn encode_keys_portbuf(keys: &[MapKey]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(8 + keys.len() * 12);
+    buf.push(6u8); // array tag
+    buf.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    for (i, k) in keys.iter().enumerate() {
+        buf.push(0u8); // index key type
+        buf.extend_from_slice(&(i as u64).to_le_bytes());
+        match k {
+            MapKey::Int(n) => {
+                buf.push(3u8);
+                buf.extend_from_slice(&n.to_le_bytes());
+            }
+            MapKey::Str(s) => {
+                buf.push(5u8);
+                let kb = &s[..];
+                buf.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                buf.extend_from_slice(kb);
+            }
+        }
+    }
+    buf
+}
+
+// ─── forEach ───────────────────────────────────────────────────────
+
+/// Snapshot all keys once via `oxphp_shared_map_all_keys`, then per key
+/// fetch the value and invoke the PHP callback through
+/// `oxphp_shared_invoke_2_ret_stop`. No shard lock is held across the PHP
+/// call. A `false` return (stop flag) ends iteration early.
+fn for_each_impl(
+    call: &mut crate::bridge::call::NativeCall,
+    entry_ptr: *const Entry,
+) -> Result<(), PhpError> {
+    let callable = unsafe { call.raw_arg_ptr(0) };
+
+    // Snapshot every key in a single O(n) pass, then re-fetch each value
+    // and invoke the callback with no map lock held. Keys deleted between
+    // snapshot and re-fetch are skipped. Only keys are pinned (cheap), so a
+    // slow callback never holds a value alive.
+    let mut keys_buf: *mut u8 = std::ptr::null_mut();
+    let mut keys_len: usize = 0;
+    let rc = unsafe { oxphp_shared_map_all_keys(entry_ptr, &mut keys_buf, &mut keys_len) };
+    map_rc_to_result(rc)?;
+    let keys = decode_key_array(keys_buf, keys_len);
+    if !keys_buf.is_null() {
+        unsafe { bridge_ffi::oxphp_portable_free(keys_buf) };
+    }
+
+    for key in keys {
+        // Fetch the current value (skip if now absent).
+        let (kind, kint, kbytes) = key_to_ffi(&key);
+        let mut vbuf: *mut u8 = std::ptr::null_mut();
+        let mut vlen: usize = 0;
+        let mut absent: c_int = 0;
+        let rc = unsafe {
+            oxphp_shared_map_get(
+                entry_ptr,
+                kind,
+                kint,
+                kbytes.as_ptr(),
+                kbytes.len(),
+                &mut vbuf,
+                &mut vlen,
+                &mut absent,
+            )
+        };
+        map_rc_to_result(rc)?;
+        if absent != 0 {
+            continue; // deleted between snapshot and re-fetch
+        }
+
+        let stop = unsafe {
+            bridge_ffi::oxphp_shared_invoke_2_ret_stop(
+                callable,
+                kind,
+                kint,
+                kbytes.as_ptr(),
+                kbytes.len(),
+                vbuf,
+                vlen,
+            )
+        };
+        if !vbuf.is_null() {
+            unsafe { bridge_ffi::oxphp_portable_free(vbuf) };
+        }
+        if stop < 0 {
+            // Callback threw or invalid callable — EG(exception) is
+            // already set on the PHP side; bail without overwriting.
+            return Err(PhpError::Custom("Map::forEach callback failed".into()));
+        }
+        if stop != 0 {
+            return Ok(()); // callback returned false → stop early
+        }
+    }
+    Ok(())
+}
+
+/// FFI key tuple for a `MapKey`: (kind, int, bytes).
+fn key_to_ffi(key: &MapKey) -> (c_int, i64, Vec<u8>) {
+    match key {
+        MapKey::Int(i) => (KEY_KIND_INT, *i, Vec::new()),
+        MapKey::Str(s) => (KEY_KIND_STR, 0, s.to_vec()),
+    }
+}
+
+/// Decode a key-snapshot portbuf array (int-keyed half holds Long/String
+/// key scalars) into a `Vec<MapKey>`.
+fn decode_key_array(buf: *mut u8, len: usize) -> Vec<MapKey> {
+    if buf.is_null() || len == 0 {
+        return Vec::new();
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
+    let raw = match portbuf_to_sv(bytes) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let arr = match raw {
+        crate::plugins::ox_shared::value::SharedValueRaw::Array(a) => a,
+        _ => return Vec::new(),
+    };
+    arr.int_keyed
+        .iter()
+        .filter_map(|v| raw_key_value_to_map_key(v).ok())
+        .collect()
+}
+
+// ─── Map\KeyCursor ─────────────────────────────────────────────────
+//
+// A native lazy Iterator returned by `getMany`. It pins the Map (one
+// strong Arc) and a materialised list of keys captured at construction;
+// each `current()` re-fetches one value via the single-key getter,
+// skipping keys now absent. No Map lock is held across iteration.
+
+/// Per-instance Rust storage for a `Map\KeyCursor`.
+struct KeyCursorState {
+    /// Strong reference to the Map entry (Arc bump). Reconstituted and
+    /// dropped on cursor Drop.
+    entry_ptr: *const Entry,
+    /// Materialised key list captured from the `iterable` at construction.
+    keys: Vec<MapKey>,
+    /// Cursor position into `keys`.
+    index: usize,
+    /// Cached portbuf bytes of the value at the current valid position
+    /// (None until positioned / when invalid).
+    current: Option<Vec<u8>>,
+}
+
+// SAFETY: `entry_ptr` is an `Arc::into_raw(Arc<Entry>)`; `Entry: Send +
+// Sync`. The cursor owns one strong ref, so moving across threads is
+// sound (same as moving an Arc<Entry>).
+unsafe impl Send for KeyCursorState {}
+unsafe impl Sync for KeyCursorState {}
+
+impl Drop for KeyCursorState {
+    fn drop(&mut self) {
+        if !self.entry_ptr.is_null() {
+            // SAFETY: entry_ptr came from Arc::into_raw via
+            // construct_key_cursor; reconstitute and drop exactly once.
+            unsafe { drop(Arc::from_raw(self.entry_ptr)) };
+        }
+    }
+}
+
+/// Storage wrapper: a single raw pointer to a boxed [`KeyCursorState`].
+/// `#[repr(C)]` so the C-side allocator helper can `memcpy` the pointer
+/// into the rust_data slot (mirrors `PoolHandleStorage`). NULL = not yet
+/// populated (factory default).
+#[repr(C)]
+struct KeyCursorStorage {
+    state: *mut KeyCursorState,
+}
+
+// SAFETY: the pointed-to KeyCursorState is Send + Sync; the wrapper just
+// carries a raw pointer with single ownership.
+unsafe impl Send for KeyCursorStorage {}
+unsafe impl Sync for KeyCursorStorage {}
+
+impl Default for KeyCursorStorage {
+    fn default() -> Self {
+        Self {
+            state: std::ptr::null_mut(),
+        }
+    }
+}
+
+impl Drop for KeyCursorStorage {
+    fn drop(&mut self) {
+        if !self.state.is_null() {
+            // SAFETY: state was Box::into_raw'd in construct_key_cursor.
+            unsafe { drop(Box::from_raw(self.state)) };
+            self.state = std::ptr::null_mut();
+        }
+    }
+}
+
+/// Build a `Map\KeyCursor` into the retval. Materialises the iterable's
+/// keys, bumps the Map's Arc, boxes the state, and hands the box pointer
+/// to the C-side allocator which constructs the object and stamps the
+/// pointer into its rust_data.
+fn construct_key_cursor(
+    call: &mut crate::bridge::call::NativeCall,
+    entry_ptr: *const Entry,
+    keys_idx: u32,
+) -> Result<(), PhpError> {
+    if entry_ptr.is_null() {
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\StaleHandleException".to_string(),
+            message: "Map handle is no longer alive".to_string(),
+            code: 0,
+        });
+    }
+    let keys = collect_iterable_keys(call, keys_idx)?;
+
+    // Bump the Map's strong refcount so the cursor keeps the entry alive.
+    // SAFETY: entry_ptr is a live Arc::into_raw pointer (the Map wrapper
+    // holds a strong ref for the duration of this call).
+    unsafe { Arc::increment_strong_count(entry_ptr) };
+
+    let state = Box::new(KeyCursorState {
+        entry_ptr,
+        keys,
+        index: 0,
+        current: None,
+    });
+    let state_ptr = Box::into_raw(state);
+
+    let retval = call.retval_ptr();
+    let rc = unsafe {
+        bridge_ffi::oxphp_shared_map_cursor_alloc(retval, state_ptr as *mut std::os::raw::c_void)
+    };
+    if rc != 0 {
+        // Allocation failed — reclaim the box (its Drop releases the Arc).
+        // SAFETY: state_ptr was just Box::into_raw'd and not consumed.
+        unsafe { drop(Box::from_raw(state_ptr)) };
+        return Err(PhpError::Custom(
+            "failed to construct Map\\KeyCursor".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Read the boxed cursor-state pointer from `$this`'s rust_data
+/// storage. Returns a raw pointer (Copy) so callers can build a `&mut`
+/// to the pointee independent of `call`'s borrow — the cursor is
+/// single-threaded per request, so aliasing is not a concern.
+fn cursor_state_ptr(
+    call: &crate::bridge::call::NativeCall,
+) -> Result<*mut KeyCursorState, PhpError> {
+    let storage = call.storage::<KeyCursorStorage>()?;
+    if storage.state.is_null() {
+        return Err(PhpError::Custom("KeyCursor not initialised".into()));
+    }
+    Ok(storage.state)
+}
+
+/// Re-fetch the value at the cursor's current key, advancing past keys
+/// that are now absent. Updates `state.current`. Stops at the first
+/// present key or at the end of the key list.
+fn cursor_advance_to_present(state: &mut KeyCursorState) {
+    state.current = None;
+    while state.index < state.keys.len() {
+        let key = state.keys[state.index].clone();
+        let (kind, kint, kbytes) = key_to_ffi(&key);
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut len: usize = 0;
+        let mut absent: c_int = 0;
+        let rc = unsafe {
+            oxphp_shared_map_get(
+                state.entry_ptr,
+                kind,
+                kint,
+                kbytes.as_ptr(),
+                kbytes.len(),
+                &mut buf,
+                &mut len,
+                &mut absent,
+            )
+        };
+        if rc != 0 {
+            // Stale handle / error: treat as end of iteration.
+            state.index = state.keys.len();
+            return;
+        }
+        if absent != 0 {
+            if !buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(buf) };
+            }
+            state.index += 1;
+            continue;
+        }
+        let bytes = if buf.is_null() || len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(buf, len).to_vec() }
+        };
+        if !buf.is_null() {
+            unsafe { bridge_ffi::oxphp_portable_free(buf) };
+        }
+        state.current = Some(bytes);
+        return;
+    }
+}
+
+fn register_key_cursor_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
+    ctx.register_class(KEY_CURSOR_FQN)
+        .final_()
+        .implements("Iterator")
+        .with_storage(KeyCursorStorage::default)
+        // ── rewind(): void ─────────────────────────────────────────
+        .method("rewind")
+        .returns(PhpType::Void)
+        .handler(|call| {
+            let sp = cursor_state_ptr(call)?;
+            // SAFETY: sp is a live Box::into_raw pointer; the cursor is
+            // single-threaded per request so no aliasing &mut exists.
+            let state = unsafe { &mut *sp };
+            state.index = 0;
+            cursor_advance_to_present(state);
+            call.ret_null();
+            Ok(())
+        })
+        // ── valid(): bool ──────────────────────────────────────────
+        .method("valid")
+        .returns(PhpType::Bool)
+        .handler(|call| {
+            let sp = cursor_state_ptr(call)?;
+            // SAFETY: see rewind.
+            let state = unsafe { &*sp };
+            let valid = state.index < state.keys.len() && state.current.is_some();
+            call.ret_bool(valid);
+            Ok(())
+        })
+        // ── current(): mixed ───────────────────────────────────────
+        .method("current")
+        .returns(PhpType::Mixed)
+        .handler(|call| {
+            let sp = cursor_state_ptr(call)?;
+            // SAFETY: see rewind. Clone the bytes so the borrow ends
+            // before we touch `call` mutably.
+            let bytes = unsafe { (*sp).current.clone() };
+            match bytes {
+                Some(b) if !b.is_empty() => {
+                    let retval = call.retval_ptr();
+                    let rc = unsafe {
+                        bridge_ffi::oxphp_portable_deserialize(
+                            b.as_ptr(),
+                            b.len(),
+                            1,
+                            retval as *mut _,
+                        )
+                    };
+                    if rc != 0 {
+                        call.ret_null();
+                    }
+                }
+                _ => call.ret_null(),
+            }
+            Ok(())
+        })
+        // ── key(): int|string ──────────────────────────────────────
+        .method("key")
+        .returns(PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .handler(|call| {
+            let sp = cursor_state_ptr(call)?;
+            // SAFETY: see rewind. Read the key out before touching call.
+            let key = unsafe {
+                let state = &*sp;
+                if state.index < state.keys.len() {
+                    Some(state.keys[state.index].clone())
+                } else {
+                    None
+                }
+            };
+            match key {
+                Some(MapKey::Int(i)) => call.ret_long(i),
+                // Binary-safe: keys are opaque bytes.
+                Some(MapKey::Str(s)) => call.ret_bytes(&s),
+                None => call.ret_null(),
+            }
+            Ok(())
+        })
+        // ── next(): void ───────────────────────────────────────────
+        .method("next")
+        .returns(PhpType::Void)
+        .handler(|call| {
+            let sp = cursor_state_ptr(call)?;
+            // SAFETY: see rewind.
+            let state = unsafe { &mut *sp };
+            state.index += 1;
+            cursor_advance_to_present(state);
+            call.ret_null();
+            Ok(())
+        })
+        .build()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn k(s: &str) -> Arc<str> {
-        Arc::from(s)
+    fn ik(i: i64) -> MapKey {
+        MapKey::Int(i)
     }
+    fn sk(s: &str) -> MapKey {
+        MapKey::from_str(s)
+    }
+
+    // ── Test helper: build an array SharedValue from str=>int pairs.
+    impl SharedValue {
+        fn from_pairs(pairs: &[(&str, i64)]) -> SharedValue {
+            let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
+            for (k, v) in pairs {
+                arr.str_keyed.push((Arc::from(*k), SharedValue::Long(*v)));
+            }
+            SharedValue::Array(Arc::new(arr))
+        }
+    }
+
+    // ── basic CRUD ─────────────────────────────────────────────────
 
     #[test]
     fn new_unbounded() {
@@ -2196,111 +2781,300 @@ mod tests {
     }
 
     #[test]
-    fn new_with_cap() {
-        let m = MapInner::new(Some(500));
-        assert_eq!(m.max_entries(), Some(500));
-    }
-
-    #[test]
-    fn set_new_key_returns_none() {
+    fn set_get_remove() {
         let m = MapInner::new(None);
-        assert!(m.set(k("a"), SharedValue::Long(1)).unwrap().is_none());
-        assert_eq!(m.count(), 1);
-    }
-
-    #[test]
-    fn set_replace_returns_previous() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        let prev = m.set(k("a"), SharedValue::Long(2)).unwrap();
+        assert!(m.set(sk("a"), SharedValue::Long(1)).unwrap().is_none());
+        assert!(matches!(m.get(&sk("a")), Some(SharedValue::Long(1))));
+        let prev = m.set(sk("a"), SharedValue::Long(2)).unwrap();
         assert!(matches!(prev, Some(SharedValue::Long(1))));
-        assert_eq!(m.count(), 1);
+        assert!(m.remove(&sk("a")));
+        assert!(!m.remove(&sk("a")));
+        assert!(m.get(&sk("a")).is_none());
     }
 
     #[test]
-    fn get_hit_and_miss() {
+    fn set_rejects_null_value() {
         let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(42)).unwrap();
-        assert!(matches!(m.get("a"), Some(SharedValue::Long(42))));
-        assert!(m.get("missing").is_none());
-    }
-
-    #[test]
-    fn has_reflects_presence() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        assert!(m.has("a"));
-        assert!(!m.has("b"));
-        m.remove("a");
-        assert!(!m.has("a"));
-    }
-
-    #[test]
-    fn remove_returns_prev_value() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        assert!(matches!(m.remove("a"), Some(SharedValue::Long(1))));
-        assert!(m.remove("a").is_none());
+        assert_eq!(
+            m.set(sk("a"), SharedValue::Null).unwrap_err(),
+            SharedError::Type
+        );
         assert_eq!(m.count(), 0);
     }
 
+    // ── MapKey distinctness (Task 1.1) ─────────────────────────────
+
     #[test]
-    fn clear_empties_the_map() {
+    fn int_and_string_keys_are_distinct() {
         let m = MapInner::new(None);
-        for i in 0..10 {
-            m.set(Arc::from(format!("k{i}")), SharedValue::Long(i))
-                .unwrap();
+        m.set(ik(123), SharedValue::String(Arc::from("int")))
+            .unwrap();
+        m.set(sk("123"), SharedValue::String(Arc::from("str")))
+            .unwrap();
+        assert_eq!(m.count(), 2);
+        assert!(matches!(m.get(&ik(123)), Some(SharedValue::String(s)) if &*s == "int"));
+        assert!(matches!(m.get(&sk("123")), Some(SharedValue::String(s)) if &*s == "str"));
+    }
+
+    #[test]
+    fn binary_keys_round_trip() {
+        let inner = MapInner::new(None);
+        // Non-UTF-8 key bytes round-trip faithfully (no rejection, no lossy).
+        inner
+            .set(MapKey::from_bytes(b"\xff\xfe"), SharedValue::Long(1))
+            .unwrap();
+        assert!(matches!(
+            inner.get(&MapKey::from_bytes(b"\xff\xfe")),
+            Some(SharedValue::Long(1))
+        ));
+        // Distinct byte keys hash/compare distinctly, and an empty string
+        // key is distinct from any non-empty byte key.
+        assert_ne!(MapKey::from_bytes(b"\xff"), MapKey::from_bytes(b"\xfe"));
+        assert_ne!(MapKey::from_bytes(b"\xff"), MapKey::from_str(""));
+    }
+
+    // ── striped counter (Task 1.2) ─────────────────────────────────
+
+    #[test]
+    fn striped_count_exact_when_quiescent() {
+        let inner = MapInner::new(None);
+        for i in 0..1000 {
+            inner.set(MapKey::Int(i), SharedValue::Long(i)).unwrap();
         }
-        assert_eq!(m.count(), 10);
-        m.clear();
+        assert_eq!(inner.count(), 1000);
+        for i in 0..400 {
+            inner.remove(&MapKey::Int(i));
+        }
+        assert_eq!(inner.count(), 600);
+    }
+
+    #[test]
+    fn clear_resets_count() {
+        let m = MapInner::new(None);
+        for i in 0..50 {
+            m.set(ik(i), SharedValue::Long(i)).unwrap();
+        }
+        assert_eq!(m.clear(), 50);
         assert_eq!(m.count(), 0);
-        assert!(m.get("k0").is_none());
+    }
+
+    // ── soft cap (Task 1.3) ────────────────────────────────────────
+
+    #[test]
+    fn soft_cap_rejects_new_key_allows_overwrite() {
+        let inner = MapInner::new(Some(2));
+        inner
+            .set(MapKey::from_str("a"), SharedValue::Long(1))
+            .unwrap();
+        inner
+            .set(MapKey::from_str("b"), SharedValue::Long(2))
+            .unwrap();
+        // overwrite existing — allowed at cap
+        inner
+            .set(MapKey::from_str("a"), SharedValue::Long(9))
+            .unwrap();
+        // new key at cap — rejected
+        let e = inner
+            .set(MapKey::from_str("c"), SharedValue::Long(3))
+            .unwrap_err();
+        assert_eq!(e, SharedError::CapacityExceeded);
     }
 
     #[test]
-    fn keys_returns_snapshot() {
-        let m = MapInner::new(None);
-        m.set(k("alpha"), SharedValue::Long(1)).unwrap();
-        m.set(k("beta"), SharedValue::Long(2)).unwrap();
-        m.set(k("gamma"), SharedValue::Long(3)).unwrap();
-
-        let mut keys: Vec<String> = m.keys().iter().map(|s| s.to_string()).collect();
-        keys.sort();
-        assert_eq!(keys, vec!["alpha", "beta", "gamma"]);
-    }
-
-    #[test]
-    fn keys_snapshot_is_independent_of_later_writes() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        let snap = m.keys();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
-        assert_eq!(snap.len(), 1);
+    fn cap_freed_by_remove() {
+        let m = MapInner::new(Some(2));
+        m.set(sk("a"), SharedValue::Long(1)).unwrap();
+        m.set(sk("b"), SharedValue::Long(2)).unwrap();
+        assert_eq!(
+            m.set(sk("c"), SharedValue::Long(3)).unwrap_err(),
+            SharedError::CapacityExceeded
+        );
+        m.remove(&sk("a"));
+        m.set(sk("c"), SharedValue::Long(3)).unwrap();
         assert_eq!(m.count(), 2);
     }
 
-    #[test]
-    fn shared_inner_impl_exposes_type_tag_and_snapshot() {
-        let m = MapInner::new(Some(100));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
+    // ── compare_and_set (Task 1.4) ─────────────────────────────────
 
+    #[test]
+    fn cas_insert_replace_remove_via_null_sentinel() {
+        let inner = MapInner::new(None);
+        // insert iff absent
+        assert!(inner
+            .compare_and_set(MapKey::from_str("k"), None, Some(SharedValue::Long(1)))
+            .unwrap());
+        assert!(!inner
+            .compare_and_set(MapKey::from_str("k"), None, Some(SharedValue::Long(9)))
+            .unwrap());
+        // replace iff == expected
+        assert!(inner
+            .compare_and_set(
+                MapKey::from_str("k"),
+                Some(SharedValue::Long(1)),
+                Some(SharedValue::Long(2))
+            )
+            .unwrap());
+        assert!(!inner
+            .compare_and_set(
+                MapKey::from_str("k"),
+                Some(SharedValue::Long(1)),
+                Some(SharedValue::Long(3))
+            )
+            .unwrap());
+        // remove iff == expected
+        assert!(inner
+            .compare_and_set(MapKey::from_str("k"), Some(SharedValue::Long(2)), None)
+            .unwrap());
+        assert!(inner.get(&MapKey::from_str("k")).is_none());
+    }
+
+    #[test]
+    fn cas_absent_to_absent_noop() {
+        let m = MapInner::new(None);
+        // absent → absent: true (no-op), and key stays absent
+        assert!(m.compare_and_set(sk("x"), None, None).unwrap());
+        assert!(m.get(&sk("x")).is_none());
+        assert_eq!(m.count(), 0);
+    }
+
+    #[test]
+    fn cas_array_equality_is_order_sensitive() {
+        let inner = MapInner::new(None);
+        let a = SharedValue::from_pairs(&[("x", 1), ("y", 2)]);
+        let a_reordered = SharedValue::from_pairs(&[("y", 2), ("x", 1)]);
+        inner.set(MapKey::from_str("k"), a.clone()).unwrap();
+        assert!(!inner
+            .compare_and_set(
+                MapKey::from_str("k"),
+                Some(a_reordered),
+                Some(SharedValue::Long(0))
+            )
+            .unwrap());
+        assert!(inner
+            .compare_and_set(MapKey::from_str("k"), Some(a), Some(SharedValue::Long(0)))
+            .unwrap());
+    }
+
+    #[test]
+    fn cas_rejects_null_new_value() {
+        let m = MapInner::new(None);
+        // null `new` (non-absent sentinel) is unstorable.
+        assert_eq!(
+            m.compare_and_set(sk("k"), None, Some(SharedValue::Null))
+                .unwrap_err(),
+            SharedError::Type
+        );
+    }
+
+    // ── swap / pop / set_if_absent (Task 1.5) ──────────────────────
+
+    #[test]
+    fn swap_and_pop_return_prev_or_none() {
+        let inner = MapInner::new(None);
+        assert!(inner
+            .swap(MapKey::from_str("k"), SharedValue::Long(1))
+            .unwrap()
+            .is_none()); // was absent
+        assert!(matches!(
+            inner
+                .swap(MapKey::from_str("k"), SharedValue::Long(2))
+                .unwrap(),
+            Some(SharedValue::Long(1))
+        ));
+        assert!(matches!(
+            inner.pop(&MapKey::from_str("k")),
+            Some(SharedValue::Long(2))
+        ));
+        assert!(inner.pop(&MapKey::from_str("k")).is_none());
+    }
+
+    #[test]
+    fn set_if_absent_returns_prev() {
+        let inner = MapInner::new(None);
+        assert!(inner
+            .set_if_absent(MapKey::from_str("k"), SharedValue::Long(1))
+            .unwrap()
+            .is_none()); // inserted
+        assert!(matches!(
+            inner
+                .set_if_absent(MapKey::from_str("k"), SharedValue::Long(9))
+                .unwrap(),
+            Some(SharedValue::Long(1))
+        ));
+        // value not clobbered
+        assert!(matches!(m_get(&inner, "k"), Some(SharedValue::Long(1))));
+    }
+
+    fn m_get(m: &MapInner, k: &str) -> Option<SharedValue> {
+        m.get(&sk(k))
+    }
+
+    #[test]
+    fn swap_rejects_null() {
+        let m = MapInner::new(None);
+        assert_eq!(
+            m.swap(sk("k"), SharedValue::Null).unwrap_err(),
+            SharedError::Type
+        );
+    }
+
+    // ── key snapshot (forEach) ─────────────────────────────────────
+
+    #[test]
+    fn all_keys_covers_every_entry_once() {
+        let inner = MapInner::new(None);
+        for i in 0..200 {
+            inner.set(MapKey::Int(i), SharedValue::Long(i)).unwrap();
+        }
+        let keys = inner.all_keys();
+        assert_eq!(keys.len(), 200, "one entry per key, no duplicates");
+        let seen: std::collections::HashSet<_> = keys.into_iter().collect();
+        assert_eq!(seen.len(), 200);
+        for i in 0..200 {
+            assert!(seen.contains(&MapKey::Int(i)));
+        }
+    }
+
+    // ── set_many_batch ─────────────────────────────────────────────
+
+    #[test]
+    fn set_many_batch_inserts_and_counts() {
+        let m = MapInner::new(None);
+        let batch = vec![
+            (sk("a"), SharedValue::Long(1)),
+            (ik(7), SharedValue::Long(2)),
+            (sk("b"), SharedValue::Long(3)),
+        ];
+        assert_eq!(m.set_many_batch(batch).unwrap(), 3);
+        assert_eq!(m.count(), 3);
+        assert!(matches!(m.get(&ik(7)), Some(SharedValue::Long(2))));
+    }
+
+    #[test]
+    fn set_many_batch_bails_on_cap() {
+        let m = MapInner::new(Some(2));
+        let batch = vec![
+            (sk("a"), SharedValue::Long(1)),
+            (sk("b"), SharedValue::Long(2)),
+            (sk("c"), SharedValue::Long(3)),
+        ];
+        let (e, n) = m.set_many_batch(batch).unwrap_err();
+        assert_eq!(e, SharedError::CapacityExceeded);
+        assert_eq!(n, 2);
+    }
+
+    // ── SharedInner / downcast ─────────────────────────────────────
+
+    #[test]
+    fn shared_inner_type_and_snapshot() {
+        let m = MapInner::new(Some(100));
+        m.set(sk("a"), SharedValue::Long(1)).unwrap();
+        m.set(sk("b"), SharedValue::Long(2)).unwrap();
         assert_eq!(m.type_tag(), SharedType::Map);
         match m.debug_snapshot() {
             SharedValue::Long(n) => assert_eq!(n, 2),
             other => panic!("expected Long, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn mem_bytes_scales_with_entries() {
-        let m = MapInner::new(None);
-        let empty = m.mem_bytes();
-        for i in 0..50 {
-            m.set(Arc::from(format!("key{i:03}")), SharedValue::Long(i))
-                .unwrap();
-        }
-        assert!(m.mem_bytes() > empty);
     }
 
     #[test]
@@ -2318,25 +3092,44 @@ mod tests {
     }
 
     #[test]
-    fn binary_safe_key_strings() {
-        // Keys are raw bytes under the hood (Arc<str> accepts any UTF-8).
-        // Non-ASCII but valid UTF-8 must round-trip.
+    fn mem_bytes_scales_with_entries() {
         let m = MapInner::new(None);
-        let key = k("ключ-π-🔥");
-        m.set(key.clone(), SharedValue::Long(7)).unwrap();
-        assert!(matches!(m.get(&key), Some(SharedValue::Long(7))));
+        let empty = m.mem_bytes();
+        for i in 0..50 {
+            m.set(ik(i), SharedValue::Long(i)).unwrap();
+        }
+        assert!(m.mem_bytes() > empty);
     }
 
-    // ── retain/release balance ────────────────────────────────────
+    // ── content equality helper ────────────────────────────────────
+
+    #[test]
+    fn sv_content_eq_scalars_and_strings() {
+        assert!(sv_content_eq(&SharedValue::Long(1), &SharedValue::Long(1)));
+        assert!(!sv_content_eq(&SharedValue::Long(1), &SharedValue::Long(2)));
+        assert!(sv_content_eq(
+            &SharedValue::String(Arc::from("x")),
+            &SharedValue::String(Arc::from("x"))
+        ));
+        assert!(!sv_content_eq(
+            &SharedValue::String(Arc::from("x")),
+            &SharedValue::String(Arc::from("y"))
+        ));
+        // cross-type scalar inequality (matches PHP ===)
+        assert!(!sv_content_eq(
+            &SharedValue::Long(1),
+            &SharedValue::String(Arc::from("1"))
+        ));
+    }
+
+    // ── registry-backed: retain/release + cycle detection ──────────
 
     use crate::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
-    use crate::plugins::ox_shared::registry::{init_registry, registry, SharedId, SharedRegistry};
+    use crate::plugins::ox_shared::registry::{init_registry, registry, SharedRegistry};
     use crate::plugins::ox_shared::types::counter::CounterInner;
     use crate::plugins::ox_shared::value::SharedRefOwned;
 
     fn ensure_registry() -> &'static SharedRegistry {
-        // Idempotent — OnceLock.set drops the dupe silently. Every test
-        // that touches refcounts calls this; the first one wins.
         init_registry(SharedConfig {
             enabled: true,
             max_entries: 10_000,
@@ -2347,6 +3140,7 @@ mod tests {
             introspection_preview_enabled: false,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
+            max_value_size: 1 << 20,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
@@ -2356,11 +3150,6 @@ mod tests {
         registry()
     }
 
-    /// Mint a fresh mock Shareable entry (a plain `CounterInner`) and
-    /// return the `SharedValue` wrapping it together with the entry id.
-    /// The returned `SharedValue::Shared(SharedRefOwned)` owns one
-    /// strong `Arc<Entry>`; passing it to a container's `set` transfers
-    /// that ownership.
     fn make_mock_shared(reg: &'static SharedRegistry) -> (SharedValue, SharedId) {
         let arc = reg
             .insert(SharedType::Counter, Arc::new(CounterInner::new(0)))
@@ -2371,262 +3160,29 @@ mod tests {
     }
 
     #[test]
-    fn set_shared_retains_target() {
+    fn set_shared_retains_and_clear_releases() {
         let reg = ensure_registry();
         let (sv, id) = make_mock_shared(reg);
-        // After make_mock_shared, the only strong holder is `sv`'s
-        // SharedRefOwned. lookup() upgrades the Weak to verify alive.
-        assert!(reg.lookup(id).is_ok(), "entry alive after construction");
-
-        let m = MapInner::new(None);
-        let prev = m.set(k("x"), sv).unwrap();
-        assert!(prev.is_none());
-        assert!(
-            reg.lookup(id).is_ok(),
-            "entry stays alive while Map holds it"
-        );
-
-        m.clear();
-        // After clear, Map dropped its only Arc; entry self-deregisters.
-        assert!(
-            reg.lookup(id).is_err(),
-            "entry dies when Map drops the last Arc"
-        );
-    }
-
-    #[test]
-    fn set_replace_transfers_prev_ownership_to_caller() {
-        let reg = ensure_registry();
-        let (sv1, id1) = make_mock_shared(reg);
-        let (sv2, id2) = make_mock_shared(reg);
-
-        let m = MapInner::new(None);
-        m.set(k("x"), sv1).unwrap();
-        assert!(reg.lookup(id1).is_ok(), "id1 alive in Map");
-
-        // Replace: new sv2 moves into Map; prev returns the Arc that
-        // used to be Map's hold on id1.
-        let prev = m.set(k("x"), sv2).unwrap().expect("replace returns prev");
-        assert!(reg.lookup(id1).is_ok(), "id1 still alive via prev's Arc");
-        assert!(reg.lookup(id2).is_ok(), "id2 alive (now in Map)");
-
-        // Caller discharges the inherited Arc by dropping prev.
-        drop(prev);
-        assert!(
-            reg.lookup(id1).is_err(),
-            "id1 dies when prev (its last Arc) drops"
-        );
-
-        m.clear();
-        assert!(
-            reg.lookup(id2).is_err(),
-            "id2 dies when Map drops its last Arc"
-        );
-    }
-
-    #[test]
-    fn remove_hands_retain_to_caller() {
-        let reg = ensure_registry();
-        let (sv, id) = make_mock_shared(reg);
-        let m = MapInner::new(None);
-        m.set(k("x"), sv).unwrap();
         assert!(reg.lookup(id).is_ok());
-
-        let prev = m.remove("x").expect("key was present");
-        // Map's store lost the key; `prev` now carries the Arc.
-        assert!(
-            reg.lookup(id).is_ok(),
-            "entry alive via prev's Arc after remove"
-        );
-
-        drop(prev);
-        assert!(
-            reg.lookup(id).is_err(),
-            "entry dies when prev (its last Arc) drops"
-        );
-    }
-
-    #[test]
-    fn clear_releases_every_shared_entry() {
-        let reg = ensure_registry();
-        let (sv1, id1) = make_mock_shared(reg);
-        let (sv2, id2) = make_mock_shared(reg);
         let m = MapInner::new(None);
-        m.set(k("a"), sv1).unwrap();
-        m.set(k("b"), sv2).unwrap();
-        assert!(reg.lookup(id1).is_ok());
-        assert!(reg.lookup(id2).is_ok());
-
-        m.clear();
-        // Map's only Arcs to id1/id2 were dropped → entries die.
-        assert!(reg.lookup(id1).is_err());
-        assert!(reg.lookup(id2).is_err());
-    }
-
-    #[test]
-    fn retain_keep_all_preserves_entries_and_refcounts() {
-        let reg = ensure_registry();
-        let (sv1, id1) = make_mock_shared(reg);
-        let (sv2, id2) = make_mock_shared(reg);
-        let m = MapInner::new(None);
-        m.set(k("a"), sv1).unwrap();
-        m.set(k("b"), sv2).unwrap();
-        assert!(reg.lookup(id1).is_ok());
-        assert!(reg.lookup(id2).is_ok());
-
-        m.retain(|_, _| true);
-        assert_eq!(m.count(), 2);
-        assert!(m.has("a"));
-        assert!(m.has("b"));
-        assert!(reg.lookup(id1).is_ok());
-        assert!(reg.lookup(id2).is_ok());
-
-        m.clear();
-    }
-
-    #[test]
-    fn retain_drop_all_empties_and_releases() {
-        let reg = ensure_registry();
-        let (sv1, id1) = make_mock_shared(reg);
-        let (sv2, id2) = make_mock_shared(reg);
-        let m = MapInner::new(None);
-        m.set(k("a"), sv1).unwrap();
-        m.set(k("b"), sv2).unwrap();
-
-        m.retain(|_, _| false);
-        assert_eq!(m.count(), 0);
-        assert!(!m.has("a"));
-        assert!(!m.has("b"));
-        // Map's Arcs dropped; entries self-deregister.
-        assert!(reg.lookup(id1).is_err());
-        assert!(reg.lookup(id2).is_err());
-    }
-
-    #[test]
-    fn retain_partial_keeps_matched_drops_others() {
-        let reg = ensure_registry();
-        let (sv_keep, id_keep) = make_mock_shared(reg);
-        let (sv_drop, id_drop) = make_mock_shared(reg);
-        let m = MapInner::new(None);
-        m.set(k("keep"), sv_keep).unwrap();
-        m.set(k("drop"), sv_drop).unwrap();
-
-        m.retain(|key, _| key == "keep");
-        assert_eq!(m.count(), 1);
-        assert!(m.has("keep"));
-        assert!(!m.has("drop"));
-        assert!(reg.lookup(id_keep).is_ok(), "keep still held by Map");
-        assert!(reg.lookup(id_drop).is_err(), "drop lost Map's last Arc");
-
-        m.clear();
-    }
-
-    #[test]
-    fn retain_predicate_sees_current_value() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
-        m.set(k("c"), SharedValue::Long(3)).unwrap();
-
-        m.retain(|_, v| matches!(v, SharedValue::Long(n) if *n >= 2));
-        assert_eq!(m.count(), 2);
-        assert!(!m.has("a"));
-        assert!(m.has("b"));
-        assert!(m.has("c"));
-    }
-
-    #[test]
-    fn retain_on_empty_is_noop() {
-        let m = MapInner::new(None);
-        m.retain(|_, _| true);
-        assert_eq!(m.count(), 0);
-        m.retain(|_, _| false);
-        assert_eq!(m.count(), 0);
-    }
-
-    #[test]
-    fn retain_count_resyncs_after_walk() {
-        // Retain must leave count() consistent with the internal DashMap
-        // so subsequent cap checks / observability reads stay accurate.
-        let m = MapInner::new(Some(10));
-        for i in 0..8 {
-            m.set(Arc::from(format!("k{i}")), SharedValue::Long(i))
-                .unwrap();
-        }
-        assert_eq!(m.count(), 8);
-
-        m.retain(|_, v| matches!(v, SharedValue::Long(n) if n % 2 == 0));
-        assert_eq!(m.count(), 4);
-        // Cap still has headroom: 10 − 4 = 6 new keys should fit.
-        for i in 100..106 {
-            m.set(Arc::from(format!("n{i}")), SharedValue::Long(i))
-                .unwrap();
-        }
-        assert_eq!(m.count(), 10);
-    }
-
-    #[test]
-    fn on_drop_releases_via_registry_release() {
-        let reg = ensure_registry();
-        let (sv, id) = make_mock_shared(reg);
-
-        let inner: Arc<dyn SharedInner> = Arc::new(MapInner::new(None));
-        // Bootstrap the Map entry. The returned Arc<Entry> is the sole
-        // strong ref to the Map's registry entry.
-        let map_arc = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
-        let map_id = map_arc.id;
-
-        // Populate through the concrete type (via downcast).
-        let map_concrete = (*inner).as_any_map().expect("just inserted MapInner");
-        map_concrete.set(k("x"), sv).unwrap();
+        m.set(sk("x"), sv).unwrap();
         assert!(reg.lookup(id).is_ok());
-
-        // Drop both Arc holders — the trait-object Arc clone we used to
-        // bind the Map, and the Entry-level Arc. With both gone the Map
-        // entry self-deregisters.
-        drop(inner);
-        drop(map_arc);
-        assert!(reg.lookup(map_id).is_err(), "Map entry evicted");
-
-        // Map's stored SharedValue dropped during Map's Drop → nested
-        // Counter's last Arc dropped → counter self-deregisters too.
+        m.clear();
         assert!(reg.lookup(id).is_err());
     }
 
     #[test]
-    fn shared_nested_inside_array_is_retained_and_released() {
+    fn pop_hands_retain_to_caller() {
         let reg = ensure_registry();
-        let (sv_inner, id) = make_mock_shared(reg);
-        assert!(reg.lookup(id).is_ok());
-
-        // Build an array: ['key' => shared_ref]
-        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
-        arr.str_keyed.push((k("key"), sv_inner));
-        let array_value = SharedValue::Array(Arc::new(arr));
-
+        let (sv, id) = make_mock_shared(reg);
         let m = MapInner::new(None);
-        m.set(k("bucket"), array_value).unwrap();
-        // Map stores the array; nested Counter's Arc travels with it.
-        assert!(reg.lookup(id).is_ok());
-
-        m.clear();
-        // Map dropped its array; nested Arc gone with it.
+        m.set(sk("x"), sv).unwrap();
+        let prev = m.pop(&sk("x")).expect("present");
+        assert!(reg.lookup(id).is_ok(), "alive via prev's Arc");
+        drop(prev);
         assert!(reg.lookup(id).is_err());
     }
 
-    // (The hot-path "scalar writes don't touch registry" guarantee is
-    // enforced by the REGISTRY.get() gate + the scalar-branch early
-    // exit in sv_retain_nested/release_nested — measured separately in
-    // `benches/shared/map_scalar_throughput.rs`. A static total_entries
-    // assertion here was fragile under parallel tests that populate
-    // the shared registry.)
-
-    // ── cycle detection integration ────────────────────────────────
-
-    /// Bootstrap a Map into the registry and return its inner Arc, the
-    /// owning `Arc<Entry>` (drop this to release the Map's entry), and
-    /// the registry id. Cycle-detection tests use the entry Arc to mint
-    /// `SharedRefOwned`s pointing at other bootstrapped Maps.
     fn bootstrap_map(
         reg: &'static SharedRegistry,
         max: Option<usize>,
@@ -2634,15 +3190,11 @@ mod tests {
         let inner: Arc<dyn SharedInner> = Arc::new(MapInner::new(max));
         let entry = reg.insert(SharedType::Map, Arc::clone(&inner)).unwrap();
         let id = entry.id;
-        // Bind the self_id so cycle check activates.
         let concrete = (*inner).as_any_map().unwrap();
         concrete.bind_id(id);
         (inner, entry, id)
     }
 
-    /// Construct a `SharedValue::Shared(SharedRefOwned)` from an
-    /// `Arc<Entry>` by cloning it — the test keeps the original; the
-    /// returned `SharedValue` carries its own +1.
     fn shared_value_for(entry: &Arc<Entry>) -> SharedValue {
         SharedValue::Shared(SharedRefOwned::from_arc(Arc::clone(entry)))
     }
@@ -2650,335 +3202,145 @@ mod tests {
     #[test]
     fn direct_self_insert_is_rejected() {
         let reg = ensure_registry();
-        let (map_arc, map_entry, _map_id) = bootstrap_map(reg, None);
+        let (map_arc, map_entry, _) = bootstrap_map(reg, None);
         let map = (*map_arc).as_any_map().unwrap();
-
         let self_ref = shared_value_for(&map_entry);
-        let rc = map.set(k("loop"), self_ref);
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        // Nothing stored.
+        assert!(matches!(
+            map.set(sk("loop"), self_ref),
+            Err(SharedError::Cycle)
+        ));
         assert_eq!(map.count(), 0);
-
         drop(map_arc);
         drop(map_entry);
     }
 
     #[test]
-    fn two_map_cycle_via_shared_is_rejected() {
-        // a -> b (allowed), then b -> a (forms cycle).
+    fn cas_propagates_cycle_rejection() {
         let reg = ensure_registry();
-        let (a_arc, a_entry, _a_id) = bootstrap_map(reg, None);
-        let (b_arc, b_entry, _b_id) = bootstrap_map(reg, None);
+        let (a_arc, a_entry, _) = bootstrap_map(reg, None);
         let a = (*a_arc).as_any_map().unwrap();
-        let b = (*b_arc).as_any_map().unwrap();
-
-        a.set(k("b"), shared_value_for(&b_entry))
-            .expect("first edge is fine");
-
-        let rc = b.set(k("a"), shared_value_for(&a_entry));
+        let rc = a.compare_and_set(sk("self"), None, Some(shared_value_for(&a_entry)));
         assert!(matches!(rc, Err(SharedError::Cycle)));
-        assert_eq!(b.count(), 0);
-        // a's original edge to b survived.
-        assert_eq!(a.count(), 1);
-
-        a.clear();
+        assert_eq!(a.count(), 0);
         drop(a_arc);
-        drop(b_arc);
         drop(a_entry);
-        drop(b_entry);
     }
 
     #[test]
-    fn cycle_detected_at_depth_five() {
-        // Chain A → B → C → D → E. Attempting to close E → A must be
-        // detected by the walker at depth 5 (well under the default
-        // SHARED_CYCLE_DETECT_DEPTH of 16).
+    fn two_map_cycle_via_shared_is_rejected() {
         let reg = ensure_registry();
         let (a_arc, a_entry, _) = bootstrap_map(reg, None);
         let (b_arc, b_entry, _) = bootstrap_map(reg, None);
-        let (c_arc, c_entry, _) = bootstrap_map(reg, None);
-        let (d_arc, d_entry, _) = bootstrap_map(reg, None);
-        let (e_arc, e_entry, _) = bootstrap_map(reg, None);
-
         let a = (*a_arc).as_any_map().unwrap();
         let b = (*b_arc).as_any_map().unwrap();
-        let c = (*c_arc).as_any_map().unwrap();
-        let d = (*d_arc).as_any_map().unwrap();
-        let e = (*e_arc).as_any_map().unwrap();
-
-        for (from, to_entry) in [(a, &b_entry), (b, &c_entry), (c, &d_entry), (d, &e_entry)] {
-            from.set(k("next"), shared_value_for(to_entry))
-                .expect("chain edge is fine");
-        }
-
-        let rc = e.set(k("back_to_a"), shared_value_for(&a_entry));
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        assert_eq!(e.count(), 0);
-
+        a.set(sk("b"), shared_value_for(&b_entry)).unwrap();
+        assert!(matches!(
+            b.set(sk("a"), shared_value_for(&a_entry)),
+            Err(SharedError::Cycle)
+        ));
+        assert_eq!(b.count(), 0);
+        assert_eq!(a.count(), 1);
         a.clear();
-        b.clear();
-        c.clear();
-        d.clear();
         drop(a_arc);
         drop(b_arc);
-        drop(c_arc);
-        drop(d_arc);
-        drop(e_arc);
         drop(a_entry);
         drop(b_entry);
-        drop(c_entry);
-        drop(d_entry);
-        drop(e_entry);
     }
 
     #[test]
-    fn concurrent_writers_no_lost_updates() {
-        // Spec exit-criteria mirror: 8 threads each inserting 1000
-        // distinct keys into the same Map; the total count must match
-        // exactly 8 * 1000 (no drops, no double-counts).
+    fn map_set_grows_registry_entry_bytes() {
+        let reg = ensure_registry();
+        let (map_arc, map_entry, _) = bootstrap_map(reg, None);
+        let m = (*map_arc).as_any_map().unwrap();
+        let baseline = map_entry.mem_bytes.load(Ordering::Relaxed);
+        for i in 0..32i64 {
+            m.set(ik(i), SharedValue::Long(i)).unwrap();
+        }
+        let grown = map_entry.mem_bytes.load(Ordering::Relaxed);
+        assert!(grown > baseline);
+        for i in 0..32i64 {
+            m.remove(&ik(i));
+        }
+        assert_eq!(
+            map_entry.mem_bytes.load(Ordering::Relaxed),
+            baseline,
+            "mem_bytes returns to baseline after symmetric removes"
+        );
+        m.clear();
+        drop(map_arc);
+        drop(map_entry);
+    }
+
+    // ── concurrency ────────────────────────────────────────────────
+
+    #[test]
+    fn concurrent_writers_count_exact() {
         use std::sync::Arc as StdArc;
         use std::thread;
-
         let m: StdArc<MapInner> = StdArc::new(MapInner::new(None));
-        let n_threads = 8usize;
-        let per_thread = 1000usize;
-
-        let mut handles = Vec::with_capacity(n_threads);
-        for t in 0..n_threads {
+        let mut handles = Vec::new();
+        for t in 0..8 {
             let m = StdArc::clone(&m);
             handles.push(thread::spawn(move || {
-                for i in 0..per_thread {
-                    m.set(
-                        Arc::from(format!("t{t}-k{i:04}")),
-                        SharedValue::Long(i as i64),
-                    )
-                    .expect("unbounded map cannot cap");
+                for i in 0..1000i64 {
+                    m.set(sk(&format!("t{t}-k{i:04}")), SharedValue::Long(i))
+                        .unwrap();
                 }
             }));
         }
         for h in handles {
             h.join().unwrap();
         }
-        assert_eq!(m.count(), n_threads * per_thread);
+        assert_eq!(m.count(), 8 * 1000);
     }
 
     #[test]
-    fn cycle_via_array_nested_reference_is_rejected() {
-        // a -> b -> array{'self' => a}  (rejected at step 2)
-        let reg = ensure_registry();
-        let (a_arc, a_entry, _a_id) = bootstrap_map(reg, None);
-        let (b_arc, b_entry, _b_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-        let b = (*b_arc).as_any_map().unwrap();
-
-        a.set(k("b"), shared_value_for(&b_entry)).unwrap();
-
-        // Try to insert array[self] = a into b — cycle via nested Shared.
-        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
-        arr.str_keyed.push((k("self"), shared_value_for(&a_entry)));
-        let rc = b.set(k("arr"), SharedValue::Array(Arc::new(arr)));
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        assert_eq!(b.count(), 0);
-
-        a.clear();
-        drop(a_arc);
-        drop(b_arc);
-        drop(a_entry);
-        drop(b_entry);
-    }
-
-    #[test]
-    fn unbound_map_skips_cycle_check() {
-        // Without bind_id, the Map is invisible in the reachability graph;
-        // even inserting a Shareable that "would" form a cycle is OK
-        // (it can't because no one can reach this Map).
-        let reg = ensure_registry();
-        let (sv, _id) = make_mock_shared(reg);
-
-        let m = MapInner::new(None);
-        // No bind_id → self_id unset.
-        assert!(m.self_id().is_none());
-        m.set(k("x"), sv).expect("unbound Map never sees cycles");
-
-        m.clear();
-    }
-
-    #[test]
-    fn non_cyclic_shared_set_succeeds_and_stores() {
-        // a.set('c', counter) where counter doesn't reach a — no cycle.
-        let reg = ensure_registry();
-        let (a_arc, a_entry, _a_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-        let (counter_sv, counter_id) = make_mock_shared(reg);
-
-        a.set(k("c"), counter_sv).expect("no cycle");
-        assert_eq!(a.count(), 1);
-        assert!(
-            reg.lookup(counter_id).is_ok(),
-            "counter still alive — Map holds its Arc"
-        );
-
-        a.clear();
-        drop(a_arc);
-        drop(a_entry);
-    }
-
-    #[test]
-    fn cycle_error_sets_path_in_last_error() {
-        use crate::plugins::ox_shared::error::{clear_last_error, oxphp_shared_last_error};
-        use std::os::raw::c_char;
-
-        let reg = ensure_registry();
-        let (a_arc, a_entry, a_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-
-        clear_last_error();
-        let _ = a.set(k("self"), shared_value_for(&a_entry));
-
-        let mut buf = [0u8; 256];
-        let len = unsafe { oxphp_shared_last_error(buf.as_mut_ptr() as *mut c_char, buf.len()) };
-        assert!(len > 0);
-        let msg = std::str::from_utf8(&buf[..len]).unwrap_or("");
-        assert!(msg.contains("cycle"), "message should say cycle: {msg}");
-        assert!(
-            msg.contains(&format!("#{a_id}")),
-            "message should include the Map id: {msg}"
-        );
-
-        drop(a_arc);
-        drop(a_entry);
-    }
-
-    // ── per-instance cap ───────────────────────────────────────────
-
-    #[test]
-    fn cap_rejects_new_key_when_full() {
-        let m = MapInner::new(Some(3));
-        m.set(k("k1"), SharedValue::Long(1)).unwrap();
-        m.set(k("k2"), SharedValue::Long(2)).unwrap();
-        m.set(k("k3"), SharedValue::Long(3)).unwrap();
-
-        let rc = m.set(k("k4"), SharedValue::Long(4));
-        assert!(matches!(rc, Err(SharedError::CapacityExceeded)));
-        assert_eq!(m.count(), 3);
-        assert!(m.get("k4").is_none());
-    }
-
-    #[test]
-    fn cap_allows_overwrite_at_limit() {
-        // Matches spec test_map_cap.php §overwrite-existing-works.
-        let m = MapInner::new(Some(2));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
-
-        // Overwrite existing — must succeed.
-        m.set(k("a"), SharedValue::Long(100))
-            .expect("overwrite should succeed at cap");
-        assert!(matches!(m.get("a"), Some(SharedValue::Long(100))));
-        assert_eq!(m.count(), 2);
-    }
-
-    #[test]
-    fn unbounded_map_never_caps() {
-        let m = MapInner::new(None);
-        for i in 0..1_000 {
-            m.set(Arc::from(format!("k{i}")), SharedValue::Long(i))
-                .unwrap();
-        }
-        assert_eq!(m.count(), 1_000);
-    }
-
-    #[test]
-    fn cap_error_message_contains_limit() {
-        use crate::plugins::ox_shared::error::{clear_last_error, oxphp_shared_last_error};
-        use std::os::raw::c_char;
-
-        let m = MapInner::new(Some(1));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        clear_last_error();
-        let _ = m.set(k("b"), SharedValue::Long(2));
-
-        let mut buf = [0u8; 256];
-        let len = unsafe { oxphp_shared_last_error(buf.as_mut_ptr() as *mut c_char, buf.len()) };
-        let msg = std::str::from_utf8(&buf[..len]).unwrap_or("");
-        assert!(msg.contains("capacity"), "msg: {msg}");
-        assert!(msg.contains("1/1"), "msg should name limit: {msg}");
-        assert!(msg.contains("maxEntries"), "msg should hint at knob: {msg}");
-    }
-
-    #[test]
-    fn remove_frees_cap_slot() {
-        let m = MapInner::new(Some(2));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
-
-        // Full — next new key rejected.
-        assert!(matches!(
-            m.set(k("c"), SharedValue::Long(3)),
-            Err(SharedError::CapacityExceeded)
-        ));
-
-        m.remove("a");
-        assert_eq!(m.count(), 1);
-
-        // Freed slot accepts a new key.
-        m.set(k("c"), SharedValue::Long(3))
-            .expect("slot should be free after remove");
-        assert_eq!(m.count(), 2);
-    }
-
-    #[test]
-    fn clear_frees_all_cap_slots() {
-        let m = MapInner::new(Some(3));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        m.set(k("b"), SharedValue::Long(2)).unwrap();
-        m.set(k("c"), SharedValue::Long(3)).unwrap();
-        assert_eq!(m.count(), 3);
-
-        m.clear();
-        assert_eq!(m.count(), 0);
-
-        for i in 0..3 {
-            m.set(Arc::from(format!("k{i}")), SharedValue::Long(i))
-                .unwrap();
-        }
-        assert_eq!(m.count(), 3);
-    }
-
-    #[test]
-    fn cap_enforced_under_concurrent_inserts() {
+    fn clear_concurrent_with_insert_keeps_count_exact() {
+        use std::sync::atomic::{AtomicBool, Ordering as O};
         use std::sync::Arc as StdArc;
         use std::thread;
+        let m: StdArc<MapInner> = StdArc::new(MapInner::new(None));
+        let stop = StdArc::new(AtomicBool::new(false));
 
-        let m: StdArc<MapInner> = StdArc::new(MapInner::new(Some(100)));
         let mut handles = Vec::new();
-
-        // 8 threads each attempting 50 unique inserts → 400 attempts,
-        // only 100 should succeed, matching the cap exactly.
-        for t in 0..8 {
+        for t in 0..4 {
             let m = StdArc::clone(&m);
+            let stop = StdArc::clone(&stop);
             handles.push(thread::spawn(move || {
-                let mut accepted = 0usize;
-                for i in 0..50 {
-                    match m.set(Arc::from(format!("t{t}-k{i}")), SharedValue::Long(i)) {
-                        Ok(_) => accepted += 1,
-                        Err(SharedError::CapacityExceeded) => {}
-                        Err(other) => panic!("unexpected err: {other:?}"),
-                    }
+                let mut i = 0i64;
+                while !stop.load(O::Relaxed) {
+                    m.set(sk(&format!("t{t}-k{i}")), SharedValue::Long(i))
+                        .unwrap();
+                    i += 1;
                 }
-                accepted
             }));
         }
 
-        let total_accepted: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
-        assert_eq!(total_accepted, 100);
-        assert_eq!(m.count(), 100);
+        // Hammer clear() concurrently with the writers. The old store(0)
+        // reset desynced the striped counter against a racing insert.
+        let mc = StdArc::clone(&m);
+        for _ in 0..500 {
+            mc.clear();
+            std::thread::yield_now();
+        }
+        stop.store(true, O::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Quiescent: the striped count must equal the real entry count.
+        let actual = m.entries.iter().count();
+        assert_eq!(
+            m.count(),
+            actual,
+            "striped count desynced from real entries after concurrent clear"
+        );
     }
 
     // ── PHP class registration ─────────────────────────────────────
 
     #[test]
-    fn register_class_emits_expected_methods() {
+    fn register_class_emits_expected_surface() {
         use crate::events::EventDispatcher;
         use crate::plugin::context::PluginDecoratorDef;
         use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
@@ -3027,674 +3389,465 @@ mod tests {
             .find(|c| c.fqn == "OxPHP\\Shared\\Map")
             .expect("Map class must be registered");
 
-        // Spot-check the methods expected on the class.
         let methods: std::collections::HashSet<&str> =
             map_class.methods.iter().map(|m| m.name.as_str()).collect();
         for expected in [
             "__construct",
             "get",
             "set",
-            "has",
-            "remove",
-            "clear",
-            "count",
-            "keys",
-            "maxEntries",
-            "trySet",
-            "update",
-            "getOrSet",
+            "setIfAbsent",
             "setMany",
             "getMany",
+            "remove",
             "removeMany",
-            "updateMany",
+            "clear",
+            "swap",
+            "pop",
+            "compareAndSet",
+            "count",
+            "maxEntries",
+            "forEach",
             "id",
         ] {
             assert!(
                 methods.contains(expected),
-                "missing method `{expected}` in Map class registration"
+                "missing method `{expected}` in Map registration"
             );
         }
-
-        // Confirms the Shareable marker wiring still flows.
+        // Removed surface must be gone.
+        for removed in ["has", "update", "getOrSet", "updateMany", "keys", "trySet"] {
+            assert!(
+                !methods.contains(removed),
+                "removed method `{removed}` is still registered"
+            );
+        }
+        // No longer Countable.
+        assert!(!map_class.interfaces.iter().any(|i| i == "Countable"));
         assert!(map_class
             .interfaces
             .iter()
-            .any(|iface| iface == "OxPHP\\Shared\\Shareable"));
+            .any(|i| i == "OxPHP\\Shared\\Shareable"));
+
+        // KeyCursor registered as an Iterator.
+        let cursor = php_classes
+            .iter()
+            .find(|c| c.fqn == KEY_CURSOR_FQN)
+            .expect("Map\\KeyCursor must be registered");
+        assert!(cursor.interfaces.iter().any(|i| i == "Iterator"));
+        let cursor_methods: std::collections::HashSet<&str> =
+            cursor.methods.iter().map(|m| m.name.as_str()).collect();
+        for expected in ["rewind", "valid", "current", "key", "next"] {
+            assert!(
+                cursor_methods.contains(expected),
+                "KeyCursor missing `{expected}`"
+            );
+        }
     }
 
-    // ── FFI round-trip ────────────────────────────────────────────
+    // ── FFI round-trip (new tagged-key signatures) ─────────────────
 
-    /// RAII wrapper over a `Shared\Map` Entry pointer for FFI tests.
-    /// Holds the `Arc::into_raw` pointer that `oxphp_shared_map_create`
-    /// writes; `Drop` reclaims the strong ref so each test cleans up.
     struct TestMap(*const Entry);
-
     impl TestMap {
         fn new(max_entries: i64) -> Self {
             ensure_registry();
             let mut ptr: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_map_create(max_entries, &mut ptr) };
-            assert_eq!(rc, 0, "map_create failed with rc={rc}");
-            assert!(!ptr.is_null(), "map_create returned null on rc=0");
+            assert_eq!(rc, 0);
+            assert!(!ptr.is_null());
             Self(ptr)
         }
-
         fn entry(&self) -> *const Entry {
             self.0
         }
     }
-
     impl Drop for TestMap {
         fn drop(&mut self) {
             unsafe { crate::plugins::ox_shared::registry::oxphp_shared_handle_drop(self.0) };
         }
     }
 
-    #[test]
-    fn ffi_create_and_basic_cycle() {
-        let m = TestMap::new(0);
-        let id = m.entry();
+    fn ffi_set_int_key(id: *const Entry, key: i64, v: &SharedValue) -> c_int {
+        let buf = sv_to_portbuf(v);
+        unsafe {
+            oxphp_shared_map_set(
+                id,
+                KEY_KIND_INT,
+                key,
+                std::ptr::null(),
+                0,
+                buf.as_ptr(),
+                buf.len(),
+            )
+        }
+    }
 
-        // Count starts at 0.
-        let mut count: u64 = 0;
-        assert_eq!(unsafe { oxphp_shared_map_count(id, &mut count) }, 0);
-        assert_eq!(count, 0);
-
-        // has("x") = false.
-        let x = b"x";
-        let mut has: c_int = 0;
-        assert_eq!(
-            unsafe { oxphp_shared_map_has(id, x.as_ptr(), x.len(), &mut has) },
-            0
-        );
-        assert_eq!(has, 0);
-
-        // set("x", 42) via portbuf.
-        let v = sv_to_portbuf(&SharedValue::Long(42));
-        assert_eq!(
-            unsafe { oxphp_shared_map_set(id, x.as_ptr(), x.len(), v.as_ptr(), v.len()) },
-            0
-        );
-
-        // has + count.
-        unsafe { oxphp_shared_map_has(id, x.as_ptr(), x.len(), &mut has) };
-        assert_eq!(has, 1);
-        unsafe { oxphp_shared_map_count(id, &mut count) };
-        assert_eq!(count, 1);
-
-        // get → portbuf → decode (raw form — no nested Shared here).
-        let mut buf: *mut u8 = std::ptr::null_mut();
-        let mut len: usize = 0;
-        let mut missing: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_map_get(id, x.as_ptr(), x.len(), &mut buf, &mut len, &mut missing)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(missing, 0);
-        assert!(!buf.is_null() && len > 0);
-        let decoded = portbuf_to_sv(unsafe { std::slice::from_raw_parts(buf, len) }).unwrap();
-        assert!(matches!(
-            decoded,
-            crate::plugins::ox_shared::value::SharedValueRaw::Long(42)
-        ));
-        unsafe { libc::free(buf as *mut libc::c_void) };
-
-        // clear + count.
-        assert_eq!(unsafe { oxphp_shared_map_clear(id) }, 0);
-        unsafe { oxphp_shared_map_count(id, &mut count) };
-        assert_eq!(count, 0);
+    fn ffi_set_str_key(id: *const Entry, key: &str, v: &SharedValue) -> c_int {
+        let buf = sv_to_portbuf(v);
+        let kb = key.as_bytes();
+        unsafe {
+            oxphp_shared_map_set(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                buf.as_ptr(),
+                buf.len(),
+            )
+        }
     }
 
     #[test]
-    fn ffi_missing_get_sets_missing_flag() {
+    fn ffi_set_get_int_and_str_keys() {
         let m = TestMap::new(0);
         let id = m.entry();
+        assert_eq!(ffi_set_int_key(id, 123, &SharedValue::Long(7)), 0);
+        assert_eq!(
+            ffi_set_str_key(id, "123", &SharedValue::String(Arc::from("s"))),
+            0
+        );
 
-        let key = b"nope";
+        // count == 2 (distinct keys)
+        let mut c: u64 = 0;
+        unsafe { oxphp_shared_map_count(id, &mut c) };
+        assert_eq!(c, 2);
+
+        // get int key
         let mut buf: *mut u8 = std::ptr::null_mut();
-        let mut len: usize = 0;
-        let mut missing: c_int = 0;
+        let mut len = 0usize;
+        let mut absent: c_int = 0;
         let rc = unsafe {
             oxphp_shared_map_get(
                 id,
-                key.as_ptr(),
-                key.len(),
+                KEY_KIND_INT,
+                123,
+                std::ptr::null(),
+                0,
                 &mut buf,
                 &mut len,
-                &mut missing,
+                &mut absent,
             )
         };
         assert_eq!(rc, 0);
-        assert_eq!(missing, 1);
-        assert!(buf.is_null() && len == 0);
+        assert_eq!(absent, 0);
+        let decoded = portbuf_to_sv(unsafe { std::slice::from_raw_parts(buf, len) }).unwrap();
+        assert!(matches!(
+            decoded,
+            crate::plugins::ox_shared::value::SharedValueRaw::Long(7)
+        ));
+        unsafe { libc::free(buf as *mut libc::c_void) };
     }
 
     #[test]
-    fn ffi_set_with_cap_rejects() {
+    fn ffi_remove_out_bool() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        ffi_set_str_key(id, "gone", &SharedValue::Long(1));
+        let mut existed: c_int = 0;
+        let kb = b"gone";
+        let rc = unsafe {
+            oxphp_shared_map_remove(id, KEY_KIND_STR, 0, kb.as_ptr(), kb.len(), &mut existed)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(existed, 1);
+        let rc = unsafe {
+            oxphp_shared_map_remove(id, KEY_KIND_STR, 0, kb.as_ptr(), kb.len(), &mut existed)
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(existed, 0);
+    }
+
+    #[test]
+    fn ffi_swap_pop_return_prev() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        let v1 = sv_to_portbuf(&SharedValue::Long(1));
+        let v2 = sv_to_portbuf(&SharedValue::Long(2));
+        let kb = b"k";
+
+        // swap on absent → out_absent=1
+        let (mut pbuf, mut plen, mut absent) = (std::ptr::null_mut(), 0usize, 0 as c_int);
+        let rc = unsafe {
+            oxphp_shared_map_swap(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                v1.as_ptr(),
+                v1.len(),
+                &mut pbuf,
+                &mut plen,
+                &mut absent,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(absent, 1);
+
+        // swap again → returns prev = 1
+        let rc = unsafe {
+            oxphp_shared_map_swap(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                v2.as_ptr(),
+                v2.len(),
+                &mut pbuf,
+                &mut plen,
+                &mut absent,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(absent, 0);
+        let prev = portbuf_to_sv(unsafe { std::slice::from_raw_parts(pbuf, plen) }).unwrap();
+        assert!(matches!(
+            prev,
+            crate::plugins::ox_shared::value::SharedValueRaw::Long(1)
+        ));
+        unsafe { libc::free(pbuf as *mut libc::c_void) };
+
+        // pop → returns prev = 2
+        let rc = unsafe {
+            oxphp_shared_map_pop(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                &mut pbuf,
+                &mut plen,
+                &mut absent,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(absent, 0);
+        let prev = portbuf_to_sv(unsafe { std::slice::from_raw_parts(pbuf, plen) }).unwrap();
+        assert!(matches!(
+            prev,
+            crate::plugins::ox_shared::value::SharedValueRaw::Long(2)
+        ));
+        unsafe { libc::free(pbuf as *mut libc::c_void) };
+    }
+
+    #[test]
+    fn ffi_set_if_absent_out_params() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        let v = sv_to_portbuf(&SharedValue::Long(1));
+        let kb = b"once";
+        let (mut pbuf, mut plen, mut absent) = (std::ptr::null_mut(), 0usize, 0 as c_int);
+
+        let rc = unsafe {
+            oxphp_shared_map_set_if_absent(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                v.as_ptr(),
+                v.len(),
+                &mut pbuf,
+                &mut plen,
+                &mut absent,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(absent, 1, "first insert → absent flag set, no prev");
+
+        let rc = unsafe {
+            oxphp_shared_map_set_if_absent(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                v.as_ptr(),
+                v.len(),
+                &mut pbuf,
+                &mut plen,
+                &mut absent,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(absent, 0, "second call returns prev");
+        let prev = portbuf_to_sv(unsafe { std::slice::from_raw_parts(pbuf, plen) }).unwrap();
+        assert!(matches!(
+            prev,
+            crate::plugins::ox_shared::value::SharedValueRaw::Long(1)
+        ));
+        unsafe { libc::free(pbuf as *mut libc::c_void) };
+    }
+
+    #[test]
+    fn ffi_compare_and_set_sentinels() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        let kb = b"k";
+        let one = sv_to_portbuf(&SharedValue::Long(1));
+        let two = sv_to_portbuf(&SharedValue::Long(2));
+        let mut swapped: c_int = 0;
+
+        // insert iff absent: expected absent, new=1
+        let rc = unsafe {
+            oxphp_shared_map_compare_and_set(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                std::ptr::null(),
+                0,
+                1, // expected_is_absent
+                one.as_ptr(),
+                one.len(),
+                0, // new present
+                &mut swapped,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(swapped, 1);
+
+        // replace iff == 1: expected=1, new=2
+        let rc = unsafe {
+            oxphp_shared_map_compare_and_set(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                one.as_ptr(),
+                one.len(),
+                0,
+                two.as_ptr(),
+                two.len(),
+                0,
+                &mut swapped,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(swapped, 1);
+
+        // conditional remove: expected=2, new absent
+        let rc = unsafe {
+            oxphp_shared_map_compare_and_set(
+                id,
+                KEY_KIND_STR,
+                0,
+                kb.as_ptr(),
+                kb.len(),
+                two.as_ptr(),
+                two.len(),
+                0,
+                std::ptr::null(),
+                0,
+                1, // new_is_absent
+                &mut swapped,
+            )
+        };
+        assert_eq!(rc, 0);
+        assert_eq!(swapped, 1);
+
+        let mut c: u64 = 0;
+        unsafe { oxphp_shared_map_count(id, &mut c) };
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn ffi_set_many_nested_pairs() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        let pairs = vec![
+            IterPair {
+                key: sk("a"),
+                value: sv_to_portbuf(&SharedValue::Long(1)),
+            },
+            IterPair {
+                key: ik(7),
+                value: sv_to_portbuf(&SharedValue::Long(2)),
+            },
+        ];
+        let buf = encode_pairs_portbuf(&pairs);
+        let mut inserted: u64 = 0;
+        let rc = unsafe { oxphp_shared_map_set_many(id, buf.as_ptr(), buf.len(), &mut inserted) };
+        assert_eq!(rc, 0);
+        assert_eq!(inserted, 2);
+
+        let mut c: u64 = 0;
+        unsafe { oxphp_shared_map_count(id, &mut c) };
+        assert_eq!(c, 2);
+    }
+
+    #[test]
+    fn ffi_remove_many_counts_hits() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        ffi_set_str_key(id, "a", &SharedValue::Long(1));
+        ffi_set_str_key(id, "b", &SharedValue::Long(2));
+        let keys = vec![sk("a"), sk("missing")];
+        let buf = encode_keys_portbuf(&keys);
+        let mut removed: u64 = 0;
+        let rc = unsafe { oxphp_shared_map_remove_many(id, buf.as_ptr(), buf.len(), &mut removed) };
+        assert_eq!(rc, 0);
+        assert_eq!(removed, 1);
+    }
+
+    #[test]
+    fn ffi_all_keys_round_trip() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        for i in 0..40i64 {
+            ffi_set_int_key(id, i, &SharedValue::Long(i));
+        }
+        let mut buf: *mut u8 = std::ptr::null_mut();
+        let mut len = 0usize;
+        let rc = unsafe { oxphp_shared_map_all_keys(id, &mut buf, &mut len) };
+        assert_eq!(rc, 0);
+        let mut seen = std::collections::HashSet::new();
+        for k in decode_key_array(buf, len) {
+            if let MapKey::Int(i) = k {
+                seen.insert(i);
+            }
+        }
+        if !buf.is_null() {
+            unsafe { libc::free(buf as *mut libc::c_void) };
+        }
+        assert_eq!(seen.len(), 40);
+    }
+
+    #[test]
+    fn ffi_clear_returns_count() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        for i in 0..5i64 {
+            ffi_set_int_key(id, i, &SharedValue::Long(i));
+        }
+        let mut removed: u64 = 0;
+        let rc = unsafe { oxphp_shared_map_clear(id, &mut removed) };
+        assert_eq!(rc, 0);
+        assert_eq!(removed, 5);
+        let mut c: u64 = 0;
+        unsafe { oxphp_shared_map_count(id, &mut c) };
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn ffi_set_rejects_null_value() {
+        let m = TestMap::new(0);
+        let id = m.entry();
+        let rc = ffi_set_str_key(id, "k", &SharedValue::Null);
+        assert_eq!(rc, SharedError::Type.code());
+    }
+
+    #[test]
+    fn ffi_set_cap_rejects() {
         let m = TestMap::new(1);
         let id = m.entry();
-
-        let k1 = b"k1";
-        let v = sv_to_portbuf(&SharedValue::Long(1));
-        unsafe { oxphp_shared_map_set(id, k1.as_ptr(), k1.len(), v.as_ptr(), v.len()) };
-
-        let k2 = b"k2";
-        let rc = unsafe { oxphp_shared_map_set(id, k2.as_ptr(), k2.len(), v.as_ptr(), v.len()) };
-        assert_eq!(rc, SharedError::CapacityExceeded.code());
-    }
-
-    #[test]
-    fn ffi_remove_returns_prev() {
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let k = b"gone";
-        let v = sv_to_portbuf(&SharedValue::String(Arc::from("value")));
-        unsafe { oxphp_shared_map_set(id, k.as_ptr(), k.len(), v.as_ptr(), v.len()) };
-
-        let mut buf: *mut u8 = std::ptr::null_mut();
-        let mut len: usize = 0;
-        let mut missing: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_map_remove(id, k.as_ptr(), k.len(), &mut buf, &mut len, &mut missing)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(missing, 0);
-        assert!(!buf.is_null() && len > 0);
-        let decoded = portbuf_to_sv(unsafe { std::slice::from_raw_parts(buf, len) }).unwrap();
-        match decoded {
-            crate::plugins::ox_shared::value::SharedValueRaw::String(s) => {
-                assert_eq!(&*s, "value")
-            }
-            other => panic!("expected String, got {other:?}"),
-        }
-        unsafe { libc::free(buf as *mut libc::c_void) };
-
-        // Second remove hits missing path.
-        let rc = unsafe {
-            oxphp_shared_map_remove(id, k.as_ptr(), k.len(), &mut buf, &mut len, &mut missing)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(missing, 1);
-    }
-
-    #[test]
-    fn ffi_set_if_absent_race() {
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let k = b"once";
-        let v = sv_to_portbuf(&SharedValue::Long(1));
-        let mut inserted: c_int = -1;
-
+        assert_eq!(ffi_set_str_key(id, "a", &SharedValue::Long(1)), 0);
         assert_eq!(
-            unsafe {
-                oxphp_shared_map_set_if_absent(
-                    id,
-                    k.as_ptr(),
-                    k.len(),
-                    v.as_ptr(),
-                    v.len(),
-                    &mut inserted,
-                )
-            },
-            0
+            ffi_set_str_key(id, "b", &SharedValue::Long(2)),
+            SharedError::CapacityExceeded.code()
         );
-        assert_eq!(inserted, 1);
-
-        assert_eq!(
-            unsafe {
-                oxphp_shared_map_set_if_absent(
-                    id,
-                    k.as_ptr(),
-                    k.len(),
-                    v.as_ptr(),
-                    v.len(),
-                    &mut inserted,
-                )
-            },
-            0
-        );
-        assert_eq!(inserted, 0, "second call must not overwrite");
-    }
-
-    #[test]
-    fn ffi_keys_returns_portbuf_array() {
-        use crate::plugins::ox_shared::value::SharedValueRaw;
-
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        for name in ["alpha", "beta", "gamma"] {
-            let v = sv_to_portbuf(&SharedValue::Long(1));
-            unsafe {
-                oxphp_shared_map_set(id, name.as_ptr(), name.len(), v.as_ptr(), v.len());
-            }
-        }
-
-        let mut buf: *mut u8 = std::ptr::null_mut();
-        let mut len: usize = 0;
-        assert_eq!(unsafe { oxphp_shared_map_keys(id, &mut buf, &mut len) }, 0);
-        assert!(!buf.is_null() && len > 0);
-
-        let raw = portbuf_to_sv(unsafe { std::slice::from_raw_parts(buf, len) }).unwrap();
-        let arr = match raw {
-            SharedValueRaw::Array(a) => a,
-            other => panic!("expected Array, got {other:?}"),
-        };
-        let mut collected: Vec<String> = arr
-            .int_keyed
-            .iter()
-            .filter_map(|v| match v {
-                SharedValueRaw::String(s) => Some(s.to_string()),
-                _ => None,
-            })
-            .collect();
-        collected.sort();
-        assert_eq!(collected, vec!["alpha", "beta", "gamma"]);
-        unsafe { libc::free(buf as *mut libc::c_void) };
-    }
-
-    // ── batched FFI round-trip ─────────────────────────────────────
-
-    fn encode_str_keyed(pairs: &[(&str, SharedValue)]) -> Vec<u8> {
-        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
-        for (k, v) in pairs {
-            arr.str_keyed.push((Arc::from(*k), v.clone()));
-        }
-        sv_to_portbuf(&SharedValue::Array(Arc::new(arr)))
-    }
-
-    fn encode_int_keyed_strings(keys: &[&str]) -> Vec<u8> {
-        let mut arr = crate::plugins::ox_shared::value::SharedArray::default();
-        for k in keys {
-            arr.int_keyed.push(SharedValue::String(Arc::from(*k)));
-        }
-        sv_to_portbuf(&SharedValue::Array(Arc::new(arr)))
-    }
-
-    #[test]
-    fn ffi_set_many_inserts_all_pairs() {
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let buf = encode_str_keyed(&[
-            ("a", SharedValue::Long(1)),
-            ("b", SharedValue::Long(2)),
-            ("c", SharedValue::Long(3)),
-        ]);
-        let mut inserted: u64 = 0;
-        let rc = unsafe { oxphp_shared_map_set_many(id, buf.as_ptr(), buf.len(), &mut inserted) };
-        assert_eq!(rc, 0);
-        assert_eq!(inserted, 3);
-
-        let mut count: u64 = 0;
-        unsafe { oxphp_shared_map_count(id, &mut count) };
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn ffi_set_many_respects_cap_mid_batch() {
-        let m = TestMap::new(2);
-        let id = m.entry();
-
-        let buf = encode_str_keyed(&[
-            ("a", SharedValue::Long(1)),
-            ("b", SharedValue::Long(2)),
-            ("c", SharedValue::Long(3)), // trips cap
-        ]);
-        let mut inserted: u64 = 0;
-        let rc = unsafe { oxphp_shared_map_set_many(id, buf.as_ptr(), buf.len(), &mut inserted) };
-        // Per-key atomic, bail at first failure.
-        assert_eq!(rc, SharedError::CapacityExceeded.code());
-        assert_eq!(inserted, 2, "partial count reflects the two that landed");
-    }
-
-    #[test]
-    fn ffi_get_many_returns_keyed_array_with_nulls() {
-        use crate::plugins::ox_shared::value::SharedValueRaw;
-
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let seed = encode_str_keyed(&[("a", SharedValue::Long(10)), ("b", SharedValue::Long(20))]);
-        let mut n: u64 = 0;
-        unsafe { oxphp_shared_map_set_many(id, seed.as_ptr(), seed.len(), &mut n) };
-
-        let keys_buf = encode_int_keyed_strings(&["a", "b", "missing"]);
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let rc = unsafe {
-            oxphp_shared_map_get_many(
-                id,
-                keys_buf.as_ptr(),
-                keys_buf.len(),
-                &mut out_buf,
-                &mut out_len,
-            )
-        };
-        assert_eq!(rc, 0);
-
-        let raw = portbuf_to_sv(unsafe { std::slice::from_raw_parts(out_buf, out_len) }).unwrap();
-        unsafe { libc::free(out_buf as *mut libc::c_void) };
-
-        let arr = match raw {
-            SharedValueRaw::Array(a) => a,
-            other => panic!("expected Array, got {other:?}"),
-        };
-        assert_eq!(arr.str_keyed.len(), 3);
-        assert_eq!(&*arr.str_keyed[0].0, "a");
-        assert!(matches!(arr.str_keyed[0].1, SharedValueRaw::Long(10)));
-        assert_eq!(&*arr.str_keyed[1].0, "b");
-        assert!(matches!(arr.str_keyed[1].1, SharedValueRaw::Long(20)));
-        assert_eq!(&*arr.str_keyed[2].0, "missing");
-        assert!(matches!(arr.str_keyed[2].1, SharedValueRaw::Null));
-    }
-
-    #[test]
-    fn ffi_remove_many_counts_hits_only() {
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let seed = encode_str_keyed(&[
-            ("a", SharedValue::Long(1)),
-            ("b", SharedValue::Long(2)),
-            ("c", SharedValue::Long(3)),
-        ]);
-        let mut n: u64 = 0;
-        unsafe { oxphp_shared_map_set_many(id, seed.as_ptr(), seed.len(), &mut n) };
-
-        let keys_buf = encode_int_keyed_strings(&["a", "c", "nope"]);
-        let mut removed: u64 = 0;
-        let rc = unsafe {
-            oxphp_shared_map_remove_many(id, keys_buf.as_ptr(), keys_buf.len(), &mut removed)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(removed, 2, "only existing keys should count");
-
-        let mut count: u64 = 0;
-        unsafe { oxphp_shared_map_count(id, &mut count) };
-        assert_eq!(count, 1); // "b" survives.
-    }
-
-    #[test]
-    fn ffi_set_many_empty_noop() {
-        let m = TestMap::new(0);
-        let id = m.entry();
-
-        let buf = encode_str_keyed(&[]);
-        let mut inserted: u64 = 0;
-        let rc = unsafe { oxphp_shared_map_set_many(id, buf.as_ptr(), buf.len(), &mut inserted) };
-        assert_eq!(rc, 0);
-        assert_eq!(inserted, 0);
-    }
-
-    #[test]
-    fn ffi_bound_map_rejects_self_insert() {
-        // The Map needs to be bound to its self_id for cycle check —
-        // create through the FFI does that. Construct a portbuf
-        // referencing the Map's own id, then try to set it back into
-        // the same Map.
-        let m = TestMap::new(0);
-        let id = m.entry();
-        let self_id = unsafe { crate::plugins::ox_shared::registry::oxphp_shared_entry_id(id) };
-
-        // Self-reference payload encoded as a raw tag-7 (id, Map). We
-        // bypass `SharedValue::Shared(SharedRefOwned)` here because the
-        // construction would require holding an Arc to the very entry
-        // we're about to insert into — the cycle is supposed to be
-        // rejected before that holding becomes a problem. Encode tag 7
-        // directly.
-        let mut v: Vec<u8> = Vec::with_capacity(10);
-        v.push(7); // tag
-        v.push(SharedType::Map as u8);
-        v.extend_from_slice(&self_id.to_le_bytes());
-
-        let k = b"loop";
-        let rc = unsafe { oxphp_shared_map_set(id, k.as_ptr(), k.len(), v.as_ptr(), v.len()) };
-        assert_eq!(rc, SharedError::Cycle.code());
-    }
-
-    // ── atomic RMW (trySet / update / getOrSet) ───────────────────
-
-    #[test]
-    fn set_if_absent_inserts_when_vacant() {
-        let m = MapInner::new(None);
-        let inserted = m.set_if_absent(k("a"), SharedValue::Long(1)).unwrap();
-        assert!(inserted);
-        assert!(matches!(m.get("a"), Some(SharedValue::Long(1))));
-    }
-
-    #[test]
-    fn set_if_absent_noop_when_occupied() {
-        let m = MapInner::new(None);
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-        let inserted = m.set_if_absent(k("a"), SharedValue::Long(99)).unwrap();
-        assert!(!inserted);
-        assert!(matches!(m.get("a"), Some(SharedValue::Long(1))));
-    }
-
-    #[test]
-    fn set_if_absent_respects_cap() {
-        let m = MapInner::new(Some(1));
-        m.set(k("a"), SharedValue::Long(1)).unwrap();
-
-        let rc = m.set_if_absent(k("b"), SharedValue::Long(2));
-        assert!(matches!(rc, Err(SharedError::CapacityExceeded)));
-        assert_eq!(m.count(), 1);
-
-        // Existing-key set_if_absent is cheap (no cap touched).
-        let rc = m.set_if_absent(k("a"), SharedValue::Long(42));
-        assert!(!rc.unwrap());
-    }
-
-    #[test]
-    fn update_modifies_existing() {
-        let m = MapInner::new(None);
-        m.set(k("n"), SharedValue::Long(10)).unwrap();
-
-        let ret = m
-            .update_with(k("n"), |cur| match cur {
-                Some(SharedValue::Long(v)) => Some(SharedValue::Long(v * 2)),
-                _ => Some(SharedValue::Long(0)),
-            })
-            .unwrap();
-        assert!(matches!(ret, Some(SharedValue::Long(20))));
-        assert!(matches!(m.get("n"), Some(SharedValue::Long(20))));
-    }
-
-    #[test]
-    fn update_inserts_new_when_absent() {
-        let m = MapInner::new(None);
-        let ret = m
-            .update_with(k("fresh"), |cur| {
-                assert!(cur.is_none());
-                Some(SharedValue::Long(42))
-            })
-            .unwrap();
-        assert!(matches!(ret, Some(SharedValue::Long(42))));
-        assert_eq!(m.count(), 1);
-    }
-
-    #[test]
-    fn update_removes_on_none_return() {
-        let m = MapInner::new(None);
-        m.set(k("doomed"), SharedValue::Long(1)).unwrap();
-        m.set(k("kept"), SharedValue::Long(2)).unwrap();
-
-        let ret = m.update_with(k("doomed"), |_cur| None).unwrap();
-        assert!(ret.is_none());
-        assert!(m.get("doomed").is_none());
-        assert_eq!(m.count(), 1);
-        // Unrelated key untouched.
-        assert!(matches!(m.get("kept"), Some(SharedValue::Long(2))));
-    }
-
-    #[test]
-    fn update_noop_when_closure_returns_none_for_absent_key() {
-        let m = MapInner::new(None);
-        let ret = m.update_with(k("never"), |_cur| None).unwrap();
-        assert!(ret.is_none());
-        assert_eq!(m.count(), 0);
-    }
-
-    #[test]
-    fn update_propagates_cycle_rejection() {
-        let reg = ensure_registry();
-        let (a_arc, a_entry, _a_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-
-        // Attempt to update key to a self-reference — cycle.
-        let rc = a.update_with(k("self"), |_cur| Some(shared_value_for(&a_entry)));
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        assert_eq!(a.count(), 0);
-
-        drop(a_arc);
-        drop(a_entry);
-    }
-
-    #[test]
-    fn get_or_set_returns_existing_value() {
-        let m = MapInner::new(None);
-        m.set(k("x"), SharedValue::Long(1)).unwrap();
-
-        let called = std::cell::Cell::new(false);
-        let got = m
-            .get_or_set_with(k("x"), || {
-                called.set(true);
-                SharedValue::Long(999)
-            })
-            .unwrap();
-        assert!(matches!(got, SharedValue::Long(1)));
-        assert!(!called.get(), "factory must NOT run when key exists");
-    }
-
-    #[test]
-    fn get_or_set_computes_when_absent() {
-        let m = MapInner::new(None);
-        let called = std::cell::Cell::new(false);
-        let got = m
-            .get_or_set_with(k("fresh"), || {
-                called.set(true);
-                SharedValue::Long(7)
-            })
-            .unwrap();
-        assert!(matches!(got, SharedValue::Long(7)));
-        assert!(called.get());
-        assert!(matches!(m.get("fresh"), Some(SharedValue::Long(7))));
-    }
-
-    #[test]
-    fn get_or_set_respects_cap() {
-        let m = MapInner::new(Some(1));
-        m.set(k("full"), SharedValue::Long(1)).unwrap();
-
-        let rc = m.get_or_set_with(k("overflow"), || SharedValue::Long(99));
-        assert!(matches!(rc, Err(SharedError::CapacityExceeded)));
-    }
-
-    #[test]
-    fn set_if_absent_retain_released_on_cycle_rejection() {
-        // Regression: cycle-rejected set_if_absent must not leak Arc holds.
-        let reg = ensure_registry();
-        let (a_arc, a_entry, a_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-
-        let before = Arc::strong_count(&a_entry);
-        let rc = a.set_if_absent(k("loop"), shared_value_for(&a_entry));
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        // Cycle rejection: the candidate `SharedValue` was dropped on
-        // the error path so its temporary Arc cleared. Net change vs
-        // before: 0.
-        assert_eq!(
-            Arc::strong_count(&a_entry),
-            before,
-            "rejected set must not leak a strong ref"
-        );
-        // Map still healthy.
-        assert!(reg.lookup(a_id).is_ok());
-
-        drop(a_arc);
-        drop(a_entry);
-    }
-
-    #[test]
-    fn no_mutation_on_rejected_cycle_insert() {
-        // Verify rejected-cycle inserts do not leak Arcs on unrelated
-        // Shareds that travelled in via the candidate value.
-        let reg = ensure_registry();
-        let (a_arc, a_entry, _a_id) = bootstrap_map(reg, None);
-        let a = (*a_arc).as_any_map().unwrap();
-        let (counter_sv_for_a, counter_id) = make_mock_shared(reg);
-
-        a.set(k("c"), counter_sv_for_a).unwrap();
-        assert!(
-            reg.lookup(counter_id).is_ok(),
-            "counter alive — Map holds Arc"
-        );
-
-        // Attempt self-insert (cycle). Map should reject without
-        // consuming an extra Arc on the unrelated counter.
-        let rc = a.set(k("self"), shared_value_for(&a_entry));
-        assert!(matches!(rc, Err(SharedError::Cycle)));
-        assert!(
-            reg.lookup(counter_id).is_ok(),
-            "counter still alive after rejected set"
-        );
-
-        a.clear();
-        drop(a_arc);
-        drop(a_entry);
-    }
-
-    /// Pins the contract that `Map::set` propagates per-entry growth
-    /// into the registry's byte accounting. Without dynamic updates,
-    /// an empty Map's `Entry::mem_bytes` stays frozen at insert-time,
-    /// so an attacker that pushes thousands of entries can grow the
-    /// container far past `OX_SHARED_MAX_BYTES` while the operator's
-    /// gauges show the original 128 B base footprint.
-    ///
-    /// Asserts against `Entry::mem_bytes`, not registry-global
-    /// `total_bytes` — see `SharedRegistry::total_bytes` for why.
-    #[test]
-    fn map_set_grows_registry_entry_bytes() {
-        let reg = ensure_registry();
-        let (map_arc, map_entry, _map_id) = bootstrap_map(reg, None);
-        let m = (*map_arc).as_any_map().unwrap();
-
-        let baseline = map_entry.mem_bytes.load(Ordering::Relaxed);
-        for i in 0..32u64 {
-            m.set(k(&format!("key{i:03}")), SharedValue::Long(i as i64))
-                .unwrap();
-        }
-        let grown = map_entry.mem_bytes.load(Ordering::Relaxed);
-
-        assert!(
-            grown > baseline,
-            "entry mem_bytes ({grown}) must exceed baseline ({baseline}) after 32 set()s"
-        );
-
-        // Each entry contributes ≥ 64 (slot) + 16 (key) + 6 (key.len for
-        // "keyNNN") + 8 (Long value) = 94 B. Lower-bound the growth.
-        let min_growth: usize = 32 * 94;
-        assert!(
-            grown - baseline >= min_growth,
-            "growth ({}) below conservative lower bound ({min_growth})",
-            grown - baseline
-        );
-
-        // remove() refunds the per-entry cost.
-        for i in 0..32u64 {
-            m.remove(&format!("key{i:03}"));
-        }
-        assert_eq!(
-            map_entry.mem_bytes.load(Ordering::Relaxed),
-            baseline,
-            "entry mem_bytes must return to baseline after symmetric removes"
-        );
-
-        m.clear();
-        drop(map_arc);
-        drop(map_entry);
     }
 }

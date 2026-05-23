@@ -1368,106 +1368,127 @@ namespace OxPHP\Shared {
     }
 
     /**
-     * Concurrent `string → mixed` key-value store, visible from every
+     * Concurrent `int|string → mixed` key-value store, visible from every
      * worker thread.
      *
-     * Nested {@see Shareable} values are stored as refcount-managed
-     * references without serialisation. Cycle insertion is rejected
-     * with {@see CycleException}. Per-instance cap via `maxEntries`.
+     * `null` is never a stored value — it is the absence sentinel across
+     * the whole API: a `null` return means "no such key", and writing a
+     * `null` value throws {@see TypeException}. Keys are `int` or `string`,
+     * kept distinct (`123` and `"123"` are different keys; no PHP key
+     * coercion); string keys are binary-safe (stored as opaque bytes, so
+     * non-UTF-8 keys round-trip faithfully). Nested {@see Shareable} values
+     * are stored as
+     * refcount-managed references without serialisation; cycle insertion is
+     * rejected with {@see CycleException}. `maxEntries` is an approximate
+     * per-instance ceiling.
      *
      * @link docs/en/features/shared-map.md
      */
-    final class Map implements Shareable, \Countable
+    final class Map implements Shareable
     {
         /**
-         * @param int|null $maxEntries Per-instance size cap, or null for unlimited
-         *                             (still bounded by the process-global
-         *                             `SHARED_MAX_ENTRIES` budget).
+         * @param int|null $maxEntries Approximate per-instance ceiling for
+         *        OOM-safety, or null for unbounded (still bounded by the
+         *        process-global `SHARED_MAX_ENTRIES` budget). Must be > 0;
+         *        0 or negative throws {@see TypeException}.
          */
         public function __construct(?int $maxEntries = null) {}
 
-        /** Read a value; returns `$default` when absent. */
-        public function get(string $key, mixed $default = null): mixed {}
+        /** Value for `$key`, or `null` if absent. */
+        public function get(int|string $key): mixed {}
 
         /**
-         * Write a value.
+         * Lazily stream `key => value` for `$keys`; absent keys are skipped.
+         * Returns a native lazy iterator — one value is materialised at a
+         * time and `break` stops further work.
          *
-         * @throws TypeException     Value is not a scalar, array of scalars, or Shareable.
-         * @throws CycleException    Writing this Shareable would form a reference cycle.
-         * @throws CapacityException Map reached `maxEntries` or the process cap.
+         * @param iterable<int|string> $keys
+         * @return \Iterator<int|string, mixed>
          */
-        public function set(string $key, mixed $value): void {}
+        public function getMany(iterable $keys): \Iterator {}
 
-        /** Whether a key exists. */
-        public function has(string $key): bool {}
-
-        /** Remove a key, returning the previous value or null. */
-        public function remove(string $key): mixed {}
-
-        /** Remove all entries. */
-        public function clear(): int {}
-
-        /** Number of entries currently stored. Implements `Countable`. */
+        /** Approximate entry count (striped, weakly consistent). */
         public function count(): int {}
 
-        /**
-         * Snapshot of all keys at the call time.
-         *
-         * @return string[]
-         */
-        public function keys(): array {}
-
-        /** Configured per-instance cap, or null if unlimited. */
+        /** Configured per-instance ceiling, or null if unbounded. */
         public function maxEntries(): ?int {}
 
         /**
-         * Set `$value` iff the key was absent. Returns true on insert,
-         * false if the key already existed.
-         */
-        public function trySet(string $key, mixed $value): bool {}
-
-        /**
-         * Atomically update a value with `$fn(mixed $old): mixed`. Returns
-         * the new value. Throws {@see TypeException} for unsupported values.
-         */
-        public function update(string $key, callable $fn): mixed {}
-
-        /**
-         * Return the current value, or call `$factory()` to compute and
-         * store a new value if the key is absent.
-         */
-        public function getOrSet(string $key, callable $factory): mixed {}
-
-        /**
-         * Bulk set. Returns the number of entries written.
+         * Insert or overwrite.
          *
-         * @param array<string, mixed> $kv
+         * @throws TypeException          `$value` is null, or not a scalar /
+         *                                array of supported / Shareable.
+         * @throws ValueTooLargeException Serialised value exceeds the per-value
+         *                                cap (`SHARED_MAX_VALUE_SIZE`).
+         * @throws CycleException         Storing this Shareable would form a cycle.
+         * @throws CapacityException      New key while at `maxEntries`.
          */
-        public function setMany(array $kv): int {}
+        public function set(int|string $key, mixed $value): void {}
 
         /**
-         * Bulk get.
+         * Insert iff absent. Returns the existing value, or `null` if the
+         * insert happened (`null` ⟺ inserted). Atomic.
          *
-         * @param string[] $keys
-         * @return array<string, mixed>
+         * @throws TypeException|ValueTooLargeException|CycleException|CapacityException
          */
-        public function getMany(array $keys): array {}
+        public function setIfAbsent(int|string $key, mixed $value): mixed {}
 
         /**
-         * Bulk atomic update. Applies `$fn` to each of `$keys`; missing
-         * keys are skipped.
+         * Bulk insert/overwrite. Per-key atomic, NOT batch-atomic: keys are
+         * applied one at a time, so a mid-batch failure leaves earlier keys
+         * stored (partial apply). The successfully-written count is not
+         * recoverable once an exception is thrown — re-read with `getMany`
+         * if you need to know what landed.
          *
-         * @param string[] $keys
-         * @return array<string, mixed>
+         * @param iterable<int|string, mixed> $entries
+         * @return int Number of entries written (only on full success).
+         * @throws TypeException          A null/non-storable value or non-int|string key.
+         * @throws ValueTooLargeException A value over the per-value cap.
+         * @throws CycleException         A value that would form a reference cycle.
+         * @throws CapacityException      A new key past `maxEntries`.
          */
-        public function updateMany(array $keys, callable $fn): array {}
+        public function setMany(iterable $entries): int {}
+
+        /** Remove `$key`. Returns whether it existed. No value materialised. */
+        public function remove(int|string $key): bool {}
 
         /**
-         * Bulk remove. Returns the number of keys actually removed.
+         * Bulk remove. Per-key atomic. Returns the number actually removed.
          *
-         * @param string[] $keys
+         * @param iterable<int|string> $keys
          */
-        public function removeMany(array $keys): int {}
+        public function removeMany(iterable $keys): int {}
+
+        /** Remove all entries; returns the number removed. */
+        public function clear(): int {}
+
+        /** Overwrite and return the previous value (`null` ⟺ was absent). */
+        public function swap(int|string $key, mixed $value): mixed {}
+
+        /** Remove and return the previous value (`null` ⟺ was absent). */
+        public function pop(int|string $key): mixed {}
+
+        /**
+         * Atomically store `$new` iff the current value equals `$expected`.
+         * `null` is the absence sentinel on both sides:
+         *   ($expected = null, $new = V)    → insert iff absent
+         *   ($expected = A,    $new = B)    → replace iff current === A
+         *   ($expected = A,    $new = null) → remove  iff current === A
+         * Equality is by content (arrays order-sensitive, like `===`).
+         * Returns true iff the swap was applied.
+         *
+         * @throws TypeException|ValueTooLargeException|CycleException|CapacityException
+         */
+        public function compareAndSet(int|string $key, mixed $expected, mixed $new): bool {}
+
+        /**
+         * Weakly-consistent traversal: `$fn(int|string $key, mixed $value)`
+         * runs with no lock held. Keys deleted mid-traversal are skipped;
+         * late inserts may be missed. Return `false` from `$fn` to stop early.
+         *
+         * @param callable(int|string, mixed): (bool|null) $fn
+         */
+        public function forEach(callable $fn): void {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1571,6 +1592,12 @@ namespace OxPHP\Shared {
     class CapacityException extends SharedException {}
 
     /**
+     * A single value's serialised size exceeds the per-value cap
+     * (`SHARED_MAX_VALUE_SIZE`, default 1 MiB). Thrown by Map writes.
+     */
+    class ValueTooLargeException extends SharedException {}
+
+    /**
      * A receive/send was attempted on a closed {@see Channel}, or a closed
      * {@see Once} was accessed. (Pool surfaces this only on the internal
      * shutdown-drain path; it is not part of Pool's user-facing surface,
@@ -1637,6 +1664,25 @@ namespace OxPHP\Shared\Once {
     {
         case Reset = 0;  // failure -> back to Uninitialized (retryable, default)
         case Poison = 1; // failure -> Poisoned forever
+    }
+}
+
+namespace OxPHP\Shared\Map {
+
+    /**
+     * Lazy key→value iterator returned by {@see \OxPHP\Shared\Map::getMany()}.
+     * Materialises one value at a time and skips keys absent at read time.
+     *
+     * @internal Obtain via {@see \OxPHP\Shared\Map::getMany()}; never construct
+     *           directly.
+     */
+    final class KeyCursor implements \Iterator
+    {
+        public function rewind(): void {}
+        public function valid(): bool {}
+        public function current(): mixed {}
+        public function key(): int|string {}
+        public function next(): void {}
     }
 }
 

@@ -258,12 +258,7 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
                     .get()
                     .map(|r| r.config().preview_array_limit)
                     .unwrap_or(20);
-                let sample: Vec<String> = map
-                    .keys()
-                    .iter()
-                    .take(sample_limit)
-                    .map(|s| s.to_string())
-                    .collect();
+                let sample: Vec<String> = map.sample_keys(sample_limit);
                 json!({
                     "key_count": count,
                     "max_entries": max.map(|m| m as u64),
@@ -740,6 +735,7 @@ mod tests {
             introspection_preview_enabled: true,
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
+            max_value_size: 1 << 20,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
@@ -819,7 +815,10 @@ mod tests {
         concrete.bind_id(id);
         for i in 0..3 {
             concrete
-                .set(Arc::from(format!("k{i}")), SV::Long(i))
+                .set(
+                    crate::plugins::ox_shared::types::map_key::MapKey::from_str(&format!("k{i}")),
+                    SV::Long(i),
+                )
                 .unwrap();
         }
 
@@ -1043,7 +1042,7 @@ mod tests {
         let a = (*a_inner).as_any_map().unwrap();
         a.bind_id(a_id);
         a.set(
-            Arc::from("c"),
+            crate::plugins::ox_shared::types::map_key::MapKey::from_str("c"),
             SV::Shared(SharedRefOwned::from_arc(Arc::clone(&c_entry))),
         )
         .unwrap();
@@ -1089,8 +1088,9 @@ mod tests {
         let id = entry.id;
         let concrete = (*inner).as_any_map().unwrap();
         concrete.bind_id(id);
-        concrete.set(Arc::from("a"), SV::Long(1)).unwrap();
-        concrete.set(Arc::from("b"), SV::Long(2)).unwrap();
+        use crate::plugins::ox_shared::types::map_key::MapKey;
+        concrete.set(MapKey::from_str("a"), SV::Long(1)).unwrap();
+        concrete.set(MapKey::from_str("b"), SV::Long(2)).unwrap();
 
         let mut out = String::new();
         SharedMetricsCollector.collect(&mut out);

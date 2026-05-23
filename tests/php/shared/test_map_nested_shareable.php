@@ -31,10 +31,11 @@ if ($retrieved->get() !== 11) { echo "FAIL: mutation via original not visible\n"
 $retrieved->inc();
 if ($counter->get() !== 12) { echo "FAIL: mutation via retrieved not visible\n"; exit; }
 
-// Remove unlinks the Map's hold; the Counter lives on via the PHP var.
-$removed = $m->remove('hits');
-if (!($removed instanceof OxPHP\Shared\Counter)) { echo "FAIL: remove wrong type\n"; exit; }
-if ($removed->id() !== $counter->id()) { echo "FAIL: remove identity\n"; exit; }
+// pop unlinks the Map's hold and returns the value; the Counter lives on
+// via the PHP var.
+$removed = $m->pop('hits');
+if (!($removed instanceof OxPHP\Shared\Counter)) { echo "FAIL: pop wrong type\n"; exit; }
+if ($removed->id() !== $counter->id()) { echo "FAIL: pop identity\n"; exit; }
 $counter->inc();
 if ($counter->get() !== 13) { echo "FAIL: original damaged after remove\n"; exit; }
 
