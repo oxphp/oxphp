@@ -18,6 +18,13 @@ pub struct SharedConfig {
     /// Per-value serialised size cap (bytes). A single Map/Channel value
     /// whose portbuf encoding exceeds this throws ValueTooLargeException.
     pub max_value_size: usize,
+    /// Upper bound (bytes) on a single Channel's pre-allocated slot array.
+    /// `capacity * slot_bytes` above this throws CapacityException at
+    /// construction, converting an allocation-bomb abort into a catchable
+    /// error. Env: SHARED_MAX_CHANNEL_BYTES (default 64 MiB). The effective
+    /// budget is clamped up to at least one slot, so a zero or sub-slot
+    /// value can never reject a minimal capacity-1 channel.
+    pub max_channel_bytes: u64,
     pub poison_strict: bool,
     pub lock_diagnostics: LockDiagnosticsLevel,
     pub lock_poll_interval_ms: u64,
@@ -70,6 +77,7 @@ impl SharedConfig {
             cycle_detect_depth: parse_usize(shared_value(ctx, "CYCLE_DETECT_DEPTH"), 16),
             cycle_detect_edges: parse_usize(shared_value(ctx, "CYCLE_DETECT_EDGES"), 10_000),
             max_value_size: parse_usize(shared_value(ctx, "MAX_VALUE_SIZE"), 1 << 20),
+            max_channel_bytes: parse_u64(shared_value(ctx, "MAX_CHANNEL_BYTES"), 64 << 20),
             poison_strict: shared_bool(ctx, "POISON_STRICT", false)?,
             lock_diagnostics: parse_lock_diag(shared_value(ctx, "LOCK_DIAGNOSTICS")),
             lock_poll_interval_ms: parse_u64(shared_value(ctx, "LOCK_POLL_INTERVAL_MS"), 100),
