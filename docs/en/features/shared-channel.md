@@ -68,6 +68,27 @@ final class SendResult {
 }
 ```
 
+## Size limits
+
+Two ceilings guard against allocation bombs from untrusted input; both are
+configurable via environment variables and raise a catchable exception
+rather than aborting the process:
+
+- **Capacity** — `new Channel($capacity)` pre-allocates a slot array. A
+  capacity whose slot array would exceed `SHARED_MAX_CHANNEL_BYTES`
+  (default 64 MiB, ~2M slots) throws `CapacityException`. Channels are
+  normally tens to low-thousands deep, so this only fires on pathological
+  values. (A non-positive `$capacity` is a separate `TypeException`.)
+  The effective budget is clamped up to at least one slot, so a zero or
+  too-small `SHARED_MAX_CHANNEL_BYTES` can never reject a minimal
+  capacity-1 channel — it only ever caps large capacities.
+- **Per value** — each sent value is serialised; a value whose serialised
+  size exceeds `SHARED_MAX_VALUE_SIZE` (default 1 MiB) throws
+  `ValueTooLargeException`. This applies to `send`, `trySend`,
+  `sendTimeout`, and `sendMany` (which rejects the whole batch, sending
+  nothing, if any element is over the cap). This is the same per-value cap
+  enforced by `Shared\Map`.
+
 ## Wait policies
 
 Every direction has three method variants — the suffix encodes the wait policy:

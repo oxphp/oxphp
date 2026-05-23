@@ -68,6 +68,24 @@ final class SendResult {
 }
 ```
 
+## 大小限制
+
+两道上限可防止来自不可信输入的分配炸弹；两者都可通过环境变量配置，
+并抛出可捕获的异常，而不是中止进程：
+
+- **容量** —— `new Channel($capacity)` 会预分配一个槽位数组。若某个容量
+  对应的槽位数组会超过 `SHARED_MAX_CHANNEL_BYTES`（默认 64 MiB，约 2M
+  个槽位），则抛出 `CapacityException`。通道深度通常为数十到数千，因此
+  这只会在病态取值时触发。（非正的 `$capacity` 是另一个 `TypeException`。）
+  有效预算会被抬升至至少一个槽位，因此为零或过小的
+  `SHARED_MAX_CHANNEL_BYTES` 永远不会拒绝一个最小的容量为 1 的通道——
+  它只会限制较大的容量。
+- **单个值** —— 每个发送的值都会被序列化；若某个值的序列化大小超过
+  `SHARED_MAX_VALUE_SIZE`（默认 1 MiB），则抛出 `ValueTooLargeException`。
+  这适用于 `send`、`trySend`、`sendTimeout` 和 `sendMany`（若任一元素
+  超过上限，则拒绝整个批次，不发送任何内容）。这与 `Shared\Map` 强制
+  执行的单值上限相同。
+
 ## Wait 策略
 
 每个方向都有三种方法变体——后缀编码 wait 策略：

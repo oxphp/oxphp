@@ -1295,7 +1295,12 @@ namespace OxPHP\Shared {
      */
     final class Channel implements Shareable, \Countable
     {
-        /** @param int $capacity Maximum queued values (>= 1). */
+        /**
+         * @param int $capacity Maximum queued values (>= 1).
+         * @throws TypeException If `$capacity` is not a positive int.
+         * @throws CapacityException If the requested capacity's slot array
+         *         would exceed `SHARED_MAX_CHANNEL_BYTES` (default 64 MiB).
+         */
         public function __construct(int $capacity) {}
 
         // ── Receive ────────────────────────────────────────────────
@@ -1316,10 +1321,20 @@ namespace OxPHP\Shared {
 
         // ── Send ───────────────────────────────────────────────────
 
-        /** Non-blocking send. Returns Ok / Full / Closed. */
+        /**
+         * Non-blocking send. Returns Ok / Full / Closed.
+         *
+         * @throws ValueTooLargeException If `$value`'s serialised size exceeds
+         *         the per-value cap (`SHARED_MAX_VALUE_SIZE`, default 1 MiB).
+         */
         public function trySend(mixed $value): Channel\SendResult {}
 
-        /** Block until a slot frees or the channel closes. */
+        /**
+         * Block until a slot frees or the channel closes.
+         *
+         * @throws ValueTooLargeException If `$value`'s serialised size exceeds
+         *         the per-value cap (`SHARED_MAX_VALUE_SIZE`, default 1 MiB).
+         */
         public function send(mixed $value): Channel\SendResult {}
 
         /**
@@ -1327,6 +1342,7 @@ namespace OxPHP\Shared {
          *
          * @param int $ms Wait budget in milliseconds. Must be `> 0`.
          * @throws TypeException If `$ms` is not a positive int.
+         * @throws ValueTooLargeException If `$value` exceeds the per-value cap.
          */
         public function sendTimeout(mixed $value, int $ms): Channel\SendResult {}
 
@@ -1339,6 +1355,8 @@ namespace OxPHP\Shared {
          *
          * @param int $ms Wait budget in milliseconds. Must be `> 0`.
          * @throws TypeException If `$ms` is not a positive int.
+         * @throws ValueTooLargeException If any element exceeds the per-value
+         *         cap; the whole batch is rejected (0 sent).
          */
         public function sendMany(array $values, int $ms): int {}
 
