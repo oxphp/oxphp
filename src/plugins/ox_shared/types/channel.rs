@@ -33,6 +33,67 @@ const CHANNEL_PER_PAYLOAD_BYTES: isize = 32;
 /// layer.
 pub type Payload = Vec<u8>;
 
+/// Approximate bytes crossbeam allocates per bounded-channel slot: the
+/// `Payload` plus a per-slot stamp word. A deliberate lower bound on the
+/// true slot size — enough to convert an allocation-bomb abort into a
+/// catchable CapacityException, not a precise allocator quota.
+const SLOT_BYTES: u64 = (std::mem::size_of::<Payload>() + std::mem::size_of::<usize>()) as u64;
+
+/// True iff a channel of `capacity` slots fits within `budget` bytes.
+/// Overflow of `capacity * SLOT_BYTES` counts as not fitting.
+fn channel_capacity_fits(capacity: u64, budget: u64) -> bool {
+    match capacity.checked_mul(SLOT_BYTES) {
+        Some(bytes) => bytes <= budget,
+        None => false,
+    }
+}
+
+/// Effective channel byte budget: never below one slot. Clamps a zero or
+/// sub-slot `SHARED_MAX_CHANNEL_BYTES` up so a misconfiguration can't reject
+/// a minimal capacity-1 channel; the budget only meaningfully caps large
+/// capacities.
+fn effective_channel_budget(configured: u64) -> u64 {
+    configured.max(SLOT_BYTES)
+}
+
+/// Walk per-element sizes encoded as start `offsets` into a `concat_len`-byte
+/// buffer (element i spans `offsets[i]..offsets[i+1]`, last spans
+/// `offsets[last]..concat_len`). Returns `(index, size)` of the first element
+/// whose size exceeds `cap`, or `None` if all fit.
+fn first_oversized_element(
+    offsets: &[usize],
+    concat_len: usize,
+    cap: usize,
+) -> Option<(usize, usize)> {
+    for i in 0..offsets.len() {
+        let start = offsets[i];
+        let end = offsets.get(i + 1).copied().unwrap_or(concat_len);
+        let size = end.saturating_sub(start);
+        if size > cap {
+            return Some((i, size));
+        }
+    }
+    None
+}
+
+/// Reject a serialised value larger than `cap` bytes. Pure: the caller
+/// supplies the cap from `registry().config().max_value_size`. Mirrors
+/// Shared\Map's per-value guard but returns a PhpError because the channel
+/// send paths throw directly rather than via an FFI rc.
+fn check_value_size(len: usize, cap: usize, method: &str) -> Result<(), crate::plugin::PhpError> {
+    if len > cap {
+        return Err(crate::plugin::PhpError::Exception {
+            class: "OxPHP\\Shared\\ValueTooLargeException".into(),
+            message: format!(
+                "{method}: value of {len} bytes exceeds the per-value cap of \
+                 {cap} bytes (SHARED_MAX_VALUE_SIZE)"
+            ),
+            code: 0,
+        });
+    }
+    Ok(())
+}
+
 /// Hand a `Vec<u8>` off to C via a `libc::malloc`'d buffer. C side is
 /// expected to free it via `oxphp_portable_free` when done.
 /// Returns `(buf_ptr, len)` on success; returns `SharedError::Generic`
@@ -920,6 +981,18 @@ pub unsafe extern "C" fn oxphp_shared_channel_create(
             return Err(SharedError::Type);
         }
         let reg = registry();
+        let budget = effective_channel_budget(reg.config().max_channel_bytes);
+        if !channel_capacity_fits(capacity, budget) {
+            set_last_error(format!(
+                "Channel capacity {capacity} would allocate ~{} bytes for its \
+                 slot array, exceeding SHARED_MAX_CHANNEL_BYTES ({budget}); \
+                 lower the capacity or raise the budget",
+                capacity
+                    .checked_mul(SLOT_BYTES)
+                    .map_or_else(|| "overflow".to_string(), |b| b.to_string())
+            ));
+            return Err(SharedError::CapacityExceeded);
+        }
         // Hold a typed `Arc<ChannelInner>` alongside the trait-object
         // copy handed to the registry: lets us call `bind_id` directly
         // without round-tripping through `as_any_channel` (whose
@@ -1740,6 +1813,7 @@ pub fn register_class(
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let buf_owner = serialize_arg(call, 0, "trySend")?;
             let (buf, len) = buf_owner.parts();
+            check_value_size(len, registry().config().max_value_size, "trySend")?;
             let mut success: c_int = 0;
             let rc = unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
             drop(buf_owner);
@@ -1762,7 +1836,7 @@ pub fn register_class(
         .method("send")
         .param("value", PhpType::Mixed)
         .returns(PhpType::Object)
-        .handler(|call| invoke_channel_send(call, -1))
+        .handler(|call| invoke_channel_send(call, -1, "send"))
         // ── sendTimeout(value, int $ms): SendResult ─────────────────
         //   Bounded. $ms > 0 enforced. Returns Ok / Full / Timeout / Closed.
         .method("sendTimeout")
@@ -1771,7 +1845,7 @@ pub fn register_class(
         .returns(PhpType::Object)
         .handler(|call| {
             let ms = read_positive_ms_arg(call, 1)?;
-            invoke_channel_send(call, ms)
+            invoke_channel_send(call, ms, "sendTimeout")
         })
         // ── tryRecv(): RecvResult ───────────────────────────────────
         //   Non-blocking. Returns RecvResult::Ok(value) / Empty / Closed.
@@ -1921,6 +1995,29 @@ pub fn register_class(
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\TypeException".into(),
                     message: msg.into(),
+                    code: 0,
+                });
+            }
+
+            // Pre-flight per-value cap: reject the whole batch before any
+            // deposit if any element exceeds the cap.
+            let cap = registry().config().max_value_size;
+            let sizes: &[usize] = unsafe { std::slice::from_raw_parts(offsets, n) };
+            if let Some((idx, size)) = first_oversized_element(sizes, concat_len, cap) {
+                unsafe {
+                    if !concat.is_null() {
+                        bridge_ffi::oxphp_portable_free(concat);
+                    }
+                    if !offsets.is_null() {
+                        bridge_ffi::oxphp_portable_free(offsets as *mut u8);
+                    }
+                }
+                return Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\ValueTooLargeException".into(),
+                    message: format!(
+                        "sendMany: element {idx} of {size} bytes exceeds the \
+                         per-value cap of {cap} bytes (SHARED_MAX_VALUE_SIZE)"
+                    ),
                     code: 0,
                 });
             }
@@ -2139,6 +2236,7 @@ fn serialize_arg(
 fn invoke_channel_send(
     call: &mut crate::bridge::call::NativeCall,
     timeout_ms: i64,
+    method: &str,
 ) -> Result<(), crate::plugin::PhpError> {
     use crate::bridge::ffi as bridge_ffi;
     use crate::plugin::PhpError;
@@ -2146,8 +2244,9 @@ fn invoke_channel_send(
     use crate::plugins::ox_shared::results::{self, SendKind};
 
     let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-    let buf_owner = serialize_arg(call, 0, "send")?;
+    let buf_owner = serialize_arg(call, 0, method)?;
     let (buf, len) = buf_owner.parts();
+    check_value_size(len, registry().config().max_value_size, method)?;
 
     // The fiber-suspend path uses synthetic-promise FFI that is gated
     // behind `feature = "php"` (PROMISE_MAP lives on PHP worker
@@ -2515,6 +2614,83 @@ mod tests {
     use crate::plugins::ox_shared::types::once::OnceInner;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn capacity_fits_within_budget() {
+        // 100 slots * SLOT_BYTES is far under a 1 MiB budget.
+        assert!(channel_capacity_fits(100, 1 << 20));
+    }
+
+    #[test]
+    fn capacity_rejected_over_budget() {
+        // budget allows exactly 10 slots; 11 must be rejected.
+        let budget = 10 * SLOT_BYTES;
+        assert!(channel_capacity_fits(10, budget));
+        assert!(!channel_capacity_fits(11, budget));
+    }
+
+    #[test]
+    fn capacity_rejected_on_overflow() {
+        // capacity * SLOT_BYTES overflows u64 -> treated as over-budget,
+        // never panics.
+        assert!(!channel_capacity_fits(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn tiny_budget_clamped_to_one_slot() {
+        // A zero / sub-slot configured budget is clamped up to one slot, so a
+        // minimal capacity-1 channel always succeeds; larger capacities still
+        // need a real budget.
+        assert_eq!(effective_channel_budget(0), SLOT_BYTES);
+        assert_eq!(effective_channel_budget(SLOT_BYTES - 1), SLOT_BYTES);
+        assert_eq!(effective_channel_budget(100 * SLOT_BYTES), 100 * SLOT_BYTES);
+        assert!(channel_capacity_fits(1, effective_channel_budget(0)));
+        assert!(!channel_capacity_fits(2, effective_channel_budget(0)));
+    }
+
+    #[test]
+    fn value_within_cap_is_accepted() {
+        // exactly at the cap is allowed (boundary off-by-one guard).
+        assert!(check_value_size(100, 100, "send").is_ok());
+        assert!(check_value_size(0, 100, "send").is_ok());
+    }
+
+    #[test]
+    fn value_over_cap_throws_value_too_large() {
+        let err = check_value_size(101, 100, "send").unwrap_err();
+        match err {
+            crate::plugin::PhpError::Exception { class, message, .. } => {
+                assert_eq!(class, "OxPHP\\Shared\\ValueTooLargeException");
+                assert!(message.contains("101"), "message names the size: {message}");
+                assert!(
+                    message.contains("send"),
+                    "message names the method: {message}"
+                );
+            }
+            other => panic!("expected ValueTooLargeException, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_many_first_oversized_offset_is_detected() {
+        // offsets = element start positions; concat_len = total bytes.
+        // Three elements: [0..10), [10..210), [210..215) -> sizes 10, 200, 5.
+        let offsets = [0usize, 10, 210];
+        let concat_len = 215usize;
+        let cap = 100usize;
+        // Element 1 (size 200) is the first to exceed cap=100.
+        assert_eq!(
+            first_oversized_element(&offsets, concat_len, cap),
+            Some((1, 200))
+        );
+    }
+
+    #[test]
+    fn send_many_all_within_cap_is_none() {
+        let offsets = [0usize, 10, 30];
+        let concat_len = 35usize; // sizes 10, 20, 5
+        assert_eq!(first_oversized_element(&offsets, concat_len, 100), None);
+    }
 
     #[test]
     fn new_channel_empty() {
@@ -3049,6 +3225,7 @@ mod tests {
             cycle_detect_depth: 16,
             cycle_detect_edges: 10_000,
             max_value_size: 1 << 20,
+            max_channel_bytes: 64 << 20,
             poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
