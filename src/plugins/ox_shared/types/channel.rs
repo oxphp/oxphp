@@ -861,14 +861,14 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            match synthetic::resolve_value(id, payload.bytes) {
+            match synthetic::resolve_value(id, payload.bytes, None) {
                 // Delivered to a live receiver.
                 None => return None,
                 // Waiter could not take it (resolved elsewhere, or its
                 // receiver is gone) — payload survived; try the next id.
                 // (Keepalive threading is added in a later step; the bytes
                 // round-trip is preserved here.)
-                Some(returned) => payload = Payload::bytes_only(returned),
+                Some((returned, _)) => payload = Payload::bytes_only(returned),
             }
         }
     }
@@ -885,7 +885,7 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            if synthetic::resolve(id, PromisePayload::Value(Vec::new())) {
+            if synthetic::resolve(id, PromisePayload::Value(Vec::new(), None)) {
                 return;
             }
             // Dead — skip and try the next parked id.
