@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use oxphp::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
 use oxphp::plugins::ox_shared::registry::{self, SharedType};
-use oxphp::plugins::ox_shared::types::channel::ChannelInner;
+use oxphp::plugins::ox_shared::types::channel::{ChannelInner, Payload};
 use oxphp::plugins::ox_shared::types::timeout::Wait;
 
 // Helper: ensure the process-global registry is initialised. Multiple
@@ -89,7 +89,9 @@ fn blocked_send_wakes_on_drain_with_closed() {
 
     let ch_inner = Arc::new(ChannelInner::new(1));
     // Fill the channel so the next send blocks.
-    ch_inner.try_send(vec![1]).expect("initial send");
+    ch_inner
+        .try_send(Payload::bytes_only(vec![1]))
+        .expect("initial send");
 
     let entry = reg
         .insert(SharedType::Channel, ch_inner.clone())
@@ -98,7 +100,10 @@ fn blocked_send_wakes_on_drain_with_closed() {
     let ch_for_thread = ch_inner.clone();
     let handle = std::thread::spawn(move || {
         // Will block because the channel is full.
-        ch_for_thread.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(5)))
+        ch_for_thread.send_blocking(
+            Payload::bytes_only(vec![2]),
+            Wait::Bounded(Duration::from_secs(5)),
+        )
     });
 
     std::thread::sleep(Duration::from_millis(50));

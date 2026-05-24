@@ -43,7 +43,7 @@ impl Payload {
     /// Wrap raw wire bytes with no keepalive. Used by tests and by the
     /// internal recv recirculation paths that move bytes without resolved
     /// nested shared refs.
-    pub(crate) fn bytes_only(bytes: Vec<u8>) -> Self {
+    pub fn bytes_only(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             keepalive: SmallVec::new(),
