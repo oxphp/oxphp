@@ -221,6 +221,8 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 
 `tryAcquire()` does **not** throw on saturation — it returns `null`. Because `OperationTimeoutException` extends `OxPHP\Async\AsyncException` (not `SharedException`), a `catch (SharedException)` will **not** catch an acquire timeout; use `catch (OxPHP\Async\AsyncException)` or catch `OperationTimeoutException` directly.
 
+**Why this differs from `Mutex::tryWithLock()`.** Both are non-blocking `try*` calls, but `Pool` returns `null` on contention while `Mutex` throws `ContentionException`. The split is structural, not stylistic. `Pool` is **handle-first**: every acquire hands back a `Handle`, so the "saturated" outcome has a natural carrier — `?Handle`, where `null` means "no slot" and never collides with a real value (a `Handle` is never itself a user value). `Mutex` is **closure-only** by design — it deliberately never hands a lock guard back to PHP, so a held lock cannot leak past the closure. That leaves `tryWithLock` with no object to return as nullable, and the closure's own `mixed` result may legitimately be `null` — so `null` cannot double as "not acquired". With neither a handle nor a free sentinel, the only unambiguous contention signal left is an exception. Catch accordingly: `tryAcquire` → test for `null`; `tryWithLock` → `catch (ContentionException)`.
+
 Exceptions thrown inside the factory propagate to the acquire caller unchanged and do not consume budget. Exceptions inside the `with()` / `withTimeout()` body propagate to the caller after the slot is released.
 
 ## Observability

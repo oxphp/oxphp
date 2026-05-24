@@ -55,6 +55,8 @@ final class Mutex implements Shareable
 
 如果你发现自己在把每个 `withLock` 都包进 `try { … } catch (ContentionException) { … }`，那就是用错了原语。对队列形态的负载请使用 `Shared\Channel`，对单值原子性请使用 `Shared\Counter` / `Shared\Flag`。
 
+同样的结构性原因解释了为什么 `Pool::tryAcquire()` 能返回 `null`，而 `Mutex::tryWithLock()` 却抛异常。`Pool` 是 **handle-first**：`tryAcquire(): ?Handle` 用 `null` 承载「饱和」，而 `Handle` 本身永远不是用户值，因此没有歧义。`Mutex` 是 **closure-only**——它刻意从不把锁守卫交回 PHP（使被持有的锁无法泄漏到闭包之外），于是没有可作为 nullable 返回的对象，而闭包自身的 `mixed` 结果可能本就是 `null`。既无空闲哨兵值，竞争便以 `ContentionException` 浮现。两个 `try*` 表面之所以分歧，源于各类型能交回什么，而非风格偏好。
+
 ## 示例
 
 ### 原子多字段更新
