@@ -14,7 +14,7 @@
 //! `target/criterion/*` summaries.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use oxphp::plugins::ox_shared::types::channel::ChannelInner;
+use oxphp::plugins::ox_shared::types::channel::{ChannelInner, Payload};
 use std::sync::Arc;
 
 fn bench_recv_via_synthetic_roundtrip(c: &mut Criterion) {
@@ -40,7 +40,7 @@ fn bench_recv_via_synthetic_roundtrip(c: &mut Criterion) {
             let sender = tokio::spawn(async move {
                 // Yield once to ensure the parker has parked.
                 tokio::task::yield_now().await;
-                ch2.try_send(vec![1, 2, 3, 4]).unwrap();
+                ch2.try_send(Payload::bytes_only(vec![1, 2, 3, 4])).unwrap();
             });
 
             let result = rx.await.expect("payload received");
