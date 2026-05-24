@@ -20,6 +20,8 @@
 
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use crate::plugins::ox_shared::registry::{Entry, SharedId, SharedRegistry, SharedType};
 
 /// Container payload. The lifetime-bearing form of a value; safe to
@@ -372,6 +374,90 @@ fn sv_read(
     })
 }
 
+/// Scan portbuf wire bytes for nested `Shared\*` references (tag-7) without
+/// materializing scalars/strings/arrays. Walks exactly one value, skipping
+/// scalar and string payloads by length, recursing into tag-6 arrays.
+/// Returns the `SharedRef` views of every tag-7 found. Mirrors the tag
+/// layout of `sv_read`; errors on a truncated or malformed buffer.
+pub fn scan_shared_refs(
+    buf: &[u8],
+) -> Result<SmallVec<[SharedRef; 1]>, crate::plugins::ox_shared::error::SharedError> {
+    let mut out: SmallVec<[SharedRef; 1]> = SmallVec::new();
+    let mut pos = 0usize;
+    scan_one(buf, &mut pos, &mut out)?;
+    Ok(out)
+}
+
+fn scan_one(
+    buf: &[u8],
+    pos: &mut usize,
+    out: &mut SmallVec<[SharedRef; 1]>,
+) -> Result<(), crate::plugins::ox_shared::error::SharedError> {
+    use crate::plugins::ox_shared::error::SharedError;
+    fn rd_u8(b: &[u8], p: &mut usize) -> Result<u8, SharedError> {
+        if *p >= b.len() {
+            return Err(SharedError::Generic);
+        }
+        let v = b[*p];
+        *p += 1;
+        Ok(v)
+    }
+    fn rd_u32(b: &[u8], p: &mut usize) -> Result<u32, SharedError> {
+        if *p + 4 > b.len() {
+            return Err(SharedError::Generic);
+        }
+        let v = u32::from_le_bytes(b[*p..*p + 4].try_into().unwrap());
+        *p += 4;
+        Ok(v)
+    }
+    fn rd_u64(b: &[u8], p: &mut usize) -> Result<u64, SharedError> {
+        if *p + 8 > b.len() {
+            return Err(SharedError::Generic);
+        }
+        let v = u64::from_le_bytes(b[*p..*p + 8].try_into().unwrap());
+        *p += 8;
+        Ok(v)
+    }
+    fn skip(b: &[u8], p: &mut usize, n: usize) -> Result<(), SharedError> {
+        if *p + n > b.len() {
+            return Err(SharedError::Generic);
+        }
+        *p += n;
+        Ok(())
+    }
+
+    let tag = rd_u8(buf, pos)?;
+    match tag {
+        0..=2 => {}                  // null / true / false — no body
+        3..=4 => skip(buf, pos, 8)?, // long / double
+        5 => {
+            let n = rd_u32(buf, pos)? as usize; // string / bytes
+            skip(buf, pos, n)?;
+        }
+        6 => {
+            let count = rd_u32(buf, pos)? as usize;
+            for _ in 0..count {
+                let key_type = rd_u8(buf, pos)?;
+                if key_type == 1 {
+                    let klen = rd_u32(buf, pos)? as usize;
+                    skip(buf, pos, klen)?;
+                } else {
+                    skip(buf, pos, 8)?; // u64 index key
+                }
+                scan_one(buf, pos, out)?;
+            }
+        }
+        7 => {
+            let tt = rd_u8(buf, pos)?;
+            let id = rd_u64(buf, pos)?;
+            let type_tag = SharedType::from_tag(tt).ok_or(SharedError::Type)?;
+            out.push(SharedRef { id, type_tag });
+        }
+        _ => return Err(SharedError::Type),
+    }
+    Ok(())
+}
+
 /// Walk a [`SharedValueRaw`] tree and resolve every `Shared(SharedRef)`
 /// node into `SharedValue::Shared(SharedRefOwned)` by looking up the
 /// entry in `reg`. Returns [`SharedError::StaleHandle`] if any nested
@@ -501,5 +587,60 @@ mod tests {
     #[test]
     fn portbuf_empty_buf_errors() {
         assert!(portbuf_to_sv(&[]).is_err());
+    }
+
+    #[test]
+    fn scan_finds_nothing_in_scalars() {
+        for sv in [
+            SharedValue::Null,
+            SharedValue::Bool(true),
+            SharedValue::Long(-42),
+            SharedValue::Double(2.5),
+            SharedValue::String(Arc::from("hello")),
+        ] {
+            let bytes = sv_to_portbuf(&sv);
+            assert!(scan_shared_refs(&bytes).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn scan_finds_bare_shared_ref() {
+        // tag-7: type_tag byte + u64 LE id.
+        let mut bytes = vec![7u8, SharedType::Counter as u8];
+        bytes.extend_from_slice(&99u64.to_le_bytes());
+        let refs = scan_shared_refs(&bytes).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, 99);
+        assert_eq!(refs[0].type_tag, SharedType::Counter);
+    }
+
+    #[test]
+    fn scan_recurses_into_array_with_nested_shared() {
+        // Array [ 0 => Long(1), "k" => Shared(Map#8) ]
+        let mut b = vec![6u8]; // tag array
+        b.extend_from_slice(&2u32.to_le_bytes()); // count = 2
+                                                  // int-keyed Long(1)
+        b.push(0);
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.push(3);
+        b.extend_from_slice(&1i64.to_le_bytes());
+        // str-keyed "k" => Shared(Map#8)
+        b.push(1);
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.push(b'k');
+        b.push(7);
+        b.push(SharedType::Map as u8);
+        b.extend_from_slice(&8u64.to_le_bytes());
+        let refs = scan_shared_refs(&b).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, 8);
+        assert_eq!(refs[0].type_tag, SharedType::Map);
+    }
+
+    #[test]
+    fn scan_errors_on_truncated_buffer() {
+        assert!(scan_shared_refs(&[]).is_err());
+        assert!(scan_shared_refs(&[7u8]).is_err()); // tag-7 missing body
+        assert!(scan_shared_refs(&[5u8, 10, 0, 0, 0]).is_err()); // string len=10, no data
     }
 }
