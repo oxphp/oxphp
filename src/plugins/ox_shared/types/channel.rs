@@ -51,6 +51,55 @@ impl Payload {
     }
 }
 
+thread_local! {
+    /// Keepalive refs of values popped by a *synchronous* recv FFI
+    /// (`try_recv` / `recv_blocking` / `recv_many`), held until the handler
+    /// has deserialized the bytes. The deserializer re-resolves each tag-7 via
+    /// the registry (`oxphp_shared_handle_from_id`); without this stash the
+    /// popped Payload's keepalive would drop when the FFI returns — *before*
+    /// that re-resolve — freeing a fire-and-forget value's sole strong ref in
+    /// the gap and yielding NULL. The fiber waker path does not use this: it
+    /// anchors its keepalive in `AsyncResult`, dropped after deserialize.
+    static RECV_KEEPALIVE: std::cell::RefCell<Vec<SharedRefOwned>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Stash a popped payload's keepalive so it outlives the handler's deserialize.
+/// No-op (does not touch the thread-local) for the common no-shared-ref case.
+fn stash_recv_keepalive(keepalive: SmallVec<[SharedRefOwned; 1]>) {
+    if keepalive.is_empty() {
+        return;
+    }
+    RECV_KEEPALIVE.with(|k| k.borrow_mut().extend(keepalive));
+}
+
+/// RAII anchor for the recv keepalive stash. Snapshots the stash depth on
+/// construction and truncates back to it on drop, releasing every keepalive a
+/// recv FFI stashed during this handler call — after the handler finished
+/// deserializing. Place one at the top of each synchronous recv handler.
+///
+/// Stash and release are always synchronous within a single handler call (a
+/// buffered hit never suspends between the FFI pop and `write_recv_ok`; the
+/// only suspend — the empty/park path — stashes nothing), so the thread-local
+/// is correctly scoped even across fiber interleaving on one worker thread.
+struct RecvKeepaliveGuard {
+    prior_len: usize,
+}
+
+impl RecvKeepaliveGuard {
+    fn new() -> Self {
+        Self {
+            prior_len: RECV_KEEPALIVE.with(|k| k.borrow().len()),
+        }
+    }
+}
+
+impl Drop for RecvKeepaliveGuard {
+    fn drop(&mut self) {
+        RECV_KEEPALIVE.with(|k| k.borrow_mut().truncate(self.prior_len));
+    }
+}
+
 /// Approximate bytes crossbeam allocates per bounded-channel slot: the
 /// `Payload` plus a per-slot stamp word. A deliberate lower bound on the
 /// true slot size — enough to convert an allocation-bomb abort into a
@@ -1370,6 +1419,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
         match ch.try_recv() {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
+                // Keep nested Shared\* entries alive until the handler
+                // deserializes these bytes (re-resolving each tag-7 id).
+                stash_recv_keepalive(payload.keepalive);
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1499,6 +1551,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
                 let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
+                // Keep nested Shared\* entries alive until the handler
+                // deserializes these bytes (re-resolving each tag-7 id).
+                stash_recv_keepalive(payload.keepalive);
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1774,6 +1829,12 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
             }
             cursor += item.bytes.len();
             unsafe { *offsets_ptr.add(i + 1) = cursor };
+        }
+
+        // Keep every popped element's nested Shared\* entries alive until the
+        // recvMany handler deserializes the concat buffer (re-resolving tag-7).
+        for item in items {
+            stash_recv_keepalive(item.keepalive);
         }
 
         unsafe {
@@ -2118,6 +2179,9 @@ pub fn register_class(
         .method("tryRecv")
         .returns(PhpType::Object)
         .handler(|call| {
+            // Hold any popped value's nested keepalive until write_recv_ok has
+            // deserialized the bytes (re-resolving each tag-7 id).
+            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out_buf: *mut u8 = std::ptr::null_mut();
             let mut out_len: usize = 0;
@@ -2320,6 +2384,8 @@ pub fn register_class(
         .param("ms", PhpType::Int)
         .returns(PhpType::Array)
         .handler(|call| {
+            // Hold popped elements' nested keepalives until each is deserialized.
+            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
@@ -2732,6 +2798,11 @@ fn invoke_channel_recv(
     use crate::plugin::PhpError;
     use crate::plugins::ox_shared::handle::SharedHandle;
     use crate::plugins::ox_shared::results::{self, RecvKind};
+
+    // Hold any buffered-hit value's nested keepalive until write_recv_ok has
+    // deserialized the bytes. The fiber waker path anchors its own keepalive in
+    // AsyncResult, so this guard is a no-op there (nothing stashed).
+    let _ka_guard = RecvKeepaliveGuard::new();
 
     let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
 
@@ -3162,6 +3233,38 @@ mod tests {
         assert_eq!(
             b.build_payload(tag7(SharedType::Channel, ea.id)).err(),
             Some(SharedError::Cycle)
+        );
+    }
+
+    #[test]
+    fn recv_keepalive_guard_holds_entry_then_releases() {
+        ensure_test_registry();
+        let reg = registry();
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+        let weak = Arc::downgrade(&value);
+
+        // A keepalive holding one strong ref to the entry (as a recv FFI would
+        // stash from a popped buffered payload).
+        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
+        drop(value); // now only `ka` keeps the entry alive
+        assert!(weak.upgrade().is_some());
+
+        {
+            let _g = RecvKeepaliveGuard::new();
+            stash_recv_keepalive(ka);
+            assert!(
+                weak.upgrade().is_some(),
+                "stash must keep the entry alive across the deserialize window"
+            );
+        }
+        // Guard dropped → stash truncated → the entry's last ref is released.
+        assert!(
+            weak.upgrade().is_none(),
+            "guard drop must release the stashed keepalive"
         );
     }
 
