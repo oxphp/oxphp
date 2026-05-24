@@ -168,6 +168,16 @@ extern "C" {
         case_name: *const c_char,
         case_len: usize,
     ) -> c_int;
+    pub fn oxphp_bridge_wrap_result_ok_inplace(
+        retval: *mut c_void,
+        cls_fqn: *const c_char,
+        cls_len: usize,
+        value_prop: *const c_char,
+        value_prop_len: usize,
+        status_prop: *const c_char,
+        status_prop_len: usize,
+        status_val: std::os::raw::c_long,
+    ) -> c_int;
 
     // ── Zval lifecycle ──
     pub fn oxphp_zval_dtor(zv: *mut c_void);

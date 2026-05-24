@@ -263,6 +263,34 @@ pub(crate) fn write_recv_ok(
     Ok(())
 }
 
+/// Wrap a live payload zval (already sitting in the retval slot) into a
+/// `RecvResult::Ok(value)` **in place** — no portbuf serialize/deserialize
+/// round-trip. Used by the fiber recv waker path, where the waker delivers a
+/// materialized zval; the blocking/buffered paths use [`write_recv_ok`]
+/// because their payload arrives pre-serialized.
+#[allow(dead_code)]
+pub(crate) fn write_recv_ok_inplace(call: &mut NativeCall) -> Result<(), PhpError> {
+    let retval = call.retval_ptr();
+    let rc = unsafe {
+        bridge_ffi::oxphp_bridge_wrap_result_ok_inplace(
+            retval,
+            RECV_RESULT_FQN.as_ptr() as *const _,
+            RECV_RESULT_FQN.len(),
+            b"__value".as_ptr() as *const _,
+            "__value".len(),
+            b"__status".as_ptr() as *const _,
+            "__status".len(),
+            RECV_OK as std::os::raw::c_long,
+        )
+    };
+    if rc != 0 {
+        return Err(PhpError::Custom(
+            "RecvResult::ok: in-place wrap failed".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build a payload-free RecvResult (Empty / Timeout / Closed) directly
 /// into the retval slot.
 #[allow(dead_code)]

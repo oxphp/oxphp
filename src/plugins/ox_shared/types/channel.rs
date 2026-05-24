@@ -2483,40 +2483,13 @@ fn invoke_channel_recv(
 
         match fiber_rc {
             0 => {
-                // Waker resolved with Value → retval holds the raw value.
-                // We must wrap it in RecvResult::Ok, but write_recv_ok
-                // expects a serialised buffer (it's also called from the
-                // non-fiber path where the buffer arrives pre-serialised
-                // from oxphp_shared_channel_recv_blocking). The cheapest
-                // correctness fix: portbuf-serialise the retval here and
-                // hand it back to write_recv_ok, which deserialises into
-                // RecvResult.__value. That's a serialise→deserialise→copy
-                // round-trip on every fiber recv-success — fine for low
-                // throughput, but on fan-in dispatchers a wrap-in-place
-                // helper (object_init_ex(retval, RecvResult); ZVAL_COPY
-                // payload into __value; set __status) would skip both
-                // portbuf passes. Tracked: profile a fan-in benchmark to
-                // confirm the round-trip shows up before designing the
-                // C primitive.
-                let retval = call.retval_ptr();
-                let mut buf: *mut u8 = std::ptr::null_mut();
-                let mut len: usize = 0;
-                let ser_rc = unsafe {
-                    bridge_ffi::oxphp_portable_serialize(retval as *const _, 1, &mut buf, &mut len)
-                };
-                if ser_rc != 0 {
-                    if !buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                    }
-                    return Err(PhpError::Custom(format!(
-                        "recv: failed to wrap fiber result rc={ser_rc}"
-                    )));
-                }
-                let r = results::write_recv_ok(call, buf, len);
-                if !buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
-                }
-                r
+                // Waker resolved with Value → retval holds the materialized
+                // payload zval (oxphp_bridge_fiber_await already deserialised
+                // it). Wrap it into RecvResult::Ok in place — no portbuf
+                // serialize/deserialize round-trip. (The blocking and
+                // buffered-hit paths still go through write_recv_ok because
+                // their payload arrives pre-serialised.)
+                results::write_recv_ok_inplace(call)
             }
             -1 => {
                 let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
