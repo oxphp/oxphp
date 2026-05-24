@@ -191,6 +191,13 @@ pub struct ChannelInner {
     /// blocking and loss-free. Populated only on the rare dead-waiter
     /// race; inline cap 2.
     recv_front: Mutex<SmallVec<[Payload; 2]>>,
+    /// Multiset of `SharedRef` views the channel currently holds in transit
+    /// (crossbeam buffer + front-stash). The crossbeam buffer is not
+    /// iterable, so this side-index is the only way to expose in-flight
+    /// edges to the cycle walker via [`children`](SharedInner::children).
+    /// Maintained alongside `bump_pending`/`drop_pending` (enter/leave).
+    /// Dups allowed — the walker dedups via its visited set.
+    in_flight: Mutex<Vec<SharedRef>>,
     // Exercised by blocking paths; surfaced to observability.
     senders_blocked: AtomicU32,
     receivers_blocked: AtomicU32,
@@ -229,6 +236,7 @@ impl ChannelInner {
             recv_waiters: Mutex::new(SmallVec::new()),
             send_waiters: Mutex::new(SmallVec::new()),
             recv_front: Mutex::new(SmallVec::new()),
+            in_flight: Mutex::new(Vec::new()),
             senders_blocked: AtomicU32::new(0),
             receivers_blocked: AtomicU32::new(0),
             items_sent_total: AtomicU64::new(0),
@@ -299,6 +307,37 @@ impl ChannelInner {
         self.track_payload_delta(-1);
     }
 
+    /// Snapshot the `SharedRef` views of a payload's keepalive — captured
+    /// before the payload is moved into the crossbeam buffer so the enter
+    /// sites can register them after a successful deposit.
+    fn keepalive_views(keepalive: &[SharedRefOwned]) -> SmallVec<[SharedRef; 1]> {
+        keepalive.iter().map(SharedRefOwned::as_view).collect()
+    }
+
+    /// Register in-transit refs in the cycle index (enter). No-op when empty.
+    fn index_add(&self, views: &[SharedRef]) {
+        if views.is_empty() {
+            return;
+        }
+        self.in_flight.lock().extend_from_slice(views);
+    }
+
+    /// Remove one occurrence of each ref from the cycle index (leave). No-op
+    /// when empty. Multiset semantics: a value sent twice is removed once per
+    /// recv.
+    fn index_remove(&self, keepalive: &[SharedRefOwned]) {
+        if keepalive.is_empty() {
+            return;
+        }
+        let mut idx = self.in_flight.lock();
+        for r in keepalive {
+            let v = r.as_view();
+            if let Some(pos) = idx.iter().position(|x| *x == v) {
+                idx.swap_remove(pos);
+            }
+        }
+    }
+
     /// Pop the next front-stash item (re-deposited, oldest) if any,
     /// WITHOUT signalling senders. Decrements `pending`. Used by
     /// `drain_buffered_to_waiters`, which defers the send-waiter wake until
@@ -314,6 +353,7 @@ impl ChannelInner {
         let p = front.remove(0);
         drop(front);
         self.drop_pending();
+        self.index_remove(&p.keepalive);
         Some(p)
     }
 
@@ -335,8 +375,10 @@ impl ChannelInner {
     /// item was popped for a recv-waiter that turned out dead and the
     /// freed slot was taken before it could be returned to the buffer.
     fn push_front_stash(&self, p: Payload) {
+        let views = Self::keepalive_views(&p.keepalive);
         self.recv_front.lock().push(p);
         self.bump_pending();
+        self.index_add(&views);
     }
 
     fn track_payload_delta(&self, delta_count: isize) {
@@ -488,9 +530,13 @@ impl ChannelInner {
             }
             Some(p) => p,
         };
+        // Capture keepalive views before the payload moves into the buffer, so
+        // a successful deposit can register them in the cycle index.
+        let views = Self::keepalive_views(&payload.keepalive);
         match self.tx.try_send(payload) {
             Ok(()) => {
                 self.bump_pending();
+                self.index_add(&views);
                 self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                 self.notify_recv.notify_one();
                 // Double-check for a recv-waiter that parked in the gap
@@ -525,6 +571,7 @@ impl ChannelInner {
             Ok(p) => {
                 drop(rx);
                 self.drop_pending();
+                self.index_remove(&p.keepalive);
                 self.notify_send.notify_one();
                 // Slot just freed — hand it to a parked send-waiter if
                 // any. Resolving with empty-Value means "you may retry
@@ -606,6 +653,9 @@ impl ChannelInner {
             Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         let mut payload = payload;
+        // Keepalive is constant across retries (the same payload bounces on
+        // Timeout); capture its views once for the cycle index on deposit.
+        let views = Self::keepalive_views(&payload.keepalive);
         loop {
             if self.is_closed() {
                 return Err(SharedError::Closed);
@@ -623,6 +673,7 @@ impl ChannelInner {
             match self.tx.send_timeout(payload, quantum) {
                 Ok(()) => {
                     self.bump_pending();
+                    self.index_add(&views);
                     self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                     self.notify_recv.notify_one();
                     // Bridge the buffer→fiber gap: a fiber recv-waiter
@@ -669,6 +720,7 @@ impl ChannelInner {
                 Ok(p) => {
                     drop(rx);
                     self.drop_pending();
+                    self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -714,6 +766,7 @@ impl ChannelInner {
                     Ok(p) => {
                         drop(rx);
                         self.drop_pending();
+                        self.index_remove(&p.keepalive);
                         self.notify_send.notify_one();
                         Ok(Some(p))
                     }
@@ -737,6 +790,7 @@ impl ChannelInner {
             match recv_res {
                 Ok(p) => {
                     self.drop_pending();
+                    self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -1036,6 +1090,7 @@ impl ChannelInner {
                     Ok(p) => {
                         drop(rx);
                         self.drop_pending();
+                        self.index_remove(&p.keepalive);
                         self.notify_send.notify_one();
                         p
                     }
@@ -1130,6 +1185,9 @@ impl SharedInner for ChannelInner {
     }
     fn on_shutdown_notify(&self) {
         self.close();
+    }
+    fn children(&self, out: &mut Vec<SharedRef>) {
+        out.extend(self.in_flight.lock().iter().copied());
     }
 }
 
@@ -3047,6 +3105,63 @@ mod tests {
         assert!(
             weak.upgrade().is_some(),
             "AsyncResult keepalive should pin the in-transit entry"
+        );
+    }
+
+    #[test]
+    fn children_reports_in_flight_refs_until_consumed() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(4));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        // A nested Shared\* value to send into the channel.
+        let other = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let oid = other.id;
+
+        let payload = inner.build_payload(tag7(SharedType::Channel, oid)).unwrap();
+        inner.try_send(payload).unwrap();
+
+        let mut out = Vec::new();
+        inner.children(&mut out);
+        assert!(
+            out.iter().any(|r| r.id == oid),
+            "in-flight ref must be visible to the cycle walker"
+        );
+
+        // Consume → the ref leaves the index.
+        let _ = inner.try_recv().unwrap().unwrap();
+        let mut out2 = Vec::new();
+        inner.children(&mut out2);
+        assert!(
+            !out2.iter().any(|r| r.id == oid),
+            "consumed ref must leave children()"
+        );
+    }
+
+    #[test]
+    fn cycle_through_two_channels_is_rejected() {
+        ensure_test_registry();
+        let reg = registry();
+        let a = Arc::new(ChannelInner::new(2));
+        let ea = reg.insert(SharedType::Channel, a.clone()).unwrap();
+        a.bind_entry(Arc::downgrade(&ea));
+        let b = Arc::new(ChannelInner::new(2));
+        let eb = reg.insert(SharedType::Channel, b.clone()).unwrap();
+        b.bind_entry(Arc::downgrade(&eb));
+
+        // a.send(b): no cycle yet; b becomes in-flight in a (visible via
+        // a.children()).
+        let pa = a.build_payload(tag7(SharedType::Channel, eb.id)).unwrap();
+        a.try_send(pa).unwrap();
+
+        // b.send(a) would close an a<->b strong-ref cycle — must be rejected,
+        // which only works because a.children() now reports b.
+        assert_eq!(
+            b.build_payload(tag7(SharedType::Channel, ea.id)).err(),
+            Some(SharedError::Cycle)
         );
     }
 
