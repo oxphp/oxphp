@@ -92,6 +92,23 @@ impl RecvKeepaliveGuard {
             prior_len: RECV_KEEPALIVE.with(|k| k.borrow().len()),
         }
     }
+
+    /// Tripwire enforcing the invariant the truncate-on-drop relies on: a recv
+    /// handler must not stash a keepalive and then suspend the fiber before
+    /// releasing it. If it did, a sibling fiber running during the suspend
+    /// would create+drop its own guard and `truncate(prior_len)` away this
+    /// fiber's still-needed keepalive — a cross-fiber UAF. Call this before any
+    /// fiber suspend inside a recv handler. Today nothing stashes before
+    /// suspending (the only suspend, the empty/park path, pops nothing); this
+    /// catches a future streaming recv that pops-then-awaits.
+    fn debug_assert_no_stash_before_suspend(&self) {
+        debug_assert_eq!(
+            RECV_KEEPALIVE.with(|k| k.borrow().len()),
+            self.prior_len,
+            "recv keepalive stashed before a fiber suspend — a streaming recv \
+             that pops then awaits would corrupt the cross-fiber stash"
+        );
+    }
 }
 
 impl Drop for RecvKeepaliveGuard {
@@ -1247,7 +1264,16 @@ impl SharedInner for ChannelInner {
         self.close();
     }
     fn children(&self, out: &mut Vec<SharedRef>) {
-        out.extend(self.in_flight.lock().iter().copied());
+        // Deduplicate by id. `in_flight` is a multiset (the same ref buffered N
+        // times appears N times — needed by `index_remove`), but the cycle
+        // walker counts every returned edge against its `max_edges` budget
+        // *before* deduping via its visited set. Emitting the duplicates of a
+        // legitimate fan-out (N copies of one ref) could spuriously trip
+        // EdgeLimitExceeded → CycleException on an acyclic send. The walker
+        // only needs edge presence, so collapse to distinct ids here.
+        let idx = self.in_flight.lock();
+        let mut seen = std::collections::HashSet::with_capacity(idx.len());
+        out.extend(idx.iter().copied().filter(|r| seen.insert(r.id)));
     }
 }
 
@@ -2813,7 +2839,7 @@ fn invoke_channel_recv(
     // Hold any buffered-hit value's nested keepalive until write_recv_ok has
     // deserialized the bytes. The fiber waker path anchors its own keepalive in
     // AsyncResult, so this guard is a no-op there (nothing stashed).
-    let _ka_guard = RecvKeepaliveGuard::new();
+    let ka_guard = RecvKeepaliveGuard::new();
 
     let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
 
@@ -2884,6 +2910,10 @@ fn invoke_channel_recv(
         // waker dispatcher; we capture that into a temporary zval and
         // then transcribe into a RecvResult::Ok payload below.
         let retval = call.retval_ptr();
+        // Invariant tripwire: nothing must be stashed before this suspend, or a
+        // sibling fiber's guard could truncate it away. The fast-path try_recv
+        // above stashes only on a hit, which returns without reaching here.
+        ka_guard.debug_assert_no_stash_before_suspend();
         let fiber_rc = unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
 
         // True only when the recvTimeout deadline has actually elapsed —
@@ -3220,6 +3250,34 @@ mod tests {
         assert!(
             !out2.iter().any(|r| r.id == oid),
             "consumed ref must leave children()"
+        );
+    }
+
+    #[test]
+    fn children_deduplicates_fanout() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(8));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let other = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let oid = other.id;
+
+        // Buffer the SAME ref several times (a legitimate fan-out).
+        for _ in 0..5 {
+            let p = inner.build_payload(tag7(SharedType::Channel, oid)).unwrap();
+            inner.try_send(p).unwrap();
+        }
+
+        let mut out = Vec::new();
+        inner.children(&mut out);
+        let count = out.iter().filter(|r| r.id == oid).count();
+        assert_eq!(
+            count, 1,
+            "children() must report a fan-out ref once, not per buffered copy \
+             (duplicates would inflate the cycle walker's edge budget)"
         );
     }
 
