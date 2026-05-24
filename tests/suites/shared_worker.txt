@@ -4,6 +4,7 @@
 shared/test_channel_fiber_producer_consumer
 shared/test_channel_async_usevar_stress
 shared/test_channel_shutdown_drain
+shared/test_channel_recv_inplace_refcounted
 shared/test_counter_cross_thread
 shared/test_atomic_cross_thread
 shared/test_mutex_contention
