@@ -507,6 +507,17 @@ impl ChannelInner {
     /// Reject a send whose value would close a strong-ref cycle back to this
     /// channel. Mirror of `Shared\Map::check_cycles`. No-op without a bound
     /// `self_id` or registry (Rust-only fixtures).
+    ///
+    /// **Relative guarantee (TOCTOU).** This check and the `in_flight` edge
+    /// registration (in `try_send`) are not atomic: two threads concurrently
+    /// sending each other (`a.send(b)` and `b.send(a)`) can both pass here
+    /// before either registers its edge, forming an undetected `a↔b` cycle
+    /// whose mutual keepalive Arcs then never release. This is the same
+    /// check-then-mutate window `Shared\Map::set` carries (its `check_cycles`
+    /// also runs outside the entry-insert lock) — an accepted relative
+    /// guarantee shared by every `Shared\*` container, not a channel-specific
+    /// gap. Closing it would require a registry-wide ordering/lock across all
+    /// container writes.
     fn cycle_check(&self, roots: &[SharedRef]) -> Result<(), SharedError> {
         use crate::plugins::ox_shared::cycle::{would_create_cycle, CycleError};
         let (Some(reg), Some(self_id)) = (REGISTRY.get(), self.self_id.get().copied()) else {

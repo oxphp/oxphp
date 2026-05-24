@@ -379,6 +379,15 @@ fn sv_read(
 /// scalar and string payloads by length, recursing into tag-6 arrays.
 /// Returns the `SharedRef` views of every tag-7 found. Mirrors the tag
 /// layout of `sv_read`; errors on a truncated or malformed buffer.
+///
+/// **Unbounded recursion** on array nesting, mirroring `sv_read` (Map's
+/// decode path). A pathologically deep portbuf array would overflow the
+/// stack here — but the same input overflows the C portbuf codec first:
+/// `oxphp_portable_serialize` recursed to *produce* these bytes on send, and
+/// `oxphp_portable_deserialize` recurses to read them on recv. A depth guard
+/// in this walker alone would not prevent the overflow; the bound belongs in
+/// the portbuf codec itself (C side), as a `Shared\*`-wide hardening shared by
+/// `sv_read`/`sv_write`/the C serializer — out of scope for this function.
 pub fn scan_shared_refs(
     buf: &[u8],
 ) -> Result<SmallVec<[SharedRef; 1]>, crate::plugins::ox_shared::error::SharedError> {
