@@ -93,21 +93,34 @@ impl RecvKeepaliveGuard {
         }
     }
 
-    /// Tripwire enforcing the invariant the truncate-on-drop relies on: a recv
+    /// Hard guard for the invariant the truncate-on-drop relies on: a recv
     /// handler must not stash a keepalive and then suspend the fiber before
     /// releasing it. If it did, a sibling fiber running during the suspend
     /// would create+drop its own guard and `truncate(prior_len)` away this
-    /// fiber's still-needed keepalive — a cross-fiber UAF. Call this before any
-    /// fiber suspend inside a recv handler. Today nothing stashes before
-    /// suspending (the only suspend, the empty/park path, pops nothing); this
-    /// catches a future streaming recv that pops-then-awaits.
-    fn debug_assert_no_stash_before_suspend(&self) {
-        debug_assert_eq!(
-            RECV_KEEPALIVE.with(|k| k.borrow().len()),
-            self.prior_len,
-            "recv keepalive stashed before a fiber suspend — a streaming recv \
-             that pops then awaits would corrupt the cross-fiber stash"
-        );
+    /// fiber's still-needed keepalive — a cross-fiber use-after-free. Call this
+    /// before any fiber suspend inside a recv handler.
+    ///
+    /// Always-on (not a `debug_assert`): the failure it guards against is
+    /// silent memory corruption in a release build, so the check must fire in
+    /// release too — a no-op tripwire would let a future streaming recv that
+    /// pops-then-awaits corrupt the stash undetected in production. Today
+    /// nothing stashes before suspending (the only suspend, the empty/park
+    /// path, pops nothing), so this never trips; it converts that future
+    /// regression from a UAF into a clean, loud error. The proper fix when a
+    /// pop-then-await path is actually needed is to transfer keepalive
+    /// ownership explicitly back to the handler (a Rust-native `Payload`
+    /// return — the recv FFI has no C caller) rather than via the thread-local.
+    fn ensure_no_stash_before_suspend(&self) -> Result<(), crate::plugin::PhpError> {
+        if RECV_KEEPALIVE.with(|k| k.borrow().len()) != self.prior_len {
+            return Err(crate::plugin::PhpError::Custom(
+                "recv keepalive stashed before a fiber suspend: a pop-then-await \
+                 path would let a sibling fiber truncate this keepalive \
+                 (cross-fiber use-after-free). Transfer keepalive ownership \
+                 explicitly instead of relying on the thread-local stash."
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2953,6 +2966,13 @@ fn invoke_channel_recv(
             }
         }
 
+        // Invariant guard: nothing must be stashed before the suspend below, or
+        // a sibling fiber's guard could truncate it away (cross-fiber UAF). The
+        // fast-path try_recv above stashes only on a hit, which returns without
+        // reaching here. Checked before registering a waiter so a violation
+        // can't strand one.
+        ka_guard.ensure_no_stash_before_suspend()?;
+
         let mut promise_id: i64 = 0;
         // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
         let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
@@ -2970,10 +2990,6 @@ fn invoke_channel_recv(
         // waker dispatcher; we capture that into a temporary zval and
         // then transcribe into a RecvResult::Ok payload below.
         let retval = call.retval_ptr();
-        // Invariant tripwire: nothing must be stashed before this suspend, or a
-        // sibling fiber's guard could truncate it away. The fast-path try_recv
-        // above stashes only on a hit, which returns without reaching here.
-        ka_guard.debug_assert_no_stash_before_suspend();
         let fiber_rc = unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
 
         // True only when the recvTimeout deadline has actually elapsed —
@@ -3395,6 +3411,34 @@ mod tests {
             weak.upgrade().is_none(),
             "guard drop must release the stashed keepalive"
         );
+    }
+
+    // The stash-before-suspend guard must reject a violation in *every* build,
+    // not just debug — the failure it prevents is a silent cross-fiber UAF in
+    // release. Guards against a future regression to `debug_assert`.
+    #[test]
+    fn ensure_no_stash_before_suspend_is_always_on() {
+        ensure_test_registry();
+        let reg = registry();
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+
+        let guard = RecvKeepaliveGuard::new();
+        // Nothing stashed yet — the live invariant holds.
+        assert!(guard.ensure_no_stash_before_suspend().is_ok());
+
+        // Simulate a future pop-then-await: stash, then re-check.
+        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
+        stash_recv_keepalive(ka);
+        assert!(
+            guard.ensure_no_stash_before_suspend().is_err(),
+            "stash-before-suspend must be rejected in all builds, not debug only"
+        );
+        // guard drops at scope end → truncate releases the stashed keepalive.
+        drop(value);
     }
 
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
