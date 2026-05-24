@@ -163,6 +163,16 @@ pub struct ChannelInner {
     // expected common case (a handful of fibers awaiting one channel).
     recv_waiters: Mutex<SmallVec<[i64; 4]>>,
     send_waiters: Mutex<SmallVec<[i64; 4]>>,
+    /// Front-stash for items popped from the buffer for a recv-waiter that
+    /// turned out dead (cancelled mid-delivery). Every recv path drains
+    /// this before the crossbeam buffer, so a re-parked item is preferred
+    /// over newer buffered ones — best-effort ordering, not a strict FIFO
+    /// guarantee: a concurrent receiver can still pull a newer buffered
+    /// item before a re-parked one becomes visible (cross-receiver FIFO is
+    /// never guaranteed in an MPMC channel). Re-deposit here is non-
+    /// blocking and loss-free. Populated only on the rare dead-waiter
+    /// race; inline cap 2.
+    recv_front: Mutex<SmallVec<[Payload; 2]>>,
     // Exercised by blocking paths; surfaced to observability.
     senders_blocked: AtomicU32,
     receivers_blocked: AtomicU32,
@@ -200,6 +210,7 @@ impl ChannelInner {
             notify_send: Arc::new(Notify::new()),
             recv_waiters: Mutex::new(SmallVec::new()),
             send_waiters: Mutex::new(SmallVec::new()),
+            recv_front: Mutex::new(SmallVec::new()),
             senders_blocked: AtomicU32::new(0),
             receivers_blocked: AtomicU32::new(0),
             items_sent_total: AtomicU64::new(0),
@@ -270,6 +281,46 @@ impl ChannelInner {
         self.track_payload_delta(-1);
     }
 
+    /// Pop the next front-stash item (re-deposited, oldest) if any,
+    /// WITHOUT signalling senders. Decrements `pending`. Used by
+    /// `drain_buffered_to_waiters`, which defers the send-waiter wake until
+    /// it knows the item is actually being delivered — an item that bounces
+    /// back to the stash (dead waiter) never left the channel, so waking a
+    /// sender to refill the "freed" slot would overshoot the bound.
+    /// Cheap when empty: one uncontended lock, no allocation.
+    fn take_front_stash(&self) -> Option<Payload> {
+        let mut front = self.recv_front.lock();
+        if front.is_empty() {
+            return None;
+        }
+        let p = front.remove(0);
+        drop(front);
+        self.drop_pending();
+        Some(p)
+    }
+
+    /// Pop the next front-stash item (re-deposited, oldest) if any, and —
+    /// when one was present — wake a parked send-waiter, since the item is
+    /// leaving the channel and occupancy genuinely drops. Recv paths call
+    /// this before touching the crossbeam buffer so a re-parked item is
+    /// preferred over newer buffered ones (best-effort, not a strict
+    /// cross-receiver FIFO); they consume the popped item directly, so the
+    /// wake is always correct.
+    fn pop_front_stash(&self) -> Option<Payload> {
+        let p = self.take_front_stash()?;
+        self.drain_one_send_waiter_on_slot_free();
+        Some(p)
+    }
+
+    /// Re-deposit a bounced item at the front of the stream. Non-blocking
+    /// and loss-free; keeps it counted in `pending`. Used when a buffered
+    /// item was popped for a recv-waiter that turned out dead and the
+    /// freed slot was taken before it could be returned to the buffer.
+    fn push_front_stash(&self, p: Payload) {
+        self.recv_front.lock().push(p);
+        self.bump_pending();
+    }
+
     fn track_payload_delta(&self, delta_count: isize) {
         let delta = delta_count * CHANNEL_PER_PAYLOAD_BYTES;
         if let Some(weak) = self.self_entry.get() {
@@ -328,6 +379,15 @@ impl ChannelInner {
                 self.bump_pending();
                 self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                 self.notify_recv.notify_one();
+                // Double-check for a recv-waiter that parked in the gap
+                // between the `drain_one_recv_waiter_with` above (saw no
+                // live waiter) and this deposit. A fiber consumer does not
+                // observe `notify_recv`, so without this it would strand
+                // until its timeout / the next send. `register_recv_waiter`
+                // performs the symmetric re-drain after parking; together
+                // they close the park-vs-deposit race. No-op (one peek) in
+                // the common no-waiter case.
+                self.drain_buffered_to_waiters();
                 Ok(())
             }
             Err(TrySendError::Full(p)) => Err(TrySendErr::Full(p)),
@@ -340,6 +400,12 @@ impl ChannelInner {
     ///   * `Ok(None)`    — channel closed and drained (end of stream).
     ///   * `Err(WouldBlockEmpty)` — empty but still open; caller may retry.
     pub fn try_recv(&self) -> Result<Option<Payload>, TryRecvErr> {
+        // Front-stash (re-deposited, oldest) takes precedence over the
+        // crossbeam buffer. A front pop frees no crossbeam slot, so it
+        // does not signal waiting senders.
+        if let Some(p) = self.pop_front_stash() {
+            return Ok(Some(p));
+        }
         let rx = self.rx.lock();
         match rx.try_recv() {
             Ok(p) => {
@@ -445,6 +511,14 @@ impl ChannelInner {
                     self.bump_pending();
                     self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                     self.notify_recv.notify_one();
+                    // Bridge the buffer→fiber gap: a fiber recv-waiter
+                    // parked AFTER we entered this slow path does not
+                    // observe `notify_recv` (it awaits a synthetic
+                    // promise), so the item just deposited would sit in
+                    // the buffer invisible to it until some producer
+                    // happened to hit the `try_send` fast path. Hand it
+                    // off now — no-op when there are no parked waiters.
+                    self.drain_buffered_to_waiters();
                     return Ok(());
                 }
                 Err(SendTimeoutError::Timeout(p)) => {
@@ -468,6 +542,10 @@ impl ChannelInner {
     /// across the full caller-supplied timeout — so concurrent
     /// receivers serialize but make progress.
     pub fn recv_blocking(&self, wait: Wait) -> Result<Option<Payload>, SharedError> {
+        // Front-stash (re-deposited, oldest) takes precedence.
+        if let Some(p) = self.pop_front_stash() {
+            return Ok(Some(p));
+        }
         // Fast path: try once under a tight lock scope. NO guard here —
         // a fast-path hit (or a closed+empty miss) never blocked, so
         // the `receivers_blocked` gauge must not transiently tick.
@@ -508,6 +586,11 @@ impl ChannelInner {
             Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         loop {
+            // Front-stash first — a bounced item parked here is the oldest
+            // and must come out before anything in the crossbeam buffer.
+            if let Some(p) = self.pop_front_stash() {
+                return Ok(Some(p));
+            }
             if self.is_closed() {
                 // Drain-before-close: re-check the queue under the
                 // lock in case a sender managed to enqueue before
@@ -737,66 +820,32 @@ impl ChannelInner {
     /// accepted (list empty or every entry dead).
     ///
     /// A waiter is "dead" if the fiber-side receiver was dropped or the
-    /// promise was already resolved by a concurrent cancel —
-    /// `synthetic::resolve` reports this via its `bool` return.
+    /// promise was already resolved by a concurrent cancel.
     ///
-    /// Ownership / optimisation: `synthetic::resolve` consumes the
-    /// payload unconditionally. To avoid a clone on the expected
-    /// common case (exactly one live waiter parked, no retry needed),
-    /// we observe `has_more` under the same lock acquisition as the
-    /// pop and branch:
-    ///
-    /// * `has_more`  → clone so `payload` survives a dead-waiter
-    ///   retry. Amortised across the (rare) waiter list.
-    /// * `!has_more` → move `payload` directly into `resolve`. Zero
-    ///   clones on the single-live-waiter happy path.
-    ///
-    /// Dead-last-waiter edge: when `!has_more` AND `resolve` reports
-    /// the waiter vanished, the payload is gone. Returning `None`
-    /// signals "handled, do not re-deposit" to the caller. This is
-    /// correct for `try_send`: the fiber that parked cancelled ≈ the
-    /// same instant the send ran, which is observationally
-    /// indistinguishable from receiving-then-immediately-cancelling
-    /// — the sender's `items_sent_total` +1 matches the "successful
-    /// send into a now-dead receiver" semantics.
-    ///
-    /// `drain_buffered_to_waiters` is also affected on this edge: a
-    /// buffered item may be dropped instead of delivered. The race
-    /// window is nanoseconds (one DashMap remove + one oneshot send
-    /// inside `synthetic::resolve`), so this is acceptable in practice;
-    /// a strict fix would need a `synthetic::resolve_with(id, || ...)`
-    /// lazy-construction API to construct the payload only after the
-    /// waiter's liveness is confirmed. Tracked as a follow-up.
+    /// Ownership: [`synthetic::resolve_value`] removes the waiter's sole
+    /// sender before building the payload, and hands the payload back
+    /// (`Some`) whenever the waiter cannot take it — either the promise was
+    /// already resolved by another resolver (its own `recvTimeout` cancel /
+    /// close winning the race), or the receiver was dropped (the parked
+    /// fiber was torn down). Either way the payload is never consumed: we
+    /// forward it to the next parked id, and if none remains, return it to
+    /// the caller to re-deposit. No clone, no lost message.
     fn drain_one_recv_waiter_with(&self, mut payload: Payload) -> Option<Payload> {
         loop {
-            // Pop head + observe remaining depth in one lock op.
-            let (id, has_more) = {
+            // Pop head — FIFO: first parked wakes first.
+            let id = {
                 let mut waiters = self.recv_waiters.lock();
                 if waiters.is_empty() {
                     return Some(payload);
                 }
-                // FIFO: first parked wakes first.
-                let head = waiters.remove(0);
-                (head, !waiters.is_empty())
+                waiters.remove(0)
             };
-            if has_more {
-                // Retry possible — clone so `payload` survives a dead
-                // waiter outcome.
-                if synthetic::resolve(id, PromisePayload::Value(payload.clone())) {
-                    return None;
-                }
-                // Dead — loop and try the next parked id.
-            } else {
-                // Last candidate — move the payload. Zero clone on
-                // the happy path.
-                let attempt = std::mem::take(&mut payload);
-                if synthetic::resolve(id, PromisePayload::Value(attempt)) {
-                    return None;
-                }
-                // Dead-last-waiter race (rare). Payload is consumed;
-                // report as handled so the sender's bookkeeping stays
-                // consistent. See rationale above.
-                return None;
+            match synthetic::resolve_value(id, payload) {
+                // Delivered to a live receiver.
+                None => return None,
+                // Waiter could not take it (resolved elsewhere, or its
+                // receiver is gone) — payload survived; try the next id.
+                Some(returned) => payload = returned,
             }
         }
     }
@@ -821,17 +870,17 @@ impl ChannelInner {
     }
 
     /// Bulk drain: while we still have buffered items AND parked
-    /// recv-waiters, pop one item / one live waiter and deliver.
-    /// Called from `register_recv_waiter` to cover the race where
-    /// a `try_send` landed into the buffer just before we parked.
+    /// recv-waiters, pop one item / one live waiter and deliver. Called
+    /// from `register_recv_waiter` (cover a `try_send` that landed in the
+    /// buffer just before we parked) and after a slow-path buffer deposit
+    /// (wake a fiber consumer that does not observe `notify_recv`).
     ///
-    /// Dead-last-waiter race note: `drain_one_recv_waiter_with`'s
-    /// optimised fast path may consume a payload on the rare edge
-    /// where a single parked waiter cancelled between pop and
-    /// resolve. In that window the buffered item is lost — acceptable
-    /// because the race window is nanoseconds and the consuming fiber
-    /// was about to stop consuming anyway. See `drain_one_recv_waiter_with`
-    /// docs for the full rationale.
+    /// Loss-free and non-blocking: items are sourced front-stash first
+    /// (oldest), then the crossbeam buffer; and when every parked waiter
+    /// turns out dead, `drain_one_recv_waiter_with` hands the payload back
+    /// and it is re-parked at the front via [`push_front_stash`] rather
+    /// than dropped (which loses the item) or blocked on (which would
+    /// starve the runtime).
     fn drain_buffered_to_waiters(&self) {
         loop {
             // Are there any parked waiters? Peek without removing.
@@ -841,8 +890,14 @@ impl ChannelInner {
                     return;
                 }
             }
-            // Try to take one item from the buffer.
-            let item = {
+            // Take one item: front-stash first (oldest), then the buffer.
+            // Neither pop wakes a send-waiter here — that is deferred to a
+            // successful delivery below, because an item that bounces back to
+            // the stash (dead waiter) never leaves the channel and must not
+            // free a slot.
+            let item = if let Some(p) = self.take_front_stash() {
+                p
+            } else {
                 let rx = self.rx.lock();
                 match rx.try_recv() {
                     Ok(p) => {
@@ -854,25 +909,38 @@ impl ChannelInner {
                     Err(_) => return,
                 }
             };
-            // Deliver to one live waiter. If delivery fails because
-            // ALL waiters (plural) were dead, push the item back into
-            // the buffer — we won't spin-drop.
+            // Deliver to one live waiter.
             match self.drain_one_recv_waiter_with(item) {
                 None => {
-                    // Slot just freed by the recv above — wake one
-                    // parked sender if any.
+                    // Delivered — the item left the channel, so occupancy
+                    // dropped by one and a parked send-waiter may now fit.
+                    // This holds whether the item came from the buffer or the
+                    // stash. (A blocking sender, if any, is woken by crossbeam
+                    // itself when a buffer pop frees a slot.)
                     self.drain_one_send_waiter_on_slot_free();
                     continue;
                 }
                 Some(p) => {
-                    // All waiters were dead. Re-deposit into the buffer.
-                    // try_send here would re-check closed and call into
-                    // drain_one_recv_waiter_with again — infinite loop.
-                    // So we bypass and write directly.
-                    let _ = self.tx.try_send(p).map(|()| {
-                        self.bump_pending();
-                    });
-                    return;
+                    // Every parked waiter was dead (and now reaped). Re-park
+                    // the item at the front so the next recv drains it before
+                    // the crossbeam buffer. Non-blocking, loss-free.
+                    //
+                    // Wake NO send-waiter: the item has NOT left the channel,
+                    // it only moved buffer/stash→front-stash and still counts
+                    // toward `pending`/capacity. Waking a sender to fill the
+                    // slot would put `cap` items in the buffer + 1 in the
+                    // stash = cap+1, overshooting the bound. The parked sender
+                    // is instead woken by `pop_front_stash` once this item is
+                    // actually consumed (occupancy genuinely drops).
+                    self.push_front_stash(p);
+                    // The item is now VISIBLE in the front-stash. Loop again
+                    // to deliver it to any waiter that parked while it was
+                    // briefly held in a local above — that waiter does not
+                    // observe `notify_recv`, so without this re-check it
+                    // would strand until its timeout / the next send. If no
+                    // waiter is parked, the next peek returns and the item
+                    // waits in the stash for a future recv.
+                    continue;
                 }
             }
         }
@@ -2292,7 +2360,16 @@ fn invoke_channel_send(
                 if r.is_zero() {
                     return results::write_send(call, SendKind::Timeout);
                 }
-                r.as_millis() as u64
+                // Clamp to ≥1ms. `as_millis()` floors, and after the first
+                // retry the residual is sub-millisecond (the timer was armed
+                // with this same floored value and fires just before the
+                // deadline), so an unclamped value rounds to 0 — which
+                // `spawn_fiber_timeout` treats as "no timeout, park forever".
+                // The loop would then never re-check the deadline and the
+                // bounded send would hang on a stuck channel. A 1ms floor
+                // keeps the timer armed so each retry re-evaluates
+                // `r.is_zero()` and converges to Timeout.
+                (r.as_millis() as u64).max(1)
             } else {
                 0
             };
@@ -2321,49 +2398,92 @@ fn invoke_channel_send(
                 0 => continue,
                 // Exception pending — inspect.
                 -1 => {
-                    let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
-                    unsafe {
-                        bridge_ffi::oxphp_exception_get(
-                            &mut cls_ptr,
-                            std::ptr::null_mut(),
-                            std::ptr::null_mut(),
-                        );
-                    }
-                    let is_async_cancel = if cls_ptr.is_null() {
-                        false
+                    // As on the recv path, the waker dispatcher
+                    // (`await_dispatch_callback`) reports through the bridge
+                    // async-exception TLS, NOT `EG(exception)`. Reading
+                    // `EG(exception)` here always saw null, so every waker
+                    // outcome (timeout, cancel, close) fell through to a
+                    // generic fatal. Read+clear the correct channel.
+                    let cls_ptr = unsafe { bridge_ffi::oxphp_bridge_get_async_exc_class() };
+                    let msg_ptr = unsafe { bridge_ffi::oxphp_bridge_get_async_exc_message() };
+                    let class = if cls_ptr.is_null() {
+                        None
                     } else {
-                        let cls = unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                        cls == "OxPHP\\Async\\AsyncException"
+                        Some(
+                            unsafe { std::ffi::CStr::from_ptr(cls_ptr) }
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
                     };
-                    if is_async_cancel {
-                        // Bounded send: deadline fired → swallow the
-                        // Async\AsyncException and return Timeout.
-                        if timeout_ms > 0
-                            && deadline
-                                .map(|d| std::time::Instant::now() >= d)
-                                .unwrap_or(false)
-                        {
-                            unsafe { bridge_ffi::oxphp_exception_clear() };
-                            return results::write_send(call, SendKind::Timeout);
+                    let message = if msg_ptr.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { std::ffi::CStr::from_ptr(msg_ptr) }
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    unsafe { bridge_ffi::oxphp_bridge_clear_async_exception() };
+
+                    match class.as_deref() {
+                        Some("OxPHP\\Shared\\ClosedException") => {
+                            // Channel closed while the send was parked.
+                            // Mirror the fast-path (above) and the recv
+                            // close handling: a SendResult::Closed, not a
+                            // thrown exception — close is timing-independent.
+                            return results::write_send(call, SendKind::Closed);
                         }
-                        // Forever-mode send: caller cancelled the fiber;
-                        // propagate the AsyncException — do NOT clear it,
-                        // do NOT map to Closed. The framework re-raises.
-                        if timeout_ms < 0 {
-                            return Err(PhpError::Custom("send: fiber cancelled".into()));
+                        Some("OxPHP\\Async\\AsyncException") => {
+                            // Bounded send whose deadline has elapsed → Timeout.
+                            if timeout_ms > 0
+                                && deadline
+                                    .map(|d| std::time::Instant::now() >= d)
+                                    .unwrap_or(false)
+                            {
+                                return results::write_send(call, SendKind::Timeout);
+                            }
+                            // Forever send (timeout_ms < 0): the cancel is
+                            // always external — propagate the AsyncException.
+                            // (No busy-loop risk: we do not retry here.)
+                            if timeout_ms < 0 {
+                                return Err(PhpError::Exception {
+                                    class: "OxPHP\\Async\\AsyncException".into(),
+                                    message: if message.is_empty() {
+                                        "send: fiber cancelled".into()
+                                    } else {
+                                        message
+                                    },
+                                    code: 0,
+                                });
+                            }
+                            // Bounded send woken just BEFORE the Rust deadline:
+                            // the fiber timeout timer is armed with `remaining_ms`
+                            // (floored, then clamped to ≥1ms; see its
+                            // computation), re-computed each retry, so it can
+                            // fire up to ~1ms early — unlike the recv path, whose
+                            // deadline is captured before the timer is armed.
+                            // Retry: the loop recomputes `remaining` at the top
+                            // and, once it reaches zero, returns Timeout. (A
+                            // pre-deadline external cancel of a bounded send is
+                            // thereby surfaced as Timeout, matching the recv
+                            // path's approximate `deadline_hit`.)
+                            continue;
                         }
-                        // Spurious cancel before deadline (e.g. a
-                        // pre-deadline wake we treat as transient) →
-                        // clear and retry the loop.
-                        unsafe { bridge_ffi::oxphp_exception_clear() };
-                        continue;
+                        Some(other) => {
+                            // A real application exception delivered through
+                            // the waker — surface its true class.
+                            return Err(PhpError::Exception {
+                                class: other.to_string(),
+                                message,
+                                code: 0,
+                            });
+                        }
+                        None => {
+                            // No error channel set (e.g. internal failure) —
+                            // surface honestly, not the generic "fiber waker"
+                            // string.
+                            return Err(PhpError::Custom("send: waker resolution failed".into()));
+                        }
                     }
-                    // Other exception (e.g. ClosedException raised by the
-                    // waker on close-side cancel) — leave it pending; the
-                    // plugin framework will surface EG(exception).
-                    return Err(PhpError::Custom(
-                        "send: fiber waker raised exception".into(),
-                    ));
                 }
                 // Direct fiber-layer timeout (should be rare given the
                 // synthetic::cancel path, but handle it).
@@ -2469,6 +2589,12 @@ fn invoke_channel_recv(
         let mut promise_id: i64 = 0;
         // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
         let fiber_timeout_ms: u64 = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
+        // Capture the deadline so the timeout branch below can tell a real
+        // deadline expiry from an external fiber cancel that arrived early
+        // — the latter must propagate AsyncException, not masquerade as
+        // Timeout. Mirrors the send path's `deadline` check.
+        let deadline = (timeout_ms > 0)
+            .then(|| std::time::Instant::now() + Duration::from_millis(fiber_timeout_ms));
         let reg_rc =
             unsafe { recv_fiber_register_shim(entry_ptr, fiber_timeout_ms, &mut promise_id) };
         super::counter::counter_rc_to_result(reg_rc)?;
@@ -2479,7 +2605,12 @@ fn invoke_channel_recv(
         let retval = call.retval_ptr();
         let fiber_rc = unsafe { bridge_ffi::oxphp_bridge_fiber_await(promise_id, 0.0, retval) };
 
-        let deadline_hit = timeout_ms > 0;
+        // True only when the recvTimeout deadline has actually elapsed —
+        // distinguishes the timeout timer firing from a pre-deadline
+        // external cancel.
+        let deadline_hit = deadline
+            .map(|d| std::time::Instant::now() >= d)
+            .unwrap_or(false);
 
         match fiber_rc {
             0 => {
@@ -2492,36 +2623,109 @@ fn invoke_channel_recv(
                 results::write_recv_ok_inplace(call)
             }
             -1 => {
-                let mut cls_ptr: *const std::os::raw::c_char = std::ptr::null();
-                unsafe {
-                    bridge_ffi::oxphp_exception_get(
-                        &mut cls_ptr,
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    );
-                }
-                let is_async_cancel = if cls_ptr.is_null() {
-                    false
+                // The waker dispatcher (`await_dispatch_callback`) reports
+                // failures through the bridge async-exception TLS — NOT
+                // `EG(exception)` — exactly like the channel that
+                // `oxphp_async_await` drains. Read and clear it here:
+                // reading `EG(exception)` would see null and misclassify
+                // every waker timeout as a fatal.
+                let cls_ptr = unsafe { bridge_ffi::oxphp_bridge_get_async_exc_class() };
+                let msg_ptr = unsafe { bridge_ffi::oxphp_bridge_get_async_exc_message() };
+                let class = if cls_ptr.is_null() {
+                    None
                 } else {
-                    let cls = unsafe { std::ffi::CStr::from_ptr(cls_ptr).to_string_lossy() };
-                    cls == "OxPHP\\Async\\AsyncException"
+                    Some(
+                        unsafe { std::ffi::CStr::from_ptr(cls_ptr) }
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
                 };
-                if is_async_cancel {
-                    if deadline_hit {
-                        // Bounded recv: deadline fired → swallow the
-                        // Async\AsyncException and return Timeout.
-                        unsafe { bridge_ffi::oxphp_exception_clear() };
-                        return results::write_recv(call, RecvKind::Timeout);
+                let message = if msg_ptr.is_null() {
+                    String::new()
+                } else {
+                    unsafe { std::ffi::CStr::from_ptr(msg_ptr) }
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                unsafe { bridge_ffi::oxphp_bridge_clear_async_exception() };
+
+                match class.as_deref() {
+                    Some("OxPHP\\Async\\AsyncException") => {
+                        // Timeout, forever-cancel and close-while-parked all
+                        // arrive here as AsyncException (synthetic::cancel).
+                        // Disambiguate with one non-blocking probe: a value
+                        // may have landed just before the cancel, or the
+                        // channel may have closed under the parked recv.
+                        let mut p_buf: *mut u8 = std::ptr::null_mut();
+                        let mut p_len: usize = 0;
+                        let mut p_state: c_int = 0;
+                        let probe_rc = unsafe {
+                            oxphp_shared_channel_try_recv(
+                                entry_ptr,
+                                &mut p_buf,
+                                &mut p_len,
+                                &mut p_state,
+                            )
+                        };
+                        super::counter::counter_rc_to_result(probe_rc)?;
+                        match p_state {
+                            0 => {
+                                let r = results::write_recv_ok(call, p_buf, p_len);
+                                if !p_buf.is_null() {
+                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
+                                }
+                                r
+                            }
+                            2 => {
+                                if !p_buf.is_null() {
+                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
+                                }
+                                results::write_recv(call, RecvKind::Closed)
+                            }
+                            _ => {
+                                // Still empty + open.
+                                if !p_buf.is_null() {
+                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
+                                }
+                                if deadline_hit {
+                                    // Bounded recv: the deadline fired →
+                                    // RecvResult::Timeout, not a fatal.
+                                    results::write_recv(call, RecvKind::Timeout)
+                                } else {
+                                    // Forever recv: caller cancelled the
+                                    // fiber. Per spec, propagate the
+                                    // AsyncException — do NOT map to Closed.
+                                    Err(PhpError::Exception {
+                                        class: "OxPHP\\Async\\AsyncException".into(),
+                                        message: if message.is_empty() {
+                                            "recv: fiber cancelled".into()
+                                        } else {
+                                            message
+                                        },
+                                        code: 0,
+                                    })
+                                }
+                            }
+                        }
                     }
-                    // Forever recv: caller cancelled the fiber. Per
-                    // spec, propagate the AsyncException — do NOT map to
-                    // RecvResult::Closed.
-                    return Err(PhpError::Custom("recv: fiber cancelled".into()));
+                    Some(other) => {
+                        // A real application exception delivered through the
+                        // waker (defensive: recv-waiters only resolve
+                        // Value/Cancelled today). Surface its true class
+                        // instead of the generic "fiber waker" string.
+                        Err(PhpError::Exception {
+                            class: other.to_string(),
+                            message,
+                            code: 0,
+                        })
+                    }
+                    None => {
+                        // Neither bridge TLS nor a thrown exception was set
+                        // (e.g. a result deserialize failed without setting
+                        // any error channel) — a genuine internal failure.
+                        Err(PhpError::Custom("recv: waker resolution failed".into()))
+                    }
                 }
-                // Non-Async exception — let the framework surface it.
-                Err(PhpError::Custom(
-                    "recv: fiber waker raised exception".into(),
-                ))
             }
             -2 => {
                 // Direct fiber-layer timeout.
@@ -3171,24 +3375,160 @@ mod tests {
     }
 
     /// Regression: dead-last-waiter race (single parked waiter,
-    /// cancelled before `try_send` reaches `resolve`). The optimised
-    /// fast path consumes the payload; the sender's bookkeeping still
-    /// records +1 to `items_sent_total`. No panic, no deadlock, and
-    /// `try_send` reports Ok — later sends and recvs work normally.
+    /// cancelled before `try_send` reaches `resolve`). The payload must
+    /// NOT be lost — `resolve_value` hands it back when the waiter was
+    /// taken, so `try_send` re-deposits it into the buffer and a later
+    /// `try_recv` still returns it (FIFO before subsequent sends). No
+    /// panic, no deadlock, no data loss.
     #[tokio::test]
-    async fn single_dead_waiter_does_not_panic_or_deadlock() {
+    async fn single_dead_waiter_redeposits_payload() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(4));
         let (id, _rx) = synthetic::alloc();
         ch.register_recv_waiter(id);
         // Kill the waiter before send reaches it.
         assert!(synthetic::cancel(id));
-        // Send must not panic; data-loss on this race is documented
-        // and acceptable.
+        // Send must not panic and must not drop the payload.
         ch.try_send(vec![0xDE, 0xAD]).unwrap();
         // Channel is still operational.
         ch.try_send(vec![0xBE, 0xEF]).unwrap();
+        // The dead-waiter payload was preserved in the buffer (FIFO).
+        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xDE, 0xAD]));
         assert_eq!(ch.try_recv().unwrap(), Some(vec![0xBE, 0xEF]));
+    }
+
+    /// Regression: `drain_buffered_to_waiters` must re-park a buffered item
+    /// at the front (loss-free, non-blocking) when the only parked waiter
+    /// turns out dead — not drop it (losing the item) nor block (starving
+    /// the runtime). A later `try_recv` returns it intact, before the
+    /// crossbeam buffer.
+    #[tokio::test]
+    async fn drain_bounce_restashes_at_front_no_loss() {
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(2));
+        // Park a waiter while the buffer is empty (register's own drain is
+        // a no-op), then kill it so it stays dead in the list.
+        let (id, _rx) = synthetic::alloc();
+        ch.register_recv_waiter(id);
+        assert!(synthetic::cancel(id));
+        // Deposit straight into the crossbeam buffer, bypassing `try_send`
+        // (which would reap the dead waiter itself). This reproduces an
+        // item buffered while a dead waiter is still parked.
+        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.bump_pending();
+        assert_eq!(ch.pending(), 1);
+        // Drain: item is popped for the dead waiter and must be re-parked
+        // at the front, still counted.
+        ch.drain_buffered_to_waiters();
+        assert_eq!(ch.pending(), 1, "re-parked item must stay counted");
+        // Recovered intact; channel then empty+open.
+        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.pending(), 0);
+        assert_eq!(ch.try_recv(), Err(TryRecvErr::WouldBlockEmpty));
+    }
+
+    /// Regression: a bounce (buffer item re-parked to the front-stash for a
+    /// dead recv-waiter) must NOT wake a parked send-waiter — the item is
+    /// still in the channel, so waking a sender to refill the freed slot
+    /// would overshoot capacity (cap in buffer + 1 in stash). The sender is
+    /// woken only once the stashed item is actually consumed.
+    #[test]
+    fn bounce_does_not_overshoot_capacity_with_parked_sender() {
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1)); // cap=1
+                                                            // Dead recv-waiter parked while empty (so register's own
+                                                            // drain is a no-op), then cancelled — stays dead in the list.
+        let (rid, _rrx) = synthetic::alloc();
+        ch.register_recv_waiter(rid);
+        assert!(synthetic::cancel(rid));
+        // A fiber send-waiter parked, waiting for a slot.
+        let (sid, mut srx) = synthetic::alloc();
+        ch.register_send_waiter(sid);
+        // Now fill the buffer directly (bypass `try_send`, which would reap
+        // the dead waiter / drain itself), reproducing a buffered item with
+        // a dead recv-waiter still parked ahead of it.
+        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.bump_pending();
+        // Drain: the item bounces to the front-stash. The send-waiter must
+        // NOT be woken — the channel still holds exactly one item.
+        ch.drain_buffered_to_waiters();
+        assert_eq!(ch.pending(), 1, "exactly one item (now in the front-stash)");
+        assert!(
+            srx.try_recv().is_err(),
+            "send-waiter must NOT be woken: no real capacity freed"
+        );
+        // Consume the stashed item → occupancy truly drops → sender wakes.
+        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.pending(), 0);
+        assert!(
+            srx.try_recv().is_ok(),
+            "send-waiter woken once a slot genuinely freed"
+        );
+    }
+
+    /// Regression: the bounce overshoot guard must also hold when the
+    /// re-delivered item is sourced from the front-stash (not the crossbeam
+    /// buffer). `drain_buffered_to_waiters` pops the stash via the
+    /// non-waking `take_front_stash`; if it instead used the waking
+    /// `pop_front_stash`, a sender would be woken even though the item
+    /// bounces straight back to the stash (dead waiter) and never leaves the
+    /// channel → cap+1.
+    #[test]
+    fn bounce_from_stash_does_not_overshoot_capacity_with_parked_sender() {
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1)); // cap=1
+                                                            // Dead recv-waiter parked while empty (register's own drain is a
+                                                            // no-op), then cancelled — stays dead in the list.
+        let (rid, _rrx) = synthetic::alloc();
+        ch.register_recv_waiter(rid);
+        assert!(synthetic::cancel(rid));
+        // A fiber send-waiter parked, waiting for a slot.
+        let (sid, mut srx) = synthetic::alloc();
+        ch.register_send_waiter(sid);
+        // Seed the item directly in the FRONT-STASH (not the buffer), so the
+        // drain sources it from the stash and must bounce it back unchanged.
+        ch.push_front_stash(vec![0xAA]);
+        assert_eq!(ch.pending(), 1);
+        // Drain: stash item is taken for the dead waiter and re-stashed. The
+        // send-waiter must NOT be woken — occupancy is unchanged.
+        ch.drain_buffered_to_waiters();
+        assert_eq!(ch.pending(), 1, "exactly one item (still in the stash)");
+        assert!(
+            srx.try_recv().is_err(),
+            "send-waiter must NOT be woken: stash bounce frees no real capacity"
+        );
+        // Consume the stashed item → occupancy truly drops → sender wakes.
+        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.pending(), 0);
+        assert!(
+            srx.try_recv().is_ok(),
+            "send-waiter woken once the stashed item is genuinely consumed"
+        );
+    }
+
+    /// Regression: a recv-waiter whose receiver was dropped (parked fiber
+    /// torn down, sender still lingering) ahead of a LIVE sibling must not
+    /// swallow the message — delivery falls through to the live sibling.
+    /// Without `resolve_value`'s `is_closed` check the item was lost and
+    /// the sibling starved.
+    #[test]
+    fn dropped_receiver_falls_through_to_live_sibling() {
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(2));
+        let (id_dead, rx_dead) = synthetic::alloc();
+        let (id_live, mut rx_live) = synthetic::alloc();
+        ch.register_recv_waiter(id_dead);
+        ch.register_recv_waiter(id_live);
+        // Receiver torn down while its synthetic sender lingers, parked
+        // ahead of the live sibling.
+        drop(rx_dead);
+        // Delivery must skip the dead id and reach the live sibling.
+        ch.try_send(vec![0x11]).unwrap();
+        let got = rx_live
+            .try_recv()
+            .expect("live sibling must receive the item, not lose it");
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 1);
     }
 
     #[test]
