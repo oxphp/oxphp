@@ -55,6 +55,8 @@ Contention and timeout are **rare events** for a well-designed mutex (locks shou
 
 If you find yourself wrapping every `withLock` in `try { … } catch (ContentionException) { … }`, you are using the wrong primitive. Reach for `Shared\Channel` for queue-shaped workloads or `Shared\Counter` / `Shared\Flag` for single-value atomicity.
 
+The same structural reason explains why `Pool::tryAcquire()` can return `null` where `Mutex::tryWithLock()` throws. `Pool` is **handle-first**: `tryAcquire(): ?Handle` carries "saturated" as `null`, and a `Handle` is never itself a user value, so there is no ambiguity. `Mutex` is **closure-only** — it deliberately never hands a lock guard back to PHP (so a held lock can't leak past the closure), which leaves no object to return as nullable, and the closure's own `mixed` result may already be `null`. With no free sentinel, contention surfaces as `ContentionException`. The two `try*` surfaces diverge because of what each type can hand back, not a style preference.
+
 ## Examples
 
 ### Atomic multi-field update

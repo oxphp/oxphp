@@ -221,6 +221,8 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 
 `tryAcquire()` 在饱和时**不**抛异常——它返回 `null`。因为 `OperationTimeoutException` 继承 `OxPHP\Async\AsyncException`（而非 `SharedException`），`catch (SharedException)` **不会**捕获获取超时；请使用 `catch (OxPHP\Async\AsyncException)` 或直接捕获 `OperationTimeoutException`。
 
+**为什么这与 `Mutex::tryWithLock()` 不同。** 二者都是非阻塞的 `try*` 调用，但 `Pool` 在竞争时返回 `null`，而 `Mutex` 抛 `ContentionException`。这种分歧是结构性的，而非风格选择。`Pool` 是 **handle-first**：每次获取都交回一个 `Handle`，因此「饱和」这个结果有天然的载体——`?Handle`，其中 `null` 表示「无槽位」，且永远不会与真实值冲突（`Handle` 本身永远不是用户值）。`Mutex` 在设计上是 **closure-only**——它刻意从不把锁守卫交回 PHP，使得被持有的锁无法泄漏到闭包之外。这导致 `tryWithLock` 没有可作为 nullable 返回的对象，而闭包自身的 `mixed` 结果合法地可能就是 `null`——因此 `null` 无法兼作「未获取」之意。既无句柄又无空闲哨兵值，唯一无歧义的竞争信号就只剩异常。请相应地捕获：`tryAcquire` → 检测 `null`；`tryWithLock` → `catch (ContentionException)`。
+
 工厂内抛出的异常原样传播给获取的调用方，且不消耗预算。`with()` / `withTimeout()` 体内的异常会在槽被释放后传播给调用方。
 
 ## 可观测性
