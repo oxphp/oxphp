@@ -20,7 +20,7 @@ use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
-use crate::plugins::ox_shared::value::SharedValue;
+use crate::plugins::ox_shared::value::{SharedRefOwned, SharedValue};
 
 /// Approximate per-pending-payload footprint booked against
 /// `total_bytes` on send/recv. Mirrors the `64 + pending * 32` formula
@@ -28,10 +28,31 @@ use crate::plugins::ox_shared::value::SharedValue;
 /// per-slot bookkeeping plus the empty `Payload` (`Vec<u8>` header).
 const CHANNEL_PER_PAYLOAD_BYTES: isize = 32;
 
-/// Serialized zval payload (portbuf bytes). Opaque at this layer —
-/// encoding/decoding lives in `value.rs` and is driven by the FFI
-/// layer.
-pub type Payload = Vec<u8>;
+/// In-transit channel value: portbuf wire bytes plus strong refs that pin
+/// every nested `Shared\*` entry alive while the value sits in the channel
+/// (buffer, front-stash, or in-flight to a fiber waker). `keepalive` is
+/// empty for payloads with no nested shared refs (the common case) —
+/// inline, no allocation. Encoding/decoding of `bytes` lives in `value.rs`.
+#[derive(Debug)]
+pub struct Payload {
+    bytes: Vec<u8>,
+    // Read by the send/recv/waker keepalive wiring added in later steps; for
+    // now it is constructed empty and held only for its Drop effect.
+    #[allow(dead_code)]
+    keepalive: SmallVec<[SharedRefOwned; 1]>,
+}
+
+impl Payload {
+    /// Wrap raw wire bytes with no keepalive. Used by tests and by the
+    /// internal recv recirculation paths that move bytes without resolved
+    /// nested shared refs.
+    pub(crate) fn bytes_only(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            keepalive: SmallVec::new(),
+        }
+    }
+}
 
 /// Approximate bytes crossbeam allocates per bounded-channel slot: the
 /// `Payload` plus a per-slot stamp word. A deliberate lower bound on the
@@ -840,12 +861,14 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            match synthetic::resolve_value(id, payload) {
+            match synthetic::resolve_value(id, payload.bytes) {
                 // Delivered to a live receiver.
                 None => return None,
                 // Waiter could not take it (resolved elsewhere, or its
                 // receiver is gone) — payload survived; try the next id.
-                Some(returned) => payload = returned,
+                // (Keepalive threading is added in a later step; the bytes
+                // round-trip is preserved here.)
+                Some(returned) => payload = Payload::bytes_only(returned),
             }
         }
     }
@@ -1110,9 +1133,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let payload: Payload = if len == 0 {
-            Vec::new()
+            Payload::bytes_only(Vec::new())
         } else {
-            unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
+            Payload::bytes_only(unsafe { std::slice::from_raw_parts(buf, len) }.to_vec())
         };
 
         match ch.try_send(payload) {
@@ -1176,7 +1199,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
 
         match ch.try_recv() {
             Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload)? };
+                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1232,9 +1255,9 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
         let payload: Payload = if len == 0 {
-            Vec::new()
+            Payload::bytes_only(Vec::new())
         } else {
-            unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
+            Payload::bytes_only(unsafe { std::slice::from_raw_parts(buf, len) }.to_vec())
         };
 
         let wait = parse_timeout(timeout_ms);
@@ -1303,7 +1326,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         let wait = parse_timeout(timeout_ms);
         match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload)? };
+                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1469,10 +1492,10 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
             }
             let len = end - start;
             let payload = if len == 0 {
-                Vec::new()
+                Payload::bytes_only(Vec::new())
             } else {
                 let slice = unsafe { std::slice::from_raw_parts(payloads_concat.add(start), len) };
-                slice.to_vec()
+                Payload::bytes_only(slice.to_vec())
             };
             payloads.push(payload);
         }
@@ -1541,7 +1564,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
             return Ok(());
         }
 
-        let total: usize = items.iter().map(|p| p.len()).sum();
+        let total: usize = items.iter().map(|p| p.bytes.len()).sum();
         let concat_ptr = if total == 0 {
             std::ptr::null_mut()
         } else {
@@ -1565,16 +1588,16 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
         let mut cursor = 0usize;
         unsafe { *offsets_ptr = 0 };
         for (i, item) in items.iter().enumerate() {
-            if !item.is_empty() && !concat_ptr.is_null() {
+            if !item.bytes.is_empty() && !concat_ptr.is_null() {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        item.as_ptr(),
+                        item.bytes.as_ptr(),
                         concat_ptr.add(cursor),
-                        item.len(),
+                        item.bytes.len(),
                     );
                 }
             }
-            cursor += item.len();
+            cursor += item.bytes.len();
             unsafe { *offsets_ptr.add(i + 1) = cursor };
         }
 
@@ -2792,6 +2815,21 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    // Test-only equality on `Payload`: compares wire bytes and ignores
+    // `keepalive` (which carries non-comparable `SharedRefOwned`). Lets the
+    // existing assertions compare a popped `Payload` against the bytes a
+    // test sent.
+    impl PartialEq for Payload {
+        fn eq(&self, other: &Self) -> bool {
+            self.bytes == other.bytes
+        }
+    }
+    impl PartialEq<Vec<u8>> for Payload {
+        fn eq(&self, other: &Vec<u8>) -> bool {
+            self.bytes == *other
+        }
+    }
+
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
     // OS threads: the consumer must receive every sent item with none lost or
     // duplicated. Exercises the bounded-queue park/wake handoff under the
@@ -2805,7 +2843,8 @@ mod tests {
             let ch = ch.clone();
             std::thread::spawn(move || {
                 for _ in 0..n {
-                    ch.send_blocking(vec![7u8], Wait::Forever).expect("send");
+                    ch.send_blocking(Payload::bytes_only(vec![7u8]), Wait::Forever)
+                        .expect("send");
                 }
                 ch.close();
             })
@@ -2917,7 +2956,8 @@ mod tests {
     #[test]
     fn try_send_then_try_recv() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1, 2, 3]).expect("send ok");
+        ch.try_send(Payload::bytes_only(vec![1, 2, 3]))
+            .expect("send ok");
         assert_eq!(ch.pending(), 1);
         match ch.try_recv() {
             Ok(Some(p)) => assert_eq!(p, vec![1, 2, 3]),
@@ -2929,8 +2969,9 @@ mod tests {
     #[test]
     fn try_send_full_returns_full() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![0xAA]).expect("first send ok");
-        match ch.try_send(vec![0xBB]) {
+        ch.try_send(Payload::bytes_only(vec![0xAA]))
+            .expect("first send ok");
+        match ch.try_send(Payload::bytes_only(vec![0xBB])) {
             Err(TrySendErr::Full(p)) => assert_eq!(p, vec![0xBB]),
             other => panic!("expected Full([0xBB]), got {other:?}"),
         }
@@ -2964,7 +3005,7 @@ mod tests {
     fn try_send_after_close_errors() {
         let ch = ChannelInner::new(4);
         ch.close();
-        match ch.try_send(vec![9]) {
+        match ch.try_send(Payload::bytes_only(vec![9])) {
             Err(TrySendErr::Closed(p)) => assert_eq!(p, vec![9]),
             other => panic!("expected Closed([9]), got {other:?}"),
         }
@@ -2973,8 +3014,8 @@ mod tests {
     #[test]
     fn try_recv_drains_after_close() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         ch.close();
         match ch.try_recv() {
             Ok(Some(p)) => assert_eq!(p, vec![1]),
@@ -2994,8 +3035,9 @@ mod tests {
     fn capacity_zero_clamped_to_one() {
         let ch = ChannelInner::new(0);
         assert_eq!(ch.capacity(), 1);
-        ch.try_send(vec![1]).expect("first send ok");
-        match ch.try_send(vec![2]) {
+        ch.try_send(Payload::bytes_only(vec![1]))
+            .expect("first send ok");
+        match ch.try_send(Payload::bytes_only(vec![2])) {
             Err(TrySendErr::Full(_)) => {}
             other => panic!("expected Full, got {other:?}"),
         }
@@ -3004,9 +3046,9 @@ mod tests {
     #[test]
     fn pending_matches_try_send_counts() {
         let ch = ChannelInner::new(8);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
-        ch.try_send(vec![3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
         assert_eq!(ch.pending(), 3);
         let _ = ch.try_recv().unwrap();
         let _ = ch.try_recv().unwrap();
@@ -3016,8 +3058,8 @@ mod tests {
     #[test]
     fn debug_snapshot_returns_pending_as_long() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         match ch.debug_snapshot() {
             SharedValue::Long(2) => {}
             other => panic!("expected Long(2), got {other:?}"),
@@ -3038,35 +3080,44 @@ mod tests {
     #[test]
     fn send_blocking_fast_path() {
         let ch = ChannelInner::new(4);
-        ch.send_blocking(vec![1], Wait::Bounded(Duration::from_millis(100)))
-            .expect("send ok");
+        ch.send_blocking(
+            Payload::bytes_only(vec![1]),
+            Wait::Bounded(Duration::from_millis(100)),
+        )
+        .expect("send ok");
         assert_eq!(ch.pending(), 1);
     }
 
     #[test]
     fn send_blocking_on_full_waits_until_recv() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(2)),
+                )
             })
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
-        assert_eq!(first, Some(vec![1]));
+        assert_eq!(first.map(|p| p.bytes), Some(vec![1]));
         let res = sender.join().expect("sender thread");
         assert!(res.is_ok(), "send_blocking got {res:?}");
         let second = ch.try_recv().expect("drain second");
-        assert_eq!(second, Some(vec![2]));
+        assert_eq!(second.map(|p| p.bytes), Some(vec![2]));
     }
 
     #[test]
     fn send_blocking_timeout_returns_timeout() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![1]).unwrap();
-        let res = ch.send_blocking(vec![2], Wait::Bounded(Duration::from_millis(50)));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        let res = ch.send_blocking(
+            Payload::bytes_only(vec![2]),
+            Wait::Bounded(Duration::from_millis(50)),
+        );
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
     }
 
@@ -3074,18 +3125,21 @@ mod tests {
     fn send_blocking_on_closed_returns_closed() {
         let ch = ChannelInner::new(4);
         ch.close();
-        let res = ch.send_blocking(vec![1], Wait::Forever);
+        let res = ch.send_blocking(Payload::bytes_only(vec![1]), Wait::Forever);
         assert!(matches!(res, Err(SharedError::Closed)), "got {res:?}");
     }
 
     #[test]
     fn send_blocking_wakes_when_closed_mid_wait() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(5)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(5)),
+                )
             })
         };
         // Let the blocker arm.
@@ -3104,9 +3158,9 @@ mod tests {
     #[test]
     fn recv_blocking_fast_path() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let res = ch.recv_blocking(Wait::Bounded(Duration::from_millis(100)));
-        assert_eq!(res.unwrap(), Some(vec![1]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![1]));
     }
 
     #[test]
@@ -3117,9 +3171,9 @@ mod tests {
             std::thread::spawn(move || ch.recv_blocking(Wait::Bounded(Duration::from_secs(2))))
         };
         std::thread::sleep(Duration::from_millis(50));
-        ch.try_send(vec![7]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![7])).unwrap();
         let res = receiver.join().expect("receiver thread");
-        assert_eq!(res.unwrap(), Some(vec![7]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![7]));
     }
 
     #[test]
@@ -3160,22 +3214,31 @@ mod tests {
     #[test]
     fn recv_blocking_drains_before_returning_none() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         ch.close();
-        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![1]));
-        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![2]));
+        assert_eq!(
+            ch.recv_blocking(Wait::Forever).unwrap().map(|p| p.bytes),
+            Some(vec![1])
+        );
+        assert_eq!(
+            ch.recv_blocking(Wait::Forever).unwrap().map(|p| p.bytes),
+            Some(vec![2])
+        );
         assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), None);
     }
 
     #[test]
     fn senders_blocked_gauge_increments_while_blocked() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(2)),
+                )
             })
         };
         std::thread::sleep(Duration::from_millis(30));
@@ -3195,9 +3258,9 @@ mod tests {
         };
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 1);
-        ch.try_send(vec![9]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![9])).unwrap();
         let res = receiver.join().expect("receiver thread");
-        assert_eq!(res.unwrap(), Some(vec![9]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![9]));
         assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 0);
     }
 
@@ -3212,7 +3275,7 @@ mod tests {
         let ch2 = ch.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            ch2.try_send(vec![7, 7]).unwrap();
+            ch2.try_send(Payload::bytes_only(vec![7, 7])).unwrap();
         });
         let got = rx.await.unwrap();
         assert!(got.success);
@@ -3253,7 +3316,7 @@ mod tests {
     async fn register_recv_waiter_drains_buffered_items() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(4));
-        ch.try_send(vec![1, 2, 3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1, 2, 3])).unwrap();
         assert_eq!(ch.pending(), 1);
         let (id, rx) = synthetic::alloc();
         ch.register_recv_waiter(id);
@@ -3267,7 +3330,7 @@ mod tests {
     async fn register_send_waiter_fires_on_try_recv() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let (id, rx) = synthetic::alloc();
         ch.register_send_waiter(id);
         let ch2 = ch.clone();
@@ -3284,7 +3347,7 @@ mod tests {
     async fn register_send_waiter_cancelled_with_closed_on_close() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let (id, rx) = synthetic::alloc();
         ch.register_send_waiter(id);
         ch.close();
@@ -3302,7 +3365,7 @@ mod tests {
         let ch = std::sync::Arc::new(ChannelInner::new(4));
         let (id, rx) = synthetic::alloc();
         ch.register_recv_waiter(id);
-        ch.try_send(vec![99]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![99])).unwrap();
         let got = rx.await.unwrap();
         assert!(got.success);
         assert_eq!(got.serialized_value_len, 1);
@@ -3342,7 +3405,7 @@ mod tests {
         // Cancel the first waiter BEFORE the send — makes it "dead"
         // from the draining thread's POV.
         assert!(synthetic::cancel(id1));
-        ch.try_send(vec![42]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![42])).unwrap();
         let got1 = rx1.await.unwrap();
         assert!(!got1.success); // first got Cancelled
         let got2 = rx2.await.unwrap();
@@ -3366,7 +3429,7 @@ mod tests {
         ch.register_recv_waiter(id);
         // Sanity: exactly one waiter parked.
         let expected = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        ch.try_send(expected.clone()).unwrap();
+        ch.try_send(Payload::bytes_only(expected.clone())).unwrap();
         let got = rx.await.unwrap();
         assert!(got.success);
         assert_eq!(got.serialized_value_len, expected.len());
@@ -3389,12 +3452,18 @@ mod tests {
         // Kill the waiter before send reaches it.
         assert!(synthetic::cancel(id));
         // Send must not panic and must not drop the payload.
-        ch.try_send(vec![0xDE, 0xAD]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xDE, 0xAD])).unwrap();
         // Channel is still operational.
-        ch.try_send(vec![0xBE, 0xEF]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xBE, 0xEF])).unwrap();
         // The dead-waiter payload was preserved in the buffer (FIFO).
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xDE, 0xAD]));
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xBE, 0xEF]));
+        assert_eq!(
+            ch.try_recv().unwrap().map(|p| p.bytes),
+            Some(vec![0xDE, 0xAD])
+        );
+        assert_eq!(
+            ch.try_recv().unwrap().map(|p| p.bytes),
+            Some(vec![0xBE, 0xEF])
+        );
     }
 
     /// Regression: `drain_buffered_to_waiters` must re-park a buffered item
@@ -3414,7 +3483,7 @@ mod tests {
         // Deposit straight into the crossbeam buffer, bypassing `try_send`
         // (which would reap the dead waiter itself). This reproduces an
         // item buffered while a dead waiter is still parked.
-        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.tx.try_send(Payload::bytes_only(vec![0xAA])).unwrap();
         ch.bump_pending();
         assert_eq!(ch.pending(), 1);
         // Drain: item is popped for the dead waiter and must be re-parked
@@ -3422,7 +3491,7 @@ mod tests {
         ch.drain_buffered_to_waiters();
         assert_eq!(ch.pending(), 1, "re-parked item must stay counted");
         // Recovered intact; channel then empty+open.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert_eq!(ch.try_recv(), Err(TryRecvErr::WouldBlockEmpty));
     }
@@ -3447,7 +3516,7 @@ mod tests {
         // Now fill the buffer directly (bypass `try_send`, which would reap
         // the dead waiter / drain itself), reproducing a buffered item with
         // a dead recv-waiter still parked ahead of it.
-        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.tx.try_send(Payload::bytes_only(vec![0xAA])).unwrap();
         ch.bump_pending();
         // Drain: the item bounces to the front-stash. The send-waiter must
         // NOT be woken — the channel still holds exactly one item.
@@ -3458,7 +3527,7 @@ mod tests {
             "send-waiter must NOT be woken: no real capacity freed"
         );
         // Consume the stashed item → occupancy truly drops → sender wakes.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert!(
             srx.try_recv().is_ok(),
@@ -3487,7 +3556,7 @@ mod tests {
         ch.register_send_waiter(sid);
         // Seed the item directly in the FRONT-STASH (not the buffer), so the
         // drain sources it from the stash and must bounce it back unchanged.
-        ch.push_front_stash(vec![0xAA]);
+        ch.push_front_stash(Payload::bytes_only(vec![0xAA]));
         assert_eq!(ch.pending(), 1);
         // Drain: stash item is taken for the dead waiter and re-stashed. The
         // send-waiter must NOT be woken — occupancy is unchanged.
@@ -3498,7 +3567,7 @@ mod tests {
             "send-waiter must NOT be woken: stash bounce frees no real capacity"
         );
         // Consume the stashed item → occupancy truly drops → sender wakes.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert!(
             srx.try_recv().is_ok(),
@@ -3523,7 +3592,7 @@ mod tests {
         // ahead of the live sibling.
         drop(rx_dead);
         // Delivery must skip the dead id and reach the live sibling.
-        ch.try_send(vec![0x11]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0x11])).unwrap();
         let got = rx_live
             .try_recv()
             .expect("live sibling must receive the item, not lose it");
@@ -3534,14 +3603,16 @@ mod tests {
     #[test]
     fn send_blocking_forever_wait_is_indefinite() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Wait::Forever))
+            std::thread::spawn(move || {
+                ch.send_blocking(Payload::bytes_only(vec![2]), Wait::Forever)
+            })
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
-        assert_eq!(first, Some(vec![1]));
+        assert_eq!(first.map(|p| p.bytes), Some(vec![1]));
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if sender.is_finished() {
@@ -3888,8 +3959,8 @@ mod tests {
     #[test]
     fn send_blocking_try_returns_timeout_when_full() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![0]).unwrap();
-        let res = ch.send_blocking(vec![1], Wait::Try);
+        ch.try_send(Payload::bytes_only(vec![0])).unwrap();
+        let res = ch.send_blocking(Payload::bytes_only(vec![1]), Wait::Try);
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
         // Gauge must not have been incremented — Try short-circuits before the guard.
         assert_eq!(ch.senders_blocked().load(Ordering::Relaxed), 0);
@@ -3924,7 +3995,7 @@ mod tests {
     fn send_blocking_try_succeeds_when_not_full() {
         let ch = ChannelInner::new(2);
         // Channel is empty — Wait::Try must succeed, not timeout.
-        let res = ch.send_blocking(vec![0xAA], Wait::Try);
+        let res = ch.send_blocking(Payload::bytes_only(vec![0xAA]), Wait::Try);
         assert!(res.is_ok(), "expected Ok, got {res:?}");
         assert_eq!(ch.pending(), 1);
     }
@@ -3932,7 +4003,7 @@ mod tests {
     #[test]
     fn recv_blocking_try_succeeds_when_not_empty() {
         let ch = ChannelInner::new(2);
-        ch.try_send(vec![0xBB]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xBB])).unwrap();
         // Channel has an item — Wait::Try must return it, not Timeout.
         let res = ch.recv_blocking(Wait::Try);
         assert!(
@@ -3988,7 +4059,7 @@ mod tests {
     #[test]
     fn send_many_fills_channel_and_returns_count() {
         let ch = ChannelInner::new(10);
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 5);
         assert_eq!(ch.pending(), 5);
@@ -3998,7 +4069,7 @@ mod tests {
     fn send_many_stops_on_closed() {
         let ch = ChannelInner::new(10);
         ch.close();
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 0);
     }
@@ -4008,7 +4079,7 @@ mod tests {
         // Capacity 2; push 5 with 50ms timeout → only first 2 fit, rest
         // time out and send_many returns the running count.
         let ch = ChannelInner::new(2);
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(sent, 2);
         assert_eq!(ch.pending(), 2);
@@ -4017,9 +4088,9 @@ mod tests {
     #[test]
     fn recv_many_drain_max_zero() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
-        ch.try_send(vec![3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
         let got = ch.recv_many(0, Wait::Forever);
         assert_eq!(got, vec![vec![1], vec![2], vec![3]]);
         assert_eq!(ch.pending(), 0);
@@ -4036,7 +4107,7 @@ mod tests {
     fn recv_many_respects_max() {
         let ch = ChannelInner::new(10);
         for i in 0u8..5 {
-            ch.try_send(vec![i]).unwrap();
+            ch.try_send(Payload::bytes_only(vec![i])).unwrap();
         }
         let got = ch.recv_many(3, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(got, vec![vec![0], vec![1], vec![2]]);
@@ -4046,7 +4117,7 @@ mod tests {
     #[test]
     fn recv_many_stops_on_closed_empty() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![7]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![7])).unwrap();
         ch.close();
         let got = ch.recv_many(10, Wait::Bounded(Duration::from_millis(50)));
         // Got the buffered item and then stopped on closed+empty; no
@@ -4057,7 +4128,7 @@ mod tests {
     #[test]
     fn recv_many_timeout_returns_partial() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let start = Instant::now();
         let got = ch.recv_many(5, Wait::Bounded(Duration::from_millis(50)));
         let elapsed = start.elapsed();
@@ -4172,7 +4243,8 @@ mod tests {
 
         let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for i in 0..4u8 {
-            ch.try_send(vec![i]).expect("buffer has room");
+            ch.try_send(Payload::bytes_only(vec![i]))
+                .expect("buffer has room");
         }
         let grown = entry.mem_bytes.load(Ordering::Relaxed);
         assert_eq!(
