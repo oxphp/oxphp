@@ -35,23 +35,20 @@ if (!oxphp_is_worker()) {
 
 $ch = new OxPHP\Shared\Channel(1);
 
-// Held in request scope so the Shared\Counter's registry entry stays alive
-// across transit. A channel stores a Shared\* value as a bare tag-7 id (no
-// strong Arc ref), so without an external keepalive the entry can be freed
-// before the receiver materializes it — an in-transit lifetime gap that is
-// orthogonal to the in-place wrap under test here.
-$counter = new OxPHP\Shared\Counter();
-$counter->add(42);
-
-$producer = oxphp_async(function () use ($ch, $counter): void {
+$producer = oxphp_async(function () use ($ch): void {
     // Pace so the request-fiber consumer parks on an empty channel before
     // each send → the send hands the payload to the parked recv-waiter →
-    // fiber_await returns 0 → the in-place wrap runs.
+    // fiber_await returns 0 → the in-place wrap runs. The Shared\Counter is
+    // created and sent without an outer keepalive: the channel now holds it
+    // alive in transit (the in-transit lifetime gap is fixed), so this also
+    // exercises that the delivered handle is live.
     usleep(10_000);
     $ch->send('hello-string');
     usleep(10_000);
     $ch->send([1, 2, 3, 'k' => 'v']);
     usleep(10_000);
+    $counter = new OxPHP\Shared\Counter();
+    $counter->add(42);
     $ch->send($counter);
     $ch->close();
 });

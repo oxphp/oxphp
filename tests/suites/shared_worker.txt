@@ -6,6 +6,9 @@ shared/test_channel_fanin_waker
 shared/test_channel_async_usevar_stress
 shared/test_channel_shutdown_drain
 shared/test_channel_recv_inplace_refcounted
+shared/test_channel_inflight_keepalive_buffered
+shared/test_channel_inflight_keepalive_waker
+shared/test_channel_cycle_detection
 shared/test_counter_cross_thread
 shared/test_atomic_cross_thread
 shared/test_mutex_contention
