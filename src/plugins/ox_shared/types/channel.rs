@@ -381,6 +381,18 @@ impl ChannelInner {
     }
 
     /// Register in-transit refs in the cycle index (enter). No-op when empty.
+    ///
+    /// Enter sites MUST call this *before* the value becomes consumable
+    /// (i.e. before `tx.try_send` / `recv_front.push`), and roll back via
+    /// [`index_remove_views`] if the deposit then fails. Registering *after*
+    /// a successful deposit races a fast consumer: between the deposit and
+    /// this add, a consumer on another thread can pop the item and run
+    /// [`index_remove`], which finds nothing (the edge is not added yet) and
+    /// no-ops; the lagging add then strands the edge in the index forever —
+    /// a "ghost" that never leaves, leaks `in_flight`, and inflates the cycle
+    /// walker's edge budget into spurious `EdgeLimitExceeded`. Adding before
+    /// the deposit guarantees the edge is visible by the time the item is
+    /// poppable, so the consumer's `index_remove` always finds it.
     fn index_add(&self, views: &[SharedRef]) {
         if views.is_empty() {
             return;
@@ -399,6 +411,23 @@ impl ChannelInner {
         for r in keepalive {
             let v = r.as_view();
             if let Some(pos) = idx.iter().position(|x| *x == v) {
+                idx.swap_remove(pos);
+            }
+        }
+    }
+
+    /// Roll back an [`index_add`] keyed on `SharedRef` views — used by the
+    /// enter sites when a deposit fails after the edge was pre-registered
+    /// (channel full/closed). Mirrors [`index_remove`] but keyed on views
+    /// rather than owned keepalive, since the payload has already moved by
+    /// the time a failed deposit hands it back. No-op when empty.
+    fn index_remove_views(&self, views: &[SharedRef]) {
+        if views.is_empty() {
+            return;
+        }
+        let mut idx = self.in_flight.lock();
+        for v in views {
+            if let Some(pos) = idx.iter().position(|x| x == v) {
                 idx.swap_remove(pos);
             }
         }
@@ -442,9 +471,12 @@ impl ChannelInner {
     /// freed slot was taken before it could be returned to the buffer.
     fn push_front_stash(&self, p: Payload) {
         let views = Self::keepalive_views(&p.keepalive);
+        // Register edges before the item becomes visible in the stash, so a
+        // racing `take_front_stash` finds them on `index_remove` rather than
+        // stranding a ghost (see `index_add`). Infallible push — no rollback.
+        self.index_add(&views);
         self.recv_front.lock().push(p);
         self.bump_pending();
-        self.index_add(&views);
     }
 
     fn track_payload_delta(&self, delta_count: isize) {
@@ -474,6 +506,14 @@ impl ChannelInner {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Test-only: raw size of the in-flight cycle index (multiset, no dedup).
+    /// Distinct from [`children`](SharedInner::children), which dedups by id —
+    /// used to assert no ghost edges leak after concurrent send/recv.
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.in_flight.lock().len()
     }
 
     /// Build an in-transit [`Payload`] from raw portbuf wire bytes: scan for
@@ -607,13 +647,16 @@ impl ChannelInner {
             }
             Some(p) => p,
         };
-        // Capture keepalive views before the payload moves into the buffer, so
-        // a successful deposit can register them in the cycle index.
+        // Register the in-transit edges BEFORE depositing into the buffer:
+        // once `tx.try_send` returns `Ok`, a consumer on another thread can
+        // pop the item immediately, and it must find the edge present to
+        // remove it. Adding after the deposit races that consumer and strands
+        // a ghost (see `index_add`). Roll back on a failed deposit.
         let views = Self::keepalive_views(&payload.keepalive);
+        self.index_add(&views);
         match self.tx.try_send(payload) {
             Ok(()) => {
                 self.bump_pending();
-                self.index_add(&views);
                 self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                 self.notify_recv.notify_one();
                 // Double-check for a recv-waiter that parked in the gap
@@ -627,8 +670,14 @@ impl ChannelInner {
                 self.drain_buffered_to_waiters();
                 Ok(())
             }
-            Err(TrySendError::Full(p)) => Err(TrySendErr::Full(p)),
-            Err(TrySendError::Disconnected(p)) => Err(TrySendErr::Closed(p)),
+            Err(TrySendError::Full(p)) => {
+                self.index_remove_views(&views);
+                Err(TrySendErr::Full(p))
+            }
+            Err(TrySendError::Disconnected(p)) => {
+                self.index_remove_views(&views);
+                Err(TrySendErr::Closed(p))
+            }
         }
     }
 
@@ -731,10 +780,17 @@ impl ChannelInner {
         };
         let mut payload = payload;
         // Keepalive is constant across retries (the same payload bounces on
-        // Timeout); capture its views once for the cycle index on deposit.
+        // Timeout); capture its views once. Register the in-transit edges
+        // BEFORE the first deposit attempt — like `try_send`, a successful
+        // `send_timeout` makes the item poppable before this thread regains
+        // control, so the edge must already be present (see `index_add`).
+        // Roll back on any terminal failure (closed / deadline), since
+        // nothing landed.
         let views = Self::keepalive_views(&payload.keepalive);
+        self.index_add(&views);
         loop {
             if self.is_closed() {
+                self.index_remove_views(&views);
                 return Err(SharedError::Closed);
             }
             let quantum = match deadline {
@@ -742,6 +798,7 @@ impl ChannelInner {
                 Some(d) => {
                     let remaining = d.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
+                        self.index_remove_views(&views);
                         return Err(SharedError::Timeout);
                     }
                     remaining.min(POLL_QUANTUM)
@@ -750,7 +807,6 @@ impl ChannelInner {
             match self.tx.send_timeout(payload, quantum) {
                 Ok(()) => {
                     self.bump_pending();
-                    self.index_add(&views);
                     self.items_sent_total.fetch_add(1, Ordering::Relaxed);
                     self.notify_recv.notify_one();
                     // Bridge the buffer→fiber gap: a fiber recv-waiter
@@ -765,9 +821,13 @@ impl ChannelInner {
                 }
                 Err(SendTimeoutError::Timeout(p)) => {
                     payload = p;
-                    // loop — re-check close and deadline.
+                    // loop — re-check close and deadline. Edge stays
+                    // registered; the same payload will retry the deposit.
                 }
-                Err(SendTimeoutError::Disconnected(_)) => return Err(SharedError::Closed),
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    self.index_remove_views(&views);
+                    return Err(SharedError::Closed);
+                }
             }
         }
     }
@@ -3373,6 +3433,113 @@ mod tests {
         prod.join().expect("producer thread");
         let got = cons.join().expect("consumer thread");
         assert_eq!(got, n, "consumer must receive every sent item");
+    }
+
+    // The enter-before-deposit ordering registers the in-flight edge *before*
+    // the deposit, so a failed deposit MUST roll the edge back or it leaks a
+    // ghost. These three tests cover every failure exit of the send paths.
+    //
+    // (The success-path ghost race the ordering actually fixes is producer-
+    // side and only a couple of atomics wide — a consumer's path to
+    // `index_remove` is reliably longer, so a stress harness cannot reproduce
+    // it deterministically. The ordering invariant is documented on
+    // `index_add`; what is deterministically testable, and what a future edit
+    // could regress, is the rollback balance below.)
+
+    /// A nested-Shared payload whose `try_send` hits a full channel must leave
+    /// no in-flight edge behind (pre-add rolled back on `Full`).
+    #[test]
+    fn try_send_full_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        // Occupy the single slot with an opaque (no-keepalive) item.
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        // Now a Shared-carrying send must fail Full — and not strand its edge.
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert!(matches!(inner.try_send(p), Err(TrySendErr::Full(_))));
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "failed try_send must roll back its pre-registered in-flight edge"
+        );
+        drop(nested);
+    }
+
+    /// A blocking send that times out on a full channel must roll back too.
+    #[test]
+    fn send_blocking_timeout_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert_eq!(
+            inner.send_blocking(p, Wait::Bounded(std::time::Duration::from_millis(20))),
+            Err(SharedError::Timeout)
+        );
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "timed-out send must roll back its pre-registered in-flight edge"
+        );
+        drop(nested);
+    }
+
+    /// A blocking send that observes the channel closed mid-wait rolls back.
+    #[test]
+    fn send_blocking_closed_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        // Close from another thread while the send is parked on the full slot.
+        let bg = {
+            let inner = inner.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                inner.close();
+            })
+        };
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert_eq!(
+            inner.send_blocking(p, Wait::Forever),
+            Err(SharedError::Closed)
+        );
+        bg.join().expect("closer thread");
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "send aborted by close must roll back its pre-registered edge"
+        );
+        drop(nested);
     }
 
     #[test]
