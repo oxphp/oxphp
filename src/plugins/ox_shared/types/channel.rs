@@ -36,9 +36,6 @@ const CHANNEL_PER_PAYLOAD_BYTES: isize = 32;
 #[derive(Debug)]
 pub struct Payload {
     bytes: Vec<u8>,
-    // Read by the send/recv/waker keepalive wiring added in later steps; for
-    // now it is constructed empty and held only for its Drop effect.
-    #[allow(dead_code)]
     keepalive: SmallVec<[SharedRefOwned; 1]>,
 }
 
@@ -957,14 +954,31 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            match synthetic::resolve_value(id, payload.bytes, None) {
+            // Carry the keepalive into the delivery so the receiving fiber's
+            // AsyncResult pins the nested entries until it deserializes. Common
+            // no-shared case stays a `None` (no Box allocation).
+            let kb: synthetic::Keepalive = if payload.keepalive.is_empty() {
+                None
+            } else {
+                Some(Box::new(std::mem::take(&mut payload.keepalive)))
+            };
+            match synthetic::resolve_value(id, payload.bytes, kb) {
                 // Delivered to a live receiver.
                 None => return None,
-                // Waiter could not take it (resolved elsewhere, or its
-                // receiver is gone) — payload survived; try the next id.
-                // (Keepalive threading is added in a later step; the bytes
-                // round-trip is preserved here.)
-                Some((returned, _)) => payload = Payload::bytes_only(returned),
+                // Waiter could not take it (resolved elsewhere, or its receiver
+                // is gone) — bytes + keepalive survived; rebuild the Payload
+                // intact and try the next id / re-park. Downcast only on this
+                // rare dead-waiter path.
+                Some((returned, kb)) => {
+                    let keepalive = kb
+                        .and_then(|b| b.downcast::<SmallVec<[SharedRefOwned; 1]>>().ok())
+                        .map(|b| *b)
+                        .unwrap_or_default();
+                    payload = Payload {
+                        bytes: returned,
+                        keepalive,
+                    };
+                }
             }
         }
     }
@@ -3000,6 +3014,40 @@ mod tests {
         bytes.extend_from_slice(&7i64.to_le_bytes());
         let payload = typed.build_payload(bytes).expect("build ok");
         assert!(payload.keepalive.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waker_handoff_carries_keepalive_into_result() {
+        ensure_test_registry();
+        let reg = registry();
+        // A nested Shared\* value that must stay alive in transit.
+        let target = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let tid = target.id;
+        // The channel under test.
+        let typed = Arc::new(ChannelInner::new(1));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+        // Park a recv-waiter, then send a tag-7 payload referencing target so
+        // try_send hands it straight to the waiter (the waker path).
+        let (id, rx) = synthetic::alloc();
+        typed.register_recv_waiter(id);
+        let payload = typed.build_payload(tag7(SharedType::Channel, tid)).unwrap();
+        typed.try_send(payload).unwrap();
+        // Drop the producer's external strong ref; the AsyncResult's keepalive
+        // must pin the entry until the fiber deserializes.
+        let weak = Arc::downgrade(&target);
+        drop(target);
+        let result = rx.await.unwrap();
+        assert!(
+            result.keepalive.is_some(),
+            "keepalive rode into AsyncResult"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "AsyncResult keepalive should pin the in-transit entry"
+        );
     }
 
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
