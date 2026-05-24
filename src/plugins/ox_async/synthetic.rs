@@ -102,6 +102,48 @@ pub fn resolve(id: i64, payload: PromisePayload) -> bool {
     tx.send(result).is_ok()
 }
 
+/// Deliver a value to a parked waiter, handing the payload **back** if
+/// the promise was already resolved by someone else (e.g. its own
+/// `recvTimeout` cancel won the race against this delivery).
+///
+/// Unlike [`resolve`], this never silently drops the payload: the sole
+/// sender is removed first, and the `AsyncResult` is built and sent only
+/// once we hold a sender whose receiver is still alive. A `Some(payload)`
+/// return means "this waiter could not take it — try a sibling or
+/// re-deposit, no message lost." A `None` return means the value was
+/// delivered to a live receiver.
+///
+/// Two paths return the payload (`Some`) instead of consuming it:
+/// - the promise was already resolved by another resolver (its own
+///   `recvTimeout` cancel / close won the race) — sender already gone;
+/// - the receiver was dropped while the sender lingered (the parked fiber
+///   was torn down, e.g. request shutdown, without a cancel). There is no
+///   consumer for THIS id, so the caller falls through to a live sibling
+///   waiter or re-parks, keeping delivery loss-free.
+///
+/// This guards the dead-waiter race that [`resolve`] documents: a buffered
+/// Channel item handed to a waiter that cancelled (or was torn down)
+/// between the pop and the send must not vanish; the caller recovers it.
+///
+/// A nanosecond TOCTOU remains: if the receiver is dropped between the
+/// `is_closed` check and `send`, the payload is consumed.
+pub fn resolve_value(id: i64, payload: Vec<u8>) -> Option<Vec<u8>> {
+    let Some((_, tx)) = senders().remove(&id) else {
+        // Already resolved (timeout / cancel / close won the race) —
+        // hand the payload back to the caller to re-deposit.
+        return Some(payload);
+    };
+    if tx.is_closed() {
+        // Receiver already dropped (the parked fiber is gone). No consumer
+        // for THIS id — hand the payload back so the caller tries a live
+        // sibling waiter or re-deposits it. Loss-free.
+        return Some(payload);
+    }
+    // We hold a sender with a live receiver. Build the result and deliver.
+    let _ = tx.send(payload_to_result(PromisePayload::Value(payload)));
+    None
+}
+
 /// Reject with an exception class + message.
 pub fn reject(id: i64, class_fqn: impl Into<String>, message: impl Into<String>) -> bool {
     resolve(
@@ -318,6 +360,43 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.exception_class.as_deref(), Some("My\\Err"));
         assert_eq!(result.exception_message.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn resolve_value_delivers_and_returns_none() {
+        let (id, rx) = alloc();
+        assert!(resolve_value(id, vec![7, 8, 9]).is_none());
+        let result = rx.await.expect("receiver should receive");
+        assert!(result.success);
+        assert_eq!(result.serialized_value_len, 3);
+    }
+
+    #[tokio::test]
+    async fn resolve_value_hands_payload_back_when_already_resolved() {
+        // Simulate the recvTimeout cancel winning the race: the promise
+        // is resolved (sender removed) before resolve_value runs.
+        let (id, rx) = alloc();
+        assert!(cancel(id));
+        // resolve_value must NOT drop the payload — it hands it back.
+        let returned = resolve_value(id, vec![1, 2, 3]);
+        assert_eq!(returned, Some(vec![1, 2, 3]));
+        // The waiter saw the cancel, not the value.
+        let result = rx.await.unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            result.exception_class.as_deref(),
+            Some("OxPHP\\Async\\AsyncException")
+        );
+    }
+
+    #[test]
+    fn resolve_value_hands_back_when_receiver_dropped() {
+        // Receiver torn down while the sender lingers (parked fiber gone).
+        // resolve_value must hand the payload back, not consume it, so the
+        // caller can try a live sibling or re-deposit it.
+        let (id, rx) = alloc();
+        drop(rx);
+        assert_eq!(resolve_value(id, vec![5, 6]), Some(vec![5, 6]));
     }
 
     #[test]

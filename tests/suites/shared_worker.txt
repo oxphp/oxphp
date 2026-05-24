@@ -2,6 +2,7 @@
 # description: Shared state primitives — Channel fiber tests + Counter / Atomic cross-thread
 
 shared/test_channel_fiber_producer_consumer
+shared/test_channel_fanin_waker
 shared/test_channel_async_usevar_stress
 shared/test_channel_shutdown_drain
 shared/test_channel_recv_inplace_refcounted
