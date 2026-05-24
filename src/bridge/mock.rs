@@ -250,6 +250,20 @@ pub unsafe fn oxphp_bridge_get_enum_case(
     -1
 }
 
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn oxphp_bridge_wrap_result_ok_inplace(
+    _retval: *mut c_void,
+    _cls_fqn: *const c_char,
+    _cls_len: usize,
+    _value_prop: *const c_char,
+    _value_prop_len: usize,
+    _status_prop: *const c_char,
+    _status_prop_len: usize,
+    _status_val: std::os::raw::c_long,
+) -> c_int {
+    -1
+}
+
 // ── Zval lifecycle ──
 
 pub unsafe fn oxphp_zval_dtor(_zv: *mut c_void) {}

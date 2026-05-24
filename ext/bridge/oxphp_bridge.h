@@ -1938,6 +1938,26 @@ int oxphp_bridge_get_enum_case(void *out,
                                const char *case_name,
                                size_t case_len);
 
+/*  oxphp_bridge_wrap_result_ok_inplace:
+ *      Treat the current contents of `retval` as a payload value and wrap
+ *      it, in place, into a freshly-constructed `cls_fqn` object: the old
+ *      payload is moved into the `value_prop` property and `status_val` is
+ *      written to the `status_prop` property. No serialize/deserialize
+ *      round-trip — the live payload zval is copied straight into the
+ *      property via zend_update_property (refcount handled by Zend), so it
+ *      is sound for scalars, strings, arrays and objects (including the
+ *      Shared\* handle wrappers). Returns 0 on success; on failure `retval`
+ *      is left holding the original payload untouched and -1 is returned.
+ *      `retval` must be a writable 16-byte zval slot. */
+int oxphp_bridge_wrap_result_ok_inplace(void *retval,
+                                        const char *cls_fqn,
+                                        size_t cls_len,
+                                        const char *value_prop,
+                                        size_t value_prop_len,
+                                        const char *status_prop,
+                                        size_t status_prop_len,
+                                        long status_val);
+
 #ifdef __cplusplus
 }
 #endif

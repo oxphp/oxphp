@@ -5588,3 +5588,46 @@ int oxphp_bridge_get_enum_case(void *out,
     ZVAL_OBJ((zval *)out, case_obj);
     return 0;
 }
+
+int oxphp_bridge_wrap_result_ok_inplace(void *retval,
+                                        const char *cls_fqn,
+                                        size_t cls_len,
+                                        const char *value_prop,
+                                        size_t value_prop_len,
+                                        const char *status_prop,
+                                        size_t status_prop_len,
+                                        long status_val) {
+    if (!retval || !cls_fqn || cls_len == 0) return -1;
+
+    zend_string *name = zend_string_init(cls_fqn, cls_len, 0);
+    zend_class_entry *ce = zend_lookup_class(name);
+    zend_string_release(name);
+    if (!ce) return -1;
+
+    zval *rv = (zval *)retval;
+
+    /* Snapshot the payload WITHOUT touching its refcount — `tmp` and `rv`
+     * briefly alias the same value. */
+    zval tmp;
+    ZVAL_COPY_VALUE(&tmp, rv);
+
+    /* Overwrite rv with a fresh result object. object_init_ex writes into
+     * rv, so the payload now lives only in `tmp`. */
+    if (object_init_ex(rv, ce) != SUCCESS) {
+        ZVAL_COPY_VALUE(rv, &tmp); /* restore; caller still owns the payload */
+        return -1;
+    }
+
+    /* value_prop = payload. zend_update_property does ZVAL_DEREF + ZVAL_COPY
+     * (refcount++ on the payload). */
+    zend_update_property(ce, Z_OBJ_P(rv), value_prop, value_prop_len, &tmp);
+
+    /* Balance the reference we moved out of rv: the property now holds its
+     * own ref, so drop ours. Net payload refcount is unchanged across the
+     * whole call. */
+    zval_ptr_dtor(&tmp);
+
+    zend_update_property_long(ce, Z_OBJ_P(rv), status_prop, status_prop_len,
+                              (zend_long)status_val);
+    return 0;
+}
