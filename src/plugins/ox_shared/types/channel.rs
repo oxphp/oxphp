@@ -20,7 +20,7 @@ use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
-use crate::plugins::ox_shared::value::{SharedRefOwned, SharedValue};
+use crate::plugins::ox_shared::value::{SharedRef, SharedRefOwned, SharedValue};
 
 /// Approximate per-pending-payload footprint booked against
 /// `total_bytes` on send/recv. Mirrors the `64 + pending * 32` formula
@@ -369,6 +369,102 @@ impl ChannelInner {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    /// Build an in-transit [`Payload`] from raw portbuf wire bytes: scan for
+    /// nested `Shared\*` refs, reject cycles, and resolve each ref into a
+    /// strong keepalive that pins the entry alive while the value is in
+    /// transit. The common no-shared case allocates nothing beyond the bytes.
+    ///
+    /// Called once per FFI send entry; core send methods take the built
+    /// `Payload`. Returns [`SharedError::Cycle`] when the value would close a
+    /// reference cycle back to this channel.
+    pub fn build_payload(&self, bytes: Vec<u8>) -> Result<Payload, SharedError> {
+        if bytes.is_empty() {
+            return Ok(Payload {
+                bytes,
+                keepalive: SmallVec::new(),
+            });
+        }
+        // The scan only succeeds on well-formed portbuf (which the PHP
+        // serializer always emits). A non-portbuf buffer — reachable only via
+        // direct FFI use, e.g. Rust-level tests — carries no resolvable shared
+        // ref, so transport it opaquely with no keepalive rather than failing.
+        let roots = match crate::plugins::ox_shared::value::scan_shared_refs(&bytes) {
+            Ok(r) => r,
+            Err(_) => return Ok(Payload::bytes_only(bytes)),
+        };
+        if roots.is_empty() {
+            return Ok(Payload {
+                bytes,
+                keepalive: SmallVec::new(),
+            });
+        }
+        self.cycle_check(&roots)?;
+        let mut keepalive: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        if let Some(reg) = REGISTRY.get() {
+            for r in &roots {
+                match reg.lookup(r.id) {
+                    Ok(arc) => keepalive.push(SharedRefOwned::from_arc(arc)),
+                    // Near-impossible: the sending zval holds these Arcs across
+                    // the send() call. Defensive degrade in release; the
+                    // receiver would observe NULL for this one ref as before.
+                    Err(_) => debug_assert!(false, "stale shared ref at channel send"),
+                }
+            }
+        }
+        Ok(Payload { bytes, keepalive })
+    }
+
+    /// Reject a send whose value would close a strong-ref cycle back to this
+    /// channel. Mirror of `Shared\Map::check_cycles`. No-op without a bound
+    /// `self_id` or registry (Rust-only fixtures).
+    fn cycle_check(&self, roots: &[SharedRef]) -> Result<(), SharedError> {
+        use crate::plugins::ox_shared::cycle::{would_create_cycle, CycleError};
+        let (Some(reg), Some(self_id)) = (REGISTRY.get(), self.self_id.get().copied()) else {
+            return Ok(());
+        };
+        let cfg = reg.config();
+        for root in roots {
+            let children_of = |id, out: &mut Vec<SharedRef>| {
+                if let Ok(e) = reg.lookup(id) {
+                    e.inner.children(out);
+                }
+            };
+            match would_create_cycle(
+                *root,
+                self_id,
+                cfg.cycle_detect_depth,
+                cfg.cycle_detect_edges,
+                children_of,
+            ) {
+                Ok(()) => {}
+                Err(CycleError::CycleFound(path)) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: send would form a reference cycle: {}",
+                        crate::plugins::ox_shared::cycle::format_cycle_path(&path)
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+                Err(CycleError::DepthExceeded) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: cycle detection depth limit ({}) exceeded; \
+                         raise SHARED_CYCLE_DETECT_DEPTH or break the graph",
+                        cfg.cycle_detect_depth
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+                Err(CycleError::EdgeLimitExceeded) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: cycle detection edge limit ({}) exceeded; \
+                         raise SHARED_CYCLE_DETECT_EDGES or break the graph",
+                        cfg.cycle_detect_edges
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Non-blocking send. See module docs for semantics.
@@ -1132,11 +1228,13 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_try_send on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        let payload: Payload = if len == 0 {
-            Payload::bytes_only(Vec::new())
+        let bytes: Vec<u8> = if len == 0 {
+            Vec::new()
         } else {
-            Payload::bytes_only(unsafe { std::slice::from_raw_parts(buf, len) }.to_vec())
+            unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
         };
+        // Scan + cycle-check + resolve keepalive (Err(Cycle)/etc. propagate).
+        let payload: Payload = ch.build_payload(bytes)?;
 
         match ch.try_send(payload) {
             Ok(()) => {
@@ -1254,11 +1352,13 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        let payload: Payload = if len == 0 {
-            Payload::bytes_only(Vec::new())
+        let bytes: Vec<u8> = if len == 0 {
+            Vec::new()
         } else {
-            Payload::bytes_only(unsafe { std::slice::from_raw_parts(buf, len) }.to_vec())
+            unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
         };
+        // Scan + cycle-check + resolve keepalive (Err(Cycle)/etc. propagate).
+        let payload: Payload = ch.build_payload(bytes)?;
 
         let wait = parse_timeout(timeout_ms);
         let res = ch.send_blocking(payload, wait);
@@ -1491,13 +1591,16 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
                 return Err(SharedError::Generic);
             }
             let len = end - start;
-            let payload = if len == 0 {
-                Payload::bytes_only(Vec::new())
+            let bytes = if len == 0 {
+                Vec::new()
             } else {
                 let slice = unsafe { std::slice::from_raw_parts(payloads_concat.add(start), len) };
-                Payload::bytes_only(slice.to_vec())
+                slice.to_vec()
             };
-            payloads.push(payload);
+            // Build (scan + cycle-check + resolve) every element BEFORE sending
+            // any, so a cyclic element rejects the whole batch atomically —
+            // `?` returns Cycle here with `*out_sent` still 0, nothing sent.
+            payloads.push(ch.build_payload(bytes)?);
         }
 
         let wait = parse_timeout(timeout_ms);
@@ -2256,6 +2359,7 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         -4 => "OxPHP\\Shared\\CapacityException",
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\OperationTimeoutException",
+        -9 => "OxPHP\\Shared\\CycleException",
         -10 => "OxPHP\\Shared\\UninitializedException",
         _ => "OxPHP\\Shared\\SharedException",
     };
@@ -2828,6 +2932,74 @@ mod tests {
         fn eq(&self, other: &Vec<u8>) -> bool {
             self.bytes == *other
         }
+    }
+
+    /// Encode a tag-7 (nested `Shared\*` ref) portbuf record for `id`/`tag`.
+    fn tag7(tag: SharedType, id: u64) -> Vec<u8> {
+        let mut b = vec![7u8, tag as u8];
+        b.extend_from_slice(&id.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn buffered_send_holds_keepalive_for_shared_value() {
+        ensure_test_registry();
+        let reg = registry();
+        // A nested Shared\* value (another Channel entry stands in for one).
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+        // The channel under test, bound to the registry.
+        let typed = Arc::new(ChannelInner::new(4));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+
+        let payload = typed
+            .build_payload(tag7(SharedType::Channel, vid))
+            .expect("build ok");
+        assert_eq!(
+            payload.keepalive.len(),
+            1,
+            "keepalive resolved for nested ref"
+        );
+        typed.try_send(payload).expect("send ok");
+
+        // Drop the producer's external strong ref; the buffered payload's
+        // keepalive must keep the entry alive in transit.
+        let weak = Arc::downgrade(&value);
+        drop(value);
+        assert!(
+            weak.upgrade().is_some(),
+            "buffered payload should keep the in-transit entry alive"
+        );
+
+        // Consume it; the returned payload still carries its keepalive.
+        let got = typed.try_recv().expect("recv ok").expect("some");
+        assert_eq!(got.bytes[0], 7);
+        drop(got);
+    }
+
+    #[test]
+    fn build_payload_rejects_direct_self_reference() {
+        ensure_test_registry();
+        let reg = registry();
+        let typed = Arc::new(ChannelInner::new(4));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+        let bytes = tag7(SharedType::Channel, ch_entry.id);
+        assert_eq!(typed.build_payload(bytes).err(), Some(SharedError::Cycle));
+    }
+
+    #[test]
+    fn build_payload_no_shared_refs_is_empty_keepalive() {
+        ensure_test_registry();
+        let typed = ChannelInner::new(4);
+        // a plain Long(7) portbuf: tag 3 + 8 LE bytes — no nested refs.
+        let mut bytes = vec![3u8];
+        bytes.extend_from_slice(&7i64.to_le_bytes());
+        let payload = typed.build_payload(bytes).expect("build ok");
+        assert!(payload.keepalive.is_empty());
     }
 
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two

@@ -386,6 +386,7 @@ pub(super) fn counter_rc_to_result(rc: c_int) -> Result<(), PhpError> {
         -2 => "OxPHP\\Shared\\StaleHandleException",
         -3 => "OxPHP\\Shared\\TypeException",
         -4 => "OxPHP\\Shared\\CapacityException",
+        -9 => "OxPHP\\Shared\\CycleException",
         -10 => "OxPHP\\Shared\\UninitializedException",
         _ => "OxPHP\\Shared\\SharedException",
     };
