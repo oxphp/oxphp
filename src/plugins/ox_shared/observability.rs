@@ -720,7 +720,7 @@ mod tests {
     use super::*;
     use crate::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
     use crate::plugins::ox_shared::registry::{init_registry, registry};
-    use crate::plugins::ox_shared::types::channel::ChannelInner;
+    use crate::plugins::ox_shared::types::channel::{ChannelInner, Payload};
     use http::{HeaderMap, Method};
     use http_body_util::BodyExt;
 
@@ -1119,8 +1119,10 @@ mod tests {
         let a = Arc::new(ChannelInner::new(4));
         let b = Arc::new(ChannelInner::new(8));
         // Deposit a few payloads so `pending` > 0 for one of them.
-        a.try_send(b"x".to_vec()).expect("send a");
-        a.try_send(b"y".to_vec()).expect("send a2");
+        a.try_send(Payload::bytes_only(b"x".to_vec()))
+            .expect("send a");
+        a.try_send(Payload::bytes_only(b"y".to_vec()))
+            .expect("send a2");
 
         let entry_a = reg
             .insert(SharedType::Channel, a.clone())

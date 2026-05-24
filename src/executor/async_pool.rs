@@ -177,6 +177,7 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: Some("OxPHP\\Async\\AsyncException".into()),
                 exception_message: Some("Task cancelled before execution".into()),
+                keepalive: None,
             });
             if let Some(ref m) = metrics {
                 m.async_task_cancelled();
@@ -201,6 +202,7 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: Some("RuntimeException".into()),
                     exception_message: Some("Failed to allocate args buffer".into()),
+                    keepalive: None,
                 });
                 continue;
             }
@@ -221,6 +223,7 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: Some("RuntimeException".into()),
                     exception_message: Some("Failed to deserialize arguments".into()),
+                    keepalive: None,
                 });
                 continue;
             }
@@ -255,6 +258,7 @@ fn async_worker_thread(
                         serialized_value_len: 0,
                         exception_class: Some("RuntimeException".into()),
                         exception_message: Some("Failed to deserialize static vars".into()),
+                        keepalive: None,
                     });
                     continue;
                 }
@@ -283,6 +287,7 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: Some("RuntimeException".into()),
                 exception_message: Some("Failed to allocate return value buffer".into()),
+                keepalive: None,
             });
             continue;
         }
@@ -324,6 +329,7 @@ fn async_worker_thread(
                     serialized_value_len: 0,
                     exception_class: None,
                     exception_message: None,
+                    keepalive: None,
                 }
             } else {
                 AsyncResult {
@@ -332,6 +338,7 @@ fn async_worker_thread(
                     serialized_value_len: ser_len,
                     exception_class: None,
                     exception_message: None,
+                    keepalive: None,
                 }
             }
         } else {
@@ -350,6 +357,7 @@ fn async_worker_thread(
                 serialized_value_len: 0,
                 exception_class: class_str,
                 exception_message: message_str,
+                keepalive: None,
             }
         };
 

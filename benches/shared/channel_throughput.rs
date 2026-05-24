@@ -11,7 +11,7 @@
 //! against `target/criterion/*` summaries.
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use oxphp::plugins::ox_shared::types::channel::ChannelInner;
+use oxphp::plugins::ox_shared::types::channel::{ChannelInner, Payload};
 use oxphp::plugins::ox_shared::types::timeout::Wait;
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ fn bench_recv_single_vs_batched(c: &mut Criterion) {
         b.iter(|| {
             // Top up so the next drain has exactly 10 items.
             for i in 0..10u8 {
-                let _ = ch.try_send(vec![i]);
+                let _ = ch.try_send(Payload::bytes_only(vec![i]));
             }
             for _ in 0..10 {
                 let _ = ch.try_recv();
@@ -40,7 +40,7 @@ fn bench_recv_single_vs_batched(c: &mut Criterion) {
     group.bench_function("batched_recv_many", |b| {
         b.iter(|| {
             for i in 0..10u8 {
-                let _ = ch.try_send(vec![i]);
+                let _ = ch.try_send(Payload::bytes_only(vec![i]));
             }
             let _ = ch.recv_many(10, Wait::Forever);
         });
@@ -61,7 +61,7 @@ fn bench_spsc_throughput(c: &mut Criterion) {
         let ch = ChannelInner::new(10_000);
         b.iter(|| {
             for i in 0..10_000u16 {
-                let _ = ch.try_send(i.to_le_bytes().to_vec());
+                let _ = ch.try_send(Payload::bytes_only(i.to_le_bytes().to_vec()));
             }
             for _ in 0..10_000 {
                 let _ = ch.try_recv();

@@ -29,18 +29,40 @@ use tokio::sync::oneshot;
 
 use crate::async_types::AsyncResult;
 
+/// Type-erased keepalive carried alongside a delivered value: pins nested
+/// `Shared\*` entries alive until the receiver deserializes the bytes.
+/// `None` in the common case. Concrete type is owned by the producing layer
+/// (e.g. a Channel's `SmallVec<[SharedRefOwned; 1]>`).
+pub type Keepalive = Option<Box<dyn std::any::Any + Send>>;
+
 /// Payload delivered to a suspended fiber.
-#[derive(Debug)]
 pub enum PromisePayload {
     /// Portable-serialised zval bytes (system-malloc'd buffer is built
     /// by this module, not by the caller). The receiver deserialises
-    /// on its own thread.
-    Value(Vec<u8>),
+    /// on its own thread. The optional second element is a type-erased
+    /// keepalive (e.g. a Channel's `SharedRefOwned` list) that pins nested
+    /// `Shared\*` entries alive until the receiver deserialises the bytes;
+    /// it rides into `AsyncResult.keepalive`. `None` in the common case.
+    Value(Vec<u8>, Keepalive),
     /// Exception to throw: (fqn, message).
     Exception(String, String),
     /// Cancelled — no value; suspend site decides how to surface this
     /// (typically as a Closed/Stale error).
     Cancelled,
+}
+
+impl std::fmt::Debug for PromisePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(b, k) => f
+                .debug_tuple("Value")
+                .field(&b.len())
+                .field(&k.is_some())
+                .finish(),
+            Self::Exception(c, m) => f.debug_tuple("Exception").field(c).field(m).finish(),
+            Self::Cancelled => write!(f, "Cancelled"),
+        }
+    }
 }
 
 /// Process-global sender registry. Key = synthetic promise id
@@ -127,20 +149,26 @@ pub fn resolve(id: i64, payload: PromisePayload) -> bool {
 ///
 /// A nanosecond TOCTOU remains: if the receiver is dropped between the
 /// `is_closed` check and `send`, the payload is consumed.
-pub fn resolve_value(id: i64, payload: Vec<u8>) -> Option<Vec<u8>> {
+pub fn resolve_value(
+    id: i64,
+    payload: Vec<u8>,
+    keepalive: Keepalive,
+) -> Option<(Vec<u8>, Keepalive)> {
     let Some((_, tx)) = senders().remove(&id) else {
         // Already resolved (timeout / cancel / close won the race) —
-        // hand the payload back to the caller to re-deposit.
-        return Some(payload);
+        // hand the payload (and its keepalive) back to the caller to
+        // re-deposit.
+        return Some((payload, keepalive));
     };
     if tx.is_closed() {
         // Receiver already dropped (the parked fiber is gone). No consumer
-        // for THIS id — hand the payload back so the caller tries a live
-        // sibling waiter or re-deposits it. Loss-free.
-        return Some(payload);
+        // for THIS id — hand the payload + keepalive back so the caller
+        // tries a live sibling waiter or re-deposits it. Loss-free.
+        return Some((payload, keepalive));
     }
-    // We hold a sender with a live receiver. Build the result and deliver.
-    let _ = tx.send(payload_to_result(PromisePayload::Value(payload)));
+    // We hold a sender with a live receiver. Build the result and deliver;
+    // the keepalive rides along in `AsyncResult.keepalive`.
+    let _ = tx.send(payload_to_result(PromisePayload::Value(payload, keepalive)));
     None
 }
 
@@ -166,7 +194,7 @@ pub fn cancel(id: i64) -> bool {
 /// - `Cancelled` → `{ success: false, exception_class: "OxPHP\\Async\\AsyncException", exception_message: "cancelled" }`
 fn payload_to_result(payload: PromisePayload) -> AsyncResult {
     match payload {
-        PromisePayload::Value(bytes) => {
+        PromisePayload::Value(bytes, keepalive) => {
             if bytes.is_empty() {
                 AsyncResult {
                     success: true,
@@ -174,6 +202,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                     serialized_value_len: 0,
                     exception_class: None,
                     exception_message: None,
+                    keepalive,
                 }
             } else {
                 // The downstream `oxphp_portable_free(serialized_value)`
@@ -189,6 +218,8 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                         exception_message: Some(
                             "synthetic promise: failed to allocate result buffer".to_string(),
                         ),
+                        // Delivery failed; releasing the keepalive here is correct.
+                        keepalive: None,
                     };
                 }
                 unsafe {
@@ -200,6 +231,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
                     serialized_value_len: len,
                     exception_class: None,
                     exception_message: None,
+                    keepalive,
                 }
             }
         }
@@ -209,6 +241,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
             serialized_value_len: 0,
             exception_class: Some(class),
             exception_message: Some(message),
+            keepalive: None,
         },
         PromisePayload::Cancelled => AsyncResult {
             success: false,
@@ -216,6 +249,7 @@ fn payload_to_result(payload: PromisePayload) -> AsyncResult {
             serialized_value_len: 0,
             exception_class: Some("OxPHP\\Async\\AsyncException".to_string()),
             exception_message: Some("synthetic promise cancelled".to_string()),
+            keepalive: None,
         },
     }
 }
@@ -230,10 +264,10 @@ extern "C" fn c_alloc() -> i64 {
 #[cfg(feature = "php")]
 extern "C" fn c_resolve(id: i64, payload_bytes: *const u8, payload_len: usize) -> i32 {
     let payload = if payload_bytes.is_null() || payload_len == 0 {
-        PromisePayload::Value(Vec::new())
+        PromisePayload::Value(Vec::new(), None)
     } else {
         let slice = unsafe { std::slice::from_raw_parts(payload_bytes, payload_len) };
-        PromisePayload::Value(slice.to_vec())
+        PromisePayload::Value(slice.to_vec(), None)
     };
     i32::from(resolve(id, payload))
 }
@@ -308,7 +342,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_delivers_value() {
         let (id, rx) = alloc();
-        assert!(resolve(id, PromisePayload::Value(vec![1, 2, 3])));
+        assert!(resolve(id, PromisePayload::Value(vec![1, 2, 3], None)));
         let result = rx.await.expect("receiver should receive");
         assert!(result.success);
         assert_eq!(result.serialized_value_len, 3);
@@ -318,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_empty_value_uses_null_buf() {
         let (id, rx) = alloc();
-        assert!(resolve(id, PromisePayload::Value(Vec::new())));
+        assert!(resolve(id, PromisePayload::Value(Vec::new(), None)));
         let result = rx.await.expect("receiver should receive");
         assert!(result.success);
         assert!(result.serialized_value.is_null());
@@ -365,10 +399,20 @@ mod tests {
     #[tokio::test]
     async fn resolve_value_delivers_and_returns_none() {
         let (id, rx) = alloc();
-        assert!(resolve_value(id, vec![7, 8, 9]).is_none());
+        assert!(resolve_value(id, vec![7, 8, 9], None).is_none());
         let result = rx.await.expect("receiver should receive");
         assert!(result.success);
         assert_eq!(result.serialized_value_len, 3);
+    }
+
+    #[tokio::test]
+    async fn resolve_value_moves_keepalive_into_result() {
+        let (id, rx) = alloc();
+        let marker = Box::new(String::from("kept")) as Box<dyn std::any::Any + Send>;
+        assert!(resolve_value(id, vec![9, 9], Some(marker)).is_none());
+        let result = rx.await.unwrap();
+        assert_eq!(result.serialized_value_len, 2);
+        assert!(result.keepalive.is_some());
     }
 
     #[tokio::test]
@@ -378,8 +422,8 @@ mod tests {
         let (id, rx) = alloc();
         assert!(cancel(id));
         // resolve_value must NOT drop the payload — it hands it back.
-        let returned = resolve_value(id, vec![1, 2, 3]);
-        assert_eq!(returned, Some(vec![1, 2, 3]));
+        let returned = resolve_value(id, vec![1, 2, 3], None);
+        assert_eq!(returned.map(|(b, _)| b), Some(vec![1, 2, 3]));
         // The waiter saw the cancel, not the value.
         let result = rx.await.unwrap();
         assert!(!result.success);
@@ -396,7 +440,10 @@ mod tests {
         // caller can try a live sibling or re-deposit it.
         let (id, rx) = alloc();
         drop(rx);
-        assert_eq!(resolve_value(id, vec![5, 6]), Some(vec![5, 6]));
+        assert_eq!(
+            resolve_value(id, vec![5, 6], None).map(|(b, _)| b),
+            Some(vec![5, 6])
+        );
     }
 
     #[test]

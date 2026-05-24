@@ -20,7 +20,7 @@ use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedId, SharedInner, SharedType, ENTRY_MAGIC, REGISTRY,
 };
 use crate::plugins::ox_shared::types::timeout::{parse_timeout, Wait};
-use crate::plugins::ox_shared::value::SharedValue;
+use crate::plugins::ox_shared::value::{SharedRef, SharedRefOwned, SharedValue};
 
 /// Approximate per-pending-payload footprint booked against
 /// `total_bytes` on send/recv. Mirrors the `64 + pending * 32` formula
@@ -28,10 +28,107 @@ use crate::plugins::ox_shared::value::SharedValue;
 /// per-slot bookkeeping plus the empty `Payload` (`Vec<u8>` header).
 const CHANNEL_PER_PAYLOAD_BYTES: isize = 32;
 
-/// Serialized zval payload (portbuf bytes). Opaque at this layer —
-/// encoding/decoding lives in `value.rs` and is driven by the FFI
-/// layer.
-pub type Payload = Vec<u8>;
+/// In-transit channel value: portbuf wire bytes plus strong refs that pin
+/// every nested `Shared\*` entry alive while the value sits in the channel
+/// (buffer, front-stash, or in-flight to a fiber waker). `keepalive` is
+/// empty for payloads with no nested shared refs (the common case) —
+/// inline, no allocation. Encoding/decoding of `bytes` lives in `value.rs`.
+#[derive(Debug)]
+pub struct Payload {
+    bytes: Vec<u8>,
+    keepalive: SmallVec<[SharedRefOwned; 1]>,
+}
+
+impl Payload {
+    /// Wrap raw wire bytes with no keepalive. Used by tests and by the
+    /// internal recv recirculation paths that move bytes without resolved
+    /// nested shared refs.
+    pub fn bytes_only(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            keepalive: SmallVec::new(),
+        }
+    }
+}
+
+thread_local! {
+    /// Keepalive refs of values popped by a *synchronous* recv FFI
+    /// (`try_recv` / `recv_blocking` / `recv_many`), held until the handler
+    /// has deserialized the bytes. The deserializer re-resolves each tag-7 via
+    /// the registry (`oxphp_shared_handle_from_id`); without this stash the
+    /// popped Payload's keepalive would drop when the FFI returns — *before*
+    /// that re-resolve — freeing a fire-and-forget value's sole strong ref in
+    /// the gap and yielding NULL. The fiber waker path does not use this: it
+    /// anchors its keepalive in `AsyncResult`, dropped after deserialize.
+    static RECV_KEEPALIVE: std::cell::RefCell<Vec<SharedRefOwned>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Stash a popped payload's keepalive so it outlives the handler's deserialize.
+/// No-op (does not touch the thread-local) for the common no-shared-ref case.
+fn stash_recv_keepalive(keepalive: SmallVec<[SharedRefOwned; 1]>) {
+    if keepalive.is_empty() {
+        return;
+    }
+    RECV_KEEPALIVE.with(|k| k.borrow_mut().extend(keepalive));
+}
+
+/// RAII anchor for the recv keepalive stash. Snapshots the stash depth on
+/// construction and truncates back to it on drop, releasing every keepalive a
+/// recv FFI stashed during this handler call — after the handler finished
+/// deserializing. Place one at the top of each synchronous recv handler.
+///
+/// Stash and release are always synchronous within a single handler call (a
+/// buffered hit never suspends between the FFI pop and `write_recv_ok`; the
+/// only suspend — the empty/park path — stashes nothing), so the thread-local
+/// is correctly scoped even across fiber interleaving on one worker thread.
+struct RecvKeepaliveGuard {
+    prior_len: usize,
+}
+
+impl RecvKeepaliveGuard {
+    fn new() -> Self {
+        Self {
+            prior_len: RECV_KEEPALIVE.with(|k| k.borrow().len()),
+        }
+    }
+
+    /// Hard guard for the invariant the truncate-on-drop relies on: a recv
+    /// handler must not stash a keepalive and then suspend the fiber before
+    /// releasing it. If it did, a sibling fiber running during the suspend
+    /// would create+drop its own guard and `truncate(prior_len)` away this
+    /// fiber's still-needed keepalive — a cross-fiber use-after-free. Call this
+    /// before any fiber suspend inside a recv handler.
+    ///
+    /// Always-on (not a `debug_assert`): the failure it guards against is
+    /// silent memory corruption in a release build, so the check must fire in
+    /// release too — a no-op tripwire would let a future streaming recv that
+    /// pops-then-awaits corrupt the stash undetected in production. Today
+    /// nothing stashes before suspending (the only suspend, the empty/park
+    /// path, pops nothing), so this never trips; it converts that future
+    /// regression from a UAF into a clean, loud error. The proper fix when a
+    /// pop-then-await path is actually needed is to transfer keepalive
+    /// ownership explicitly back to the handler (a Rust-native `Payload`
+    /// return — the recv FFI has no C caller) rather than via the thread-local.
+    fn ensure_no_stash_before_suspend(&self) -> Result<(), crate::plugin::PhpError> {
+        if RECV_KEEPALIVE.with(|k| k.borrow().len()) != self.prior_len {
+            return Err(crate::plugin::PhpError::Custom(
+                "recv keepalive stashed before a fiber suspend: a pop-then-await \
+                 path would let a sibling fiber truncate this keepalive \
+                 (cross-fiber use-after-free). Transfer keepalive ownership \
+                 explicitly instead of relying on the thread-local stash."
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for RecvKeepaliveGuard {
+    fn drop(&mut self) {
+        RECV_KEEPALIVE.with(|k| k.borrow_mut().truncate(self.prior_len));
+    }
+}
 
 /// Approximate bytes crossbeam allocates per bounded-channel slot: the
 /// `Payload` plus a per-slot stamp word. A deliberate lower bound on the
@@ -173,6 +270,13 @@ pub struct ChannelInner {
     /// blocking and loss-free. Populated only on the rare dead-waiter
     /// race; inline cap 2.
     recv_front: Mutex<SmallVec<[Payload; 2]>>,
+    /// Multiset of `SharedRef` views the channel currently holds in transit
+    /// (crossbeam buffer + front-stash). The crossbeam buffer is not
+    /// iterable, so this side-index is the only way to expose in-flight
+    /// edges to the cycle walker via [`children`](SharedInner::children).
+    /// Maintained alongside `bump_pending`/`drop_pending` (enter/leave).
+    /// Dups allowed — the walker dedups via its visited set.
+    in_flight: Mutex<Vec<SharedRef>>,
     // Exercised by blocking paths; surfaced to observability.
     senders_blocked: AtomicU32,
     receivers_blocked: AtomicU32,
@@ -211,6 +315,7 @@ impl ChannelInner {
             recv_waiters: Mutex::new(SmallVec::new()),
             send_waiters: Mutex::new(SmallVec::new()),
             recv_front: Mutex::new(SmallVec::new()),
+            in_flight: Mutex::new(Vec::new()),
             senders_blocked: AtomicU32::new(0),
             receivers_blocked: AtomicU32::new(0),
             items_sent_total: AtomicU64::new(0),
@@ -281,6 +386,66 @@ impl ChannelInner {
         self.track_payload_delta(-1);
     }
 
+    /// Snapshot the `SharedRef` views of a payload's keepalive — captured
+    /// before the payload is moved into the crossbeam buffer so the enter
+    /// sites can register them after a successful deposit.
+    fn keepalive_views(keepalive: &[SharedRefOwned]) -> SmallVec<[SharedRef; 1]> {
+        keepalive.iter().map(SharedRefOwned::as_view).collect()
+    }
+
+    /// Register in-transit refs in the cycle index (enter). No-op when empty.
+    ///
+    /// Enter sites MUST call this *before* the value becomes consumable
+    /// (i.e. before `tx.try_send` / `recv_front.push`), and roll back via
+    /// [`index_remove_views`] if the deposit then fails. Registering *after*
+    /// a successful deposit races a fast consumer: between the deposit and
+    /// this add, a consumer on another thread can pop the item and run
+    /// [`index_remove`], which finds nothing (the edge is not added yet) and
+    /// no-ops; the lagging add then strands the edge in the index forever —
+    /// a "ghost" that never leaves, leaks `in_flight`, and inflates the cycle
+    /// walker's edge budget into spurious `EdgeLimitExceeded`. Adding before
+    /// the deposit guarantees the edge is visible by the time the item is
+    /// poppable, so the consumer's `index_remove` always finds it.
+    fn index_add(&self, views: &[SharedRef]) {
+        if views.is_empty() {
+            return;
+        }
+        self.in_flight.lock().extend_from_slice(views);
+    }
+
+    /// Remove one occurrence of each ref from the cycle index (leave). No-op
+    /// when empty. Multiset semantics: a value sent twice is removed once per
+    /// recv.
+    fn index_remove(&self, keepalive: &[SharedRefOwned]) {
+        if keepalive.is_empty() {
+            return;
+        }
+        let mut idx = self.in_flight.lock();
+        for r in keepalive {
+            let v = r.as_view();
+            if let Some(pos) = idx.iter().position(|x| *x == v) {
+                idx.swap_remove(pos);
+            }
+        }
+    }
+
+    /// Roll back an [`index_add`] keyed on `SharedRef` views — used by the
+    /// enter sites when a deposit fails after the edge was pre-registered
+    /// (channel full/closed). Mirrors [`index_remove`] but keyed on views
+    /// rather than owned keepalive, since the payload has already moved by
+    /// the time a failed deposit hands it back. No-op when empty.
+    fn index_remove_views(&self, views: &[SharedRef]) {
+        if views.is_empty() {
+            return;
+        }
+        let mut idx = self.in_flight.lock();
+        for v in views {
+            if let Some(pos) = idx.iter().position(|x| x == v) {
+                idx.swap_remove(pos);
+            }
+        }
+    }
+
     /// Pop the next front-stash item (re-deposited, oldest) if any,
     /// WITHOUT signalling senders. Decrements `pending`. Used by
     /// `drain_buffered_to_waiters`, which defers the send-waiter wake until
@@ -296,6 +461,7 @@ impl ChannelInner {
         let p = front.remove(0);
         drop(front);
         self.drop_pending();
+        self.index_remove(&p.keepalive);
         Some(p)
     }
 
@@ -317,6 +483,11 @@ impl ChannelInner {
     /// item was popped for a recv-waiter that turned out dead and the
     /// freed slot was taken before it could be returned to the buffer.
     fn push_front_stash(&self, p: Payload) {
+        let views = Self::keepalive_views(&p.keepalive);
+        // Register edges before the item becomes visible in the stash, so a
+        // racing `take_front_stash` finds them on `index_remove` rather than
+        // stranding a ghost (see `index_add`). Infallible push — no rollback.
+        self.index_add(&views);
         self.recv_front.lock().push(p);
         self.bump_pending();
     }
@@ -350,6 +521,121 @@ impl ChannelInner {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Test-only: raw size of the in-flight cycle index (multiset, no dedup).
+    /// Distinct from [`children`](SharedInner::children), which dedups by id —
+    /// used to assert no ghost edges leak after concurrent send/recv.
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.in_flight.lock().len()
+    }
+
+    /// Build an in-transit [`Payload`] from raw portbuf wire bytes: scan for
+    /// nested `Shared\*` refs, reject cycles, and resolve each ref into a
+    /// strong keepalive that pins the entry alive while the value is in
+    /// transit. The common no-shared case allocates nothing beyond the bytes.
+    ///
+    /// Called once per FFI send entry; core send methods take the built
+    /// `Payload`. Returns [`SharedError::Cycle`] when the value would close a
+    /// reference cycle back to this channel.
+    pub fn build_payload(&self, bytes: Vec<u8>) -> Result<Payload, SharedError> {
+        if bytes.is_empty() {
+            return Ok(Payload {
+                bytes,
+                keepalive: SmallVec::new(),
+            });
+        }
+        // The scan only succeeds on well-formed portbuf (which the PHP
+        // serializer always emits). A non-portbuf buffer — reachable only via
+        // direct FFI use, e.g. Rust-level tests — carries no resolvable shared
+        // ref, so transport it opaquely with no keepalive rather than failing.
+        let roots = match crate::plugins::ox_shared::value::scan_shared_refs(&bytes) {
+            Ok(r) => r,
+            Err(_) => return Ok(Payload::bytes_only(bytes)),
+        };
+        if roots.is_empty() {
+            return Ok(Payload {
+                bytes,
+                keepalive: SmallVec::new(),
+            });
+        }
+        self.cycle_check(&roots)?;
+        let mut keepalive: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        if let Some(reg) = REGISTRY.get() {
+            for r in &roots {
+                match reg.lookup(r.id) {
+                    Ok(arc) => keepalive.push(SharedRefOwned::from_arc(arc)),
+                    // Near-impossible: the sending zval holds these Arcs across
+                    // the send() call. Defensive degrade in release; the
+                    // receiver would observe NULL for this one ref as before.
+                    Err(_) => debug_assert!(false, "stale shared ref at channel send"),
+                }
+            }
+        }
+        Ok(Payload { bytes, keepalive })
+    }
+
+    /// Reject a send whose value would close a strong-ref cycle back to this
+    /// channel. Mirror of `Shared\Map::check_cycles`. No-op without a bound
+    /// `self_id` or registry (Rust-only fixtures).
+    ///
+    /// **Relative guarantee (TOCTOU).** This check and the `in_flight` edge
+    /// registration (in `try_send`) are not atomic: two threads concurrently
+    /// sending each other (`a.send(b)` and `b.send(a)`) can both pass here
+    /// before either registers its edge, forming an undetected `a↔b` cycle
+    /// whose mutual keepalive Arcs then never release. This is the same
+    /// check-then-mutate window `Shared\Map::set` carries (its `check_cycles`
+    /// also runs outside the entry-insert lock) — an accepted relative
+    /// guarantee shared by every `Shared\*` container, not a channel-specific
+    /// gap. Closing it would require a registry-wide ordering/lock across all
+    /// container writes.
+    fn cycle_check(&self, roots: &[SharedRef]) -> Result<(), SharedError> {
+        use crate::plugins::ox_shared::cycle::{would_create_cycle, CycleError};
+        let (Some(reg), Some(self_id)) = (REGISTRY.get(), self.self_id.get().copied()) else {
+            return Ok(());
+        };
+        let cfg = reg.config();
+        for root in roots {
+            let children_of = |id, out: &mut Vec<SharedRef>| {
+                if let Ok(e) = reg.lookup(id) {
+                    e.inner.children(out);
+                }
+            };
+            match would_create_cycle(
+                *root,
+                self_id,
+                cfg.cycle_detect_depth,
+                cfg.cycle_detect_edges,
+                children_of,
+            ) {
+                Ok(()) => {}
+                Err(CycleError::CycleFound(path)) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: send would form a reference cycle: {}",
+                        crate::plugins::ox_shared::cycle::format_cycle_path(&path)
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+                Err(CycleError::DepthExceeded) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: cycle detection depth limit ({}) exceeded; \
+                         raise SHARED_CYCLE_DETECT_DEPTH or break the graph",
+                        cfg.cycle_detect_depth
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+                Err(CycleError::EdgeLimitExceeded) => {
+                    set_last_error(format!(
+                        "Shared\\Channel: cycle detection edge limit ({}) exceeded; \
+                         raise SHARED_CYCLE_DETECT_EDGES or break the graph",
+                        cfg.cycle_detect_edges
+                    ));
+                    return Err(SharedError::Cycle);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Non-blocking send. See module docs for semantics.
     ///
     /// Ordering: a parked recv-waiter (synthetic promise from a
@@ -374,6 +660,13 @@ impl ChannelInner {
             }
             Some(p) => p,
         };
+        // Register the in-transit edges BEFORE depositing into the buffer:
+        // once `tx.try_send` returns `Ok`, a consumer on another thread can
+        // pop the item immediately, and it must find the edge present to
+        // remove it. Adding after the deposit races that consumer and strands
+        // a ghost (see `index_add`). Roll back on a failed deposit.
+        let views = Self::keepalive_views(&payload.keepalive);
+        self.index_add(&views);
         match self.tx.try_send(payload) {
             Ok(()) => {
                 self.bump_pending();
@@ -390,8 +683,14 @@ impl ChannelInner {
                 self.drain_buffered_to_waiters();
                 Ok(())
             }
-            Err(TrySendError::Full(p)) => Err(TrySendErr::Full(p)),
-            Err(TrySendError::Disconnected(p)) => Err(TrySendErr::Closed(p)),
+            Err(TrySendError::Full(p)) => {
+                self.index_remove_views(&views);
+                Err(TrySendErr::Full(p))
+            }
+            Err(TrySendError::Disconnected(p)) => {
+                self.index_remove_views(&views);
+                Err(TrySendErr::Closed(p))
+            }
         }
     }
 
@@ -411,6 +710,7 @@ impl ChannelInner {
             Ok(p) => {
                 drop(rx);
                 self.drop_pending();
+                self.index_remove(&p.keepalive);
                 self.notify_send.notify_one();
                 // Slot just freed — hand it to a parked send-waiter if
                 // any. Resolving with empty-Value means "you may retry
@@ -492,8 +792,18 @@ impl ChannelInner {
             Wait::Bounded(d) => Some(std::time::Instant::now() + d),
         };
         let mut payload = payload;
+        // Keepalive is constant across retries (the same payload bounces on
+        // Timeout); capture its views once. Register the in-transit edges
+        // BEFORE the first deposit attempt — like `try_send`, a successful
+        // `send_timeout` makes the item poppable before this thread regains
+        // control, so the edge must already be present (see `index_add`).
+        // Roll back on any terminal failure (closed / deadline), since
+        // nothing landed.
+        let views = Self::keepalive_views(&payload.keepalive);
+        self.index_add(&views);
         loop {
             if self.is_closed() {
+                self.index_remove_views(&views);
                 return Err(SharedError::Closed);
             }
             let quantum = match deadline {
@@ -501,6 +811,7 @@ impl ChannelInner {
                 Some(d) => {
                     let remaining = d.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
+                        self.index_remove_views(&views);
                         return Err(SharedError::Timeout);
                     }
                     remaining.min(POLL_QUANTUM)
@@ -523,9 +834,13 @@ impl ChannelInner {
                 }
                 Err(SendTimeoutError::Timeout(p)) => {
                     payload = p;
-                    // loop — re-check close and deadline.
+                    // loop — re-check close and deadline. Edge stays
+                    // registered; the same payload will retry the deposit.
                 }
-                Err(SendTimeoutError::Disconnected(_)) => return Err(SharedError::Closed),
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    self.index_remove_views(&views);
+                    return Err(SharedError::Closed);
+                }
             }
         }
     }
@@ -555,6 +870,7 @@ impl ChannelInner {
                 Ok(p) => {
                     drop(rx);
                     self.drop_pending();
+                    self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -600,6 +916,7 @@ impl ChannelInner {
                     Ok(p) => {
                         drop(rx);
                         self.drop_pending();
+                        self.index_remove(&p.keepalive);
                         self.notify_send.notify_one();
                         Ok(Some(p))
                     }
@@ -623,6 +940,7 @@ impl ChannelInner {
             match recv_res {
                 Ok(p) => {
                     self.drop_pending();
+                    self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
                     return Ok(Some(p));
                 }
@@ -840,12 +1158,31 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            match synthetic::resolve_value(id, payload) {
+            // Carry the keepalive into the delivery so the receiving fiber's
+            // AsyncResult pins the nested entries until it deserializes. Common
+            // no-shared case stays a `None` (no Box allocation).
+            let kb: synthetic::Keepalive = if payload.keepalive.is_empty() {
+                None
+            } else {
+                Some(Box::new(std::mem::take(&mut payload.keepalive)))
+            };
+            match synthetic::resolve_value(id, payload.bytes, kb) {
                 // Delivered to a live receiver.
                 None => return None,
-                // Waiter could not take it (resolved elsewhere, or its
-                // receiver is gone) — payload survived; try the next id.
-                Some(returned) => payload = returned,
+                // Waiter could not take it (resolved elsewhere, or its receiver
+                // is gone) — bytes + keepalive survived; rebuild the Payload
+                // intact and try the next id / re-park. Downcast only on this
+                // rare dead-waiter path.
+                Some((returned, kb)) => {
+                    let keepalive = kb
+                        .and_then(|b| b.downcast::<SmallVec<[SharedRefOwned; 1]>>().ok())
+                        .map(|b| *b)
+                        .unwrap_or_default();
+                    payload = Payload {
+                        bytes: returned,
+                        keepalive,
+                    };
+                }
             }
         }
     }
@@ -862,7 +1199,7 @@ impl ChannelInner {
                 }
                 waiters.remove(0)
             };
-            if synthetic::resolve(id, PromisePayload::Value(Vec::new())) {
+            if synthetic::resolve(id, PromisePayload::Value(Vec::new(), None)) {
                 return;
             }
             // Dead — skip and try the next parked id.
@@ -903,6 +1240,7 @@ impl ChannelInner {
                     Ok(p) => {
                         drop(rx);
                         self.drop_pending();
+                        self.index_remove(&p.keepalive);
                         self.notify_send.notify_one();
                         p
                     }
@@ -997,6 +1335,18 @@ impl SharedInner for ChannelInner {
     }
     fn on_shutdown_notify(&self) {
         self.close();
+    }
+    fn children(&self, out: &mut Vec<SharedRef>) {
+        // Deduplicate by id. `in_flight` is a multiset (the same ref buffered N
+        // times appears N times — needed by `index_remove`), but the cycle
+        // walker counts every returned edge against its `max_edges` budget
+        // *before* deduping via its visited set. Emitting the duplicates of a
+        // legitimate fan-out (N copies of one ref) could spuriously trip
+        // EdgeLimitExceeded → CycleException on an acyclic send. The walker
+        // only needs edge presence, so collapse to distinct ids here.
+        let idx = self.in_flight.lock();
+        let mut seen = std::collections::HashSet::with_capacity(idx.len());
+        out.extend(idx.iter().copied().filter(|r| seen.insert(r.id)));
     }
 }
 
@@ -1109,11 +1459,13 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_try_send on freed Entry");
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        let payload: Payload = if len == 0 {
+        let bytes: Vec<u8> = if len == 0 {
             Vec::new()
         } else {
             unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
         };
+        // Scan + cycle-check + resolve keepalive (Err(Cycle)/etc. propagate).
+        let payload: Payload = ch.build_payload(bytes)?;
 
         match ch.try_send(payload) {
             Ok(()) => {
@@ -1176,7 +1528,10 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
 
         match ch.try_recv() {
             Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload)? };
+                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
+                // Keep nested Shared\* entries alive until the handler
+                // deserializes these bytes (re-resolving each tag-7 id).
+                stash_recv_keepalive(payload.keepalive);
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1231,11 +1586,13 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
         );
         let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
 
-        let payload: Payload = if len == 0 {
+        let bytes: Vec<u8> = if len == 0 {
             Vec::new()
         } else {
             unsafe { std::slice::from_raw_parts(buf, len) }.to_vec()
         };
+        // Scan + cycle-check + resolve keepalive (Err(Cycle)/etc. propagate).
+        let payload: Payload = ch.build_payload(bytes)?;
 
         let wait = parse_timeout(timeout_ms);
         let res = ch.send_blocking(payload, wait);
@@ -1303,7 +1660,10 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
         let wait = parse_timeout(timeout_ms);
         match ch.recv_blocking(wait) {
             Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload)? };
+                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
+                // Keep nested Shared\* entries alive until the handler
+                // deserializes these bytes (re-resolving each tag-7 id).
+                stash_recv_keepalive(payload.keepalive);
                 entry.registry.record_op(entry);
                 unsafe {
                     *out_buf = ptr;
@@ -1468,13 +1828,16 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
                 return Err(SharedError::Generic);
             }
             let len = end - start;
-            let payload = if len == 0 {
+            let bytes = if len == 0 {
                 Vec::new()
             } else {
                 let slice = unsafe { std::slice::from_raw_parts(payloads_concat.add(start), len) };
                 slice.to_vec()
             };
-            payloads.push(payload);
+            // Build (scan + cycle-check + resolve) every element BEFORE sending
+            // any, so a cyclic element rejects the whole batch atomically —
+            // `?` returns Cycle here with `*out_sent` still 0, nothing sent.
+            payloads.push(ch.build_payload(bytes)?);
         }
 
         let wait = parse_timeout(timeout_ms);
@@ -1541,7 +1904,7 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
             return Ok(());
         }
 
-        let total: usize = items.iter().map(|p| p.len()).sum();
+        let total: usize = items.iter().map(|p| p.bytes.len()).sum();
         let concat_ptr = if total == 0 {
             std::ptr::null_mut()
         } else {
@@ -1565,17 +1928,23 @@ pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
         let mut cursor = 0usize;
         unsafe { *offsets_ptr = 0 };
         for (i, item) in items.iter().enumerate() {
-            if !item.is_empty() && !concat_ptr.is_null() {
+            if !item.bytes.is_empty() && !concat_ptr.is_null() {
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        item.as_ptr(),
+                        item.bytes.as_ptr(),
                         concat_ptr.add(cursor),
-                        item.len(),
+                        item.bytes.len(),
                     );
                 }
             }
-            cursor += item.len();
+            cursor += item.bytes.len();
             unsafe { *offsets_ptr.add(i + 1) = cursor };
+        }
+
+        // Keep every popped element's nested Shared\* entries alive until the
+        // recvMany handler deserializes the concat buffer (re-resolving tag-7).
+        for item in items {
+            stash_recv_keepalive(item.keepalive);
         }
 
         unsafe {
@@ -1920,6 +2289,9 @@ pub fn register_class(
         .method("tryRecv")
         .returns(PhpType::Object)
         .handler(|call| {
+            // Hold any popped value's nested keepalive until write_recv_ok has
+            // deserialized the bytes (re-resolving each tag-7 id).
+            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let mut out_buf: *mut u8 = std::ptr::null_mut();
             let mut out_len: usize = 0;
@@ -2122,6 +2494,8 @@ pub fn register_class(
         .param("ms", PhpType::Int)
         .returns(PhpType::Array)
         .handler(|call| {
+            // Hold popped elements' nested keepalives until each is deserialized.
+            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
@@ -2233,6 +2607,7 @@ fn map_channel_rc(rc: c_int) -> crate::plugin::PhpError {
         -4 => "OxPHP\\Shared\\CapacityException",
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\OperationTimeoutException",
+        -9 => "OxPHP\\Shared\\CycleException",
         -10 => "OxPHP\\Shared\\UninitializedException",
         _ => "OxPHP\\Shared\\SharedException",
     };
@@ -2534,6 +2909,11 @@ fn invoke_channel_recv(
     use crate::plugins::ox_shared::handle::SharedHandle;
     use crate::plugins::ox_shared::results::{self, RecvKind};
 
+    // Hold any buffered-hit value's nested keepalive until write_recv_ok has
+    // deserialized the bytes. The fiber waker path anchors its own keepalive in
+    // AsyncResult, so this guard is a no-op there (nothing stashed).
+    let ka_guard = RecvKeepaliveGuard::new();
+
     let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
 
     // The fiber-suspend path uses synthetic-promise FFI that is gated
@@ -2585,6 +2965,13 @@ fn invoke_channel_recv(
                 }
             }
         }
+
+        // Invariant guard: nothing must be stashed before the suspend below, or
+        // a sibling fiber's guard could truncate it away (cross-fiber UAF). The
+        // fast-path try_recv above stashes only on a hit, which returns without
+        // reaching here. Checked before registering a waiter so a violation
+        // can't strand one.
+        ka_guard.ensure_no_stash_before_suspend()?;
 
         let mut promise_id: i64 = 0;
         // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
@@ -2792,6 +3179,268 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    // Test-only equality on `Payload`: compares wire bytes and ignores
+    // `keepalive` (which carries non-comparable `SharedRefOwned`). Lets the
+    // existing assertions compare a popped `Payload` against the bytes a
+    // test sent.
+    impl PartialEq for Payload {
+        fn eq(&self, other: &Self) -> bool {
+            self.bytes == other.bytes
+        }
+    }
+    impl PartialEq<Vec<u8>> for Payload {
+        fn eq(&self, other: &Vec<u8>) -> bool {
+            self.bytes == *other
+        }
+    }
+
+    /// Encode a tag-7 (nested `Shared\*` ref) portbuf record for `id`/`tag`.
+    fn tag7(tag: SharedType, id: u64) -> Vec<u8> {
+        let mut b = vec![7u8, tag as u8];
+        b.extend_from_slice(&id.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn buffered_send_holds_keepalive_for_shared_value() {
+        ensure_test_registry();
+        let reg = registry();
+        // A nested Shared\* value (another Channel entry stands in for one).
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+        // The channel under test, bound to the registry.
+        let typed = Arc::new(ChannelInner::new(4));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+
+        let payload = typed
+            .build_payload(tag7(SharedType::Channel, vid))
+            .expect("build ok");
+        assert_eq!(
+            payload.keepalive.len(),
+            1,
+            "keepalive resolved for nested ref"
+        );
+        typed.try_send(payload).expect("send ok");
+
+        // Drop the producer's external strong ref; the buffered payload's
+        // keepalive must keep the entry alive in transit.
+        let weak = Arc::downgrade(&value);
+        drop(value);
+        assert!(
+            weak.upgrade().is_some(),
+            "buffered payload should keep the in-transit entry alive"
+        );
+
+        // Consume it; the returned payload still carries its keepalive.
+        let got = typed.try_recv().expect("recv ok").expect("some");
+        assert_eq!(got.bytes[0], 7);
+        drop(got);
+    }
+
+    #[test]
+    fn build_payload_rejects_direct_self_reference() {
+        ensure_test_registry();
+        let reg = registry();
+        let typed = Arc::new(ChannelInner::new(4));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+        let bytes = tag7(SharedType::Channel, ch_entry.id);
+        assert_eq!(typed.build_payload(bytes).err(), Some(SharedError::Cycle));
+    }
+
+    #[test]
+    fn build_payload_no_shared_refs_is_empty_keepalive() {
+        ensure_test_registry();
+        let typed = ChannelInner::new(4);
+        // a plain Long(7) portbuf: tag 3 + 8 LE bytes — no nested refs.
+        let mut bytes = vec![3u8];
+        bytes.extend_from_slice(&7i64.to_le_bytes());
+        let payload = typed.build_payload(bytes).expect("build ok");
+        assert!(payload.keepalive.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waker_handoff_carries_keepalive_into_result() {
+        ensure_test_registry();
+        let reg = registry();
+        // A nested Shared\* value that must stay alive in transit.
+        let target = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let tid = target.id;
+        // The channel under test.
+        let typed = Arc::new(ChannelInner::new(1));
+        let ch_entry = reg.insert(SharedType::Channel, typed.clone()).unwrap();
+        typed.bind_entry(Arc::downgrade(&ch_entry));
+        // Park a recv-waiter, then send a tag-7 payload referencing target so
+        // try_send hands it straight to the waiter (the waker path).
+        let (id, rx) = synthetic::alloc();
+        typed.register_recv_waiter(id);
+        let payload = typed.build_payload(tag7(SharedType::Channel, tid)).unwrap();
+        typed.try_send(payload).unwrap();
+        // Drop the producer's external strong ref; the AsyncResult's keepalive
+        // must pin the entry until the fiber deserializes.
+        let weak = Arc::downgrade(&target);
+        drop(target);
+        let result = rx.await.unwrap();
+        assert!(
+            result.keepalive.is_some(),
+            "keepalive rode into AsyncResult"
+        );
+        assert!(
+            weak.upgrade().is_some(),
+            "AsyncResult keepalive should pin the in-transit entry"
+        );
+    }
+
+    #[test]
+    fn children_reports_in_flight_refs_until_consumed() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(4));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        // A nested Shared\* value to send into the channel.
+        let other = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let oid = other.id;
+
+        let payload = inner.build_payload(tag7(SharedType::Channel, oid)).unwrap();
+        inner.try_send(payload).unwrap();
+
+        let mut out = Vec::new();
+        inner.children(&mut out);
+        assert!(
+            out.iter().any(|r| r.id == oid),
+            "in-flight ref must be visible to the cycle walker"
+        );
+
+        // Consume → the ref leaves the index.
+        let _ = inner.try_recv().unwrap().unwrap();
+        let mut out2 = Vec::new();
+        inner.children(&mut out2);
+        assert!(
+            !out2.iter().any(|r| r.id == oid),
+            "consumed ref must leave children()"
+        );
+    }
+
+    #[test]
+    fn children_deduplicates_fanout() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(8));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let other = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let oid = other.id;
+
+        // Buffer the SAME ref several times (a legitimate fan-out).
+        for _ in 0..5 {
+            let p = inner.build_payload(tag7(SharedType::Channel, oid)).unwrap();
+            inner.try_send(p).unwrap();
+        }
+
+        let mut out = Vec::new();
+        inner.children(&mut out);
+        let count = out.iter().filter(|r| r.id == oid).count();
+        assert_eq!(
+            count, 1,
+            "children() must report a fan-out ref once, not per buffered copy \
+             (duplicates would inflate the cycle walker's edge budget)"
+        );
+    }
+
+    #[test]
+    fn cycle_through_two_channels_is_rejected() {
+        ensure_test_registry();
+        let reg = registry();
+        let a = Arc::new(ChannelInner::new(2));
+        let ea = reg.insert(SharedType::Channel, a.clone()).unwrap();
+        a.bind_entry(Arc::downgrade(&ea));
+        let b = Arc::new(ChannelInner::new(2));
+        let eb = reg.insert(SharedType::Channel, b.clone()).unwrap();
+        b.bind_entry(Arc::downgrade(&eb));
+
+        // a.send(b): no cycle yet; b becomes in-flight in a (visible via
+        // a.children()).
+        let pa = a.build_payload(tag7(SharedType::Channel, eb.id)).unwrap();
+        a.try_send(pa).unwrap();
+
+        // b.send(a) would close an a<->b strong-ref cycle — must be rejected,
+        // which only works because a.children() now reports b.
+        assert_eq!(
+            b.build_payload(tag7(SharedType::Channel, ea.id)).err(),
+            Some(SharedError::Cycle)
+        );
+    }
+
+    #[test]
+    fn recv_keepalive_guard_holds_entry_then_releases() {
+        ensure_test_registry();
+        let reg = registry();
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+        let weak = Arc::downgrade(&value);
+
+        // A keepalive holding one strong ref to the entry (as a recv FFI would
+        // stash from a popped buffered payload).
+        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
+        drop(value); // now only `ka` keeps the entry alive
+        assert!(weak.upgrade().is_some());
+
+        {
+            let _g = RecvKeepaliveGuard::new();
+            stash_recv_keepalive(ka);
+            assert!(
+                weak.upgrade().is_some(),
+                "stash must keep the entry alive across the deserialize window"
+            );
+        }
+        // Guard dropped → stash truncated → the entry's last ref is released.
+        assert!(
+            weak.upgrade().is_none(),
+            "guard drop must release the stashed keepalive"
+        );
+    }
+
+    // The stash-before-suspend guard must reject a violation in *every* build,
+    // not just debug — the failure it prevents is a silent cross-fiber UAF in
+    // release. Guards against a future regression to `debug_assert`.
+    #[test]
+    fn ensure_no_stash_before_suspend_is_always_on() {
+        ensure_test_registry();
+        let reg = registry();
+        let value = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let vid = value.id;
+
+        let guard = RecvKeepaliveGuard::new();
+        // Nothing stashed yet — the live invariant holds.
+        assert!(guard.ensure_no_stash_before_suspend().is_ok());
+
+        // Simulate a future pop-then-await: stash, then re-check.
+        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
+        stash_recv_keepalive(ka);
+        assert!(
+            guard.ensure_no_stash_before_suspend().is_err(),
+            "stash-before-suspend must be rejected in all builds, not debug only"
+        );
+        // guard drops at scope end → truncate releases the stashed keepalive.
+        drop(value);
+    }
+
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
     // OS threads: the consumer must receive every sent item with none lost or
     // duplicated. Exercises the bounded-queue park/wake handoff under the
@@ -2805,7 +3454,8 @@ mod tests {
             let ch = ch.clone();
             std::thread::spawn(move || {
                 for _ in 0..n {
-                    ch.send_blocking(vec![7u8], Wait::Forever).expect("send");
+                    ch.send_blocking(Payload::bytes_only(vec![7u8]), Wait::Forever)
+                        .expect("send");
                 }
                 ch.close();
             })
@@ -2827,6 +3477,113 @@ mod tests {
         prod.join().expect("producer thread");
         let got = cons.join().expect("consumer thread");
         assert_eq!(got, n, "consumer must receive every sent item");
+    }
+
+    // The enter-before-deposit ordering registers the in-flight edge *before*
+    // the deposit, so a failed deposit MUST roll the edge back or it leaks a
+    // ghost. These three tests cover every failure exit of the send paths.
+    //
+    // (The success-path ghost race the ordering actually fixes is producer-
+    // side and only a couple of atomics wide — a consumer's path to
+    // `index_remove` is reliably longer, so a stress harness cannot reproduce
+    // it deterministically. The ordering invariant is documented on
+    // `index_add`; what is deterministically testable, and what a future edit
+    // could regress, is the rollback balance below.)
+
+    /// A nested-Shared payload whose `try_send` hits a full channel must leave
+    /// no in-flight edge behind (pre-add rolled back on `Full`).
+    #[test]
+    fn try_send_full_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        // Occupy the single slot with an opaque (no-keepalive) item.
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        // Now a Shared-carrying send must fail Full — and not strand its edge.
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert!(matches!(inner.try_send(p), Err(TrySendErr::Full(_))));
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "failed try_send must roll back its pre-registered in-flight edge"
+        );
+        drop(nested);
+    }
+
+    /// A blocking send that times out on a full channel must roll back too.
+    #[test]
+    fn send_blocking_timeout_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert_eq!(
+            inner.send_blocking(p, Wait::Bounded(std::time::Duration::from_millis(20))),
+            Err(SharedError::Timeout)
+        );
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "timed-out send must roll back its pre-registered in-flight edge"
+        );
+        drop(nested);
+    }
+
+    /// A blocking send that observes the channel closed mid-wait rolls back.
+    #[test]
+    fn send_blocking_closed_rolls_back_in_flight_edge() {
+        ensure_test_registry();
+        let reg = registry();
+        let inner = Arc::new(ChannelInner::new(1));
+        let entry = reg.insert(SharedType::Channel, inner.clone()).unwrap();
+        inner.bind_entry(Arc::downgrade(&entry));
+        let nested = reg
+            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+            .unwrap();
+        let nid = nested.id;
+
+        inner
+            .try_send(Payload::bytes_only(vec![0u8]))
+            .expect("fill slot");
+        // Close from another thread while the send is parked on the full slot.
+        let bg = {
+            let inner = inner.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                inner.close();
+            })
+        };
+        let p = inner.build_payload(tag7(SharedType::Channel, nid)).unwrap();
+        assert_eq!(
+            inner.send_blocking(p, Wait::Forever),
+            Err(SharedError::Closed)
+        );
+        bg.join().expect("closer thread");
+        assert_eq!(
+            inner.in_flight_len(),
+            0,
+            "send aborted by close must roll back its pre-registered edge"
+        );
+        drop(nested);
     }
 
     #[test]
@@ -2917,7 +3674,8 @@ mod tests {
     #[test]
     fn try_send_then_try_recv() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1, 2, 3]).expect("send ok");
+        ch.try_send(Payload::bytes_only(vec![1, 2, 3]))
+            .expect("send ok");
         assert_eq!(ch.pending(), 1);
         match ch.try_recv() {
             Ok(Some(p)) => assert_eq!(p, vec![1, 2, 3]),
@@ -2929,8 +3687,9 @@ mod tests {
     #[test]
     fn try_send_full_returns_full() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![0xAA]).expect("first send ok");
-        match ch.try_send(vec![0xBB]) {
+        ch.try_send(Payload::bytes_only(vec![0xAA]))
+            .expect("first send ok");
+        match ch.try_send(Payload::bytes_only(vec![0xBB])) {
             Err(TrySendErr::Full(p)) => assert_eq!(p, vec![0xBB]),
             other => panic!("expected Full([0xBB]), got {other:?}"),
         }
@@ -2964,7 +3723,7 @@ mod tests {
     fn try_send_after_close_errors() {
         let ch = ChannelInner::new(4);
         ch.close();
-        match ch.try_send(vec![9]) {
+        match ch.try_send(Payload::bytes_only(vec![9])) {
             Err(TrySendErr::Closed(p)) => assert_eq!(p, vec![9]),
             other => panic!("expected Closed([9]), got {other:?}"),
         }
@@ -2973,8 +3732,8 @@ mod tests {
     #[test]
     fn try_recv_drains_after_close() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         ch.close();
         match ch.try_recv() {
             Ok(Some(p)) => assert_eq!(p, vec![1]),
@@ -2994,8 +3753,9 @@ mod tests {
     fn capacity_zero_clamped_to_one() {
         let ch = ChannelInner::new(0);
         assert_eq!(ch.capacity(), 1);
-        ch.try_send(vec![1]).expect("first send ok");
-        match ch.try_send(vec![2]) {
+        ch.try_send(Payload::bytes_only(vec![1]))
+            .expect("first send ok");
+        match ch.try_send(Payload::bytes_only(vec![2])) {
             Err(TrySendErr::Full(_)) => {}
             other => panic!("expected Full, got {other:?}"),
         }
@@ -3004,9 +3764,9 @@ mod tests {
     #[test]
     fn pending_matches_try_send_counts() {
         let ch = ChannelInner::new(8);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
-        ch.try_send(vec![3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
         assert_eq!(ch.pending(), 3);
         let _ = ch.try_recv().unwrap();
         let _ = ch.try_recv().unwrap();
@@ -3016,8 +3776,8 @@ mod tests {
     #[test]
     fn debug_snapshot_returns_pending_as_long() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         match ch.debug_snapshot() {
             SharedValue::Long(2) => {}
             other => panic!("expected Long(2), got {other:?}"),
@@ -3038,35 +3798,44 @@ mod tests {
     #[test]
     fn send_blocking_fast_path() {
         let ch = ChannelInner::new(4);
-        ch.send_blocking(vec![1], Wait::Bounded(Duration::from_millis(100)))
-            .expect("send ok");
+        ch.send_blocking(
+            Payload::bytes_only(vec![1]),
+            Wait::Bounded(Duration::from_millis(100)),
+        )
+        .expect("send ok");
         assert_eq!(ch.pending(), 1);
     }
 
     #[test]
     fn send_blocking_on_full_waits_until_recv() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(2)),
+                )
             })
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
-        assert_eq!(first, Some(vec![1]));
+        assert_eq!(first.map(|p| p.bytes), Some(vec![1]));
         let res = sender.join().expect("sender thread");
         assert!(res.is_ok(), "send_blocking got {res:?}");
         let second = ch.try_recv().expect("drain second");
-        assert_eq!(second, Some(vec![2]));
+        assert_eq!(second.map(|p| p.bytes), Some(vec![2]));
     }
 
     #[test]
     fn send_blocking_timeout_returns_timeout() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![1]).unwrap();
-        let res = ch.send_blocking(vec![2], Wait::Bounded(Duration::from_millis(50)));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        let res = ch.send_blocking(
+            Payload::bytes_only(vec![2]),
+            Wait::Bounded(Duration::from_millis(50)),
+        );
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
     }
 
@@ -3074,18 +3843,21 @@ mod tests {
     fn send_blocking_on_closed_returns_closed() {
         let ch = ChannelInner::new(4);
         ch.close();
-        let res = ch.send_blocking(vec![1], Wait::Forever);
+        let res = ch.send_blocking(Payload::bytes_only(vec![1]), Wait::Forever);
         assert!(matches!(res, Err(SharedError::Closed)), "got {res:?}");
     }
 
     #[test]
     fn send_blocking_wakes_when_closed_mid_wait() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(5)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(5)),
+                )
             })
         };
         // Let the blocker arm.
@@ -3104,9 +3876,9 @@ mod tests {
     #[test]
     fn recv_blocking_fast_path() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let res = ch.recv_blocking(Wait::Bounded(Duration::from_millis(100)));
-        assert_eq!(res.unwrap(), Some(vec![1]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![1]));
     }
 
     #[test]
@@ -3117,9 +3889,9 @@ mod tests {
             std::thread::spawn(move || ch.recv_blocking(Wait::Bounded(Duration::from_secs(2))))
         };
         std::thread::sleep(Duration::from_millis(50));
-        ch.try_send(vec![7]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![7])).unwrap();
         let res = receiver.join().expect("receiver thread");
-        assert_eq!(res.unwrap(), Some(vec![7]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![7]));
     }
 
     #[test]
@@ -3160,22 +3932,31 @@ mod tests {
     #[test]
     fn recv_blocking_drains_before_returning_none() {
         let ch = ChannelInner::new(4);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
         ch.close();
-        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![1]));
-        assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), Some(vec![2]));
+        assert_eq!(
+            ch.recv_blocking(Wait::Forever).unwrap().map(|p| p.bytes),
+            Some(vec![1])
+        );
+        assert_eq!(
+            ch.recv_blocking(Wait::Forever).unwrap().map(|p| p.bytes),
+            Some(vec![2])
+        );
         assert_eq!(ch.recv_blocking(Wait::Forever).unwrap(), None);
     }
 
     #[test]
     fn senders_blocked_gauge_increments_while_blocked() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
             std::thread::spawn(move || {
-                ch.send_blocking(vec![2], Wait::Bounded(Duration::from_secs(2)))
+                ch.send_blocking(
+                    Payload::bytes_only(vec![2]),
+                    Wait::Bounded(Duration::from_secs(2)),
+                )
             })
         };
         std::thread::sleep(Duration::from_millis(30));
@@ -3195,9 +3976,9 @@ mod tests {
         };
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 1);
-        ch.try_send(vec![9]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![9])).unwrap();
         let res = receiver.join().expect("receiver thread");
-        assert_eq!(res.unwrap(), Some(vec![9]));
+        assert_eq!(res.unwrap().map(|p| p.bytes), Some(vec![9]));
         assert_eq!(ch.receivers_blocked().load(Ordering::Relaxed), 0);
     }
 
@@ -3212,7 +3993,7 @@ mod tests {
         let ch2 = ch.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            ch2.try_send(vec![7, 7]).unwrap();
+            ch2.try_send(Payload::bytes_only(vec![7, 7])).unwrap();
         });
         let got = rx.await.unwrap();
         assert!(got.success);
@@ -3253,7 +4034,7 @@ mod tests {
     async fn register_recv_waiter_drains_buffered_items() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(4));
-        ch.try_send(vec![1, 2, 3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1, 2, 3])).unwrap();
         assert_eq!(ch.pending(), 1);
         let (id, rx) = synthetic::alloc();
         ch.register_recv_waiter(id);
@@ -3267,7 +4048,7 @@ mod tests {
     async fn register_send_waiter_fires_on_try_recv() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let (id, rx) = synthetic::alloc();
         ch.register_send_waiter(id);
         let ch2 = ch.clone();
@@ -3284,7 +4065,7 @@ mod tests {
     async fn register_send_waiter_cancelled_with_closed_on_close() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let (id, rx) = synthetic::alloc();
         ch.register_send_waiter(id);
         ch.close();
@@ -3302,7 +4083,7 @@ mod tests {
         let ch = std::sync::Arc::new(ChannelInner::new(4));
         let (id, rx) = synthetic::alloc();
         ch.register_recv_waiter(id);
-        ch.try_send(vec![99]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![99])).unwrap();
         let got = rx.await.unwrap();
         assert!(got.success);
         assert_eq!(got.serialized_value_len, 1);
@@ -3342,7 +4123,7 @@ mod tests {
         // Cancel the first waiter BEFORE the send — makes it "dead"
         // from the draining thread's POV.
         assert!(synthetic::cancel(id1));
-        ch.try_send(vec![42]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![42])).unwrap();
         let got1 = rx1.await.unwrap();
         assert!(!got1.success); // first got Cancelled
         let got2 = rx2.await.unwrap();
@@ -3366,7 +4147,7 @@ mod tests {
         ch.register_recv_waiter(id);
         // Sanity: exactly one waiter parked.
         let expected = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        ch.try_send(expected.clone()).unwrap();
+        ch.try_send(Payload::bytes_only(expected.clone())).unwrap();
         let got = rx.await.unwrap();
         assert!(got.success);
         assert_eq!(got.serialized_value_len, expected.len());
@@ -3389,12 +4170,18 @@ mod tests {
         // Kill the waiter before send reaches it.
         assert!(synthetic::cancel(id));
         // Send must not panic and must not drop the payload.
-        ch.try_send(vec![0xDE, 0xAD]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xDE, 0xAD])).unwrap();
         // Channel is still operational.
-        ch.try_send(vec![0xBE, 0xEF]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xBE, 0xEF])).unwrap();
         // The dead-waiter payload was preserved in the buffer (FIFO).
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xDE, 0xAD]));
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xBE, 0xEF]));
+        assert_eq!(
+            ch.try_recv().unwrap().map(|p| p.bytes),
+            Some(vec![0xDE, 0xAD])
+        );
+        assert_eq!(
+            ch.try_recv().unwrap().map(|p| p.bytes),
+            Some(vec![0xBE, 0xEF])
+        );
     }
 
     /// Regression: `drain_buffered_to_waiters` must re-park a buffered item
@@ -3414,7 +4201,7 @@ mod tests {
         // Deposit straight into the crossbeam buffer, bypassing `try_send`
         // (which would reap the dead waiter itself). This reproduces an
         // item buffered while a dead waiter is still parked.
-        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.tx.try_send(Payload::bytes_only(vec![0xAA])).unwrap();
         ch.bump_pending();
         assert_eq!(ch.pending(), 1);
         // Drain: item is popped for the dead waiter and must be re-parked
@@ -3422,7 +4209,7 @@ mod tests {
         ch.drain_buffered_to_waiters();
         assert_eq!(ch.pending(), 1, "re-parked item must stay counted");
         // Recovered intact; channel then empty+open.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert_eq!(ch.try_recv(), Err(TryRecvErr::WouldBlockEmpty));
     }
@@ -3447,7 +4234,7 @@ mod tests {
         // Now fill the buffer directly (bypass `try_send`, which would reap
         // the dead waiter / drain itself), reproducing a buffered item with
         // a dead recv-waiter still parked ahead of it.
-        ch.tx.try_send(vec![0xAA]).unwrap();
+        ch.tx.try_send(Payload::bytes_only(vec![0xAA])).unwrap();
         ch.bump_pending();
         // Drain: the item bounces to the front-stash. The send-waiter must
         // NOT be woken — the channel still holds exactly one item.
@@ -3458,7 +4245,7 @@ mod tests {
             "send-waiter must NOT be woken: no real capacity freed"
         );
         // Consume the stashed item → occupancy truly drops → sender wakes.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert!(
             srx.try_recv().is_ok(),
@@ -3487,7 +4274,7 @@ mod tests {
         ch.register_send_waiter(sid);
         // Seed the item directly in the FRONT-STASH (not the buffer), so the
         // drain sources it from the stash and must bounce it back unchanged.
-        ch.push_front_stash(vec![0xAA]);
+        ch.push_front_stash(Payload::bytes_only(vec![0xAA]));
         assert_eq!(ch.pending(), 1);
         // Drain: stash item is taken for the dead waiter and re-stashed. The
         // send-waiter must NOT be woken — occupancy is unchanged.
@@ -3498,7 +4285,7 @@ mod tests {
             "send-waiter must NOT be woken: stash bounce frees no real capacity"
         );
         // Consume the stashed item → occupancy truly drops → sender wakes.
-        assert_eq!(ch.try_recv().unwrap(), Some(vec![0xAA]));
+        assert_eq!(ch.try_recv().unwrap().map(|p| p.bytes), Some(vec![0xAA]));
         assert_eq!(ch.pending(), 0);
         assert!(
             srx.try_recv().is_ok(),
@@ -3523,7 +4310,7 @@ mod tests {
         // ahead of the live sibling.
         drop(rx_dead);
         // Delivery must skip the dead id and reach the live sibling.
-        ch.try_send(vec![0x11]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0x11])).unwrap();
         let got = rx_live
             .try_recv()
             .expect("live sibling must receive the item, not lose it");
@@ -3534,14 +4321,16 @@ mod tests {
     #[test]
     fn send_blocking_forever_wait_is_indefinite() {
         let ch = Arc::new(ChannelInner::new(1));
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let sender = {
             let ch = Arc::clone(&ch);
-            std::thread::spawn(move || ch.send_blocking(vec![2], Wait::Forever))
+            std::thread::spawn(move || {
+                ch.send_blocking(Payload::bytes_only(vec![2]), Wait::Forever)
+            })
         };
         std::thread::sleep(Duration::from_millis(50));
         let first = ch.try_recv().expect("drain first");
-        assert_eq!(first, Some(vec![1]));
+        assert_eq!(first.map(|p| p.bytes), Some(vec![1]));
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if sender.is_finished() {
@@ -3888,8 +4677,8 @@ mod tests {
     #[test]
     fn send_blocking_try_returns_timeout_when_full() {
         let ch = ChannelInner::new(1);
-        ch.try_send(vec![0]).unwrap();
-        let res = ch.send_blocking(vec![1], Wait::Try);
+        ch.try_send(Payload::bytes_only(vec![0])).unwrap();
+        let res = ch.send_blocking(Payload::bytes_only(vec![1]), Wait::Try);
         assert!(matches!(res, Err(SharedError::Timeout)), "got {res:?}");
         // Gauge must not have been incremented — Try short-circuits before the guard.
         assert_eq!(ch.senders_blocked().load(Ordering::Relaxed), 0);
@@ -3924,7 +4713,7 @@ mod tests {
     fn send_blocking_try_succeeds_when_not_full() {
         let ch = ChannelInner::new(2);
         // Channel is empty — Wait::Try must succeed, not timeout.
-        let res = ch.send_blocking(vec![0xAA], Wait::Try);
+        let res = ch.send_blocking(Payload::bytes_only(vec![0xAA]), Wait::Try);
         assert!(res.is_ok(), "expected Ok, got {res:?}");
         assert_eq!(ch.pending(), 1);
     }
@@ -3932,7 +4721,7 @@ mod tests {
     #[test]
     fn recv_blocking_try_succeeds_when_not_empty() {
         let ch = ChannelInner::new(2);
-        ch.try_send(vec![0xBB]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![0xBB])).unwrap();
         // Channel has an item — Wait::Try must return it, not Timeout.
         let res = ch.recv_blocking(Wait::Try);
         assert!(
@@ -3988,7 +4777,7 @@ mod tests {
     #[test]
     fn send_many_fills_channel_and_returns_count() {
         let ch = ChannelInner::new(10);
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 5);
         assert_eq!(ch.pending(), 5);
@@ -3998,7 +4787,7 @@ mod tests {
     fn send_many_stops_on_closed() {
         let ch = ChannelInner::new(10);
         ch.close();
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Forever);
         assert_eq!(sent, 0);
     }
@@ -4008,7 +4797,7 @@ mod tests {
         // Capacity 2; push 5 with 50ms timeout → only first 2 fit, rest
         // time out and send_many returns the running count.
         let ch = ChannelInner::new(2);
-        let payloads: Vec<Payload> = (0u8..5).map(|i| vec![i]).collect();
+        let payloads: Vec<Payload> = (0u8..5).map(|i| Payload::bytes_only(vec![i])).collect();
         let sent = ch.send_many(payloads, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(sent, 2);
         assert_eq!(ch.pending(), 2);
@@ -4017,9 +4806,9 @@ mod tests {
     #[test]
     fn recv_many_drain_max_zero() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![1]).unwrap();
-        ch.try_send(vec![2]).unwrap();
-        ch.try_send(vec![3]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
         let got = ch.recv_many(0, Wait::Forever);
         assert_eq!(got, vec![vec![1], vec![2], vec![3]]);
         assert_eq!(ch.pending(), 0);
@@ -4036,7 +4825,7 @@ mod tests {
     fn recv_many_respects_max() {
         let ch = ChannelInner::new(10);
         for i in 0u8..5 {
-            ch.try_send(vec![i]).unwrap();
+            ch.try_send(Payload::bytes_only(vec![i])).unwrap();
         }
         let got = ch.recv_many(3, Wait::Bounded(Duration::from_millis(50)));
         assert_eq!(got, vec![vec![0], vec![1], vec![2]]);
@@ -4046,7 +4835,7 @@ mod tests {
     #[test]
     fn recv_many_stops_on_closed_empty() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![7]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![7])).unwrap();
         ch.close();
         let got = ch.recv_many(10, Wait::Bounded(Duration::from_millis(50)));
         // Got the buffered item and then stopped on closed+empty; no
@@ -4057,7 +4846,7 @@ mod tests {
     #[test]
     fn recv_many_timeout_returns_partial() {
         let ch = ChannelInner::new(10);
-        ch.try_send(vec![1]).unwrap();
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
         let start = Instant::now();
         let got = ch.recv_many(5, Wait::Bounded(Duration::from_millis(50)));
         let elapsed = start.elapsed();
@@ -4172,7 +4961,8 @@ mod tests {
 
         let baseline = entry.mem_bytes.load(Ordering::Relaxed);
         for i in 0..4u8 {
-            ch.try_send(vec![i]).expect("buffer has room");
+            ch.try_send(Payload::bytes_only(vec![i]))
+                .expect("buffer has room");
         }
         let grown = entry.mem_bytes.load(Ordering::Relaxed);
         assert_eq!(

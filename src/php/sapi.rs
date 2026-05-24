@@ -4223,6 +4223,7 @@ mod tests {
             serialized_value_len: 0,
             exception_class: None,
             exception_message: None,
+            keepalive: None,
         };
         tx.send(result).unwrap();
 

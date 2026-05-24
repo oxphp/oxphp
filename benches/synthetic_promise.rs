@@ -22,7 +22,7 @@ fn bench_roundtrip(c: &mut Criterion) {
             let (id, rx) = alloc();
             // Resolve from another tokio task (simulates cross-thread).
             let resolver = tokio::spawn(async move {
-                let _ = resolve(id, PromisePayload::Value(vec![1, 2, 3, 4]));
+                let _ = resolve(id, PromisePayload::Value(vec![1, 2, 3, 4], None));
             });
             let result = rx.await.expect("payload received");
             resolver.await.expect("resolver task");

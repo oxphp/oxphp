@@ -52,7 +52,6 @@ pub struct AsyncTask {
 unsafe impl Send for AsyncTask {}
 
 /// The result of executing an async task, sent back to the originating PHP worker.
-#[derive(Debug)]
 pub struct AsyncResult {
     /// Whether the closure executed successfully (true) or threw an exception (false).
     pub success: bool,
@@ -65,11 +64,30 @@ pub struct AsyncResult {
     pub exception_class: Option<String>,
     /// Exception message, if the closure threw.
     pub exception_message: Option<String>,
+    /// Type-erased keepalive that pins nested `Shared\*` entries alive until
+    /// the receiving fiber deserializes `serialized_value`. The concrete type
+    /// is owned by the channel layer (`SmallVec<[SharedRefOwned; 1]>`); this
+    /// layer only holds it so it drops at the right time — at the end of
+    /// `await_dispatch_callback`, after `oxphp_portable_deserialize`. `None`
+    /// for every non-channel result and the common no-shared-ref case.
+    pub keepalive: Option<Box<dyn std::any::Any + Send>>,
 }
 
 // SAFETY: The serialized_value pointer is a system-malloc'd buffer exclusively
 // owned by this result — no other thread holds a reference to it. String fields are owned.
 unsafe impl Send for AsyncResult {}
+
+impl std::fmt::Debug for AsyncResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncResult")
+            .field("success", &self.success)
+            .field("serialized_value_len", &self.serialized_value_len)
+            .field("exception_class", &self.exception_class)
+            .field("exception_message", &self.exception_message)
+            .field("keepalive", &self.keepalive.is_some())
+            .finish()
+    }
+}
 
 impl Drop for AsyncResult {
     fn drop(&mut self) {
@@ -195,6 +213,7 @@ mod tests {
             serialized_value_len: 0,
             exception_class: None,
             exception_message: None,
+            keepalive: None,
         };
 
         assert!(result.success);
@@ -211,6 +230,7 @@ mod tests {
             serialized_value_len: 0,
             exception_class: Some("RuntimeException".to_string()),
             exception_message: Some("something went wrong".to_string()),
+            keepalive: None,
         };
 
         assert!(!result.success);
