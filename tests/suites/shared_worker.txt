@@ -11,6 +11,8 @@ shared/test_channel_inflight_keepalive_waker
 shared/test_channel_cycle_detection
 shared/test_counter_cross_thread
 shared/test_atomic_cross_thread
+shared/test_atomic_cas_loop_cross_thread
+shared/test_atomic_bitset_cross_thread
 shared/test_mutex_contention
 shared/test_mutex_with_lock_timeout
 shared/test_once_init_single_init
