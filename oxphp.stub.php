@@ -1195,8 +1195,10 @@ namespace OxPHP\Shared {
     /**
      * Atomic boolean flag, visible from every PHP worker thread.
      *
-     * Use Flag for feature toggles, circuit-breaker state, shutdown
-     * signals — anything that fits a single yes/no switch.
+     * The bool twin of {@see Atomic}: lock-free load/store/swap/compareAndSet
+     * with explicit memory ordering. Use Flag for feature toggles,
+     * circuit-breaker state, shutdown signals, one-shot init markers — any
+     * single cross-worker yes/no switch.
      *
      * @link docs/en/features/shared-flag.md
      */
@@ -1204,22 +1206,38 @@ namespace OxPHP\Shared {
     {
         public function __construct(bool $initial = false) {}
 
-        /** Current value. */
-        public function isSet(): bool {}
-
-        /** Atomically set to true, returning the previous value. */
-        public function set(): bool {}
-
-        /** Atomically set to false, returning the previous value. */
-        public function clear(): bool {}
+        /**
+         * Atomically read the current value.
+         *
+         * @param Ordering $order One of Relaxed, Acquire, SeqCst.
+         */
+        public function load(Ordering $order = Ordering::SeqCst): bool {}
 
         /**
-         * Compare-and-set. Returns true if the swap succeeded.
+         * Atomically store `$value`.
+         *
+         * @param Ordering $order One of Relaxed, Release, SeqCst.
          */
-        public function compareAndSet(bool $expect, bool $new): bool {}
+        public function store(bool $value, Ordering $order = Ordering::SeqCst): void {}
 
-        /** Atomically set to `$new`, returning the previous value. */
-        public function exchange(bool $new): bool {}
+        /** Atomically store `$value`, returning the previous value. */
+        public function swap(bool $value, Ordering $order = Ordering::SeqCst): bool {}
+
+        /**
+         * Compare-and-set. If the current value equals `$expect`, replace it
+         * with `$new` and return true; otherwise leave it unchanged and
+         * return false.
+         *
+         * @param Ordering $success Ordering applied on a successful swap (any case).
+         * @param Ordering $failure Ordering applied on failure — one of
+         *                          Relaxed, Acquire, SeqCst.
+         */
+        public function compareAndSet(
+            bool $expect,
+            bool $new,
+            Ordering $success = Ordering::SeqCst,
+            Ordering $failure = Ordering::SeqCst,
+        ): bool {}
 
         /** Registry ID for this instance. */
         public function id(): int {}

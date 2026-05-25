@@ -25,7 +25,7 @@ use oxphp::plugins::ox_shared::types::counter::{
     oxphp_shared_counter_add, oxphp_shared_counter_create, CounterInner, SharedInnerCounterExt,
 };
 use oxphp::plugins::ox_shared::types::flag::{
-    oxphp_shared_flag_create, oxphp_shared_flag_test, FlagInner, SharedInnerFlagExt,
+    oxphp_shared_flag_create, oxphp_shared_flag_load, FlagInner, SharedInnerFlagExt,
 };
 use oxphp::plugins::ox_shared::types::once::{
     oxphp_shared_once_create, OnceInner, SharedInnerOnceExt,
@@ -173,6 +173,9 @@ where
 // `0u8` is the wire encoding of `Ordering::Relaxed` accepted by
 // oxphp_shared_atomic_load (see `ordering_from_u8` in atomic.rs).
 const ORDER_RELAXED: u8 = 0;
+// `4u8` is the wire encoding of `Ordering::SeqCst` — used by the Flag bench
+// to match its SeqCst bare baseline (and the pre-redesign all-SeqCst Flag).
+const ORDER_SEQCST: u8 = 4;
 
 fn bench_atomic_single(c: &mut Criterion, ids: EntryIds) {
     let mut group = c.benchmark_group("atomic_load");
@@ -437,7 +440,7 @@ fn bench_counter(c: &mut Criterion, ids: EntryIds) {
 }
 
 fn bench_flag(c: &mut Criterion, ids: EntryIds) {
-    let mut group = c.benchmark_group("flag_test");
+    let mut group = c.benchmark_group("flag_load");
     let h = ids.flag;
 
     let bare_single = AtomicBool::new(false);
@@ -450,7 +453,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
     group.bench_function(BenchmarkId::new("current", 1), |b| {
         b.iter(|| {
             let mut out: std::os::raw::c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_test(h.ptr.raw(), &mut out) };
+            let rc = unsafe { oxphp_shared_flag_load(h.ptr.raw(), ORDER_SEQCST, &mut out) };
             debug_assert_eq!(rc, 0);
             criterion::black_box(out);
         });
@@ -462,7 +465,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
             b.iter(|| {
                 let entry = reg.lookup(h.id).expect("entry exists");
                 let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                let v = inner.test();
+                let v = inner.load(Ordering::SeqCst);
                 entry.ops.fetch_add(1, Ordering::Relaxed);
                 criterion::black_box(v);
             });
@@ -475,7 +478,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
             b.iter(|| {
                 let entry = reg.lookup(h.id).expect("entry exists");
                 let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                let v = inner.test();
+                let v = inner.load(Ordering::SeqCst);
                 criterion::black_box(v);
             });
         });
@@ -488,7 +491,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
         group.bench_function(BenchmarkId::new("raw_ptr", 1), |b| {
             b.iter(|| {
                 let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                let v = inner.test();
+                let v = inner.load(Ordering::SeqCst);
                 entry.ops.fetch_add(1, Ordering::Relaxed);
                 criterion::black_box(v);
             });
@@ -509,7 +512,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
             b.iter_custom(|iters| {
                 run_threads(n, iters, move || {
                     let mut out: std::os::raw::c_int = 0;
-                    let rc = unsafe { oxphp_shared_flag_test(h.ptr.raw(), &mut out) };
+                    let rc = unsafe { oxphp_shared_flag_load(h.ptr.raw(), ORDER_SEQCST, &mut out) };
                     debug_assert_eq!(rc, 0);
                     criterion::black_box(out);
                 })
@@ -521,7 +524,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
                     let reg = registry();
                     let entry = reg.lookup(h.id).expect("entry exists");
                     let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                    let v = inner.test();
+                    let v = inner.load(Ordering::SeqCst);
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
@@ -533,7 +536,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
                     let reg = registry();
                     let entry = reg.lookup(h.id).expect("entry exists");
                     let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                    let v = inner.test();
+                    let v = inner.load(Ordering::SeqCst);
                     criterion::black_box(v);
                 })
             });
@@ -546,7 +549,7 @@ fn bench_flag(c: &mut Criterion, ids: EntryIds) {
                 let entry = std::sync::Arc::clone(&entry_v4);
                 run_threads(n, iters, move || {
                     let inner: &FlagInner = entry.inner.as_any_flag().expect("type matches");
-                    let v = inner.test();
+                    let v = inner.load(Ordering::SeqCst);
                     entry.ops.fetch_add(1, Ordering::Relaxed);
                     criterion::black_box(v);
                 })
@@ -736,7 +739,7 @@ fn geomean(xs: &[f64]) -> Option<f64> {
     Some((log_sum / nonzero.len() as f64).exp())
 }
 
-const GROUPS: &[&str] = &["atomic_load", "counter_add", "flag_test", "once_state"];
+const GROUPS: &[&str] = &["atomic_load", "counter_add", "flag_load", "once_state"];
 const VARIANTS: &[&str] = &["bare", "current", "one_lookup", "no_record_op", "raw_ptr"];
 
 fn print_summary() {

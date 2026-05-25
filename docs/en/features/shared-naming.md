@@ -49,7 +49,7 @@ muscle memory comes from.
 
 ### 4. Boolean-getter — `is*()` prefix
 
-`Channel::isClosed()`, `Flag::isSet()`.
+`Channel::isClosed()`.
 
 No bare verbs (`test`, `check`) and no domain-specific names
 (`closed`). The `is` prefix marks a pure read of a boolean property.
@@ -100,14 +100,10 @@ eliminates.
 `Atomic::compareAndSet()`, `Flag::compareAndSet()`. Always returns
 `bool` (the swap happened, or it didn't).
 
-### 7. Replace and return previous — `swap()`, `exchange()`
+### 7. Replace and return previous — `swap()`
 
-`Atomic::swap()` for ints, `Flag::exchange()` for bools.
-
-Naming asymmetry is historical and intentional: `swap` reads as
-"replace contents of two locations" in low-level contexts; `exchange`
-is more common in PHP for "swap with new". Both return the previous
-value.
+`Atomic::swap()` for ints, `Flag::swap()` for bools. Returns the
+previous value.
 
 ### 8. Atomic RMW returning previous — `fetch*()` prefix
 
@@ -127,17 +123,14 @@ Do not mix.
 
 ### 9. Reset to default — `clear()`
 
-`Map::clear()`, `Flag::clear()` (in the sense of "set to false").
-Returns `void` for plain reset; returns the previous value when the
-caller can reasonably want it (`Flag::clear()`).
+`Map::clear()` — empty the container; returns `void`.
 
 `Counter` has no `clear()` — `set(0)` is its windowed reset.
 `Counter::set()` is the documented exception that returns the
 **previous** value (not `void`): it is the atomic exchange, and
 `set(0)` reading the prior total is the LongAdder `sumThenReset`
-idiom. (`Atomic` spells the same operation `swap()` / `exchange()`;
-Counter keeps `set` because `set($n)` reads naturally for seeding
-and windowing.)
+idiom. (`Atomic` spells the same operation `swap()`; Counter keeps
+`set` because `set($n)` reads naturally for seeding and windowing.)
 
 ### 10. Registry identity — `id(): int`
 
@@ -154,15 +147,15 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 | Write an atomic             | `store($v, $order)`      | `Atomic::store`                         |
 | Number of elements          | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
 | Has key / has element       | `has($key): bool`        | `Map::has`                              |
-| Boolean property            | `is*(): bool`            | `Flag::isSet`, `Channel::isClosed`      |
+| Boolean property            | `is*(): bool`            | `Channel::isClosed`                     |
 | Non-blocking wait           | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
 | Forever wait                | bare verb                | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
 | Bounded wait                | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
-| Swap, return prev           | `swap()` / `exchange()`  | `Atomic::swap`, `Flag::exchange`        |
+| Swap, return prev           | `swap()`                 | `Atomic::swap`, `Flag::swap`            |
 | Atomic RMW, return prev     | `fetch*()`               | `Atomic::fetchAdd`                      |
 | Atomic RMW, return new      | bare verb                | `Counter::add`                          |
-| Reset to default            | `clear()`                | `Map::clear`, `Flag::clear`             |
+| Reset to default            | `clear()`                | `Map::clear`                            |
 | Registry id                 | `id(): int`              | every `Shared\*` type                   |
 
 ## Adding a new `Shared\*` type
