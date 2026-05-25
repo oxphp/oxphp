@@ -21,30 +21,36 @@ impl CounterInner {
         }
     }
 
-    // All Counter ops use SeqCst by contract: the value participates in a
-    // single global modification order, so PHP code may treat a Counter as
-    // a synchronisation point (write payload, then bump; a reader who sees
-    // the bump sees the payload). Stronger than a bare metric needs — kept
-    // deliberately so the public contract is one sentence. Do not weaken
-    // without updating the public Counter stubs and CHANGELOG.
+    // All Counter ops use Relaxed ordering. A Counter is a statistics
+    // accumulator, not a synchronisation point: Relaxed makes each
+    // add / swap / CAS atomic (no lost ticks, no torn reads) but
+    // establishes no happens-before with other memory. Code that must
+    // synchronise other state through the integer uses Shared\Atomic,
+    // which exposes explicit Ordering. Do not strengthen this without
+    // updating the public Counter stubs, docs, and CHANGELOG.
     pub fn get(&self) -> i64 {
-        self.value.load(Ordering::SeqCst)
+        self.value.load(Ordering::Relaxed)
     }
 
     pub fn swap(&self, v: i64) -> i64 {
-        self.value.swap(v, Ordering::SeqCst)
+        self.value.swap(v, Ordering::Relaxed)
     }
 
     /// Returns the NEW value.
     pub fn add(&self, delta: i64) -> i64 {
         self.value
-            .fetch_add(delta, Ordering::SeqCst)
+            .fetch_add(delta, Ordering::Relaxed)
             .wrapping_add(delta)
     }
 
-    pub fn add_batch(&self, deltas: &[i64]) -> i64 {
-        let sum: i64 = deltas.iter().fold(0i64, |acc, d| acc.wrapping_add(*d));
-        self.add(sum)
+    /// CAS. Returns true if the current value was `expect` and was
+    /// replaced with `new`. Relaxed/Relaxed — sufficient for bounded /
+    /// saturating counters whose decision is made on the counter's own
+    /// value. Ordered CAS belongs to Shared\Atomic.
+    pub fn compare_and_set(&self, expect: i64, new: i64) -> bool {
+        self.value
+            .compare_exchange(expect, new, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 }
 
@@ -175,17 +181,16 @@ pub unsafe extern "C" fn oxphp_shared_counter_add(
 
 /// # Safety
 /// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-/// `out_new` must be valid for writes of `i64`. `deltas` must be valid for
-/// reads of `n` `i64` values when `n > 0`.
+/// `out_swapped` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
+pub unsafe extern "C" fn oxphp_shared_counter_cas(
     entry_ptr: *const Entry,
-    deltas: *const i64,
-    n: usize,
-    out_new: *mut i64,
+    expect: i64,
+    new_val: i64,
+    out_swapped: *mut c_int,
 ) -> c_int {
-    if out_new.is_null() || (n > 0 && deltas.is_null()) {
-        set_last_error("null argument");
+    if out_swapped.is_null() {
+        set_last_error("out_swapped is null");
         return SharedError::Generic.code();
     }
     if entry_ptr.is_null() {
@@ -194,17 +199,12 @@ pub unsafe extern "C" fn oxphp_shared_counter_add_batch(
     ffi_entry(|| {
         // SAFETY: see oxphp_shared_counter_get.
         let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_add_batch on freed Entry");
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "counter_cas on freed Entry");
         let inner = entry.inner.as_any_counter().ok_or(SharedError::Type)?;
-        let slice = if n == 0 {
-            &[][..]
-        } else {
-            unsafe { std::slice::from_raw_parts(deltas, n) }
-        };
-        let new_val = inner.add_batch(slice);
+        let swapped = inner.compare_and_set(expect, new_val);
         entry.registry.record_op(entry);
-        // SAFETY: out_new checked non-null above.
-        unsafe { *out_new = new_val };
+        // SAFETY: out_swapped checked non-null above.
+        unsafe { *out_swapped = swapped as c_int };
         Ok(())
     })
 }
@@ -224,7 +224,6 @@ impl SharedInnerCounterExt for dyn SharedInner {
 
 // ─── PHP class registration ───────────────────────────────────────────
 
-use crate::bridge::types::ValType;
 use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
 use crate::plugin::{PhpError, PluginContext, PluginError};
 use crate::plugins::ox_shared::handle::SharedHandle;
@@ -277,82 +276,48 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             call.ret_long(out);
             Ok(())
         })
-        .method("inc")
-        .optional_param("by", PhpType::Int, PhpValue::Int(1))
+        .method("set")
+        .param("value", PhpType::Int)
         .returns(PhpType::Int)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
-            let by = if call.argc() > 0 {
-                call.arg_long(0).unwrap_or(1)
-            } else {
-                1
-            };
-            let mut new_val: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, by, &mut new_val) };
+            let value = call.arg_long(0)?;
+            let mut prev: i64 = 0;
+            let rc = unsafe { oxphp_shared_counter_swap(handle.entry_ptr, value, &mut prev) };
             counter_rc_to_result(rc)?;
-            call.ret_long(new_val);
-            Ok(())
-        })
-        .method("dec")
-        .optional_param("by", PhpType::Int, PhpValue::Int(1))
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let by = if call.argc() > 0 {
-                call.arg_long(0).unwrap_or(1)
-            } else {
-                1
-            };
-            let mut new_val: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, -by, &mut new_val) };
-            counter_rc_to_result(rc)?;
-            call.ret_long(new_val);
+            call.ret_long(prev);
             Ok(())
         })
         .method("add")
-        .param("delta", PhpType::Int)
+        .optional_param("delta", PhpType::Int, PhpValue::Int(1))
         .returns(PhpType::Int)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
-            let delta = call.arg_long(0)?;
+            let delta = if call.argc() > 0 {
+                call.arg_long(0).unwrap_or(1)
+            } else {
+                1
+            };
             let mut new_val: i64 = 0;
             let rc = unsafe { oxphp_shared_counter_add(handle.entry_ptr, delta, &mut new_val) };
             counter_rc_to_result(rc)?;
             call.ret_long(new_val);
             Ok(())
         })
-        .method("addBatch")
-        .param("deltas", PhpType::Array)
-        .returns(PhpType::Int)
-        .handler(|call| {
-            let handle_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let mut deltas: Vec<i64> = Vec::new();
-            call.arg_array_foreach(0, |_key, val| {
-                if val.val_type() == ValType::Long {
-                    deltas.push(val.as_long());
-                }
-            })?;
-            let mut new_val: i64 = 0;
-            let rc = unsafe {
-                oxphp_shared_counter_add_batch(
-                    handle_ptr,
-                    deltas.as_ptr(),
-                    deltas.len(),
-                    &mut new_val,
-                )
-            };
-            counter_rc_to_result(rc)?;
-            call.ret_long(new_val);
-            Ok(())
-        })
-        .method("reset")
-        .returns(PhpType::Int)
+        .method("compareAndSet")
+        .param("expect", PhpType::Int)
+        .param("new", PhpType::Int)
+        .returns(PhpType::Bool)
         .handler(|call| {
             let handle = call.storage::<SharedHandle>()?;
-            let mut prev: i64 = 0;
-            let rc = unsafe { oxphp_shared_counter_swap(handle.entry_ptr, 0, &mut prev) };
+            let expect = call.arg_long(0)?;
+            let new_val = call.arg_long(1)?;
+            let mut swapped: c_int = 0;
+            let rc = unsafe {
+                oxphp_shared_counter_cas(handle.entry_ptr, expect, new_val, &mut swapped)
+            };
             counter_rc_to_result(rc)?;
-            call.ret_long(prev);
+            call.ret_bool(swapped != 0);
             Ok(())
         })
         .method("id")
@@ -412,10 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn add_batch_sums_correctly() {
-        let c = CounterInner::new(0);
-        assert_eq!(c.add_batch(&[1, 2, 3, -4, 10]), 12);
-        assert_eq!(c.add_batch(&[]), 12);
+    fn compare_and_set_swaps_only_on_match() {
+        let c = CounterInner::new(5);
+        assert!(c.compare_and_set(5, 10));
+        assert_eq!(c.get(), 10);
+        // current is 10, not 5 → no swap
+        assert!(!c.compare_and_set(5, 20));
+        assert_eq!(c.get(), 10);
     }
 
     #[test]

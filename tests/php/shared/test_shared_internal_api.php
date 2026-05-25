@@ -7,8 +7,8 @@ header('Content-Type: text/plain');
 
 // Create sample entries so the API has data to report on.
 $counter = new OxPHP\Shared\Counter(42);
-$counter->inc();
-$counter->inc();
+$counter->add();
+$counter->add();
 $flag = new OxPHP\Shared\Flag(true);
 
 $internal = 'http://127.0.0.1:9090';

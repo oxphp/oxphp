@@ -167,7 +167,7 @@ $counters = new OxPHP\Shared\Map();
 $counters->set('requests_handled', new OxPHP\Shared\Counter());
 
 // Любой воркер инкрементирует через сохранённый Shareable (хранится по ссылке).
-$counters->get('requests_handled')->inc();
+$counters->get('requests_handled')->add();
 ```
 
 ### Итерация большого map
@@ -214,11 +214,11 @@ $counter = new OxPHP\Shared\Counter(10);
 $map->set('c', $counter);
 
 $retrieved = $map->get('c');           // та же идентичность Shareable
-$retrieved->inc();                      // мутация видна и через $counter
+$retrieved->add();                      // мутация видна и через $counter
 echo $counter->get();                   // 11
 
 $counter2 = $map->pop('c');             // Map отпускает своё удержание, возвращает значение
-$counter2->inc();                       // всё ещё жив через возвращённую обёртку
+$counter2->add();                       // всё ещё жив через возвращённую обёртку
 ```
 
 ### Обнаружение циклов отклоняет до мутации

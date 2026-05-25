@@ -41,7 +41,7 @@ final class SharedCounterBackend implements CounterBackend
             $key,
             fn () => new OxPHP\Shared\Counter(),
         );
-        return $counter->inc($by);
+        return $counter->add($by);
     }
 
     public function get(string $key): int
@@ -53,7 +53,7 @@ final class SharedCounterBackend implements CounterBackend
     public function reset(string $key): int
     {
         $counter = $this->counters->get($key);
-        return $counter?->reset() ?? 0;
+        return $counter?->set(0) ?? 0;
     }
 }
 
@@ -92,7 +92,7 @@ final class RedisCounterBackend implements CounterBackend
 
 Семантические разрывы:
 
-- `addBatch(array $deltas)` — это один FFI round trip в `Shared\*`. В Redis — это пайплайн (всё ещё один RTT); в NATS — N вызовов. Предпочитайте предвычислять сумму и делать один `INCRBY`.
+- Массовая аккумуляция — это `add(array_sum($deltas))`, один FFI round trip в `Shared\*`. В Redis предвычислите сумму и сделайте один `INCRBY` (один RTT); в NATS — один `KV.update`.
 - Целочисленное переполнение в Redis возвращает ошибку; `Shared\Counter` молча оборачивается.
 
 ### `Shared\Flag` → Redis / NATS feature-flag сервис

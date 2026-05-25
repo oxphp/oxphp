@@ -103,9 +103,8 @@ count($pool);  // 全部活跃槽（in-use + idle）
 `Atomic::fetchAdd()`、`fetchSub()`、`fetchAnd()`、`fetchOr()`、
 `fetchXor()`。
 
-`fetch` 前缀编码了返回契约：**操作前的值**。这与 `Counter::add()`、
-`Counter::inc()`、`Counter::dec()` 形成对比 — 后者返回**新**值
-（LongAdder 风格的聚合计数器）。
+`fetch` 前缀编码了返回契约：**操作前的值**。这与 `Counter::add()`
+形成对比 — 后者返回**新**值（LongAdder 风格的聚合计数器）。
 
 为新 RMW 方法命名时，先选契约，再起名：
 
@@ -117,12 +116,13 @@ count($pool);  // 全部活跃槽（in-use + idle）
 ### 9. 重置为默认 — `clear()`
 
 `Map::clear()`、`Flag::clear()`（含义为「设为 false」）。普通重置
-返回 `void`；当调用方合理需要原值时返回原值（`Flag::clear()`、
-`Counter::reset()`）。
+返回 `void`；当调用方合理需要原值时返回原值（`Flag::clear()`）。
 
-`Counter::reset()` 是已记录的例外，保留 `reset`：LongAdder 约定为
-`sumThenReset`，重命名会误导熟悉 Java `LongAdder` 或 Go
-`atomic.Int64.Swap(0)` 的用户。
+`Counter` 没有 `clear()` —— `set(0)` 即其窗口重置。`Counter::set()`
+是已记录的例外，返回**原**值（而非 `void`）：它是原子交换，而
+`set(0)` 读取先前总和正是 LongAdder 的 `sumThenReset` 惯用法。
+（`Atomic` 将同一操作命名为 `swap()` / `exchange()`；Counter 保留
+`set`，因为 `set($n)` 用于初始化和窗口重置时读起来更自然。）
 
 ### 10. 注册表标识 — `id(): int`
 
@@ -146,7 +146,7 @@ count($pool);  // 全部活跃槽（in-use + idle）
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
 | 替换并返回 prev             | `swap()` / `exchange()`  | `Atomic::swap`、`Flag::exchange`        |
 | 原子 RMW，返回 prev         | `fetch*()`               | `Atomic::fetchAdd`                      |
-| 原子 RMW，返回 new          | 裸动词                   | `Counter::inc`、`Counter::add`          |
+| 原子 RMW，返回 new          | 裸动词                   | `Counter::add`                          |
 | 重置为默认                  | `clear()`                | `Map::clear`、`Flag::clear`             |
 | 注册表标识                  | `id(): int`              | 所有 `Shared\*` 类型                    |
 
@@ -155,7 +155,7 @@ count($pool);  // 全部活跃槽（in-use + idle）
 提交新原语前请逐项检查：
 
 - [ ] 每个方法对应速查表中的一行，或有 ADR 说明例外（参见上文
-  `Atomic::load/store` 与 `Counter::reset`）。
+  `Atomic::load/store` 与 `Counter::set`）。
 - [ ] 若该类型存放值的集合，则实现 `\Countable` 并暴露
   `count(): int`。
 - [ ] 读取方法为 `get` 或 `load`（仅原子）。

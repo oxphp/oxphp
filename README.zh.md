@@ -126,7 +126,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ### 共享状态（`OxPHP\Shared\*`）
 进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/features/shared-state.md)，[可观测性参考](docs/zh/operations/shared-observability.md)。
 
-- **`Shared\Counter`** — 原子 int64（`inc`、`dec`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/features/shared-counter.md)
+- **`Shared\Counter`** — 原子 int64（`get`、`set`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/features/shared-counter.md)
 - **`Shared\Flag`** — 支持 `compareAndSet` 的原子 bool，用于一次性状态切换 — 参见 [Flag](docs/zh/features/shared-flag.md)
 - **`Shared\Once`** — 带可重入安全工厂的单次初始化容器 — 参见 [Once](docs/zh/features/shared-once.md)
 - **`Shared\Mutex`** — 带毒化机制的互斥锁，保护存储值，支持可重入与跨线程死锁检测 — 参见 [Mutex](docs/zh/features/shared-mutex.md)

@@ -1086,9 +1086,12 @@ namespace OxPHP\Shared {
     /**
      * Atomic signed 64-bit counter, visible from every PHP worker thread.
      *
-     * All operations are lock-free (`SeqCst`). Use Counter for rate
-     * counters, progress trackers, sequence generators, or any shared
-     * integer state that would otherwise require Redis INCR.
+     * All operations are lock-free and `Relaxed`: each is atomic (no lost
+     * ticks, no torn reads) but establishes no happens-before with other
+     * memory. Use Counter for rate counters, progress trackers, sequence
+     * generators, or any shared integer state that would otherwise require
+     * Redis INCR. To synchronise other memory through the integer, use
+     * {@see Atomic} (with an explicit {@see Ordering}).
      *
      * @link docs/en/features/shared-counter.md
      */
@@ -1096,32 +1099,21 @@ namespace OxPHP\Shared {
     {
         public function __construct(int $initial = 0) {}
 
-        /** Current value. */
+        /** Current value (atomic load). */
         public function get(): int {}
 
-        /** Set to `$value`, returning the previous value. */
+        /** Set to `$value`, returning the previous value (atomic exchange; set(0) resets a window). */
         public function set(int $value): int {}
 
-        /** Atomically add `$by` (default 1), returning the new value. */
-        public function inc(int $by = 1): int {}
-
-        /** Atomically subtract `$by` (default 1), returning the new value. */
-        public function dec(int $by = 1): int {}
-
-        /** Atomically add `$delta` (may be negative), returning the new value. */
-        public function add(int $delta): int {}
+        /** Atomically add `$delta` (default 1; may be negative), returning the new value. */
+        public function add(int $delta = 1): int {}
 
         /**
-         * Compare-and-set. Returns true if the swap succeeded (current
-         * value was `$expect`), false otherwise.
+         * Compare-and-set. Returns true if the current value was `$expect`
+         * and was replaced with `$new`, false otherwise. Relaxed ordering;
+         * for ordered CAS use {@see Atomic}.
          */
         public function compareAndSet(int $expect, int $new): bool {}
-
-        /** Atomic sum of `$deltas`, returning the new value. */
-        public function addBatch(array $deltas): int {}
-
-        /** Reset to `$newValue` (default 0), returning the previous value. */
-        public function reset(int $newValue = 0): int {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1131,7 +1123,7 @@ namespace OxPHP\Shared {
      * Generic atomic signed 64-bit integer with explicit memory-ordering
      * control, visible from every PHP worker thread.
      *
-     * Where {@see Counter} is a fixed-`SeqCst` convenience surface, Atomic
+     * Where {@see Counter} is a fixed-`Relaxed` accumulator surface, Atomic
      * exposes the full lock-free toolkit — load/store/swap, compare-and-set,
      * and fetch arithmetic/bitwise — each taking an {@see Ordering} so
      * latency-sensitive code can relax barriers it does not need. Use it for

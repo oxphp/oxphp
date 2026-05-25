@@ -167,7 +167,7 @@ $counters = new OxPHP\Shared\Map();
 $counters->set('requests_handled', new OxPHP\Shared\Counter());
 
 // 任何工作线程都能通过存储的 Shareable 自增（按引用存储）。
-$counters->get('requests_handled')->inc();
+$counters->get('requests_handled')->add();
 ```
 
 ### 迭代大型映射
@@ -214,11 +214,11 @@ $counter = new OxPHP\Shared\Counter(10);
 $map->set('c', $counter);
 
 $retrieved = $map->get('c');           // 同一个 Shareable 身份
-$retrieved->inc();                      // 通过 $counter 也能看到变更
+$retrieved->add();                      // 通过 $counter 也能看到变更
 echo $counter->get();                   // 11
 
 $counter2 = $map->pop('c');             // Map 释放它的持有，并返回该值
-$counter2->inc();                       // 通过返回的包装仍然存活
+$counter2->add();                       // 通过返回的包装仍然存活
 ```
 
 ### 循环检测在变更之前拒绝

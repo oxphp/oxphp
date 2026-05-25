@@ -19,10 +19,10 @@ impl FlagInner {
         }
     }
 
-    // All Flag ops use SeqCst by contract, mirroring Counter: a Flag is a
-    // one-shot signal that PHP code may use as a synchronisation point
-    // (write payload, then set; a reader who sees `test()` true sees the
-    // payload). Do not weaken without updating the public Flag stubs.
+    // All Flag ops use SeqCst by contract: a Flag is a one-shot signal
+    // that PHP code may use as a synchronisation point (write payload,
+    // then set; a reader who sees `test()` true sees the payload). Do not
+    // weaken without updating the public Flag stubs.
     pub fn test(&self) -> bool {
         self.value.load(Ordering::SeqCst)
     }

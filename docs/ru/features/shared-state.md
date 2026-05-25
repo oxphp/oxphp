@@ -79,7 +79,7 @@ require __DIR__ . '/vendor/autoload.php';
 $requests = new OxPHP\Shared\Counter();
 
 oxphp_worker(function () use ($requests) {
-    $requests->inc();                 // атомарно под конкурентностью
+    $requests->add();                 // атомарно под конкурентностью
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
@@ -92,7 +92,7 @@ oxphp_worker(function () use ($requests) {
 ```php
 <?php
 oxphp_async(function () use ($requests) {
-    $requests->inc();                 // выполняется на том воркере, который подхватит файбер
+    $requests->add();                 // выполняется на том воркере, который подхватит файбер
 });
 ```
 
@@ -215,7 +215,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 $hits = new OxPHP\Shared\Counter();
 
 // Каждый запрос инкрементирует, цикл read-modify-write не нужен.
-$current = $hits->inc();          // атомарный inc-и-вернуть
+$current = $hits->add();          // атомарный inc-и-вернуть
 ```
 
 Берите `Map<string, Counter>` (map из счётчиков), когда нужны per-key итоги без логики окон:
@@ -225,7 +225,7 @@ $current = $hits->inc();          // атомарный inc-и-вернуть
 $perTenant = new OxPHP\Shared\Map();
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
-$counter->inc();
+$counter->add();
 ```
 
 ## Семантика хэндла

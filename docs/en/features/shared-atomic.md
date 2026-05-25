@@ -20,7 +20,7 @@ When to use Atomic instead of `Shared\Counter`:
 - **CAS loops** — read with `load`, compute new, retry `compareAndSet` until it succeeds.
 - **Bitflag masks** — `fetchOr` to set, `fetchAnd` to clear.
 
-`Counter` is the right tool for accumulation (`add`, `inc`, `dec`); `Atomic` is the right tool for arbitrary atomic state.
+`Counter` is the right tool for accumulation (`add`); `Atomic` is the right tool for arbitrary atomic state.
 
 ## API Reference
 

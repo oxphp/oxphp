@@ -41,7 +41,7 @@ final class SharedCounterBackend implements CounterBackend
             $key,
             fn () => new OxPHP\Shared\Counter(),
         );
-        return $counter->inc($by);
+        return $counter->add($by);
     }
 
     public function get(string $key): int
@@ -53,7 +53,7 @@ final class SharedCounterBackend implements CounterBackend
     public function reset(string $key): int
     {
         $counter = $this->counters->get($key);
-        return $counter?->reset() ?? 0;
+        return $counter?->set(0) ?? 0;
     }
 }
 
@@ -92,7 +92,7 @@ Each `Shared\*` type has semantic quirks that do not translate trivially to any 
 
 Semantic gaps:
 
-- `addBatch(array $deltas)` is a single FFI round trip in `Shared\*`. In Redis it is a pipeline (still one RTT); in NATS it is N calls. Prefer precomputing the sum and doing one `INCRBY`.
+- Batch accumulation is `add(array_sum($deltas))` — one FFI round trip in `Shared\*`. In Redis, precompute the sum and do one `INCRBY` (one RTT); in NATS it is one `KV.update`.
 - Integer overflow in Redis returns an error; `Shared\Counter` wraps silently.
 
 ### `Shared\Flag` → Redis / NATS feature-flag service

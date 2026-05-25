@@ -126,7 +126,7 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 ### Разделяемое состояние (`OxPHP\Shared\*`)
 Конкурентные примитивы уровня процесса — позволяют PHP-воркерам координировать изменяемое состояние без Redis, Memcached или APCu. Всё внутри процесса: стоимость операции — микросекунды, а не сетевой round-trip. Полное руководство: [Разделяемое состояние](docs/ru/features/shared-state.md), [справочник наблюдаемости](docs/ru/operations/shared-observability.md).
 
-- **`Shared\Counter`** — атомарный int64 (`inc`, `dec`, `add`, `compareAndSet`) — см. [Counter](docs/ru/features/shared-counter.md)
+- **`Shared\Counter`** — атомарный int64 (`get`, `set`, `add`, `compareAndSet`) — см. [Counter](docs/ru/features/shared-counter.md)
 - **`Shared\Flag`** — атомарный bool с `compareAndSet` для one-shot переходов — см. [Flag](docs/ru/features/shared-flag.md)
 - **`Shared\Once`** — контейнер однократной инициализации с reentrancy-safe фабрикой — см. [Once](docs/ru/features/shared-once.md)
 - **`Shared\Mutex`** — отравляемый мьютекс над хранимым значением, с reentrancy и кросс-поточной детекцией дедлоков — см. [Mutex](docs/ru/features/shared-mutex.md)

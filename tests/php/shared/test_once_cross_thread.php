@@ -10,7 +10,7 @@ for ($i = 0; $i < 4; $i++) {
     $n = $i + 1; // 1..4
     $promises[] = oxphp_async(function() use ($once, $winners, $n) {
         if ($once->trySet($n)) {
-            $winners->inc();
+            $winners->add();
         }
     });
 }

@@ -126,7 +126,7 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 ### Shared State (`OxPHP\Shared\*`)
 Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/features/shared-state.md) and [observability reference](docs/en/operations/shared-observability.md).
 
-- **`Shared\Counter`** — atomic int64 (`inc`, `dec`, `add`, `compareAndSet`) — see [Counter](docs/en/features/shared-counter.md)
+- **`Shared\Counter`** — atomic int64 (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/features/shared-counter.md)
 - **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/features/shared-flag.md)
 - **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/features/shared-once.md)
 - **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/features/shared-mutex.md)

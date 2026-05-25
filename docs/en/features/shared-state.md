@@ -79,7 +79,7 @@ require __DIR__ . '/vendor/autoload.php';
 $requests = new OxPHP\Shared\Counter();
 
 oxphp_worker(function () use ($requests) {
-    $requests->inc();                 // atomic under concurrency
+    $requests->add();                 // atomic under concurrency
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
@@ -92,7 +92,7 @@ When a fiber needs to see the counter too, hand it through `use`:
 ```php
 <?php
 oxphp_async(function () use ($requests) {
-    $requests->inc();                 // runs on whatever worker picks the fiber up
+    $requests->add();                 // runs on whatever worker picks the fiber up
 });
 ```
 
@@ -215,7 +215,7 @@ The example uses a `Map<string, array{count,start}>` because each IP needs two f
 $hits = new OxPHP\Shared\Counter();
 
 // Every request increments, no read-modify-write cycle.
-$current = $hits->inc();          // atomic increment-then-get
+$current = $hits->add();          // atomic increment-then-get
 ```
 
 Reach for `Map<string, Counter>` (a map of counters) when you need per-key totals with no window logic:
@@ -225,7 +225,7 @@ Reach for `Map<string, Counter>` (a map of counters) when you need per-key total
 $perTenant = new OxPHP\Shared\Map();
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
-$counter->inc();
+$counter->add();
 ```
 
 ## Handle semantics

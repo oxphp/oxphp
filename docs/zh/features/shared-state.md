@@ -79,7 +79,7 @@ require __DIR__ . '/vendor/autoload.php';
 $requests = new OxPHP\Shared\Counter();
 
 oxphp_worker(function () use ($requests) {
-    $requests->inc();                 // 并发下的原子操作
+    $requests->add();                 // 并发下的原子操作
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
@@ -92,7 +92,7 @@ oxphp_worker(function () use ($requests) {
 ```php
 <?php
 oxphp_async(function () use ($requests) {
-    $requests->inc();                 // 在任意拾取该 fiber 的工作线程上运行
+    $requests->add();                 // 在任意拾取该 fiber 的工作线程上运行
 });
 ```
 
@@ -215,7 +215,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 $hits = new OxPHP\Shared\Counter();
 
 // 每次请求都自增，不需要读-改-写循环。
-$current = $hits->inc();          // 原子地「自增后取值」
+$current = $hits->add();          // 原子地「自增后取值」
 ```
 
 当你需要按键累计但不涉及窗口逻辑时，选用 `Map<string, Counter>`（计数器的映射）：
@@ -225,7 +225,7 @@ $current = $hits->inc();          // 原子地「自增后取值」
 $perTenant = new OxPHP\Shared\Map();
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
-$counter->inc();
+$counter->add();
 ```
 
 ## 句柄语义
