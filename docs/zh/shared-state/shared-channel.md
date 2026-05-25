@@ -348,6 +348,6 @@ if ($ch->trySend($event)->isFull()) {
 
 ## 相关特性
 
-- [Worker 模式](worker-mode.md) —— fiber 挂起式阻塞变体的前置条件。
-- [异步 Promise](async-promises.md) —— `oxphp_async()` 闭包是把 `Channel` 交给后台 fiber 的常规方式。
-- [Fiber 多路复用](fiber-multiplexing.md) —— 阐述挂起如何在通道操作等待时让工作线程继续产出。
+- [Worker 模式](../features/worker-mode.md) —— fiber 挂起式阻塞变体的前置条件。
+- [异步 Promise](../features/async-promises.md) —— `oxphp_async()` 闭包是把 `Channel` 交给后台 fiber 的常规方式。
+- [Fiber 多路复用](../features/fiber-multiplexing.md) —— 阐述挂起如何在通道操作等待时让工作线程继续产出。

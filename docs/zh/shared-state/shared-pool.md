@@ -227,7 +227,7 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 
 ## 可观测性
 
-完整内容请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
+完整内容请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`。
 - `GET /__ox_shared/summary` 统计 Pool 实例和聚合的 `waiting_total`、`evicted_total`。
@@ -256,4 +256,4 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 - [Shared\Once](shared-once.md) —— 当你需要的是恰好一个资源（不是 N 个的池）。
 - [Shared\Channel](shared-channel.md) —— 配合池构成生产者/消费者流水线。
 - [Shared\Map](shared-map.md) —— 按租户名为键的「每租户一个 Pool」。
-- [Worker 模式](worker-mode.md) —— 同一工作线程内跨请求复用池句柄。
+- [Worker 模式](../features/worker-mode.md) —— 同一工作线程内跨请求复用池句柄。

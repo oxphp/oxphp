@@ -5,7 +5,7 @@ description: OxPHP 文档 —— 高性能异步 PHP 应用服务器，内置 TL
 
 [English](../en/index.md) · [Русский](../ru/index.md) · **中文**
 
-[入门](#入门) · [功能特性](#功能特性) · [安全](#安全) · [PHP](#php) · [运维](#运维) · [架构](#架构)
+[入门](#入门) · [功能特性](#功能特性) · [共享状态](#共享状态) · [安全](#安全) · [PHP](#php) · [运维](#运维) · [架构](#架构)
 
 # OxPHP 文档
 
@@ -31,7 +31,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - **[Worker 模式](features/worker-mode.md)** —— 持久化 PHP 进程，支持 [Fiber 多路复用](features/fiber-multiplexing.md)
 - **[SSE 流式传输](features/sse.md)** —— 从 PHP 推送实时 Server-Sent Events
 - **[异步 Promise](features/async-promises.md)** —— 后台执行 PHP 闭包，不阻塞 Worker
-- **[共享状态](features/shared-state.md)** —— 进程内并发原语（Counter、Flag、Once、Mutex、Channel、Map、Pool），无需 Redis 或 APCu 即可协调工作线程
+- **[共享状态](shared-state/shared-state.md)** —— 进程内并发原语（Counter、Flag、Once、Mutex、Channel、Map、Pool），无需 Redis 或 APCu 即可协调工作线程
 - **[装饰器](features/decorators.md)** —— 通过 PHP 8 属性拦截调用
 - **[分布式追踪与 APM](features/distributed-tracing.md)** —— W3C Trace Context、OpenTelemetry、数据库/HTTP/缓存/文件调用的自动埋点，以及 PHP 追踪 SDK
 
@@ -59,10 +59,26 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [SSE](features/sse.md) —— 从 PHP 进行实时 Server-Sent Events 流式传输
 - [提前响应](features/early-response.md) —— 立即发送响应并继续后台处理
 - [异步 Promise](features/async-promises.md) —— 在后台线程运行 PHP 闭包并等待结果
-- [共享状态](features/shared-state.md) —— 进程内原语：[Counter](features/shared-counter.md)、[Atomic](features/shared-atomic.md)、[Flag](features/shared-flag.md)、[Once](features/shared-once.md)、[Mutex](features/shared-mutex.md)、[Channel](features/shared-channel.md)、[Map](features/shared-map.md)、[Pool](features/shared-pool.md)；[可观测性](operations/shared-observability.md)；[迁移到外部存储](features/migrating-to-external-store.md)
 - [装饰器](features/decorators.md) —— 使用 PHP 8 属性拦截函数和方法调用
 - [分布式追踪与 APM](features/distributed-tracing.md) —— W3C Trace Context、OpenTelemetry、自动埋点和 PHP 追踪 SDK
 - [内部服务器](features/internal-server.md) —— 用于健康检查、Prometheus 指标和实时配置的专用端口
+
+## 共享状态
+
+进程内并发原语，让工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态 —— 一切都在进程内，因此每次操作的开销是微秒级，而非网络往返。
+
+- [概览](shared-state/shared-state.md) —— 注册表模型、句柄生命周期，以及何时该使用共享状态
+- [Counter](shared-state/shared-counter.md) —— 原子 int64 累加器（`get`、`set`、`add`、`compareAndSet`）
+- [Atomic](shared-state/shared-atomic.md) —— 带显式内存序控制的原子 int64
+- [Flag](shared-state/shared-flag.md) —— 用于一次性状态转换的原子布尔
+- [Once](shared-state/shared-once.md) —— 带可重入安全工厂的一次性容器
+- [Mutex](shared-state/shared-mutex.md) —— 基于存储值的中毒互斥锁，带死锁检测
+- [Channel](shared-state/shared-channel.md) —— 有界、fiber 感知的 MPMC 队列
+- [Map](shared-state/shared-map.md) —— 支持批量访问的并发字符串键存储
+- [Pool](shared-state/shared-pool.md) —— 带线程亲和性的有界对象池
+- [命名约定](shared-state/shared-naming.md) —— `Shared\*` 家族的方法命名速查
+- [可观测性](shared-state/shared-observability.md) —— Prometheus 计数器和 JSON 内省端点
+- [迁移到外部存储](shared-state/migrating-to-external-store.md) —— 何时以及如何迁移到 Redis 或 APCu
 
 ## 安全
 

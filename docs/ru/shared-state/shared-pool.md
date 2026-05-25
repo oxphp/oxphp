@@ -227,7 +227,7 @@ Idle-слоты вытесняются фоновым планировщиком
 
 ## Наблюдаемость
 
-Полную экскурсию см. в [Shared Observability](../operations/shared-observability.md). Краткие отсылки:
+Полную экскурсию см. в [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
 - `GET /__ox_shared/summary` считает экземпляры Pool и агрегированные `waiting_total`, `evicted_total`.
@@ -256,4 +256,4 @@ Idle-слоты вытесняются фоновым планировщиком
 - [Shared\Once](shared-once.md) — когда нужен ровно один ресурс (а не пул из N).
 - [Shared\Channel](shared-channel.md) — пара с пулом для producer/consumer пайплайнов.
 - [Shared\Map](shared-map.md) — один `Pool` на тенант, ключуемый по имени.
-- [Worker Mode](worker-mode.md) — хэндлы пула между запросами в пределах одного потока воркера.
+- [Worker Mode](../features/worker-mode.md) — хэндлы пула между запросами в пределах одного потока воркера.

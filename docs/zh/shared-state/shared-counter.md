@@ -115,7 +115,7 @@ Counter 在溢出或极值时永远不会抛出——它会回绕。
 
 ## 可观测性
 
-完整内容请见 [Shared 可观测性](../operations/shared-observability.md)。速查:
+完整内容请见 [Shared 可观测性](shared-observability.md)。速查:
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ value, type: "Counter" }`。
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` 仪表跟踪当前值。

@@ -152,7 +152,7 @@ $secrets->getOrInit(fn () => loadSecretsOrThrow());
 
 ## 可观测性
 
-请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
+请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ status: "uninitialized" | "pending" | "ready" | "poisoned", type: "Once" }`，并在 `ready` 时附带已存储值的预览。
 

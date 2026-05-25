@@ -308,7 +308,7 @@ The registry endpoints walk live state under read locks, so scraping is cheap bu
 
 ## Related
 
-- [Shared State](../features/shared-state.md) — mental model and primitives overview.
-- [Prometheus Metrics](metrics.md) — core server metrics under the same `/metrics` endpoint.
+- [Shared State](shared-state.md) — mental model and primitives overview.
+- [Prometheus Metrics](../operations/metrics.md) — core server metrics under the same `/metrics` endpoint.
 - [Internal Server](../features/internal-server.md) — how the `/__ox_shared/*` endpoints plug into `INTERNAL_ADDR`.
-- [Migrating to an external store](../features/migrating-to-external-store.md) — when saturation is structural, not tunable.
+- [Migrating to an external store](migrating-to-external-store.md) — when saturation is structural, not tunable.

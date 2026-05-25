@@ -308,7 +308,7 @@ SOAK_CONCURRENCY=400 SOAK_THREADS=8 tests/soak/pool_soak.sh
 
 ## См. также
 
-- [Разделяемое состояние](../features/shared-state.md) — ментальная модель и обзор примитивов.
-- [Метрики Prometheus](metrics.md) — метрики ядра сервера на том же эндпоинте `/metrics`.
+- [Разделяемое состояние](shared-state.md) — ментальная модель и обзор примитивов.
+- [Метрики Prometheus](../operations/metrics.md) — метрики ядра сервера на том же эндпоинте `/metrics`.
 - [Внутренний сервер](../features/internal-server.md) — как эндпоинты `/__ox_shared/*` подключаются к `INTERNAL_ADDR`.
-- [Миграция на внешнее хранилище](../features/migrating-to-external-store.md) — когда насыщение структурно, а не настраиваемо.
+- [Миграция на внешнее хранилище](migrating-to-external-store.md) — когда насыщение структурно, а не настраиваемо.

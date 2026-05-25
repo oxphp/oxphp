@@ -85,7 +85,7 @@ oxphp_worker(function () use ($requests) {
 });
 ```
 
-[Worker 模式](worker-mode.md) 的外层作用域每个工作线程运行一次；`use ($requests)` 捕获使同一个 `Shared\Counter` 句柄在该工作线程处理的每次请求中都保持存活。跨工作线程来看，注册表条目本身是同一个——所有持有同 `id()` 句柄的工作线程都会变更同一个原子 int64。
+[Worker 模式](../features/worker-mode.md) 的外层作用域每个工作线程运行一次；`use ($requests)` 捕获使同一个 `Shared\Counter` 句柄在该工作线程处理的每次请求中都保持存活。跨工作线程来看，注册表条目本身是同一个——所有持有同 `id()` 句柄的工作线程都会变更同一个原子 int64。
 
 当 fiber 也需要看到该计数器时，通过 `use` 传入：
 
@@ -204,7 +204,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 - **少一个依赖。** APCu 不再出现在部署故事中。
 - **高负载下的精确计数。** 同一 IP 上的两次并发命中永远不会彼此覆盖。
 
-> 内置的 [限流](rate-limiting.md) 功能（`RATE_LIMIT=...`）继续在连接层运行，比 PHP 层限流器更快。只有当你需要 PHP 层的策略（按租户、按路由、按用户 ID，而非按 IP）时，才需要自定义限流器。
+> 内置的 [限流](../features/rate-limiting.md) 功能（`RATE_LIMIT=...`）继续在连接层运行，比 PHP 层限流器更快。只有当你需要 PHP 层的策略（按租户、按路由、按用户 ID，而非按 IP）时，才需要自定义限流器。
 
 ### 何时选 Map，何时选 Counter
 
@@ -235,7 +235,7 @@ $counter->add();
 1. **身份即注册表 ID，而非 PHP 对象。** 两个 ID 相同的句柄指向同一份状态。相等性测试是 `$a->id() === $b->id()`。
 2. **禁止序列化。** `serialize($counter)` 会抛出异常。注册表仅存活于本进程——放到网络上没有任何用处。当你确实需要跨越进程边界时，请使用[迁移指南](migrating-to-external-store.md)。
 3. **禁止 `clone`。** 原因同上——克隆后的包装看似独立实则共享状态。如果你想要独立值，请构造新实例。
-4. **`id()` 是仅在本进程内有效的不透明令牌。** 在最后一个引用被释放之前保持稳定；可以安全地写入日志、附到 trace span，或在同一进程内传给内部服务器的 [可观测性](../operations/shared-observability.md) 端点。该值在进程启动时随机生成，进程之外没有任何意义——不要把它保存到外部存储、会话、cookie 或另一个 OxPHP worker 中。没有 `fromId()` 构造函数；来自其他进程的 id 无法被解析为任何对象。
+4. **`id()` 是仅在本进程内有效的不透明令牌。** 在最后一个引用被释放之前保持稳定；可以安全地写入日志、附到 trace span，或在同一进程内传给内部服务器的 [可观测性](shared-observability.md) 端点。该值在进程启动时随机生成，进程之外没有任何意义——不要把它保存到外部存储、会话、cookie 或另一个 OxPHP worker 中。没有 `fromId()` 构造函数；来自其他进程的 id 无法被解析为任何对象。
 
 ## 生命周期
 
@@ -289,7 +289,7 @@ $queue->send(['url' => $_POST['url']]);
 
 ## 可观测性
 
-每个注册表条目都可通过[内部服务器](../operations/internal-server.md)查看。完整内容请见 [Shared 可观测性](../operations/shared-observability.md)。概览：
+每个注册表条目都可通过[内部服务器](../features/internal-server.md)查看。完整内容请见 [Shared 可观测性](shared-observability.md)。概览：
 
 - `GET /__ox_shared/summary` —— 按类型聚合的计数、内存和操作量。
 - `GET /__ox_shared/entries` —— 每个存活条目的 id、类型、引用计数和大小。
@@ -343,5 +343,5 @@ $queue->send(['url' => $_POST['url']]);
 - [Shared\Channel](shared-channel.md) —— 有界 MPMC 队列。
 - [Shared\Map](shared-map.md) —— 并发按键存储。
 - [Shared\Pool](shared-pool.md) —— 有界对象池。
-- [Shared 可观测性](../operations/shared-observability.md) —— 内省、指标、诊断。
+- [Shared 可观测性](shared-observability.md) —— 内省、指标、诊断。
 - [迁移到外部存储](migrating-to-external-store.md) —— 当共享状态超出单机时。

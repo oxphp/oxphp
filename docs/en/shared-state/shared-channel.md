@@ -351,6 +351,6 @@ if ($ch->trySend($event)->isFull()) {
 
 ## Related features
 
-- [Worker Mode](worker-mode.md) — prerequisite for fiber-suspending blocking variants.
-- [Async Promises](async-promises.md) — the `oxphp_async()` closure is the normal way to hand a `Channel` to a background fiber.
-- [Fiber Multiplexing](fiber-multiplexing.md) — explains how suspension keeps the worker thread productive while channel operations wait.
+- [Worker Mode](../features/worker-mode.md) — prerequisite for fiber-suspending blocking variants.
+- [Async Promises](../features/async-promises.md) — the `oxphp_async()` closure is the normal way to hand a `Channel` to a background fiber.
+- [Fiber Multiplexing](../features/fiber-multiplexing.md) — explains how suspension keeps the worker thread productive while channel operations wait.

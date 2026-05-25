@@ -227,7 +227,7 @@ Exceptions thrown inside the factory propagate to the acquire caller unchanged a
 
 ## Observability
 
-See [Shared Observability](../operations/shared-observability.md) for the full tour. Quick references:
+See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
 - `GET /__ox_shared/summary` counts Pool instances and aggregate `waiting_total`, `evicted_total`.
@@ -256,4 +256,4 @@ Alert-worthy combinations: rising `waiting` with flat `size` means the pool is s
 - [Shared\Once](shared-once.md) — when you need exactly one resource (not a pool of N).
 - [Shared\Channel](shared-channel.md) — pair with a pool for producer/consumer pipelines.
 - [Shared\Map](shared-map.md) — one `Pool` per tenant keyed by name.
-- [Worker Mode](worker-mode.md) — pool handles across requests within one worker thread.
+- [Worker Mode](../features/worker-mode.md) — pool handles across requests within one worker thread.

@@ -85,7 +85,7 @@ oxphp_worker(function () use ($requests) {
 });
 ```
 
-[Worker mode](worker-mode.md) runs the outer scope once per worker thread; the `use ($requests)` capture keeps the same `Shared\Counter` handle live across every request that worker handles. Across worker threads the registry entry itself is the same — all worker threads that hold handles with the same `id()` mutate the same atomic int64.
+[Worker mode](../features/worker-mode.md) runs the outer scope once per worker thread; the `use ($requests)` capture keeps the same `Shared\Counter` handle live across every request that worker handles. Across worker threads the registry entry itself is the same — all worker threads that hold handles with the same `id()` mutate the same atomic int64.
 
 When a fiber needs to see the counter too, hand it through `use`:
 
@@ -204,7 +204,7 @@ What the migration bought you:
 - **One less dependency.** APCu is no longer in the deployment story.
 - **Accurate count under load.** Two concurrent hits on the same IP never clobber each other.
 
-> The built-in [Rate Limiting](rate-limiting.md) feature (`RATE_LIMIT=...`) continues to run at the connection layer and is faster than a PHP-level limiter. Reach for a custom limiter only when you need PHP-level policy — per-tenant, per-route, per-user-id rather than per-IP.
+> The built-in [Rate Limiting](../features/rate-limiting.md) feature (`RATE_LIMIT=...`) continues to run at the connection layer and is faster than a PHP-level limiter. Reach for a custom limiter only when you need PHP-level policy — per-tenant, per-route, per-user-id rather than per-IP.
 
 ### When to pick Map vs Counter
 
@@ -235,7 +235,7 @@ Every `Shared\*` object is a thin PHP wrapper around a registry ID. A few rules 
 1. **Identity is the registry ID, not the PHP object.** Two handles with the same ID point at the same state. `$a->id() === $b->id()` is the equality test.
 2. **Serialisation is blocked.** `serialize($counter)` throws. The registry lives only in this process — there is nothing useful to put on the wire. Use the [migration guide](migrating-to-external-store.md) when you genuinely need to cross a process boundary.
 3. **`clone` is blocked.** For the same reason — a cloned wrapper would look distinct but share state. Construct a fresh instance if you want an independent value.
-4. **`id()` is an opaque, per-process token.** Stable until the last reference drops; safe to log, attach to trace spans, or pass to the internal server's [Observability](../operations/shared-observability.md) endpoints inside the same process. The value is randomised at process start and carries no meaning outside this process — do not persist it to external storage, sessions, cookies, or another OxPHP worker. There is no `fromId()` constructor; an id from a foreign process resolves to nothing.
+4. **`id()` is an opaque, per-process token.** Stable until the last reference drops; safe to log, attach to trace spans, or pass to the internal server's [Observability](shared-observability.md) endpoints inside the same process. The value is randomised at process start and carries no meaning outside this process — do not persist it to external storage, sessions, cookies, or another OxPHP worker. There is no `fromId()` constructor; an id from a foreign process resolves to nothing.
 
 ## Lifecycle
 
@@ -289,7 +289,7 @@ $queue->send(['url' => $_POST['url']]);
 
 ## Observability
 
-Every registry entry is visible through the [internal server](../operations/internal-server.md). See [Shared Observability](../operations/shared-observability.md) for the full tour. At a glance:
+Every registry entry is visible through the [internal server](../features/internal-server.md). See [Shared Observability](shared-observability.md) for the full tour. At a glance:
 
 - `GET /__ox_shared/summary` — aggregate counts, memory, and ops by type.
 - `GET /__ox_shared/entries` — every live entry with id, type, refcount, and size.
@@ -343,5 +343,5 @@ Shared state is in-process. That constrains when it fits.
 - [Shared\Channel](shared-channel.md) — bounded MPMC queue.
 - [Shared\Map](shared-map.md) — concurrent keyed store.
 - [Shared\Pool](shared-pool.md) — bounded object pool.
-- [Shared Observability](../operations/shared-observability.md) — introspection, metrics, diagnostics.
+- [Shared Observability](shared-observability.md) — introspection, metrics, diagnostics.
 - [Migrating to an external store](migrating-to-external-store.md) — when shared state outgrows a single host.

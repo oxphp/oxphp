@@ -124,18 +124,18 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 - **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — batch, race (first settled), and any (first fulfilled, JS `Promise.any` style) primitives
 
 ### Shared State (`OxPHP\Shared\*`)
-Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/features/shared-state.md) and [observability reference](docs/en/operations/shared-observability.md).
+Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/shared-state/shared-state.md) and [observability reference](docs/en/shared-state/shared-observability.md).
 
-- **`Shared\Counter`** — atomic int64 (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/features/shared-counter.md)
-- **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/features/shared-flag.md)
-- **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/features/shared-once.md)
-- **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/features/shared-mutex.md)
-- **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/en/features/shared-channel.md)
-- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/en/features/shared-map.md)
-- **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/en/features/shared-pool.md)
+- **`Shared\Counter`** — atomic int64 (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/shared-state/shared-counter.md)
+- **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/shared-state/shared-flag.md)
+- **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/shared-state/shared-once.md)
+- **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/shared-state/shared-mutex.md)
+- **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/en/shared-state/shared-channel.md)
+- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/en/shared-state/shared-map.md)
+- **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/en/shared-state/shared-pool.md)
 - **Built-in observability** — `oxphp_shared_*` Prometheus counters and `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON endpoints on the internal port
 - **Refcount + lifecycle safety** — handles cannot outlive the registry entry; cycle detector rejects graphs that would leak memory
-- When you outgrow it, see [Migrating to an external store](docs/en/features/migrating-to-external-store.md)
+- When you outgrow it, see [Migrating to an external store](docs/en/shared-state/migrating-to-external-store.md)
 
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2 on one port** — the protocol is auto-detected per connection: prior-knowledge h2c over cleartext, or `h2` via ALPN under TLS, with transparent HTTP/1.1 fallback. Flow-control windows are tuned for typical PHP response sizes — see [HTTP/2](docs/en/features/tls.md#http2)

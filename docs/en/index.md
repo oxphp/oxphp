@@ -5,7 +5,7 @@ description: Documentation for OxPHP, a high-performance async PHP application s
 
 **English** · [Русский](../ru/index.md) · [中文](../zh/index.md)
 
-[Getting Started](#getting-started) · [Features](#features) · [Security](#security) · [PHP](#php) · [Operations](#operations) · [Architecture](#architecture)
+[Getting Started](#getting-started) · [Features](#features) · [Shared State](#shared-state) · [Security](#security) · [PHP](#php) · [Operations](#operations) · [Architecture](#architecture)
 
 # OxPHP Documentation
 
@@ -31,7 +31,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - **[Worker mode](features/worker-mode.md)** — persistent PHP processes with [fiber multiplexing](features/fiber-multiplexing.md)
 - **[SSE streaming](features/sse.md)** — real-time Server-Sent Events from PHP
 - **[Async promises](features/async-promises.md)** — background execution of PHP closures without blocking the worker
-- **[Shared state](features/shared-state.md)** — process-wide concurrent primitives (Counter, Flag, Once, Mutex, Channel, Map, Pool) so workers can coordinate without Redis or APCu
+- **[Shared state](shared-state/shared-state.md)** — process-wide concurrent primitives (Counter, Flag, Once, Mutex, Channel, Map, Pool) so workers can coordinate without Redis or APCu
 - **[Decorators](features/decorators.md)** — intercept calls via PHP 8 attributes
 - **[Distributed tracing & APM](features/distributed-tracing.md)** — W3C Trace Context, OpenTelemetry, automatic instrumentation of database/HTTP/cache/file calls, and a PHP tracing SDK
 
@@ -59,10 +59,26 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [SSE](features/sse.md) — real-time Server-Sent Events streaming from PHP
 - [Early Response](features/early-response.md) — send the response immediately and continue background processing
 - [Async Promises](features/async-promises.md) — run PHP closures on background threads and await results
-- [Shared State](features/shared-state.md) — process-wide primitives: [Counter](features/shared-counter.md), [Atomic](features/shared-atomic.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [observability](operations/shared-observability.md); [migrating to an external store](features/migrating-to-external-store.md)
 - [Decorators](features/decorators.md) — intercept function and method calls with PHP 8 attributes
 - [Distributed Tracing & APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, auto-instrumentation, and PHP tracing SDK
 - [Internal Server](features/internal-server.md) — dedicated port for health checks, Prometheus metrics, and live configuration
+
+## Shared State
+
+Process-wide concurrent primitives so workers can coordinate mutable state without Redis, Memcached, or APCu — everything lives in-process, so per-operation cost is microseconds rather than network round-trips.
+
+- [Overview](shared-state/shared-state.md) — registry model, handle lifecycle, and when to reach for shared state
+- [Counter](shared-state/shared-counter.md) — atomic int64 accumulator (`get`, `set`, `add`, `compareAndSet`)
+- [Atomic](shared-state/shared-atomic.md) — atomic int64 with explicit memory-ordering control
+- [Flag](shared-state/shared-flag.md) — atomic boolean for one-shot transitions
+- [Once](shared-state/shared-once.md) — run-once container with reentrancy-safe factory
+- [Mutex](shared-state/shared-mutex.md) — poisoning mutex over a stored value with deadlock detection
+- [Channel](shared-state/shared-channel.md) — bounded, fiber-aware MPMC queue
+- [Map](shared-state/shared-map.md) — concurrent string-keyed store with batched access
+- [Pool](shared-state/shared-pool.md) — bounded object pool with per-thread affinity
+- [Naming Conventions](shared-state/shared-naming.md) — method-naming cheat sheet across the `Shared\*` family
+- [Observability](shared-state/shared-observability.md) — Prometheus counters and JSON introspection endpoints
+- [Migrating to an External Store](shared-state/migrating-to-external-store.md) — when and how to move to Redis or APCu
 
 ## Security
 

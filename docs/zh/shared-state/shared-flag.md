@@ -143,7 +143,7 @@ if ($ready->load(Ordering::Acquire)) {
 
 ## 可观测性
 
-请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
+请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ value: true|false, type: "Flag" }`。
 - Prometheus `oxphp_shared_flag_value{flag_id="…"}` 仪表（0 或 1）。

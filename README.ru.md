@@ -124,18 +124,18 @@ OxPHP заменяет связку nginx + PHP-FPM одним контейне�
 - **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — пакетный, гоночный (первый завершившийся) и any-примитив (первый успешно завершившийся, в стиле JS `Promise.any`)
 
 ### Разделяемое состояние (`OxPHP\Shared\*`)
-Конкурентные примитивы уровня процесса — позволяют PHP-воркерам координировать изменяемое состояние без Redis, Memcached или APCu. Всё внутри процесса: стоимость операции — микросекунды, а не сетевой round-trip. Полное руководство: [Разделяемое состояние](docs/ru/features/shared-state.md), [справочник наблюдаемости](docs/ru/operations/shared-observability.md).
+Конкурентные примитивы уровня процесса — позволяют PHP-воркерам координировать изменяемое состояние без Redis, Memcached или APCu. Всё внутри процесса: стоимость операции — микросекунды, а не сетевой round-trip. Полное руководство: [Разделяемое состояние](docs/ru/shared-state/shared-state.md), [справочник наблюдаемости](docs/ru/shared-state/shared-observability.md).
 
-- **`Shared\Counter`** — атомарный int64 (`get`, `set`, `add`, `compareAndSet`) — см. [Counter](docs/ru/features/shared-counter.md)
-- **`Shared\Flag`** — атомарный bool с `compareAndSet` для one-shot переходов — см. [Flag](docs/ru/features/shared-flag.md)
-- **`Shared\Once`** — контейнер однократной инициализации с reentrancy-safe фабрикой — см. [Once](docs/ru/features/shared-once.md)
-- **`Shared\Mutex`** — отравляемый мьютекс над хранимым значением, с reentrancy и кросс-поточной детекцией дедлоков — см. [Mutex](docs/ru/features/shared-mutex.md)
-- **`Shared\Channel`** — ограниченная MPMC-очередь, fiber-aware (блокирующий recv уступает текущий файбер) — см. [Channel](docs/ru/features/shared-channel.md)
-- **`Shared\Map`** — конкурентное key-value хранилище со строковыми ключами, batched `setMany`/`getMany` и cycle-check для вложенных значений — см. [Map](docs/ru/features/shared-map.md)
-- **`Shared\Pool`** — ограниченный пул объектов с строгим per-thread affinity, идл-таймаут эвикцией и chaos-reclaim при гибели воркера — см. [Pool](docs/ru/features/shared-pool.md)
+- **`Shared\Counter`** — атомарный int64 (`get`, `set`, `add`, `compareAndSet`) — см. [Counter](docs/ru/shared-state/shared-counter.md)
+- **`Shared\Flag`** — атомарный bool с `compareAndSet` для one-shot переходов — см. [Flag](docs/ru/shared-state/shared-flag.md)
+- **`Shared\Once`** — контейнер однократной инициализации с reentrancy-safe фабрикой — см. [Once](docs/ru/shared-state/shared-once.md)
+- **`Shared\Mutex`** — отравляемый мьютекс над хранимым значением, с reentrancy и кросс-поточной детекцией дедлоков — см. [Mutex](docs/ru/shared-state/shared-mutex.md)
+- **`Shared\Channel`** — ограниченная MPMC-очередь, fiber-aware (блокирующий recv уступает текущий файбер) — см. [Channel](docs/ru/shared-state/shared-channel.md)
+- **`Shared\Map`** — конкурентное key-value хранилище со строковыми ключами, batched `setMany`/`getMany` и cycle-check для вложенных значений — см. [Map](docs/ru/shared-state/shared-map.md)
+- **`Shared\Pool`** — ограниченный пул объектов с строгим per-thread affinity, идл-таймаут эвикцией и chaos-reclaim при гибели воркера — см. [Pool](docs/ru/shared-state/shared-pool.md)
 - **Встроенная наблюдаемость** — Prometheus-метрики `oxphp_shared_*` и JSON-эндпоинты `/__ox_shared/{summary,entries,entry,preview,types,graph}` на внутреннем порту
 - **Refcount + lifecycle-safety** — handle не может пережить запись в реестре; cycle-детектор отвергает графы, которые привели бы к утечке памяти
-- Когда перерастёте, см. [Миграция на внешнее хранилище](docs/ru/features/migrating-to-external-store.md)
+- Когда перерастёте, см. [Миграция на внешнее хранилище](docs/ru/shared-state/migrating-to-external-store.md)
 
 ### HTTP и сетевое взаимодействие
 - **HTTP/1.1 + HTTP/2 на одном порту** — протокол определяется автоматически для каждого соединения: h2c по prior-knowledge поверх незашифрованного соединения или `h2` через ALPN под TLS, с прозрачным откатом на HTTP/1.1. Окна управления потоком подобраны под типичные размеры PHP-ответов — см. [HTTP/2](docs/ru/features/tls.md#http2)

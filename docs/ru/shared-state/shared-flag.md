@@ -143,7 +143,7 @@ if ($ready->load(Ordering::Acquire)) {
 
 ## Наблюдаемость
 
-См. [Shared Observability](../operations/shared-observability.md). Краткие отсылки:
+См. [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ value: true|false, type: "Flag" }`.
 - Prometheus `oxphp_shared_flag_value{flag_id="…"}` gauge (0 или 1).

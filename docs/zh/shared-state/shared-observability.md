@@ -306,7 +306,7 @@ SOAK_CONCURRENCY=400 SOAK_THREADS=8 tests/soak/pool_soak.sh
 
 ## 相关
 
-- [共享状态](../features/shared-state.md) —— 心智模型与原语概览。
-- [Prometheus 指标](metrics.md) —— 同一 `/metrics` 端点下的核心服务器指标。
+- [共享状态](shared-state.md) —— 心智模型与原语概览。
+- [Prometheus 指标](../operations/metrics.md) —— 同一 `/metrics` 端点下的核心服务器指标。
 - [内部服务器](../features/internal-server.md) —— `/__ox_shared/*` 端点如何接入 `INTERNAL_ADDR`。
-- [迁移到外部存储](../features/migrating-to-external-store.md) —— 当饱和是结构性而非可调时。
+- [迁移到外部存储](migrating-to-external-store.md) —— 当饱和是结构性而非可调时。
