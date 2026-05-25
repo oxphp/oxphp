@@ -352,6 +352,6 @@ if ($ch->trySend($event)->isFull()) {
 
 ## Связанные возможности
 
-- [Worker Mode](worker-mode.md) — предпосылка для fiber-приостанавливающих блокирующих вариантов.
-- [Async Promises](async-promises.md) — замыкание `oxphp_async()` — обычный способ передать `Channel` фоновому файберу.
-- [Fiber Multiplexing](fiber-multiplexing.md) — объясняет, как приостановка держит поток воркера продуктивным, пока операции канала ждут.
+- [Worker Mode](../features/worker-mode.md) — предпосылка для fiber-приостанавливающих блокирующих вариантов.
+- [Async Promises](../features/async-promises.md) — замыкание `oxphp_async()` — обычный способ передать `Channel` фоновому файберу.
+- [Fiber Multiplexing](../features/fiber-multiplexing.md) — объясняет, как приостановка держит поток воркера продуктивным, пока операции канала ждут.

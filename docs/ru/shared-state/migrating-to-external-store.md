@@ -278,5 +278,5 @@ Trade-off: если процесс умирает до завершения сл
 ## См. также
 
 - [Разделяемое состояние](shared-state.md) — обзор; когда оставаться in-process.
-- [Shared Observability](../operations/shared-observability.md) — инструментируйте оба бэкенда одинаково.
-- [Rate Limiting](rate-limiting.md) — встроенный per-IP лимитер (выполняется до PHP; ортогонально PHP-уровню лимитов).
+- [Shared Observability](shared-observability.md) — инструментируйте оба бэкенда одинаково.
+- [Rate Limiting](../features/rate-limiting.md) — встроенный per-IP лимитер (выполняется до PHP; ортогонально PHP-уровню лимитов).

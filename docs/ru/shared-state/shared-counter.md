@@ -115,7 +115,7 @@ Counter'ы никогда не бросают на переполнение ил
 
 ## Наблюдаемость
 
-Полную экскурсию см. в [Shared Observability](../operations/shared-observability.md). Краткие отсылки:
+Полную экскурсию см. в [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ value, type: "Counter" }`.
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` gauge отслеживает текущее значение.

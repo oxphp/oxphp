@@ -185,7 +185,7 @@ try {
 
 ## Наблюдаемость
 
-См. [Shared Observability](../operations/shared-observability.md). Краткие отсылки:
+См. [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ type: "Mutex", corrupted, waiters, last_acquire_ms, held_by_thread }`.
 - Prometheus-метрики per instance:

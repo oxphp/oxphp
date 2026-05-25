@@ -115,7 +115,7 @@ Counters never throw on overflow or extreme values — they wrap.
 
 ## Observability
 
-See [Shared Observability](../operations/shared-observability.md) for the full tour. Quick references:
+See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ value, type: "Counter" }`.
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` gauge tracks the current value.

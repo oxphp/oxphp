@@ -124,18 +124,18 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 - **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — 批量、竞速（首个完成）以及 any 原语（首个成功完成，JS `Promise.any` 风格）
 
 ### 共享状态（`OxPHP\Shared\*`）
-进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/features/shared-state.md)，[可观测性参考](docs/zh/operations/shared-observability.md)。
+进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/shared-state/shared-state.md)，[可观测性参考](docs/zh/shared-state/shared-observability.md)。
 
-- **`Shared\Counter`** — 原子 int64（`get`、`set`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/features/shared-counter.md)
-- **`Shared\Flag`** — 支持 `compareAndSet` 的原子 bool，用于一次性状态切换 — 参见 [Flag](docs/zh/features/shared-flag.md)
-- **`Shared\Once`** — 带可重入安全工厂的单次初始化容器 — 参见 [Once](docs/zh/features/shared-once.md)
-- **`Shared\Mutex`** — 带毒化机制的互斥锁，保护存储值，支持可重入与跨线程死锁检测 — 参见 [Mutex](docs/zh/features/shared-mutex.md)
-- **`Shared\Channel`** — 有界 MPMC 队列，Fiber-aware（阻塞 recv 会让出当前 Fiber）— 参见 [Channel](docs/zh/features/shared-channel.md)
-- **`Shared\Map`** — 字符串键并发存储，支持批量 `setMany`/`getMany` 以及嵌套值的循环检测 — 参见 [Map](docs/zh/features/shared-map.md)
-- **`Shared\Pool`** — 有界对象池，严格按线程亲和性分配，支持空闲超时驱逐和工作线程死亡后的混沌回收 — 参见 [Pool](docs/zh/features/shared-pool.md)
+- **`Shared\Counter`** — 原子 int64（`get`、`set`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/shared-state/shared-counter.md)
+- **`Shared\Flag`** — 支持 `compareAndSet` 的原子 bool，用于一次性状态切换 — 参见 [Flag](docs/zh/shared-state/shared-flag.md)
+- **`Shared\Once`** — 带可重入安全工厂的单次初始化容器 — 参见 [Once](docs/zh/shared-state/shared-once.md)
+- **`Shared\Mutex`** — 带毒化机制的互斥锁，保护存储值，支持可重入与跨线程死锁检测 — 参见 [Mutex](docs/zh/shared-state/shared-mutex.md)
+- **`Shared\Channel`** — 有界 MPMC 队列，Fiber-aware（阻塞 recv 会让出当前 Fiber）— 参见 [Channel](docs/zh/shared-state/shared-channel.md)
+- **`Shared\Map`** — 字符串键并发存储，支持批量 `setMany`/`getMany` 以及嵌套值的循环检测 — 参见 [Map](docs/zh/shared-state/shared-map.md)
+- **`Shared\Pool`** — 有界对象池，严格按线程亲和性分配，支持空闲超时驱逐和工作线程死亡后的混沌回收 — 参见 [Pool](docs/zh/shared-state/shared-pool.md)
 - **内置可观测性** — `oxphp_shared_*` Prometheus 指标 + 内部端口上的 `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON 端点
 - **引用计数 + 生命周期安全** — 句柄不会比注册表条目存活更久；循环检测器会拒绝可能导致内存泄漏的图结构
-- 当规模超出承载时，请参阅 [迁移到外部存储](docs/zh/features/migrating-to-external-store.md)
+- 当规模超出承载时，请参阅 [迁移到外部存储](docs/zh/shared-state/migrating-to-external-store.md)
 
 ### HTTP 与网络
 - **HTTP/1.1 + HTTP/2 同端口** —— 协议按每个连接自动检测：明文上基于先验知识（prior knowledge）的 h2c，或 TLS 下通过 ALPN 协商的 `h2`，并透明回退到 HTTP/1.1。流控窗口针对典型 PHP 响应大小做了调优 —— 参见 [HTTP/2](docs/zh/features/tls.md#http2)

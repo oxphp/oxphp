@@ -278,5 +278,5 @@ $writes->trySend([$key, $value]);
 ## 相关
 
 - [共享状态](shared-state.md) —— 概览；何时留在进程内。
-- [Shared 可观测性](../operations/shared-observability.md) —— 用同样的方式给两个后端打点。
-- [限流](rate-limiting.md) —— 内置的按 IP 限流器（在 PHP 之前运行；与 PHP 层限流正交）。
+- [Shared 可观测性](shared-observability.md) —— 用同样的方式给两个后端打点。
+- [限流](../features/rate-limiting.md) —— 内置的按 IP 限流器（在 PHP 之前运行；与 PHP 层限流正交）。

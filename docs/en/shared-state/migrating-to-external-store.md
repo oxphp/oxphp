@@ -278,5 +278,5 @@ Before you cut over:
 ## Related
 
 - [Shared State](shared-state.md) — overview; when to stay in-process.
-- [Shared Observability](../operations/shared-observability.md) — instrument both backends the same way.
-- [Rate Limiting](rate-limiting.md) — the built-in per-IP limiter (runs before PHP; orthogonal to PHP-level limits).
+- [Shared Observability](shared-observability.md) — instrument both backends the same way.
+- [Rate Limiting](../features/rate-limiting.md) — the built-in per-IP limiter (runs before PHP; orthogonal to PHP-level limits).

@@ -5,7 +5,7 @@ description: Документация по OxPHP — высокопроизво�
 
 [English](../en/index.md) · **Русский** · [中文](../zh/index.md)
 
-[Начало работы](#начало-работы) · [Возможности](#возможности) · [Безопасность](#безопасность) · [PHP](#php) · [Эксплуатация](#эксплуатация) · [Архитектура](#архитектура)
+[Начало работы](#начало-работы) · [Возможности](#возможности) · [Разделяемое состояние](#разделяемое-состояние) · [Безопасность](#безопасность) · [PHP](#php) · [Эксплуатация](#эксплуатация) · [Архитектура](#архитектура)
 
 # Документация OxPHP
 
@@ -31,7 +31,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - **[Режим воркеров](features/worker-mode.md)** — постоянные PHP-процессы с [мультиплексированием файберов](features/fiber-multiplexing.md)
 - **[SSE-стриминг](features/sse.md)** — Server-Sent Events в реальном времени из PHP
 - **[Асинхронные промисы](features/async-promises.md)** — фоновое выполнение PHP-замыканий без блокировки воркера
-- **[Разделяемое состояние](features/shared-state.md)** — процесс-wide примитивы (Counter, Flag, Once, Mutex, Channel, Map, Pool) для координации воркеров без Redis или APCu
+- **[Разделяемое состояние](shared-state/shared-state.md)** — процесс-wide примитивы (Counter, Flag, Once, Mutex, Channel, Map, Pool) для координации воркеров без Redis или APCu
 - **[Декораторы](features/decorators.md)** — перехват вызовов через атрибуты PHP 8
 - **[Распределённая трассировка и APM](features/distributed-tracing.md)** — W3C Trace Context, OpenTelemetry, автоматическое инструментирование вызовов базы данных/HTTP/кэша/файлов и PHP tracing SDK
 
@@ -59,10 +59,26 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [SSE](features/sse.md) — стриминг Server-Sent Events в реальном времени из PHP
 - [Ранний ответ](features/early-response.md) — немедленная отправка ответа с продолжением фоновой обработки
 - [Асинхронные промисы](features/async-promises.md) — выполнение PHP-замыканий в фоновых потоках с ожиданием результатов
-- [Разделяемое состояние](features/shared-state.md) — process-wide примитивы: [Counter](features/shared-counter.md), [Atomic](features/shared-atomic.md), [Flag](features/shared-flag.md), [Once](features/shared-once.md), [Mutex](features/shared-mutex.md), [Channel](features/shared-channel.md), [Map](features/shared-map.md), [Pool](features/shared-pool.md); [наблюдаемость](operations/shared-observability.md); [миграция на внешнее хранилище](features/migrating-to-external-store.md)
 - [Декораторы](features/decorators.md) — перехват вызовов функций и методов с помощью атрибутов PHP 8
 - [Распределённая трассировка и APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, автоинструментирование и PHP tracing SDK
 - [Внутренний сервер](features/internal-server.md) — выделенный порт для проверок состояния, метрик Prometheus и просмотра конфигурации
+
+## Разделяемое состояние
+
+Процессные примитивы конкуррентности, позволяющие воркерам координировать изменяемое состояние без Redis, Memcached или APCu — всё живёт внутри процесса, поэтому стоимость операции измеряется микросекундами, а не сетевыми round-trip'ами.
+
+- [Обзор](shared-state/shared-state.md) — модель реестра, жизненный цикл хэндлов и когда тянуться к разделяемому состоянию
+- [Counter](shared-state/shared-counter.md) — атомарный аккумулятор int64 (`get`, `set`, `add`, `compareAndSet`)
+- [Atomic](shared-state/shared-atomic.md) — атомарный int64 с явным управлением порядком памяти
+- [Flag](shared-state/shared-flag.md) — атомарный bool для одноразовых переходов
+- [Once](shared-state/shared-once.md) — контейнер однократного запуска с reentrancy-safe фабрикой
+- [Mutex](shared-state/shared-mutex.md) — отравляющийся мьютекс над хранимым значением с детектором дедлоков
+- [Channel](shared-state/shared-channel.md) — ограниченная MPMC-очередь, дружелюбная к файберам
+- [Map](shared-state/shared-map.md) — конкурентное хранилище по строковому ключу с батчевым доступом
+- [Pool](shared-state/shared-pool.md) — ограниченный пул объектов с привязкой к потоку
+- [Соглашения об именовании](shared-state/shared-naming.md) — шпаргалка по именам методов в семействе `Shared\*`
+- [Наблюдаемость](shared-state/shared-observability.md) — счётчики Prometheus и JSON-эндпоинты интроспекции
+- [Миграция на внешнее хранилище](shared-state/migrating-to-external-store.md) — когда и как переходить на Redis или APCu
 
 ## Безопасность
 

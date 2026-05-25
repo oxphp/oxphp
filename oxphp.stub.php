@@ -1093,7 +1093,7 @@ namespace OxPHP\Shared {
      * Redis INCR. To synchronise other memory through the integer, use
      * {@see Atomic} (with an explicit {@see Ordering}).
      *
-     * @link docs/en/features/shared-counter.md
+     * @link docs/en/shared-state/shared-counter.md
      */
     final class Counter implements Shareable
     {
@@ -1134,7 +1134,7 @@ namespace OxPHP\Shared {
      * only when you can prove it correct. A disallowed ordering for a given
      * method throws {@see InvalidOrderingException}.
      *
-     * @link docs/en/features/shared-atomic.md
+     * @link docs/en/shared-state/shared-atomic.md
      */
     final class Atomic implements Shareable
     {
@@ -1200,7 +1200,7 @@ namespace OxPHP\Shared {
      * circuit-breaker state, shutdown signals, one-shot init markers — any
      * single cross-worker yes/no switch.
      *
-     * @link docs/en/features/shared-flag.md
+     * @link docs/en/shared-state/shared-flag.md
      */
     final class Flag implements Shareable
     {
@@ -1251,7 +1251,7 @@ namespace OxPHP\Shared {
      * expensive singletons) where every worker may race to request
      * the value on first touch.
      *
-     * @link docs/en/features/shared-once.md
+     * @link docs/en/shared-state/shared-once.md
      */
     /**
      * @template T
@@ -1341,7 +1341,7 @@ namespace OxPHP\Shared {
      * throws {@see CorruptedMutexException}. There is no API to clear
      * corruption — discard the instance and create a new one.
      *
-     * @link docs/en/features/shared-mutex.md
+     * @link docs/en/shared-state/shared-mutex.md
      */
     final class Mutex implements Shareable
     {
@@ -1406,7 +1406,7 @@ namespace OxPHP\Shared {
      *   - (bare)        block forever (or until the request fiber is cancelled)
      *   - `*Timeout`    bounded wait, `int $ms > 0`
      *
-     * @link docs/en/features/shared-channel.md
+     * @link docs/en/shared-state/shared-channel.md
      */
     final class Channel implements Shareable, \Countable
     {
@@ -1515,7 +1515,7 @@ namespace OxPHP\Shared {
      * rejected with {@see CycleException}. `maxEntries` is an approximate
      * per-instance ceiling.
      *
-     * @link docs/en/features/shared-map.md
+     * @link docs/en/shared-state/shared-map.md
      */
     final class Map implements Shareable
     {
@@ -1636,7 +1636,7 @@ namespace OxPHP\Shared {
      * is reached, acquire waits for a free slot (see the namespace-level
      * timeout convention).
      *
-     * @link docs/en/features/shared-pool.md
+     * @link docs/en/shared-state/shared-pool.md
      */
     final class Pool implements Shareable
     {

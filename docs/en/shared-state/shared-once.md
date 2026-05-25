@@ -152,7 +152,7 @@ If the factory itself throws, that exception propagates unchanged to the current
 
 ## Observability
 
-See [Shared Observability](../operations/shared-observability.md). Quick references:
+See [Shared Observability](shared-observability.md). Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ status: "uninitialized" | "pending" | "ready" | "poisoned", type: "Once" }` plus a preview of the stored value when `ready`.
 

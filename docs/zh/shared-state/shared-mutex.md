@@ -183,7 +183,7 @@ try {
 
 ## 可观测性
 
-请见 [Shared 可观测性](../operations/shared-observability.md)。速查：
+请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ type: "Mutex", corrupted, waiters, last_acquire_ms, held_by_thread }`。
 - 每实例 Prometheus 指标：
