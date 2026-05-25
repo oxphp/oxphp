@@ -1046,10 +1046,42 @@ namespace OxPHP\Shared {
      * without being serialised. Plain PHP objects cannot — the runtime
      * rejects them with {@see TypeException}.
      *
-     * Implemented internally by Counter, Flag, Once, Mutex, Channel, Map,
-     * Pool. User code cannot implement this interface directly.
+     * Implemented internally by Atomic, Counter, Flag, Once, Mutex, Channel,
+     * Map, Pool. User code cannot implement this interface directly.
      */
     interface Shareable {}
+
+    /**
+     * Memory-ordering constraint for {@see Atomic} operations, mirroring the
+     * C++/Rust `memory_order` model.
+     *
+     * Stronger orderings cost more on weakly-ordered CPUs (ARM, POWER) but
+     * are nearly free on x86. The default for every Atomic method is
+     * `SeqCst` — correct everywhere, only sometimes slower than necessary.
+     *
+     * Not every method accepts every case:
+     *
+     *  * {@see Atomic::load} — `Relaxed`, `Acquire`, `SeqCst`
+     *  * {@see Atomic::store} — `Relaxed`, `Release`, `SeqCst`
+     *  * {@see Atomic::compareAndSet} `$failure` — `Relaxed`, `Acquire`, `SeqCst`
+     *  * read-modify-write ({@see Atomic::swap}, the `fetch*` family, and
+     *    {@see Atomic::compareAndSet} `$success`) — any case
+     *
+     * Passing a disallowed case throws {@see InvalidOrderingException}.
+     */
+    enum Ordering: int
+    {
+        /** No ordering constraint beyond the operation's own atomicity. */
+        case Relaxed = 0;
+        /** Later reads/writes cannot be reordered before this load. */
+        case Acquire = 1;
+        /** Earlier reads/writes cannot be reordered after this store. */
+        case Release = 2;
+        /** Acquire (on the load half) + Release (on the store half) for RMW ops. */
+        case AcqRel = 3;
+        /** Sequential consistency: a single total order seen by all threads. */
+        case SeqCst = 4;
+    }
 
     /**
      * Atomic signed 64-bit counter, visible from every PHP worker thread.
@@ -1090,6 +1122,79 @@ namespace OxPHP\Shared {
 
         /** Reset to `$newValue` (default 0), returning the previous value. */
         public function reset(int $newValue = 0): int {}
+
+        /** Registry ID for this instance. */
+        public function id(): int {}
+    }
+
+    /**
+     * Generic atomic signed 64-bit integer with explicit memory-ordering
+     * control, visible from every PHP worker thread.
+     *
+     * Where {@see Counter} is a fixed-`SeqCst` convenience surface, Atomic
+     * exposes the full lock-free toolkit — load/store/swap, compare-and-set,
+     * and fetch arithmetic/bitwise — each taking an {@see Ordering} so
+     * latency-sensitive code can relax barriers it does not need. Use it for
+     * lock-free state machines, sequence numbers, bitmask flags, and
+     * seqlock-style protocols.
+     *
+     * Every method defaults to `Ordering::SeqCst`; pass a weaker ordering
+     * only when you can prove it correct. A disallowed ordering for a given
+     * method throws {@see InvalidOrderingException}.
+     *
+     * @link docs/en/features/shared-atomic.md
+     */
+    final class Atomic implements Shareable
+    {
+        public function __construct(int $initial = 0) {}
+
+        /**
+         * Atomically read the current value.
+         *
+         * @param Ordering $order One of Relaxed, Acquire, SeqCst.
+         */
+        public function load(Ordering $order = Ordering::SeqCst): int {}
+
+        /**
+         * Atomically store `$value`.
+         *
+         * @param Ordering $order One of Relaxed, Release, SeqCst.
+         */
+        public function store(int $value, Ordering $order = Ordering::SeqCst): void {}
+
+        /** Atomically store `$value`, returning the previous value. */
+        public function swap(int $value, Ordering $order = Ordering::SeqCst): int {}
+
+        /**
+         * Compare-and-set. If the current value equals `$expect`, replace it
+         * with `$new` and return true; otherwise leave it unchanged and
+         * return false.
+         *
+         * @param Ordering $success Ordering applied on a successful swap (any case).
+         * @param Ordering $failure Ordering applied on failure — one of
+         *                          Relaxed, Acquire, SeqCst.
+         */
+        public function compareAndSet(
+            int $expect,
+            int $new,
+            Ordering $success = Ordering::SeqCst,
+            Ordering $failure = Ordering::SeqCst,
+        ): bool {}
+
+        /** Atomically add `$delta` (may be negative), returning the previous value. */
+        public function fetchAdd(int $delta, Ordering $order = Ordering::SeqCst): int {}
+
+        /** Atomically subtract `$delta`, returning the previous value. */
+        public function fetchSub(int $delta, Ordering $order = Ordering::SeqCst): int {}
+
+        /** Atomically bitwise-AND with `$mask`, returning the previous value. */
+        public function fetchAnd(int $mask, Ordering $order = Ordering::SeqCst): int {}
+
+        /** Atomically bitwise-OR with `$mask`, returning the previous value. */
+        public function fetchOr(int $mask, Ordering $order = Ordering::SeqCst): int {}
+
+        /** Atomically bitwise-XOR with `$mask`, returning the previous value. */
+        public function fetchXor(int $mask, Ordering $order = Ordering::SeqCst): int {}
 
         /** Registry ID for this instance. */
         public function id(): int {}
@@ -1592,6 +1697,7 @@ namespace OxPHP\Shared {
     //          ├── ClosedException             (Channel / Once close paths)
     //          ├── PoisonedException           (deprecated; Once only)
     //          ├── UninitializedException
+    //          ├── InvalidOrderingException
     //          └── CorruptedMutexException
 
     /** Base class for every Shared\* exception. */
@@ -1631,6 +1737,12 @@ namespace OxPHP\Shared {
 
     /** Access to a Once before it was initialised. */
     class UninitializedException extends SharedException {}
+
+    /**
+     * An {@see Atomic} operation was given a memory ordering it does not
+     * permit (e.g. `Acquire` on a store, `Release` on a load).
+     */
+    class InvalidOrderingException extends SharedException {}
 
     /**
      * Mutex acquisition failed because a prior closure invocation
