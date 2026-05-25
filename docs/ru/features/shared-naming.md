@@ -51,7 +51,7 @@ API независимо от того, из какого языка взяла�
 
 ### 4. Boolean-геттер — префикс `is*()`
 
-`Channel::isClosed()`, `Flag::isSet()`.
+`Channel::isClosed()`.
 
 Никаких голых глаголов (`test`, `check`) и доменных имён
 (`closed`). Префикс `is` отмечает чистое чтение
@@ -103,14 +103,10 @@ non-int и отсутствие поднимают `OxPHP\Shared\TypeException` 
 `Atomic::compareAndSet()`, `Flag::compareAndSet()`. Всегда возвращает
 `bool` (обмен произошёл или нет).
 
-### 7. Замена с возвратом предыдущего — `swap()`, `exchange()`
+### 7. Замена с возвратом предыдущего — `swap()`
 
-`Atomic::swap()` для int, `Flag::exchange()` для bool.
-
-Асимметрия имён — историческая и намеренная: `swap` читается как
-«поменять содержимое двух мест» в низкоуровневых контекстах;
-`exchange` чаще встречается в PHP для «обменять на новое». Оба
-возвращают предыдущее значение.
+`Atomic::swap()` для int, `Flag::swap()` для bool. Возвращает
+предыдущее значение.
 
 ### 8. Atomic RMW с возвратом предыдущего — префикс `fetch*()`
 
@@ -131,15 +127,13 @@ non-int и отсутствие поднимают `OxPHP\Shared\TypeException` 
 
 ### 9. Сброс к значению по умолчанию — `clear()`
 
-`Map::clear()`, `Flag::clear()` (в смысле «выставить в false»).
-Возвращает `void` для простого сброса; возвращает предыдущее значение,
-когда вызывающая сторона разумно может его захотеть (`Flag::clear()`).
+`Map::clear()` — опустошить контейнер; возвращает `void`.
 
 У `Counter` нет `clear()` — оконный сброс это `set(0)`.
 `Counter::set()` — задокументированное исключение, возвращающее
 **предыдущее** значение (а не `void`): это атомарный обмен, а
 `set(0)`, читающий прежний итог, — идиома LongAdder `sumThenReset`.
-(`Atomic` называет ту же операцию `swap()` / `exchange()`; Counter
+(`Atomic` называет ту же операцию `swap()`; Counter
 сохраняет `set`, потому что `set($n)` естественно читается для
 инициализации и оконного сброса.)
 
@@ -158,15 +152,15 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
 | Запись атомика              | `store($v, $order)`      | `Atomic::store`                         |
 | Количество элементов        | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
 | Наличие ключа/элемента      | `has($key): bool`        | `Map::has`                              |
-| Boolean-свойство            | `is*(): bool`            | `Flag::isSet`, `Channel::isClosed`      |
+| Boolean-свойство            | `is*(): bool`            | `Channel::isClosed`                     |
 | Non-blocking ожидание       | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
 | Бесконечное ожидание        | голый глагол             | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
 | Ограниченное ожидание       | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
-| Замена с возвратом prev     | `swap()` / `exchange()`  | `Atomic::swap`, `Flag::exchange`        |
+| Замена с возвратом prev     | `swap()`                 | `Atomic::swap`, `Flag::swap`            |
 | Atomic RMW, возврат prev    | `fetch*()`               | `Atomic::fetchAdd`                      |
 | Atomic RMW, возврат new     | голый глагол             | `Counter::add`                          |
-| Сброс к значению по умолч.  | `clear()`                | `Map::clear`, `Flag::clear`             |
+| Сброс к значению по умолч.  | `clear()`                | `Map::clear`                            |
 | Идентификатор в реестре     | `id(): int`              | каждый тип `Shared\*`                   |
 
 ## Добавление нового типа `Shared\*`

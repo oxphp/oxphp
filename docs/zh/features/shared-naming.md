@@ -46,7 +46,7 @@ count($pool);  // 全部活跃槽（in-use + idle）
 
 ### 4. 布尔 getter — `is*()` 前缀
 
-`Channel::isClosed()`、`Flag::isSet()`。
+`Channel::isClosed()`。
 
 不使用裸动词（`test`、`check`），也不使用领域专有名
 （`closed`）。`is` 前缀标记对布尔属性的纯读取。
@@ -90,13 +90,9 @@ count($pool);  // 全部活跃槽（in-use + idle）
 `Atomic::compareAndSet()`、`Flag::compareAndSet()`。始终返回 `bool`
 （交换是否发生）。
 
-### 7. 替换并返回原值 — `swap()`、`exchange()`
+### 7. 替换并返回原值 — `swap()`
 
-`Atomic::swap()` 用于 int，`Flag::exchange()` 用于 bool。
-
-命名上的不对称是历史的、刻意保留的：`swap` 在底层语境里读作
-「交换两处内容」；`exchange` 在 PHP 中更常用于「换为新值」。
-两者都返回原值。
+`Atomic::swap()` 用于 int，`Flag::swap()` 用于 bool。返回原值。
 
 ### 8. 返回原值的原子 RMW — `fetch*()` 前缀
 
@@ -115,13 +111,12 @@ count($pool);  // 全部活跃槽（in-use + idle）
 
 ### 9. 重置为默认 — `clear()`
 
-`Map::clear()`、`Flag::clear()`（含义为「设为 false」）。普通重置
-返回 `void`；当调用方合理需要原值时返回原值（`Flag::clear()`）。
+`Map::clear()` —— 清空容器；返回 `void`。
 
 `Counter` 没有 `clear()` —— `set(0)` 即其窗口重置。`Counter::set()`
 是已记录的例外，返回**原**值（而非 `void`）：它是原子交换，而
 `set(0)` 读取先前总和正是 LongAdder 的 `sumThenReset` 惯用法。
-（`Atomic` 将同一操作命名为 `swap()` / `exchange()`；Counter 保留
+（`Atomic` 将同一操作命名为 `swap()`；Counter 保留
 `set`，因为 `set($n)` 用于初始化和窗口重置时读起来更自然。）
 
 ### 10. 注册表标识 — `id(): int`
@@ -139,15 +134,15 @@ count($pool);  // 全部活跃槽（in-use + idle）
 | 写入原子                    | `store($v, $order)`      | `Atomic::store`                         |
 | 元素数量                    | `count(): int`           | `Map::count`、`Channel::count`、`Pool::count` |
 | 键/元素存在性               | `has($key): bool`        | `Map::has`                              |
-| 布尔属性                    | `is*(): bool`            | `Flag::isSet`、`Channel::isClosed`      |
+| 布尔属性                    | `is*(): bool`            | `Channel::isClosed`                     |
 | 非阻塞等待                  | `try*()`                 | `Channel::trySend`、`Mutex::tryWithLock`、`Map::trySet` |
 | 永久等待                    | 裸动词                   | `Channel::send`、`Channel::recv`、`Mutex::withLock`     |
 | 有界等待                    | `*Timeout(int $ms)`      | `Channel::sendTimeout`、`Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
-| 替换并返回 prev             | `swap()` / `exchange()`  | `Atomic::swap`、`Flag::exchange`        |
+| 替换并返回 prev             | `swap()`                 | `Atomic::swap`、`Flag::swap`            |
 | 原子 RMW，返回 prev         | `fetch*()`               | `Atomic::fetchAdd`                      |
 | 原子 RMW，返回 new          | 裸动词                   | `Counter::add`                          |
-| 重置为默认                  | `clear()`                | `Map::clear`、`Flag::clear`             |
+| 重置为默认                  | `clear()`                | `Map::clear`                            |
 | 注册表标识                  | `id(): int`              | 所有 `Shared\*` 类型                    |
 
 ## 添加新的 `Shared\*` 类型

@@ -108,7 +108,7 @@ use crate::plugins::ox_shared::error::{
 };
 use crate::plugins::ox_shared::registry::registry;
 
-fn ordering_from_u8(v: u8) -> Ordering {
+pub(crate) fn ordering_from_u8(v: u8) -> Ordering {
     match v {
         0 => Ordering::Relaxed,
         1 => Ordering::Acquire,
@@ -367,7 +367,7 @@ use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
 use crate::plugin::{PluginContext, PluginError};
 use crate::plugins::ox_shared::handle::SharedHandle;
 
-fn atomic_rc_to_result(rc: c_int) -> Result<(), PhpError> {
+pub(crate) fn atomic_rc_to_result(rc: c_int) -> Result<(), PhpError> {
     if rc == 0 {
         return Ok(());
     }
@@ -390,7 +390,10 @@ fn atomic_rc_to_result(rc: c_int) -> Result<(), PhpError> {
 /// before returning — `Shared\Ordering` always backs to 0..=4, but a
 /// caller who reaches us through reflection or a bug could plant garbage,
 /// and silently mapping it to SeqCst would mask the problem.
-fn read_order_arg(call: &mut crate::bridge::call::NativeCall, idx: u32) -> Result<u8, PhpError> {
+pub(crate) fn read_order_arg(
+    call: &mut crate::bridge::call::NativeCall,
+    idx: u32,
+) -> Result<u8, PhpError> {
     if call.argc() > idx {
         let v = call.arg_enum_long(idx)?;
         if !(0..=4).contains(&v) {
@@ -409,11 +412,11 @@ fn read_order_arg(call: &mut crate::bridge::call::NativeCall, idx: u32) -> Resul
     }
 }
 
-fn order_default() -> PhpValue {
+pub(crate) fn order_default() -> PhpValue {
     PhpValue::ConstExpr("\\OxPHP\\Shared\\Ordering::SeqCst".to_string())
 }
 
-fn order_type() -> PhpType {
+pub(crate) fn order_type() -> PhpType {
     PhpType::Enum("OxPHP\\Shared\\Ordering".to_string())
 }
 

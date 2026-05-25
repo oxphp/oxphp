@@ -7,6 +7,8 @@ shared/test_atomic_basic
 shared/test_atomic_ordering
 shared/test_atomic_state_machine
 shared/test_atomic_signed_overflow
+shared/test_flag_basic
+shared/test_flag_removed_methods
 shared/test_channel_basic
 shared/test_channel_forbidden_clone
 shared/test_channel_try_send_full

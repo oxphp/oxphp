@@ -143,6 +143,18 @@ $v = $o->getOrInit(fn () => compute());
 if ($o->status() === OxPHP\Shared\Once\Status::Ready) { $cached = $o->get(); }
 ```
 
+**11. `Shared\Flag` — redesigned as the bool twin of `Shared\Atomic`**
+
+`isSet()` / `set()` / `clear()` / `exchange()` are removed. Flag now mirrors `Shared\Atomic`: `load` / `store` / `swap` / `compareAndSet`, each taking an optional `Ordering` (default `SeqCst`). `swap` returns the previous value; `store` returns `void`.
+
+```php
+$f->isSet();               // → $f->load()
+$f->set();                 // → $f->store(true)   (or $f->swap(true) for the prior value)
+$f->clear();               // → $f->store(false)  (or $f->swap(false) for the prior value)
+$f->exchange($new);        // → $f->swap($new)
+$f->compareAndSet($e, $n); // unchanged (now also accepts optional $success / $failure Ordering)
+```
+
 ### Breaking changes
 
 - **`Shared\Channel` and `Shared\Mutex` adopt a trichotomous wait-policy API.** The single overloaded `?float $timeout` argument was replaced with three explicit methods per direction — `try*` for non-blocking, the bare verb for forever, and `*Timeout(int $ms)` for bounded — and the return shape moved from mixed/null/bool to value-typed Result classes (Channel) or exception-style (Mutex). No alias shims. Mechanical migration:

@@ -102,7 +102,7 @@ final class RedisCounterBackend implements CounterBackend
 
 Семантические разрывы:
 
-- `exchange($new)` → Redis `GETSET`. Атомарно.
+- `swap($new)` → Redis `GETSET`. Атомарно.
 - `compareAndSet($expect, $new)` → Lua-скрипт или `WATCH`/`MULTI`. Стоит обернуть в helper.
 - Внешние flag-сервисы обычно кэшируют значение локально; ваше чтение не всегда сетевой round trip. Это обычно нормально, но ожидайте eventual consistency на изменениях.
 

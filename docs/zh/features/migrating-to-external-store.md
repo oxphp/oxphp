@@ -102,7 +102,7 @@ final class RedisCounterBackend implements CounterBackend
 
 语义差异：
 
-- `exchange($new)` → Redis `GETSET`。原子。
+- `swap($new)` → Redis `GETSET`。原子。
 - `compareAndSet($expect, $new)` → Lua 脚本或 `WATCH`/`MULTI`。值得封装为帮助函数。
 - 外部开关服务通常会在本地缓存值；你的读取并不总是网络往返。这通常没问题，但变更时要预期最终一致。
 

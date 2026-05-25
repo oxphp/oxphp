@@ -1,10 +1,15 @@
-//! Shared\Flag — atomic bool.
+//! Shared\Flag — atomic bool with explicit memory ordering control.
+//!
+//! The bool twin of `Shared\Atomic`: load/store/swap/compareAndSet, each
+//! taking an explicit `Ordering`, validated identically to Atomic.
 
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{
+    ffi_entry, read_last_error_message, set_last_error, SharedError,
+};
 use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
@@ -19,34 +24,28 @@ impl FlagInner {
         }
     }
 
-    // All Flag ops use SeqCst by contract: a Flag is a one-shot signal
-    // that PHP code may use as a synchronisation point (write payload,
-    // then set; a reader who sees `test()` true sees the payload). Do not
-    // weaken without updating the public Flag stubs.
-    pub fn test(&self) -> bool {
-        self.value.load(Ordering::SeqCst)
+    pub fn load(&self, order: Ordering) -> bool {
+        self.value.load(order)
     }
 
-    /// Sets the flag to true. Returns the previous value.
-    pub fn set(&self) -> bool {
-        self.value.swap(true, Ordering::SeqCst)
+    pub fn store(&self, v: bool, order: Ordering) {
+        self.value.store(v, order);
     }
 
-    /// Clears the flag (sets to false). Returns the previous value.
-    pub fn clear(&self) -> bool {
-        self.value.swap(false, Ordering::SeqCst)
+    pub fn swap(&self, v: bool, order: Ordering) -> bool {
+        self.value.swap(v, order)
     }
 
-    /// Compare-and-swap. Returns true if the swap was performed.
-    pub fn cas(&self, expect: bool, new: bool) -> bool {
+    pub fn compare_and_set(
+        &self,
+        expect: bool,
+        new: bool,
+        success: Ordering,
+        failure: Ordering,
+    ) -> bool {
         self.value
-            .compare_exchange(expect, new, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(expect, new, success, failure)
             .is_ok()
-    }
-
-    /// Exchange: set to `new`, return the previous value.
-    pub fn exchange(&self, new: bool) -> bool {
-        self.value.swap(new, Ordering::SeqCst)
     }
 }
 
@@ -58,7 +57,9 @@ impl SharedInner for FlagInner {
         self
     }
     fn debug_snapshot(&self) -> SharedValue {
-        SharedValue::Bool(self.test())
+        // Relaxed: introspection-only read, never part of a caller-controlled
+        // happens-before — a stronger ordering would add a barrier for nothing.
+        SharedValue::Bool(self.load(Ordering::Relaxed))
     }
     fn mem_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
@@ -68,6 +69,8 @@ impl SharedInner for FlagInner {
 }
 
 // ─── FFI ──────────────────────────────────────────────────────────────
+
+use super::atomic::ordering_from_u8;
 
 /// # Safety
 /// `out_ptr` must be valid for writes of `*const Entry` if non-null.
@@ -94,7 +97,11 @@ pub unsafe extern "C" fn oxphp_shared_flag_create(
 /// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_test(entry_ptr: *const Entry, out: *mut c_int) -> c_int {
+pub unsafe extern "C" fn oxphp_shared_flag_load(
+    entry_ptr: *const Entry,
+    order: u8,
+    out: *mut c_int,
+) -> c_int {
     if out.is_null() {
         set_last_error("out is null");
         return SharedError::Generic.code();
@@ -103,13 +110,12 @@ pub unsafe extern "C" fn oxphp_shared_flag_test(entry_ptr: *const Entry, out: *m
         return SharedError::StaleHandle.code();
     }
     ffi_entry(|| {
-        // SAFETY: entry_ptr non-null and, per the handle contract, a
-        // live Arc::into_raw pointer — the calling PHP wrapper holds a
-        // strong ref through it.
+        // SAFETY: entry_ptr non-null and, per the handle contract, a live
+        // Arc::into_raw pointer — the calling PHP wrapper holds a strong ref.
         let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_test on freed Entry");
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_load on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
-        let v = inner.test();
+        let v = inner.load(ordering_from_u8(order));
         entry.registry.record_op(entry);
         unsafe { *out = v as c_int };
         Ok(())
@@ -118,27 +124,22 @@ pub unsafe extern "C" fn oxphp_shared_flag_test(entry_ptr: *const Entry, out: *m
 
 /// # Safety
 /// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-/// `out_prev` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_set(
+pub unsafe extern "C" fn oxphp_shared_flag_store(
     entry_ptr: *const Entry,
-    out_prev: *mut c_int,
+    value: c_int,
+    order: u8,
 ) -> c_int {
-    if out_prev.is_null() {
-        set_last_error("out_prev is null");
-        return SharedError::Generic.code();
-    }
     if entry_ptr.is_null() {
         return SharedError::StaleHandle.code();
     }
     ffi_entry(|| {
-        // SAFETY: see oxphp_shared_flag_test.
+        // SAFETY: see oxphp_shared_flag_load.
         let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_set on freed Entry");
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_store on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
-        let prev = inner.set();
+        inner.store(value != 0, ordering_from_u8(order));
         entry.registry.record_op(entry);
-        unsafe { *out_prev = prev as c_int };
         Ok(())
     })
 }
@@ -147,8 +148,10 @@ pub unsafe extern "C" fn oxphp_shared_flag_set(
 /// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
 /// `out_prev` must be valid for writes of `c_int` if non-null.
 #[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_clear(
+pub unsafe extern "C" fn oxphp_shared_flag_swap(
     entry_ptr: *const Entry,
+    value: c_int,
+    order: u8,
     out_prev: *mut c_int,
 ) -> c_int {
     if out_prev.is_null() {
@@ -159,11 +162,11 @@ pub unsafe extern "C" fn oxphp_shared_flag_clear(
         return SharedError::StaleHandle.code();
     }
     ffi_entry(|| {
-        // SAFETY: see oxphp_shared_flag_test.
+        // SAFETY: see oxphp_shared_flag_load.
         let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_clear on freed Entry");
+        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_swap on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
-        let prev = inner.clear();
+        let prev = inner.swap(value != 0, ordering_from_u8(order));
         entry.registry.record_op(entry);
         unsafe { *out_prev = prev as c_int };
         Ok(())
@@ -178,6 +181,8 @@ pub unsafe extern "C" fn oxphp_shared_flag_cas(
     entry_ptr: *const Entry,
     expect: c_int,
     new_val: c_int,
+    success: u8,
+    failure: u8,
     out_swapped: *mut c_int,
 ) -> c_int {
     if out_swapped.is_null() {
@@ -188,41 +193,18 @@ pub unsafe extern "C" fn oxphp_shared_flag_cas(
         return SharedError::StaleHandle.code();
     }
     ffi_entry(|| {
-        // SAFETY: see oxphp_shared_flag_test.
+        // SAFETY: see oxphp_shared_flag_load.
         let entry: &Entry = unsafe { &*entry_ptr };
         debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_cas on freed Entry");
         let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
-        let swapped = inner.cas(expect != 0, new_val != 0);
+        let swapped = inner.compare_and_set(
+            expect != 0,
+            new_val != 0,
+            ordering_from_u8(success),
+            ordering_from_u8(failure),
+        );
         entry.registry.record_op(entry);
         unsafe { *out_swapped = swapped as c_int };
-        Ok(())
-    })
-}
-
-/// # Safety
-/// `entry_ptr` must be a live `Arc::into_raw` pointer or NULL.
-/// `out_prev` must be valid for writes of `c_int` if non-null.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_flag_exchange(
-    entry_ptr: *const Entry,
-    new_val: c_int,
-    out_prev: *mut c_int,
-) -> c_int {
-    if out_prev.is_null() {
-        set_last_error("out_prev is null");
-        return SharedError::Generic.code();
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    ffi_entry(|| {
-        // SAFETY: see oxphp_shared_flag_test.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "flag_exchange on freed Entry");
-        let inner = entry.inner.as_any_flag().ok_or(SharedError::Type)?;
-        let prev = inner.exchange(new_val != 0);
-        entry.registry.record_op(entry);
-        unsafe { *out_prev = prev as c_int };
         Ok(())
     })
 }
@@ -240,6 +222,10 @@ impl SharedInnerFlagExt for dyn SharedInner {
 
 // ─── PHP class registration ───────────────────────────────────────────
 
+use super::atomic::{
+    atomic_rc_to_result, order_default, order_type, read_order_arg, validate_cas_failure_ordering,
+    validate_ordering_for_load, validate_ordering_for_store,
+};
 use crate::plugin::types::{MagicMethod, PhpType, PhpValue};
 use crate::plugin::{PhpError, PluginContext, PluginError};
 use crate::plugins::ox_shared::handle::SharedHandle;
@@ -273,7 +259,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             if rc != 0 {
                 return Err(PhpError::Exception {
                     class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: rc_to_phperr_msg(rc),
+                    message: read_last_error_message(),
                     code: 0,
                 });
             }
@@ -282,68 +268,74 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             handle.type_tag = SharedType::Flag as u8;
             Ok(())
         })
-        .method("isSet")
+        .method("load")
+        .optional_param("order", order_type(), order_default())
         .returns(PhpType::Bool)
         .handler(|call| {
+            let order = read_order_arg(call, 0)?;
+            validate_ordering_for_load(order)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut out: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_test(handle.entry_ptr, &mut out) };
-            super::counter::counter_rc_to_result(rc)?;
+            let rc = unsafe { oxphp_shared_flag_load(handle.entry_ptr, order, &mut out) };
+            atomic_rc_to_result(rc)?;
             call.ret_bool(out != 0);
             Ok(())
         })
-        .method("set")
-        .returns(PhpType::Bool)
+        .method("store")
+        .param("value", PhpType::Bool)
+        .optional_param("order", order_type(), order_default())
+        .returns(PhpType::Void)
         .handler(|call| {
+            let value = call.arg_bool(0)?;
+            let order = read_order_arg(call, 1)?;
+            validate_ordering_for_store(order)?;
             let handle = call.storage::<SharedHandle>()?;
-            let mut prev: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_set(handle.entry_ptr, &mut prev) };
-            super::counter::counter_rc_to_result(rc)?;
-            call.ret_bool(prev != 0);
+            let rc = unsafe { oxphp_shared_flag_store(handle.entry_ptr, value as c_int, order) };
+            atomic_rc_to_result(rc)?;
             Ok(())
         })
-        .method("clear")
+        .method("swap")
+        .param("value", PhpType::Bool)
+        .optional_param("order", order_type(), order_default())
         .returns(PhpType::Bool)
         .handler(|call| {
+            let value = call.arg_bool(0)?;
+            let order = read_order_arg(call, 1)?;
             let handle = call.storage::<SharedHandle>()?;
             let mut prev: c_int = 0;
-            let rc = unsafe { oxphp_shared_flag_clear(handle.entry_ptr, &mut prev) };
-            super::counter::counter_rc_to_result(rc)?;
+            let rc = unsafe {
+                oxphp_shared_flag_swap(handle.entry_ptr, value as c_int, order, &mut prev)
+            };
+            atomic_rc_to_result(rc)?;
             call.ret_bool(prev != 0);
             Ok(())
         })
         .method("compareAndSet")
         .param("expect", PhpType::Bool)
         .param("new", PhpType::Bool)
+        .optional_param("success", order_type(), order_default())
+        .optional_param("failure", order_type(), order_default())
         .returns(PhpType::Bool)
         .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
             let expect = call.arg_bool(0)?;
-            let new = call.arg_bool(1)?;
+            let new_val = call.arg_bool(1)?;
+            let success = read_order_arg(call, 2)?;
+            let failure = read_order_arg(call, 3)?;
+            validate_cas_failure_ordering(failure)?;
+            let handle = call.storage::<SharedHandle>()?;
             let mut swapped: c_int = 0;
             let rc = unsafe {
                 oxphp_shared_flag_cas(
                     handle.entry_ptr,
                     expect as c_int,
-                    new as c_int,
+                    new_val as c_int,
+                    success,
+                    failure,
                     &mut swapped,
                 )
             };
-            super::counter::counter_rc_to_result(rc)?;
+            atomic_rc_to_result(rc)?;
             call.ret_bool(swapped != 0);
-            Ok(())
-        })
-        .method("exchange")
-        .param("new", PhpType::Bool)
-        .returns(PhpType::Bool)
-        .handler(|call| {
-            let handle = call.storage::<SharedHandle>()?;
-            let new = call.arg_bool(0)?;
-            let mut prev: c_int = 0;
-            let rc =
-                unsafe { oxphp_shared_flag_exchange(handle.entry_ptr, new as c_int, &mut prev) };
-            super::counter::counter_rc_to_result(rc)?;
-            call.ret_bool(prev != 0);
             Ok(())
         })
         .method("id")
@@ -368,45 +360,25 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     Ok(())
 }
 
-fn rc_to_phperr_msg(rc: c_int) -> String {
-    // Reuse counter's error-string extraction via last_error.
-    let mut buf = [0u8; 512];
-    let n = unsafe {
-        crate::plugins::ox_shared::error::oxphp_shared_last_error(
-            buf.as_mut_ptr() as *mut std::os::raw::c_char,
-            buf.len(),
-        )
-    };
-    let _ = rc; // rc used for context if needed in the future
-    let len = n.min(buf.len() - 1);
-    String::from_utf8_lossy(&buf[..len]).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_set_clear() {
+    fn load_store_swap_baseline() {
         let f = FlagInner::new(false);
-        // set() when false → prev = false
-        assert!(!f.set());
-        // set() again when true → prev = true
-        assert!(f.set());
-        // clear() when true → prev = true
-        assert!(f.clear());
-        // clear() again when false → prev = false
-        assert!(!f.clear());
+        assert!(!f.load(Ordering::SeqCst));
+        f.store(true, Ordering::SeqCst);
+        assert!(f.load(Ordering::Acquire));
+        assert!(f.swap(false, Ordering::SeqCst)); // returns previous = true
+        assert!(!f.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn cas() {
+    fn cas_success_and_failure_paths() {
         let f = FlagInner::new(false);
-        // cas(false → true) should succeed
-        assert!(f.cas(false, true));
-        // now flag is true; cas(false → true) should fail
-        assert!(!f.cas(false, true));
-        // flag is still true
-        assert!(f.test());
+        assert!(f.compare_and_set(false, true, Ordering::SeqCst, Ordering::SeqCst));
+        assert!(!f.compare_and_set(false, true, Ordering::SeqCst, Ordering::Acquire));
+        assert!(f.load(Ordering::SeqCst));
     }
 }

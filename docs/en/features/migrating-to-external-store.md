@@ -102,7 +102,7 @@ Semantic gaps:
 
 Semantic gaps:
 
-- `exchange($new)` → Redis `GETSET`. Atomic.
+- `swap($new)` → Redis `GETSET`. Atomic.
 - `compareAndSet($expect, $new)` → Lua script or `WATCH`/`MULTI`. Worth wrapping as a helper.
 - External flag services usually cache the value locally; your read is not always a network round trip. That is typically fine, but expect eventual consistency on changes.
 
