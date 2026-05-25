@@ -20,7 +20,7 @@ description: 跨 PHP 工作线程共享的通用原子 int64——load/store、s
 - **CAS 循环** —— `load` 读取，计算新值，`compareAndSet` 重试直至成功。
 - **位标志掩码** —— `fetchOr` 置位，`fetchAnd` 清位。
 
-`Counter` 适合累加（`add`、`inc`、`dec`）；`Atomic` 适合任意原子状态。
+`Counter` 适合累加（`add`）；`Atomic` 适合任意原子状态。
 
 ## API 参考
 

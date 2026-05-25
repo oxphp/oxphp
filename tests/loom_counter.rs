@@ -20,10 +20,15 @@ impl LoomCounter {
         }
     }
     fn add(&self, d: i64) -> i64 {
-        self.value.fetch_add(d, Ordering::SeqCst) + d
+        self.value.fetch_add(d, Ordering::Relaxed).wrapping_add(d)
     }
     fn get(&self) -> i64 {
-        self.value.load(Ordering::SeqCst)
+        self.value.load(Ordering::Relaxed)
+    }
+    fn compare_and_set(&self, expect: i64, new: i64) -> bool {
+        self.value
+            .compare_exchange(expect, new, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 }
 
@@ -43,6 +48,27 @@ fn counter_add_from_two_threads() {
                 c.add(1);
             })
         };
+        a.join().unwrap();
+        b.join().unwrap();
+        assert_eq!(c.get(), 2);
+    });
+}
+
+#[test]
+fn counter_cas_increment_from_two_threads() {
+    loom::model(|| {
+        let c = Arc::new(LoomCounter::new(0));
+        let mk = || {
+            let c = Arc::clone(&c);
+            loom::thread::spawn(move || loop {
+                let cur = c.get();
+                if c.compare_and_set(cur, cur + 1) {
+                    break;
+                }
+            })
+        };
+        let a = mk();
+        let b = mk();
         a.join().unwrap();
         b.join().unwrap();
         assert_eq!(c.get(), 2);

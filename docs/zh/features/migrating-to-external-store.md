@@ -41,7 +41,7 @@ final class SharedCounterBackend implements CounterBackend
             $key,
             fn () => new OxPHP\Shared\Counter(),
         );
-        return $counter->inc($by);
+        return $counter->add($by);
     }
 
     public function get(string $key): int
@@ -53,7 +53,7 @@ final class SharedCounterBackend implements CounterBackend
     public function reset(string $key): int
     {
         $counter = $this->counters->get($key);
-        return $counter?->reset() ?? 0;
+        return $counter?->set(0) ?? 0;
     }
 }
 
@@ -92,7 +92,7 @@ final class RedisCounterBackend implements CounterBackend
 
 语义差异：
 
-- `addBatch(array $deltas)` 在 `Shared\*` 中是单次 FFI 往返。Redis 中是一次流水线（仍是一次 RTT）；NATS 中是 N 次调用。优先预先求和后做一次 `INCRBY`。
+- 批量累加即 `add(array_sum($deltas))`，在 `Shared\*` 中是单次 FFI 往返。Redis 中先求和再做一次 `INCRBY`（一次 RTT）；NATS 中是一次 `KV.update`。
 - Redis 的整数溢出会返回错误；`Shared\Counter` 静默回绕。
 
 ### `Shared\Flag` → Redis / NATS 特性开关服务

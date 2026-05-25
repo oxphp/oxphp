@@ -10,7 +10,7 @@ $n = 1000;
 $promises = [];
 for ($i = 0; $i < 4; $i++) {
     $promises[] = oxphp_async(function() use ($c, $n) {
-        for ($j = 0; $j < $n; $j++) { $c->inc(); }
+        for ($j = 0; $j < $n; $j++) { $c->add(); }
     });
 }
 oxphp_async_await_all($promises);

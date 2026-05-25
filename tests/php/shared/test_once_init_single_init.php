@@ -9,7 +9,7 @@ $promises = [];
 for ($i = 0; $i < 10; $i++) {
     $promises[] = oxphp_async(function() use ($o, $counter) {
         $v = $o->getOrInit(function() use ($counter) {
-            $counter->inc();
+            $counter->add();
             usleep(5000);
             return 'singleton-value';
         });

@@ -2,7 +2,7 @@
 # description: Shared state primitives — Channel, Map, Pool, Counter, Atomic
 
 shared/test_counter_basic
-shared/test_counter_no_swap
+shared/test_counter_removed_methods
 shared/test_atomic_basic
 shared/test_atomic_ordering
 shared/test_atomic_state_machine

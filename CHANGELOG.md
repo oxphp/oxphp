@@ -34,25 +34,24 @@ The wire status now reflects the cancel reason: `max_execution_time` exhaustion 
 - If you ship a custom `ERROR_PAGES_DIR`, add `504.html`, `503.html`, and optionally `499.html` next to `500.html`.
 - `5xx` rate SLOs will drop after rollout because `499` is no longer 5xx — this is honest improvement, not a regression.
 
-**3. `Shared\Counter` is now a pure accumulator**
+**3. `Shared\Counter` — `inc`/`dec`/`addBatch`/`reset` removed**
 
-`Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed; atomic-replace and CAS live on the new `Shared\Atomic` class. `Counter::reset()` no longer takes an argument and always zeroes the counter, returning the prior sum.
+`Counter::inc()`, `Counter::dec()`, `Counter::addBatch()`, and `Counter::reset()` were removed. `inc()`/`dec()` collapse into `add(int $delta = 1)` (`add()` adds 1, `add(-1)` decrements); `addBatch($deltas)` becomes `add(array_sum($deltas))`; `reset()` becomes `set(0)`, which — like the old `reset()` — returns the previous value. `get()`, `set()` (atomic exchange, returns the previous value), `compareAndSet()`, and `id()` keep their 0.5.0 signatures. The behavioural changes: `add()` gains a default delta of `1`, and every operation is now `Relaxed` rather than `SeqCst` — a Counter is a statistics accumulator, not a synchronisation point — use `Shared\Atomic` (with an explicit `Ordering`) when a counter must synchronise other memory or run a CAS that publishes other state.
 
 ```php
-// Before
-$c->set(42);
-$c->swap(0);
-$c->compareAndSet(0, 1);
-$prev = $c->reset(5);
-
-// After — atomic-replace and CAS on Atomic
-$a = new \OxPHP\Shared\Atomic(42);
-$a->store(42);
-$a->swap(0);
-$a->compareAndSet(0, 1);
-
-// Counter::reset() always zeroes
+// Before (0.5.0)
+$c->inc();
+$c->inc(5);
+$c->dec();
+$c->addBatch([1, 2, 3]);
 $prev = $c->reset();
+
+// After
+$c->add();
+$c->add(5);
+$c->add(-1);
+$c->add(array_sum([1, 2, 3]));
+$prev = $c->set(0);
 ```
 
 **4. `OxPHP\Shared\*` — unified method naming**
@@ -161,7 +160,7 @@ if ($o->status() === OxPHP\Shared\Once\Status::Ready) { $cached = $o->get(); }
   | `$m->isPoisoned()`, `$m->clearPoison()` | removed; PHP throws no longer corrupt the mutex |
 
   Timeout parameters on the `*Timeout` methods are `int $ms (> 0)` in milliseconds, not `?float $seconds` — zero, negative, non-int, and absent values raise `OxPHP\Shared\TypeException` (use `try*` or the bare verb for those policies). The Channel `RecvResult` `value()` accessor throws `OxPHP\Shared\SharedException` if called on a non-Ok variant; use `isOk()` / `valueOr()` / `status()` to dispatch. The Mutex closure signature changed from `function ($value): mixed` (return-to-commit) to `function (&$value): mixed` (by-ref mutation; the return value becomes the caller's return value). `Shared\TimeoutException` is removed — `OperationTimeoutException` (now under `Async\AsyncException`) replaces it for `withLockTimeout` and the Pool-saturated path; `Shared\ClosedException` remains registered but is deprecated and only thrown by the still-unmigrated `Shared\Pool`; `Shared\PoisonedException` is now a first-class part of the redesigned `Shared\Once` (its `Poison` failure mode) and is no longer deprecated. `Shared\DeadlockException` is reparented from `Shared\TimeoutException` to `Async\AsyncException`, so a single `catch (Async\AsyncException)` now sweeps every concurrency outcome across Shared\* and Async\*.
-- `Shared\Counter` is now a pure accumulator. `Counter::set()`, `Counter::swap()`, and `Counter::compareAndSet()` were removed — atomic-replace and compare-and-swap belong on the new `Shared\Atomic` class. `Counter::reset(int $newValue)` lost its argument; `reset()` now always returns the previous value and atomically zeroes the counter (the LongAdder `sumThenReset` pattern). For state machines, version stamps, or arbitrary atomic int storage, use `Shared\Atomic` instead.
+- `Shared\Counter` reshaped to a minimal accumulator: `inc()`, `dec()`, `addBatch()`, and `reset()` were removed in favour of `add(int $delta = 1)` (covers increment and decrement) and `set(0)` (windowed reset, returns the previous value). `get()`, `set()`, `compareAndSet()`, and `id()` are retained with their 0.5.0 signatures; `add()` gains a default delta of `1`. All operations switched from `SeqCst` to `Relaxed` — a Counter is statistics, not a synchronisation point; use `Shared\Atomic` (with an explicit `Ordering`) to synchronise other memory, run an ordered CAS, or store arbitrary atomic int state.
 - `oxphp_async_await_any(array, ?float): array` was renamed to `oxphp_async_await_race(array, ?float): array`. The implementation is unchanged — first settled (success or failure) wins, as before. If your code relied on this behavior, replace the function name in-place.
 - `OxPHP\Shared\*` method naming unified across types. The renames below are mechanical (semantics and signatures unchanged), and ship without alias shims — update call sites with sed before upgrading. The rules are documented at [`docs/en/features/shared-naming.md`](docs/en/features/shared-naming.md).
   - `Channel::pending()` → `Channel::count()`

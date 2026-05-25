@@ -167,7 +167,7 @@ $counters = new OxPHP\Shared\Map();
 $counters->set('requests_handled', new OxPHP\Shared\Counter());
 
 // Any worker increments via the stored Shareable (stored by reference).
-$counters->get('requests_handled')->inc();
+$counters->get('requests_handled')->add();
 ```
 
 ### Iterating a large map
@@ -214,11 +214,11 @@ $counter = new OxPHP\Shared\Counter(10);
 $map->set('c', $counter);
 
 $retrieved = $map->get('c');           // same Shareable identity
-$retrieved->inc();                      // mutation visible via $counter too
+$retrieved->add();                      // mutation visible via $counter too
 echo $counter->get();                   // 11
 
 $counter2 = $map->pop('c');             // Map releases its hold, returns the value
-$counter2->inc();                       // still alive via the returned wrapper
+$counter2->add();                       // still alive via the returned wrapper
 ```
 
 ### Cycle detection rejects before it mutates

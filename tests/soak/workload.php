@@ -38,7 +38,7 @@ for ($i = 0; $i < $count; $i++) {
             return $r;
         },
         destroy: function (object $_r) use ($destroyed) {
-            $destroyed->inc();
+            $destroyed->add();
         },
         maxSize: $maxSize,
         idleTimeout: $idleSec,

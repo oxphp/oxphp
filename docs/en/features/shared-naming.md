@@ -115,9 +115,8 @@ value.
 `fetchXor()`.
 
 The `fetch` prefix encodes the return contract: **the value before
-the operation**. This contrasts with `Counter::add()` /
-`Counter::inc()` / `Counter::dec()`, which return the **new** value
-(LongAdder-style aggregate counter).
+the operation**. This contrasts with `Counter::add()`, which returns the **new**
+value (LongAdder-style aggregate counter).
 
 When adding new RMW methods, pick the contract first, then the name:
 
@@ -130,12 +129,15 @@ Do not mix.
 
 `Map::clear()`, `Flag::clear()` (in the sense of "set to false").
 Returns `void` for plain reset; returns the previous value when the
-caller can reasonably want it (`Flag::clear()`, `Counter::reset()`).
+caller can reasonably want it (`Flag::clear()`).
 
-`Counter::reset()` is the documented exception that keeps `reset`:
-the LongAdder convention is `sumThenReset`, and renaming would
-mislead users coming from Java's `LongAdder` / Go's
-`atomic.Int64.Swap(0)`.
+`Counter` has no `clear()` — `set(0)` is its windowed reset.
+`Counter::set()` is the documented exception that returns the
+**previous** value (not `void`): it is the atomic exchange, and
+`set(0)` reading the prior total is the LongAdder `sumThenReset`
+idiom. (`Atomic` spells the same operation `swap()` / `exchange()`;
+Counter keeps `set` because `set($n)` reads naturally for seeding
+and windowing.)
 
 ### 10. Registry identity — `id(): int`
 
@@ -159,7 +161,7 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
 | Swap, return prev           | `swap()` / `exchange()`  | `Atomic::swap`, `Flag::exchange`        |
 | Atomic RMW, return prev     | `fetch*()`               | `Atomic::fetchAdd`                      |
-| Atomic RMW, return new      | bare verb                | `Counter::inc`, `Counter::add`          |
+| Atomic RMW, return new      | bare verb                | `Counter::add`                          |
 | Reset to default            | `clear()`                | `Map::clear`, `Flag::clear`             |
 | Registry id                 | `id(): int`              | every `Shared\*` type                   |
 
@@ -169,7 +171,7 @@ When proposing a new primitive, fill out this checklist before merging:
 
 - [ ] Every method maps to a row in the cheat sheet, or has an ADR
   explaining the exception (see `Atomic::load/store` and
-  `Counter::reset` above).
+  `Counter::set` above).
 - [ ] If the type holds a collection of values, it implements
   `\Countable` and exposes `count(): int`.
 - [ ] Read methods are `get` or `load` (atomic only).

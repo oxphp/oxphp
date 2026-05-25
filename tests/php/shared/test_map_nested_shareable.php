@@ -26,9 +26,9 @@ if ($retrieved->get() !== 10) {
 }
 
 // Mutations via original or retrieved are visible through both.
-$counter->inc();
+$counter->add();
 if ($retrieved->get() !== 11) { echo "FAIL: mutation via original not visible\n"; exit; }
-$retrieved->inc();
+$retrieved->add();
 if ($counter->get() !== 12) { echo "FAIL: mutation via retrieved not visible\n"; exit; }
 
 // pop unlinks the Map's hold and returns the value; the Counter lives on
@@ -36,7 +36,7 @@ if ($counter->get() !== 12) { echo "FAIL: mutation via retrieved not visible\n";
 $removed = $m->pop('hits');
 if (!($removed instanceof OxPHP\Shared\Counter)) { echo "FAIL: pop wrong type\n"; exit; }
 if ($removed->id() !== $counter->id()) { echo "FAIL: pop identity\n"; exit; }
-$counter->inc();
+$counter->add();
 if ($counter->get() !== 13) { echo "FAIL: original damaged after remove\n"; exit; }
 
 echo "OK\n";
