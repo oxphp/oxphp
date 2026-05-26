@@ -15,11 +15,14 @@ use smallvec::SmallVec;
 use crate::bridge::types::ValType;
 use crate::plugin::types::{MagicMethod, PhpType};
 use crate::plugin::{PhpError, PluginContext, PluginError};
-use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
+use crate::plugins::ox_shared::error::{
+    ffi_entry, read_last_error_message, set_last_error, SharedError,
+};
 use crate::plugins::ox_shared::handle::SharedHandle;
 use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedInner, SharedRegistry, SharedType, ENTRY_MAGIC,
 };
+use std::sync::Weak;
 use crate::plugins::ox_shared::value::SharedValue;
 
 // Per-thread set of Once ids currently inside `getOrInit(factory)` on
@@ -104,6 +107,15 @@ impl PartialEq for PoisonInfo {
 impl Eq for PoisonInfo {}
 
 /// Error returned by the factory closure passed to [`OnceInner::get_or_init`].
+///
+/// Mapping to [`OnceFailureMode`]:
+/// - `Threw` and `NotSerialisable` are *factory failures* — the call
+///   site was correct, but execution did not produce a usable value.
+///   They honour the configured `FailureMode` (Reset → retryable,
+///   Poison → terminal).
+/// - `Invalid` is a *programmer mistake at the call site* — the
+///   argument was not callable at all. It always resets so a follow-up
+///   call with a real callable succeeds, regardless of `FailureMode`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OnceFactoryError {
     /// The PHP factory threw; carries the captured exception info.
@@ -145,6 +157,12 @@ pub struct OnceInner {
     poison: Mutex<Option<PoisonInfo>>,
     set_lock: Mutex<()>,
     failure_mode: OnceFailureMode,
+    /// Back-reference to the owning Entry, set in `bind_entry` after the
+    /// registry insert. Lets the post-init writes call
+    /// `Entry::adjust_mem_bytes` so `total_bytes` reflects the stored
+    /// payload size (otherwise it would stay at the empty-Once skeleton
+    /// and silently bypass `SHARED_MAX_BYTES` caps).
+    self_entry: OnceLock<Weak<Entry>>,
 }
 
 impl OnceInner {
@@ -159,6 +177,27 @@ impl OnceInner {
             poison: Mutex::new(None),
             set_lock: Mutex::new(()),
             failure_mode,
+            self_entry: OnceLock::new(),
+        }
+    }
+
+    /// Wire the back-reference to the owning Entry. Called by
+    /// `oxphp_shared_once_create` right after `registry.insert()`.
+    pub fn bind_entry(&self, weak: Weak<Entry>) {
+        let _ = self.self_entry.set(weak);
+    }
+
+    /// Book `value`'s contribution against `Entry::mem_bytes` and the
+    /// registry's `total_bytes`. No-op before `bind_entry` (e.g. unit
+    /// tests that exercise `OnceInner::new()` standalone).
+    fn track_set_delta(&self, value: &SharedValue) {
+        let Some(weak) = self.self_entry.get() else {
+            return;
+        };
+        let Some(entry) = weak.upgrade() else { return };
+        let delta = value.mem_bytes() as isize;
+        if delta != 0 {
+            entry.adjust_mem_bytes(delta);
         }
     }
 
@@ -193,6 +232,7 @@ impl OnceInner {
             ST_READY | ST_PENDING => return Ok(false),
             _ => {}
         }
+        self.track_set_delta(&v);
         let _ = self.value.set(v);
         self.state.store(ST_READY, Ordering::Release);
         Ok(true)
@@ -240,6 +280,7 @@ impl OnceInner {
         pending_guard.armed = false;
         match outcome {
             Ok(v) => {
+                self.track_set_delta(&v);
                 let _ = self.value.set(v.clone());
                 self.state.store(ST_READY, Ordering::Release);
                 Ok(v)
@@ -258,7 +299,41 @@ impl OnceInner {
                 }
                 Err(SharedError::Generic)
             }
-            Err(OnceFactoryError::Invalid) | Err(OnceFactoryError::NotSerialisable) => {
+            Err(OnceFactoryError::NotSerialisable) => {
+                // Factory ran to completion and produced a value the
+                // shared layer cannot store (closure / resource /
+                // non-Shareable object). That is a *factory failure* in
+                // the same operational sense as Threw — the same code
+                // will keep failing on retry — so honour the
+                // FailureMode contract: Reset stays retryable, Poison
+                // makes the cell terminal. Synthesise a PoisonInfo with
+                // the TypeException class so later callers see a
+                // PoisonedException carrying an explanatory message.
+                match self.failure_mode {
+                    OnceFailureMode::Reset => {
+                        self.state.store(ST_UNINIT, Ordering::Release);
+                    }
+                    OnceFailureMode::Poison => {
+                        *self.poison.lock() = Some(PoisonInfo {
+                            class: "OxPHP\\Shared\\TypeException".to_string(),
+                            message: "factory returned a non-serialisable value \
+                                 (closure / resource / non-Shareable object)"
+                                .to_string(),
+                            code: 0,
+                        });
+                        self.state.store(ST_POISONED, Ordering::Release);
+                    }
+                }
+                Err(SharedError::Type)
+            }
+            Err(OnceFactoryError::Invalid) => {
+                // The callable argument itself was unusable (NULL,
+                // fcall_init failure). That is a programmer mistake on
+                // the *call site*, not a runtime factory failure — the
+                // next call with a real callable should succeed — so
+                // reset regardless of FailureMode. Aligns with the
+                // PendingResetGuard policy (Rust panic = internal
+                // fault, never poison).
                 self.state.store(ST_UNINIT, Ordering::Release);
                 Err(SharedError::Type)
             }
@@ -318,7 +393,11 @@ pub unsafe extern "C" fn oxphp_shared_once_create(
     let mode = OnceFailureMode::from_i64(failure_mode as i64);
     ffi_entry(|| {
         let reg = registry();
-        let arc = reg.insert(SharedType::Once, Arc::new(OnceInner::with_mode(mode)))?;
+        let inner = Arc::new(OnceInner::with_mode(mode));
+        let arc = reg.insert(SharedType::Once, inner.clone())?;
+        // Wire the inner's back-reference so post-init writes can adjust
+        // total_bytes via Entry::adjust_mem_bytes.
+        inner.bind_entry(Arc::downgrade(&arc));
         // SAFETY: out_ptr checked non-null above.
         unsafe { *out_ptr = Arc::into_raw(arc) };
         Ok(())
@@ -540,9 +619,34 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             let result = inner.get_or_init(|| {
                 let mut out_buf: *mut u8 = std::ptr::null_mut();
                 let mut out_len: usize = 0;
+                // If the factory returns a Shared\* wrapper, the C shim
+                // retains its Entry across the wrapper drop so the lookup
+                // path below cannot race against Entry::drop. RetainGuard
+                // releases the +1 when this closure exits, by which point
+                // the SharedValue::Shared(owned) (if any) has its own Arc.
+                let mut retained: *const std::os::raw::c_void = std::ptr::null();
                 let rc = unsafe {
-                    ffi::oxphp_shared_invoke_0_portbuf(callable_zv, &mut out_buf, &mut out_len)
+                    ffi::oxphp_shared_invoke_0_portbuf(
+                        callable_zv,
+                        &mut out_buf,
+                        &mut out_len,
+                        &mut retained,
+                    )
                 };
+                struct RetainGuard(*const std::os::raw::c_void);
+                impl Drop for RetainGuard {
+                    fn drop(&mut self) {
+                        if !self.0.is_null() {
+                            unsafe {
+                                drop(std::sync::Arc::from_raw(
+                                    self.0
+                                        as *const crate::plugins::ox_shared::registry::Entry,
+                                ))
+                            };
+                        }
+                    }
+                }
+                let _retain_release = RetainGuard(retained);
                 match rc {
                     x if x == ffi::OXPHP_SHARED_INVOKE_OK => {
                         let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
@@ -567,6 +671,22 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                         // the original exception still propagates to this caller.
                         Err(OnceFactoryError::Threw(capture_pending_exception()))
                     }
+                    x if x == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
+                        if !out_buf.is_null() {
+                            unsafe { ffi::oxphp_portable_free(out_buf) };
+                        }
+                        // The callable ran to completion; the C-side
+                        // portbuf serialiser rejected its return value
+                        // (closure, resource, non-Shareable object).
+                        // Distinguish from `Invalid` (the callable
+                        // itself was unusable) so the surfaced message
+                        // points at the right line of PHP.
+                        set_last_error(
+                            "Once::getOrInit: factory returned a non-serialisable value \
+                             (closure / resource / non-Shareable object)",
+                        );
+                        Err(OnceFactoryError::NotSerialisable)
+                    }
                     _ => {
                         if !out_buf.is_null() {
                             unsafe { ffi::oxphp_portable_free(out_buf) };
@@ -589,6 +709,28 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     Err(PhpError::Custom("Once::getOrInit factory threw".into()))
                 }
                 Err(SharedError::Poisoned) => Err(poisoned_error(inner)),
+                Err(SharedError::Type) => {
+                    // The factory closure paths above (NotSerialisable,
+                    // Invalid) write a precise diagnostic via
+                    // `set_last_error` ("factory returned a non-serialisable
+                    // value …" / "factory is not a valid callable"). Surface
+                    // it as the TypeException message instead of the generic
+                    // `SharedError::Type` Display ("type error"); empty
+                    // last_error falls back to the Display so the path stays
+                    // safe under future callers that raise Type without
+                    // writing last_error.
+                    let detail = read_last_error_message();
+                    let message = if detail.is_empty() {
+                        SharedError::Type.to_string()
+                    } else {
+                        detail
+                    };
+                    Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\TypeException".to_string(),
+                        message,
+                        code: 0,
+                    })
+                }
                 Err(e) => Err(err_to_phperr(e, id)),
             }
         })
@@ -918,7 +1060,8 @@ mod tests {
     #[test]
     fn non_serialisable_return_is_distinct_from_invalid_callable() {
         // Both map to SharedError::Type (TypeException) and leave the cell
-        // retryable, but the variants are distinct for diagnostics.
+        // retryable under Reset mode, but the variants are distinct for
+        // diagnostics.
         let o = OnceInner::new();
         assert_eq!(
             o.get_or_init(|| Err(OnceFactoryError::NotSerialisable))
@@ -932,5 +1075,50 @@ mod tests {
             SharedError::Type
         );
         assert_eq!(o.state(), ST_UNINIT);
+    }
+
+    #[test]
+    fn non_serialisable_return_under_poison_mode_poisons_terminally() {
+        // A factory that ran to completion but produced a non-Shareable
+        // value is a factory failure in the same operational sense as
+        // Threw — honour FailureMode::Poison.
+        let o = OnceInner::with_mode(OnceFailureMode::Poison);
+        assert_eq!(
+            o.get_or_init(|| Err(OnceFactoryError::NotSerialisable))
+                .unwrap_err(),
+            SharedError::Type
+        );
+        assert_eq!(o.state(), ST_POISONED);
+        let info = o.poison_info().expect("poison captured");
+        assert_eq!(info.class, "OxPHP\\Shared\\TypeException");
+        assert!(
+            info.message.contains("non-serialisable"),
+            "message: {}",
+            info.message
+        );
+        // Cell is terminal: further calls report Poisoned, not Type.
+        assert_eq!(
+            o.get_or_init(|| Ok(SharedValue::Long(1))).unwrap_err(),
+            SharedError::Poisoned
+        );
+        assert_eq!(o.try_set(SharedValue::Long(1)), Err(SharedError::Poisoned));
+    }
+
+    #[test]
+    fn invalid_callable_under_poison_mode_still_resets() {
+        // `Invalid` is a programmer mistake at the call site (the arg
+        // was not callable at all) — a follow-up call with a real
+        // callable must succeed regardless of FailureMode.
+        let o = OnceInner::with_mode(OnceFailureMode::Poison);
+        assert_eq!(
+            o.get_or_init(|| Err(OnceFactoryError::Invalid))
+                .unwrap_err(),
+            SharedError::Type
+        );
+        assert_eq!(o.state(), ST_UNINIT);
+        let v = o
+            .get_or_init(|| Ok(SharedValue::Long(42)))
+            .expect("retry after Invalid must succeed even under Poison");
+        assert!(matches!(v, SharedValue::Long(42)));
     }
 }

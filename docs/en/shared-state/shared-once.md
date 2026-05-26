@@ -5,11 +5,13 @@ description: Run-once container — exactly one worker's factory produces the va
 
 # Shared\Once
 
-`OxPHP\Shared\Once` runs an initialisation closure exactly once across the whole process and makes its result visible to every subsequent caller. It is the primitive for "expensive thing that should happen at most once, no matter how many workers start up in parallel."
+`OxPHP\Shared\Once` runs an initialisation closure exactly once for **a single `Once` cell** and makes its result visible to every subsequent caller of that same cell. It is the primitive for "expensive thing that should happen at most once."
+
+To get true cross-worker / cross-request "exactly once across the whole process" semantics, bind the `Once` under a name via [`Shared\Registry::once(...)`](shared-registry.md) so every worker converges on the same cell. The bare `new Shared\Once()` constructor pattern produces a separate cell per worker thread in worker mode (each worker's bootstrap runs the constructor) and per request in traditional mode — that gives once-per-cell, not once-per-process.
 
 ## Overview
 
-- **Run-once across workers.** Two workers racing into `getOrInit($factory)` run the factory on only one of them; the loser blocks and receives the winner's value.
+- **Run-once across workers _for one cell_.** Two workers racing into `getOrInit($factory)` on the same `Once` cell run the factory on only one of them; the loser blocks and receives the winner's value. Combine with `Shared\Registry::once` to make "the same cell" mean "the same name across every worker."
 - **A four-state machine.** A cell is `Uninitialized`, `Pending` (a factory is running right now), `Ready`, or `Poisoned`. Read it with `status()`.
 - **No ambiguous null.** `get()` throws on an unset cell instead of returning `null`, so a stored `null` is a real value, not "missing".
 - **Reentrancy-safe.** Calling `getOrInit()` on the same Once from inside its own factory throws `DeadlockException` instead of hanging.
@@ -53,11 +55,20 @@ enum FailureMode: int { case Reset = 0; case Poison = 1; }
 
 ```php
 <?php
-$config = new OxPHP\Shared\Once();
+// Registry::once binds the cell under a name so every worker's bootstrap
+// converges on it. Without Registry the bare `new Once()` here would
+// create one cell PER worker thread, and the factory would run once
+// per worker, not once per process.
+$config = OxPHP\Shared\Registry::once(
+    'app-config',
+    fn() => new OxPHP\Shared\Once(),
+);
 
 oxphp_worker(function () use ($config) {
     $cfg = $config->getOrInit(function () {
-        // Runs in exactly one worker; everyone else blocks and sees the result.
+        // Runs in exactly one worker process-wide; every other worker
+        // (and every later request, in traditional mode) blocks here
+        // and sees the result.
         return json_decode(file_get_contents('/etc/myapp.json'), true);
     });
 
@@ -105,7 +116,10 @@ A `false` return means the cell was already `Ready` **or** `Pending` — it does
 
 ```php
 <?php
-$pool = new OxPHP\Shared\Once();
+// Name the cell so only one PDO connection is opened across the
+// entire OxPHP process. The factory acquires a resource — exactly
+// what `getOrInit`'s block-losers semantics protect.
+$pool = OxPHP\Shared\Registry::once('db-conn', fn() => new OxPHP\Shared\Once());
 
 $conn = $pool->getOrInit(function () {
     return new PDO(getenv('DB_DSN'), getenv('DB_USER'), getenv('DB_PASS'), [

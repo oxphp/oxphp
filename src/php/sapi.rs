@@ -1699,7 +1699,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 crate::bridge::ffi::oxphp_bridge_interface_add_method(
                     handle,
                     mname.as_ptr(),
-                    method.modifiers.bits() as u32,
+                    method_modifiers_to_zend(method.modifiers),
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
@@ -1787,7 +1787,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 crate::bridge::ffi::oxphp_bridge_enum_add_method(
                     handle,
                     mname.as_ptr(),
-                    method.modifiers.bits() as u32,
+                    method_modifiers_to_zend(method.modifiers),
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
@@ -1894,7 +1894,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     handle,
                     mname.as_ptr(),
                     visibility_to_zend(method.visibility),
-                    method.modifiers.bits() as u32,
+                    method_modifiers_to_zend(method.modifiers),
                     method.required_params() as c_int,
                     method.total_params() as c_int,
                     method.is_variadic as c_int,
@@ -2088,6 +2088,29 @@ fn visibility_to_zend(v: Visibility) -> u32 {
         Visibility::Protected => 0x02, // ZEND_ACC_PROTECTED
         Visibility::Private => 0x04,   // ZEND_ACC_PRIVATE
     }
+}
+
+/// Translate plugin-builder `Modifiers` bits into Zend method `fn_flags`
+/// bits. The C side ORs the result into `methods[m].flags`, which is then
+/// poured into `zend_internal_function::fn_flags` by Zend — so the wire
+/// value must use Zend's encoding, not ours. Symmetrically to the
+/// class-level translation above: forwarding the raw `Modifiers::*` bits
+/// would collide with the visibility low-nibble (ABSTRACT=0x01 = PUBLIC,
+/// FINAL=0x02 = PROTECTED, STATIC=0x04 = PRIVATE), silently mis-marking
+/// every `.static_()` method as private and breaking static dispatch.
+fn method_modifiers_to_zend(mods: crate::plugin::types::Modifiers) -> u32 {
+    use crate::plugin::types::Modifiers;
+    let mut flags: u32 = 0;
+    if mods.contains(Modifiers::STATIC) {
+        flags |= 0x10; // ZEND_ACC_STATIC
+    }
+    if mods.contains(Modifiers::FINAL) {
+        flags |= 0x20; // ZEND_ACC_FINAL
+    }
+    if mods.contains(Modifiers::ABSTRACT) {
+        flags |= 0x40; // ZEND_ACC_ABSTRACT
+    }
+    flags
 }
 
 /// Map `Option<PhpType>` to bridge return type constants `(OXPHP_RT_*, is_nullable)`.

@@ -86,6 +86,8 @@ impl Plugin for SharedPlugin {
         types::map::register_class(ctx)?;
         // Shared\Pool + Shared\Pool\Handle.
         types::pool::register_classes(ctx)?;
+        // Shared\Registry — name-keyed get-or-create facade.
+        types::registry::register_class(ctx)?;
 
         // Cross-thread fcc invocation probe (temporary spike).
         pool_spike::register_functions(ctx)?;

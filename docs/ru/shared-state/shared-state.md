@@ -73,19 +73,29 @@ OxPHP 0.3 поставляется с семью типами. Выбирайт�
 
 ```php
 <?php
-// worker.php — entry script in worker mode, выполняется один раз на PHP-воркер
+// worker.php — entry script в worker mode, выполняется один раз на PHP-воркер
 require __DIR__ . '/vendor/autoload.php';
 
-$requests = new OxPHP\Shared\Counter();
+// Registry::counter привязывает счётчик под ключом. Каждый воркер,
+// который выполняет этот bootstrap, сходится на ОДНОЙ записи —
+// один счётчик на весь процесс.
+$requests = OxPHP\Shared\Registry::counter(
+    'request-counter',
+    fn() => new OxPHP\Shared\Counter(),
+);
 
 oxphp_worker(function () use ($requests) {
-    $requests->add();                 // атомарно под конкурентностью
+    $requests->add();                 // атомарно между всеми воркерами
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
 ```
 
-[Worker mode](../features/worker-mode.md) выполняет внешнюю область видимости один раз на поток воркера; захват `use ($requests)` сохраняет тот же хэндл `Shared\Counter` живым между всеми запросами, которые обрабатывает этот воркер. Между потоками воркеров сама запись реестра одна и та же — все потоки воркеров, которые держат хэндлы с одинаковым `id()`, мутируют один и тот же атомарный int64.
+[Worker mode](../features/worker-mode.md) выполняет внешнюю область видимости один раз **на поток воркера**. Захват `use ($requests)` сохраняет тот же хэндл живым между всеми запросами, которые обрабатывает этот воркер. Именно `Registry::counter('request-counter', …)` заставляет все эти worker-local хэндлы указывать на одну общую запись — фабрика выполняется ровно один раз на весь процесс, и каждый вызов из других воркеров находит уже привязанную запись.
+
+Без `Registry` голый паттерн `new OxPHP\Shared\Counter()` создаёт **разный** счётчик на каждый воркер-поток (каждый bootstrap создаёт свою анонимную запись). Это нормально для per-worker аккумуляторов, но для process-wide итога — маршрутизируйте через `Registry`.
+
+Та же форма работает и в традиционном режиме (без `WORKER_MODE_ENABLED`). Первый запрос, который трогает `'request-counter'`, создаёт запись; каждый последующий запрос — на любом воркер-потоке — её видит. См. [Shared\Registry](shared-registry.md) для полной истории.
 
 Когда файберу тоже нужно увидеть счётчик, передайте его через `use`:
 
@@ -96,7 +106,7 @@ oxphp_async(function () use ($requests) {
 });
 ```
 
-> Создание `new OxPHP\Shared\Counter()` в двух разных местах создаёт два независимых счётчика с разными `id()`. Разделяемое состояние разделяется *по хэндлу*, а не по имени. Пробрасывайте хэндл через DI, захваты замыкания или bootstrap-файл — не конструируйте заново в каждом воркере и не ожидайте, что они сольются.
+> `new OxPHP\Shared\Counter()` в двух разных местах создаёт два независимых счётчика с разными `id()`. Разделяемое состояние разделяется *по хэндлу* (путь конструктора) или *по имени* через `Registry::counter(...)`. Выберите один и придерживайтесь; не конструируйте заново в каждом воркере и не ожидайте, что хэндлы сольются.
 
 ## Канонический пример — миграция самописного счётчика
 
@@ -182,8 +192,16 @@ final class RateLimiter
 }
 
 // Bootstrap
+// Bootstrap — Registry::map привязывает buckets под именем, чтобы все
+// воркеры и все запросы сходились на ОДНОЙ мапе. Без Registry голое
+// `new Shared\Map(...)` здесь создало бы отдельную мапу на каждый
+// воркер-поток (в worker mode) или на каждый запрос (в традиционном
+// режиме), и эффективный лимит масштабировался бы с числом воркеров.
 $limiter = new RateLimiter(
-    buckets:       new OxPHP\Shared\Map(maxEntries: 50_000),
+    buckets:       OxPHP\Shared\Registry::map(
+        'rate-limit-buckets',
+        fn() => new OxPHP\Shared\Map(maxEntries: 50_000),
+    ),
     maxRequests:   100,
     windowSeconds: 60,
 );
@@ -203,6 +221,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 - **Детерминированная очистка.** `sweep()` предсказуем и выполняется по расписанию, которое вы контролируете.
 - **На одну зависимость меньше.** APCu больше нет в истории деплоя.
 - **Точный счёт под нагрузкой.** Два конкурентных хита на один IP никогда не затирают друг друга.
+- **Действительно process-wide.** Привязка через `Registry::map` делает buckets одним общим экземпляром — лимит применяется ко всему серверу, а не per-worker.
 
 > Встроенный [Rate Limiting](../features/rate-limiting.md) (`RATE_LIMIT=...`) продолжает работать на уровне соединения и быстрее, чем лимитер на уровне PHP. Берите самописный лимитер только когда нужна политика уровня PHP — per-tenant, per-route, per-user-id, а не per-IP.
 
@@ -222,7 +241,8 @@ $current = $hits->add();          // атомарный inc-и-вернуть
 
 ```php
 <?php
-$perTenant = new OxPHP\Shared\Map();
+// Привяжите внешнюю Map под именем, чтобы её разделяли все воркеры.
+$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
 $counter->add();
@@ -343,5 +363,6 @@ $queue->send(['url' => $_POST['url']]);
 - [Shared\Channel](shared-channel.md) — ограниченная MPMC-очередь.
 - [Shared\Map](shared-map.md) — конкурентное key-value хранилище.
 - [Shared\Pool](shared-pool.md) — ограниченный пул объектов.
+- [Shared\Registry](shared-registry.md) — именованные process-global хэндлы (история cross-worker / cross-request).
 - [Shared Observability](shared-observability.md) — интроспекция, метрики, диагностика.
 - [Миграция на внешнее хранилище](migrating-to-external-store.md) — когда разделяемое состояние перерастает один хост.

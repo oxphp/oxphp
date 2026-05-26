@@ -5,11 +5,13 @@ description: 一次性容器——仅一个工作线程的工厂回调产生值�
 
 # Shared\Once
 
-`OxPHP\Shared\Once` 在整个进程中仅运行一次初始化闭包，并把结果暴露给所有后续调用者。它是「无论并发启动多少工作线程，都最多发生一次的昂贵动作」的原语。
+`OxPHP\Shared\Once` 针对**单个 `Once` 单元**只运行一次初始化闭包，并把结果暴露给该单元的所有后续调用者。它是「最多发生一次的昂贵动作」的原语。
+
+要在整个进程范围内获得真正的「跨工作线程 / 跨请求恰好一次」语义，请通过 [`Shared\Registry::once(...)`](shared-registry.md) 把 `Once` 绑定到一个名称上，让所有工作线程都汇聚到同一个单元。直接 `new Shared\Once()` 的构造模式在 worker 模式下每个工作线程产生一个独立单元（每个工作线程的引导阶段都会执行构造函数），在传统模式下每次请求产生一个独立单元——这给你的是「单元级仅一次」，而非「进程级仅一次」。
 
 ## 概览
 
-- **跨工作线程仅运行一次。** 两个工作线程同时进入 `getOrInit($factory)` 时，只有其中之一会运行工厂；落败方阻塞并收到胜出方的值。
+- **跨工作线程仅运行一次 _（针对同一个单元）_。** 两个工作线程同时进入同一个 `Once` 单元的 `getOrInit($factory)` 时，只有其中之一会运行工厂；落败方阻塞并收到胜出方的值。配合 `Shared\Registry::once` 即可让「同一个单元」对应「所有工作线程上同一个名称」。
 - **四状态机。** 一个单元处于 `Uninitialized`、`Pending`（工厂正在运行）、`Ready` 或 `Poisoned`。用 `status()` 读取。
 - **没有歧义的 null。** `get()` 在未设置的单元上抛异常，而非返回 `null`，因此存储的 `null` 是真实的值，而非「缺失」。
 - **可重入安全。** 从工厂内部对同一个 Once 调用 `getOrInit()` 会抛出 `DeadlockException`，而不是挂起。
@@ -53,11 +55,18 @@ enum FailureMode: int { case Reset = 0; case Poison = 1; }
 
 ```php
 <?php
-$config = new OxPHP\Shared\Once();
+// Registry::once 把单元绑定到一个名称上，让每个工作线程的引导阶段都汇聚到
+// 同一个单元。若不使用 Registry，这里裸写的 `new Once()` 会在每个工作线程上
+// 各创建一个单元，工厂会按工作线程运行一次，而非按进程运行一次。
+$config = OxPHP\Shared\Registry::once(
+    'app-config',
+    fn() => new OxPHP\Shared\Once(),
+);
 
 oxphp_worker(function () use ($config) {
     $cfg = $config->getOrInit(function () {
-        // 恰好在一个工作线程内运行；其他工作线程阻塞并看到结果。
+        // 恰好在进程内的一个工作线程中运行；其他每个工作线程
+        //（以及传统模式下的每次后续请求）都会在此阻塞并看到结果。
         return json_decode(file_get_contents('/etc/myapp.json'), true);
     });
 
@@ -105,7 +114,10 @@ $sha = $buildSha->get();   // 上面 trySet 之后为 Ready
 
 ```php
 <?php
-$pool = new OxPHP\Shared\Once();
+// 给单元命名，使整个 OxPHP 进程范围内只打开一个 PDO 连接。
+// 工厂会获取资源——这恰好是 `getOrInit` 的「落败者阻塞」
+// 语义所要保护的场景。
+$pool = OxPHP\Shared\Registry::once('db-conn', fn() => new OxPHP\Shared\Once());
 
 $conn = $pool->getOrInit(function () {
     return new PDO(getenv('DB_DSN'), getenv('DB_USER'), getenv('DB_PASS'), [

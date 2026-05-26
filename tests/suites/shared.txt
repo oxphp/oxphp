@@ -55,6 +55,12 @@ shared/test_pool_handle_release
 shared/test_pool_stats
 shared/test_mutex_timeout_contract
 shared/test_mutex_php_throw_not_poisoned
+shared/test_mutex_with_nonserialisable_return
+shared/test_mutex_bad_return_preserves_partial_mutations
+shared/test_mutex_bad_return_loses_shareable_state
+shared/test_mutex_shareable_in_state_ok_path
+shared/test_mutex_array_initial
+shared/test_mutex_with_returns_fresh_shareable
 shared/test_pool_timeout_contract
 shared/test_pool_perf
 shared/test_pool_observability
@@ -66,5 +72,18 @@ shared/test_once_init_basic
 shared/test_once_init_factory_throws
 shared/test_once_init_reentrant
 shared/test_once_poison
+shared/test_once_poison_nonserialisable
+shared/test_once_memory_accounting
 shared/test_once_full_value
 shared/test_shared_cross_plugin_catch
+
+# OxPHP\Shared\Registry — name-keyed process-global handles
+shared/test_registry_basic
+shared/test_registry_type_mismatch
+shared/test_registry_global_escape_hatch
+shared/test_registry_remove
+shared/test_registry_keys
+shared/test_registry_memory
+shared/test_registry_reentrant
+shared/test_registry_factory_throws
+shared/test_registry_empty_key

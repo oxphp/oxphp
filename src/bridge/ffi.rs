@@ -386,6 +386,7 @@ extern "C" {
         callable: *mut c_void,
         out_ret_buf: *mut *mut u8,
         out_ret_len: *mut usize,
+        out_retained_entry: *mut *const c_void,
     ) -> c_int;
 
     pub fn oxphp_shared_invoke_byref_1_portbuf(
@@ -397,7 +398,18 @@ extern "C" {
         out_ret_buf: *mut *mut u8,
         out_ret_len: *mut usize,
         did_mutate: *mut c_int,
+        out_retained_state: *mut *mut c_void,
+        out_retained_ret: *mut *mut c_void,
     ) -> c_int;
+
+    /// Release a retained zval pointer produced by
+    /// [`oxphp_shared_invoke_byref_1_portbuf`] — either
+    /// `out_retained_state` (pins Shareables in the by-ref state) or
+    /// `out_retained_ret` (pins Shareables in the closure's return).
+    /// Once Rust has finished decoding the corresponding wire buffer
+    /// into owned `SharedValue`s (which take their own `Arc` strong
+    /// refs), the pin can be released. Null-safe.
+    pub fn oxphp_shared_free_zval(p: *mut c_void);
 
     /// Invoke `$fn(key, value)` for `Shared\Map::forEach`. The key is the
     /// tagged tuple `(key_kind: 0=int/1=str, key_int, key_ptr, key_len)`;
@@ -721,8 +733,12 @@ extern "C" {
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
-/// Mirrors the C header constant. Rust callers branch via a `_` arm rather
-/// than naming this, so rustc flags it as dead; keep the name for parity
-/// with `ext/bridge/oxphp_bridge.h` so future consumers can reference it.
-#[allow(dead_code)]
+/// "Cannot invoke at all": null pointer, `zend_fcall_info_init` failed, etc.
+/// The callable argument itself is unusable.
 pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
+/// "Invoked OK, but the returned value cannot be ferried back": the
+/// callable ran to completion without throwing, but `oxphp_portable_serialize`
+/// rejected the result (closure, resource, non-Shareable object …).
+/// Distinct from `BAD_CALLABLE` so callers can surface a precise error
+/// instead of conflating "invalid callable" with "invalid return".
+pub const OXPHP_SHARED_INVOKE_BAD_RETURN: c_int = -2;
