@@ -734,7 +734,10 @@ extern "C" {
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
 /// "Cannot invoke at all": null pointer, `zend_fcall_info_init` failed, etc.
-/// The callable argument itself is unusable.
+/// The callable argument itself is unusable. Defined to mirror the C-side
+/// ABI; Rust callers fold this into the generic-error arm of their match
+/// rather than branching on it explicitly.
+#[allow(dead_code)]
 pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
 /// "Invoked OK, but the returned value cannot be ferried back": the
 /// callable ran to completion without throwing, but `oxphp_portable_serialize`

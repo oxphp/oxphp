@@ -1149,30 +1149,28 @@ mod tests {
         for _ in 0..8 {
             let creators = creators.clone();
             handles.push(thread::spawn(move || -> u64 {
-                loop {
-                    match r.name_acquire("hot", SharedType::Counter) {
-                        AcquireOutcome::NeedsFactory(_) => {
-                            creators.fetch_add(1, O::Relaxed);
-                            let arc = r
-                                .insert(SharedType::Counter, Arc::new(CounterInner::new(0)))
-                                .unwrap();
-                            let id = arc.id;
-                            r.name_bind("hot", arc, SharedType::Counter).unwrap();
-                            return id;
-                        }
-                        AcquireOutcome::Hit(ptr) => {
-                            let id = unsafe { (*ptr).id };
-                            // Balance the strong+1 from Arc::into_raw.
-                            unsafe { drop(Arc::from_raw(ptr)) };
-                            return id;
-                        }
-                        AcquireOutcome::TypeMismatch => unreachable!("same type used"),
-                        AcquireOutcome::Reentrant => {
-                            unreachable!("distinct threads — no reentrancy possible")
-                        }
-                        AcquireOutcome::ShuttingDown => unreachable!("no drain in this test"),
-                        AcquireOutcome::Deadlock => unreachable!("no cross-key cycle in this test"),
+                match r.name_acquire("hot", SharedType::Counter) {
+                    AcquireOutcome::NeedsFactory(_) => {
+                        creators.fetch_add(1, O::Relaxed);
+                        let arc = r
+                            .insert(SharedType::Counter, Arc::new(CounterInner::new(0)))
+                            .unwrap();
+                        let id = arc.id;
+                        r.name_bind("hot", arc, SharedType::Counter).unwrap();
+                        id
                     }
+                    AcquireOutcome::Hit(ptr) => {
+                        let id = unsafe { (*ptr).id };
+                        // Balance the strong+1 from Arc::into_raw.
+                        unsafe { drop(Arc::from_raw(ptr)) };
+                        id
+                    }
+                    AcquireOutcome::TypeMismatch => unreachable!("same type used"),
+                    AcquireOutcome::Reentrant => {
+                        unreachable!("distinct threads — no reentrancy possible")
+                    }
+                    AcquireOutcome::ShuttingDown => unreachable!("no drain in this test"),
+                    AcquireOutcome::Deadlock => unreachable!("no cross-key cycle in this test"),
                 }
             }));
         }
