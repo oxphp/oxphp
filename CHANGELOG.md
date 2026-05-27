@@ -2,7 +2,7 @@
 
 All notable changes to OxPHP are documented in this file.
 
-## [Unreleased]
+## [0.6.0] - 2026-05-28
 
 ### Migration from 0.5.0
 
@@ -620,6 +620,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.6.0]: https://github.com/oxphp/oxphp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/oxphp/oxphp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/oxphp/oxphp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/oxphp/oxphp/releases/tag/v0.3.0
