@@ -37,6 +37,13 @@ OxPHP 通过 `oxphp_sapi` 扩展注册其函数，该扩展在服务器执行每
 - [oxphp_apm_trace_id()](#oxphp_apm_trace_id)
 - [oxphp_apm_span_id()](#oxphp_apm_span_id)
 - [oxphp_apm_header()](#oxphp_apm_header)
+- [OxPHP\\Profile\\is_active()](#oxphpprofileis_active)
+- [OxPHP\\Profile\\start()](#oxphpprofilestart)
+- [OxPHP\\Profile\\stop()](#oxphpprofilestop)
+- [OxPHP\\Profile\\pause()](#oxphpprofilepause)
+- [OxPHP\\Profile\\resume()](#oxphpprofileresume)
+- [OxPHP\\Profile\\mark()](#oxphpprofilemark)
+- [OxPHP\\Profile\\metric()](#oxphpprofilemetric)
 - [类与接口](#类与接口)
 - [异常](#异常)
 
@@ -881,6 +888,170 @@ oxphp_apm_end($spanId);
 
 ---
 
+## OxPHP\Profile\is_active()
+
+```php
+OxPHP\Profile\is_active(): bool
+```
+
+当本次请求的 profile 采集当前处于激活状态时返回 `true` —— 即剖析器已被触发（通过请求头、Cookie、查询参数或采样率）且采集未被 [`pause()`](#oxphpprofilepause) 暂停。
+
+适合用来守卫只在剖析开启时才需要运行的高成本埋点。
+
+**返回值：** `bool`。
+
+**示例：**
+
+```php
+<?php
+if (OxPHP\Profile\is_active()) {
+    OxPHP\Profile\mark('checkpoint.before_query');
+}
+```
+
+---
+
+## OxPHP\Profile\start()
+
+```php
+OxPHP\Profile\start(): void
+```
+
+以编程方式为当前请求剩余部分启用 profile 采集，即使 RINIT 时没有触发器被命中。它会将剖析模式设为 `PROFILE_ALL` 并清除暂停标志。
+
+如果此前已在另一种模式下激活了 profile，本调用会提升模式 —— 较低模式下已采集到的 span 会被丢弃，从而保证最终捕获的 profile 内部一致。当你想在不依赖触发器的情况下为某段代码路径单独开启剖析时使用。
+
+**返回值：** `void`。
+
+**示例：**
+
+```php
+<?php
+if ($request->header('x-debug') === 'on') {
+    OxPHP\Profile\start();
+}
+```
+
+---
+
+## OxPHP\Profile\stop()
+
+```php
+OxPHP\Profile\stop(): void
+```
+
+停止为本请求采集后续 span。当前已打开的 span 会随着 PHP 从中返回自然关闭，调用栈保持平衡 —— 只是不再记录新的 span。
+
+**返回值：** `void`。
+
+**示例：**
+
+```php
+<?php
+OxPHP\Profile\start();
+expensive_work();
+OxPHP\Profile\stop();
+non_profiled_work();
+```
+
+---
+
+## OxPHP\Profile\pause()
+
+```php
+OxPHP\Profile\pause(): void
+```
+
+[`stop()`](#oxphpprofilestop) 的软变体。效果相同（设置暂停标志）；差别在意图 —— `pause()` 表示之后会通过 [`resume()`](#oxphpprofileresume) 恢复采集，而 `stop()` 不会。
+
+**返回值：** `void`。
+
+---
+
+## OxPHP\Profile\resume()
+
+```php
+OxPHP\Profile\resume(): void
+```
+
+清除由 [`pause()`](#oxphpprofilepause) 或 [`stop()`](#oxphpprofilestop) 设置的暂停标志。剖析模式本身不会改变 —— 如果剖析从未启用，`resume()` 不会产生可观察的效果。
+
+**返回值：** `void`。
+
+**示例：**
+
+```php
+<?php
+OxPHP\Profile\pause();
+$secret = decrypt_payload($data);
+OxPHP\Profile\resume();
+```
+
+---
+
+## OxPHP\Profile\mark()
+
+```php
+OxPHP\Profile\mark(string $label, array $attrs = []): void
+```
+
+为最顶部已打开的 span 附加一个 `Mark` 事件，可选附带属性表。当没有打开的 span 时是空操作（例如剖析未激活，或在任何已埋点帧之外的请求顶层调用 `mark()`）。
+
+属性的键和值都会被强制转换为字符串；非字符串值会变为空字符串。
+
+**参数：**
+
+- `$label` —— 该事件的简短可读名称（如 `"cache.miss"`、`"db.slow_query"`）
+- `$attrs` —— 可选的 `array<string, scalar>` 键值对，附加到事件上
+
+**返回值：** `void`。
+
+**示例：**
+
+```php
+<?php
+function load_user(int $id): array {
+    $cached = $cache->get("user:$id");
+    if ($cached === null) {
+        OxPHP\Profile\mark('cache.miss', ['key' => "user:$id"]);
+        $cached = $db->fetchUser($id);
+    }
+    return $cached;
+}
+```
+
+---
+
+## OxPHP\Profile\metric()
+
+```php
+OxPHP\Profile\metric(string $name, float $value): void
+```
+
+在当前打开的 span 的属性集中追加 `metric.<name>` 属性。当没有打开的 span 时是空操作。
+
+与 [`mark()`](#oxphpprofilemark)（创建一个离散事件）不同，`metric()` 直接写入现有 span 的属性集 —— 适合记录与所在操作绑定的数值观测（取回的行数、处理的字节数、重试次数）。
+
+**参数：**
+
+- `$name` —— 指标标识符；将以 `metric.<name>` 存储
+- `$value` —— 数值（会被强制转换为 `float`）
+
+**返回值：** `void`。
+
+**示例：**
+
+```php
+<?php
+function search(string $query): array {
+    $results = $index->search($query);
+    OxPHP\Profile\metric('result_count', count($results));
+    return $results;
+}
+```
+
+---
+
 ## 类与接口
 
 `oxphp_sapi` 扩展注册了以下类：
@@ -899,7 +1070,7 @@ oxphp_apm_end($spanId);
 | 类 / 接口 | 描述 |
 |-----------|------|
 | `OxPHP\Decorator\AttributeInterface` | 装饰器接口。要求实现 `before(Context $ctx)` 和 `after(Context $ctx)` 方法。 |
-| `OxPHP\Decorator\Context` | 传递给装饰器钩子的上下文对象。`final`。包含 `target`、`requestId`、参数和返回值。 |
+| `OxPHP\Decorator\Context` | 传递给装饰器钩子的上下文对象。`final`。公开属性：`target`、`class`、`method`、`function`、`objectId`、`requestId`、`traceId`。方法：`getParams(): array`、`getResult(): mixed`、`hasResult(): bool`。完整参考参见[装饰器](../features/decorators.md)。 |
 
 ### 追踪
 

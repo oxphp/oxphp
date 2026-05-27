@@ -28,19 +28,22 @@ is part of a memory-model contract distinct from a plain getter.
 `Map::set()`, `Mutex` value reset (via `with`), `Once::getOrInit()`.
 `Atomic::store($value, ?Ordering)` mirrors `load` for the same reason.
 
-### 3. Number of elements — `count(): int` + `\Countable`
+### 3. Number of elements — `count(): int`
 
-Every container exposes `count(): int` and implements `\Countable`.
-This lets `count($obj)` work natively:
+Every container that exposes its current size does so under the name
+`count(): int`. `Channel` additionally implements `\Countable`, so
+`count($ch)` works as a native idiom for queued items. `Map` and
+`Pool` expose `count(): int` as a method but do not implement
+`\Countable` — call it directly:
 
 ```php
 $ch  = new OxPHP\Shared\Channel(1024);
 $map = new OxPHP\Shared\Map();
 $pool = new OxPHP\Shared\Pool($factory);
 
-count($ch);    // queued items
-count($map);   // entries
-count($pool);  // total live slots (in-use + idle)
+count($ch);       // queued items (Channel implements \Countable)
+$map->count();    // entries
+$pool->count();   // total live slots (in-use + idle)
 ```
 
 No `size()`, `len()`, or `pending()` — these are forbidden on the
@@ -83,11 +86,11 @@ methods with self-documenting names. The `$ms` argument on `*Timeout`
 methods is **strictly positive** — zero, negative, non-int, and
 absent values raise `OxPHP\Shared\TypeException` at the bridge.
 
-`try*` shares one further sub-meaning that predates the trichotomy:
-
-- **Conditional-success op.** `Map::trySet` succeeds only when the
-  key was absent; collision → `false`, no exception. Parallel to
-  `HashMap::try_insert`.
+Conditional-success ops live on `Map` under the `setIfAbsent`
+spelling rather than `try*`: `Map::setIfAbsent` commits only when the
+key was absent and returns `bool` (parallel to `HashMap::try_insert`).
+The `setIfAbsent` name is reserved for that single semantics; do not
+reuse it elsewhere.
 
 The unifying invariant for `try*`: it either returns a value-typed
 Result (Channel) or throws a `ContentionException` (Mutex). It never
@@ -146,9 +149,9 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 | Write a value               | `set()`                  | `Map::set`                              |
 | Write an atomic             | `store($v, $order)`      | `Atomic::store`                         |
 | Number of elements          | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
-| Has key / has element       | `has($key): bool`        | `Map::has`                              |
 | Boolean property            | `is*(): bool`            | `Channel::isClosed`                     |
-| Non-blocking wait           | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
+| Conditional insert          | `setIfAbsent($k, $v)`    | `Map::setIfAbsent`                      |
+| Non-blocking wait           | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock` |
 | Forever wait                | bare verb                | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
 | Bounded wait                | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
@@ -171,12 +174,11 @@ When proposing a new primitive, fill out this checklist before merging:
 - [ ] Boolean getters use the `is*` prefix.
 - [ ] Wait-policy variants follow the `try*` / bare / `*Timeout(int $ms)`
   trichotomy. The `*Timeout` variant takes `int $ms > 0` and rejects
-  zero / negative / non-int input with `TypeException`. Conditional-
-  success ops (`Map::trySet`) keep the `try*` prefix and may still
-  return `bool`; new wait-policy `try*` methods return either a value-
-  typed Result or throw a domain exception — never `null`-to-encode.
-- [ ] No `len`, `size`, `pending`, `test`, `setIfAbsent`, or other
-  ad-hoc names.
+  zero / negative / non-int input with `TypeException`. Wait-policy
+  `try*` methods return either a value-typed Result or throw a domain
+  exception — never `null`-to-encode. Conditional-success ops follow
+  the dedicated `setIfAbsent` naming instead of `try*`.
+- [ ] No `len`, `size`, `pending`, `test`, or other ad-hoc names.
 - [ ] Domain-specific verbs (`evict`, `drain`, `flush`, etc.) appear
   only when no canonical entry in the cheat sheet covers the concept.
 

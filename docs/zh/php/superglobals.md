@@ -52,6 +52,22 @@ Cookie: session=xyz          -> HTTP_COOKIE
 
 > **注意：** `Content-Type` 和 `Content-Length` 不带 `HTTP_` 前缀，分别以 `CONTENT_TYPE` 和 `CONTENT_LENGTH` 的形式出现——这是 CGI 规范的要求。
 
+### 位于反向代理之后
+
+当配置了 `TRUSTED_PROXIES` 且请求对端属于受信任集合时，OxPHP 会根据转发头（`X-Forwarded-*` 或 RFC 7239 `Forwarded`）改写以下 `$_SERVER` 键：
+
+| 变量 | 对端受信任时的值 | 否则 |
+|----------|----------------------------|------------------|
+| `REMOTE_ADDR` | `X-Forwarded-For` / `Forwarded` 中最右侧的不受信任地址 | 直接对端 IP |
+| `HTTPS` | 当 `X-Forwarded-Proto: https` 时为 `"on"` | 仅当对端连接是 TLS 时设置 |
+| `REQUEST_SCHEME` | 由 `X-Forwarded-Proto` 得到的 `"https"` / `"http"` | 基于实际 TLS 状态 |
+| `SERVER_NAME` | `X-Forwarded-Host` 的主机部分 | `Host` 头的主机部分 |
+| `SERVER_PORT` | `X-Forwarded-Host` 的端口部分，或按协议取 443/80 | `Host` 的端口部分，或 443/80 |
+
+原始的 `HTTP_X_FORWARDED_FOR`、`HTTP_X_FORWARDED_PROTO`、`HTTP_X_FORWARDED_HOST` 和 `HTTP_FORWARDED` 仍保留在 `$_SERVER` 中——改写后的值与原始请求头同时可见。
+
+当 `TRUSTED_PROXIES` **未**设置时，不进行任何改写，`REMOTE_ADDR` 始终是直接对端——通常是你的负载均衡器，而不是终端客户端。手动解析 `X-Forwarded-For` 很容易出错（最左 vs 最右、缺少 CIDR 信任判断）；建议配置 `TRUSTED_PROXIES`。信任算法和配置语法参见[受信任的代理](../security/trusted-proxies.md)。
+
 ### 分布式追踪变量
 
 启用分布式追踪后，OxPHP 会向 `$_SERVER` 添加追踪上下文变量：
@@ -89,8 +105,9 @@ $scheme  = $_SERVER['REQUEST_SCHEME'];  // "http" 或 "https"
 // 读取自定义请求头
 $token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
 
-// 在受信任反向代理后面时，优先使用 X-Forwarded-For
-$xff  = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+// 配置了 TRUSTED_PROXIES 时，REMOTE_ADDR 已经是真实的客户端 IP。
+// 未配置时，REMOTE_ADDR 是直接对端（通常是负载均衡器）。
+$clientIp = $_SERVER['REMOTE_ADDR'];
 
 // 不通过检查端口来判断是否使用 TLS
 if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {

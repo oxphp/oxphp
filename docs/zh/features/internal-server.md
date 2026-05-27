@@ -10,7 +10,13 @@ OxPHP 在专用端口上运行独立的 HTTP 服务器，用于健康检查、Pr
 ## 工作原理
 
 1. **设置 `INTERNAL_ADDR`** 为监听地址（例如 `127.0.0.1:9090`）。OxPHP 在该地址上启动第二个 HTTP 监听器。
-2. 内部服务器暴露三个内置端点：`/health`、`/metrics` 和 `/config`。
+2. 内部服务器暴露下列内置端点：
+   - `/health` — 聚合 JSON 状态
+   - `/health/liveness`、`/healthz`（别名）— 存活探针
+   - `/health/readiness`、`/readyz`（别名）— 就绪探针
+   - `/health/startup`、`/startupz`（别名）— 启动探针
+   - `/metrics` — Prometheus 格式输出
+   - `/config` — 当前生效的服务器配置 JSON
 3. 插件可以在 `/__<plugin>/` 前缀下注册额外的端点。
 4. 优雅关闭期间，内部服务器保持可用，直到主服务器完成连接排空。
 
@@ -58,11 +64,11 @@ OxPHP 在专用端口上运行独立的 HTTP 服务器，用于健康检查、Pr
 }
 ```
 
-`plugins` 对象列出每个已加载插件及其健康状态：`"ok"`、`"degraded"` 或 `"failed"`。只有 `"failed"` 会触发 503 响应——`"degraded"` 插件会出现在 JSON 中，但 HTTP 状态码仍为 200。
+`plugins` 对象列出每个已加载插件及其健康状态：`"ok"`、`"degraded"` 或 `"failed"`。当任何插件报告 `"failed"` **或** 脚本执行器不健康（`executor_healthy: false`）时，该端点返回 503。`"degraded"` 插件会出现在 JSON 响应体中，但 HTTP 状态码仍为 200。
 
 ### GET /metrics
 
-以文本格式（`text/plain; version=0.0.4`）返回兼容 Prometheus 的指标。始终返回 200。
+以文本格式（`text/plain; version=0.0.4; charset=utf-8`）返回兼容 Prometheus 的指标。始终返回 200。
 
 ```bash
 curl http://localhost:9090/metrics

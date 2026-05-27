@@ -106,12 +106,14 @@ curl http://localhost/
 <h1>OxPHP</h1>
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
-<p>SAPI: oxphp</p>
+<p>SAPI: cli-server</p>
 <p>Version: 0.5.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
 每个请求都会获得一个唯一 ID，Worker ID 显示处理该请求的 PHP Worker 线程编号。
+
+> **为什么 `php_sapi_name()` 报告 `cli-server` 而不是 `oxphp`？** OxPHP 有意将自身注册为 OPcache 已识别的 SAPI 名称之一。OPcache 对未知 SAPI 会自动禁用；如果不做这次重命名，PHP 执行将完全跳过 OPcache 层，速度会下降数倍。代价是 `php_sapi_name()` 无法用来检测 OxPHP——请改用 `function_exists('oxphp_request_id')` 或 `OxPHP\Http\Request::current()`。
 
 ### 7. 查看内部端点
 

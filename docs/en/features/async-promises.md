@@ -202,16 +202,17 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 | Allowed | Not allowed |
 |---------|-------------|
-| `null`, `bool`, `int`, `float`, `string` | Objects (any class instance) |
+| `null`, `bool`, `int`, `float`, `string` | Plain objects (any class not implementing `OxPHP\Shared\Shareable`) |
 | Arrays of scalar types | Resources (file handles, DB connections, streams) |
-| Nested scalar arrays | Closures referencing objects in `use` |
+| Nested scalar arrays | Closures whose `use` captures non-Shareable objects |
+| `Shared\*` instances (`Counter`, `Map`, `Channel`, `Atomic`, `Flag`, `Mutex`, `Once`, `Pool`, `Registry`) and other classes implementing `OxPHP\Shared\Shareable` | |
 
 Additional constraints:
 
 - **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\AsyncException`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
-- **No shared state** — each async worker has its own PHP environment. There are no shared variables between the dispatching thread and the async thread
+- **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
 
 ## Docker Example
 

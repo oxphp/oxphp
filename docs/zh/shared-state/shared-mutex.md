@@ -35,7 +35,7 @@ final class Mutex implements Shareable
 }
 ```
 
-闭包签名为 `function (mixed &$value): mixed` —— `$value` 以引用传入，因此你可以原地修改它。闭包的正常返回值会被转发给 `withLock` / `tryWithLock` / `withLockTimeout` 的调用方，但**返回值仅限标量与 `null`**（string、int、float、bool、byte-string、null）。返回数组或 `Shared\*` 实例会抛出 `OxPHP\Shared\TypeException`。要把结构化状态冒泡给调用方，要么通过 `&$value` 原地修改并在调用后重新读取，要么通过 `use (&$captured)` 变量暂存所需内容。放宽此限制由单独的工单跟踪。
+闭包签名为 `function (mixed &$value): mixed` —— `$value` 以引用传入，因此你可以原地修改它。闭包的正常返回值会被转发给 `withLock` / `tryWithLock` / `withLockTimeout` 的调用方。**返回路径支持标量、`null` 与 `Shared\*` 实例**（string、int、float、bool、byte-string、null 以及任何实现 `OxPHP\Shared\Shareable` 的句柄）。返回 PHP 数组会抛出 `OxPHP\Shared\TypeException` —— 该场景暂不支持，由单独的工单跟踪。要把结构化的数组状态冒泡给调用方，要么通过 `&$value` 原地修改并在调用后重新读取，要么通过 `use (&$captured)` 变量暂存所需内容。
 
 | 方法                        | 行为                                                            |
 |-----------------------------|-----------------------------------------------------------------|
@@ -165,7 +165,7 @@ try {
 - **闭包在持锁状态下运行。** 请保持短小。不要调用 `sleep`、不要在网络 I/O 上阻塞、不要再次进入可能回调该 mutex 的其他 Shared\* 类型。
 - **PHP 抛异常不再损坏锁。** 这是相对于先前「任意 throw 即 Poisoned」策略的有意改动：部分更新策略现在是「调用方负责恢复不变量」。如果需要不修改状态的「尝试计算」模式，请在 mutex 外完成，然后仅调用 `withLock` 提交最终值。
 - **存储值类标量。** 字符串、整数、浮点、布尔、`null` 以及它们的嵌套数组都可以；对象、闭包、资源会抛出 `TypeException`。
-- **闭包返回值同样仅限标量——*目前*。** 存储值可以是数组（通过 `&$value` 修改），但闭包自己的 *return* 路径只支持 string/int/float/bool/null/byte-string。返回数组或 `Shared\*` 实例会抛出 `OxPHP\Shared\TypeException`。变通方法：捕获到 `use (&$x)` 变量，或通过返回标量投影的后续 `withLock` 读取状态。
+- **闭包返回值覆盖标量、`null` 与 `Shared\*` 实例；数组尚未支持。** 存储值仍可以是数组（通过 `&$value` 修改），但闭包自己的 *return* 路径接受 string/int/float/bool/null/byte-string 以及任何 `OxPHP\Shared\Shareable` 句柄。返回 PHP 数组会抛出 `OxPHP\Shared\TypeException`。数组的变通方法：捕获到 `use (&$x)` 变量，或通过返回标量投影的后续 `withLock` 读取状态。
 - **同一线程重入会抛 `DeadlockException`。** 使用不同的 mutex 或重构代码——同一线程重入是 bug，不是特性。
 - **Fiber 取消以 `Async\AsyncException` 传播。** 被请求取消打断的 `withLock` 会抛该异常；锁会被干净释放。
 
@@ -211,7 +211,7 @@ try {
 | `Shared\TimeoutException`                               | `Shared\OperationTimeoutException`（现在继承 `Async\AsyncException`）          |
 | `DeadlockException extends Shared\TimeoutException`     | `DeadlockException extends Async\AsyncException`                               |
 
-闭包签名也由 `function (mixed $value): mixed`（return-to-commit）变为 `function (mixed &$value): mixed`（按引用修改，正常 return 是闭包自己的值，而不是新状态）。若闭包未返回任何值，存储值保留按引用修改后的内容。**一项先前的限制延续了下来**：闭包的 *return* 必须是标量（string / int / float / bool / null / byte-string）——返回数组或 `Shared\*` 实例会抛出 `OxPHP\Shared\TypeException`。存储值仍然可以是数组；通过 `&$value` 修改它，并用 `use (&$x)` 把结构化数据冒泡上去。
+闭包签名也由 `function (mixed $value): mixed`（return-to-commit）变为 `function (mixed &$value): mixed`（按引用修改，正常 return 是闭包自己的值，而不是新状态）。若闭包未返回任何值，存储值保留按引用修改后的内容。**一项先前的限制延续了下来**：闭包的 *return* 必须是标量（string / int / float / bool / null / byte-string）或 `Shared\*` 句柄——返回 PHP 数组会抛出 `OxPHP\Shared\TypeException`。存储值仍然可以是数组；通过 `&$value` 修改它，并用 `use (&$x)` 把结构化数据冒泡上去。
 
 ## 相关
 

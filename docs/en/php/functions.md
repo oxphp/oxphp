@@ -37,6 +37,13 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_apm_trace_id()](#oxphp_apm_trace_id)
 - [oxphp_apm_span_id()](#oxphp_apm_span_id)
 - [oxphp_apm_header()](#oxphp_apm_header)
+- [OxPHP\\Profile\\is_active()](#oxphpprofileis_active)
+- [OxPHP\\Profile\\start()](#oxphpprofilestart)
+- [OxPHP\\Profile\\stop()](#oxphpprofilestop)
+- [OxPHP\\Profile\\pause()](#oxphpprofilepause)
+- [OxPHP\\Profile\\resume()](#oxphpprofileresume)
+- [OxPHP\\Profile\\mark()](#oxphpprofilemark)
+- [OxPHP\\Profile\\metric()](#oxphpprofilemetric)
 - [Classes and Interfaces](#classes-and-interfaces)
 - [Exceptions](#exceptions)
 
@@ -881,6 +888,170 @@ oxphp_apm_end($spanId);
 
 ---
 
+## OxPHP\Profile\is_active()
+
+```php
+OxPHP\Profile\is_active(): bool
+```
+
+Returns `true` when profile capture is currently active for this request — i.e. the profiler has been triggered (by header, cookie, query parameter, or sample rate) and capture has not been paused via [`pause()`](#oxphpprofilepause).
+
+Useful for guarding expensive instrumentation that should only run when profiling is on.
+
+**Returns:** `bool`.
+
+**Example:**
+
+```php
+<?php
+if (OxPHP\Profile\is_active()) {
+    OxPHP\Profile\mark('checkpoint.before_query');
+}
+```
+
+---
+
+## OxPHP\Profile\start()
+
+```php
+OxPHP\Profile\start(): void
+```
+
+Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and clears the paused flag.
+
+If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. Use this when you want to opt a specific code path into profiling without relying on triggers.
+
+**Returns:** `void`.
+
+**Example:**
+
+```php
+<?php
+if ($request->header('x-debug') === 'on') {
+    OxPHP\Profile\start();
+}
+```
+
+---
+
+## OxPHP\Profile\stop()
+
+```php
+OxPHP\Profile\stop(): void
+```
+
+Disables further span capture for this request. Currently-open spans close naturally as PHP returns from them, so the call stack remains balanced — only new spans stop being recorded.
+
+**Returns:** `void`.
+
+**Example:**
+
+```php
+<?php
+OxPHP\Profile\start();
+expensive_work();
+OxPHP\Profile\stop();
+non_profiled_work();
+```
+
+---
+
+## OxPHP\Profile\pause()
+
+```php
+OxPHP\Profile\pause(): void
+```
+
+Soft variant of [`stop()`](#oxphpprofilestop). Same effect (sets the paused flag); the distinction is intent — `pause()` signals that capture will resume later via [`resume()`](#oxphpprofileresume), while `stop()` does not.
+
+**Returns:** `void`.
+
+---
+
+## OxPHP\Profile\resume()
+
+```php
+OxPHP\Profile\resume(): void
+```
+
+Clears the paused flag set by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). Profile mode itself is not changed — if it was never enabled, `resume()` does nothing observable.
+
+**Returns:** `void`.
+
+**Example:**
+
+```php
+<?php
+OxPHP\Profile\pause();
+$secret = decrypt_payload($data);
+OxPHP\Profile\resume();
+```
+
+---
+
+## OxPHP\Profile\mark()
+
+```php
+OxPHP\Profile\mark(string $label, array $attrs = []): void
+```
+
+Attaches a `Mark` event to the topmost open span, with an optional attribute bag. No-op when no span is open (e.g. profiling not active, or `mark()` called at request top-level outside any instrumented frame).
+
+Attribute keys and values are coerced to strings; non-string values become an empty string.
+
+**Parameters:**
+
+- `$label` — short human-readable name for the event (e.g. `"cache.miss"`, `"db.slow_query"`)
+- `$attrs` — optional `array<string, scalar>` of key/value pairs attached to the event
+
+**Returns:** `void`.
+
+**Example:**
+
+```php
+<?php
+function load_user(int $id): array {
+    $cached = $cache->get("user:$id");
+    if ($cached === null) {
+        OxPHP\Profile\mark('cache.miss', ['key' => "user:$id"]);
+        $cached = $db->fetchUser($id);
+    }
+    return $cached;
+}
+```
+
+---
+
+## OxPHP\Profile\metric()
+
+```php
+OxPHP\Profile\metric(string $name, float $value): void
+```
+
+Appends a `metric.<name>` attribute to the current open span. No-op when no span is open.
+
+Unlike [`mark()`](#oxphpprofilemark) (which creates a discrete event), `metric()` writes onto the existing span's attribute set — useful for recording numeric observations tied to the surrounding operation (rows fetched, bytes processed, retry count).
+
+**Parameters:**
+
+- `$name` — metric identifier; will be stored as `metric.<name>`
+- `$value` — numeric value (coerced to `float`)
+
+**Returns:** `void`.
+
+**Example:**
+
+```php
+<?php
+function search(string $query): array {
+    $results = $index->search($query);
+    OxPHP\Profile\metric('result_count', count($results));
+    return $results;
+}
+```
+
+---
+
 ## Classes and Interfaces
 
 The `oxphp_sapi` extension registers the following classes:
@@ -899,7 +1070,7 @@ The `oxphp_sapi` extension registers the following classes:
 | Class / Interface | Description |
 |-------------------|-------------|
 | `OxPHP\Decorator\AttributeInterface` | Interface for decorators. Requires `before(Context $ctx)` and `after(Context $ctx)` methods. |
-| `OxPHP\Decorator\Context` | Context object passed to decorator hooks. `final`. Contains `target`, `requestId`, arguments, and return value. |
+| `OxPHP\Decorator\Context` | Context object passed to decorator hooks. `final`. Public properties: `target`, `class`, `method`, `function`, `objectId`, `requestId`, `traceId`. Methods: `getParams(): array`, `getResult(): mixed`, `hasResult(): bool`. See [Decorators](../features/decorators.md) for the full reference. |
 
 ### Tracing
 

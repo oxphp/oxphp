@@ -56,7 +56,7 @@ If your `ERROR_PAGES_DIR` only ships a `500.html`, add `504.html`, `503.html`, a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive request headers after the connection is accepted. Protects against slowloris attacks. Set to `0` to disable |
+| `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive request headers after the connection is accepted. Protects against slowloris attacks. `0` is **not** treated specially — it passes through to hyper as a zero-second timeout, which fires immediately. To disable the timeout, unset the variable rather than setting it to `0` |
 
 PHP execution time is configured via `php.ini`, not OxPHP env vars:
 

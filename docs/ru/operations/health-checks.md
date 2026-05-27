@@ -88,6 +88,7 @@ curl http://localhost:9090/health
 | `total_requests` | integer | Общее количество HTTP-запросов, обработанных на основном порту |
 | `active_connections` | integer | Текущее число открытых соединений на основном порту |
 | `executor_healthy` | boolean | Принимает ли пул PHP-воркеров запросы |
+| `plugins` | `object<string, string>` | Состояние плагинов: ключи — имена плагинов, значения — `"ok"`, `"degraded"` или `"failed"`. Пустой `{}`, если ни один плагин не сообщает о состоянии. Плагин со статусом `"failed"` переводит HTTP-статус в 503; `"degraded"` отображается здесь, но оставляет статус 200. |
 
 ## GET /metrics
 

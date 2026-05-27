@@ -37,6 +37,13 @@ OxPHP регистрирует свои функции через расшире
 - [oxphp_apm_trace_id()](#oxphp_apm_trace_id)
 - [oxphp_apm_span_id()](#oxphp_apm_span_id)
 - [oxphp_apm_header()](#oxphp_apm_header)
+- [OxPHP\\Profile\\is_active()](#oxphpprofileis_active)
+- [OxPHP\\Profile\\start()](#oxphpprofilestart)
+- [OxPHP\\Profile\\stop()](#oxphpprofilestop)
+- [OxPHP\\Profile\\pause()](#oxphpprofilepause)
+- [OxPHP\\Profile\\resume()](#oxphpprofileresume)
+- [OxPHP\\Profile\\mark()](#oxphpprofilemark)
+- [OxPHP\\Profile\\metric()](#oxphpprofilemetric)
 - [Классы и интерфейсы](#классы-и-интерфейсы)
 - [Исключения](#исключения)
 
@@ -883,6 +890,170 @@ oxphp_apm_end($spanId);
 
 ---
 
+## OxPHP\Profile\is_active()
+
+```php
+OxPHP\Profile\is_active(): bool
+```
+
+Возвращает `true`, если для текущего запроса в данный момент активен захват профиля — то есть профилировщик был запущен (по заголовку, cookie, query-параметру или sample rate) и захват не приостановлен через [`pause()`](#oxphpprofilepause).
+
+Удобно как защита перед дорогостоящей инструментацией, которая должна выполняться только при включённом профилировании.
+
+**Возвращает:** `bool`.
+
+**Пример:**
+
+```php
+<?php
+if (OxPHP\Profile\is_active()) {
+    OxPHP\Profile\mark('checkpoint.before_query');
+}
+```
+
+---
+
+## OxPHP\Profile\start()
+
+```php
+OxPHP\Profile\start(): void
+```
+
+Программно включает захват профиля для остатка текущего запроса, даже если на RINIT не сработал ни один триггер. Устанавливает режим профилирования `PROFILE_ALL` и сбрасывает флаг паузы.
+
+Если профиль уже был активен в другом режиме, этот вызов повышает его уровень — спаны, уже накопленные в более низком режиме, отбрасываются, чтобы итоговый профиль оставался внутренне согласованным. Используйте, когда нужно включить профилирование на конкретном пути выполнения, не полагаясь на триггеры.
+
+**Возвращает:** `void`.
+
+**Пример:**
+
+```php
+<?php
+if ($request->header('x-debug') === 'on') {
+    OxPHP\Profile\start();
+}
+```
+
+---
+
+## OxPHP\Profile\stop()
+
+```php
+OxPHP\Profile\stop(): void
+```
+
+Прекращает захват новых спанов в этом запросе. Уже открытые спаны естественно закрываются при возврате из PHP, так что стек вызовов остаётся сбалансированным — просто перестают записываться новые спаны.
+
+**Возвращает:** `void`.
+
+**Пример:**
+
+```php
+<?php
+OxPHP\Profile\start();
+expensive_work();
+OxPHP\Profile\stop();
+non_profiled_work();
+```
+
+---
+
+## OxPHP\Profile\pause()
+
+```php
+OxPHP\Profile\pause(): void
+```
+
+Мягкий вариант [`stop()`](#oxphpprofilestop). Эффект тот же (выставляет флаг паузы); отличие — в намерении: `pause()` сигнализирует, что захват будет возобновлён позже через [`resume()`](#oxphpprofileresume), а `stop()` — нет.
+
+**Возвращает:** `void`.
+
+---
+
+## OxPHP\Profile\resume()
+
+```php
+OxPHP\Profile\resume(): void
+```
+
+Сбрасывает флаг паузы, установленный [`pause()`](#oxphpprofilepause) или [`stop()`](#oxphpprofilestop). Сам режим профилирования при этом не меняется — если он не был включён, `resume()` ничего заметного не делает.
+
+**Возвращает:** `void`.
+
+**Пример:**
+
+```php
+<?php
+OxPHP\Profile\pause();
+$secret = decrypt_payload($data);
+OxPHP\Profile\resume();
+```
+
+---
+
+## OxPHP\Profile\mark()
+
+```php
+OxPHP\Profile\mark(string $label, array $attrs = []): void
+```
+
+Прикрепляет событие `Mark` к самому верхнему открытому спану с опциональным мешком атрибутов. No-op, если открытых спанов нет (например, профилирование не активно или `mark()` вызван на верхнем уровне запроса вне любого инструментированного фрейма).
+
+Ключи и значения атрибутов приводятся к строкам; нестроковые значения становятся пустой строкой.
+
+**Параметры:**
+
+- `$label` — короткое человекочитаемое имя события (например, `"cache.miss"`, `"db.slow_query"`)
+- `$attrs` — опциональный `array<string, scalar>` с парами ключ/значение, прикрепляемыми к событию
+
+**Возвращает:** `void`.
+
+**Пример:**
+
+```php
+<?php
+function load_user(int $id): array {
+    $cached = $cache->get("user:$id");
+    if ($cached === null) {
+        OxPHP\Profile\mark('cache.miss', ['key' => "user:$id"]);
+        $cached = $db->fetchUser($id);
+    }
+    return $cached;
+}
+```
+
+---
+
+## OxPHP\Profile\metric()
+
+```php
+OxPHP\Profile\metric(string $name, float $value): void
+```
+
+Дописывает атрибут `metric.<name>` в текущий открытый спан. No-op, если открытых спанов нет.
+
+В отличие от [`mark()`](#oxphpprofilemark), создающего дискретное событие, `metric()` пишет в уже существующий набор атрибутов спана — удобно для записи числовых наблюдений, привязанных к окружающей операции (число выбранных строк, обработанных байт, число повторов).
+
+**Параметры:**
+
+- `$name` — идентификатор метрики; будет сохранён как `metric.<name>`
+- `$value` — числовое значение (приводится к `float`)
+
+**Возвращает:** `void`.
+
+**Пример:**
+
+```php
+<?php
+function search(string $query): array {
+    $results = $index->search($query);
+    OxPHP\Profile\metric('result_count', count($results));
+    return $results;
+}
+```
+
+---
+
 ## Классы и интерфейсы
 
 Расширение `oxphp_sapi` регистрирует следующие классы:
@@ -901,7 +1072,7 @@ oxphp_apm_end($spanId);
 | Класс / Интерфейс | Описание |
 |--------------------|----------|
 | `OxPHP\Decorator\AttributeInterface` | Интерфейс для декораторов. Требует методы `before(Context $ctx)` и `after(Context $ctx)`. |
-| `OxPHP\Decorator\Context` | Объект контекста, передаваемый в хуки декоратора. `final`. Содержит `target`, `requestId`, аргументы и возвращаемое значение. |
+| `OxPHP\Decorator\Context` | Объект контекста, передаваемый в хуки декоратора. `final`. Публичные свойства: `target`, `class`, `method`, `function`, `objectId`, `requestId`, `traceId`. Методы: `getParams(): array`, `getResult(): mixed`, `hasResult(): bool`. Полный справочник — в разделе [Декораторы](../features/decorators.md). |
 
 ### Трассировка
 

@@ -148,7 +148,7 @@ final class NaiveRateLimiter
 
 该片段隐藏了三个 bug：`apcu_fetch` + `apcu_store` 的组合不是原子的；紧挨着的竞争会丢失窗口起点；清理实际上完全取决于 APCu 的 TTL 驱逐策略。
 
-### 迁移后：Shared\Map + update()
+### 迁移后：Shared\Map + compareAndSet 循环
 
 ```php
 <?php
@@ -164,16 +164,22 @@ final class RateLimiter
     {
         $now = time();
 
-        // 原子的读-改-写。闭包看到当前值
-        // （首次命中时为 null），并返回要存储的新形态。
-        $state = $this->buckets->update($ip, function ($current) use ($now) {
+        // 通过 compareAndSet 实现原子的读-改-写。读取当前桶，
+        // 计算下一个状态，并 CAS 写回。若有并发写入者抢先，
+        // 就用新值重试。
+        while (true) {
+            $current = $this->buckets->get($ip);
             if ($current === null || $now - $current['start'] >= $this->windowSeconds) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
 
-        return $state['count'] <= $this->maxRequests;
+            if ($this->buckets->compareAndSet($ip, $current, $next)) {
+                return $next['count'] <= $this->maxRequests;
+            }
+            // 输了竞争——重新读取并重试。
+        }
     }
 
     /** 后台清理——从定时工作线程或 oxphp_async 循环里调用。 */
@@ -181,12 +187,11 @@ final class RateLimiter
     {
         $now    = time();
         $cutoff = $this->windowSeconds * 2;
-        foreach ($this->buckets->keys() as $ip) {
-            $state = $this->buckets->get($ip);
-            if ($state !== null && $now - $state['start'] >= $cutoff) {
+        $this->buckets->forEach(function (string $ip, array $state) use ($now, $cutoff): void {
+            if ($now - $state['start'] >= $cutoff) {
                 $this->buckets->remove($ip);
             }
-        }
+        });
     }
 }
 
@@ -214,7 +219,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 
 这次迁移给你带来的好处：
 
-- **原子性。** `update($key, fn)` 是单次 RMW；不存在先读后写的竞争。
+- **原子性。** `compareAndSet($key, $expected, $next)` 要么提交新值，要么报告竞争让调用方重试——不存在先读后写的覆盖。`setIfAbsent` 一次调用就能覆盖"若不存在则创建，否则保留"的场景。
 - **确定性清理。** `sweep()` 可预测，且按你掌控的计划执行。
 - **少一个依赖。** APCu 不再出现在部署故事中。
 - **高负载下的精确计数。** 同一 IP 上的两次并发命中永远不会彼此覆盖。
@@ -238,10 +243,13 @@ $current = $hits->add();          // 原子地「自增后取值」
 
 ```php
 <?php
-// 把外层 Map 绑定到一个名称上，让所有工作线程共享同一个。
-$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
-
-$counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
+// 按名称分键的按租户计数器。`Registry::counter` 把每个租户的
+// 计数器绑定到一个稳定名字上，使所有工作线程都汇聚到同一个
+// 条目——同一名字下工厂最多只会执行一次。
+$counter = OxPHP\Shared\Registry::counter(
+    "tenant:{$tenantId}",
+    fn () => new OxPHP\Shared\Counter(),
+);
 $counter->add();
 ```
 
@@ -294,7 +302,7 @@ try {
 $queue = new OxPHP\Shared\Channel(256);
 
 oxphp_async(function () use ($queue) {              // ← 显式 use
-    while (($job = $queue->recv(timeout: 30.0)) !== null) {
+    while (($job = $queue->recvTimeout(30_000)) !== null) {
         process($job);
     }
 });

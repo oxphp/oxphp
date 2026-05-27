@@ -156,6 +156,22 @@ $worker->serve(function () {
 remain available and route through the same internal state. New code should
 prefer the class API.
 
+The class also exposes runtime introspection useful for graceful self-recycling, observability, and health checks:
+
+| Method | Returns |
+|--------|---------|
+| `Worker::isWorkerMode(): bool` | Whether the server is running in worker mode |
+| `$worker->id(): int` | Stable per-thread worker ID |
+| `$worker->startTime(): float` | Unix timestamp of when this worker started |
+| `$worker->requestCount(): int` | Number of requests this worker has handled |
+| `$worker->memoryUsage(): int` | Current `memory_get_usage(true)` for this worker |
+| `$worker->rss(): int` | Current resident set size in bytes (Linux/macOS) |
+| `$worker->maxMemoryBytes(): int` | Recycle threshold — `WORKER_MAX_MEMORY_MIB` × 1 MiB, or `0` when unlimited |
+| `$worker->isExitScheduled(): bool` | Whether `scheduleExit()` has been called |
+| `$worker->exitReason(): ?string` | `null` while running; `"scheduled"`, `"max_memory"`, or `"error"` once the worker is going down |
+
+See [`OxPHP\Server\Worker`](../php/worker-class.md) for full signatures and worked examples.
+
 ## PHP Examples
 
 ### Detecting Worker Mode

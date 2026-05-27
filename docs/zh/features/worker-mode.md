@@ -155,6 +155,22 @@ $worker->serve(function () {
 **旧的自由函数**（`oxphp_is_worker`、`oxphp_worker_id`、`oxphp_worker`）
 仍然可用，并通过相同的内部状态工作。新代码应优先使用类 API。
 
+该类还暴露了运行时自省能力，便于实现优雅自回收、可观测性和健康检查：
+
+| 方法 | 返回值 |
+|--------|---------|
+| `Worker::isWorkerMode(): bool` | 服务器是否运行在工作进程模式下 |
+| `$worker->id(): int` | 稳定的每线程工作进程 ID |
+| `$worker->startTime(): float` | 此工作进程启动的 Unix 时间戳 |
+| `$worker->requestCount(): int` | 此工作进程已处理的请求数 |
+| `$worker->memoryUsage(): int` | 此工作进程当前的 `memory_get_usage(true)` |
+| `$worker->rss(): int` | 当前常驻集大小（字节，Linux/macOS） |
+| `$worker->maxMemoryBytes(): int` | 回收阈值——`WORKER_MAX_MEMORY_MIB` × 1 MiB，未限制时为 `0` |
+| `$worker->isExitScheduled(): bool` | 是否已调用过 `scheduleExit()` |
+| `$worker->exitReason(): ?string` | 运行中为 `null`；工作进程即将退出时为 `"scheduled"`、`"max_memory"` 或 `"error"` |
+
+完整签名和示例参见 [`OxPHP\Server\Worker`](../php/worker-class.md)。
+
 ## PHP 示例
 
 ### 检测 Worker 模式

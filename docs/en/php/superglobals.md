@@ -52,6 +52,22 @@ Cookie: session=xyz          -> HTTP_COOKIE
 
 > **Note:** `Content-Type` and `Content-Length` appear without the `HTTP_` prefix — as `CONTENT_TYPE` and `CONTENT_LENGTH` — as required by the CGI specification.
 
+### Behind a Reverse Proxy
+
+When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, OxPHP rewrites the following `$_SERVER` keys from forwarded headers (`X-Forwarded-*` or RFC 7239 `Forwarded`):
+
+| Variable | Value when peer is trusted | Value otherwise |
+|----------|----------------------------|------------------|
+| `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded` | Direct peer IP |
+| `HTTPS` | `"on"` when `X-Forwarded-Proto: https` | Set only when the peer connection is TLS |
+| `REQUEST_SCHEME` | `"https"` / `"http"` from `X-Forwarded-Proto` | Based on actual TLS state |
+| `SERVER_NAME` | Host portion of `X-Forwarded-Host` | Host portion of the `Host` header |
+| `SERVER_PORT` | Port portion of `X-Forwarded-Host`, or 443/80 by scheme | Port portion of `Host`, or 443/80 |
+
+The raw `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, and `HTTP_FORWARDED` keys remain in `$_SERVER` unchanged — both the rewritten values and the original headers are available.
+
+When `TRUSTED_PROXIES` is **not** set, no rewriting occurs and `REMOTE_ADDR` is always the direct peer — typically your load balancer, not the end client. Parsing `X-Forwarded-For` manually is error-prone (leftmost vs rightmost, no CIDR trust check); prefer configuring `TRUSTED_PROXIES`. See [Trusted Proxies](../security/trusted-proxies.md) for the trust algorithm and configuration syntax.
+
 ### Trace Context Variables
 
 When distributed tracing is enabled, OxPHP adds trace context variables to `$_SERVER`:
@@ -89,8 +105,9 @@ $scheme  = $_SERVER['REQUEST_SCHEME'];  // "http" or "https"
 // Read a custom header
 $token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
 
-// Prefer X-Forwarded-For when behind a trusted reverse proxy
-$xff  = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+// REMOTE_ADDR is already the real client IP when TRUSTED_PROXIES is configured.
+// Without it, REMOTE_ADDR is the direct peer (usually a load balancer).
+$clientIp = $_SERVER['REMOTE_ADDR'];
 
 // Check TLS without checking the port
 if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {

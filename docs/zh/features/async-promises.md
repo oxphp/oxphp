@@ -201,16 +201,17 @@ oxphp_worker(function () {
 
 | 允许 | 不允许 |
 |---------|-------------|
-| `null`、`bool`、`int`、`float`、`string` | 对象（任何类实例） |
+| `null`、`bool`、`int`、`float`、`string` | 普通对象（任何未实现 `OxPHP\Shared\Shareable` 的类） |
 | 标量类型数组 | 资源（文件句柄、数据库连接、流） |
-| 嵌套标量数组 | 在 `use` 中引用对象的闭包 |
+| 嵌套标量数组 | `use` 捕获了非 Shareable 对象的闭包 |
+| `Shared\*` 实例（`Counter`、`Map`、`Channel`、`Atomic`、`Flag`、`Mutex`、`Once`、`Pool`、`Registry`）以及其他实现 `OxPHP\Shared\Shareable` 的类 | |
 
 其他限制：
 
 - **不支持嵌套异步** — 在异步闭包内调用 `oxphp_async()` 会抛出 `OxPHP\Async\AsyncException`
 - **仅限用户定义函数** — 闭包必须是用户定义的，不能是对内置函数的包装
 - **序列化开销** — 参数和返回值在线程边界间序列化。大数组或字符串会增加延迟
-- **无共享状态** — 每个异步 Worker 有独立的 PHP 环境，分发线程和异步线程之间没有共享变量
+- **普通 PHP 值不共享状态** — 每个异步 Worker 拥有独立的 PHP 环境。普通变量、数组和类实例会跨边界复制（或被拒绝）。使用[共享状态原语](../shared-state/shared-state.md)（`Shared\Counter`、`Shared\Map`、`Shared\Channel` 等）来传递在两个线程间都可见的引用
 
 ## Docker 示例
 

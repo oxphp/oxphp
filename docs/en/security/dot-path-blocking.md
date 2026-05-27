@@ -23,7 +23,7 @@ Any request where a path segment starts with `.` returns 404:
 | `/path/.hidden/file.txt` | 404 |
 | `/path/to/.env` | 404 |
 
-Percent-encoded bypasses are caught — `/%2egit/HEAD` decodes to `/.git/HEAD` and is blocked.
+Single-level percent-encoded bypasses are caught — `/%2egit/HEAD` decodes once to `/.git/HEAD` and is rejected. Double-encoded inputs (`/%252egit/HEAD`) are decoded only once and remain `/%2egit/HEAD`, which is not recognised as a dot-segment by this layer. Standard HTTP clients and browsers do not double-encode, so this rarely matters in practice; if your upstream proxy normalises URIs before forwarding, single-pass decoding is sufficient.
 
 ## `.well-known` Exception
 

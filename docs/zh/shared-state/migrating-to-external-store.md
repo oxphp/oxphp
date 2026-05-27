@@ -33,12 +33,10 @@ interface CounterBackend
 
 final class SharedCounterBackend implements CounterBackend
 {
-    public function __construct(private OxPHP\Shared\Map $counters) {}
-
     public function inc(string $key, int $by = 1): int
     {
-        $counter = $this->counters->getOrSet(
-            $key,
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
             fn () => new OxPHP\Shared\Counter(),
         );
         return $counter->add($by);
@@ -46,14 +44,20 @@ final class SharedCounterBackend implements CounterBackend
 
     public function get(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->get() ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->get();
     }
 
     public function reset(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->set(0) ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->set(0);
     }
 }
 
@@ -149,7 +153,7 @@ final class RedisCounterBackend implements CounterBackend
 
 语义差异：
 
-- `update($key, $fn)` 在 Redis 中必须变成服务端 Lua 脚本（以保持 RMW 原子），或在 SQL 中使用 `SELECT ... FOR UPDATE`。普通 `HGET` + 计算 + `HSET` 失去原子性。
+- `Map::compareAndSet` 重试循环（Shared\* 的原子 RMW 习惯用法）在 Redis 中必须变成服务端 Lua 脚本，或在 SQL 中使用 `SELECT ... FOR UPDATE`。普通 `HGET` + 计算 + `HSET` 失去原子性。`Map::setIfAbsent` 覆盖更简单的"仅插入一次"场景；注意它返回 `bool`，因此要读回值时，调用方需要在 `setIfAbsent` 之后再调用 `get`。
 - Map 的**循环安全**在外部不存在。你不会闭合循环，因为没有可闭合的 Shareable 图。
 - **嵌套 Shareable** 变成「单独键、值中编码指针」。簿记由你负责。
 
@@ -182,13 +186,18 @@ final class SharedRateLimiterBackend implements RateLimiterBackend
     public function allow(string $key, int $max, int $windowSecs): bool
     {
         $now = time();
-        $state = $this->buckets->update($key, function ($current) use ($now, $windowSecs) {
+        while (true) {
+            $current = $this->buckets->get($key);
             if ($current === null || $now - $current['start'] >= $windowSecs) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
-        return $state['count'] <= $max;
+            if ($this->buckets->compareAndSet($key, $current, $next)) {
+                return $next['count'] <= $max;
+            }
+            // 输了竞争——重新读取并重试。
+        }
     }
 }
 
@@ -238,7 +247,13 @@ final class RedisRateLimiterBackend implements RateLimiterBackend
 
 ```php
 <?php
-$cfg = $cache->getOrSet($tenantId, fn () => loadFromRedis($tenantId));
+// 未命中时插入，命中时读取。setIfAbsent 仅在键缺失时提交，并返回 bool ——
+// 之后用 get() 回读已缓存的值。
+$cfg = $cache->get($tenantId);
+if ($cfg === null) {
+    $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
+    $cfg = $cache->get($tenantId);
+}
 ```
 
 通过所有 OxPHP 进程都订阅的 Redis pub/sub 通道使其失效，或在本地 Map 中用 TTL 过期。

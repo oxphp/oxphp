@@ -88,6 +88,7 @@ curl http://localhost:9090/health
 | `total_requests` | integer | Total HTTP requests processed on the main port |
 | `active_connections` | integer | Currently open connections on the main port |
 | `executor_healthy` | boolean | Whether the PHP worker pool is accepting requests |
+| `plugins` | `object<string, string>` | Per-plugin health: keys are plugin names, values are `"ok"`, `"degraded"`, or `"failed"`. Empty `{}` when no plugins report health. A `"failed"` plugin causes the HTTP status to switch to 503; `"degraded"` appears here but keeps the status at 200. |
 
 ## GET /metrics
 

@@ -120,6 +120,8 @@ $request->port(): int
 
 来自 `Host` 请求头的端口号。未显式指定时，返回对应协议的默认端口：HTTP 为 `80`，HTTPS 为 `443`。
 
+> **位于反向代理之后：** 当 `TRUSTED_PROXIES` 包含对端时，`scheme()`、`isSecure()`、`host()` 和 `port()` 会尊重 `X-Forwarded-Proto` 与 `X-Forwarded-Host`。未配置受信任的代理时，它们反映直接连接。
+
 ```php
 $request->queryString(): ?string
 ```
@@ -335,7 +337,9 @@ foreach ($photos as $photo) {
 $request->ip(): string
 ```
 
-返回客户端 IP 地址（`REMOTE_ADDR`）。当应用位于反向代理后面时，请直接从 `$request->header('X-Forwarded-For')` 读取并应用你自己的信任逻辑。
+返回客户端 IP 地址。当配置了 `TRUSTED_PROXIES` 且请求对端属于受信任集合时，该值是 `X-Forwarded-For` 或 RFC 7239 `Forwarded` 中最右侧的不受信任地址；否则它就是直接对端 IP——通常是你的负载均衡器，而不是终端客户端。
+
+原始 `X-Forwarded-For` 头仍可通过 `$request->header('X-Forwarded-For')` 获取，用于高级场景，但手动解析它很少正确（最左 vs 最右、缺少 CIDR 信任判断）。请改为配置 `TRUSTED_PROXIES`——参见[受信任的代理](../security/trusted-proxies.md)。
 
 ---
 

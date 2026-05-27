@@ -22,7 +22,10 @@ docker pull ghcr.io/oxphp/oxphp:0.5.0
 - **PHP-расширение OxPHP** (`oxphp_sapi.so`) — предоставляет `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()` и другие встроенные функции
 - **Библиотека-мост** (`liboxphp_bridge.so`) — связывает Rust-сервер со средой выполнения PHP
 - **Alpine Linux** — минимальный базовый образ
-- Запускается от имени **www-data** (UID 82, GID 82) для выполнения контейнера без root-прав
+- **Без директивы `USER`** — образ по умолчанию запускается от **root**, что соответствует поведению `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. Пользователь `www-data` (UID 82, GID 82) предварительно создан, а директория `/var/www/html` принадлежит ему уже на этапе сборки; снижайте привилегии на уровне оркестратора при развёртывании:
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.5.0`
+  - Compose: `services.app.user: www-data`
+  - Kubernetes: `securityContext.runAsUser: 82`
 
 ### Структура образа
 
@@ -35,13 +38,22 @@ docker pull ghcr.io/oxphp/oxphp:0.5.0
 ├── lib/
 │   ├── libphp.so                                    # PHP ZTS runtime (8.4 или 8.5, соответствует тегу образа)
 │   ├── liboxphp_bridge.so                           # библиотека-мост C
-│   └── php/extensions/no-debug-zts-20240924/
+│   └── php/extensions/no-debug-zts-<ABI>/
 │       └── oxphp_sapi.so                            # PHP-расширение OxPHP
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # настройки PHP для OxPHP
 │       └── extension.ini                            # extension=oxphp_sapi.so
 ```
+
+> **Значение `<ABI>` зависит от минора PHP.** PHP 8.4 использует `20240924`, у PHP 8.5 другая дата. В примерах ниже жёстко прописан `20240924`, потому что в их `FROM` указан `php:8.4-zts-alpine3.23` — поменяете FROM, придётся менять и дату. Чтобы получить её портабельно прямо в сборке:
+>
+> ```bash
+> php -r 'echo ini_get("extension_dir");'
+> # /usr/local/lib/php/extensions/no-debug-zts-20240924
+> ```
+>
+> Используйте `$(php -r 'echo ini_get("extension_dir");')` в shell-командах, чтобы не хардкодить значение.
 
 Три компонента OxPHP и их назначение:
 

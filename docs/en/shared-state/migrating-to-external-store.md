@@ -33,12 +33,10 @@ interface CounterBackend
 
 final class SharedCounterBackend implements CounterBackend
 {
-    public function __construct(private OxPHP\Shared\Map $counters) {}
-
     public function inc(string $key, int $by = 1): int
     {
-        $counter = $this->counters->getOrSet(
-            $key,
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
             fn () => new OxPHP\Shared\Counter(),
         );
         return $counter->add($by);
@@ -46,14 +44,20 @@ final class SharedCounterBackend implements CounterBackend
 
     public function get(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->get() ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->get();
     }
 
     public function reset(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->set(0) ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->set(0);
     }
 }
 
@@ -149,7 +153,7 @@ Semantic gaps:
 
 Semantic gaps:
 
-- `update($key, $fn)` must become a server-side Lua script in Redis (to keep the RMW atomic) or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity.
+- The `Map::compareAndSet` retry loop (Shared\*'s atomic RMW idiom) must become a server-side Lua script in Redis or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity. `Map::setIfAbsent` covers the simpler insert-once case; note it returns `bool`, so to read the value back the caller does `setIfAbsent` followed by `get`.
 - Map's **cycle safety** does not exist externally. You will never close a cycle because there is no Shareable graph to close.
 - **Nested Shareables** become "separate key with a pointer encoded in the value". You own the bookkeeping.
 
@@ -182,13 +186,18 @@ final class SharedRateLimiterBackend implements RateLimiterBackend
     public function allow(string $key, int $max, int $windowSecs): bool
     {
         $now = time();
-        $state = $this->buckets->update($key, function ($current) use ($now, $windowSecs) {
+        while (true) {
+            $current = $this->buckets->get($key);
             if ($current === null || $now - $current['start'] >= $windowSecs) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
-        return $state['count'] <= $max;
+            if ($this->buckets->compareAndSet($key, $current, $next)) {
+                return $next['count'] <= $max;
+            }
+            // Lost the race — re-read and try again.
+        }
     }
 }
 
@@ -238,7 +247,13 @@ Read-heavy workloads often use `Shared\Map` as a TTL cache in front of an extern
 
 ```php
 <?php
-$cfg = $cache->getOrSet($tenantId, fn () => loadFromRedis($tenantId));
+// Insert on miss, read on hit. setIfAbsent commits only when the key
+// is absent and returns bool — read the cached value back with get().
+$cfg = $cache->get($tenantId);
+if ($cfg === null) {
+    $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
+    $cfg = $cache->get($tenantId);
+}
 ```
 
 Invalidate via a Redis pub/sub channel that all OxPHP processes subscribe to, or via a TTL in the local Map.

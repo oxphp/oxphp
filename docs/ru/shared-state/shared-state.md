@@ -149,7 +149,7 @@ final class NaiveRateLimiter
 
 В этом коде спрятаны три бага: пара `apcu_fetch` + `apcu_store` не атомарна, начало окна теряется при близкой гонке, а очистка — это фактически то, что APCu решит вытеснить по TTL.
 
-### После: Shared\Map + update()
+### После: Shared\Map + цикл compareAndSet
 
 ```php
 <?php
@@ -165,16 +165,23 @@ final class RateLimiter
     {
         $now = time();
 
-        // Атомарный read-modify-write. Замыкание видит текущее значение
-        // (или null при первом попадании) и возвращает новую форму для хранения.
-        $state = $this->buckets->update($ip, function ($current) use ($now) {
+        // Атомарный read-modify-write через compareAndSet. Читаем текущий
+        // бакет, вычисляем следующее состояние и пытаемся зафиксировать
+        // через CAS. Если параллельный писатель нас обогнал — повторяем
+        // с новым значением.
+        while (true) {
+            $current = $this->buckets->get($ip);
             if ($current === null || $now - $current['start'] >= $this->windowSeconds) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
 
-        return $state['count'] <= $this->maxRequests;
+            if ($this->buckets->compareAndSet($ip, $current, $next)) {
+                return $next['count'] <= $this->maxRequests;
+            }
+            // Проиграли гонку — перечитываем и пробуем снова.
+        }
     }
 
     /** Фоновая очистка — вызывайте из планируемого воркера или цикла oxphp_async. */
@@ -182,12 +189,11 @@ final class RateLimiter
     {
         $now    = time();
         $cutoff = $this->windowSeconds * 2;
-        foreach ($this->buckets->keys() as $ip) {
-            $state = $this->buckets->get($ip);
-            if ($state !== null && $now - $state['start'] >= $cutoff) {
+        $this->buckets->forEach(function (string $ip, array $state) use ($now, $cutoff): void {
+            if ($now - $state['start'] >= $cutoff) {
                 $this->buckets->remove($ip);
             }
-        }
+        });
     }
 }
 
@@ -217,7 +223,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 
 Что принесла миграция:
 
-- **Атомарность.** `update($key, fn)` — это один RMW; гонки read-then-store нет.
+- **Атомарность.** `compareAndSet($key, $expected, $next)` либо фиксирует новое значение, либо сообщает о гонке и вызывающий повторяет попытку — никаких затираний read-then-store. Для случая «создать или оставить» в один вызов есть `setIfAbsent`.
 - **Детерминированная очистка.** `sweep()` предсказуем и выполняется по расписанию, которое вы контролируете.
 - **На одну зависимость меньше.** APCu больше нет в истории деплоя.
 - **Точный счёт под нагрузкой.** Два конкурентных хита на один IP никогда не затирают друг друга.
@@ -241,10 +247,13 @@ $current = $hits->add();          // атомарный inc-и-вернуть
 
 ```php
 <?php
-// Привяжите внешнюю Map под именем, чтобы её разделяли все воркеры.
-$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
-
-$counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
+// Per-tenant счётчики по имени. `Registry::counter` привязывает счётчик
+// каждого тенанта под стабильным именем, чтобы все воркеры сходились на
+// одной записи — фабрика выполняется максимум один раз на имя.
+$counter = OxPHP\Shared\Registry::counter(
+    "tenant:{$tenantId}",
+    fn () => new OxPHP\Shared\Counter(),
+);
 $counter->add();
 ```
 
@@ -297,7 +306,7 @@ Shared-хэндлы безопасно использовать из любог�
 $queue = new OxPHP\Shared\Channel(256);
 
 oxphp_async(function () use ($queue) {              // ← явный use
-    while (($job = $queue->recv(timeout: 30.0)) !== null) {
+    while (($job = $queue->recvTimeout(30_000)) !== null) {
         process($job);
     }
 });

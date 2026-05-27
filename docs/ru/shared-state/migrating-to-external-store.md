@@ -33,12 +33,10 @@ interface CounterBackend
 
 final class SharedCounterBackend implements CounterBackend
 {
-    public function __construct(private OxPHP\Shared\Map $counters) {}
-
     public function inc(string $key, int $by = 1): int
     {
-        $counter = $this->counters->getOrSet(
-            $key,
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
             fn () => new OxPHP\Shared\Counter(),
         );
         return $counter->add($by);
@@ -46,14 +44,20 @@ final class SharedCounterBackend implements CounterBackend
 
     public function get(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->get() ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->get();
     }
 
     public function reset(string $key): int
     {
-        $counter = $this->counters->get($key);
-        return $counter?->set(0) ?? 0;
+        $counter = OxPHP\Shared\Registry::counter(
+            "counter:{$key}",
+            fn () => new OxPHP\Shared\Counter(),
+        );
+        return $counter->set(0);
     }
 }
 
@@ -149,7 +153,7 @@ final class RedisCounterBackend implements CounterBackend
 
 Семантические разрывы:
 
-- `update($key, $fn)` должен стать server-side Lua-скриптом в Redis (чтобы сохранить RMW атомарным) или `SELECT ... FOR UPDATE` в SQL. Простой `HGET` + compute + `HSET` теряет атомарность.
+- Цикл повторов `Map::compareAndSet` (идиома атомарного RMW в Shared\*) должен стать server-side Lua-скриптом в Redis или `SELECT ... FOR UPDATE` в SQL. Простой `HGET` + compute + `HSET` теряет атомарность. Простой случай «вставить, если отсутствует» покрывает `Map::setIfAbsent`; помните, что он возвращает `bool`, поэтому для чтения значения после вставки делайте `setIfAbsent`, а затем `get`.
 - **Cycle safety** Map'а не существует снаружи. Вы никогда не замкнёте цикл, потому что нет графа Shareable, который можно замкнуть.
 - **Вложенные Shareable** становятся «отдельным ключом с указателем, закодированным в значении». Бухгалтерию ведёте вы.
 
@@ -182,13 +186,18 @@ final class SharedRateLimiterBackend implements RateLimiterBackend
     public function allow(string $key, int $max, int $windowSecs): bool
     {
         $now = time();
-        $state = $this->buckets->update($key, function ($current) use ($now, $windowSecs) {
+        while (true) {
+            $current = $this->buckets->get($key);
             if ($current === null || $now - $current['start'] >= $windowSecs) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
-        return $state['count'] <= $max;
+            if ($this->buckets->compareAndSet($key, $current, $next)) {
+                return $next['count'] <= $max;
+            }
+            // Проиграли гонку — перечитываем и пробуем снова.
+        }
     }
 }
 
@@ -238,7 +247,14 @@ Read-heavy нагрузки часто используют `Shared\Map` как 
 
 ```php
 <?php
-$cfg = $cache->getOrSet($tenantId, fn () => loadFromRedis($tenantId));
+// Вставка на промахе, чтение при попадании. setIfAbsent фиксирует значение
+// только если ключ отсутствует и возвращает bool — читайте закэшированное
+// значение обратно через get().
+$cfg = $cache->get($tenantId);
+if ($cfg === null) {
+    $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
+    $cfg = $cache->get($tenantId);
+}
 ```
 
 Инвалидируйте через канал Redis pub/sub, на который подписаны все процессы OxPHP, или через TTL в локальном Map.

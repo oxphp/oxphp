@@ -30,19 +30,23 @@ memory model, а не обычный геттер.
 `Map::set()`, сброс значения `Mutex` через `with`, `Once::getOrInit()`.
 `Atomic::store($value, ?Ordering)` симметричен `load` по той же причине.
 
-### 3. Количество элементов — `count(): int` + `\Countable`
+### 3. Количество элементов — `count(): int`
 
-Каждый контейнер предоставляет `count(): int` и реализует `\Countable`.
-Это позволяет `count($obj)` работать нативно:
+Каждый контейнер, у которого есть понятие текущего размера, делает это
+под именем `count(): int`. `Channel` дополнительно реализует
+`\Countable`, поэтому `count($ch)` нативно работает как идиома для
+количества элементов в очереди. `Map` и `Pool` предоставляют
+`count(): int` как метод, но `\Countable` **не** реализуют — вызывайте
+напрямую:
 
 ```php
 $ch  = new OxPHP\Shared\Channel(1024);
 $map = new OxPHP\Shared\Map();
 $pool = new OxPHP\Shared\Pool($factory);
 
-count($ch);    // буферизованные элементы
-count($map);   // записи
-count($pool);  // всего живых слотов (in-use + idle)
+count($ch);       // буферизованные элементы (Channel реализует \Countable)
+$map->count();    // записи
+$pool->count();   // всего живых слотов (in-use + idle)
 ```
 
 Никаких `size()`, `len()` или `pending()` — они запрещены в публичном
@@ -86,11 +90,11 @@ sticky, невосстановима и всплывает через `Corrupted
 non-int и отсутствие поднимают `OxPHP\Shared\TypeException` на
 бридже.
 
-`try*` несёт ещё один под-смысл, существовавший до трихотомии:
-
-- **Conditional-success операция.** `Map::trySet` успешен только
-  если ключ отсутствовал; коллизия → `false`, без исключения.
-  Параллель: `HashMap::try_insert`.
+Conditional-success операции живут на `Map` под именем `setIfAbsent`, а
+не под префиксом `try*`: `Map::setIfAbsent` фиксирует значение только
+если ключ отсутствовал, и возвращает `bool` (параллель —
+`HashMap::try_insert`). Имя `setIfAbsent` зарезервировано именно за
+этой семантикой; не переиспользуйте его в других случаях.
 
 Объединяющий инвариант для `try*`: он либо возвращает Result со
 значением (Channel), либо бросает `ContentionException` (Mutex). Он
@@ -151,9 +155,9 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
 | Запись значения             | `set()`                  | `Map::set`                              |
 | Запись атомика              | `store($v, $order)`      | `Atomic::store`                         |
 | Количество элементов        | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
-| Наличие ключа/элемента      | `has($key): bool`        | `Map::has`                              |
 | Boolean-свойство            | `is*(): bool`            | `Channel::isClosed`                     |
-| Non-blocking ожидание       | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock`, `Map::trySet` |
+| Условная вставка            | `setIfAbsent($k, $v)`    | `Map::setIfAbsent`                      |
+| Non-blocking ожидание       | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock` |
 | Бесконечное ожидание        | голый глагол             | `Channel::send`, `Channel::recv`, `Mutex::withLock`     |
 | Ограниченное ожидание       | `*Timeout(int $ms)`      | `Channel::sendTimeout`, `Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
@@ -177,12 +181,11 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
 - [ ] Wait-policy варианты следуют трихотомии `try*` / голое имя /
   `*Timeout(int $ms)`. Вариант `*Timeout` принимает `int $ms > 0` и
   отклоняет ноль / отрицательные / non-int значения через
-  `TypeException`. Conditional-success операции (`Map::trySet`)
-  сохраняют префикс `try*` и могут возвращать `bool`; новые
-  wait-policy `try*`-методы возвращают либо Result со значением,
-  либо бросают доменное исключение — никогда `null`-в-роли-кода.
-- [ ] Никаких `len`, `size`, `pending`, `test`, `setIfAbsent` и других
-  ad-hoc имён.
+  `TypeException`. Wait-policy `try*`-методы возвращают либо Result
+  со значением, либо бросают доменное исключение — никогда
+  `null`-в-роли-кода. Conditional-success операции используют
+  выделенное имя `setIfAbsent`, а не префикс `try*`.
+- [ ] Никаких `len`, `size`, `pending`, `test` и других ad-hoc имён.
 - [ ] Доменные глаголы (`evict`, `drain`, `flush` и т. п.) появляются
   только когда у концепта нет канонического аналога в шпаргалке.
 

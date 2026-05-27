@@ -22,7 +22,10 @@ The image includes:
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
-- Runs as **www-data** (UID 82, GID 82) for non-root container execution
+- **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.5.0`
+  - Compose: `services.app.user: www-data`
+  - Kubernetes: `securityContext.runAsUser: 82`
 
 ### Image Structure
 
@@ -35,13 +38,22 @@ File layout of the runtime image:
 ├── lib/
 │   ├── libphp.so                                    # PHP ZTS runtime (8.4 or 8.5, matches the image tag)
 │   ├── liboxphp_bridge.so                           # C bridge library
-│   └── php/extensions/no-debug-zts-20240924/
+│   └── php/extensions/no-debug-zts-<ABI>/
 │       └── oxphp_sapi.so                            # OxPHP PHP extension
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # PHP settings for OxPHP
 │       └── extension.ini                            # extension=oxphp_sapi.so
 ```
+
+> **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.23` — switch the FROM and you must switch the date too. To derive it portably inside the build:
+>
+> ```bash
+> php -r 'echo ini_get("extension_dir");'
+> # /usr/local/lib/php/extensions/no-debug-zts-20240924
+> ```
+>
+> Use `$(php -r 'echo ini_get("extension_dir");')` in shell commands to avoid hardcoding.
 
 The three OxPHP components and their purpose:
 
