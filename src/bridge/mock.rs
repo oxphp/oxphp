@@ -886,6 +886,7 @@ pub unsafe fn oxphp_shared_invoke_0_portbuf(
     _callable: *mut c_void,
     _out_ret_buf: *mut *mut u8,
     _out_ret_len: *mut usize,
+    _out_retained_entry: *mut *const c_void,
 ) -> c_int {
     -1
 }
@@ -900,8 +901,15 @@ pub unsafe fn oxphp_shared_invoke_byref_1_portbuf(
     _out_ret_buf: *mut *mut u8,
     _out_ret_len: *mut usize,
     _did_mutate: *mut c_int,
+    _out_retained_state: *mut *mut c_void,
+    _out_retained_ret: *mut *mut c_void,
 ) -> c_int {
     -1
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe fn oxphp_shared_free_zval(_p: *mut c_void) {
+    // host mock: no zval ever materialised, so nothing to free.
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -927,8 +935,8 @@ pub unsafe fn oxphp_shared_map_cursor_alloc(
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
-#[allow(dead_code)]
 pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
+pub const OXPHP_SHARED_INVOKE_BAD_RETURN: c_int = -2;
 
 // ── Shared\Pool bridge (host mock) ───────────────────────
 // Host tests cannot invoke PHP, so every factory/body path fails

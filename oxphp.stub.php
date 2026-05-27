@@ -1692,6 +1692,136 @@ namespace OxPHP\Shared {
         public function id(): int {}
     }
 
+    /**
+     * Name-keyed process-global handles for `Shared\*`. Identity-by-name
+     * complements identity-by-handle (`new Shared\*()`): every worker /
+     * request that calls a method with the same `$key` converges on the
+     * one entry the registry binds under that key.
+     *
+     * Get-or-create semantics: the factory runs **exactly once** per
+     * successful bind (block-losers across worker threads). On hit, the
+     * factory is ignored. The bound entry is pinned for the process
+     * lifetime — invalidate by mutating in place (`$map->clear()`,
+     * `$counter->set(0)`) or unbind the namespace key with `remove()`.
+     *
+     * Works in both routing modes. In worker mode the named entry
+     * collapses the per-worker bootstrap pattern into one shared
+     * instance; in traditional mode it survives across requests, giving
+     * APCu-style same-host coordination without an external store.
+     *
+     * @see Shareable
+     */
+    final class Registry
+    {
+        /**
+         * Typed get-or-create. Returns the existing `Map` bound under
+         * `$key`, or runs `$factory()` (must return a fresh `Map`),
+         * binds and returns it.
+         *
+         * The exception set is identical for every typed method
+         * (`counter`, `atomic`, `flag`, `once`, `mutex`, `channel`,
+         * `pool`) and for `global` (which never raises `TypeException`).
+         * The list is documented once here and elided on the siblings
+         * to keep the stub readable.
+         *
+         * @throws TypeException If `$key` is bound to a different
+         *                       Shared type, the factory returned the
+         *                       wrong type, or the factory returned a
+         *                       non-Shareable / non-serialisable value.
+         * @throws DeadlockException If called for `$key` from inside
+         *                           its own factory on the same thread
+         *                           (reentrancy), or if a cross-key
+         *                           cycle held the call past the
+         *                           30-second gate timeout.
+         * @throws CapacityException If creating the entry would exceed
+         *                           the `SHARED_MAX_ENTRIES` /
+         *                           `SHARED_MAX_BYTES` caps.
+         * @throws SharedException If the registry is draining
+         *                         (graceful shutdown in progress), or
+         *                         a peer creator won the bind race
+         *                         after this thread's factory finished.
+         * @throws \InvalidArgumentException If `$key` is empty.
+         */
+        public static function map(string $key, callable $factory): Map {}
+
+        /** Typed get-or-create for `Shared\Counter`. See {@see map()} for the full exception list. */
+        public static function counter(string $key, callable $factory): Counter {}
+
+        /** Typed get-or-create for `Shared\Atomic`. See {@see map()} for the full exception list. */
+        public static function atomic(string $key, callable $factory): Atomic {}
+
+        /** Typed get-or-create for `Shared\Flag`. See {@see map()} for the full exception list. */
+        public static function flag(string $key, callable $factory): Flag {}
+
+        /** Typed get-or-create for `Shared\Once`. See {@see map()} for the full exception list. */
+        public static function once(string $key, callable $factory): Once {}
+
+        /** Typed get-or-create for `Shared\Mutex`. See {@see map()} for the full exception list. */
+        public static function mutex(string $key, callable $factory): Mutex {}
+
+        /** Typed get-or-create for `Shared\Channel`. See {@see map()} for the full exception list. */
+        public static function channel(string $key, callable $factory): Channel {}
+
+        /** Typed get-or-create for `Shared\Pool`. See {@see map()} for the full exception list. */
+        public static function pool(string $key, callable $factory): Pool {}
+
+        /**
+         * Untyped escape hatch. Returns whatever is bound under `$key`
+         * (no type guard). On miss, runs `$factory()` which must return
+         * any `Shareable`. Does NOT raise `TypeException` on hit; every
+         * other exception from {@see map()} still applies.
+         */
+        public static function global(string $key, callable $factory): Shareable {}
+
+        /**
+         * Unbind a key and drop its pin. Existing handles continue to
+         * work on the now-anonymous entry; the entry self-deregisters
+         * when its last handle drops. The next typed call under the
+         * same key creates a NEW entry — captured handles do not
+         * automatically converge on it. This is namespace management,
+         * not object teardown.
+         *
+         * @return bool True if a bound key was removed, false if absent.
+         * @throws \InvalidArgumentException If `$key` is empty.
+         */
+        public static function remove(string $key): bool {}
+
+        /**
+         * Currently-bound keys. `Creating` (in-flight first-touch)
+         * slots are NOT included.
+         *
+         * @return list<string>
+         */
+        public static function keys(): array {}
+
+        /**
+         * Estimated bytes across **all** Shared\* entries — named AND
+         * anonymous. Same accounting `SHARED_MAX_BYTES` caps. This is a
+         * static estimate, not RSS; use a heap profiler / cgroups for
+         * the true number.
+         */
+        public static function memoryUsage(): int {}
+
+        /**
+         * Live Shared\* entries (named + anonymous). Transient —
+         * **not** equal to `count(Registry::keys())`, which is the
+         * named namespace only.
+         */
+        public static function count(): int {}
+
+        /**
+         * Registry is a static facade. The constructor is registered on
+         * the class only so the runtime can throw a clear
+         * `SharedException` on `new Registry()` — calling it always
+         * fails. Marked `public` here so static analysers and IDEs see
+         * the same surface the runtime exposes; the `@throws` documents
+         * the unconditional failure.
+         *
+         * @throws SharedException always — Registry cannot be instantiated.
+         */
+        public function __construct() {}
+    }
+
     // ── Exception hierarchy ─────────────────────────────────────
     //
     //   \Exception

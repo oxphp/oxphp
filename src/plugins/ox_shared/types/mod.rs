@@ -9,4 +9,5 @@ pub(crate) mod map_key;
 pub mod mutex;
 pub mod once;
 pub mod pool;
+pub mod registry;
 pub mod timeout;

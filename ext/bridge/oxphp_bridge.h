@@ -1777,12 +1777,33 @@ int oxphp_shared_wrapper_new(zval *out,
 #define OXPHP_SHARED_INVOKE_OK           0
 #define OXPHP_SHARED_INVOKE_PHP_THREW    1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
+#define OXPHP_SHARED_INVOKE_BAD_RETURN   -2
 #endif
 
+/* If the callable returned a Shared\* object, the C side calls
+ * oxphp_shared_handle_clone() on its entry_ptr before destroying the
+ * return zval so the Entry survives the wrapper drop. The cloned
+ * pointer is written into *out_retained_entry; the caller MUST balance
+ * it with oxphp_shared_handle_drop() (or equivalent Rust Arc::from_raw
+ * + drop) after decoding the buffer. NULL = scalar / array / null
+ * return; nothing to release. */
 int oxphp_shared_invoke_0_portbuf(zval *callable,
                                   uint8_t **out_ret_buf,
-                                  size_t *out_ret_len);
+                                  size_t *out_ret_len,
+                                  const void **out_retained_entry);
 
+/* `*out_retained_state` and `*out_retained_ret` each carry an opaque
+ * pointer (actually a heap-allocated zval) that pins every embedded
+ * Shareable in the serialised state / return value across the C-side
+ * `zval_ptr_dtor` that runs before this function returns. Without
+ * these, a fresh `Shared\*` assigned into the by-ref state (or
+ * returned by the closure) would be GC'd before the Rust caller
+ * could decode `*new_state_buf` / `*out_ret_buf`. Each is NULL when
+ * there is nothing to pin (the function returned BAD_CALLABLE early,
+ * the corresponding serialise step rejected the value, or ret was
+ * IS_UNDEF/IS_NULL). The caller MUST balance each non-NULL pointer
+ * with `oxphp_shared_free_zval()` after consuming the wire buffer
+ * (or on any early exit). */
 int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          const uint8_t *state_buf,
                                          size_t state_len,
@@ -1790,7 +1811,14 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          size_t *new_state_len,
                                          uint8_t **out_ret_buf,
                                          size_t *out_ret_len,
-                                         int *did_mutate);
+                                         int *did_mutate,
+                                         void **out_retained_state,
+                                         void **out_retained_ret);
+
+/* Release a retained zval pointer produced by
+ * `oxphp_shared_invoke_byref_1_portbuf` (either `*out_retained_state`
+ * or `*out_retained_ret`). NULL is a no-op. */
+void oxphp_shared_free_zval(void *p);
 
 /* Shared\Map::forEach — invoke $fn(key, value); 1=stop, 0=continue,
  * <0=bad callable / deserialise failure / PHP throw. */

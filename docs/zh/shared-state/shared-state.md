@@ -76,16 +76,25 @@ OxPHP 0.3 提供七种类型。请按语义而非熟悉度来选择：
 // worker.php —— Worker 模式入口脚本，每个 PHP 工作线程运行一次
 require __DIR__ . '/vendor/autoload.php';
 
-$requests = new OxPHP\Shared\Counter();
+// Registry::counter 把计数器绑定到一个键上。每个运行该引导脚本的工作线程
+// 都汇聚到「同一个」条目——整个进程范围内只有一个计数器。
+$requests = OxPHP\Shared\Registry::counter(
+    'request-counter',
+    fn() => new OxPHP\Shared\Counter(),
+);
 
 oxphp_worker(function () use ($requests) {
-    $requests->add();                 // 并发下的原子操作
+    $requests->add();                 // 跨所有工作线程的原子操作
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
 ```
 
-[Worker 模式](../features/worker-mode.md) 的外层作用域每个工作线程运行一次；`use ($requests)` 捕获使同一个 `Shared\Counter` 句柄在该工作线程处理的每次请求中都保持存活。跨工作线程来看，注册表条目本身是同一个——所有持有同 `id()` 句柄的工作线程都会变更同一个原子 int64。
+[Worker 模式](../features/worker-mode.md) 的外层作用域**每个工作线程运行一次**。`use ($requests)` 捕获使同一个句柄在该工作线程处理的每次请求中都保持存活。`Registry::counter('request-counter', …)` 才是让所有工作线程本地句柄都指向同一个共享条目的关键——工厂在整个进程范围内恰好运行一次，其他工作线程的调用都会找到那个已绑定的条目。
+
+若不使用 `Registry`，直接 `new OxPHP\Shared\Counter()` 的模式会**为每个工作线程产生一个不同的计数器**（每个引导脚本都会创建自己的匿名条目）。这对按工作线程累计的场景没问题，但若要进程级总计，请通过 `Registry`。
+
+同样的形态在传统模式（未启用 `WORKER_MODE_ENABLED`）下也适用。首次触及 `'request-counter'` 的请求会创建条目；后续每个请求——在任意工作线程上——都能看到它。完整说明见 [Shared\Registry](shared-registry.md)。
 
 当 fiber 也需要看到该计数器时，通过 `use` 传入：
 
@@ -96,7 +105,7 @@ oxphp_async(function () use ($requests) {
 });
 ```
 
-> 在两处分别执行 `new OxPHP\Shared\Counter()` 会得到两个独立的计数器，`id()` 不同。共享状态是*按句柄*共享，而非按名称共享。请通过 DI、闭包捕获或引导文件将句柄贯通——不要在每个工作线程里重新构造并期望它们合并。
+> 在两处分别执行 `new OxPHP\Shared\Counter()` 会得到两个独立的计数器，`id()` 不同。共享状态是*按句柄*（构造函数路径）共享，或者*按名称*——通过 `Registry::counter(...)`。请二者择一并坚持下去；不要在每个工作线程里重新构造并期望句柄合并。
 
 ## 典范示例——迁移手写计数器
 
@@ -181,9 +190,15 @@ final class RateLimiter
     }
 }
 
-// 引导阶段
+// 引导阶段——Registry::map 把 buckets 绑定到一个名称上，让所有工作线程和
+// 所有请求都汇聚到「同一个」map。若不使用 Registry，这里裸写的
+// `new Shared\Map(...)` 会在 worker 模式下每个工作线程创建一个独立的 map
+//（传统模式下则是每次请求一个），实际的限流阈值会随工作线程池规模放大。
 $limiter = new RateLimiter(
-    buckets:       new OxPHP\Shared\Map(maxEntries: 50_000),
+    buckets:       OxPHP\Shared\Registry::map(
+        'rate-limit-buckets',
+        fn() => new OxPHP\Shared\Map(maxEntries: 50_000),
+    ),
     maxRequests:   100,
     windowSeconds: 60,
 );
@@ -203,6 +218,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 - **确定性清理。** `sweep()` 可预测，且按你掌控的计划执行。
 - **少一个依赖。** APCu 不再出现在部署故事中。
 - **高负载下的精确计数。** 同一 IP 上的两次并发命中永远不会彼此覆盖。
+- **真正的进程级共享。** `Registry::map` 绑定让 buckets 成为一个共享实例——限流阈值作用于整个服务器，而非按工作线程。
 
 > 内置的 [限流](../features/rate-limiting.md) 功能（`RATE_LIMIT=...`）继续在连接层运行，比 PHP 层限流器更快。只有当你需要 PHP 层的策略（按租户、按路由、按用户 ID，而非按 IP）时，才需要自定义限流器。
 
@@ -222,7 +238,8 @@ $current = $hits->add();          // 原子地「自增后取值」
 
 ```php
 <?php
-$perTenant = new OxPHP\Shared\Map();
+// 把外层 Map 绑定到一个名称上，让所有工作线程共享同一个。
+$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
 $counter->add();
@@ -343,5 +360,6 @@ $queue->send(['url' => $_POST['url']]);
 - [Shared\Channel](shared-channel.md) —— 有界 MPMC 队列。
 - [Shared\Map](shared-map.md) —— 并发按键存储。
 - [Shared\Pool](shared-pool.md) —— 有界对象池。
+- [Shared\Registry](shared-registry.md) —— 按名键的进程级全局句柄（跨工作线程 / 跨请求的关键）。
 - [Shared 可观测性](shared-observability.md) —— 内省、指标、诊断。
 - [迁移到外部存储](migrating-to-external-store.md) —— 当共享状态超出单机时。

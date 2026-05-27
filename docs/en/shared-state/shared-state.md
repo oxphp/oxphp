@@ -76,16 +76,26 @@ OxPHP 0.3 ships seven types. Pick by semantics, not by what feels familiar:
 // worker.php — entry script in worker mode, runs once per PHP worker
 require __DIR__ . '/vendor/autoload.php';
 
-$requests = new OxPHP\Shared\Counter();
+// Registry::counter binds the counter under a key. Every worker that
+// runs this bootstrap converges on the SAME entry — one counter
+// process-wide.
+$requests = OxPHP\Shared\Registry::counter(
+    'request-counter',
+    fn() => new OxPHP\Shared\Counter(),
+);
 
 oxphp_worker(function () use ($requests) {
-    $requests->add();                 // atomic under concurrency
+    $requests->add();                 // atomic across every worker
     header('X-Request-Count: ' . $requests->get());
     echo 'hello';
 });
 ```
 
-[Worker mode](../features/worker-mode.md) runs the outer scope once per worker thread; the `use ($requests)` capture keeps the same `Shared\Counter` handle live across every request that worker handles. Across worker threads the registry entry itself is the same — all worker threads that hold handles with the same `id()` mutate the same atomic int64.
+[Worker mode](../features/worker-mode.md) runs the outer scope once **per worker thread**. The `use ($requests)` capture keeps the same handle live across every request that worker handles. `Registry::counter('request-counter', …)` is what makes all those worker-local handles point at one shared entry — the factory runs exactly once across the whole process, and every other worker's call finds the bound entry.
+
+Without `Registry`, the bare `new OxPHP\Shared\Counter()` pattern produces a **different** counter per worker thread (each bootstrap creates its own anonymous entry). That can be fine for per-worker accumulators, but for a process-wide total, route through `Registry`.
+
+The same shape works in traditional mode (no `WORKER_MODE_ENABLED`). The first request that touches `'request-counter'` creates the entry; every subsequent request — on any worker thread — sees it. See [Shared\Registry](shared-registry.md) for the full story.
 
 When a fiber needs to see the counter too, hand it through `use`:
 
@@ -96,7 +106,7 @@ oxphp_async(function () use ($requests) {
 });
 ```
 
-> Creating `new OxPHP\Shared\Counter()` in two different places produces two independent counters with different `id()`s. Shared state is shared *by handle*, not by name. Plumb the handle through DI, closure captures, or a bootstrap file — do not re-construct in each worker and expect them to merge.
+> `new OxPHP\Shared\Counter()` in two different places produces two independent counters with different `id()`s. Shared state is shared *by handle* (the constructor path) or *by name* via `Registry::counter(...)`. Pick one and stick with it; do not re-construct in each worker and expect handles to merge.
 
 ## Canonical example — migrating a hand-rolled counter
 
@@ -181,9 +191,16 @@ final class RateLimiter
     }
 }
 
-// Bootstrap
+// Bootstrap — Registry::map keys the buckets under a name so every
+// worker and every request converges on ONE map. Without Registry the
+// bare `new Shared\Map(...)` here would create a separate map per
+// worker thread (in worker mode) or per request (in traditional mode),
+// and the effective rate limit would scale with the worker pool.
 $limiter = new RateLimiter(
-    buckets:       new OxPHP\Shared\Map(maxEntries: 50_000),
+    buckets:       OxPHP\Shared\Registry::map(
+        'rate-limit-buckets',
+        fn() => new OxPHP\Shared\Map(maxEntries: 50_000),
+    ),
     maxRequests:   100,
     windowSeconds: 60,
 );
@@ -203,6 +220,7 @@ What the migration bought you:
 - **Deterministic cleanup.** `sweep()` is predictable and runs on a schedule you control.
 - **One less dependency.** APCu is no longer in the deployment story.
 - **Accurate count under load.** Two concurrent hits on the same IP never clobber each other.
+- **Genuinely process-wide.** The `Registry::map` binding makes the buckets one shared instance — the rate limit applies to the whole server, not per-worker.
 
 > The built-in [Rate Limiting](../features/rate-limiting.md) feature (`RATE_LIMIT=...`) continues to run at the connection layer and is faster than a PHP-level limiter. Reach for a custom limiter only when you need PHP-level policy — per-tenant, per-route, per-user-id rather than per-IP.
 
@@ -222,7 +240,8 @@ Reach for `Map<string, Counter>` (a map of counters) when you need per-key total
 
 ```php
 <?php
-$perTenant = new OxPHP\Shared\Map();
+// Bind the outer Map under a name so all workers share it.
+$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
 
 $counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
 $counter->add();
@@ -343,5 +362,6 @@ Shared state is in-process. That constrains when it fits.
 - [Shared\Channel](shared-channel.md) — bounded MPMC queue.
 - [Shared\Map](shared-map.md) — concurrent keyed store.
 - [Shared\Pool](shared-pool.md) — bounded object pool.
+- [Shared\Registry](shared-registry.md) — name-keyed process-global handles (the cross-worker / cross-request story).
 - [Shared Observability](shared-observability.md) — introspection, metrics, diagnostics.
 - [Migrating to an external store](migrating-to-external-store.md) — when shared state outgrows a single host.

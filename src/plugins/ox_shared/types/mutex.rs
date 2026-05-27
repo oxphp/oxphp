@@ -132,8 +132,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
     timeout_ms: i64,
     out_ret_buf: *mut *mut u8,
     out_ret_len: *mut usize,
+    out_retained_ret: *mut *mut std::ffi::c_void,
 ) -> c_int {
-    if out_ret_buf.is_null() || out_ret_len.is_null() {
+    if out_ret_buf.is_null() || out_ret_len.is_null() || out_retained_ret.is_null() {
         set_last_error("out pointers null");
         return SharedError::Generic.code();
     }
@@ -143,6 +144,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
     unsafe {
         *out_ret_buf = std::ptr::null_mut();
         *out_ret_len = 0;
+        *out_retained_ret = std::ptr::null_mut();
     }
 
     ffi_entry(|| {
@@ -234,6 +236,29 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         let mut ret_buf: *mut u8 = std::ptr::null_mut();
         let mut ret_len: usize = 0;
         let mut did_mutate: c_int = 0;
+        // Pins every embedded Shareable in the serialised state across
+        // the C-side `zval_ptr_dtor`. Without this, `$s = new Map()`
+        // inside the closure (where the Map's only PHP ref is `$s`
+        // itself) would have its Entry GC'd before `raw_to_owned`
+        // below could `Weak::upgrade` it — `raw_to_owned` would return
+        // `StaleHandle` and either silently roll back the state or
+        // surface a misleading "stale handle" error. C populates this
+        // whenever it successfully serialised state; the RAII guard
+        // below balances the heap allocation on every exit path.
+        let mut retained_state: *mut std::ffi::c_void = std::ptr::null_mut();
+        // Symmetric pin for the closure's RETURN value. The C side
+        // populates this on the OK path when ret_zv serialised cleanly
+        // (it stays NULL on PHP_THREW / BAD_RETURN / unsupported ret
+        // types). Decoding of `ret_buf` happens in the outer caller
+        // (`invoke_mutex_with`), so we propagate the pointer via
+        // `*out_retained_ret` and rely on the outer RAII to free it
+        // after `raw_to_owned`. Without this, a closure returning a
+        // freshly-constructed `new Shared\*()` (whose only strong ref
+        // is the return zval itself) would have its Entry GC'd at the
+        // C-side `zval_ptr_dtor(&ret_zv)` before the Rust receiver
+        // could upgrade the Weak — surfacing as a silent PHP-side
+        // `null` return.
+        let mut retained_ret: *mut std::ffi::c_void = std::ptr::null_mut();
 
         // Wrap the engine call in catch_unwind — a Rust panic during
         // invocation must mark the mutex corrupted (sticky) before
@@ -248,8 +273,51 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 &mut ret_buf,
                 &mut ret_len,
                 &mut did_mutate,
+                &mut retained_state,
+                &mut retained_ret,
             )
         }));
+
+        // Free the retained state on every exit path, AFTER the match
+        // arms have decoded `new_state_buf` (the decode is what needs
+        // the embedded Shareables to be alive).
+        struct RetainedStateGuard(*mut std::ffi::c_void);
+        impl Drop for RetainedStateGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                }
+            }
+        }
+        let _retained_state_guard = RetainedStateGuard(retained_state);
+
+        // Transferable guard for retained_ret. On OK path with non-NULL
+        // ret_buf we hand ownership to the caller (`take()`); on every
+        // other path (panic, PHP_THREW, BAD_RETURN, OK with no ret), the
+        // Drop below releases the pin locally. Done as an in-place flag
+        // rather than `CreatingGuard`-style RAII because the propagation
+        // happens deep inside a single match arm.
+        struct RetainedRetGuard {
+            ptr: *mut std::ffi::c_void,
+            released: bool,
+        }
+        impl RetainedRetGuard {
+            fn take(&mut self) -> *mut std::ffi::c_void {
+                self.released = true;
+                self.ptr
+            }
+        }
+        impl Drop for RetainedRetGuard {
+            fn drop(&mut self) {
+                if !self.released && !self.ptr.is_null() {
+                    unsafe { ffi::oxphp_shared_free_zval(self.ptr) };
+                }
+            }
+        }
+        let mut retained_ret_guard = RetainedRetGuard {
+            ptr: retained_ret,
+            released: false,
+        };
 
         match invoke_result {
             Err(_panic) => {
@@ -287,6 +355,10 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 unsafe {
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
+                    // Hand the ret retention to the outer caller. If
+                    // ret_buf is empty the retained pointer is NULL
+                    // anyway, so take() is still safe.
+                    *out_retained_ret = retained_ret_guard.take();
                 }
                 entry.registry.record_op(entry);
                 Ok(())
@@ -296,6 +368,13 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 // is set. Default policy: do NOT poison.
                 // The C shim serialises partial state before returning
                 // PHP_THREW, so apply it here to honour the no-rollback policy.
+                //
+                // Free is split from apply: the apply branch is gated on
+                // `len > 0`, but `new_state_buf` ownership is on
+                // non-null alone — keeping the two checks symmetric with
+                // `oxphp_shared_mutex_try_with` below, so a future
+                // C-side change that yields a non-null/zero-len buffer
+                // does not leak silently on one path but not the other.
                 if !new_state_buf.is_null() && new_state_len > 0 {
                     let new_bytes =
                         unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
@@ -304,6 +383,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                     {
                         *guard = new_sv;
                     }
+                }
+                if !new_state_buf.is_null() {
                     unsafe { ffi::oxphp_portable_free(new_state_buf) };
                 }
                 if !ret_buf.is_null() {
@@ -312,6 +393,41 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 entry.registry.record_op(entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
+            }
+            Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
+                // Closure ran to completion without throwing. Two sub-cases:
+                //   (a) the *return value* is non-Shareable but the by-ref
+                //       state serialised cleanly — the C side hands us the
+                //       partial mutation in `new_state_buf` so we apply it
+                //       per Mutex's no-rollback policy (symmetric with
+                //       PHP_THREW). The closure already ran in PHP-land;
+                //       there is no rollback path, so the only correct move
+                //       is to commit the legitimate state mutation and
+                //       raise TypeException pointing at the return value.
+                //   (b) the *state itself* contained a non-Shareable value
+                //       (caught at the state-serialise step) — `new_state_buf`
+                //       is NULL because the C side never wrote it. Nothing
+                //       to apply, fall through and raise TypeException.
+                if !new_state_buf.is_null() && new_state_len > 0 {
+                    let new_bytes =
+                        unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
+                        *guard = new_sv;
+                    }
+                }
+                if !new_state_buf.is_null() {
+                    unsafe { ffi::oxphp_portable_free(new_state_buf) };
+                }
+                if !ret_buf.is_null() {
+                    unsafe { ffi::oxphp_portable_free(ret_buf) };
+                }
+                set_last_error(
+                    "Mutex::with: closure returned or assigned a non-serialisable value \
+                     (closure, resource, non-Shareable object)",
+                );
+                Err(SharedError::Type)
             }
             Ok(_) => {
                 if !new_state_buf.is_null() {
@@ -338,8 +454,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
     callable: *mut std::ffi::c_void,
     out_ret_buf: *mut *mut u8,
     out_ret_len: *mut usize,
+    out_retained_ret: *mut *mut std::ffi::c_void,
 ) -> c_int {
-    if out_ret_buf.is_null() || out_ret_len.is_null() {
+    if out_ret_buf.is_null() || out_ret_len.is_null() || out_retained_ret.is_null() {
         set_last_error("out pointers null");
         return SharedError::Generic.code();
     }
@@ -349,6 +466,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
     unsafe {
         *out_ret_buf = std::ptr::null_mut();
         *out_ret_len = 0;
+        *out_retained_ret = std::ptr::null_mut();
     }
 
     ffi_entry(|| {
@@ -398,6 +516,13 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
         let mut ret_buf: *mut u8 = std::ptr::null_mut();
         let mut ret_len: usize = 0;
         let mut did_mutate: c_int = 0;
+        // See the matching block in `oxphp_shared_mutex_with` for the
+        // full rationale: pins embedded Shareables in serialised state
+        // (and the return value) across the C-side `zval_ptr_dtor`
+        // so `raw_to_owned`'s `Weak::upgrade` below can resolve the
+        // wire ids.
+        let mut retained_state: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut retained_ret: *mut std::ffi::c_void = std::ptr::null_mut();
 
         let invoke_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             ffi::oxphp_shared_invoke_byref_1_portbuf(
@@ -409,8 +534,44 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 &mut ret_buf,
                 &mut ret_len,
                 &mut did_mutate,
+                &mut retained_state,
+                &mut retained_ret,
             )
         }));
+
+        struct RetainedStateGuard(*mut std::ffi::c_void);
+        impl Drop for RetainedStateGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                }
+            }
+        }
+        let _retained_state_guard = RetainedStateGuard(retained_state);
+
+        // Transferable guard for retained_ret — see the matching block
+        // in `oxphp_shared_mutex_with` for the full rationale.
+        struct RetainedRetGuard {
+            ptr: *mut std::ffi::c_void,
+            released: bool,
+        }
+        impl RetainedRetGuard {
+            fn take(&mut self) -> *mut std::ffi::c_void {
+                self.released = true;
+                self.ptr
+            }
+        }
+        impl Drop for RetainedRetGuard {
+            fn drop(&mut self) {
+                if !self.released && !self.ptr.is_null() {
+                    unsafe { ffi::oxphp_shared_free_zval(self.ptr) };
+                }
+            }
+        }
+        let mut retained_ret_guard = RetainedRetGuard {
+            ptr: retained_ret,
+            released: false,
+        };
 
         match invoke_result {
             Err(_) => {
@@ -440,6 +601,8 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 unsafe {
                     *out_ret_buf = ret_buf;
                     *out_ret_len = ret_len;
+                    // Hand the ret retention to the outer caller.
+                    *out_retained_ret = retained_ret_guard.take();
                 }
                 entry.registry.record_op(entry);
                 Ok(())
@@ -469,6 +632,36 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 entry.registry.record_op(entry);
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
+            }
+            Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
+                // Symmetric with oxphp_shared_mutex_with: closure ran
+                // successfully but produced a non-Shareable return
+                // value, or the by-ref state itself was non-Shareable.
+                // The C side hands us `new_state_buf` non-NULL only in
+                // the return-is-bad sub-case (state serialised cleanly);
+                // apply that partial mutation per the no-rollback
+                // policy before raising TypeException. See the with()
+                // comment for the full rationale.
+                if !new_state_buf.is_null() && new_state_len > 0 {
+                    let new_bytes =
+                        unsafe { std::slice::from_raw_parts(new_state_buf, new_state_len) };
+                    if let Ok(new_sv) =
+                        portbuf_to_sv(new_bytes).and_then(|raw| raw_to_owned(raw, entry.registry))
+                    {
+                        *guard = new_sv;
+                    }
+                }
+                if !new_state_buf.is_null() {
+                    unsafe { ffi::oxphp_portable_free(new_state_buf) };
+                }
+                if !ret_buf.is_null() {
+                    unsafe { ffi::oxphp_portable_free(ret_buf) };
+                }
+                set_last_error(
+                    "Mutex::tryWithLock: closure returned or assigned a non-serialisable value \
+                     (closure, resource, non-Shareable object)",
+                );
+                Err(SharedError::Type)
             }
             Ok(_) => {
                 if !new_state_buf.is_null() {
@@ -504,8 +697,14 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .method("__construct")
         .optional_param("initial", PhpType::Mixed, PhpValue::Null)
         .handler(|call| {
-            // Extract initial as SharedValue via ValType dispatch.
+            // Scalars on the fast path; arrays / Shared objects go via
+            // the portbuf encoder so `mixed $initial` actually preserves
+            // them instead of silently coercing to null. Resources and
+            // non-Shareable objects are rejected up-front with
+            // TypeException — without this guard the portbuf encoder
+            // would lossily turn them into null (PHP-side data loss).
             let initial_sv = match call.arg_type(0).unwrap_or(ValType::Null) {
+                ValType::Null => SharedValue::Null,
                 ValType::Long => SharedValue::Long(call.arg_long(0).unwrap_or(0)),
                 ValType::Double => SharedValue::Double(call.arg_double(0).unwrap_or(0.0)),
                 ValType::True => SharedValue::Bool(true),
@@ -513,7 +712,70 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 ValType::String => {
                     SharedValue::String(std::sync::Arc::from(call.arg_str(0).unwrap_or("")))
                 }
-                _ => SharedValue::Null,
+                ValType::Resource => {
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\TypeException".into(),
+                        message: "Mutex initial value is not serialisable \
+                                  (resource handles cannot be shared)"
+                            .into(),
+                        code: 0,
+                    });
+                }
+                ValType::Object | ValType::Array => {
+                    use crate::bridge::ffi as bridge_ffi;
+                    use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned};
+                    // For an Object, fail fast if it isn't Shareable —
+                    // the portbuf encoder otherwise writes null and we
+                    // lose the user's data without an error.
+                    if matches!(call.arg_type(0).unwrap_or(ValType::Null), ValType::Object) {
+                        let arg_ptr = unsafe { call.raw_arg_ptr(0) };
+                        let is_shareable =
+                            unsafe { bridge_ffi::oxphp_is_shareable(arg_ptr as *const _) != 0 };
+                        if !is_shareable {
+                            return Err(PhpError::Exception {
+                                class: "OxPHP\\Shared\\TypeException".into(),
+                                message: "Mutex initial value is not serialisable \
+                                          (object does not implement OxPHP\\Shared\\Shareable)"
+                                    .into(),
+                                code: 0,
+                            });
+                        }
+                    }
+                    let arg_ptr = unsafe { call.raw_arg_ptr(0) };
+                    let mut buf: *mut u8 = std::ptr::null_mut();
+                    let mut len: usize = 0;
+                    let rc = unsafe {
+                        bridge_ffi::oxphp_portable_serialize(
+                            arg_ptr as *const _,
+                            1,
+                            &mut buf,
+                            &mut len,
+                        )
+                    };
+                    if rc != 0 {
+                        if !buf.is_null() {
+                            unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                        }
+                        return Err(PhpError::Exception {
+                            class: "OxPHP\\Shared\\TypeException".into(),
+                            message: "Mutex initial value is not serialisable \
+                                      (contains closure / resource / non-Shareable object)"
+                                .into(),
+                            code: 0,
+                        });
+                    }
+                    let bytes = unsafe { std::slice::from_raw_parts(buf, len) };
+                    let sv = portbuf_to_sv(bytes)
+                        .and_then(|raw| raw_to_owned(raw, super::super::registry::registry()));
+                    unsafe { bridge_ffi::oxphp_portable_free(buf) };
+                    sv.map_err(|_| PhpError::Exception {
+                        class: "OxPHP\\Shared\\TypeException".into(),
+                        message: "Mutex initial value is not serialisable \
+                                  (contains closure / resource / non-Shareable object)"
+                            .into(),
+                        code: 0,
+                    })?
+                }
             };
 
             let bytes = sv_to_portbuf(&initial_sv);
@@ -585,6 +847,12 @@ fn invoke_mutex_with(
 
     let mut ret_buf: *mut u8 = std::ptr::null_mut();
     let mut ret_len: usize = 0;
+    // Pin for the closure's RETURN value across the C-side
+    // `zval_ptr_dtor(&ret_zv)`. The inner `oxphp_shared_mutex_with`
+    // transfers ownership here on the OK path; the RAII guard below
+    // frees the pinned zval after `raw_to_owned` decodes the wire
+    // bytes (or immediately on any non-OK path / panic).
+    let mut retained_ret: *mut std::ffi::c_void = std::ptr::null_mut();
     let rc = unsafe {
         oxphp_shared_mutex_with(
             entry_ptr,
@@ -592,8 +860,19 @@ fn invoke_mutex_with(
             timeout_ms,
             &mut ret_buf,
             &mut ret_len,
+            &mut retained_ret,
         )
     };
+    struct RetainedRetGuard(*mut std::ffi::c_void);
+    impl Drop for RetainedRetGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { ffi::oxphp_shared_free_zval(self.0) };
+            }
+        }
+    }
+    let _retained_ret_guard = RetainedRetGuard(retained_ret);
+
     if rc != 0 {
         if !ret_buf.is_null() {
             unsafe { ffi::oxphp_portable_free(ret_buf) };
@@ -628,8 +907,26 @@ fn invoke_mutex_try_with(call: &mut crate::bridge::call::NativeCall) -> Result<(
     let callable_zv = unsafe { call.raw_arg_ptr(0) };
     let mut ret_buf: *mut u8 = std::ptr::null_mut();
     let mut ret_len: usize = 0;
-    let rc =
-        unsafe { oxphp_shared_mutex_try_with(entry_ptr, callable_zv, &mut ret_buf, &mut ret_len) };
+    // See `invoke_mutex_with` for the retention rationale.
+    let mut retained_ret: *mut std::ffi::c_void = std::ptr::null_mut();
+    let rc = unsafe {
+        oxphp_shared_mutex_try_with(
+            entry_ptr,
+            callable_zv,
+            &mut ret_buf,
+            &mut ret_len,
+            &mut retained_ret,
+        )
+    };
+    struct RetainedRetGuard(*mut std::ffi::c_void);
+    impl Drop for RetainedRetGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { ffi::oxphp_shared_free_zval(self.0) };
+            }
+        }
+    }
+    let _retained_ret_guard = RetainedRetGuard(retained_ret);
 
     // Contention path: the underlying try_with returns SharedError::Timeout
     // when the lock is held by another thread. Translate to the new
@@ -700,10 +997,36 @@ fn write_value_to_retval(
         SharedValue::Double(d) => call.ret_double(*d),
         SharedValue::String(s) => call.ret_str(s),
         SharedValue::Bytes(b) => call.ret_bytes(b),
+        SharedValue::Shared(_) => {
+            // Materialise the SharedRefOwned into a fresh PHP wrapper
+            // via the portbuf round-trip — same path Registry uses to
+            // hand back a typed Shared\* return. Requires the upstream
+            // ret-retention (`out_retained_ret`) to keep the Entry
+            // alive until this deserialise builds its own wrapper that
+            // holds an independent strong ref.
+            use crate::bridge::ffi as bridge_ffi;
+            use crate::plugins::ox_shared::value::sv_to_portbuf;
+            let bytes = sv_to_portbuf(v);
+            let rc = unsafe {
+                bridge_ffi::oxphp_portable_deserialize(
+                    bytes.as_ptr(),
+                    bytes.len(),
+                    1,
+                    call.retval_ptr(),
+                )
+            };
+            if rc != 0 {
+                return Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\SharedException".into(),
+                    message: "Mutex: failed to materialise Shared return wrapper".into(),
+                    code: 0,
+                });
+            }
+        }
         _ => {
             return Err(PhpError::Exception {
                 class: "OxPHP\\Shared\\TypeException".into(),
-                message: "Mutex does not yet support array/nested-shared return".into(),
+                message: "Mutex does not yet support array return".into(),
                 code: 0,
             });
         }

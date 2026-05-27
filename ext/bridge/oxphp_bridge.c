@@ -2698,23 +2698,26 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
         case IS_REFERENCE:
             return portbuf_ser_zval(b, Z_REFVAL_P(zv));
         case IS_OBJECT: {
+            /* Only OxPHP\Shared\* wrappers cross the wire. Closures,
+             * stdClass, user objects, etc. are non-Shareable — refuse
+             * the value so the caller can surface a precise diagnostic
+             * (BAD_RETURN / TypeException "non-serialisable value
+             * (closure / resource / non-Shareable object)") instead of
+             * silently coercing it to null and losing data. */
             if (!oxphp_is_shareable((void *)zv)) {
-                /* Non-shareable object — fall through to null. */
-                portbuf_u8(b, 0);
-                break;
+                return -1;
             }
             uint8_t     type_tag;
             const void *entry_ptr;
             if (oxphp_plugin_get_shared_handle((zval *)zv, &type_tag, &entry_ptr) != 0) {
-                /* Uninitialised or broken wrapper — serialize as null. */
-                portbuf_u8(b, 0);
-                break;
+                /* Shared\* wrapper exists but its handle is unbound
+                 * (constructor not finished) — cannot encode an id. */
+                return -1;
             }
             /* Need the wire id. If the Rust binary is absent (bare CLI
-             * dlopen), entry_id is unresolved — serialize as null. */
+             * dlopen), entry_id is unresolved — can't encode. */
             if (oxphp_shared_entry_id == NULL) {
-                portbuf_u8(b, 0);
-                break;
+                return -1;
             }
             uint64_t shared_id = oxphp_shared_entry_id(entry_ptr);
             if (portbuf_ensure(b, 1 + 1 + 8) != 0) return -1;
@@ -2730,9 +2733,9 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
             break;
         }
         default:
-            /* Non-shareable objects, resources — serialize as null */
-            portbuf_u8(b, 0);
-            break;
+            /* IS_RESOURCE and any other non-encodable type — refuse so
+             * BAD_RETURN points at the value, not at the callable. */
+            return -1;
     }
     return 0;
 }
@@ -4885,6 +4888,7 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 #define OXPHP_SHARED_INVOKE_OK          0
 #define OXPHP_SHARED_INVOKE_PHP_THREW   1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
+#define OXPHP_SHARED_INVOKE_BAD_RETURN  -2
 
 /* Invoke a zero-argument closure/callable. Returns its portbuf-encoded
  * return value in *out_ret_buf (emalloc'd via the same free path as
@@ -4895,11 +4899,14 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  */
 int oxphp_shared_invoke_0_portbuf(zval *callable,
                                   uint8_t **out_ret_buf,
-                                  size_t *out_ret_len)
+                                  size_t *out_ret_len,
+                                  const void **out_retained_entry)
 {
-    if (!callable || !out_ret_buf || !out_ret_len) return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+    if (!callable || !out_ret_buf || !out_ret_len || !out_retained_entry)
+        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
     *out_ret_buf = NULL;
     *out_ret_len = 0;
+    *out_retained_entry = NULL;
 
     zend_fcall_info fci;
     zend_fcall_info_cache fcc;
@@ -4924,10 +4931,40 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
         return OXPHP_SHARED_INVOKE_PHP_THREW;
     }
 
-    /* Serialise ret_zv into portbuf bytes for Rust to decode. */
+    /* Serialise ret_zv into portbuf bytes for Rust to decode. The
+     * callable executed successfully — failure here means the *return
+     * value* is not portbuf-serialisable (e.g. a closure, a resource,
+     * or a non-Shareable PHP object). Surface as BAD_RETURN so the
+     * caller can distinguish it from "could not invoke at all" and
+     * raise a precise PHP exception. */
     if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
         zval_ptr_dtor(&ret_zv);
-        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+        return OXPHP_SHARED_INVOKE_BAD_RETURN;
+    }
+
+    /* Top-level Shared return: retain the entry across the wrapper
+     * drop. The buffer only carries the id; if the wrapper was the
+     * sole strong ref to the Entry, zval_ptr_dtor would fire
+     * Entry::drop, the registry's Weak would die, and the Rust
+     * receiver's lookup(id) would return StaleHandle — manifesting as
+     * "factory must return a Shared\\* instance" even though it did.
+     *
+     * The +1 strong ref is conceptually owned by *out_ret_buf; the
+     * Rust caller MUST drop it (Arc::from_raw + drop) after decoding,
+     * symmetric to oxphp_portable_free for the byte buffer.
+     *
+     * Nested Shared\* (e.g., a Shared inside an array return) is NOT
+     * retained here — those values land in the wildcard arm of the
+     * Registry/Once factory match and surface a TypeException anyway,
+     * so the early Entry::drop has no observable effect. */
+    if (Z_TYPE(ret_zv) == IS_OBJECT && oxphp_is_shareable(&ret_zv)
+        && oxphp_shared_handle_clone != NULL) {
+        uint8_t type_tag;
+        const void *entry_ptr;
+        if (oxphp_plugin_get_shared_handle(&ret_zv, &type_tag, &entry_ptr) == 0) {
+            oxphp_shared_handle_clone(entry_ptr);
+            *out_retained_entry = entry_ptr;
+        }
     }
 
     zval_ptr_dtor(&ret_zv);
@@ -4944,8 +4981,51 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
  *   diff pre/post, so callers always write back on INVOKE_OK. Rust
  *   keeps the state lock held across this call.
  *
- * On closure throw: state is NOT materialised back; *new_state_buf
- * stays NULL. EG(exception) stays set.
+ * Return codes:
+ *   INVOKE_OK            — closure ran, state and return value serialised.
+ *   INVOKE_PHP_THREW     — closure threw; EG(exception) set. Partial
+ *                          state (mutations before the throw) IS
+ *                          serialised into *new_state_buf so callers
+ *                          can honour a no-rollback policy.
+ *   INVOKE_BAD_CALLABLE  — callable itself is unusable (NULL, fcall_init
+ *                          failure, missing required args).
+ *   INVOKE_BAD_RETURN    — callable ran to completion but either its
+ *                          return value or the post-call state contains
+ *                          a non-Shareable zval (closure, resource,
+ *                          non-Shareable object) that the portbuf
+ *                          serialiser refused. Distinct from
+ *                          BAD_CALLABLE so the caller can point the
+ *                          PHP-level diagnostic at the return/state
+ *                          instead of the callable.
+ *
+ *                          State-preservation contract (symmetric with
+ *                          PHP_THREW): if the *state* serialised cleanly
+ *                          and only the return value is the offender,
+ *                          *new_state_buf is non-NULL and carries the
+ *                          partial mutation for the caller to apply per
+ *                          its no-rollback policy. If the state itself
+ *                          contained the non-Shareable value (caught at
+ *                          the state-serialise step), *new_state_buf
+ *                          stays NULL — nothing to apply. The caller
+ *                          frees *new_state_buf on every non-OK return.
+ *
+ * Embedded-Shareable retention (*out_retained_state, *out_retained_ret):
+ *   Symmetric pin for both the by-ref state and the return value. If the
+ *   closure assigns a fresh Shared\* into the by-ref state (e.g.
+ *   `$s = new Map()`) OR returns one (`return new Map()`), that wrapper's
+ *   only PHP-level strong ref is `state_zv` / `ret_zv` itself. The
+ *   serialiser writes the wire id into `new_state_buf` / `out_ret_buf`,
+ *   but the Rust-side decode (`raw_to_owned` → `Weak::upgrade`) runs
+ *   AFTER this function returns — and AFTER the `zval_ptr_dtor`s below
+ *   would drop the wrapper and GC the Entry, invalidating the wire id.
+ *   To bridge that lifetime gap, on every code path where the
+ *   corresponding wire buffer is non-NULL we `ZVAL_COPY` the post-call
+ *   value into a heap-allocated zval and hand its pointer back via the
+ *   out-param. The copy pins every embedded Shareable across the dtor
+ *   (ZVAL_COPY on an array bumps refcounts on every nested element);
+ *   the caller MUST balance with `oxphp_shared_free_zval()` after
+ *   decoding (or on any early exit). NULL when there is nothing to
+ *   retain (serialise step failed, ret was IS_UNDEF/IS_NULL, etc.).
  */
 int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          const uint8_t *state_buf,
@@ -4954,11 +5034,14 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          size_t *new_state_len,
                                          uint8_t **out_ret_buf,
                                          size_t *out_ret_len,
-                                         int *did_mutate)
+                                         int *did_mutate,
+                                         void **out_retained_state,
+                                         void **out_retained_ret)
 {
     if (!callable || !state_buf || state_len == 0 ||
         !new_state_buf || !new_state_len ||
-        !out_ret_buf || !out_ret_len || !did_mutate) {
+        !out_ret_buf || !out_ret_len || !did_mutate ||
+        !out_retained_state || !out_retained_ret) {
         return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
     }
     *new_state_buf = NULL;
@@ -4966,6 +5049,8 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     *out_ret_buf = NULL;
     *out_ret_len = 0;
     *did_mutate = 0;
+    *out_retained_state = NULL;
+    *out_retained_ret = NULL;
 
     zend_fcall_info fci;
     zend_fcall_info_cache fcc;
@@ -5011,7 +5096,28 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     if (oxphp_portable_serialize(state_inner, 1, new_state_buf, new_state_len) != 0) {
         zval_ptr_dtor(&state_zv);
         zval_ptr_dtor(&ret_zv);
-        return EG(exception) ? OXPHP_SHARED_INVOKE_PHP_THREW : OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+        /* Closure completed (or threw); the serialiser refused the
+         * (possibly partially-mutated) state — e.g. the closure assigned
+         * a non-Shareable value into the by-ref state. If a PHP exception
+         * is also pending, report PHP_THREW so the caller surfaces it
+         * unchanged; otherwise BAD_RETURN distinguishes "callable is
+         * fine, return/state value is unusable" from "callable itself
+         * is unusable" (BAD_CALLABLE).
+         *
+         * No state to retain: serialise itself rejected the value,
+         * `*new_state_buf` is NULL, so embedded Shareables (if any)
+         * never reached the wire format. */
+        return EG(exception) ? OXPHP_SHARED_INVOKE_PHP_THREW : OXPHP_SHARED_INVOKE_BAD_RETURN;
+    }
+
+    /* State serialised cleanly. Pin embedded Shareables across the
+     * upcoming `zval_ptr_dtor(&state_zv)` so the Rust-side decode can
+     * resolve their wire ids. The caller MUST balance via
+     * `oxphp_shared_free_zval()` after decoding. */
+    {
+        zval *retained = (zval *)emalloc(sizeof(zval));
+        ZVAL_COPY(retained, state_inner);
+        *out_retained_state = retained;
     }
 
     if (EG(exception)) {
@@ -5024,18 +5130,53 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     }
 
     if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
-        oxphp_portable_free(*new_state_buf);
-        *new_state_buf = NULL;
-        *new_state_len = 0;
+        /* Callable ran to completion without throwing; the serialiser
+         * refused the returned value (closure, resource, non-Shareable
+         * object). The by-ref STATE serialised cleanly at the call
+         * above and lives in *new_state_buf — hand it back so the
+         * caller can apply the partial mutation per Mutex's no-rollback
+         * policy, symmetric with PHP_THREW. The caller frees
+         * *new_state_buf on every non-OK return.
+         *
+         * No ret to retain: the serialiser rejected the value, so the
+         * wire bytes carry nothing for the Rust decoder to upgrade. */
         zval_ptr_dtor(&state_zv);
         zval_ptr_dtor(&ret_zv);
-        return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
+        return OXPHP_SHARED_INVOKE_BAD_RETURN;
+    }
+
+    /* Ret serialised cleanly. Symmetric to the state-retention block
+     * above: pin any Shareables embedded in the return value across the
+     * upcoming `zval_ptr_dtor(&ret_zv)` so the Rust caller's
+     * `raw_to_owned` can resolve the wire ids. Without this, a closure
+     * returning a freshly-constructed `new Shared\*()` (whose only
+     * strong ref is `ret_zv` itself) would have its Entry GC'd before
+     * the receiver decodes the wire bytes — manifesting as a silent
+     * PHP-side `null` return. `ZVAL_COPY` on an array bumps refcounts
+     * on every nested element too, so nested Shareables are covered.
+     * The caller MUST balance via `oxphp_shared_free_zval()` after
+     * decoding (or on any early exit). */
+    if (Z_TYPE(ret_zv) != IS_UNDEF && Z_TYPE(ret_zv) != IS_NULL) {
+        zval *retained = (zval *)emalloc(sizeof(zval));
+        ZVAL_COPY(retained, &ret_zv);
+        *out_retained_ret = retained;
     }
 
     *did_mutate = 1;
     zval_ptr_dtor(&state_zv);
     zval_ptr_dtor(&ret_zv);
     return OXPHP_SHARED_INVOKE_OK;
+}
+
+/* Release a retained-state zval produced by
+ * `oxphp_shared_invoke_byref_1_portbuf` (`*out_retained_state`). NULL
+ * is a no-op (callers don't have to gate themselves). */
+void oxphp_shared_free_zval(void *p)
+{
+    if (!p) return;
+    zval *z = (zval *)p;
+    zval_ptr_dtor(z);
+    efree(z);
 }
 
 /* Invoke $fn(key, value) for Shared\Map::forEach. The key is the tagged

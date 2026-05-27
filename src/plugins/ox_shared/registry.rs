@@ -272,6 +272,12 @@ pub struct SharedRegistry {
     total_entries: AtomicU64,
     config: SharedConfig,
     shutting_down: AtomicBool,
+    /// Name → entry index for `OxPHP\Shared\Registry`. `Bound` holds a
+    /// strong `Arc<Entry>` (the pin that keeps a named entry alive
+    /// independent of any PHP handle). `Creating` is a per-key gate for
+    /// block-losers get-or-create. Distinct from `entries` (which is
+    /// Weak and never pins). See `types/registry.rs`.
+    pub(crate) names: DashMap<String, crate::plugins::ox_shared::types::registry::NameSlot>,
 }
 
 pub(crate) static REGISTRY: OnceLock<SharedRegistry> = OnceLock::new();
@@ -290,6 +296,7 @@ pub fn init_registry(config: SharedConfig) {
         total_entries: AtomicU64::new(0),
         config,
         shutting_down: AtomicBool::new(false),
+        names: DashMap::with_capacity(16),
     };
     REGISTRY.set(reg).ok();
 }
@@ -518,12 +525,36 @@ impl SharedRegistry {
     /// on the connection-drain loop in `main.rs` long enough for woken
     /// PHP requests to unwind their exception and flush their response.
     pub fn drain(&self) {
+        // Set the flag first so any concurrent `name_acquire` short-circuits
+        // before installing a new Creating slot — without this the loop
+        // below could miss late entrants.
         self.shutting_down.store(true, Ordering::Release);
+        // Wake any threads currently blocked in `name_acquire` on a
+        // `Creating` slot's gate — they hold cloned `Arc<CreateGate>`s,
+        // so `clear()` below would NOT wake them on its own. Settle each
+        // gate as aborted; waiters loop back into acquire, observe the
+        // shutdown flag, and return a `Shutdown` outcome.
+        for entry in self.names.iter() {
+            if let crate::plugins::ox_shared::types::registry::NameSlot::Creating(g) = entry.value()
+            {
+                g.settle_aborted();
+            }
+        }
+        // Notify every live entry BEFORE dropping the name pins. Otherwise
+        // a named entry whose only strong ref is the names-index pin would
+        // drop in `clear()` below, firing `Entry::drop` (which calls
+        // `on_drop`, NOT `on_shutdown_notify`) — Channel/Pool would close
+        // their `Notify`/`Condvar` only via the drop path, masking the
+        // shutdown signal for any inner that distinguishes the two hooks.
         for w in self.entries.iter() {
             if let Some(entry) = w.value().upgrade() {
                 entry.inner.on_shutdown_notify();
             }
         }
+        // Drop every Bound pin in the Shared\Registry name index. Without
+        // this, named entries (which the names index keeps alive via a
+        // strong Arc) would survive the registry teardown.
+        self.names.clear();
     }
 }
 
@@ -679,6 +710,7 @@ impl SharedRegistry {
             total_entries: AtomicU64::new(0),
             config,
             shutting_down: AtomicBool::new(false),
+            names: DashMap::with_capacity(8),
         }))
     }
 }
