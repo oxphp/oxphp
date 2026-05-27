@@ -142,7 +142,7 @@ OxPHP listens on a single port. To support both protocols simultaneously, use a 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.5.0
+    image: ghcr.io/oxphp/oxphp:0.6.0
     ports:
       - "443:443"
     environment:

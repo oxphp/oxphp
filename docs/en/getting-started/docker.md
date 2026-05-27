@@ -12,7 +12,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.5.0
+FROM ghcr.io/oxphp/oxphp:0.6.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.5.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.6.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -168,7 +168,7 @@ Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`p
 The shortest useful example:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.5.0
+FROM ghcr.io/oxphp/oxphp:0.6.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -183,7 +183,7 @@ The container starts as root. In production, drop privileges at the orchestrator
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.5.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.6.0 AS prod` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
@@ -199,13 +199,13 @@ The same prod image can run `php` CLI commands for migrations, Composer, or ad-h
 # root-owned mounted volumes.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.5.0 \
+    ghcr.io/oxphp/oxphp:0.6.0 \
     php artisan migrate
 
 # If the mounted volume is owned by www-data, pass Docker's --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.5.0 \
+    ghcr.io/oxphp/oxphp:0.6.0 \
     php artisan migrate
 ```
 
@@ -215,12 +215,12 @@ docker run --rm --user www-data \
 
 The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.5.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.6.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.5.0
+      image: ghcr.io/oxphp/oxphp:0.6.0
       user: www-data
   ```
 - **Kubernetes:**

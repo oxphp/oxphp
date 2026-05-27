@@ -121,7 +121,7 @@ A 304 means the client already has the current version. This is correct behavior
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.5.0
+    image: ghcr.io/oxphp/oxphp:0.6.0
     ports:
       - "8080:80"
     volumes:

@@ -10,7 +10,7 @@ description: Запустите OxPHP менее чем за 5 минут. Со�
 Если у вас уже есть PHP-проект с директорией `public/`:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.5.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
 ```
 
 Откройте `http://localhost/` — ваше приложение работает.
@@ -18,7 +18,7 @@ docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.5.0
 Для включения внутреннего сервера (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.5.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
 ```
 
 ---
@@ -36,12 +36,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Создайте Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.5.0
+FROM ghcr.io/oxphp/oxphp:0.6.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-Официальный образ включает серверный бинарный файл, PHP 8.4 или 8.5 ZTS (по умолчанию 8.5; для 8.4 загрузите тег `:0.5.0-php8.4` или любой вариант `*-php8.4*`), PHP-расширение OxPHP и все зависимости времени выполнения.
+Официальный образ включает серверный бинарный файл, PHP 8.4 или 8.5 ZTS (по умолчанию 8.5; для 8.4 загрузите тег `:0.6.0-php8.4` или любой вариант `*-php8.4*`), PHP-расширение OxPHP и все зависимости времени выполнения.
 
 > **Совет:** Если вашему приложению нужны дополнительные PHP-расширения (pdo_pgsql, intl, xdebug и т.д.), см. [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) в репозитории — готовый многоэтапный Dockerfile с отдельными целями `dev` и `prod`.
 
@@ -107,7 +107,7 @@ curl http://localhost/
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.5.0</p>
+<p>Version: 0.6.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
