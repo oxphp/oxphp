@@ -35,18 +35,19 @@ $key = 'test_registry_remove_race_' . bin2hex(random_bytes(4));
 // Cross-fiber counter to observe factory invocations.
 $runs = new Counter(0);
 
-// Slow factory so that waiters genuinely enter gate.wait().
-$factory = function () use ($runs) {
-    $runs->add();
-    // Burn a few ms so concurrent acquirers definitely park.
-    $t0 = microtime(true);
-    while (microtime(true) - $t0 < 0.005) {} // ~5ms
-    return new Map();
-};
-
+// Factory is defined *inside* each async closure so its use-vars stay
+// Shareable: oxphp_async() rejects closures whose use(...) captures
+// non-Shareable objects (Closure itself is not Shareable).
 $waiters = [];
 for ($i = 0; $i < 16; $i++) {
-    $waiters[] = oxphp_async(function () use ($key, $factory) {
+    $waiters[] = oxphp_async(function () use ($key, $runs) {
+        $factory = function () use ($runs) {
+            $runs->add();
+            // Burn a few ms so concurrent acquirers definitely park.
+            $t0 = microtime(true);
+            while (microtime(true) - $t0 < 0.005) {} // ~5ms
+            return new Map();
+        };
         Registry::map($key, $factory);
     });
 }
