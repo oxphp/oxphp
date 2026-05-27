@@ -314,7 +314,10 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 }
             }
         }
-        let mut retained_ret_guard = RetainedRetGuard { ptr: retained_ret, released: false };
+        let mut retained_ret_guard = RetainedRetGuard {
+            ptr: retained_ret,
+            released: false,
+        };
 
         match invoke_result {
             Err(_panic) => {
@@ -565,7 +568,10 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 }
             }
         }
-        let mut retained_ret_guard = RetainedRetGuard { ptr: retained_ret, released: false };
+        let mut retained_ret_guard = RetainedRetGuard {
+            ptr: retained_ret,
+            released: false,
+        };
 
         match invoke_result {
             Err(_) => {
@@ -723,9 +729,8 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                     // lose the user's data without an error.
                     if matches!(call.arg_type(0).unwrap_or(ValType::Null), ValType::Object) {
                         let arg_ptr = unsafe { call.raw_arg_ptr(0) };
-                        let is_shareable = unsafe {
-                            bridge_ffi::oxphp_is_shareable(arg_ptr as *const _) != 0
-                        };
+                        let is_shareable =
+                            unsafe { bridge_ffi::oxphp_is_shareable(arg_ptr as *const _) != 0 };
                         if !is_shareable {
                             return Err(PhpError::Exception {
                                 class: "OxPHP\\Shared\\TypeException".into(),

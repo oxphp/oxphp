@@ -22,8 +22,8 @@ use crate::plugins::ox_shared::handle::SharedHandle;
 use crate::plugins::ox_shared::registry::{
     registry, Entry, SharedInner, SharedRegistry, SharedType, ENTRY_MAGIC,
 };
-use std::sync::Weak;
 use crate::plugins::ox_shared::value::SharedValue;
+use std::sync::Weak;
 
 // Per-thread set of Once ids currently inside `getOrInit(factory)` on
 // this thread. Used to detect a recursive Once::getOrInit on the same
@@ -639,8 +639,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                         if !self.0.is_null() {
                             unsafe {
                                 drop(std::sync::Arc::from_raw(
-                                    self.0
-                                        as *const crate::plugins::ox_shared::registry::Entry,
+                                    self.0 as *const crate::plugins::ox_shared::registry::Entry,
                                 ))
                             };
                         }
