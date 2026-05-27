@@ -29,7 +29,7 @@ When a shutdown signal is received, OxPHP follows this sequence:
 5. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
 6. **Exit** — the process exits with status code 0.
 
-> **Note:** PHP workers shut down implicitly when the request queue closes. Worker threads exit after finishing any in-progress request.
+> **Note:** PHP workers are stopped explicitly during step 1 — the executor's `shutdown()` is called as part of stopping the main server, which signals worker threads to exit after finishing any in-progress request.
 
 ## Configuration
 

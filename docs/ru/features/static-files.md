@@ -32,7 +32,7 @@ MIME-типы определяются автоматически по расш�
 |------------|-------------|
 | `.html` | `text/html` |
 | `.css` | `text/css` |
-| `.js` | `application/javascript` |
+| `.js` | `text/javascript` |
 | `.json` | `application/json` |
 | `.png` | `image/png` |
 | `.svg` | `image/svg+xml` |

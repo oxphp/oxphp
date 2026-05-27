@@ -52,6 +52,22 @@ Cookie: session=xyz          -> HTTP_COOKIE
 
 > **Примечание:** `Content-Type` и `Content-Length` присутствуют без префикса `HTTP_` — как `CONTENT_TYPE` и `CONTENT_LENGTH` — согласно требованиям спецификации CGI.
 
+### За reverse proxy
+
+Когда настроен `TRUSTED_PROXIES` и пир запроса входит в доверенное множество, OxPHP переписывает следующие ключи `$_SERVER` из forwarded-заголовков (`X-Forwarded-*` или RFC 7239 `Forwarded`):
+
+| Переменная | Значение, когда пир доверенный | Значение в остальных случаях |
+|------------|--------------------------------|------------------------------|
+| `REMOTE_ADDR` | Самый правый недоверенный адрес из `X-Forwarded-For` / `Forwarded` | IP прямого пира |
+| `HTTPS` | `"on"`, когда `X-Forwarded-Proto: https` | Устанавливается только если пир-соединение использует TLS |
+| `REQUEST_SCHEME` | `"https"` / `"http"` из `X-Forwarded-Proto` | По фактическому состоянию TLS |
+| `SERVER_NAME` | Hostname из `X-Forwarded-Host` | Hostname из заголовка `Host` |
+| `SERVER_PORT` | Порт из `X-Forwarded-Host` или 443/80 по схеме | Порт из `Host` или 443/80 |
+
+Сырые ключи `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST` и `HTTP_FORWARDED` остаются в `$_SERVER` без изменений — доступны и переписанные значения, и оригинальные заголовки.
+
+Когда `TRUSTED_PROXIES` **не** задано, переписывание не выполняется и `REMOTE_ADDR` всегда содержит IP прямого пира — как правило, вашего балансировщика, а не конечного клиента. Разбирать `X-Forwarded-For` вручную легко ошибиться (leftmost против rightmost, отсутствие CIDR-проверки доверия); предпочтительно настроить `TRUSTED_PROXIES`. Алгоритм доверия и синтаксис конфигурации — в разделе [Доверенные прокси](../security/trusted-proxies.md).
+
 ### Переменные контекста трассировки
 
 При включённой распределённой трассировке OxPHP добавляет в `$_SERVER` переменные контекста трассировки:
@@ -89,8 +105,9 @@ $scheme  = $_SERVER['REQUEST_SCHEME'];  // "http" или "https"
 // Читаем произвольный заголовок
 $token = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
 
-// Предпочитаем X-Forwarded-For за доверенным обратным прокси
-$xff  = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'];
+// REMOTE_ADDR уже содержит реальный IP клиента, когда настроен TRUSTED_PROXIES.
+// Без него REMOTE_ADDR — это прямой пир (обычно балансировщик нагрузки).
+$clientIp = $_SERVER['REMOTE_ADDR'];
 
 // Проверяем TLS без проверки порта
 if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {

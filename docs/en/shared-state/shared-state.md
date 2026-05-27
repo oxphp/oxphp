@@ -149,7 +149,7 @@ final class NaiveRateLimiter
 
 Three bugs hide in that snippet: the `apcu_fetch` + `apcu_store` pair is not atomic, the window start is lost on a close race, and cleanup is effectively whatever APCu decides to TTL-evict.
 
-### After: Shared\Map + update()
+### After: Shared\Map + compareAndSet loop
 
 ```php
 <?php
@@ -165,16 +165,22 @@ final class RateLimiter
     {
         $now = time();
 
-        // Atomic read-modify-write. The closure sees the current value
-        // (or null on first hit) and returns the new shape to store.
-        $state = $this->buckets->update($ip, function ($current) use ($now) {
+        // Atomic read-modify-write via compareAndSet. Read the current
+        // bucket, compute the next state, and CAS it in. If a concurrent
+        // writer raced us, retry with the new value.
+        while (true) {
+            $current = $this->buckets->get($ip);
             if ($current === null || $now - $current['start'] >= $this->windowSeconds) {
-                return ['count' => 1, 'start' => $now];
+                $next = ['count' => 1, 'start' => $now];
+            } else {
+                $next = ['count' => $current['count'] + 1, 'start' => $current['start']];
             }
-            return ['count' => $current['count'] + 1, 'start' => $current['start']];
-        });
 
-        return $state['count'] <= $this->maxRequests;
+            if ($this->buckets->compareAndSet($ip, $current, $next)) {
+                return $next['count'] <= $this->maxRequests;
+            }
+            // Lost the race — re-read and try again.
+        }
     }
 
     /** Background cleanup — call from a scheduled worker or oxphp_async loop. */
@@ -182,12 +188,11 @@ final class RateLimiter
     {
         $now    = time();
         $cutoff = $this->windowSeconds * 2;
-        foreach ($this->buckets->keys() as $ip) {
-            $state = $this->buckets->get($ip);
-            if ($state !== null && $now - $state['start'] >= $cutoff) {
+        $this->buckets->forEach(function (string $ip, array $state) use ($now, $cutoff): void {
+            if ($now - $state['start'] >= $cutoff) {
                 $this->buckets->remove($ip);
             }
-        }
+        });
     }
 }
 
@@ -216,7 +221,7 @@ if (!$limiter->allow($_SERVER['REMOTE_ADDR'])) {
 
 What the migration bought you:
 
-- **Atomicity.** `update($key, fn)` is a single RMW; no read-then-store race.
+- **Atomicity.** `compareAndSet($key, $expected, $next)` either commits the new value or reports the race so the caller retries — no read-then-store clobber. `setIfAbsent` covers the "create or leave alone" case in one call.
 - **Deterministic cleanup.** `sweep()` is predictable and runs on a schedule you control.
 - **One less dependency.** APCu is no longer in the deployment story.
 - **Accurate count under load.** Two concurrent hits on the same IP never clobber each other.
@@ -240,10 +245,13 @@ Reach for `Map<string, Counter>` (a map of counters) when you need per-key total
 
 ```php
 <?php
-// Bind the outer Map under a name so all workers share it.
-$perTenant = OxPHP\Shared\Registry::map('per-tenant', fn () => new OxPHP\Shared\Map());
-
-$counter = $perTenant->getOrSet($tenantId, fn () => new OxPHP\Shared\Counter());
+// Per-tenant counters keyed by name. `Registry::counter` binds each
+// tenant's counter under a stable name so every worker converges on
+// the same entry — the factory runs at most once per name.
+$counter = OxPHP\Shared\Registry::counter(
+    "tenant:{$tenantId}",
+    fn () => new OxPHP\Shared\Counter(),
+);
 $counter->add();
 ```
 
@@ -296,7 +304,7 @@ Shared handles are safe to use from any worker and from async contexts. The only
 $queue = new OxPHP\Shared\Channel(256);
 
 oxphp_async(function () use ($queue) {              // ← explicit use
-    while (($job = $queue->recv(timeout: 30.0)) !== null) {
+    while (($job = $queue->recvTimeout(30_000)) !== null) {
         process($job);
     }
 });

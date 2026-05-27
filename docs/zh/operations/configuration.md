@@ -107,6 +107,7 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任的反向代理网络（逗号分隔 CIDR 或 `private`）。设置后，OxPHP 使用 rightmost-non-trusted 算法从 `Forwarded`（[RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)）或 `X-Forwarded-For` 中提取真实客户端 IP。同时处理 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 以设置 `$_SERVER['HTTPS']`、`REQUEST_SCHEME`、`SERVER_NAME` 和 `SERVER_PORT`。未设置 = 功能禁用 |
 | `PHP_DENY_PATHS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**,/admin/legacy.php`）。模式可以指向整个目录，也可以指向单个文件。仅在直接文件映射模式（未设置 `ENTRY_FILE`）下生效 —— 若同时设置了 `ENTRY_FILE`，会在启动时发出警告并忽略，因为前端控制器、SPA 与 Worker 模式都已通过单一受信脚本路由所有请求。匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。旧名称 `PHP_DENY_DIRS` 作为已弃用别名仍被接受，启动时输出 `WARN`。参见 [PHP 执行拒绝名单](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | 命中 `PHP_DENY_PATHS` 时返回什么。可以是 HTTP 状态码 `400`–`599`（与 `ERROR_PAGES_DIR` 配合可自定义 HTML），也可以是以 `/` 开头、指向 `DOCUMENT_ROOT` 内 PHP 回退脚本的 URI 路径。脚本在 `$_SERVER` 中接收 `OXPHP_DENIED_PATH` 与 `OXPHP_DENIED_PATTERN`。启动时严格校验：文件必须存在、规范化路径必须位于 `DOCUMENT_ROOT` 内，且脚本自身不得命中 `PHP_DENY_PATHS`（防止循环） |
+| `SYMLINK_ALLOW_PATHS` | *（未设置）* | 逗号分隔的绝对路径列表，列出允许其下符号链接指向 `DOCUMENT_ROOT` 之外的路径。每个条目必须在磁盘上已存在；相对路径与不存在的路径会导致启动失败。未设置 = 不允许任何符号链接逃逸。参见 [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 特殊值 `private` 展开为所有 RFC-1918 私有网络、回环和链路本地地址（IPv4 和 IPv6）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10`。
 
@@ -178,6 +179,50 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | 异步队列中的最大待处理任务数。`0` = 自动（工作进程数 × 64） |
 
 异步工作进程池处理从 PHP 分发的即发即忘后台任务。它独立于 PHP 工作进程池，标准请求处理不需要它。
+
+## 共享状态
+
+进程内并发原语（`OxPHP\Shared\Counter`、`Map`、`Channel`、`Mutex`、`Once`、`Pool`、`Atomic`、`Flag`、`Registry`）。API 速览参见[共享状态](../shared-state/shared-state.md)。
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `SHARED_ENABLED` | `true` | 布尔——参见[布尔值](#布尔值)。整个 `OxPHP\Shared\*` 子系统的总开关 |
+| `SHARED_MAX_ENTRIES` | `100000` | 所有 Shared 条目合计的全局上限。超出后插入失败并抛出 `CapacityException` |
+| `SHARED_MAX_BYTES` | `1073741824`（1 GiB） | 所有 Shared 条目估算内存的全局上限 |
+| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | 当使用量超过 `SHARED_MAX_BYTES` / `SHARED_MAX_ENTRIES` 的此比例时，开始丢弃最低优先级的工作 |
+| `SHARED_METRICS_ENABLED` | `true` | 布尔。切换 `oxphp_shared_*` Prometheus 输出 |
+| `SHARED_INTROSPECTION_ENABLED` | `true` | 布尔。切换内部服务器上的 `/__ox_shared/*` 自省 API |
+| `SHARED_INTROSPECTION_PREVIEW_ENABLED` | `true` | 布尔。切换自省响应中的值预览（当预览可能泄露敏感数据时禁用） |
+| `SHARED_CYCLE_DETECT_DEPTH` | `16` | 环检查期间的 BFS 深度。对于合法的深层图可调高 |
+| `SHARED_CYCLE_DETECT_EDGES` | `10000` | 环检查期间遍历的边数。对于合法的稠密图可调高 |
+| `SHARED_MAX_VALUE_SIZE` | `1048576`（1 MiB） | 单值大小上限。插入更大的值会快速失败 |
+| `SHARED_MAX_CHANNEL_BYTES` | `67108864`（64 MiB） | 单个 Channel 的负载总量上限 |
+| `SHARED_POISON_STRICT` | `false` | 布尔。为真值时，Mutex/Once 闭包内的 panic 会永久毒化该原语，而非尽力恢复 |
+| `SHARED_LOCK_DIAGNOSTICS` | `off` | 锁竞争诊断：`off`、`count` 或 `trace` |
+| `SHARED_LOCK_POLL_INTERVAL_MS` | `100` | 锁诊断采样器使用的轮询间隔 |
+| `SHARED_PREVIEW_STRING_LIMIT` | `256` | `/entry?id=…` 预览中每个字符串的截断长度 |
+| `SHARED_PREVIEW_ARRAY_LIMIT` | `20` | `/entry?id=…` 预览中采样的条目数 |
+
+## 性能剖析
+
+发出 xhprof / speedscope 跟踪的采样剖析器。输出格式与查看器集成参见[剖析](../features/profiling.md)。
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `PROFILER_ENABLED` | `false` | 布尔——参见[布尔值](#布尔值)。总开关。即使关闭，其他所有 `PROFILER_*` 变量仍会在启动时解析，以便拼写错误立即暴露 |
+| `PROFILER_SAMPLE_RATE` | `0.0` | 单个请求被采样的概率（0.0–1.0）。超出范围的值会被钳制 |
+| `PROFILER_INTERNAL` | `false` | 布尔。为真值时，发往内部服务器（`/health`、`/metrics`、插件端点）的请求也可被采样 |
+| `PROFILER_AUTH_TOKEN` | *（未设置）* | 可选 Bearer Token。设置后，`oxphp_profiler_*` PHP 函数要求请求携带该 Token 才能启用按需剖析 |
+| `PROFILER_MAX_SPANS` | `50000` | 单个请求的 profile span 上限。超过该上限的 profile 会被截断 |
+| `PROFILER_MAX_DEPTH` | `256` | 每次采样捕获的最大调用栈深度。硬上限为 `65535` |
+| `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | 磁盘 profile 文件的输出目录 |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | 逗号分隔的输出格式列表，决定写入磁盘的格式 |
+| `PROFILER_DISK_MAX_PER_SEC` | `10` | 每秒写入磁盘的 profile 文件数上限 |
+| `PROFILER_RETENTION_COUNT` | `100` | `PROFILER_OUTPUT_DIR` 中保留的 profile 文件最大数量。较旧的文件会被清除 |
+| `PROFILER_EXPORT_URL` | *（未设置）* | 用于 POST profile 的远程端点。设置后仍会写盘，除非 `PROFILER_OUTPUT_FORMATS` 为空 |
+| `PROFILER_EXPORT_FORMAT` | `xhprof` | `PROFILER_EXPORT_URL` 上传时使用的线格式 |
+| `PROFILER_EXPORT_AUTH_TOKEN` | *（未设置）* | 每次导出请求附带的可选 Bearer Token |
+| `PROFILER_EXPORT_XHGUI` | *（自动检测）* | 布尔。强制导出负载使用 XHGui 兼容的包装。未设置 = 根据 `PROFILER_EXPORT_URL` 自动检测（匹配 `xhgui` 或 `/run/import`） |
 
 ## 配置示例
 

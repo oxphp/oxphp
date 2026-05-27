@@ -26,7 +26,7 @@ If you want to try [worker mode](features/worker-mode.md), where the PHP process
 OxPHP also includes capabilities that typically require separate tools or third-party libraries:
 
 - **[Static file serving](features/static-files.md)** — in-memory caching, ETag/Last-Modified, automatic MIME types
-- **[Four routing modes](features/routing.md)** — file-based, framework, SPA, and worker
+- **[Three routing modes](features/routing.md)** — file-based, framework, and SPA (each combinable with persistent [worker mode](features/worker-mode.md))
 - **[Early response](features/early-response.md)** — send the response immediately and continue background processing
 - **[Worker mode](features/worker-mode.md)** — persistent PHP processes with [fiber multiplexing](features/fiber-multiplexing.md)
 - **[SSE streaming](features/sse.md)** — real-time Server-Sent Events from PHP
@@ -45,7 +45,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 
 ## Features
 
-- [Routing](features/routing.md) — four routing modes: traditional file mapping, framework front-controller, SPA fallback, and worker mode
+- [Routing](features/routing.md) — three routing modes: traditional file mapping, framework front-controller, and SPA fallback. Worker mode is an orthogonal execution-model toggle and applies on top of any routing mode
 - [Static Files](features/static-files.md) — file cache, MIME detection, ETag/Last-Modified headers, and streaming
 - [Worker Mode](features/worker-mode.md) — persistent PHP processes with automatic soft reset between requests
 - [Fiber Multiplexing](features/fiber-multiplexing.md) — handle hundreds of concurrent requests per worker thread with cooperative multitasking

@@ -157,6 +157,22 @@ $worker->serve(function () {
 `oxphp_worker`) по-прежнему доступны и используют то же внутреннее состояние.
 Новый код стоит писать на классе API.
 
+Класс также предоставляет рантайм-интроспекцию, полезную для штатного саморециклирования, наблюдаемости и проверок работоспособности:
+
+| Метод | Возвращает |
+|-------|-----------|
+| `Worker::isWorkerMode(): bool` | Работает ли сервер в режиме воркера |
+| `$worker->id(): int` | Стабильный идентификатор воркера, привязанный к потоку |
+| `$worker->startTime(): float` | Unix-таймстамп момента запуска этого воркера |
+| `$worker->requestCount(): int` | Количество запросов, обработанных этим воркером |
+| `$worker->memoryUsage(): int` | Текущее значение `memory_get_usage(true)` для этого воркера |
+| `$worker->rss(): int` | Текущий resident set size в байтах (Linux/macOS) |
+| `$worker->maxMemoryBytes(): int` | Порог рециклирования — `WORKER_MAX_MEMORY_MIB` × 1 MiB или `0`, когда лимит не задан |
+| `$worker->isExitScheduled(): bool` | Был ли вызван `scheduleExit()` |
+| `$worker->exitReason(): ?string` | `null` во время работы; `"scheduled"`, `"max_memory"` или `"error"`, когда воркер уходит на завершение |
+
+Полные сигнатуры и развёрнутые примеры см. в [`OxPHP\Server\Worker`](../php/worker-class.md).
+
 ## Примеры PHP
 
 ### Определение режима воркера

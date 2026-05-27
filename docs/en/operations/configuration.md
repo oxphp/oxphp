@@ -107,6 +107,7 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
 | `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Direct-mapping (no `ENTRY_FILE`) only — ignored with a startup warning when `ENTRY_FILE` is set, since front-controller, SPA, and worker modes already route every request through one trusted script. Matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention) |
+| `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
 
@@ -178,6 +179,50 @@ When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, m
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | Maximum pending tasks in the async queue. `0` = auto (workers × 64) |
 
 The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.
+
+## Shared State
+
+In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mutex`, `Once`, `Pool`, `Atomic`, `Flag`, `Registry`). See [Shared State](../shared-state/shared-state.md) for the API tour.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem |
+| `SHARED_MAX_ENTRIES` | `100000` | Global cap on all Shared entries combined. Insert past this fails with `CapacityException` |
+| `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on estimated memory across all Shared entries |
+| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Start shedding lowest-priority work when usage crosses this fraction of `SHARED_MAX_BYTES` / `SHARED_MAX_ENTRIES` |
+| `SHARED_METRICS_ENABLED` | `true` | Boolean. Toggles the `oxphp_shared_*` Prometheus exposition |
+| `SHARED_INTROSPECTION_ENABLED` | `true` | Boolean. Toggles the `/__ox_shared/*` introspection API on the internal server |
+| `SHARED_INTROSPECTION_PREVIEW_ENABLED` | `true` | Boolean. Toggles value previews in introspection responses (disable when previews could leak sensitive data) |
+| `SHARED_CYCLE_DETECT_DEPTH` | `16` | BFS depth during cycle check. Raise for deep legitimate graphs |
+| `SHARED_CYCLE_DETECT_EDGES` | `10000` | Edges walked during cycle check. Raise for dense legitimate graphs |
+| `SHARED_MAX_VALUE_SIZE` | `1048576` (1 MiB) | Per-value size cap. Inserting a larger value fails fast |
+| `SHARED_MAX_CHANNEL_BYTES` | `67108864` (64 MiB) | Per-channel total payload cap |
+| `SHARED_POISON_STRICT` | `false` | Boolean. When truthy, a panic inside a Mutex/Once closure poisons the primitive permanently instead of best-effort recovery |
+| `SHARED_LOCK_DIAGNOSTICS` | `off` | Lock-contention diagnostics: `off`, `count`, or `trace` |
+| `SHARED_LOCK_POLL_INTERVAL_MS` | `100` | Polling interval used by the lock-diagnostics sampler |
+| `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/entry?id=…` previews |
+| `SHARED_PREVIEW_ARRAY_LIMIT` | `20` | Entries sampled in `/entry?id=…` previews |
+
+## Profiling
+
+Sampling profiler that emits xhprof / speedscope traces. See [Profiling](../features/profiling.md) for output formats and viewer integration.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PROFILER_ENABLED` | `false` | Boolean — see [Boolean values](#boolean-values). Master switch. All other `PROFILER_*` vars are still parsed at startup so typos surface immediately |
+| `PROFILER_SAMPLE_RATE` | `0.0` | Probability (0.0–1.0) that a request is sampled. Values outside the range are clamped |
+| `PROFILER_INTERNAL` | `false` | Boolean. When truthy, requests to the internal server (`/health`, `/metrics`, plugin endpoints) are also eligible for sampling |
+| `PROFILER_AUTH_TOKEN` | *(unset)* | Optional bearer token. When set, the `oxphp_profiler_*` PHP functions require requests carrying this token to enable on-demand profiling |
+| `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
+| `PROFILER_MAX_DEPTH` | `256` | Maximum call-stack depth captured per sample. Hard-capped at `65535` |
+| `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Directory for on-disk profile files |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | Comma-separated list of output formats to write to disk |
+| `PROFILER_DISK_MAX_PER_SEC` | `10` | Rate limit on profile files written to disk per second |
+| `PROFILER_RETENTION_COUNT` | `100` | Maximum profile files kept in `PROFILER_OUTPUT_DIR`. Older files are pruned |
+| `PROFILER_EXPORT_URL` | *(unset)* | Remote endpoint to POST profiles to. When set, disk writes still happen unless `PROFILER_OUTPUT_FORMATS` is empty |
+| `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts |
+| `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Optional bearer token sent with each export request |
+| `PROFILER_EXPORT_XHGUI` | *(auto-detect)* | Boolean. Forces XHGui-compatible wrapping of the export payload. Unset = auto-detect from `PROFILER_EXPORT_URL` (matches `xhgui` or `/run/import`) |
 
 ## Example Configurations
 

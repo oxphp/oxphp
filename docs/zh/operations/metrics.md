@@ -111,7 +111,7 @@ curl http://localhost:9090/metrics
 | `oxphp_worker_mode_enabled` | gauge | 工作进程模式启用时始终为 `1` |
 | `oxphp_worker_requests_handled_total` | counter | 持久化工作进程处理的总请求数 |
 | `oxphp_worker_recycles_total` | counter | 工作进程回收总次数（工作进程退出并重新创建） |
-| `oxphp_worker_recycles_by_reason_total` | counter | 按原因统计的回收次数。标签：`reason`（`max_requests`、`max_memory`、`error`） |
+| `oxphp_worker_recycles_by_reason_total` | counter | 按原因统计的回收次数。标签：`reason`（`scheduled`、`max_memory`、`error`） |
 | `oxphp_worker_soft_resets_total` | counter | 请求间执行软重置的总次数 |
 
 ### 单工作进程指标
@@ -143,6 +143,7 @@ curl http://localhost:9090/metrics
 | `oxphp_async_tasks_failed_total` | counter | 抛出异常的异步任务数 |
 | `oxphp_async_tasks_cancelled_total` | counter | 被取消的异步任务数 |
 | `oxphp_async_tasks_rejected_total` | counter | 因进程池队列已满而被拒绝的异步任务数 |
+| `oxphp_async_tasks_stranded_total` | counter | 超过 `await_race` / `await_any` 超时仍在运行的工作进程。每个滞留任务最多可延长 RSHUTDOWN 5 秒。 |
 
 ## Grafana 仪表板技巧
 

@@ -132,6 +132,7 @@ Both `before()` and `after()` receive an `OxPHP\Decorator\Context` object with i
 | `$function` | `string` | Function name for standalone functions, or `""` for methods |
 | `$objectId` | `int` | `spl_object_id()` of the called object, `0` for functions and static methods |
 | `$requestId` | `string` | Current request ID |
+| `$traceId` | `string` | Current W3C trace ID. Empty string when distributed tracing is not active |
 
 ### Methods
 
@@ -294,7 +295,6 @@ For more on APM tracing, see [Distributed Tracing & APM](distributed-tracing.md)
 - **Registration before first call** — decorators must be registered before the first invocation of any function they target. Register during bootstrap
 - **Scalar constructor arguments** — attribute constructor arguments are evaluated once at first call. Complex expressions or runtime values in attributes are not supported
 - **Max 32 nesting levels** — the decorator context stack supports up to 32 levels of nested decorated function calls
-- **Max 256 cached instances per worker** — decorator instances are cached per worker thread. Collisions are possible in applications with more than 256 unique decorator-function pairs
 
 ## Troubleshooting
 

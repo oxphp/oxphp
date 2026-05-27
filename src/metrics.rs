@@ -569,7 +569,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_dropped_requests_total Requests dropped (529)."
+            "# HELP oxphp_dropped_requests_total Requests dropped after the worker accepted them (worker died or oneshot channel error)."
         );
         let _ = writeln!(out, "# TYPE oxphp_dropped_requests_total counter");
         let _ = writeln!(

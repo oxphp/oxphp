@@ -32,7 +32,7 @@ MIME 类型根据文件扩展名自动确定。如果无法确定类型，服务
 |--------|-------------|
 | `.html` | `text/html` |
 | `.css` | `text/css` |
-| `.js` | `application/javascript` |
+| `.js` | `text/javascript` |
 | `.json` | `application/json` |
 | `.png` | `image/png` |
 | `.svg` | `image/svg+xml` |

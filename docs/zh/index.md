@@ -26,7 +26,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 此外，OxPHP 还包含通常需要单独工具或第三方库才能实现的功能：
 
 - **[静态文件服务](features/static-files.md)** —— 内存缓存、ETag/Last-Modified、自动 MIME 类型
-- **[四种路由模式](features/routing.md)** —— 文件映射、框架、SPA 和 Worker
+- **[三种路由模式](features/routing.md)** —— 文件映射、框架和 SPA（每种都可与持久化 [Worker 模式](features/worker-mode.md) 叠加）
 - **[提前响应](features/early-response.md)** —— 立即发送响应并继续后台处理
 - **[Worker 模式](features/worker-mode.md)** —— 持久化 PHP 进程，支持 [Fiber 多路复用](features/fiber-multiplexing.md)
 - **[SSE 流式传输](features/sse.md)** —— 从 PHP 推送实时 Server-Sent Events
@@ -45,7 +45,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 
 ## 功能特性
 
-- [路由](features/routing.md) —— 四种路由模式：传统文件映射、框架前置控制器、SPA 回退和 Worker 模式
+- [路由](features/routing.md) —— 三种路由模式：传统文件映射、框架前置控制器和 SPA 回退。Worker 模式是一个正交的执行模型开关，可叠加在任意路由模式之上
 - [静态文件](features/static-files.md) —— 文件缓存、MIME 检测、ETag/Last-Modified 响应头和流式传输
 - [Worker 模式](features/worker-mode.md) —— 请求之间自动软重置的持久化 PHP 进程
 - [Fiber 多路复用](features/fiber-multiplexing.md) —— 通过协作式多任务，每个 Worker 线程处理数百个并发请求

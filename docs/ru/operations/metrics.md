@@ -111,7 +111,7 @@ curl http://localhost:9090/metrics
 | `oxphp_worker_mode_enabled` | gauge | Всегда `1` при активном режиме worker |
 | `oxphp_worker_requests_handled_total` | counter | Общее количество запросов, обработанных постоянными воркерами |
 | `oxphp_worker_recycles_total` | counter | Общее количество перезапусков воркеров (воркер завершился и был перезапущен) |
-| `oxphp_worker_recycles_by_reason_total` | counter | Перезапуски по причине. Метка: `reason` (`max_requests`, `max_memory`, `error`) |
+| `oxphp_worker_recycles_by_reason_total` | counter | Перезапуски по причине. Метка: `reason` (`scheduled`, `max_memory`, `error`) |
 | `oxphp_worker_soft_resets_total` | counter | Общее количество мягких сбросов между запросами |
 
 ### Метрики по воркерам
@@ -143,6 +143,7 @@ curl http://localhost:9090/metrics
 | `oxphp_async_tasks_failed_total` | counter | Асинхронные задачи, завершившиеся с исключением |
 | `oxphp_async_tasks_cancelled_total` | counter | Отменённые асинхронные задачи |
 | `oxphp_async_tasks_rejected_total` | counter | Асинхронные задачи, отклонённые из-за переполнения очереди пула |
+| `oxphp_async_tasks_stranded_total` | counter | Воркеры, продолжившие работу после тайм-аута `await_race` / `await_any`. Каждая такая задача может продлить RSHUTDOWN до 5 секунд. |
 
 ## Советы по дашборду Grafana
 

@@ -22,7 +22,10 @@ docker pull ghcr.io/oxphp/oxphp:0.5.0
 - **OxPHP PHP 扩展**（`oxphp_sapi.so`）—— 提供 `oxphp_request_id()`、`oxphp_server_info()`、`oxphp_worker()` 等内置函数
 - **Bridge 库**（`liboxphp_bridge.so`）—— 连接 Rust 服务器与 PHP 运行时
 - **Alpine Linux** 基础镜像 —— 最小化运行时占用
-- 以 **www-data**（UID 82，GID 82）用户运行，实现非 root 容器执行
+- **不设置 `USER` 指令** —— 镜像默认以 **root** 运行，与 `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine` 保持一致。`www-data` 用户（UID 82，GID 82）已预先创建，并在构建时将 `/var/www/html` 的所有权切换给它；部署时请在编排层下放权限：
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.5.0`
+  - Compose：`services.app.user: www-data`
+  - Kubernetes：`securityContext.runAsUser: 82`
 
 ### 镜像结构
 
@@ -35,13 +38,22 @@ docker pull ghcr.io/oxphp/oxphp:0.5.0
 ├── lib/
 │   ├── libphp.so                                    # PHP ZTS 运行时（8.4 或 8.5，与镜像标签一致）
 │   ├── liboxphp_bridge.so                           # C Bridge 库
-│   └── php/extensions/no-debug-zts-20240924/
+│   └── php/extensions/no-debug-zts-<ABI>/
 │       └── oxphp_sapi.so                            # OxPHP PHP 扩展
 ├── etc/php/
 │   └── conf.d/
 │       ├── oxphp.ini                                # OxPHP 的 PHP 配置
 │       └── extension.ini                            # extension=oxphp_sapi.so
 ```
+
+> **`<ABI>` 的取值依赖 PHP 小版本号。** PHP 8.4 使用 `20240924`，PHP 8.5 使用另一个日期戳。下面的示例硬编码 `20240924`，是因为它们的 `FROM` 行指向 `php:8.4-zts-alpine3.23` —— 切换 FROM 时也必须切换日期。要在构建中可移植地获取它：
+>
+> ```bash
+> php -r 'echo ini_get("extension_dir");'
+> # /usr/local/lib/php/extensions/no-debug-zts-20240924
+> ```
+>
+> 在 shell 命令中使用 `$(php -r 'echo ini_get("extension_dir");')` 可避免硬编码。
 
 OxPHP 的三个组件及其用途：
 

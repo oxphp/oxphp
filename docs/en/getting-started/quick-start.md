@@ -106,12 +106,14 @@ Expected output:
 <h1>OxPHP</h1>
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
-<p>SAPI: oxphp</p>
+<p>SAPI: cli-server</p>
 <p>Version: 0.5.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
 Each request gets a unique ID. The worker ID shows which PHP worker thread handled it.
+
+> **Why does `php_sapi_name()` report `cli-server` instead of `oxphp`?** OxPHP deliberately registers under one of the SAPI names OPcache recognises. OPcache disables itself for unknown SAPIs; without this rename PHP execution would skip the OPcache layer entirely and run several times slower. The trade-off is that `php_sapi_name()` cannot be used to detect OxPHP — use `function_exists('oxphp_request_id')` or `OxPHP\Http\Request::current()` instead.
 
 ### 7. Check the Internal Endpoints
 

@@ -32,7 +32,7 @@ MIME types are determined automatically from the file extension. If no type can 
 |-----------|-------------|
 | `.html` | `text/html` |
 | `.css` | `text/css` |
-| `.js` | `application/javascript` |
+| `.js` | `text/javascript` |
 | `.json` | `application/json` |
 | `.png` | `image/png` |
 | `.svg` | `image/svg+xml` |

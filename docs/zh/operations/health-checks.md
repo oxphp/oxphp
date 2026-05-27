@@ -88,6 +88,7 @@ curl http://localhost:9090/health
 | `total_requests` | integer | 主端口处理的 HTTP 请求总数 |
 | `active_connections` | integer | 主端口当前打开的连接数 |
 | `executor_healthy` | boolean | PHP 工作进程池是否正在接受请求 |
+| `plugins` | `object<string, string>` | 每个插件的健康状态：键为插件名，值为 `"ok"`、`"degraded"` 或 `"failed"`。当没有插件上报健康状态时为空 `{}`。`"failed"` 的插件会使 HTTP 状态码变为 503；`"degraded"` 会出现在此处但 HTTP 状态码仍为 200。 |
 
 ## GET /metrics
 

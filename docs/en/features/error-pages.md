@@ -12,7 +12,7 @@ OxPHP serves branded HTML error pages for 4xx and 5xx responses. Error pages are
 1. At startup, OxPHP reads the directory specified by `ERROR_PAGES_DIR` and loads every valid `{status}.html` file into memory.
 2. Files must be named with a numeric HTTP status code in the 400–599 range (for example, `404.html`, `503.html`). Files with non-numeric names, status codes outside that range (including `200.html`), or non-`.html` extensions are silently ignored.
 3. When OxPHP generates a 4xx or 5xx response, it checks for a matching pre-loaded error page. If one exists, the response body is replaced with the custom HTML and the `Content-Type` is set to `text/html; charset=utf-8`.
-4. If the directory does not exist or cannot be read at startup, OxPHP logs an error and exits. If an individual file cannot be read, OxPHP logs an error and exits. Ensure the directory and all `.html` files are readable before starting.
+4. If the directory does not exist or cannot be read at startup, OxPHP logs a warning and continues without custom error pages. Error responses fall back to plain-text bodies until the directory is fixed and the server is restarted.
 
 ## Configuration
 
@@ -79,9 +79,9 @@ docker logs my-app 2>&1 | grep "error page"
 
 **Fix:** Ensure the directory path is correct, the files are named `{status}.html`, and the container has read access to the directory.
 
-### The server exits at startup with a file error
+### Startup warning about missing error pages directory
 
-OxPHP stops if the `ERROR_PAGES_DIR` directory does not exist or a file cannot be read. Check that the volume is mounted correctly in Docker:
+OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGES_DIR` directory does not exist or cannot be read. Error responses then use plain-text bodies. Check that the volume is mounted correctly in Docker:
 
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \

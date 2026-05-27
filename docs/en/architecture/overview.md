@@ -99,7 +99,7 @@ Route resolution
 2. **HTTP parsing and request ID** — the request is parsed and a unique request ID is generated (or an incoming `X-Request-ID` header is preserved).
 3. **Trusted proxy resolution** — if `TRUSTED_PROXIES` is set and the connecting IP is trusted, OxPHP extracts the real client IP, protocol, and host from `Forwarded` (RFC 7239) or `X-Forwarded-*` headers. The resolved IP is used for all subsequent steps including rate limiting and access logging. See [Trusted Proxies](../security/trusted-proxies.md).
 4. **Rate limiting** — if `RATE_LIMIT` is set, the client's IP is checked against the per-IP request counter. Requests that exceed the limit receive a `429 Too Many Requests` response immediately.
-5. **Route resolution** — the URL is matched against the configured routing mode (traditional, framework, SPA, or worker). The result is either a static file, a PHP script, or a 404.
+5. **Route resolution** — the URL is matched against the configured routing mode (traditional, framework, or SPA). The result is either a static file, a PHP script, or a 404. Worker mode, if enabled, changes how PHP executes the resolved script but does not change route resolution itself.
 6. **Static files** — served directly from an in-memory cache (for frequently accessed files) or streamed from disk. OxPHP adds `ETag`, `Last-Modified`, and `Cache-Control` headers automatically.
 7. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 529 immediately.
 8. **Compression** — text-based responses are compressed with Brotli before being sent when the client sends `Accept-Encoding: br` (configurable via `COMPRESSION_LEVEL`).
@@ -153,7 +153,7 @@ OxPHP provides several guarantees to keep your application running reliably in p
 - **Automatic worker respawn** — OxPHP monitors the health of all PHP workers. If a worker dies unexpectedly, a new worker is started in its place without manual intervention.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
-- **Graceful shutdown** — on SIGTERM, OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
+- **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 
@@ -163,7 +163,7 @@ OxPHP provides several guarantees to keep your application running reliably in p
 - [Early Response](../features/early-response.md) — `oxphp_finish_request()` and background processing
 - [Async Promises](../features/async-promises.md) — `oxphp_async()` / `oxphp_async_await()`
 - [Internal Server](../features/internal-server.md) — health, metrics, config
-- [Routing](../features/routing.md) — four routing modes and how URLs are resolved
+- [Routing](../features/routing.md) — three routing modes and how URLs are resolved
 - [Configuration Reference](../operations/configuration.md) — complete list of environment variables
 - [Metrics](../operations/metrics.md) — observing the worker pool and request pipeline
 - [Quick Start](../getting-started/quick-start.md) — get OxPHP running in under 5 minutes

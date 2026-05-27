@@ -106,12 +106,14 @@ curl http://localhost/
 <h1>OxPHP</h1>
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
-<p>SAPI: oxphp</p>
+<p>SAPI: cli-server</p>
 <p>Version: 0.5.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
 Каждый запрос получает уникальный ID. ID воркера показывает, какой PHP-поток его обработал.
+
+> **Почему `php_sapi_name()` сообщает `cli-server` вместо `oxphp`?** OxPHP намеренно регистрируется под одним из имён SAPI, которые распознаёт OPcache. Для неизвестных SAPI OPcache отключает сам себя; без этого переименования выполнение PHP проходило бы мимо OPcache и работало бы в несколько раз медленнее. Компромисс в том, что использовать `php_sapi_name()` для определения OxPHP нельзя — используйте `function_exists('oxphp_request_id')` или `OxPHP\Http\Request::current()`.
 
 ### 7. Проверьте внутренние эндпоинты
 

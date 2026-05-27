@@ -26,19 +26,21 @@ PHP 约定。用于 `Map::get()`、`Counter::get()`、`Once::get()`。
 `Map::set()`、`Mutex` 通过 `with` 重置值、`Once::getOrInit()`。
 `Atomic::store($value, ?Ordering)` 与 `load` 对称，原因相同。
 
-### 3. 元素数量 — `count(): int` + `\Countable`
+### 3. 元素数量 — `count(): int`
 
-每个容器都暴露 `count(): int` 并实现 `\Countable`。这样可直接使用
-`count($obj)`：
+每个暴露当前规模的容器都以 `count(): int` 命名该方法。`Channel`
+还实现了 `\Countable`，因此 `count($ch)` 是已排队项数的原生
+惯用法。`Map` 与 `Pool` 把 `count(): int` 作为方法暴露，但
+**不**实现 `\Countable` —— 直接调用即可：
 
 ```php
 $ch  = new OxPHP\Shared\Channel(1024);
 $map = new OxPHP\Shared\Map();
 $pool = new OxPHP\Shared\Pool($factory);
 
-count($ch);    // 已缓冲的项
-count($map);   // 条目数
-count($pool);  // 全部活跃槽（in-use + idle）
+count($ch);       // 已排队项数（Channel 实现了 \Countable）
+$map->count();    // 条目数
+$pool->count();   // 全部活跃槽（in-use + idle）
 ```
 
 不允许 `size()`、`len()`、`pending()` — 无论实现者的肌肉记忆来自
@@ -76,10 +78,10 @@ count($pool);  // 全部活跃槽（in-use + idle）
 **严格为正** —— 零、负数、非 int 和缺失都会在桥层抛出
 `OxPHP\Shared\TypeException`。
 
-`try*` 还携带一个早于三分法就存在的子语义：
-
-- **条件性成功操作。** `Map::trySet` 仅在键缺失时成功；冲突
-  → `false`，不抛异常。对应 `HashMap::try_insert`。
+条件性成功操作位于 `Map` 上，名称为 `setIfAbsent`，而非
+`try*`：`Map::setIfAbsent` 仅在键缺失时提交并返回 `bool`
+（对应 `HashMap::try_insert`）。`setIfAbsent` 这个名字专门
+保留给这种语义，不要在别处复用。
 
 `try*` 的统一不变量：它要么返回带值的 Result（Channel），要么抛出
 `ContentionException`（Mutex）。它从不用 `null` 来编码「未成功」 ——
@@ -133,9 +135,9 @@ count($pool);  // 全部活跃槽（in-use + idle）
 | 写入值                      | `set()`                  | `Map::set`                              |
 | 写入原子                    | `store($v, $order)`      | `Atomic::store`                         |
 | 元素数量                    | `count(): int`           | `Map::count`、`Channel::count`、`Pool::count` |
-| 键/元素存在性               | `has($key): bool`        | `Map::has`                              |
 | 布尔属性                    | `is*(): bool`            | `Channel::isClosed`                     |
-| 非阻塞等待                  | `try*()`                 | `Channel::trySend`、`Mutex::tryWithLock`、`Map::trySet` |
+| 条件性插入                  | `setIfAbsent($k, $v)`    | `Map::setIfAbsent`                      |
+| 非阻塞等待                  | `try*()`                 | `Channel::trySend`、`Mutex::tryWithLock` |
 | 永久等待                    | 裸动词                   | `Channel::send`、`Channel::recv`、`Mutex::withLock`     |
 | 有界等待                    | `*Timeout(int $ms)`      | `Channel::sendTimeout`、`Mutex::withLockTimeout`        |
 | Compare-and-swap            | `compareAndSet()`        | `Atomic::compareAndSet`                 |
@@ -157,11 +159,10 @@ count($pool);  // 全部活跃槽（in-use + idle）
 - [ ] 布尔 getter 使用 `is*` 前缀。
 - [ ] Wait-policy 变体遵循 `try*` / 裸名 / `*Timeout(int $ms)` 三分
   法。`*Timeout` 变体接受 `int $ms > 0`，并以 `TypeException` 拒绝
-  零 / 负数 / 非 int 输入。条件性成功操作（`Map::trySet`）保留
-  `try*` 前缀，仍可返回 `bool`；新的 wait-policy `try*` 方法要么
-  返回带值的 Result，要么抛出领域异常 —— 永远不用 `null`-编码。
-- [ ] 不出现 `len`、`size`、`pending`、`test`、`setIfAbsent` 等
-  临时命名。
+  零 / 负数 / 非 int 输入。Wait-policy 的 `try*` 方法要么返回带值
+  的 Result，要么抛出领域异常 —— 永远不用 `null`-编码。条件性成功
+  操作改用专门的 `setIfAbsent` 命名，而不是 `try*`。
+- [ ] 不出现 `len`、`size`、`pending`、`test` 等临时命名。
 - [ ] 领域专有动词（`evict`、`drain`、`flush` 等）仅在速查表中没有
   规范对应项时出现。
 

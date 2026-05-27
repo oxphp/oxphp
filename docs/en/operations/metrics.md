@@ -111,7 +111,7 @@ These metrics are only emitted when worker mode is active (`WORKER_MODE_ENABLED=
 | `oxphp_worker_mode_enabled` | gauge | Always `1` when worker mode is active |
 | `oxphp_worker_requests_handled_total` | counter | Total requests processed by persistent workers |
 | `oxphp_worker_recycles_total` | counter | Total worker recycles (worker exited and was respawned) |
-| `oxphp_worker_recycles_by_reason_total` | counter | Recycles by reason. Label: `reason` (`max_requests`, `max_memory`, `error`) |
+| `oxphp_worker_recycles_by_reason_total` | counter | Recycles by reason. Label: `reason` (`scheduled`, `max_memory`, `error`) |
 | `oxphp_worker_soft_resets_total` | counter | Total soft resets performed between requests |
 
 ### Per-Worker Gauges
@@ -143,6 +143,7 @@ These metrics are only emitted when `ASYNC_WORKERS` is set to a non-zero value.
 | `oxphp_async_tasks_failed_total` | counter | Async tasks that threw an exception |
 | `oxphp_async_tasks_cancelled_total` | counter | Async tasks that were cancelled |
 | `oxphp_async_tasks_rejected_total` | counter | Async tasks rejected because the pool queue was full |
+| `oxphp_async_tasks_stranded_total` | counter | Workers left running past an `await_race` / `await_any` timeout. Each stranded task can extend RSHUTDOWN by up to 5 seconds. |
 
 ## Grafana Dashboard Tips
 

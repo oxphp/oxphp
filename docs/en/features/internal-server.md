@@ -10,7 +10,13 @@ OxPHP runs a separate HTTP server on a dedicated port for health checks, Prometh
 ## How It Works
 
 1. **Set `INTERNAL_ADDR`** to a listen address (e.g. `127.0.0.1:9090`). OxPHP starts a second HTTP listener on that address
-2. The internal server exposes three built-in endpoints: `/health`, `/metrics`, and `/config`
+2. The internal server exposes the built-in endpoints below:
+   - `/health` — aggregate JSON status
+   - `/health/liveness`, `/healthz` (alias) — liveness probe
+   - `/health/readiness`, `/readyz` (alias) — readiness probe
+   - `/health/startup`, `/startupz` (alias) — startup probe
+   - `/metrics` — Prometheus exposition
+   - `/config` — active server configuration JSON
 3. Plugins can register additional endpoints under the `/__<plugin>/` prefix
 4. During graceful shutdown, the internal server stays available until the main server finishes draining connections
 
@@ -58,11 +64,11 @@ Returns a JSON health status. Use this for Kubernetes readiness and liveness pro
 }
 ```
 
-The `plugins` object lists every loaded plugin with its health status: `"ok"`, `"degraded"`, or `"failed"`. Only `"failed"` triggers a 503 response — `"degraded"` plugins appear in the JSON but the HTTP status remains 200.
+The `plugins` object lists every loaded plugin with its health status: `"ok"`, `"degraded"`, or `"failed"`. The endpoint returns 503 when any plugin reports `"failed"` **or** the script executor is unhealthy (`executor_healthy: false`). `"degraded"` plugins appear in the JSON body but the HTTP status remains 200.
 
 ### GET /metrics
 
-Returns Prometheus-compatible metrics in text format (`text/plain; version=0.0.4`). Always returns 200.
+Returns Prometheus-compatible metrics in text format (`text/plain; version=0.0.4; charset=utf-8`). Always returns 200.
 
 ```bash
 curl http://localhost:9090/metrics
