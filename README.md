@@ -23,7 +23,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/rust-powered-orange">
-  <img alt="PHP" src="https://img.shields.io/badge/php-8.4-blue">
+  <img alt="PHP" src="https://img.shields.io/badge/php-8.4%20%7C%208.5-blue">
   <img alt="License" src="https://img.shields.io/github/license/oxphp/oxphp">
   <img alt="Release" src="https://img.shields.io/github/v/release/oxphp/oxphp">
   <img alt="Stars" src="https://img.shields.io/github/stars/oxphp/oxphp?style=flat">
@@ -33,6 +33,9 @@
 </p>
 
 ---
+
+> [!WARNING]
+> **OxPHP is not production-ready yet.** The project is under active development — APIs may change, edge cases are still being uncovered, and there is no SLA. It **is** ready for evaluation, staging environments, and early adopters who want to test it on real workloads and report what breaks. Feedback, bug reports, and benchmarks against your stack are exactly what we need right now — open an issue or start a discussion on GitHub.
 
 ## Quick Start
 
@@ -64,7 +67,6 @@ OxPHP replaces nginx + PHP-FPM with a single container. The server works out of 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
 | Language | C | Go + C | Go | **Rust + C** |
-| HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | HTTP/3 | ✅ | ✅ | ✅ experimental | 🔜 roadmap |
 | TLS 1.3 | ✅ | ✅ | ✅ | ✅ (rustls) |
 | Persistent worker state | ❌ | ✅ | ✅ | ✅ |
@@ -77,7 +79,7 @@ OxPHP replaces nginx + PHP-FPM with a single container. The server works out of 
 | Memory safety | ❌ (C) | partial (Go + cgo) | ✅ (Go, PHP isolated via IPC) | partial (Rust + C FFI) |
 | WebSocket server | ✅ (proxies) | ✅ (Mercure) | ✅ (centrifuge plugin) | ❌ |
 | Reverse proxy / upstream | ✅ (full-featured) | ✅ (Caddy) | ✅ | ❌ |
-| Native install (non-Docker) | apt/yum/brew/port | brew, static binary | brew, binary | roadmap |
+| Native install (non-Docker) | apt/yum/brew/port | brew, static binary | brew, binary | ❌ |
 | Platforms (runtime) | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | Linux only (glibc/musl) |
 | Supported PHP versions | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 8.4 and 8.5 |
 | License | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 |
@@ -126,13 +128,15 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 ### Shared State (`OxPHP\Shared\*`)
 Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/shared-state/shared-state.md) and [observability reference](docs/en/shared-state/shared-observability.md).
 
-- **`Shared\Counter`** — atomic int64 (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/shared-state/shared-counter.md)
+- **`Shared\Counter`** — atomic int64 accumulator (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/shared-state/shared-counter.md)
+- **`Shared\Atomic`** — full lock-free int64 primitive (`load`, `store`, `swap`, `compareAndSet`, `fetchAdd/Sub/And/Or/Xor`) with explicit memory ordering — see [Atomic](docs/en/shared-state/shared-atomic.md)
 - **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/shared-state/shared-flag.md)
 - **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/shared-state/shared-once.md)
 - **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/shared-state/shared-mutex.md)
 - **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/en/shared-state/shared-channel.md)
 - **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/en/shared-state/shared-map.md)
 - **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/en/shared-state/shared-pool.md)
+- **`Shared\Registry`** — name-keyed handles (`Registry::counter('hits', fn() => ...)`) so every worker and every request converges on the same entry without external stores — see [Registry](docs/en/shared-state/shared-registry.md)
 - **Built-in observability** — `oxphp_shared_*` Prometheus counters and `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON endpoints on the internal port
 - **Refcount + lifecycle safety** — handles cannot outlive the registry entry; cycle detector rejects graphs that would leak memory
 - When you outgrow it, see [Migrating to an external store](docs/en/shared-state/migrating-to-external-store.md)
@@ -156,9 +160,9 @@ Full guide: [Distributed tracing](docs/en/features/distributed-tracing.md).
 
 - **W3C Trace Context** — automatic `traceparent`/`tracestate` propagation, `$_SERVER['OXPHP_TRACE_ID']` for PHP log correlation
 - **OpenTelemetry** — OTLP span export (gRPC/HTTP) with semantic conventions, configurable sampling, batch processing
-- **APM auto-instrumentation** — 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) hooked at the engine level; every call becomes a span with zero code changes
-- **`#[OxPHP\Tracing\Trace]` decorator** — annotate any function or method with a PHP 8 attribute to create spans automatically
-- **PHP tracing SDK** — 10 `oxphp_trace_*()` functions for manual span creation, attributes, events, error recording, and trace context propagation
+- **APM auto-instrumentation** — internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O hooked at the engine level; every call becomes a span with zero code changes
+- **`#[OxPHP\Apm\Trace]` decorator** — annotate any function or method with a PHP 8 attribute to create spans automatically
+- **PHP tracing SDK** — 10 `oxphp_apm_*()` functions (`start`, `end`, `attribute`, `event`, `error`, `status`, `header`, `trace`, `trace_id`, `span_id`) for manual span creation, attributes, events, error recording, and trace context propagation
 - **Prometheus metrics** at `/metrics` — per-worker, zero dependencies — see [Metrics](docs/en/operations/metrics.md)
 - **Health check** at `/health` — ready for K8s readiness probes — see [Health checks](docs/en/operations/health-checks.md)
 - **Internal server** on a separate port for health, metrics, and runtime config — see [Internal server](docs/en/features/internal-server.md)
@@ -258,7 +262,7 @@ flowchart LR
     subgraph PHP ["PHP worker thread"]
         SDK["PHP tracing SDK<br/>oxphp_trace_*()"]
         DEC["#[OxPHP\\Apm\\Trace]<br/>decorator"]
-        HOOKS["APM hooks (33 fn)<br/>PDO · mysqli · cURL<br/>Redis · Memcached · file I/O"]
+        HOOKS["APM hooks (≈33 fn)<br/>PDO · mysqli · cURL<br/>Redis · Memcached · file I/O"]
         STACK[("SPAN_STACK<br/>thread-local")]
         PHPERR["PHP errors"]
     end
@@ -300,83 +304,31 @@ flowchart LR
 
 All settings are via environment variables — no config files required.
 
+The essentials — what most deployments need to get a service up:
+
 | Variable | Default | Description |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port to bind |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional, `*.php` = Framework, non-`.php` = SPA. Resolved against `DOCUMENT_ROOT` |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
-| `TOKIO_WORKERS` | `0` (CPU / 2, min 1) | HTTP server threads for handling connections; `0` = auto |
-| `EXECUTOR` | `sapi` | PHP executor: `sapi` (real PHP) or `stub` (test mode) |
-| `PHP_WORKERS` | `0` (CPU / 2, min 1) | Worker pool: `N` = fixed, `MIN:MAX` = dynamic, `0` = auto |
-| `PHP_WORKERS_IDLE_SECONDS` | `30` | Idle timeout before retiring a dynamic worker |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | Max pending requests in the queue before the server returns 529 |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Graceful shutdown drain timeout |
-| `LOG_LEVEL` | `info` | Tracing verbosity: `error`, `warn`, `info`, `debug`, `trace` |
 | `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config (e.g. `0.0.0.0:9090`) |
-| `RATE_LIMIT` | `0` (off) | Max requests per IP per window |
-| `RATE_WINDOW_SECONDS` | `60` | Rate limit window in seconds |
-| `HEADER_TIMEOUT_SECONDS` | `5` | Header read timeout (Slowloris protection) |
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
-| `ERROR_PAGES_DIR` | *(unset)* | Directory with custom error pages (`{status}.html`) |
-| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files (`30s`, `5m`, `2h`, `30d`, `1y`, `off`). Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache. Replaces deprecated `STATIC_CACHE=off`. |
-| `COMPRESSION_LEVEL` | `4` | Brotli quality (0 = off, 1–11) |
-| `ACCESS_LOG` | *(off)* | Per-request JSON log: `all`, `error`, or unset |
-| `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
-| `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max memory (MiB) per worker before recycling. Application-driven recycling is available via `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | Max pending async tasks in the queue; tasks are rejected when full |
-| `TRACE_CONTEXT` | `false` | W3C Trace Context propagation (`traceparent`/`tracestate`). Auto-enabled when `OTEL_ENABLED=true` |
-| `TRUSTED_PROXIES` | *(unset)* | Trusted proxy CIDRs: `10.0.0.0/8,172.16.0.0/12` or `private` (all RFC-1918). Enables real client IP extraction from `Forwarded`/`X-Forwarded-*` headers |
-| `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated paths (absolute or relative to `DOCUMENT_ROOT`) that symlinks may resolve to. Default empty = symlink targets must stay inside `DOCUMENT_ROOT`. See [Symlink allow paths](docs/en/security/symlink-allow-paths.md) |
-| `PHP_DENY_PATHS` | *(unset)* | Glob patterns (files or directories) where PHP execution is blocked. Traditional mode only. Example: `/uploads/**,/cache/**,/admin/legacy.php` |
-| `PHP_DENY_FALLBACK` | `404` | HTTP status code (400–599) or path to a PHP fallback script. On match from `PHP_DENY_PATHS`, the response is the status (with optional custom HTML from `ERROR_PAGES_DIR`) or the fallback script runs with `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` in `$_SERVER` |
 
-> **Deprecated env vars** (still parsed, with a startup `WARN`): `INDEX_FILE` → use `ENTRY_FILE`. `WORKER_FILE` → use `WORKER_MODE_ENABLED=true ENTRY_FILE=...`. `PHP_DENY_DIRS` → use `PHP_DENY_PATHS`. The legacy forms will be removed in a future release.
+Worker pool, queue, rate limiting, timeouts, TLS tuning, static file caching, compression, access logs, trusted proxies, PHP-execution deny rules, and every plugin-scoped variable live in the consolidated reference — see [Configuration](docs/en/operations/configuration.md) for the full table.
 
 > **Boolean values** (case-insensitive, trimmed): truthy = `on` / `true` / `1` / `yes`; falsy = `off` / `false` / `0` / `no`. Any non-empty value outside that set — typos like `ture` — fails fast at startup with an error naming the variable. An unset variable or empty assignment (`FOO=`) falls back to the default, so Docker Compose / Kubernetes substitutions like `FOO=${FOO}` work cleanly when the host variable is missing.
 
-### OpenTelemetry (`plugin-otel` feature)
+### OpenTelemetry, APM, and Shared State
 
-| Variable | Default | Description |
-|---|---|---|
-| `OTEL_ENABLED` | `false` | Enable span export. Implies `TRACE_CONTEXT=true` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP collector endpoint |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` (port 4317) or `http/protobuf` (port 4318) |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
-| `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Auth headers for hosted backends (`key=value,key=value`) |
-| `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported traces |
-| `OTEL_SERVICE_VERSION` | *(unset)* | Service version in exported traces |
-| `OTEL_RESOURCE_ATTRIBUTES` | *(unset)* | Resource attributes (`key=value,key=value`) |
-| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | Sampler: `always_on`, `always_off`, `traceidratio`, `parentbased_traceidratio` |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | Sampling ratio (0.0–1.0) |
+Plugin-scoped env vars (the `OTEL_*`, `OTEL_APM_*`, and `SHARED_*` families) live in the consolidated configuration reference so there is one source of truth:
 
-> **Note:** Invalid or out-of-range `OTEL_TRACES_SAMPLER_ARG` values are clamped to `[0.0, 1.0]` and logged at warn level. Unknown `OTEL_TRACES_SAMPLER` values fall back to `parentbased_traceidratio` and are logged.
-
-### APM (`plugin-apm` feature)
-
-| Variable | Default | Description |
-|---|---|---|
-| `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP tracing SDK. Requires `OTEL_ENABLED=true` |
-| `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold (ms). Queries above this get `oxphp.db.slow=true` |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in `db.params` span attribute |
-
-### Shared State (`plugin-shared` feature)
-
-| Variable | Default | Description |
-|---|---|---|
-| `SHARED_ENABLED` | `true` | Master switch for the `OxPHP\Shared\*` layer |
-| `SHARED_MAX_ENTRIES` | `100000` | Max number of registry entries (counters + flags + maps + …) before `OutOfCapacityException` |
-| `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Soft cap on aggregate memory used by Shared\* entries |
-| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Fraction of `MAX_*` at which `oxphp_shared_capacity_warn` fires |
-| `SHARED_LOCK_DIAGNOSTICS` | `warn` (release) / `strict` (debug) | Mutex deadlock detection: `off`, `warn` (log only), `strict` (break the cycle) |
-| `SHARED_CYCLE_DETECT_DEPTH` | `16` | Max BFS depth when checking nested-Shareable insertions for cycles |
-| `SHARED_CYCLE_DETECT_EDGES` | `10000` | Max edges walked per cycle check (guard against dense graphs) |
-| `SHARED_INTROSPECTION_ENABLED` | `true` | Toggle the `/__ox_shared/*` JSON endpoints on the internal server |
-| `SHARED_METRICS_ENABLED` | `true` | Toggle the `oxphp_shared_*` Prometheus series |
+- **OpenTelemetry** (`plugin-otel`): [Configuration → OpenTelemetry](docs/en/operations/configuration.md#opentelemetry). For the export pipeline end-to-end, see the [Distributed tracing guide](docs/en/features/distributed-tracing.md).
+- **APM** (`plugin-apm`): [Configuration → APM](docs/en/operations/configuration.md#apm). Requires `OTEL_ENABLED=true`.
+- **Shared State** (`plugin-shared`): [Configuration → Shared State](docs/en/operations/configuration.md#shared-state). Concept-level walkthrough lives in the [Shared state guide](docs/en/shared-state/shared-state.md).
 
 ---
 
@@ -396,32 +348,6 @@ docker compose build
 DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
-## Development
-
-```bash
-# Full verification (host)
-cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
-
-# Docker smoke tests
-docker compose build && docker compose up -d
-curl http://localhost/
-curl "http://localhost/test_superglobals.php?foo=bar"
-curl -X POST -d "key=value" http://localhost/test_superglobals.php
-curl -H "Cookie: session=abc" http://localhost/test_superglobals.php
-
-# Async promises
-curl http://localhost/test_async.php
-curl http://localhost/test_async_parallel.php
-curl http://localhost/test_async_die.php
-
-# Internal server
-INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
-curl http://localhost:9090/health
-curl http://localhost:9090/metrics
-```
-
----
-
 ## Roadmap
 
 > Items are not ordered by priority. Presence on this list does not guarantee implementation.
@@ -430,7 +356,7 @@ curl http://localhost:9090/metrics
 |---|---|
 | ~~**Trace Context (W3C)**~~ | ✅ Implemented — automatic propagation of `traceparent` / `tracestate` headers (W3C spec), enabled via `TRACE_CONTEXT=true` |
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
-| ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O), `#[OxPHP\Tracing\Trace]` decorator, 10 `oxphp_trace_*()` SDK functions, PHP error capture |
+| ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O, `#[OxPHP\Apm\Trace]` decorator, 10 `oxphp_apm_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
 | ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/en/features/profiling.md) |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |
@@ -442,6 +368,9 @@ curl http://localhost:9090/metrics
 | ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |
 | ~~**Fiber Multiplexing**~~ | ✅ Implemented — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` / `oxphp_usleep()` and `oxphp_async_await()` yield the fiber cooperatively |
 | **Diagnostics** | Production doctor: checks OS limits (ulimit, TCP backlog, epoll/kqueue, container settings), identifies performance bottlenecks (worker queue depth, lock contention, GC/alloc pressure, ZTS stats), and gives specific actionable recommendations |
+| **TLS hot-reload** | Reload TLS certificate and key without restart — compatible with cert-manager / SPIRE / istiod short-lived rotation, removes the rolling-restart-per-rotation workaround |
+| **SPIFFE Workload API** | Native client for SPIFFE/SPIRE workload identity: streaming SVIDs over Unix socket with cryptographic node attestation, as an opt-in alternative to file-mount cert distribution |
+| **FIPS-validated TLS** | Cargo-feature switch from `rustls` + `ring` to `rustls` + `aws-lc-rs` with the `fips` feature for FIPS 140-2 / 140-3 compliance in regulated deployments |
 
 ## Documentation
 
@@ -452,3 +381,7 @@ curl http://localhost:9090/metrics
 ## License
 
 [AGPL-3.0](LICENSE)
+
+---
+
+<p align="center"><sub><i>Built and evolved with AI under careful human guidance.</i></sub></p>
