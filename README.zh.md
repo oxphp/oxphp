@@ -23,7 +23,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/rust-powered-orange">
-  <img alt="PHP" src="https://img.shields.io/badge/php-8.4-blue">
+  <img alt="PHP" src="https://img.shields.io/badge/php-8.4%20%7C%208.5-blue">
   <img alt="License" src="https://img.shields.io/github/license/oxphp/oxphp">
   <img alt="Release" src="https://img.shields.io/github/v/release/oxphp/oxphp">
   <img alt="Stars" src="https://img.shields.io/github/stars/oxphp/oxphp?style=flat">
@@ -33,6 +33,9 @@
 </p>
 
 ---
+
+> [!WARNING]
+> **OxPHP 尚未达到生产就绪状态。** 项目正在积极开发中 —— API 可能变化、边界情况仍在被发现、没有 SLA。但它**已经可以**用于评估、staging 环境，以及希望在真实负载上试用并反馈问题的早期用户。反馈、bug 报告以及在你自己技术栈上的对比基准测试，正是我们现在最需要的 —— 欢迎在 GitHub 上提交 issue 或发起讨论。
 
 ## 快速开始
 
@@ -64,7 +67,6 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
 | 语言 | C | Go + C | Go | **Rust + C** |
-| HTTP/2 | ✅ | ✅ | ✅ | ✅ |
 | HTTP/3 | ✅ | ✅ | ✅ 实验性 | 🔜 路线图 |
 | TLS 1.3 | ✅ | ✅ | ✅ | ✅ (rustls) |
 | 持久化 worker 状态 | ❌ | ✅ | ✅ | ✅ |
@@ -77,7 +79,7 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 | 内存安全 | ❌ (C) | 部分 (Go + cgo) | ✅ (Go，PHP 通过 IPC 隔离) | 部分 (Rust + C FFI) |
 | WebSocket 服务器 | ✅ (代理) | ✅ (Mercure) | ✅ (centrifuge 插件) | ❌ |
 | 反向代理 / upstream | ✅ (完整) | ✅ (Caddy) | ✅ | ❌ |
-| 原生安装（非 Docker） | apt/yum/brew/port | brew, static binary | brew, 二进制 | 路线图 |
+| 原生安装（非 Docker） | apt/yum/brew/port | brew, static binary | brew, 二进制 | ❌ |
 | 运行平台 | Linux/BSD/Win/Mac | Linux/Mac/Win | Linux/Mac/Win | 仅 Linux (glibc/musl) |
 | 支持的 PHP 版本 | 7.4–8.4 | 8.2–8.4 | 7.4–8.4 | 仅 8.4 (8.5 会 SIGBUS 崩溃) |
 | 许可证 | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 |
@@ -126,13 +128,15 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 ### 共享状态（`OxPHP\Shared\*`）
 进程内并发原语，让 PHP 工作线程无需 Redis、Memcached 或 APCu 即可协调可变状态。所有数据均驻留进程内：单次操作耗时为微秒级，而非网络往返。完整指南：[共享状态](docs/zh/shared-state/shared-state.md)，[可观测性参考](docs/zh/shared-state/shared-observability.md)。
 
-- **`Shared\Counter`** — 原子 int64（`get`、`set`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/shared-state/shared-counter.md)
+- **`Shared\Counter`** — 原子 int64 累加器（`get`、`set`、`add`、`compareAndSet`）— 参见 [Counter](docs/zh/shared-state/shared-counter.md)
+- **`Shared\Atomic`** — 完整的 lock-free int64 原语（`load`、`store`、`swap`、`compareAndSet`、`fetchAdd/Sub/And/Or/Xor`），带显式 memory ordering — 参见 [Atomic](docs/zh/shared-state/shared-atomic.md)
 - **`Shared\Flag`** — 支持 `compareAndSet` 的原子 bool，用于一次性状态切换 — 参见 [Flag](docs/zh/shared-state/shared-flag.md)
 - **`Shared\Once`** — 带可重入安全工厂的单次初始化容器 — 参见 [Once](docs/zh/shared-state/shared-once.md)
 - **`Shared\Mutex`** — 带毒化机制的互斥锁，保护存储值，支持可重入与跨线程死锁检测 — 参见 [Mutex](docs/zh/shared-state/shared-mutex.md)
 - **`Shared\Channel`** — 有界 MPMC 队列，Fiber-aware（阻塞 recv 会让出当前 Fiber）— 参见 [Channel](docs/zh/shared-state/shared-channel.md)
 - **`Shared\Map`** — 字符串键并发存储，支持批量 `setMany`/`getMany` 以及嵌套值的循环检测 — 参见 [Map](docs/zh/shared-state/shared-map.md)
 - **`Shared\Pool`** — 有界对象池，严格按线程亲和性分配，支持空闲超时驱逐和工作线程死亡后的混沌回收 — 参见 [Pool](docs/zh/shared-state/shared-pool.md)
+- **`Shared\Registry`** — 按名字键化的句柄（`Registry::counter('hits', fn() => ...)`），让每个工作线程、每次请求都收敛到同一个条目，无需外部存储 — 参见 [Registry](docs/zh/shared-state/shared-registry.md)
 - **内置可观测性** — `oxphp_shared_*` Prometheus 指标 + 内部端口上的 `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON 端点
 - **引用计数 + 生命周期安全** — 句柄不会比注册表条目存活更久；循环检测器会拒绝可能导致内存泄漏的图结构
 - 当规模超出承载时，请参阅 [迁移到外部存储](docs/zh/shared-state/migrating-to-external-store.md)
@@ -156,9 +160,9 @@ OxPHP 用一个容器替代 nginx + PHP-FPM。服务器开箱即用 —— TLS�
 
 - **W3C Trace Context** — 自动传播 `traceparent`/`tracestate`，`$_SERVER['OXPHP_TRACE_ID']` 用于 PHP 日志关联
 - **OpenTelemetry** — 通过 `plugin-otel` 特性进行 OTLP Span 导出（gRPC/HTTP），支持语义化约定、可配置采样和批处理
-- **APM 自动埋点** — 在引擎层面 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）；每次调用自动成为 Span，无需修改代码
-- **`#[OxPHP\Tracing\Trace]` 装饰器** — 通过 PHP 8 属性注解任意函数或方法，自动创建 Span
-- **PHP 追踪 SDK** — 10 个 `oxphp_trace_*()` 函数，支持手动创建 Span、设置属性、记录事件、错误记录和追踪上下文传播
+- **APM 自动埋点** — 在引擎层面 hook 跨 PDO、mysqli、cURL、Redis、Memcached 和文件 I/O 的 PHP 内部函数；每次调用自动成为 Span，无需修改代码
+- **`#[OxPHP\Apm\Trace]` 装饰器** — 通过 PHP 8 属性注解任意函数或方法，自动创建 Span
+- **PHP 追踪 SDK** — 10 个 `oxphp_apm_*()` 函数（`start`、`end`、`attribute`、`event`、`error`、`status`、`header`、`trace`、`trace_id`、`span_id`），支持手动创建 Span、设置属性、记录事件、错误记录和追踪上下文传播
 - **Prometheus 指标** — 通过 `/metrics` 暴露，按工作进程统计，零外部依赖 — 参见 [指标](docs/zh/operations/metrics.md)
 - **健康检查**端点 `/health` — 支持 K8s 就绪探针 — 参见 [健康检查](docs/zh/operations/health-checks.md)
 - **内部服务器** 在独立端口上提供 health、metrics 和运行时配置 — 参见 [内部服务器](docs/zh/features/internal-server.md)
@@ -258,7 +262,7 @@ flowchart LR
     subgraph PHP ["PHP 工作线程"]
         SDK["PHP 追踪 SDK<br/>oxphp_trace_*()"]
         DEC["#[OxPHP\\Apm\\Trace]<br/>装饰器"]
-        HOOKS["APM hooks（33 个函数）<br/>PDO · mysqli · cURL<br/>Redis · Memcached · 文件 I/O"]
+        HOOKS["APM hooks（≈33 个函数）<br/>PDO · mysqli · cURL<br/>Redis · Memcached · 文件 I/O"]
         STACK[("SPAN_STACK<br/>thread-local")]
         PHPERR["PHP 错误"]
     end
@@ -300,84 +304,31 @@ flowchart LR
 
 所有配置均通过环境变量设置 —— 无需配置文件。
 
+核心变量 —— 大多数部署起一个服务所需的内容：
+
 | 变量 | 默认值 | 描述 |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | 监听地址和端口 |
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
 | `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional，`*.php` = Framework，非 `.php` = SPA。相对路径基于 `DOCUMENT_ROOT` 解析 |
 | `WORKER_MODE_ENABLED` | `false` | 启用持久化工作进程模式。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
-| `TOKIO_WORKERS` | `0`（CPU / 2，最少 1） | 处理连接的 HTTP 服务器线程数；`0` = 自动 |
-| `EXECUTOR` | `sapi` | PHP 执行器：`sapi`（真实 PHP）或 `stub`（测试模式） |
-| `PHP_WORKERS` | `0`（CPU / 2，最少 1） | 工作池模式：`N` = 固定数量，`MIN:MAX` = 动态伸缩，`0` = 自动 |
-| `PHP_WORKERS_IDLE_SECONDS` | `30` | 动态模式下工作线程的空闲超时时间 |
-| `QUEUE_CAPACITY` | `PHP_WORKERS * 128` | 服务器返回 529 前队列中允许的最大待处理请求数 |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭的排空等待超时 |
-| `LOG_LEVEL` | `info` | 日志级别：`error`、`warn`、`info`、`debug`、`trace` |
 | `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
-| `RATE_LIMIT` | `0`（关闭） | 每个 IP 每个时间窗口内的最大请求数 |
-| `RATE_WINDOW_SECONDS` | `60` | 限流时间窗口（秒） |
-| `HEADER_TIMEOUT_SECONDS` | `5` | 请求头读取超时（Slowloris 防护） |
-| `REQUEST_TIMEOUT_SECONDS` | `120` | 整体请求超时；`0` 表示禁用 |
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
-| `ERROR_PAGES_DIR` | *(未设置)* | 自定义错误页面目录（文件名格式：`{status}.html`） |
-| `STATIC_MAX_AGE` | `30d` | 静态文件的 `Cache-Control: max-age`（`30s`、`5m`、`2h`、`30d`、`1y`、`off`）。替代已弃用的 `STATIC_CACHE_TTL`。 |
-| `STATIC_REVALIDATE` | `off` | 设为 `on` 启用内存内容缓存的 mtime 重新验证。替代已弃用的 `STATIC_CACHE`（其 `off` 表示同样含义）。 |
-| `COMPRESSION_LEVEL` | `4` | Brotli 压缩质量（0 = 关闭，1-11） |
-| `ACCESS_LOG` | *(关闭)* | 每请求 JSON 日志：`all`、`error`，或不设置 |
-| `MAX_CONNECTIONS` | `10000` | 最大并发连接数 |
-| `WORKER_MAX_MEMORY_MIB` | `0`（无限制） | 每个工作进程回收前的最大内存（MiB）。应用层主动回收请使用 `Worker::scheduleExit()` |
 | `SUPERGLOBALS_ENABLED` | `true` | 填充 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`；设为 `false` 时仅使用 `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0`（禁用） | `oxphp_async()` 专用异步工作线程数 |
-| `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS * 64` | 队列中允许的最大待处理异步任务数；队列满时拒绝任务 |
-| `TRACE_CONTEXT` | `false` | W3C Trace Context 传播（`traceparent`/`tracestate`）。当 `OTEL_ENABLED=true` 时自动启用 |
-| `TRUSTED_PROXIES` | *（未设置）* | 受信任代理 CIDR 列表：`10.0.0.0/8,172.16.0.0/12` 或 `private`（所有 RFC-1918）。从 `Forwarded`/`X-Forwarded-*` 头中提取真实客户端 IP |
-| `SYMLINK_ALLOW_PATHS` | *（未设置）* | 逗号分隔的路径（绝对或相对于 `DOCUMENT_ROOT`），符号链接可解析至这些目标。默认为空时，符号链接目标必须留在 `DOCUMENT_ROOT` 内。参见 [符号链接允许路径](docs/zh/security/symlink-allow-paths.md) |
-| `PHP_DENY_PATHS` | *（未设置）* | 禁止执行 PHP 的路径 glob 模式（文件或目录）。仅限传统模式。示例：`/uploads/**,/cache/**,/admin/legacy.php` |
-| `PHP_DENY_FALLBACK` | `404` | HTTP 状态码（400–599）或指向 PHP 回退脚本的路径。命中 `PHP_DENY_PATHS` 时返回该状态码（可与 `ERROR_PAGES_DIR` 中的自定义 HTML 配合），或在 `$_SERVER` 中携带 `OXPHP_DENIED_PATH` / `OXPHP_DENIED_PATTERN` 执行回退脚本 |
 
-> **已弃用的环境变量**（仍会被解析，启动时输出 `WARN`）：`INDEX_FILE` → 请使用 `ENTRY_FILE`。`WORKER_FILE` → 请使用 `WORKER_MODE_ENABLED=true ENTRY_FILE=...`。`PHP_DENY_DIRS` → 请使用 `PHP_DENY_PATHS`。旧形式将在后续版本中移除。
+工作池、队列、限流、超时、TLS 细调、静态文件缓存、压缩、访问日志、受信任代理、PHP 执行拒绝规则以及所有插件级变量，均整合到统一参考文档 —— 完整表格参见 [配置](docs/zh/operations/configuration.md)。
 
 > **布尔值**（大小写不敏感，自动去除首尾空白）：真值 = `on` / `true` / `1` / `yes`；假值 = `off` / `false` / `0` / `no`。规范集合之外的非空取值——例如 `ture` 之类的拼写错误——都会在启动时报错并指出变量名。未设置的变量或空赋值（`FOO=`）会回退到默认值，这样 Docker Compose / Kubernetes 中 `FOO=${FOO}` 这样的替换在宿主变量缺失时也能正常工作。
 
-### OpenTelemetry（`plugin-otel` 特性）
+### OpenTelemetry、APM 和 Shared State
 
-| 变量 | 默认值 | 描述 |
-|---|---|---|
-| `OTEL_ENABLED` | `false` | 启用 Span 导出。隐含 `TRACE_CONTEXT=true` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP 收集器端点 |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc`（端口 4317）或 `http/protobuf`（端口 4318） |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
-| `OTEL_EXPORTER_OTLP_HEADERS` | *(未设置)* | 托管后端的认证头（`key=value,key=value`） |
-| `OTEL_SERVICE_NAME` | `oxphp` | 导出追踪中的服务名称 |
-| `OTEL_SERVICE_VERSION` | *(未设置)* | 导出追踪中的服务版本 |
-| `OTEL_RESOURCE_ATTRIBUTES` | *(未设置)* | 资源属性（`key=value,key=value`） |
-| `OTEL_TRACES_SAMPLER` | `parentbased_traceidratio` | 采样器：`always_on`、`always_off`、`traceidratio`、`parentbased_traceidratio` |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | 采样比率（0.0-1.0） |
+插件级环境变量（`OTEL_*`、`OTEL_APM_*` 和 `SHARED_*` 系列）整合在统一配置参考中，作为单一真相来源：
 
-> **注意：** 无效或超出范围的 `OTEL_TRACES_SAMPLER_ARG` 值会被钳制到 `[0.0, 1.0]` 并在 warn 级别记录日志。未知的 `OTEL_TRACES_SAMPLER` 值会回退到 `parentbased_traceidratio` 并记录日志。
-
-### APM（`plugin-apm` 特性）
-
-| 变量 | 默认值 | 描述 |
-|---|---|---|
-| `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获、PHP 追踪 SDK。需要 `OTEL_ENABLED=true` |
-| `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的查询将标记 `oxphp.db.slow=true` |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中 |
-
-### 共享状态（`plugin-shared` 特性）
-
-| 变量 | 默认值 | 描述 |
-|---|---|---|
-| `SHARED_ENABLED` | `true` | `OxPHP\Shared\*` 层的总开关 |
-| `SHARED_MAX_ENTRIES` | `100000` | 注册表条目最大数量（counters + flags + maps + …），超出后抛出 `OutOfCapacityException` |
-| `SHARED_MAX_BYTES` | `1073741824`（1 GiB） | Shared\* 条目聚合内存的软上限 |
-| `SHARED_SOFT_LIMIT_RATIO` | `0.7` | 触发 `oxphp_shared_capacity_warn` 的 `MAX_*` 占用比例 |
-| `SHARED_LOCK_DIAGNOSTICS` | `warn`（release）/ `strict`（debug） | 互斥锁死锁检测：`off`、`warn`（仅记录日志）、`strict`（打破环路） |
-| `SHARED_CYCLE_DETECT_DEPTH` | `16` | 嵌套 Shareable 插入循环检查的最大 BFS 深度 |
-| `SHARED_CYCLE_DETECT_EDGES` | `10000` | 单次循环检查最多遍历的边数（防御稠密图） |
-| `SHARED_INTROSPECTION_ENABLED` | `true` | 内部服务器上 `/__ox_shared/*` JSON 端点开关 |
-| `SHARED_METRICS_ENABLED` | `true` | `oxphp_shared_*` Prometheus 指标系列开关 |
+- **OpenTelemetry**（`plugin-otel`）：[配置 → OpenTelemetry](docs/zh/operations/configuration.md#opentelemetry)。端到端的导出管道参见 [分布式追踪指南](docs/zh/features/distributed-tracing.md)。
+- **APM**（`plugin-apm`）：[配置 → APM](docs/zh/operations/configuration.md#apm)。要求 `OTEL_ENABLED=true`。
+- **Shared State**（`plugin-shared`）：[配置 → Shared State](docs/zh/operations/configuration.md#shared-state)。概念级讲解参见 [共享状态指南](docs/zh/shared-state/shared-state.md)。
 
 ---
 
@@ -397,42 +348,15 @@ docker compose build
 DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
-## 开发
-
-```bash
-# 完整验证（宿主机）
-cargo fmt -- --check && cargo clippy --no-default-features -- -D warnings && cargo test --no-default-features
-
-# Docker 冒烟测试
-docker compose build && docker compose up -d
-curl http://localhost/
-curl "http://localhost/test_superglobals.php?foo=bar"
-curl -X POST -d "key=value" http://localhost/test_superglobals.php
-curl -H "Cookie: session=abc" http://localhost/test_superglobals.php
-
-# 异步 Promise
-curl http://localhost/test_async.php
-curl http://localhost/test_async_parallel.php
-curl http://localhost/test_async_die.php
-
-# 内部服务器
-INTERNAL_ADDR=127.0.0.1:9090 ./target/release/oxphp &
-curl http://localhost:9090/health
-curl http://localhost:9090/metrics
-```
-
----
-
 ## 路线图
 
 > 以下项目未按优先级排序。列入此表并不代表一定会实现。
 
 | Feature | 描述 |
 |---|---|
-| **PHP 8.5** | 支持 PHP 8.5 |
 | ~~**Trace Context (W3C)**~~ | ✅ 已实现 — 自动传播 `traceparent` / `tracestate` 头（W3C 规范），通过 `TRACE_CONTEXT=true` 启用 |
 | ~~**OpenTelemetry**~~ | ✅ 已实现 — 通过 `plugin-otel` 特性进行 OTLP 追踪导出，W3C context 传播，每请求 Span 支持标准语义化约定 |
-| ~~**APM & Auto-Instrumentation**~~ | ✅ 已实现 — `plugin-apm` 特性：自动追踪 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O），`#[OxPHP\Tracing\Trace]` 装饰器，10 个 `oxphp_trace_*()` SDK 函数，PHP 错误捕获 |
+| ~~**APM & Auto-Instrumentation**~~ | ✅ 已实现 — `plugin-apm` 特性：跨 PDO、mysqli、cURL、Redis、Memcached 和文件 I/O 自动追踪 PHP 内部函数，`#[OxPHP\Apm\Trace]` 装饰器，10 个 `oxphp_apm_*()` SDK 函数，PHP 错误捕获 |
 | **Custom Metrics** | 提供 PHP API，允许从用户代码注册应用自定义的 Prometheus 指标 |
 | ~~**Built-in PHP Profiler**~~ | ✅ 已实现 — `plugin-profiler` 特性：按请求性能分析，支持 xhprof/speedscope/pprof/collapsed 格式，PHP SDK，属性触发，内存 LRU + 磁盘保留，HTTP 推送至 xhgui，`/__profiler/` 内部路由，Prometheus 指标 — 参见 [性能分析](docs/zh/features/profiling.md) |
 | **Dockerfile.bookworm** | 提供基于 Debian Bookworm 的官方镜像，作为 Alpine 的替代方案 |
@@ -444,6 +368,9 @@ curl http://localhost:9090/metrics
 | ~~**Promise API**~~ | ✅ 已实现 — `oxphp_async()` / `oxphp_async_await()`，支持专用线程池、可移植序列化和异常安全 |
 | ~~**Fiber Multiplexing**~~ | ✅ 已实现 — 每个工作线程通过 PHP 8.4 Fiber 处理多个并发请求；`oxphp_sleep()` / `oxphp_usleep()` 和 `oxphp_async_await()` 协作式让出 Fiber |
 | **Diagnostics** | 生产诊断工具：检查操作系统限制（ulimit、TCP backlog、epoll/kqueue、容器设置），识别性能瓶颈（工作队列深度、锁竞争、GC/内存分配压力、ZTS 统计），并给出针对性的可操作建议 |
+| **TLS hot-reload** | 无需重启即可重新加载 TLS 证书和密钥 —— 兼容 cert-manager / SPIRE / istiod 的短生命周期轮换，免除「每次轮换都滚动重启」的变通方案 |
+| **SPIFFE Workload API** | SPIFFE/SPIRE workload identity 的原生客户端：通过 Unix socket 流式接收 SVID，并带有节点级密码学证明 —— 作为文件挂载式证书分发的可选替代方案 |
+| **FIPS-validated TLS** | Cargo feature 开关，将 `rustls` + `ring` 切换为带 `fips` 特性的 `rustls` + `aws-lc-rs`，用于需要 FIPS 140-2 / 140-3 合规的受监管部署 |
 
 ## 文档
 
@@ -454,3 +381,7 @@ curl http://localhost:9090/metrics
 ## 许可证
 
 [AGPL-3.0](LICENSE)
+
+---
+
+<p align="center"><sub><i>在审慎的人类引导下，由 AI 构建并持续演进。</i></sub></p>
