@@ -2,23 +2,46 @@
 /**
  * OxPHP — Default page.
  *
- * Confirms the server is running and PHP is operational.
+ * Serves "/" as the landing page, "/robots.txt", and 404 for any other
+ * path. Works in both classic per-request mode and worker mode
+ * (WORKER_MODE_ENABLED=true): the request logic lives in a handler the
+ * server invokes once per request.
  * CLI clients (curl, wget, httpie) get clean plain text.
  * Browsers get a styled HTML page.
  */
 
-$server   = $_SERVER['SERVER_SOFTWARE'] ?? 'OxPHP';
-$php_ver  = PHP_VERSION;
-$sapi     = PHP_SAPI;
-$time     = gmdate('Y-m-d H:i:s') . ' UTC';
-$ua       = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$handle = static function (): void {
+    $req  = oxphp_http_request();
+    $path = $req->path();
+    $ua   = $req->header('User-Agent') ?? '';
 
-// ── CLI clients → plain text ──────────────────────────────────────
+    // ── /robots.txt ───────────────────────────────────────────────
+    if ($path === '/robots.txt') {
+        header('Content-Type: text/plain; charset=utf-8');
+        echo "User-agent: *\nDisallow:\n";
+        return;
+    }
 
-if (preg_match('/^(curl|Wget|HTTPie|fetch|http)/i', $ua)) {
-    header('Content-Type: text/plain; charset=utf-8');
+    $server  = $_SERVER['SERVER_SOFTWARE'] ?? 'OxPHP';
+    $php_ver = PHP_VERSION;
+    $sapi    = PHP_SAPI;
+    $time    = gmdate('Y-m-d H:i:s') . ' UTC';
 
-    echo <<<TEXT
+    $not_found = $path !== '/';
+    if ($not_found) {
+        http_response_code(404);
+    }
+
+    // ── CLI clients → plain text ──────────────────────────────────
+    if (preg_match('/^(curl|Wget|HTTPie|fetch|http)/i', $ua)) {
+        header('Content-Type: text/plain; charset=utf-8');
+
+        if ($not_found) {
+            echo "\n  404 Not Found\n\n  {$path}\n\n";
+            return;
+        }
+
+        echo <<<TEXT
 
       OxPHP is running.
 
@@ -29,34 +52,35 @@ if (preg_match('/^(curl|Wget|HTTPie|fetch|http)/i', $ua)) {
       https://github.com/oxphp/oxphp
 
     TEXT;
-    echo "\n";
-    return;
-}
+        echo "\n";
+        return;
+    }
 
-// ── Browsers → HTML ───────────────────────────────────────────────
-
-$esc = htmlspecialchars($server, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-?>
+    // ── Browsers → HTML ───────────────────────────────────────────
+    $esc   = htmlspecialchars($server, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $epath = htmlspecialchars($path, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OxPHP</title>
+<meta name="description" content="OxPHP — an asynchronous PHP application server written in Rust, replacing nginx and PHP-FPM with a single binary.">
+<title><?= $not_found ? '404 — OxPHP' : 'OxPHP' ?></title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
     --bg: #0f1117;
     --text: #e2e4e9;
-    --subtitle: #6b6f82;
-    --label: #4a4e5e;
-    --value: #8b8fa3;
+    --subtitle: #9296a8;
+    --label: #7e8294;
+    --value: #b0b5cc;
     --ox: #B7472A;
     --php: #777BB4;
     --glow-ox: rgba(183,71,42,0.15);
     --glow-php: rgba(119,123,180,0.08);
-    --link: #4a4e5e;
+    --link: #7e8294;
     --link-hover: #777BB4;
     color-scheme: dark;
 }
@@ -65,14 +89,14 @@ $esc = htmlspecialchars($server, ENT_QUOTES | ENT_HTML5, 'UTF-8');
     :root {
         --bg: #f5f5f7;
         --text: #1d1d1f;
-        --subtitle: #86868b;
-        --label: #aeaeb2;
-        --value: #48484a;
+        --subtitle: #6e6e73;
+        --label: #6e6e73;
+        --value: #232323;
         --ox: #A33D22;
         --php: #5b5ea6;
         --glow-ox: rgba(163,61,34,0.08);
         --glow-php: rgba(91,94,166,0.05);
-        --link: #aeaeb2;
+        --link: #6e6e73;
         --link-hover: #5b5ea6;
         color-scheme: light;
     }
@@ -130,7 +154,7 @@ h1 {
 
 .info .row { display: flex; gap: 16px; }
 .info .label { color: var(--label); min-width: 64px; text-align: right; }
-.info .value { color: var(--value); }
+.info .value { color: var(--value); font-weight: 600; }
 
 .link {
     margin-top: 40px;
@@ -146,7 +170,17 @@ h1 {
 </style>
 </head>
 <body>
-<div class="page">
+<main class="page">
+<?php if ($not_found): ?>
+    <h1><span class="ox">4</span><span class="php">04</span></h1>
+    <p class="subtitle">not found</p>
+    <div class="info">
+        <div class="row"><span class="label">path</span> <span class="value"><?= $epath ?></span></div>
+    </div>
+    <div class="link">
+        <a href="/">back to start</a>
+    </div>
+<?php else: ?>
     <h1><span class="ox">Ox</span><span class="php">PHP</span></h1>
     <p class="subtitle">is running<span class="cursor"></span></p>
     <div class="info">
@@ -157,6 +191,17 @@ h1 {
     <div class="link">
         <a href="https://github.com/oxphp/oxphp">github.com/oxphp/oxphp</a>
     </div>
-</div>
+<?php endif; ?>
+</main>
 </body>
 </html>
+<?php
+};
+
+// ── Dispatch: worker mode loops internally, classic mode runs once ──
+
+if (oxphp_is_worker()) {
+    oxphp_worker($handle);
+} else {
+    $handle();
+}
