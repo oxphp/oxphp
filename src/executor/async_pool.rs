@@ -317,6 +317,28 @@ fn async_worker_thread(
                     &mut ser_len,
                 )
             };
+            // Pin any nested `Shared\*` entries the return value references
+            // BEFORE freeing the retval zval below. The serialized bytes carry
+            // only tag-7 ids; the retval zval is the entries' last strong ref,
+            // so the resolve must run while it still holds them — otherwise a
+            // fire-and-forget `Shared\*` is freed here and the awaiting fiber
+            // re-resolves a dead id to NULL. The keepalive rides the result and
+            // drops only after the fiber deserializes (in await_dispatch_callback).
+            let keepalive: Option<Box<dyn std::any::Any + Send>> =
+                if ser_rc == 0 && !ser_buf.is_null() {
+                    #[cfg(feature = "plugin-shared")]
+                    {
+                        let bytes = unsafe { std::slice::from_raw_parts(ser_buf, ser_len) };
+                        crate::plugins::ox_shared::value::resolve_transit_keepalive(bytes)
+                    }
+                    #[cfg(not(feature = "plugin-shared"))]
+                    {
+                        None
+                    }
+                } else {
+                    None
+                };
+
             // Free the original retval contents (on this thread's heap — safe)
             unsafe { ffi::oxphp_deep_free_zval(retval_buf as *mut c_void) };
             // Free the Rust-allocated retval container
@@ -338,7 +360,7 @@ fn async_worker_thread(
                     serialized_value_len: ser_len,
                     exception_class: None,
                     exception_message: None,
-                    keepalive: None,
+                    keepalive,
                 }
             }
         } else {
