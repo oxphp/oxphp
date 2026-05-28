@@ -397,6 +397,40 @@ pub fn scan_shared_refs(
     Ok(out)
 }
 
+/// Scan portbuf wire bytes for nested `Shared\*` refs and resolve each into a
+/// strong keepalive, type-erased into a box that pins those entries alive until
+/// the receiver deserializes the bytes (re-resolving each tag-7 id through the
+/// registry on the far thread). Used by the async-pool return path, where the
+/// serialized retval is the value's last strong ref: without this, a
+/// fire-and-forget `Shared\*` returned from an `oxphp_async()` closure is freed
+/// before the awaiting fiber materializes it, yielding NULL.
+///
+/// Returns `None` for the common no-ref case or a non-portbuf buffer (which
+/// carries no resolvable ref). Unlike `Shared\Channel`, this runs **no** cycle
+/// detection: an async result is not a persistent container — the keepalive
+/// drops after a single await's deserialize, so it cannot close a long-lived
+/// strong-ref cycle.
+pub fn resolve_transit_keepalive(bytes: &[u8]) -> Option<Box<dyn std::any::Any + Send>> {
+    let roots = scan_shared_refs(bytes).ok()?;
+    if roots.is_empty() {
+        return None;
+    }
+    let reg = crate::plugins::ox_shared::registry::REGISTRY.get()?;
+    let mut keepalive: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
+    for r in &roots {
+        // A ref already dead here is near-impossible: the caller resolves while
+        // the source zval still pins these Arcs (before its deep-free). Degrade
+        // by skipping — the receiver would observe NULL for that one ref.
+        if let Ok(arc) = reg.lookup(r.id) {
+            keepalive.push(SharedRefOwned::from_arc(arc));
+        }
+    }
+    if keepalive.is_empty() {
+        return None;
+    }
+    Some(Box::new(keepalive))
+}
+
 fn scan_one(
     buf: &[u8],
     pos: &mut usize,
@@ -651,5 +685,77 @@ mod tests {
         assert!(scan_shared_refs(&[]).is_err());
         assert!(scan_shared_refs(&[7u8]).is_err()); // tag-7 missing body
         assert!(scan_shared_refs(&[5u8, 10, 0, 0, 0]).is_err()); // string len=10, no data
+    }
+
+    // ── resolve_transit_keepalive ─────────────────────────────────────────
+
+    /// Idempotent: the process registry is a `OnceLock` shared with the other
+    /// `ox_shared` test modules; the first caller wins and the rest are no-ops.
+    fn ensure_test_registry() {
+        use crate::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
+        use crate::plugins::ox_shared::registry::init_registry;
+        init_registry(SharedConfig {
+            enabled: true,
+            max_entries: 10_000,
+            max_bytes: 1 << 30,
+            soft_limit_ratio: 0.7,
+            metrics_enabled: true,
+            introspection_enabled: true,
+            introspection_preview_enabled: true,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            max_value_size: 1 << 20,
+            max_channel_bytes: 64 << 20,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        });
+    }
+
+    #[test]
+    fn resolve_transit_keepalive_pins_then_releases_nested_entry() {
+        use crate::plugins::ox_shared::registry::registry;
+        use crate::plugins::ox_shared::types::counter::CounterInner;
+
+        ensure_test_registry();
+        let reg = registry();
+        // A Shared\Counter entry stands in for the value an async closure returns.
+        let entry = reg
+            .insert(SharedType::Counter, Arc::new(CounterInner::new(7)))
+            .unwrap();
+        let id = entry.id;
+        // tag-7 portbuf bytes referencing it (as oxphp_portable_serialize emits).
+        let mut bytes = vec![7u8, SharedType::Counter as u8];
+        bytes.extend_from_slice(&id.to_le_bytes());
+
+        let keepalive = resolve_transit_keepalive(&bytes).expect("nested ref resolved");
+
+        // Drop the producer's external strong ref; the keepalive must keep the
+        // entry alive in transit — the receiver re-resolves the id after this.
+        let weak = Arc::downgrade(&entry);
+        drop(entry);
+        assert!(
+            weak.upgrade().is_some(),
+            "keepalive must pin the in-transit entry"
+        );
+
+        // Releasing the keepalive drops the last strong ref → entry collected.
+        drop(keepalive);
+        assert!(
+            weak.upgrade().is_none(),
+            "entry must collect once the keepalive drops"
+        );
+    }
+
+    #[test]
+    fn resolve_transit_keepalive_none_without_nested_refs() {
+        // Plain Long(7): tag 3 + 8 LE bytes — no nested Shared\* ref.
+        let mut bytes = vec![3u8];
+        bytes.extend_from_slice(&7i64.to_le_bytes());
+        assert!(resolve_transit_keepalive(&bytes).is_none());
+        // Empty / non-portbuf buffer degrades to None, never panics.
+        assert!(resolve_transit_keepalive(&[]).is_none());
     }
 }

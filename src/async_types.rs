@@ -66,10 +66,12 @@ pub struct AsyncResult {
     pub exception_message: Option<String>,
     /// Type-erased keepalive that pins nested `Shared\*` entries alive until
     /// the receiving fiber deserializes `serialized_value`. The concrete type
-    /// is owned by the channel layer (`SmallVec<[SharedRefOwned; 1]>`); this
-    /// layer only holds it so it drops at the right time — at the end of
-    /// `await_dispatch_callback`, after `oxphp_portable_deserialize`. `None`
-    /// for every non-channel result and the common no-shared-ref case.
+    /// is `SmallVec<[SharedRefOwned; 1]>`, produced by the `ox_shared` layer —
+    /// either by a Channel's waker delivery or by the async-pool return path
+    /// (`value::resolve_transit_keepalive`) when a closure returns a `Shared\*`.
+    /// This layer only holds it so it drops at the right time — at the end of
+    /// `await_dispatch_callback`, after `oxphp_portable_deserialize`. `None` in
+    /// the common no-shared-ref case (every scalar/string/array result).
     pub keepalive: Option<Box<dyn std::any::Any + Send>>,
 }
 
