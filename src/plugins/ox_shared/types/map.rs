@@ -2711,9 +2711,14 @@ fn register_key_cursor_class(ctx: &mut PluginContext) -> Result<(), PluginError>
             }
             Ok(())
         })
-        // ── key(): int|string ──────────────────────────────────────
+        // ── key(): mixed ────────────────────────────────────────────
+        // Keys are int|string, but the bridge return-type wire format
+        // can't encode a union mask, so declare `mixed` to match the
+        // `Iterator::key(): mixed` contract. Anything narrower would
+        // drop to "no return type" and trip PHP's tentative-return-type
+        // deprecation. The stub keeps the precise `int|string` hint.
         .method("key")
-        .returns(PhpType::Union(vec![PhpType::Int, PhpType::String]))
+        .returns(PhpType::Mixed)
         .handler(|call| {
             let sp = cursor_state_ptr(call)?;
             // SAFETY: see rewind. Read the key out before touching call.
