@@ -6,3 +6,11 @@ files/test_upload_multiple | POST | -F "file1=@$FIXTURES_DIR/small.txt" -F "file
 files/test_upload_array | POST | -F "files[]=@$FIXTURES_DIR/small.txt" -F "files[]=@$FIXTURES_DIR/small.txt" | |
 files/test_upload_content | POST | -F "file=@$FIXTURES_DIR/small.txt" | |
 files/test_upload_no_file | POST | -d "" | |
+files/test_object_file_single | POST | -F "avatar=@$FIXTURES_DIR/small.txt" | |
+files/test_object_files_all | POST | -F "a=@$FIXTURES_DIR/small.txt" -F "b=@$FIXTURES_DIR/small.txt" | |
+files/test_object_files_array | POST | -F "photos[]=@$FIXTURES_DIR/small.txt" -F "photos[]=@$FIXTURES_DIR/small.txt" | |
+files/test_object_file_type | POST | -F "doc=@$FIXTURES_DIR/small.txt;type=application/x-bogus" | |
+files/test_object_file_move | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+files/test_object_files_array_integrity | POST | -F "photos[]=@$FIXTURES_DIR/small.txt" -F "photos[]=@$FIXTURES_DIR/small.txt" | |
+files/test_object_file_assoc | POST | -F "docs[passport]=@$FIXTURES_DIR/small.txt" -F "docs[license]=@$FIXTURES_DIR/small.txt" | |
+files/test_object_file_nofile | POST | -F "avatar=@/dev/null;filename=" | |
