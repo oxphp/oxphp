@@ -2,6 +2,12 @@
 
 All notable changes to OxPHP are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- `OxPHP\Http\Request::file()` and `Request::files()` now return the uploaded files instead of always `null` / `[]`. The object upload API documented in `docs/en/php/request-api.md` is wired to the request's parsed `$_FILES`: `file('avatar')` yields an `OxPHP\Http\UploadedFile` (or the first file of an array field `name="avatar[]"`, or `null` when the field is absent), `files('photos')` returns every file of one field, and `files()` returns a flat list of every upload. The scalar (`name="avatar"`), sequential-array (`name="avatar[]"`) and associative-array (`name="avatar[key]"`) `$_FILES` shapes are all handled. The `UploadedFile` accessors (`name()`, `clientType()`, content-detected `type()`, `size()`, `tmpPath()`, `error()`, `isValid()`, `moveTo()`) were already present; only the two `Request` entry points were stubbed, so code following the documented examples saw no files and had to fall back to the `$_FILES` superglobal.
+
 ## [0.6.0] - 2026-05-28
 
 ### Migration from 0.5.0

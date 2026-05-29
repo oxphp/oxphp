@@ -597,26 +597,132 @@ ZEND_METHOD(OxPHP_Http_Request, session) {
 }
 /* }}} */
 
-/* {{{ OxPHP\Http\Request::file(string $name): null — placeholder */
+/* Construct an OxPHP\Http\UploadedFile from one rfc1867 entry's scalar parts.
+ * Each zval is a slot of the $_FILES sub-arrays (name/type/tmp_name/error/size);
+ * zend_update_property copies them, so the object owns its own refs. */
+static void oxphp_new_uploaded_file(zval *out, zval *z_name, zval *z_type,
+        zval *z_tmp, zval *z_err, zval *z_size) {
+    object_init_ex(out, oxphp_http_uploaded_file_ce);
+    zend_object *obj = Z_OBJ_P(out);
+    if (z_name)  zend_update_property(oxphp_http_uploaded_file_ce, obj, "name", sizeof("name")-1, z_name);
+    if (z_type)  zend_update_property(oxphp_http_uploaded_file_ce, obj, "clientType", sizeof("clientType")-1, z_type);
+    if (z_tmp)   zend_update_property(oxphp_http_uploaded_file_ce, obj, "tmpPath", sizeof("tmpPath")-1, z_tmp);
+    if (z_err)   zend_update_property(oxphp_http_uploaded_file_ce, obj, "error", sizeof("error")-1, z_err);
+    if (z_size)  zend_update_property(oxphp_http_uploaded_file_ce, obj, "size", sizeof("size")-1, z_size);
+}
+
+/* Resolve one slot of a parallel $_FILES sub-array (name/type/error/size),
+ * keyed the same way as the tmp_name slot being iterated. PHP keys these arrays
+ * by integer for name="field[]" and by string for name="field[key]"; pick
+ * whichever the current tmp_name key uses. */
+static zval *oxphp_field_slot(zval *arr, zend_string *str_key, zend_ulong num_key) {
+    if (!arr || Z_TYPE_P(arr) != IS_ARRAY) {
+        return NULL;
+    }
+    return str_key ? zend_hash_find(Z_ARRVAL_P(arr), str_key)
+                   : zend_hash_index_find(Z_ARRVAL_P(arr), num_key);
+}
+
+/* Append every UploadedFile of one $_FILES field to `out`. Handles the scalar
+ * shape (single file) and both array shapes — sequential (name="field[]") and
+ * associative (name="field[key]") — by pairing each tmp_name slot with the
+ * same-keyed slot of the parallel name/type/error/size arrays. */
+static void oxphp_append_field_files(zval *out, zval *entry) {
+    zval *z_name = zend_hash_str_find(Z_ARRVAL_P(entry), "name", sizeof("name")-1);
+    zval *z_type = zend_hash_str_find(Z_ARRVAL_P(entry), "type", sizeof("type")-1);
+    zval *z_tmp  = zend_hash_str_find(Z_ARRVAL_P(entry), "tmp_name", sizeof("tmp_name")-1);
+    zval *z_err  = zend_hash_str_find(Z_ARRVAL_P(entry), "error", sizeof("error")-1);
+    zval *z_size = zend_hash_str_find(Z_ARRVAL_P(entry), "size", sizeof("size")-1);
+    if (!z_tmp) {
+        return;
+    }
+    if (Z_TYPE_P(z_tmp) == IS_ARRAY) {
+        zend_ulong idx;
+        zend_string *key;
+        zval *f_tmp;
+        ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(z_tmp), idx, key, f_tmp) {
+            zval *f_name = oxphp_field_slot(z_name, key, idx);
+            zval *f_type = oxphp_field_slot(z_type, key, idx);
+            zval *f_err  = oxphp_field_slot(z_err, key, idx);
+            zval *f_size = oxphp_field_slot(z_size, key, idx);
+            zval file_obj;
+            oxphp_new_uploaded_file(&file_obj, f_name, f_type, f_tmp, f_err, f_size);
+            add_next_index_zval(out, &file_obj);
+        } ZEND_HASH_FOREACH_END();
+    } else {
+        zval file_obj;
+        oxphp_new_uploaded_file(&file_obj, z_name, z_type, z_tmp, z_err, z_size);
+        add_next_index_zval(out, &file_obj);
+    }
+}
+
+/* {{{ OxPHP\Http\Request::file(string $name): ?UploadedFileInterface
+ * Returns the uploaded file for `$name`, or the first file for an array field
+ * (name="$name[]" / name="$name[key]"), or null when the field is absent or
+ * carries no files. */
 ZEND_METHOD(OxPHP_Http_Request, file) {
     zend_string *name;
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(name)
     ZEND_PARSE_PARAMETERS_END();
-    /* File support implemented in Task 5 */
-    RETURN_NULL();
+
+    zval *files = &PG(http_globals)[TRACK_VARS_FILES];
+    if (Z_TYPE_P(files) != IS_ARRAY) {
+        RETURN_NULL();
+    }
+    zval *entry = zend_hash_find(Z_ARRVAL_P(files), name);
+    if (!entry || Z_TYPE_P(entry) != IS_ARRAY) {
+        RETURN_NULL();
+    }
+
+    /* Expand the field once, then hand back its first file (or null when the
+     * field carries none). Sharing oxphp_append_field_files() keeps the scalar,
+     * sequential-array and associative-array shapes resolved in one place. */
+    zval list;
+    array_init(&list);
+    oxphp_append_field_files(&list, entry);
+    zval *first = zend_hash_index_find(Z_ARRVAL(list), 0);
+    if (first) {
+        ZVAL_COPY(return_value, first);
+    } else {
+        ZVAL_NULL(return_value);
+    }
+    zval_ptr_dtor(&list);
 }
 /* }}} */
 
-/* {{{ OxPHP\Http\Request::files(?string $name = null): array — placeholder */
+/* {{{ OxPHP\Http\Request::files(?string $name = null): array
+ * Without an argument, returns every uploaded file as a flat list. With a field
+ * name, returns all files for that field (supports name="$name[]" and
+ * name="$name[key]"). */
 ZEND_METHOD(OxPHP_Http_Request, files) {
     zend_string *name = NULL;
     ZEND_PARSE_PARAMETERS_START(0, 1)
         Z_PARAM_OPTIONAL
         Z_PARAM_STR_OR_NULL(name)
     ZEND_PARSE_PARAMETERS_END();
-    /* File support implemented in Task 5 */
+
     array_init(return_value);
+
+    zval *files = &PG(http_globals)[TRACK_VARS_FILES];
+    if (Z_TYPE_P(files) != IS_ARRAY) {
+        return;
+    }
+
+    if (name) {
+        zval *entry = zend_hash_find(Z_ARRVAL_P(files), name);
+        if (entry && Z_TYPE_P(entry) == IS_ARRAY) {
+            oxphp_append_field_files(return_value, entry);
+        }
+        return;
+    }
+
+    zval *entry;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(files), entry) {
+        if (Z_TYPE_P(entry) == IS_ARRAY) {
+            oxphp_append_field_files(return_value, entry);
+        }
+    } ZEND_HASH_FOREACH_END();
 }
 /* }}} */
 
@@ -845,10 +951,12 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
     if (cached && Z_TYPE_P(cached) == IS_STRING) {
         RETURN_COPY(cached);
     }
-    /* Use mime_content_type() for magic-bytes detection */
+    /* Use mime_content_type() for magic-bytes detection. Skip it for an empty
+     * tmpPath (e.g. an UPLOAD_ERR_NO_FILE entry): mime_content_type('') throws a
+     * ValueError, so fall straight through to the default below instead. */
     zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "tmpPath", sizeof("tmpPath")-1, 1, NULL);
-    if (tmp_path && Z_TYPE_P(tmp_path) == IS_STRING) {
+    if (tmp_path && Z_TYPE_P(tmp_path) == IS_STRING && Z_STRLEN_P(tmp_path) > 0) {
         zval func_name, retval;
         ZVAL_STRING(&func_name, "mime_content_type");
         zval args[1];
