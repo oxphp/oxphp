@@ -4302,14 +4302,8 @@ void oxphp_bridge_clear_filter_cache(void) {
     g_prof.force_profile_fn_count = 0;
 }
 
-/* Resolver context — stack-allocated by observer init, passed
- * opaquely to Rust, used by the read_attr_arg_* helpers below
- * to look up attribute args by (name, occurrence, arg_idx). */
-typedef struct {
-    zend_class_entry *scope;          /* may be NULL for free functions */
-    HashTable        *fn_attrs;       /* func->common.attributes — may be NULL */
-    HashTable        *class_attrs;    /* scope ? scope->attributes : NULL */
-} ox_attr_resolver_ctx_t;
+/* `ox_attr_resolver_ctx_t` is declared in oxphp_bridge.h so the SAPI
+ * translation unit can build it for the decorator resolve path too. */
 
 /* Look up the `idx`-th attribute named `attr_name` in `attrs`.
  * Repeated attributes (e.g. multiple #[Tag(...)] on one function)
@@ -4384,6 +4378,77 @@ int oxphp_bridge_read_attr_arg_double(
     }
     zval_ptr_dtor(&val);
     return ok;
+}
+
+int oxphp_bridge_attr_arg_count(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx)
+{
+    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
+    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
+    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
+    if (!attr) return -1;
+    return (int)attr->argc;
+}
+
+int oxphp_bridge_read_attr_arg_variant(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    int64_t *out_long,
+    double *out_double,
+    int *out_bool,
+    char *out, size_t out_cap)
+{
+    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
+    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
+    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
+    if (!attr || arg_idx >= attr->argc) return 0;
+
+    zval val;
+    if (zend_get_attribute_value(&val, attr, arg_idx, ctx->scope) != SUCCESS) {
+        return 0;
+    }
+    int tag = 0;
+    switch (Z_TYPE(val)) {
+        case IS_LONG:
+            *out_long = (int64_t)Z_LVAL(val);
+            tag = 1;
+            break;
+        case IS_DOUBLE:
+            *out_double = Z_DVAL(val);
+            tag = 2;
+            break;
+        case IS_STRING:
+            if (out_cap > 0) {
+                size_t src_len = Z_STRLEN(val);
+                size_t copy = src_len < out_cap - 1 ? src_len : out_cap - 1;
+                memcpy(out, Z_STRVAL(val), copy);
+                out[copy] = '\0';
+            }
+            tag = 3;
+            break;
+        case IS_TRUE:
+            *out_bool = 1;
+            tag = 4;
+            break;
+        case IS_FALSE:
+            *out_bool = 0;
+            tag = 4;
+            break;
+        case IS_NULL:
+            tag = 5;
+            break;
+        default:
+            tag = 0;
+            break;
+    }
+    zval_ptr_dtor(&val);
+    return tag;
 }
 
 /* ============================================================ *

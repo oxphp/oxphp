@@ -1,8 +1,11 @@
+use std::os::raw::c_void;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use super::types::{AttributeTargets, Decorator};
+#[cfg(feature = "php")]
+use super::types::AttrArg;
+use super::types::{AttrArgs, AttributeTargets, Decorator};
 
 /// Metadata for a PHP-side decorator registered via `oxphp_register_decorator()`.
 #[derive(Debug, Clone)]
@@ -65,12 +68,26 @@ impl DecoratorRegistry {
     /// Resolve decorators for a function ID. Returns true if decorators were found.
     /// Called by observer init — caches the result for subsequent calls.
     /// `attr_names` is the list of attribute class names found on the function.
-    pub fn resolve(&self, fn_id: usize, attr_names: &[String]) -> bool {
+    /// `attr_ctx` is the opaque C-side attribute resolver context used to read
+    /// each matched decorator's constructor arguments (null in host builds).
+    pub fn resolve(&self, fn_id: usize, attr_names: &[String], attr_ctx: *mut c_void) -> bool {
+        #[cfg(not(feature = "php"))]
+        let _ = attr_ctx;
         let mut decorators = Vec::new();
 
         for (index, name) in attr_names.iter().enumerate() {
             if let Some(dec) = self.rust_decorators.get(name) {
-                decorators.push(ResolvedDecorator::Rust(Arc::clone(dec.value())));
+                let template = Arc::clone(dec.value());
+                // Decode the attribute's constructor args once and let the
+                // decorator build a configured instance. `configure`
+                // returning None means "no per-attribute config" — share
+                // the registered template as-is.
+                #[cfg(feature = "php")]
+                let args = read_attr_args(attr_ctx, name);
+                #[cfg(not(feature = "php"))]
+                let args = AttrArgs::default();
+                let inst = template.configure(&args).unwrap_or(template);
+                decorators.push(ResolvedDecorator::Rust(inst));
             } else if self.php_decorators.contains_key(name) {
                 decorators.push(ResolvedDecorator::Php {
                     class_name: name.clone(),
@@ -147,10 +164,99 @@ impl Default for DecoratorRegistry {
     }
 }
 
+/// Decode the constructor arguments of attribute `attr_name` from the
+/// C-side resolver context. Tries the function scope first, then the
+/// class scope (matching how decorator attributes attach). Reads the
+/// first occurrence only. Returns empty args when the context is null
+/// or the attribute carries no arguments.
+#[cfg(feature = "php")]
+fn read_attr_args(attr_ctx: *mut c_void, attr_name: &str) -> AttrArgs {
+    use std::ffi::CString;
+
+    if attr_ctx.is_null() {
+        return AttrArgs::default();
+    }
+    let cname = match CString::new(attr_name) {
+        Ok(c) => c,
+        Err(_) => return AttrArgs::default(),
+    };
+
+    for is_class_scope in [0_i32, 1_i32] {
+        let count = unsafe {
+            crate::php::bindings::oxphp_bridge_attr_arg_count(
+                attr_ctx,
+                is_class_scope,
+                cname.as_ptr(),
+                0, // first occurrence
+            )
+        };
+        if count < 0 {
+            continue; // attribute not present in this scope
+        }
+        let mut args = Vec::with_capacity(count as usize);
+        for arg_idx in 0..count as u32 {
+            args.push(read_one_arg(
+                attr_ctx,
+                is_class_scope,
+                cname.as_ptr(),
+                arg_idx,
+            ));
+        }
+        return AttrArgs::positional(args);
+    }
+    AttrArgs::default()
+}
+
+/// Read a single attribute argument as a tagged value via the bridge.
+#[cfg(feature = "php")]
+fn read_one_arg(
+    attr_ctx: *mut c_void,
+    is_class_scope: i32,
+    attr_name: *const std::os::raw::c_char,
+    arg_idx: u32,
+) -> AttrArg {
+    let mut out_long: i64 = 0;
+    let mut out_double: f64 = 0.0;
+    let mut out_bool: i32 = 0;
+    let mut buf = [0 as std::os::raw::c_char; 256];
+    let kind = unsafe {
+        crate::php::bindings::oxphp_bridge_read_attr_arg_variant(
+            attr_ctx,
+            is_class_scope,
+            attr_name,
+            0, // first occurrence
+            arg_idx,
+            &mut out_long,
+            &mut out_double,
+            &mut out_bool,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    };
+    match kind {
+        1 => AttrArg::Int(out_long),
+        2 => AttrArg::Float(out_double),
+        3 => {
+            let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+            AttrArg::Str(Arc::from(s.as_ref()))
+        }
+        4 => AttrArg::Bool(out_bool != 0),
+        // tag 5 = explicit null; tag 0 = decode error. Both map to Null:
+        // a typed accessor then returns None and the decorator falls back
+        // to its default. Conflating them is safe here because PHP requires
+        // attribute arguments to be constant expressions, so a decode error
+        // (zend_get_attribute_value != SUCCESS) is effectively unreachable
+        // for valid source — there is no distinct "error" outcome worth
+        // surfacing separately.
+        _ => AttrArg::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::types::{DecoratorAction, DecoratorCallContext, DecoratorCallResult};
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     struct MockDecorator {
         name: &'static str,
@@ -168,6 +274,76 @@ mod tests {
             DecoratorAction::Continue
         }
         fn on_end(&self, _: &DecoratorCallContext, _: &DecoratorCallResult) {}
+    }
+
+    /// Decorator whose `configure` returns a distinct instance. `on_begin`
+    /// bumps `template_begins` on the registered template and
+    /// `configured_begins` on a configured instance, so a test can tell
+    /// which instance `resolve` cached.
+    struct ConfigurableMock {
+        configured: bool,
+        template_begins: Arc<AtomicU32>,
+        configured_begins: Arc<AtomicU32>,
+    }
+
+    impl Decorator for ConfigurableMock {
+        fn attribute_name(&self) -> &str {
+            "App\\Cfg"
+        }
+        fn targets(&self) -> AttributeTargets {
+            AttributeTargets::ALL
+        }
+        fn on_begin(&self, _: &DecoratorCallContext) -> DecoratorAction {
+            if self.configured {
+                self.configured_begins.fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.template_begins.fetch_add(1, Ordering::Relaxed);
+            }
+            DecoratorAction::Continue
+        }
+        fn on_end(&self, _: &DecoratorCallContext, _: &DecoratorCallResult) {}
+        fn configure(&self, _args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+            Some(Arc::new(ConfigurableMock {
+                configured: true,
+                template_begins: Arc::clone(&self.template_begins),
+                configured_begins: Arc::clone(&self.configured_begins),
+            }))
+        }
+    }
+
+    #[test]
+    fn test_resolve_caches_configured_instance() {
+        let registry = DecoratorRegistry::new();
+        let template_begins = Arc::new(AtomicU32::new(0));
+        let configured_begins = Arc::new(AtomicU32::new(0));
+        registry.register_rust(Arc::new(ConfigurableMock {
+            configured: false,
+            template_begins: Arc::clone(&template_begins),
+            configured_begins: Arc::clone(&configured_begins),
+        }));
+
+        let attrs = vec!["App\\Cfg".to_string()];
+        assert!(registry.resolve(0xc0, &attrs, std::ptr::null_mut()));
+
+        let resolved = registry.get_resolved(0xc0).unwrap();
+        let ctx = DecoratorCallContext {
+            target: Arc::from("f"),
+            class: None,
+            method: None,
+            function: Some(Arc::from("f")),
+            object_id: 0,
+            request_id: String::new(),
+            trace_id: String::new(),
+            timestamp_ns: 0,
+        };
+        for d in resolved.iter() {
+            if let ResolvedDecorator::Rust(dec) = d {
+                dec.on_begin(&ctx);
+            }
+        }
+        // The configured instance ran, not the registered template.
+        assert_eq!(configured_begins.load(Ordering::Relaxed), 1);
+        assert_eq!(template_begins.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -206,7 +382,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Unknown".to_string(),
         ];
-        let found = registry.resolve(42, &attrs);
+        let found = registry.resolve(42, &attrs, std::ptr::null_mut());
         assert!(found);
 
         let resolved = registry.get_resolved(42).unwrap();
@@ -223,7 +399,7 @@ mod tests {
     fn test_resolve_no_decorators_returns_false() {
         let registry = DecoratorRegistry::new();
         let attrs = vec!["PHP\\Attribute".to_string(), "App\\Unknown".to_string()];
-        let found = registry.resolve(99, &attrs);
+        let found = registry.resolve(99, &attrs, std::ptr::null_mut());
         assert!(!found);
         assert!(registry.get_resolved(99).is_none());
     }
@@ -238,7 +414,7 @@ mod tests {
         registry.register_rust(dec);
 
         let attrs = vec!["App\\Profiler".to_string()];
-        registry.resolve(7, &attrs);
+        registry.resolve(7, &attrs, std::ptr::null_mut());
 
         let cached = registry.get_resolved(7);
         assert!(cached.is_some());
@@ -256,7 +432,7 @@ mod tests {
         registry.register_php("App\\Cache".to_string(), AttributeTargets::METHOD);
 
         let attrs = vec!["App\\Timer".to_string()];
-        registry.resolve(1, &attrs);
+        registry.resolve(1, &attrs, std::ptr::null_mut());
         assert!(registry.get_resolved(1).is_some());
 
         registry.clear_cache();
@@ -284,7 +460,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Log".to_string(),
         ];
-        registry.resolve(10, &attrs);
+        registry.resolve(10, &attrs, std::ptr::null_mut());
 
         // Only PHP decorators counted (App\\Cache and App\\Log)
         assert_eq!(registry.php_decorator_count(10), 2);
@@ -308,7 +484,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Log".to_string(),
         ];
-        registry.resolve(20, &attrs);
+        registry.resolve(20, &attrs, std::ptr::null_mut());
 
         // Index 0 = first PHP decorator (App\\Cache)
         let (name, _key) = registry.php_decorator_at(20, 0).unwrap();
@@ -335,7 +511,7 @@ mod tests {
         registry.register_rust(rust_dec);
 
         let attrs = vec!["App\\Timer".to_string()];
-        registry.resolve(30, &attrs);
+        registry.resolve(30, &attrs, std::ptr::null_mut());
 
         assert_eq!(registry.php_decorator_count(30), 0);
         assert!(registry.php_decorator_at(30, 0).is_none());

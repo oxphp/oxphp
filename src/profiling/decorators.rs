@@ -5,36 +5,44 @@
 //! plug into the existing `Decorator` infrastructure used by APM —
 //! same registration path as `OxPHP\Apm\Trace`.
 //!
-//! Per spec §6 split:
+//! Split:
 //!   - Decorator-based (this file): `Mark`, `SlowThreshold`,
 //!     `MemoryThreshold`.
 //!   - Observer-filter:             `Profile`, `Exclude`, `Sample`,
 //!     `Tag` — must run in the C observer hot path.
 //!
-//! ## Per-attribute parameter limitation
+//! ## Per-attribute parameters
 //!
-//! `DecoratorCallContext` does not surface the attribute's
-//! constructor arguments at runtime. `SlowThreshold` and
-//! `MemoryThreshold` therefore use **register-time globals**
-//! captured when the plugin instantiates the decorator. Per-call
-//! parameterisation needs a `DecoratorCallContext` extension and is
-//! tracked as a follow-up.
+//! Each decorator is a factory: the registered instance carries the
+//! global default, and [`Decorator::configure`] builds a per-attribute
+//! instance from the attribute's constructor arguments at resolve time.
+//! `#[SlowThreshold(ms: 250)]` therefore produces an instance with
+//! `ms = 250`; a bare `#[SlowThreshold]` falls back to the registered
+//! default. `on_begin`/`on_end` read the configured `self` — no
+//! per-call argument lookup on the hot path.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::decorator::{
-    AttributeTargets, Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
+    AttrArgs, AttributeTargets, Decorator, DecoratorAction, DecoratorCallContext,
+    DecoratorCallResult,
 };
 use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 
 // ─── #[OxPHP\Profile\Mark] ────────────────────────────────────
 
 /// Auto-attach a `Mark` SpanEvent on entry to the decorated function.
-/// The event is named after the function's qualified target (e.g.
-/// `App\Service::run`); per-attribute `label` parameter support is
-/// deferred until `DecoratorCallContext` exposes attribute args.
-pub struct MarkDecorator;
+/// The event is named after the attribute's `label` argument
+/// (`#[Mark(label: "checkout")]`), falling back to the function's
+/// qualified target (e.g. `App\Service::run`) for a bare `#[Mark]`.
+pub struct MarkDecorator {
+    /// Explicit label from `#[Mark(label: ...)]`. `None` on the
+    /// registered instance and for a bare `#[Mark]` — falls back to the
+    /// function target.
+    pub label: Option<Arc<str>>,
+}
 
 impl Decorator for MarkDecorator {
     fn attribute_name(&self) -> &str {
@@ -46,7 +54,10 @@ impl Decorator for MarkDecorator {
     }
 
     fn on_begin(&self, ctx: &DecoratorCallContext) -> DecoratorAction {
-        let label = ctx.target.to_string();
+        let label = match &self.label {
+            Some(l) => l.to_string(),
+            None => ctx.target.to_string(),
+        };
         PROFILING_CONTEXT.with(|cell| {
             cell.borrow_mut().attach_mark_on_current(label, vec![]);
         });
@@ -54,6 +65,11 @@ impl Decorator for MarkDecorator {
     }
 
     fn on_end(&self, _ctx: &DecoratorCallContext, _result: &DecoratorCallResult) {}
+
+    fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+        let label = args.str(0).map(Arc::from);
+        Some(Arc::new(Self { label }))
+    }
 }
 
 // ─── #[OxPHP\Profile\SlowThreshold(ms)] ────────────────────────
@@ -65,9 +81,10 @@ thread_local! {
 }
 
 pub struct SlowThresholdDecorator {
-    /// Threshold in milliseconds. Register-time global; per-
-    /// attribute parameterisation deferred (see module doc).
-    pub default_ms: u64,
+    /// Threshold in milliseconds. The registered instance holds the
+    /// global default; `configure` overrides it per attribute from
+    /// `#[SlowThreshold(ms: N)]`.
+    pub ms: u64,
 }
 
 impl Decorator for SlowThresholdDecorator {
@@ -88,20 +105,14 @@ impl Decorator for SlowThresholdDecorator {
         let started = SLOW_STARTS.with(|stack| stack.borrow_mut().pop());
         if let Some(t0) = started {
             let elapsed_ms = t0.elapsed().as_millis() as u64;
-            if elapsed_ms > self.default_ms {
+            if elapsed_ms > self.ms {
                 PROFILING_CONTEXT.with(|cell| {
                     if let Some(span) = cell.borrow_mut().current_mut() {
                         span.events.push(SpanEvent {
                             name: "slow".into(),
                             attributes: vec![
-                                (
-                                    std::sync::Arc::from("threshold_ms"),
-                                    std::sync::Arc::from(self.default_ms.to_string()),
-                                ),
-                                (
-                                    std::sync::Arc::from("elapsed_ms"),
-                                    std::sync::Arc::from(elapsed_ms.to_string()),
-                                ),
+                                (Arc::from("threshold_ms"), Arc::from(self.ms.to_string())),
+                                (Arc::from("elapsed_ms"), Arc::from(elapsed_ms.to_string())),
                             ],
                             timestamp_ns: now_ns(),
                             kind: SpanEventKind::Slow,
@@ -110,6 +121,11 @@ impl Decorator for SlowThresholdDecorator {
                 });
             }
         }
+    }
+
+    fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+        let ms = args.int(0).map(|v| v.max(0) as u64).unwrap_or(self.ms);
+        Some(Arc::new(Self { ms }))
     }
 }
 
@@ -120,8 +136,10 @@ thread_local! {
 }
 
 pub struct MemoryThresholdDecorator {
-    /// Threshold in kibibytes. Register-time global.
-    pub default_kb: u64,
+    /// Threshold in kibibytes. The registered instance holds the global
+    /// default; `configure` overrides it per attribute from
+    /// `#[MemoryThreshold(kb: N)]`.
+    pub kb: u64,
 }
 
 impl Decorator for MemoryThresholdDecorator {
@@ -144,20 +162,14 @@ impl Decorator for MemoryThresholdDecorator {
         if let Some(m0) = started {
             let now = current_memory_usage_bytes();
             let delta = (now - m0).max(0);
-            if (delta as u64) > self.default_kb.saturating_mul(1024) {
+            if (delta as u64) > self.kb.saturating_mul(1024) {
                 PROFILING_CONTEXT.with(|cell| {
                     if let Some(span) = cell.borrow_mut().current_mut() {
                         span.events.push(SpanEvent {
                             name: "memory_spike".into(),
                             attributes: vec![
-                                (
-                                    std::sync::Arc::from("threshold_kb"),
-                                    std::sync::Arc::from(self.default_kb.to_string()),
-                                ),
-                                (
-                                    std::sync::Arc::from("delta_bytes"),
-                                    std::sync::Arc::from(delta.to_string()),
-                                ),
+                                (Arc::from("threshold_kb"), Arc::from(self.kb.to_string())),
+                                (Arc::from("delta_bytes"), Arc::from(delta.to_string())),
                             ],
                             timestamp_ns: now_ns(),
                             kind: SpanEventKind::MemorySpike,
@@ -166,6 +178,11 @@ impl Decorator for MemoryThresholdDecorator {
                 });
             }
         }
+    }
+
+    fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+        let kb = args.int(0).map(|v| v.max(0) as u64).unwrap_or(self.kb);
+        Some(Arc::new(Self { kb }))
     }
 }
 
@@ -187,7 +204,7 @@ fn current_memory_usage_bytes() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::decorator::AttrArg;
 
     fn dummy_ctx(target: &str) -> DecoratorCallContext {
         DecoratorCallContext {
@@ -222,7 +239,7 @@ mod tests {
             let id = ctx.push("App\\Svc::run".into(), vec![]);
             drop(ctx);
 
-            MarkDecorator.on_begin(&dummy_ctx("App\\Svc::run"));
+            MarkDecorator { label: None }.on_begin(&dummy_ctx("App\\Svc::run"));
 
             let mut ctx = cell.borrow_mut();
             let span = ctx.get_mut(id).expect("open");
@@ -244,7 +261,7 @@ mod tests {
             let id = ctx.push("slow_op".into(), vec![]);
             drop(ctx);
 
-            let dec = SlowThresholdDecorator { default_ms: 0 };
+            let dec = SlowThresholdDecorator { ms: 0 };
             dec.on_begin(&dummy_ctx("slow_op"));
             std::thread::sleep(std::time::Duration::from_millis(2));
             dec.on_end(&dummy_ctx("slow_op"), &dummy_result());
@@ -274,9 +291,7 @@ mod tests {
             drop(ctx);
 
             // Threshold huge — never triggers.
-            let dec = SlowThresholdDecorator {
-                default_ms: 1_000_000,
-            };
+            let dec = SlowThresholdDecorator { ms: 1_000_000 };
             dec.on_begin(&dummy_ctx("fast_op"));
             dec.on_end(&dummy_ctx("fast_op"), &dummy_result());
 
@@ -301,7 +316,7 @@ mod tests {
             let id = ctx.push("alloc_heavy".into(), vec![]);
             drop(ctx);
 
-            let dec = MemoryThresholdDecorator { default_kb: 1 };
+            let dec = MemoryThresholdDecorator { kb: 1 };
             dec.on_begin(&dummy_ctx("alloc_heavy"));
             dec.on_end(&dummy_ctx("alloc_heavy"), &dummy_result());
 
@@ -330,7 +345,7 @@ mod tests {
             let inner = ctx.push("inner".into(), vec![]);
             drop(ctx);
 
-            let dec = SlowThresholdDecorator { default_ms: 0 };
+            let dec = SlowThresholdDecorator { ms: 0 };
             // Outer begins
             dec.on_begin(&dummy_ctx("outer"));
             std::thread::sleep(std::time::Duration::from_millis(2));
@@ -351,6 +366,151 @@ mod tests {
             let _inner_span = ctx.get_mut(inner);
             // SLOW_STARTS should be empty after balanced begins/ends.
             SLOW_STARTS.with(|s| assert!(s.borrow().is_empty()));
+        });
+    }
+
+    // ── configure(): per-attribute parameterisation ──
+
+    /// A configured SlowThreshold uses the per-attribute `ms`, not the
+    /// registered default. This is the regression guard for the bug
+    /// where `#[SlowThreshold(ms: N)]` silently ignored `N`.
+    #[test]
+    fn slow_configure_uses_per_attribute_ms() {
+        let template = SlowThresholdDecorator { ms: 100 };
+        // Threshold far above any scheduling jitter so the negative
+        // assertion below can't flake under CI preemption.
+        let configured = template
+            .configure(&AttrArgs::positional(vec![AttrArg::Int(3_600_000)]))
+            .expect("configure yields an instance");
+
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("op".into(), vec![]);
+
+            configured.on_begin(&dummy_ctx("op"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            configured.on_end(&dummy_ctx("op"), &dummy_result());
+
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            // A 2ms call is under the configured threshold → no slow
+            // event. (The configured value gates, not the template's 100.)
+            assert!(
+                span.events.is_empty(),
+                "2ms must be under the configured threshold"
+            );
+        });
+
+        // And the emitted threshold_ms reflects the per-attribute value.
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("op".into(), vec![]);
+            let fast = template
+                .configure(&AttrArgs::positional(vec![AttrArg::Int(0)]))
+                .expect("configure yields an instance");
+            fast.on_begin(&dummy_ctx("op"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            fast.on_end(&dummy_ctx("op"), &dummy_result());
+
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            assert_eq!(span.events.len(), 1);
+            let threshold = span.events[0]
+                .attributes
+                .iter()
+                .find(|(k, _)| k.as_ref() == "threshold_ms")
+                .map(|(_, v)| v.as_ref());
+            assert_eq!(threshold, Some("0"), "threshold_ms reflects configured ms");
+        });
+    }
+
+    /// A bare `#[SlowThreshold]` (no args) falls back to the registered
+    /// default.
+    #[test]
+    fn slow_configure_falls_back_to_default_without_args() {
+        let template = SlowThresholdDecorator { ms: 1_000_000 };
+        let configured = template
+            .configure(&AttrArgs::default())
+            .expect("configure yields an instance");
+
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("op".into(), vec![]);
+            configured.on_begin(&dummy_ctx("op"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            configured.on_end(&dummy_ctx("op"), &dummy_result());
+
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            // 2ms well under the 1_000_000ms default → silent.
+            assert!(span.events.is_empty());
+        });
+    }
+
+    /// MemoryThreshold's per-attribute `kb` only changes observable
+    /// behaviour under a real PHP allocator (host build reads 0 bytes),
+    /// so the spike path is covered in the Docker profile. Here we just
+    /// confirm `configure` always yields an instance, with and without
+    /// an argument.
+    #[test]
+    fn memory_configure_yields_instance() {
+        let template = MemoryThresholdDecorator { kb: 64 };
+        assert!(template
+            .configure(&AttrArgs::positional(vec![AttrArg::Int(2048)]))
+            .is_some());
+        assert!(template.configure(&AttrArgs::default()).is_some());
+    }
+
+    #[test]
+    fn mark_configure_uses_label_then_falls_back_to_target() {
+        // With a label argument the Mark event is named after the label.
+        let labelled = MarkDecorator { label: None }
+            .configure(&AttrArgs::positional(vec![AttrArg::Str(Arc::from(
+                "checkout",
+            ))]))
+            .expect("configure yields an instance");
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("App\\Order::pay".into(), vec![]);
+            labelled.on_begin(&dummy_ctx("App\\Order::pay"));
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            assert_eq!(span.events.len(), 1);
+            assert_eq!(span.events[0].name, "checkout");
+        });
+
+        // A bare #[Mark] (no label arg) falls back to the function target.
+        let bare = MarkDecorator { label: None }
+            .configure(&AttrArgs::default())
+            .expect("configure yields an instance");
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("App\\Order::pay".into(), vec![]);
+            bare.on_begin(&dummy_ctx("App\\Order::pay"));
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            assert_eq!(span.events.len(), 1);
+            assert_eq!(span.events[0].name, "App\\Order::pay");
         });
     }
 }

@@ -6,11 +6,12 @@ use OxPHP\Profile\SlowThreshold;
 
 $t = new TestCase('decorator_slow_threshold', 'profiler');
 
-// The current implementation uses a register-time global (default_ms = 100),
-// so the `ms` parameter declared on the attribute is currently ignored
-// at runtime. The test still uses it for spec-conformance — once
-// per-attribute parameterisation lands, this script becomes a
-// real per-call threshold check.
+// The `ms` argument is applied per attribute: each function gets its
+// own threshold. `slow_decorated` (1 ms threshold, ~150 ms runtime)
+// emits a `slow` event; `fast_decorated` (1 s threshold, instant) does
+// not. This script is a smoke check on the execution path — the
+// emitted span events are asserted in the Rust harness
+// (tests/profiler_decorators_tests.rs).
 #[SlowThreshold(ms: 1)]
 function slow_decorated(): int
 {
@@ -18,7 +19,7 @@ function slow_decorated(): int
     return 1;
 }
 
-#[SlowThreshold(ms: 1)]
+#[SlowThreshold(ms: 1000)]
 function fast_decorated(): int
 {
     return 2;

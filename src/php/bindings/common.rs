@@ -252,6 +252,29 @@ extern "C" {
         arg_idx: u32,
         out: *mut f64,
     ) -> i32;
+    /// Number of constructor arguments of the `attr_idx`-th occurrence of
+    /// `attr_name` in the given scope, or `-1` if the attribute is absent.
+    pub fn oxphp_bridge_attr_arg_count(
+        ctx: *mut c_void,
+        is_class_scope: i32,
+        attr_name: *const c_char,
+        attr_idx: u32,
+    ) -> i32;
+    /// Read one attribute argument as a tagged value. Returns the type tag
+    /// (1=long, 2=double, 3=string, 4=bool, 5=null, 0=error). For strings,
+    /// the value is copied into `out` (NUL-terminated, truncated to `out_cap`).
+    pub fn oxphp_bridge_read_attr_arg_variant(
+        ctx: *mut c_void,
+        is_class_scope: i32,
+        attr_name: *const c_char,
+        attr_idx: u32,
+        arg_idx: u32,
+        out_long: *mut i64,
+        out_double: *mut f64,
+        out_bool: *mut i32,
+        out: *mut c_char,
+        out_cap: usize,
+    ) -> i32;
     pub fn oxphp_bridge_get_filter_spec_id_cached(fn_id: usize) -> u32;
     pub fn oxphp_bridge_clear_filter_cache();
 
