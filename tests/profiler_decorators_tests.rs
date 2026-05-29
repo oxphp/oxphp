@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use oxphp::decorator::{Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult};
+use oxphp::decorator::{
+    AttrArg, AttrArgs, Decorator, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
+};
 use oxphp::profiling::decorators::{
     MarkDecorator, MemoryThresholdDecorator, SlowThresholdDecorator,
 };
@@ -50,7 +52,7 @@ fn mark_decorator_attaches_to_current_open_span() {
         let id = ctx.push("App\\Repo::find".into(), vec![]);
         drop(ctx);
 
-        let action = MarkDecorator.on_begin(&dummy_ctx("App\\Repo::find"));
+        let action = MarkDecorator { label: None }.on_begin(&dummy_ctx("App\\Repo::find"));
         assert_eq!(action, DecoratorAction::Continue);
 
         let mut ctx = cell.borrow_mut();
@@ -69,7 +71,7 @@ fn slow_decorator_emits_slow_event_with_elapsed_attribute() {
         let id = ctx.push("expensive".into(), vec![]);
         drop(ctx);
 
-        let dec = SlowThresholdDecorator { default_ms: 0 };
+        let dec = SlowThresholdDecorator { ms: 0 };
         dec.on_begin(&dummy_ctx("expensive"));
         std::thread::sleep(std::time::Duration::from_millis(2));
         dec.on_end(&dummy_ctx("expensive"), &dummy_result_ok());
@@ -98,9 +100,7 @@ fn slow_decorator_emits_nothing_under_threshold() {
         let id = ctx.push("fast".into(), vec![]);
         drop(ctx);
 
-        let dec = SlowThresholdDecorator {
-            default_ms: 1_000_000,
-        };
+        let dec = SlowThresholdDecorator { ms: 1_000_000 };
         dec.on_begin(&dummy_ctx("fast"));
         dec.on_end(&dummy_ctx("fast"), &dummy_result_ok());
 
@@ -121,7 +121,7 @@ fn memory_decorator_does_not_false_positive_in_host_build() {
         let id = ctx.push("alloc".into(), vec![]);
         drop(ctx);
 
-        let dec = MemoryThresholdDecorator { default_kb: 1 };
+        let dec = MemoryThresholdDecorator { kb: 1 };
         dec.on_begin(&dummy_ctx("alloc"));
         // Allocate something on the Rust side — does NOT count toward
         // PHP's zend_memory_usage, so still no event.
@@ -147,13 +147,102 @@ fn memory_decorator_does_not_false_positive_in_host_build() {
 fn decorator_attribute_names_match_spec() {
     // Trivial guard against accidental rename — the C-side decorator
     // observer reads these strings to pick up our attributes.
-    assert_eq!(MarkDecorator.attribute_name(), "OxPHP\\Profile\\Mark");
     assert_eq!(
-        SlowThresholdDecorator { default_ms: 1 }.attribute_name(),
+        MarkDecorator { label: None }.attribute_name(),
+        "OxPHP\\Profile\\Mark"
+    );
+    assert_eq!(
+        SlowThresholdDecorator { ms: 1 }.attribute_name(),
         "OxPHP\\Profile\\SlowThreshold"
     );
     assert_eq!(
-        MemoryThresholdDecorator { default_kb: 1 }.attribute_name(),
+        MemoryThresholdDecorator { kb: 1 }.attribute_name(),
         "OxPHP\\Profile\\MemoryThreshold"
     );
+}
+
+/// Regression guard for the bug this change fixes: the per-attribute
+/// `ms` argument must reach the decorator instead of the hardcoded
+/// register-time default. Drives the same factory path the resolver
+/// uses (`configure`) and asserts the emitted `threshold_ms` equals the
+/// attribute value — and that two different attribute values produce
+/// different gating.
+#[test]
+fn slow_threshold_honours_per_attribute_ms() {
+    // Registered template carries the default (100ms in production).
+    let template = SlowThresholdDecorator { ms: 100 };
+
+    // `#[SlowThreshold(ms: 0)]` → everything is "slow"; threshold_ms == 0.
+    let strict = template
+        .configure(&AttrArgs::positional(vec![AttrArg::Int(0)]))
+        .expect("configure yields an instance");
+    PROFILING_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
+        let id = cell.borrow_mut().push("op".into(), vec![]);
+        strict.on_begin(&dummy_ctx("op"));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        strict.on_end(&dummy_ctx("op"), &dummy_result_ok());
+
+        let mut ctx = cell.borrow_mut();
+        let span = ctx.get_mut(id).expect("open");
+        assert_eq!(span.events.len(), 1, "ms:0 must flag a 2ms call as slow");
+        let threshold = span.events[0]
+            .attributes
+            .iter()
+            .find(|(k, _)| k.as_ref() == "threshold_ms")
+            .map(|(_, v)| v.as_ref());
+        assert_eq!(
+            threshold,
+            Some("0"),
+            "threshold_ms must reflect the per-attribute ms, not the default 100"
+        );
+    });
+
+    // A large per-attribute threshold → the call is NOT slow. Under the
+    // old bug both attributes behaved as the hardcoded default, so this
+    // case and the one above could not diverge. The threshold is set far
+    // above any plausible scheduling jitter (1 h) so the negative
+    // assertion can't flake under CI preemption.
+    const HUGE_MS: i64 = 3_600_000;
+    let lenient = template
+        .configure(&AttrArgs::positional(vec![AttrArg::Int(HUGE_MS)]))
+        .expect("configure yields an instance");
+    PROFILING_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
+        let id = cell.borrow_mut().push("op".into(), vec![]);
+        lenient.on_begin(&dummy_ctx("op"));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        lenient.on_end(&dummy_ctx("op"), &dummy_result_ok());
+
+        let mut ctx = cell.borrow_mut();
+        let span = ctx.get_mut(id).expect("open");
+        assert!(
+            span.events.is_empty(),
+            "a 2ms call must not trip a 1h threshold"
+        );
+    });
+}
+
+/// `#[Mark(label: "...")]` names the event after the label; a bare
+/// `#[Mark]` falls back to the function target.
+#[test]
+fn mark_honours_per_attribute_label() {
+    let template = MarkDecorator { label: None };
+    let labelled = template
+        .configure(&AttrArgs::positional(vec![AttrArg::Str(Arc::from(
+            "checkout",
+        ))]))
+        .expect("configure yields an instance");
+    PROFILING_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
+        let id = cell.borrow_mut().push("App\\Order::pay".into(), vec![]);
+        labelled.on_begin(&dummy_ctx("App\\Order::pay"));
+        let mut ctx = cell.borrow_mut();
+        let span = ctx.get_mut(id).expect("open");
+        assert_eq!(span.events.len(), 1);
+        assert_eq!(span.events[0].name, "checkout");
+    });
 }

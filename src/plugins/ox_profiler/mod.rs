@@ -500,13 +500,9 @@ impl Plugin for ProfilerPlugin {
                 .param("value", PhpType::String)
                 .build()?;
         }
-        ctx.register_decorator(crate::profiling::decorators::MarkDecorator);
-        ctx.register_decorator(crate::profiling::decorators::SlowThresholdDecorator {
-            default_ms: 100,
-        });
-        ctx.register_decorator(crate::profiling::decorators::MemoryThresholdDecorator {
-            default_kb: 64,
-        });
+        ctx.register_decorator(crate::profiling::decorators::MarkDecorator { label: None });
+        ctx.register_decorator(crate::profiling::decorators::SlowThresholdDecorator { ms: 100 });
+        ctx.register_decorator(crate::profiling::decorators::MemoryThresholdDecorator { kb: 64 });
 
         if self.config.auth_token.is_none() {
             tracing::warn!(

@@ -77,6 +77,7 @@ extern "C" {
                 fn_id: usize,
                 attr_names: *const *const c_char,
                 attr_count: u32,
+                attr_ctx: *mut c_void,
             ) -> c_int,
         >,
     );

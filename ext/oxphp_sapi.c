@@ -2055,8 +2055,17 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(
         return (zend_observer_fcall_handlers){NULL, NULL};
     }
 
+    /* Attribute resolver context — lets Rust read each matched
+     * decorator's constructor arguments during resolve so per-attribute
+     * parameters (e.g. #[SlowThreshold(ms: 250)]) reach the decorator. */
+    ox_attr_resolver_ctx_t actx = {
+        .scope       = func->common.scope,
+        .fn_attrs    = func->common.attributes,
+        .class_attrs = func->common.scope ? func->common.scope->attributes : NULL,
+    };
+
     uintptr_t fn_id = (uintptr_t)func;
-    int found = resolve(fn_id, attr_names, attr_count);
+    int found = resolve(fn_id, attr_names, attr_count, &actx);
     if (!found) {
         return (zend_observer_fcall_handlers){NULL, NULL};
     }

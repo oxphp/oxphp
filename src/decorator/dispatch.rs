@@ -47,11 +47,16 @@ pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
 
 /// Called by observer init — resolve which decorators apply to this function.
 /// Returns 1 if decorators found, 0 otherwise.
+///
+/// `attr_ctx` is the C-side attribute resolver context (an
+/// `ox_attr_resolver_ctx_t*`), forwarded to the registry so each matched
+/// decorator can read its attribute's constructor arguments.
 #[allow(dead_code)]
 unsafe extern "C" fn resolve_callback(
     fn_id: usize,
     attr_names: *const *const c_char,
     attr_count: u32,
+    attr_ctx: *mut std::os::raw::c_void,
 ) -> c_int {
     let registry = get_registry();
     let mut names = Vec::with_capacity(attr_count as usize);
@@ -61,7 +66,7 @@ unsafe extern "C" fn resolve_callback(
             names.push(s.to_string());
         }
     }
-    if registry.resolve(fn_id, &names) {
+    if registry.resolve(fn_id, &names, attr_ctx) {
         1
     } else {
         0
@@ -262,7 +267,7 @@ mod tests {
         registry.register_rust(dec);
 
         let attrs = vec!["Test\\Counter".to_string()];
-        assert!(registry.resolve(0x1, &attrs));
+        assert!(registry.resolve(0x1, &attrs, std::ptr::null_mut()));
 
         let resolved = registry.get_resolved(0x1).unwrap();
         let ctx = DecoratorCallContext {

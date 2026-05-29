@@ -55,6 +55,75 @@ pub struct DecoratorCallResult {
     pub exception_class: Option<String>,
 }
 
+/// One decoded PHP attribute constructor argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrArg {
+    Int(i64),
+    Float(f64),
+    Str(Arc<str>),
+    Bool(bool),
+    Null,
+}
+
+/// Decoded constructor arguments of one attribute occurrence, in
+/// declaration order. Read once at resolve time and handed to
+/// [`Decorator::configure`]. Owned (no FFI / no lifetime) so decorators
+/// and tests can build and inspect it without the C bridge.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttrArgs {
+    positional: Vec<AttrArg>,
+}
+
+impl AttrArgs {
+    /// Build from positional values (used by the resolve layer and tests).
+    pub fn positional(args: Vec<AttrArg>) -> Self {
+        Self { positional: args }
+    }
+
+    /// Number of arguments.
+    pub fn len(&self) -> usize {
+        self.positional.len()
+    }
+
+    /// True when no arguments were supplied (a bare `#[Attr]`).
+    pub fn is_empty(&self) -> bool {
+        self.positional.is_empty()
+    }
+
+    /// Integer at `idx`. Only an `Int` matches — no coercion.
+    pub fn int(&self, idx: usize) -> Option<i64> {
+        match self.positional.get(idx) {
+            Some(AttrArg::Int(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Float at `idx`. Accepts `Float` and integer-valued `Int`.
+    pub fn float(&self, idx: usize) -> Option<f64> {
+        match self.positional.get(idx) {
+            Some(AttrArg::Float(v)) => Some(*v),
+            Some(AttrArg::Int(v)) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    /// String slice at `idx`.
+    pub fn str(&self, idx: usize) -> Option<&str> {
+        match self.positional.get(idx) {
+            Some(AttrArg::Str(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Boolean at `idx`. Only a `Bool` matches — no coercion.
+    pub fn bool(&self, idx: usize) -> Option<bool> {
+        match self.positional.get(idx) {
+            Some(AttrArg::Bool(v)) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
 /// Trait for Rust-native decorators, registered by plugins.
 pub trait Decorator: Send + Sync {
     /// Fully qualified PHP attribute class name (e.g. "App\\Profiler\\Timer").
@@ -68,6 +137,19 @@ pub trait Decorator: Send + Sync {
 
     /// Called after the decorated function executes.
     fn on_end(&self, ctx: &DecoratorCallContext, result: &DecoratorCallResult);
+
+    /// Build a configured instance for one attribute occurrence.
+    ///
+    /// Called once per `(function, attribute)` at resolve time with the
+    /// attribute's decoded constructor arguments. Return a new instance
+    /// carrying them — it then receives `on_begin`/`on_end` for every
+    /// call of the decorated function. The default returns `None`: no
+    /// per-attribute configuration, the registered instance is shared
+    /// as-is.
+    fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+        let _ = args;
+        None
+    }
 }
 
 #[cfg(test)]
@@ -140,5 +222,61 @@ mod tests {
         };
         assert!(!result.success);
         assert_eq!(result.exception_class.as_deref(), Some("RuntimeException"));
+    }
+
+    #[test]
+    fn test_attr_args_accessors() {
+        let args = AttrArgs::positional(vec![
+            AttrArg::Int(250),
+            AttrArg::Str(Arc::from("checkout")),
+            AttrArg::Float(0.5),
+            AttrArg::Bool(true),
+            AttrArg::Null,
+        ]);
+        assert_eq!(args.len(), 5);
+        assert!(!args.is_empty());
+        assert_eq!(args.int(0), Some(250));
+        assert_eq!(args.str(1), Some("checkout"));
+        assert_eq!(args.float(2), Some(0.5));
+        assert_eq!(args.bool(3), Some(true));
+        // Int coerces to float; the reverse does not coerce.
+        assert_eq!(args.float(0), Some(250.0));
+        assert_eq!(args.int(2), None);
+        assert_eq!(args.bool(0), None);
+        // Null and out-of-range read as None through every accessor.
+        assert_eq!(args.int(4), None);
+        assert_eq!(args.str(4), None);
+        assert_eq!(args.bool(4), None);
+        assert_eq!(args.int(9), None);
+        assert_eq!(args.str(0), None);
+    }
+
+    #[test]
+    fn test_attr_args_empty() {
+        let args = AttrArgs::default();
+        assert!(args.is_empty());
+        assert_eq!(args.int(0), None);
+        assert_eq!(args.str(0), None);
+    }
+
+    #[test]
+    fn test_default_configure_returns_none() {
+        struct Bare;
+        impl Decorator for Bare {
+            fn attribute_name(&self) -> &str {
+                "App\\Bare"
+            }
+            fn targets(&self) -> AttributeTargets {
+                AttributeTargets::ALL
+            }
+            fn on_begin(&self, _: &DecoratorCallContext) -> DecoratorAction {
+                DecoratorAction::Continue
+            }
+            fn on_end(&self, _: &DecoratorCallContext, _: &DecoratorCallResult) {}
+        }
+        // Default impl ignores args and opts out of per-attribute config.
+        assert!(Bare
+            .configure(&AttrArgs::positional(vec![AttrArg::Int(1)]))
+            .is_none());
     }
 }

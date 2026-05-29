@@ -715,7 +715,8 @@ oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void);
 typedef int (*oxphp_decorator_resolve_fn_t)(
     uintptr_t fn_id,
     const char **attr_names,
-    uint32_t attr_count
+    uint32_t attr_count,
+    void *attr_ctx
 );
 
 typedef int (*oxphp_decorator_begin_fn_t)(
@@ -1629,6 +1630,20 @@ typedef uint32_t (*oxphp_profiler_resolve_filter_fn_t)(
  * (default — observer init won't try to resolve filters). */
 void oxphp_bridge_set_filter_resolver(oxphp_profiler_resolve_filter_fn_t resolver);
 
+/* Attribute resolver context — stack-allocated by an observer init
+ * and passed opaquely (as `void *`) into the resolver/resolve
+ * callback, then back into the read_attr_arg_* helpers below. Defined
+ * here (with forward-declared pointer types so no PHP headers are
+ * required) so both the bridge and the SAPI translation units can
+ * build it regardless of include order. */
+struct _zend_class_entry;
+struct _zend_array;
+typedef struct {
+    struct _zend_class_entry *scope;       /* may be NULL for free functions */
+    struct _zend_array       *fn_attrs;    /* func->common.attributes — may be NULL */
+    struct _zend_array       *class_attrs; /* scope ? scope->attributes : NULL */
+} ox_attr_resolver_ctx_t;
+
 /* Helper exposed back to Rust during a resolver call. Reads the
  * `attr_idx`-th occurrence of attribute `attr_name` and returns its
  * `arg_idx`-th constructor arg as a UTF-8 string. NUL-terminates;
@@ -1653,6 +1668,30 @@ int oxphp_bridge_read_attr_arg_double(
     uint32_t attr_idx,
     uint32_t arg_idx,
     double *out);
+
+/* Number of constructor arguments of the `attr_idx`-th occurrence of
+ * `attr_name` in the given scope, or -1 if the attribute is absent. */
+int oxphp_bridge_attr_arg_count(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx);
+
+/* Read one constructor argument as a tagged value. Returns the type
+ * tag: 1=long, 2=double, 3=string, 4=bool, 5=null, 0=error/absent.
+ * For tag 1 the value is in `*out_long`, tag 2 in `*out_double`, tag 4
+ * in `*out_bool`, tag 3 copied (NUL-terminated, capped at out_cap-1)
+ * into `out`. Output pointers for unused tags are left untouched. */
+int oxphp_bridge_read_attr_arg_variant(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    int64_t *out_long,
+    double *out_double,
+    int *out_bool,
+    char *out, size_t out_cap);
 
 /* Diagnostic: read the cached spec_id for a function. Returns 255
  * if not yet cached. Used by tests. */

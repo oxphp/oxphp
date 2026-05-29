@@ -6,9 +6,11 @@ use OxPHP\Profile\MemoryThreshold;
 
 $t = new TestCase('decorator_memory_threshold', 'profiler');
 
-// Register-time global default_kb = 64. The declared parameter is
-// reserved for a follow-up that surfaces attribute args in
-// DecoratorCallContext.
+// The `kb` argument is applied per attribute. `alloc_heavy` (1 KB
+// threshold, allocates 256 KB) crosses its threshold; `alloc_light`
+// (large threshold, allocates nothing) does not. This script is a
+// smoke check on the execution path — the emitted span events are
+// asserted in the Rust harness (tests/profiler_decorators_tests.rs).
 #[MemoryThreshold(kb: 1)]
 function alloc_heavy(): int
 {
@@ -16,7 +18,7 @@ function alloc_heavy(): int
     return strlen($junk);
 }
 
-#[MemoryThreshold(kb: 1)]
+#[MemoryThreshold(kb: 8192)]
 function alloc_light(): int
 {
     return 1;
