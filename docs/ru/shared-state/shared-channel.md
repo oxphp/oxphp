@@ -264,6 +264,8 @@ $batch = $ch->recvMany(10, 100);
 - **`GET /__ox_shared/entries?type=Channel`** перечисляет записи каналов с их ID реестра.
 - **`GET /__ox_shared/entries/:id`** возвращает per-channel состояние: `capacity`, `count`, `pending` *(устаревший alias `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
+Счётчик `ops` (и общереестровый `oxphp_shared_ops_total{type="Channel"}`) считает каждую попытку recv-операции независимо от исхода — попадание, пустой/закрытый канал и истёкший `recvTimeout` все инкрементируют его. Метрика отражает обращения к каналу, а не только успешно переданные значения.
+
 Prometheus-экспозиция на `/metrics`:
 
 ```text

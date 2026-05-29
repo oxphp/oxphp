@@ -260,6 +260,8 @@ $batch = $ch->recvMany(10, 100);
 - **`GET /__ox_shared/entries?type=Channel`** 列出通道条目及其注册表 ID。
 - **`GET /__ox_shared/entries/:id`** 返回按通道的状态：`capacity`、`count`、`pending`（已弃用别名 `count`）、`closed`、`senders_blocked`、`receivers_blocked`。
 
+`ops` 计数器（以及注册表级 `oxphp_shared_ops_total{type="Channel"}`）统计每一次 recv 尝试，无论结果如何——命中、空/已关闭通道，以及超时的 `recvTimeout` 都会使其递增。该指标反映对通道的访问次数，而非仅成功传递的值。
+
 `/metrics` 上的 Prometheus 曝露：
 
 ```text

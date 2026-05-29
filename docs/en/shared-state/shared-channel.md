@@ -263,6 +263,8 @@ The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in
 - **`GET /__ox_shared/entries?type=Channel`** lists channel entries with their registry IDs.
 - **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
+The `ops` counter (and the registry-wide `oxphp_shared_ops_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
+
 Prometheus exposition on `/metrics`:
 
 ```text

@@ -51,83 +51,147 @@ impl Payload {
     }
 }
 
-thread_local! {
-    /// Keepalive refs of values popped by a *synchronous* recv FFI
-    /// (`try_recv` / `recv_blocking` / `recv_many`), held until the handler
-    /// has deserialized the bytes. The deserializer re-resolves each tag-7 via
-    /// the registry (`oxphp_shared_handle_from_id`); without this stash the
-    /// popped Payload's keepalive would drop when the FFI returns — *before*
-    /// that re-resolve — freeing a fire-and-forget value's sole strong ref in
-    /// the gap and yielding NULL. The fiber waker path does not use this: it
-    /// anchors its keepalive in `AsyncResult`, dropped after deserialize.
-    static RECV_KEEPALIVE: std::cell::RefCell<Vec<SharedRefOwned>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Stash a popped payload's keepalive so it outlives the handler's deserialize.
-/// No-op (does not touch the thread-local) for the common no-shared-ref case.
-fn stash_recv_keepalive(keepalive: SmallVec<[SharedRefOwned; 1]>) {
-    if keepalive.is_empty() {
-        return;
-    }
-    RECV_KEEPALIVE.with(|k| k.borrow_mut().extend(keepalive));
-}
-
-/// RAII anchor for the recv keepalive stash. Snapshots the stash depth on
-/// construction and truncates back to it on drop, releasing every keepalive a
-/// recv FFI stashed during this handler call — after the handler finished
-/// deserializing. Place one at the top of each synchronous recv handler.
+/// Outcome of a Rust-native channel pop. Carries the popped [`Payload`] by
+/// value so its `keepalive` rides the calling handler's stack through the
+/// synchronous deserialize window. The deserializer re-resolves each nested
+/// tag-7 id via the registry (`oxphp_shared_handle_from_id`); holding the
+/// `Payload` keeps every nested entry's strong ref alive across that
+/// re-resolve, so a fire-and-forget value can't lose its sole strong ref in
+/// the gap and yield NULL.
 ///
-/// Stash and release are always synchronous within a single handler call (a
-/// buffered hit never suspends between the FFI pop and `write_recv_ok`; the
-/// only suspend — the empty/park path — stashes nothing), so the thread-local
-/// is correctly scoped even across fiber interleaving on one worker thread.
-struct RecvKeepaliveGuard {
-    prior_len: usize,
+/// Unlike a thread-local stash, stack ownership is automatically correct under
+/// fiber interleaving: a future pop-then-await keeps the `Payload` on the
+/// suspending fiber's own stack, untouchable by sibling fibers on the same
+/// worker thread. It also avoids the malloc+copy a C-ABI out-param would need —
+/// the handler reads straight from `payload.bytes`.
+enum RecvOutcome {
+    /// A value was popped. The handler holds this until after it has
+    /// deserialized `bytes` into the PHP retval, then drops it.
+    Got(Payload),
+    /// Channel empty and open. Only the non-blocking pop returns this.
+    Empty,
+    /// Bounded wait elapsed with no value. Only the blocking pop returns this.
+    Timeout,
+    /// Channel closed and fully drained.
+    Closed,
 }
 
-impl RecvKeepaliveGuard {
-    fn new() -> Self {
-        Self {
-            prior_len: RECV_KEEPALIVE.with(|k| k.borrow().len()),
-        }
-    }
-
-    /// Hard guard for the invariant the truncate-on-drop relies on: a recv
-    /// handler must not stash a keepalive and then suspend the fiber before
-    /// releasing it. If it did, a sibling fiber running during the suspend
-    /// would create+drop its own guard and `truncate(prior_len)` away this
-    /// fiber's still-needed keepalive — a cross-fiber use-after-free. Call this
-    /// before any fiber suspend inside a recv handler.
-    ///
-    /// Always-on (not a `debug_assert`): the failure it guards against is
-    /// silent memory corruption in a release build, so the check must fire in
-    /// release too — a no-op tripwire would let a future streaming recv that
-    /// pops-then-awaits corrupt the stash undetected in production. Today
-    /// nothing stashes before suspending (the only suspend, the empty/park
-    /// path, pops nothing), so this never trips; it converts that future
-    /// regression from a UAF into a clean, loud error. The proper fix when a
-    /// pop-then-await path is actually needed is to transfer keepalive
-    /// ownership explicitly back to the handler (a Rust-native `Payload`
-    /// return — the recv FFI has no C caller) rather than via the thread-local.
-    fn ensure_no_stash_before_suspend(&self) -> Result<(), crate::plugin::PhpError> {
-        if RECV_KEEPALIVE.with(|k| k.borrow().len()) != self.prior_len {
-            return Err(crate::plugin::PhpError::Custom(
-                "recv keepalive stashed before a fiber suspend: a pop-then-await \
-                 path would let a sibling fiber truncate this keepalive \
-                 (cross-fiber use-after-free). Transfer keepalive ownership \
-                 explicitly instead of relying on the thread-local stash."
-                    .into(),
-            ));
-        }
-        Ok(())
+/// `PhpError` for a recv helper handed a stale/null handle pointer. Mirrors the
+/// `StaleHandleException` class [`counter_rc_to_result`] maps `-2` to.
+fn recv_stale_handle_err() -> crate::plugin::PhpError {
+    crate::plugin::PhpError::Exception {
+        class: "OxPHP\\Shared\\StaleHandleException".into(),
+        message: "channel handle is stale".into(),
+        code: 0,
     }
 }
 
-impl Drop for RecvKeepaliveGuard {
-    fn drop(&mut self) {
-        RECV_KEEPALIVE.with(|k| k.borrow_mut().truncate(self.prior_len));
+/// `PhpError` for a recv helper whose entry is not a `Shared\Channel`. Mirrors
+/// the `TypeException` class [`counter_rc_to_result`] maps `-3` to.
+fn recv_type_err() -> crate::plugin::PhpError {
+    crate::plugin::PhpError::Exception {
+        class: "OxPHP\\Shared\\TypeException".into(),
+        message: "Shared handle is not a Channel".into(),
+        code: 0,
     }
+}
+
+/// Resolve a channel `entry_ptr` to `(&Entry, &ChannelInner)`, running the same
+/// null / `ENTRY_MAGIC` / type checks the FFI prologue used. Shared by the
+/// native recv helpers below.
+fn channel_entry<'a>(
+    entry_ptr: *const Entry,
+) -> Result<(&'a Entry, &'a ChannelInner), crate::plugin::PhpError> {
+    if entry_ptr.is_null() {
+        return Err(recv_stale_handle_err());
+    }
+    // SAFETY: see oxphp_shared_channel_try_send — entry_ptr is a live
+    // `*const Entry` produced by `Arc::into_raw` and owned by the wrapper for
+    // the duration of the call.
+    let entry: &Entry = unsafe { &*entry_ptr };
+    debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel recv on freed Entry");
+    let ch = entry.inner.as_any_channel().ok_or_else(recv_type_err)?;
+    Ok((entry, ch))
+}
+
+/// Non-blocking pop returning the [`Payload`] by value (see [`RecvOutcome`]).
+/// Replaces the C-ABI `oxphp_shared_channel_try_recv`: the recv FFI has no C
+/// caller, so a Rust-native return lets the handler keep the keepalive on its
+/// stack instead of stashing it in a thread-local.
+fn channel_try_recv_native(
+    entry_ptr: *const Entry,
+) -> Result<RecvOutcome, crate::plugin::PhpError> {
+    let (entry, ch) = channel_entry(entry_ptr)?;
+    let outcome = match ch.try_recv() {
+        Ok(Some(payload)) => RecvOutcome::Got(payload),
+        Ok(None) => RecvOutcome::Closed,
+        Err(TryRecvErr::WouldBlockEmpty) => RecvOutcome::Empty,
+    };
+    entry.registry.record_op(entry);
+    Ok(outcome)
+}
+
+/// Thread-blocking pop with bounded/forever wait, returning the [`Payload`] by
+/// value. `timeout_ms` follows the wire convention (`-1` forever, `0` try,
+/// `>0` ms). Replaces the C-ABI `oxphp_shared_channel_recv_blocking`.
+fn channel_recv_blocking_native(
+    entry_ptr: *const Entry,
+    timeout_ms: i64,
+) -> Result<RecvOutcome, crate::plugin::PhpError> {
+    let (entry, ch) = channel_entry(entry_ptr)?;
+    let wait = parse_timeout(timeout_ms);
+    let outcome = match ch.recv_blocking(wait) {
+        Ok(Some(payload)) => RecvOutcome::Got(payload),
+        Ok(None) => RecvOutcome::Closed,
+        Err(SharedError::Timeout) => RecvOutcome::Timeout,
+        // `recv_blocking` returns no other error variant (only Timeout among
+        // `Err`s); anything else is a contract violation, caught loudly by the
+        // dispatch-boundary `catch_unwind` rather than mis-mapped silently.
+        Err(_) => unreachable!("recv_blocking returns only Ok(Some) / Ok(None) / Err(Timeout)"),
+    };
+    // `record_op` runs for every outcome including `Timeout` — a timed-out
+    // `recvTimeout` did touch the channel, so it counts toward
+    // `oxphp_shared_ops_total{type="Channel"}`. Deliberate: matches `try_recv`
+    // (which records on `Empty`) and the fiber recv path (which records via its
+    // probe), so all three recv paths agree. `record_op` is a pure Relaxed
+    // metric counter with no lifecycle effect, so this is observable only in
+    // that metric.
+    entry.registry.record_op(entry);
+    Ok(outcome)
+}
+
+/// Batched pop returning every popped [`Payload`] by value. `max == 0` drains
+/// all currently-buffered items. Replaces the C-ABI
+/// `oxphp_shared_channel_recv_many`: holding the `Vec<Payload>` on the
+/// handler's stack lets it deserialize each `bytes` directly, dropping the
+/// concat + offsets malloc/copy the C-ABI batch out-params needed.
+fn channel_recv_many_native(
+    entry_ptr: *const Entry,
+    max: u64,
+    timeout_ms: i64,
+) -> Result<Vec<Payload>, crate::plugin::PhpError> {
+    let (entry, ch) = channel_entry(entry_ptr)?;
+    let wait = parse_timeout(timeout_ms);
+    let items = ch.recv_many(max as usize, wait);
+    entry.registry.record_op(entry);
+    Ok(items)
+}
+
+/// Build a `RecvResult::Ok(value)` from a `payload` the caller still owns,
+/// deserializing straight from `payload.bytes`. The caller must keep `payload`
+/// alive across this call (its `keepalive` pins every nested `Shared\*` entry
+/// while the deserializer re-resolves each tag-7 id) and drop it afterwards.
+/// Passes a null buffer for an empty payload, matching the prior FFI contract.
+fn write_recv_payload(
+    call: &mut crate::bridge::call::NativeCall,
+    payload: &Payload,
+) -> Result<(), crate::plugin::PhpError> {
+    let (buf, len) = if payload.bytes.is_empty() {
+        (std::ptr::null(), 0)
+    } else {
+        (payload.bytes.as_ptr(), payload.bytes.len())
+    };
+    crate::plugins::ox_shared::results::write_recv_ok(call, buf, len)
 }
 
 /// Approximate bytes crossbeam allocates per bounded-channel slot: the
@@ -189,30 +253,6 @@ fn check_value_size(len: usize, cap: usize, method: &str) -> Result<(), crate::p
         });
     }
     Ok(())
-}
-
-/// Hand a `Vec<u8>` off to C via a `libc::malloc`'d buffer. C side is
-/// expected to free it via `oxphp_portable_free` when done.
-/// Returns `(buf_ptr, len)` on success; returns `SharedError::Generic`
-/// if `libc::malloc` fails.
-///
-/// # Safety
-/// The returned pointer (when non-null) owns the allocation; the caller
-/// must arrange for `oxphp_portable_free` (or `libc::free`) to run.
-unsafe fn payload_to_malloc(bytes: Vec<u8>) -> Result<(*mut u8, usize), SharedError> {
-    let n = bytes.len();
-    if n == 0 {
-        return Ok((std::ptr::null_mut(), 0));
-    }
-    let ptr = unsafe { libc::malloc(n) as *mut u8 };
-    if ptr.is_null() {
-        set_last_error("libc::malloc failed for channel payload");
-        return Err(SharedError::Generic);
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, n);
-    }
-    Ok((ptr, n))
 }
 
 /// Slow-path poll quantum for blocking send/recv. Small enough that a
@@ -1372,10 +1412,10 @@ impl SharedInnerChannelExt for dyn SharedInner {
 // `ffi_entry` so panics and SharedError values translate uniformly to
 // the negative status codes in the exception contract.
 //
-// Output-buffer ownership rule: on success `*out_buf` is either null
-// (for empty payloads) or a pointer owned by C, allocated via
-// `libc::malloc` (see `payload_to_malloc`). C releases it with
-// `oxphp_portable_free`, which forwards to `libc::free`.
+// The recv-side pops (`try_recv` / `recv_blocking` / `recv_many`) are not part
+// of this C ABI: they have no C caller, so they live as Rust-native helpers
+// (`channel_try_recv_native` etc.) that return the popped `Payload` by value,
+// letting the handler hold the keepalive on its stack through deserialize.
 
 /// Construct a new channel with the given fixed capacity and register
 /// it with the Shared registry. Capacity must be `>= 1`; zero is
@@ -1488,72 +1528,6 @@ pub unsafe extern "C" fn oxphp_shared_channel_try_send(
     })
 }
 
-/// Non-blocking recv. Writes the outcome to `*out_state`:
-///   * `0` — got an item; `*out_buf`/`*out_len` point at a malloc'd
-///     buffer (null+0 when the payload was empty).
-///   * `1` — empty but still open; caller may retry later.
-///   * `2` — closed + drained; end of stream.
-///
-/// Never returns a negative status code under normal conditions; the
-/// negative space is reserved for Rust-level panics via `ffi_entry`.
-///
-/// # Safety
-/// `out_buf`, `out_len`, `out_state` must each be valid for writes.
-/// When `*out_state == 0` and `*out_buf != null`, the caller takes
-/// ownership of the allocation.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_try_recv(
-    entry_ptr: *const Entry,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-    out_state: *mut c_int,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() || out_state.is_null() {
-        set_last_error("out pointers null");
-        return SharedError::Generic.code();
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-        *out_state = 1;
-    }
-    ffi_entry(|| {
-        // SAFETY: see oxphp_shared_channel_try_send.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_try_recv on freed Entry");
-        let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
-
-        match ch.try_recv() {
-            Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
-                // Keep nested Shared\* entries alive until the handler
-                // deserializes these bytes (re-resolving each tag-7 id).
-                stash_recv_keepalive(payload.keepalive);
-                entry.registry.record_op(entry);
-                unsafe {
-                    *out_buf = ptr;
-                    *out_len = n;
-                    *out_state = 0;
-                }
-                Ok(())
-            }
-            Err(TryRecvErr::WouldBlockEmpty) => {
-                entry.registry.record_op(entry);
-                unsafe { *out_state = 1 };
-                Ok(())
-            }
-            Ok(None) => {
-                entry.registry.record_op(entry);
-                unsafe { *out_state = 2 };
-                Ok(())
-            }
-        }
-    })
-}
-
 /// Thread-blocking send with bounded wait. `timeout_ms` follows the wire
 /// convention: `-1` = forever, `0` = try (non-blocking), `>0` = milliseconds.
 /// See `timeout::parse_timeout`. Returns `0` on success,
@@ -1607,78 +1581,6 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_blocking(
             }
             Err(e @ SharedError::Timeout) => {
                 set_last_error("send_blocking timed out");
-                Err(e)
-            }
-            Err(other) => Err(other),
-        }
-    })
-}
-
-/// Thread-blocking recv. `timeout_ms` follows the wire convention:
-/// `-1` = forever, `0` = try (non-blocking), `>0` = milliseconds.
-/// See `timeout::parse_timeout`.
-///
-/// State semantics:
-///   * `*out_state = 0` — got an item. `*out_buf`/`*out_len` set.
-///   * `*out_state = 2` — closed + drained. No item.
-///
-/// Blocking timeout is NOT expressed via state — it returns
-/// `SharedError::Timeout` (-7) as a hard error so the PHP wrapper can
-/// emit a `RecvResult::Timeout` variant instead of returning a value.
-///
-/// # Safety
-/// `out_buf`, `out_len`, `out_state` must be valid for writes.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_recv_blocking(
-    entry_ptr: *const Entry,
-    timeout_ms: i64,
-    out_buf: *mut *mut u8,
-    out_len: *mut usize,
-    out_state: *mut c_int,
-) -> c_int {
-    if out_buf.is_null() || out_len.is_null() || out_state.is_null() {
-        set_last_error("out pointers null");
-        return SharedError::Generic.code();
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    unsafe {
-        *out_buf = std::ptr::null_mut();
-        *out_len = 0;
-        *out_state = 2;
-    }
-    ffi_entry(|| {
-        // SAFETY: see oxphp_shared_channel_try_send.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(
-            entry.magic, ENTRY_MAGIC,
-            "channel_recv_blocking on freed Entry"
-        );
-        let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
-
-        let wait = parse_timeout(timeout_ms);
-        match ch.recv_blocking(wait) {
-            Ok(Some(payload)) => {
-                let (ptr, n) = unsafe { payload_to_malloc(payload.bytes)? };
-                // Keep nested Shared\* entries alive until the handler
-                // deserializes these bytes (re-resolving each tag-7 id).
-                stash_recv_keepalive(payload.keepalive);
-                entry.registry.record_op(entry);
-                unsafe {
-                    *out_buf = ptr;
-                    *out_len = n;
-                    *out_state = 0;
-                }
-                Ok(())
-            }
-            Ok(None) => {
-                entry.registry.record_op(entry);
-                unsafe { *out_state = 2 };
-                Ok(())
-            }
-            Err(e @ SharedError::Timeout) => {
-                set_last_error("recv_blocking timed out");
                 Err(e)
             }
             Err(other) => Err(other),
@@ -1844,115 +1746,6 @@ pub unsafe extern "C" fn oxphp_shared_channel_send_many(
         let sent = ch.send_many(payloads, wait);
         entry.registry.record_op(entry);
         unsafe { *out_sent = sent };
-        Ok(())
-    })
-}
-
-/// Batched recv. Collects up to `max` payloads per the `recv_many`
-/// Rust API. `timeout_ms` follows the wire convention: `-1` = forever,
-/// `0` = try (non-blocking), `>0` = milliseconds. See `timeout::parse_timeout`.
-/// On success writes:
-///   * `*out_concat` — libc::malloc'd buffer with all payloads
-///     concatenated (null when n == 0 or total length == 0).
-///   * `*out_concat_len` — total length in bytes.
-///   * `*out_offsets` — libc::malloc'd `[usize; n+1]` array with the
-///     payload boundaries (null when n == 0).
-///   * `*out_n` — number of payloads returned.
-///
-/// Caller owns both allocations and must free them via `libc::free`
-/// (or `oxphp_portable_free`, which forwards to `libc::free`).
-///
-/// # Safety
-/// `out_concat`, `out_concat_len`, `out_offsets`, `out_n` must all be
-/// valid for writes.
-#[no_mangle]
-pub unsafe extern "C" fn oxphp_shared_channel_recv_many(
-    entry_ptr: *const Entry,
-    max: u64,
-    timeout_ms: i64,
-    out_concat: *mut *mut u8,
-    out_concat_len: *mut usize,
-    out_offsets: *mut *mut usize,
-    out_n: *mut u64,
-) -> c_int {
-    if out_concat.is_null() || out_concat_len.is_null() || out_offsets.is_null() || out_n.is_null()
-    {
-        set_last_error("out ptrs null");
-        return SharedError::Generic.code();
-    }
-    if entry_ptr.is_null() {
-        return SharedError::StaleHandle.code();
-    }
-    unsafe {
-        *out_concat = std::ptr::null_mut();
-        *out_concat_len = 0;
-        *out_offsets = std::ptr::null_mut();
-        *out_n = 0;
-    }
-    ffi_entry(|| {
-        // SAFETY: see oxphp_shared_channel_try_send.
-        let entry: &Entry = unsafe { &*entry_ptr };
-        debug_assert_eq!(entry.magic, ENTRY_MAGIC, "channel_recv_many on freed Entry");
-        let ch = entry.inner.as_any_channel().ok_or(SharedError::Type)?;
-
-        let wait = parse_timeout(timeout_ms);
-        let items = ch.recv_many(max as usize, wait);
-        entry.registry.record_op(entry);
-
-        let n = items.len();
-        if n == 0 {
-            return Ok(());
-        }
-
-        let total: usize = items.iter().map(|p| p.bytes.len()).sum();
-        let concat_ptr = if total == 0 {
-            std::ptr::null_mut()
-        } else {
-            let p = unsafe { libc::malloc(total) as *mut u8 };
-            if p.is_null() {
-                set_last_error("libc::malloc failed for recv_many concat");
-                return Err(SharedError::Generic);
-            }
-            p
-        };
-        let offsets_bytes = (n + 1) * std::mem::size_of::<usize>();
-        let offsets_ptr = unsafe { libc::malloc(offsets_bytes) as *mut usize };
-        if offsets_ptr.is_null() {
-            if !concat_ptr.is_null() {
-                unsafe { libc::free(concat_ptr as *mut _) };
-            }
-            set_last_error("libc::malloc failed for recv_many offsets");
-            return Err(SharedError::Generic);
-        }
-
-        let mut cursor = 0usize;
-        unsafe { *offsets_ptr = 0 };
-        for (i, item) in items.iter().enumerate() {
-            if !item.bytes.is_empty() && !concat_ptr.is_null() {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        item.bytes.as_ptr(),
-                        concat_ptr.add(cursor),
-                        item.bytes.len(),
-                    );
-                }
-            }
-            cursor += item.bytes.len();
-            unsafe { *offsets_ptr.add(i + 1) = cursor };
-        }
-
-        // Keep every popped element's nested Shared\* entries alive until the
-        // recvMany handler deserializes the concat buffer (re-resolving tag-7).
-        for item in items {
-            stash_recv_keepalive(item.keepalive);
-        }
-
-        unsafe {
-            *out_concat = concat_ptr;
-            *out_concat_len = total;
-            *out_offsets = offsets_ptr;
-            *out_n = n as u64;
-        }
         Ok(())
     })
 }
@@ -2289,45 +2082,15 @@ pub fn register_class(
         .method("tryRecv")
         .returns(PhpType::Object)
         .handler(|call| {
-            // Hold any popped value's nested keepalive until write_recv_ok has
-            // deserialized the bytes (re-resolving each tag-7 id).
-            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
-            let mut out_buf: *mut u8 = std::ptr::null_mut();
-            let mut out_len: usize = 0;
-            let mut state: c_int = 0;
-            let rc = unsafe {
-                oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
-            };
-            super::counter::counter_rc_to_result(rc)?;
-            match state {
-                0 => {
-                    let r = results::write_recv_ok(call, out_buf, out_len);
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    r
-                }
-                1 => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    results::write_recv(call, RecvKind::Empty)
-                }
-                2 => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    results::write_recv(call, RecvKind::Closed)
-                }
-                other => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    Err(PhpError::Custom(format!(
-                        "tryRecv: unexpected state {other}"
-                    )))
-                }
+            // The popped Payload stays on this stack frame across write_recv_ok,
+            // so its keepalive pins every nested Shared\* entry while the bytes
+            // are deserialized (re-resolving each tag-7 id).
+            match channel_try_recv_native(entry_ptr)? {
+                RecvOutcome::Got(payload) => write_recv_payload(call, &payload),
+                RecvOutcome::Empty => results::write_recv(call, RecvKind::Empty),
+                RecvOutcome::Closed => results::write_recv(call, RecvKind::Closed),
+                RecvOutcome::Timeout => unreachable!("try_recv never returns Timeout"),
             }
         })
         // ── recv(): RecvResult ──────────────────────────────────────
@@ -2494,82 +2257,34 @@ pub fn register_class(
         .param("ms", PhpType::Int)
         .returns(PhpType::Array)
         .handler(|call| {
-            // Hold popped elements' nested keepalives until each is deserialized.
-            let _ka_guard = RecvKeepaliveGuard::new();
             let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
             let max_raw = call.arg_long(0).unwrap_or(0);
             let max: u64 = if max_raw < 0 { 0 } else { max_raw as u64 };
             let timeout_ms: i64 = read_positive_ms_arg(call, 1)?;
 
-            let mut concat: *mut u8 = std::ptr::null_mut();
-            let mut concat_len: usize = 0;
-            let mut offsets: *mut usize = std::ptr::null_mut();
-            let mut n: u64 = 0;
-            let rc = unsafe {
-                oxphp_shared_channel_recv_many(
-                    entry_ptr,
-                    max,
-                    timeout_ms,
-                    &mut concat,
-                    &mut concat_len,
-                    &mut offsets,
-                    &mut n,
-                )
-            };
-            if let Err(e) = super::counter::counter_rc_to_result(rc) {
-                unsafe {
-                    if !concat.is_null() {
-                        bridge_ffi::oxphp_portable_free(concat);
-                    }
-                    if !offsets.is_null() {
-                        bridge_ffi::oxphp_portable_free(offsets as *mut u8);
-                    }
-                }
-                return Err(e);
-            }
+            // `items` (each Payload's keepalive included) lives on this stack
+            // frame through every oxphp_arr_push_portbuf below, pinning nested
+            // Shared\* entries while each element is deserialized. Reading
+            // straight from `item.bytes` drops the concat + offsets malloc/copy
+            // the C-ABI batch out-params required.
+            let items = channel_recv_many_native(entry_ptr, max, timeout_ms)?;
 
-            let n_usize = n as usize;
             let retval = call.retval_ptr();
             unsafe {
-                bridge_ffi::oxphp_ret_array_init(retval, n_usize as u32);
+                bridge_ffi::oxphp_ret_array_init(retval, items.len() as u32);
             }
 
-            if n_usize > 0 {
-                // offsets must be non-null when n > 0 per FFI contract.
-                let offsets_slice = unsafe { std::slice::from_raw_parts(offsets, n_usize + 1) };
-                for i in 0..n_usize {
-                    let start = offsets_slice[i];
-                    let end = offsets_slice[i + 1];
-                    let len = end - start;
-                    let buf_ptr: *const u8 = if len == 0 || concat.is_null() {
-                        std::ptr::null()
-                    } else {
-                        unsafe { concat.add(start) as *const u8 }
-                    };
-                    let push_rc =
-                        unsafe { bridge_ffi::oxphp_arr_push_portbuf(retval, buf_ptr, len) };
-                    if push_rc != 0 {
-                        unsafe {
-                            if !concat.is_null() {
-                                bridge_ffi::oxphp_portable_free(concat);
-                            }
-                            if !offsets.is_null() {
-                                bridge_ffi::oxphp_portable_free(offsets as *mut u8);
-                            }
-                        }
-                        return Err(PhpError::Custom(format!(
-                            "recvMany: deserialize of payload {i} failed"
-                        )));
-                    }
-                }
-            }
-
-            unsafe {
-                if !concat.is_null() {
-                    bridge_ffi::oxphp_portable_free(concat);
-                }
-                if !offsets.is_null() {
-                    bridge_ffi::oxphp_portable_free(offsets as *mut u8);
+            for (i, item) in items.iter().enumerate() {
+                let (buf_ptr, len): (*const u8, usize) = if item.bytes.is_empty() {
+                    (std::ptr::null(), 0)
+                } else {
+                    (item.bytes.as_ptr(), item.bytes.len())
+                };
+                let push_rc = unsafe { bridge_ffi::oxphp_arr_push_portbuf(retval, buf_ptr, len) };
+                if push_rc != 0 {
+                    return Err(PhpError::Custom(format!(
+                        "recvMany: deserialize of payload {i} failed"
+                    )));
                 }
             }
             Ok(())
@@ -2909,11 +2624,6 @@ fn invoke_channel_recv(
     use crate::plugins::ox_shared::handle::SharedHandle;
     use crate::plugins::ox_shared::results::{self, RecvKind};
 
-    // Hold any buffered-hit value's nested keepalive until write_recv_ok has
-    // deserialized the bytes. The fiber waker path anchors its own keepalive in
-    // AsyncResult, so this guard is a no-op there (nothing stashed).
-    let ka_guard = RecvKeepaliveGuard::new();
-
     let entry_ptr = call.storage::<SharedHandle>()?.entry_ptr;
 
     // The fiber-suspend path uses synthetic-promise FFI that is gated
@@ -2929,49 +2639,23 @@ fn invoke_channel_recv(
     if in_fiber {
         // Fiber path: try_recv once first, then register recv-waiter and
         // suspend via fiber_await if the channel is empty. Matches the
-        // blocking-path FFI which always attempts once before returning
-        // Timeout, so recvTimeout($ms) on a non-empty channel succeeds
-        // rather than spuriously timing out.
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 0;
-        let try_rc = unsafe {
-            oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
-        };
-        super::counter::counter_rc_to_result(try_rc)?;
-        match state {
-            0 => {
-                let r = results::write_recv_ok(call, out_buf, out_len);
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
-                return r;
-            }
-            2 => {
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
-                return results::write_recv(call, RecvKind::Closed);
-            }
-            _ => {
-                // state == 1: WouldBlockEmpty. Free defensively before
-                // parking; Wait::Try is unreachable (tryRecv is its own
-                // handler).
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
+        // blocking path which always attempts once before returning Timeout,
+        // so recvTimeout($ms) on a non-empty channel succeeds rather than
+        // spuriously timing out. A buffered hit returns here with the Payload
+        // owned on this stack frame through write_recv_payload; nothing is
+        // stashed, so the suspend below cannot strand a keepalive.
+        match channel_try_recv_native(entry_ptr)? {
+            RecvOutcome::Got(payload) => return write_recv_payload(call, &payload),
+            RecvOutcome::Closed => return results::write_recv(call, RecvKind::Closed),
+            RecvOutcome::Timeout => unreachable!("try_recv never returns Timeout"),
+            RecvOutcome::Empty => {
+                // WouldBlockEmpty. Wait::Try is unreachable (tryRecv is its own
+                // handler) — fall through to register a waiter and suspend.
                 if matches!(parse_timeout(timeout_ms), Wait::Try) {
                     unreachable!("Wait::Try unreachable from recv/recvTimeout");
                 }
             }
         }
-
-        // Invariant guard: nothing must be stashed before the suspend below, or
-        // a sibling fiber's guard could truncate it away (cross-fiber UAF). The
-        // fast-path try_recv above stashes only on a hit, which returns without
-        // reaching here. Checked before registering a waiter so a violation
-        // can't strand one.
-        ka_guard.ensure_no_stash_before_suspend()?;
 
         let mut promise_id: i64 = 0;
         // Shim takes u64: -1 (forever) → 0 (no timeout spawned).
@@ -3042,38 +2726,17 @@ fn invoke_channel_recv(
                         // arrive here as AsyncException (synthetic::cancel).
                         // Disambiguate with one non-blocking probe: a value
                         // may have landed just before the cancel, or the
-                        // channel may have closed under the parked recv.
-                        let mut p_buf: *mut u8 = std::ptr::null_mut();
-                        let mut p_len: usize = 0;
-                        let mut p_state: c_int = 0;
-                        let probe_rc = unsafe {
-                            oxphp_shared_channel_try_recv(
-                                entry_ptr,
-                                &mut p_buf,
-                                &mut p_len,
-                                &mut p_state,
-                            )
-                        };
-                        super::counter::counter_rc_to_result(probe_rc)?;
-                        match p_state {
-                            0 => {
-                                let r = results::write_recv_ok(call, p_buf, p_len);
-                                if !p_buf.is_null() {
-                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
-                                }
-                                r
+                        // channel may have closed under the parked recv. A hit
+                        // keeps its Payload on this stack frame through
+                        // write_recv_payload.
+                        match channel_try_recv_native(entry_ptr)? {
+                            RecvOutcome::Got(payload) => write_recv_payload(call, &payload),
+                            RecvOutcome::Closed => results::write_recv(call, RecvKind::Closed),
+                            RecvOutcome::Timeout => {
+                                unreachable!("try_recv never returns Timeout")
                             }
-                            2 => {
-                                if !p_buf.is_null() {
-                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
-                                }
-                                results::write_recv(call, RecvKind::Closed)
-                            }
-                            _ => {
+                            RecvOutcome::Empty => {
                                 // Still empty + open.
-                                if !p_buf.is_null() {
-                                    unsafe { bridge_ffi::oxphp_portable_free(p_buf) };
-                                }
                                 if deadline_hit {
                                     // Bounded recv: the deadline fired →
                                     // RecvResult::Timeout, not a fatal.
@@ -3127,46 +2790,14 @@ fn invoke_channel_recv(
             }
         }
     } else {
-        // Thread-block path.
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(
-                entry_ptr,
-                timeout_ms,
-                &mut out_buf,
-                &mut out_len,
-                &mut state,
-            )
-        };
-        if rc == SharedError::Timeout.code() {
-            if !out_buf.is_null() {
-                unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-            }
-            return results::write_recv(call, RecvKind::Timeout);
-        }
-        super::counter::counter_rc_to_result(rc)?;
-        match state {
-            0 => {
-                let r = results::write_recv_ok(call, out_buf, out_len);
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
-                r
-            }
-            2 => {
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
-                results::write_recv(call, RecvKind::Closed)
-            }
-            other => {
-                if !out_buf.is_null() {
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                }
-                Err(PhpError::Custom(format!("recv: unexpected state {other}")))
-            }
+        // Thread-block path. The popped Payload lives on this stack frame
+        // through write_recv_payload, pinning nested Shared\* entries while the
+        // bytes are deserialized.
+        match channel_recv_blocking_native(entry_ptr, timeout_ms)? {
+            RecvOutcome::Got(payload) => write_recv_payload(call, &payload),
+            RecvOutcome::Timeout => results::write_recv(call, RecvKind::Timeout),
+            RecvOutcome::Closed => results::write_recv(call, RecvKind::Closed),
+            RecvOutcome::Empty => unreachable!("recv_blocking never returns Empty"),
         }
     }
 }
@@ -3381,64 +3012,56 @@ mod tests {
         );
     }
 
+    // Regression for the in-transit-lifetime guarantee: a fire-and-forget
+    // nested `Shared\*` — whose only strong ref lives in the buffered payload's
+    // keepalive — must stay alive while the popped `Payload` sits on the recv
+    // handler's stack, and be released the moment that `Payload` drops. This
+    // pins the property the stack-owned design relies on, replacing the deleted
+    // tests that exercised the old thread-local stash.
     #[test]
-    fn recv_keepalive_guard_holds_entry_then_releases() {
+    fn recv_pop_keeps_nested_shared_alive_until_payload_dropped() {
         ensure_test_registry();
         let reg = registry();
-        let value = reg
-            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
+        // Channel we send through, registered so build_payload can resolve refs.
+        let ch = Arc::new(ChannelInner::new(2));
+        let ch_entry = reg.insert(SharedType::Channel, ch.clone()).unwrap();
+        ch.bind_entry(Arc::downgrade(&ch_entry));
+
+        // Nested entry whose sole strong ref will live in the payload keepalive
+        // once we drop our handle — the fire-and-forget case.
+        let nested_inner = Arc::new(ChannelInner::new(1));
+        let nested = reg.insert(SharedType::Channel, nested_inner).unwrap();
+        let nested_id = nested.id;
+        let weak = Arc::downgrade(&nested);
+
+        // Send a value carrying a tag-7 ref to `nested`; build_payload resolves
+        // it into a strong keepalive held alongside the wire bytes.
+        let payload = ch
+            .build_payload(tag7(SharedType::Channel, nested_id))
             .unwrap();
-        let vid = value.id;
-        let weak = Arc::downgrade(&value);
+        ch.try_send(payload).unwrap();
 
-        // A keepalive holding one strong ref to the entry (as a recv FFI would
-        // stash from a popped buffered payload).
-        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
-        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
-        drop(value); // now only `ka` keeps the entry alive
-        assert!(weak.upgrade().is_some());
+        // Drop our handle — now only the buffered payload's keepalive pins it.
+        drop(nested);
+        assert!(weak.upgrade().is_some(), "buffered payload must pin nested");
 
-        {
-            let _g = RecvKeepaliveGuard::new();
-            stash_recv_keepalive(ka);
-            assert!(
-                weak.upgrade().is_some(),
-                "stash must keep the entry alive across the deserialize window"
-            );
+        // Pop via the native helper: the returned Payload rides this stack
+        // frame, so its keepalive must keep nested alive across the (here
+        // simulated) deserialize window, then release it on drop.
+        match channel_try_recv_native(Arc::as_ptr(&ch_entry)).expect("try_recv ok") {
+            RecvOutcome::Got(popped) => {
+                assert!(
+                    weak.upgrade().is_some(),
+                    "popped Payload on the stack must pin nested until dropped"
+                );
+                drop(popped);
+                assert!(
+                    weak.upgrade().is_none(),
+                    "dropping the popped Payload releases nested's last strong ref"
+                );
+            }
+            _ => panic!("expected RecvOutcome::Got"),
         }
-        // Guard dropped → stash truncated → the entry's last ref is released.
-        assert!(
-            weak.upgrade().is_none(),
-            "guard drop must release the stashed keepalive"
-        );
-    }
-
-    // The stash-before-suspend guard must reject a violation in *every* build,
-    // not just debug — the failure it prevents is a silent cross-fiber UAF in
-    // release. Guards against a future regression to `debug_assert`.
-    #[test]
-    fn ensure_no_stash_before_suspend_is_always_on() {
-        ensure_test_registry();
-        let reg = registry();
-        let value = reg
-            .insert(SharedType::Channel, Arc::new(ChannelInner::new(1)))
-            .unwrap();
-        let vid = value.id;
-
-        let guard = RecvKeepaliveGuard::new();
-        // Nothing stashed yet — the live invariant holds.
-        assert!(guard.ensure_no_stash_before_suspend().is_ok());
-
-        // Simulate a future pop-then-await: stash, then re-check.
-        let mut ka: SmallVec<[SharedRefOwned; 1]> = SmallVec::new();
-        ka.push(SharedRefOwned::from_arc(reg.lookup(vid).unwrap()));
-        stash_recv_keepalive(ka);
-        assert!(
-            guard.ensure_no_stash_before_suspend().is_err(),
-            "stash-before-suspend must be rejected in all builds, not debug only"
-        );
-        // guard drops at scope end → truncate releases the stashed keepalive.
-        drop(value);
     }
 
     // Concurrent blocking producer/consumer on a cap=1 ChannelInner from two
@@ -4373,14 +3996,6 @@ mod tests {
         });
     }
 
-    /// Free a malloc'd output buffer if non-null. Mirrors what the C
-    /// side does via `oxphp_portable_free`.
-    unsafe fn free_out(buf: *mut u8) {
-        if !buf.is_null() {
-            unsafe { libc::free(buf as *mut libc::c_void) };
-        }
-    }
-
     /// RAII guard that releases a test channel's registry entry on drop.
     /// Without this, the shared process-global registry can accumulate
     /// entries across tests and hit `max_entries` / `max_bytes` caps —
@@ -4447,18 +4062,10 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!(success, 1);
 
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 1;
-        let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 0);
-        assert_eq!(out_len, 3);
-        let slice = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
-        assert_eq!(slice, &[1, 2, 3]);
-        unsafe { free_out(out_buf) };
+        match channel_try_recv_native(ch.entry()).expect("try_recv ok") {
+            RecvOutcome::Got(p) => assert_eq!(p.bytes, vec![1, 2, 3]),
+            _ => panic!("expected RecvOutcome::Got"),
+        }
     }
 
     #[test]
@@ -4493,35 +4100,22 @@ mod tests {
     }
 
     #[test]
-    fn ffi_try_recv_empty_open_state_1() {
+    fn ffi_try_recv_empty_open_returns_empty() {
         let ch = TestChannel::new(4);
-
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 99;
-        let mut state: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 1);
-        assert!(out_buf.is_null());
-        assert_eq!(out_len, 0);
+        assert!(matches!(
+            channel_try_recv_native(ch.entry()).expect("try_recv ok"),
+            RecvOutcome::Empty
+        ));
     }
 
     #[test]
-    fn ffi_try_recv_closed_empty_state_2() {
+    fn ffi_try_recv_closed_empty_returns_closed() {
         let ch = TestChannel::new(4);
         assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
-
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 99;
-        let mut state: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_channel_try_recv(ch.entry(), &mut out_buf, &mut out_len, &mut state)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 2);
-        assert!(out_buf.is_null());
+        assert!(matches!(
+            channel_try_recv_native(ch.entry()).expect("try_recv ok"),
+            RecvOutcome::Closed
+        ));
     }
 
     #[test]
@@ -4611,65 +4205,29 @@ mod tests {
             0
         );
 
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 2;
-        let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(
-                ch.entry(),
-                100,
-                &mut out_buf,
-                &mut out_len,
-                &mut state,
-            )
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 0);
-        assert_eq!(out_len, 3);
-        let slice = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
-        assert_eq!(slice, &[7, 8, 9]);
-        unsafe { free_out(out_buf) };
+        match channel_recv_blocking_native(ch.entry(), 100).expect("recv_blocking ok") {
+            RecvOutcome::Got(p) => assert_eq!(p.bytes, vec![7, 8, 9]),
+            _ => panic!("expected RecvOutcome::Got"),
+        }
     }
 
     #[test]
-    fn ffi_recv_blocking_closed_empty_state_2() {
+    fn ffi_recv_blocking_closed_empty_returns_closed() {
         let ch = TestChannel::new(4);
         assert_eq!(unsafe { oxphp_shared_channel_close(ch.entry()) }, 0);
-
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 99;
-        let mut state: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(
-                ch.entry(),
-                -1,
-                &mut out_buf,
-                &mut out_len,
-                &mut state,
-            )
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 2);
-        assert!(out_buf.is_null());
+        assert!(matches!(
+            channel_recv_blocking_native(ch.entry(), -1).expect("recv_blocking ok"),
+            RecvOutcome::Closed
+        ));
     }
 
     #[test]
     fn ffi_recv_blocking_times_out() {
         let ch = TestChannel::new(4);
-
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 0;
-        let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(
-                ch.entry(),
-                50,
-                &mut out_buf,
-                &mut out_len,
-                &mut state,
-            )
-        };
-        assert_eq!(rc, SharedError::Timeout.code());
+        assert!(matches!(
+            channel_recv_blocking_native(ch.entry(), 50).expect("recv_blocking ok"),
+            RecvOutcome::Timeout
+        ));
     }
 
     // ─── Wait::Try coverage ──────────────────────────────────
@@ -4751,25 +4309,11 @@ mod tests {
             unsafe { oxphp_shared_channel_try_send(ch.entry(), payload.as_ptr(), 1, &mut success) };
         assert_eq!(success, 1);
 
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 1;
         // timeout_ms == 0 → Wait::Try; channel has an item → must return it.
-        let rc = unsafe {
-            oxphp_shared_channel_recv_blocking(
-                ch.entry(),
-                0,
-                &mut out_buf,
-                &mut out_len,
-                &mut state,
-            )
-        };
-        assert_eq!(rc, 0, "expected 0, got {rc}");
-        assert_eq!(state, 0, "expected state=0 (item), got {state}");
-        assert_eq!(out_len, 1);
-        let slice = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
-        assert_eq!(slice, &[0xDDu8]);
-        unsafe { free_out(out_buf) };
+        match channel_recv_blocking_native(ch.entry(), 0).expect("recv_blocking ok") {
+            RecvOutcome::Got(p) => assert_eq!(p.bytes, vec![0xDDu8]),
+            _ => panic!("expected RecvOutcome::Got"),
+        }
     }
 
     // ─── batched send_many / recv_many ───────────────────────
@@ -4922,15 +4466,10 @@ mod tests {
         ch.register_send_waiter(pid);
 
         // Free a slot via try_recv — this wakes the parked sender.
-        let mut out_buf: *mut u8 = std::ptr::null_mut();
-        let mut out_len: usize = 0;
-        let mut state: c_int = 1;
-        let rc = unsafe {
-            oxphp_shared_channel_try_recv(entry_ptr, &mut out_buf, &mut out_len, &mut state)
-        };
-        assert_eq!(rc, 0);
-        assert_eq!(state, 0);
-        unsafe { free_out(out_buf) };
+        assert!(matches!(
+            channel_try_recv_native(entry_ptr).expect("try_recv ok"),
+            RecvOutcome::Got(_)
+        ));
 
         let got = rx.await.expect("receiver should fire");
         assert!(got.success);
