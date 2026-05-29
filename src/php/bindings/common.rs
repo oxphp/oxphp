@@ -252,6 +252,19 @@ extern "C" {
         arg_idx: u32,
         out: *mut f64,
     ) -> i32;
+    /// Parameter name of the `arg_idx`-th constructor argument (the
+    /// `name:` in `#[Attr(name: value)]`), copied into `out`
+    /// (NUL-terminated, truncated to `out_cap`). Returns the bytes
+    /// written, or 0 for a positional argument (no name) / absent arg.
+    pub fn oxphp_bridge_read_attr_arg_name(
+        ctx: *mut c_void,
+        is_class_scope: i32,
+        attr_name: *const c_char,
+        attr_idx: u32,
+        arg_idx: u32,
+        out: *mut c_char,
+        out_cap: usize,
+    ) -> usize;
     /// Number of constructor arguments of the `attr_idx`-th occurrence of
     /// `attr_name` in the given scope, or `-1` if the attribute is absent.
     pub fn oxphp_bridge_attr_arg_count(

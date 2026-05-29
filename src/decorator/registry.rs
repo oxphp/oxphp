@@ -202,19 +202,21 @@ fn read_attr_args(attr_ctx: *mut c_void, attr_name: &str) -> AttrArgs {
                 arg_idx,
             ));
         }
-        return AttrArgs::positional(args);
+        return AttrArgs::from_pairs(args);
     }
     AttrArgs::default()
 }
 
-/// Read a single attribute argument as a tagged value via the bridge.
+/// Read a single attribute argument as a `(name, value)` pair via the
+/// bridge. `name` is `Some` for `name:`-style arguments, `None` for
+/// positional ones — see [`AttrArgs`] for why both are surfaced.
 #[cfg(feature = "php")]
 fn read_one_arg(
     attr_ctx: *mut c_void,
     is_class_scope: i32,
     attr_name: *const std::os::raw::c_char,
     arg_idx: u32,
-) -> AttrArg {
+) -> (Option<Arc<str>>, AttrArg) {
     let mut out_long: i64 = 0;
     let mut out_double: f64 = 0.0;
     let mut out_bool: i32 = 0;
@@ -233,7 +235,7 @@ fn read_one_arg(
             buf.len(),
         )
     };
-    match kind {
+    let value = match kind {
         1 => AttrArg::Int(out_long),
         2 => AttrArg::Float(out_double),
         3 => {
@@ -249,7 +251,39 @@ fn read_one_arg(
         // for valid source — there is no distinct "error" outcome worth
         // surfacing separately.
         _ => AttrArg::Null,
+    };
+    (
+        read_arg_name(attr_ctx, is_class_scope, attr_name, arg_idx),
+        value,
+    )
+}
+
+/// Read the parameter name of one attribute argument. Returns `None`
+/// for a positional argument (no `name:`) or an empty/oversized name.
+#[cfg(feature = "php")]
+fn read_arg_name(
+    attr_ctx: *mut c_void,
+    is_class_scope: i32,
+    attr_name: *const std::os::raw::c_char,
+    arg_idx: u32,
+) -> Option<Arc<str>> {
+    let mut buf = [0 as std::os::raw::c_char; 128];
+    let len = unsafe {
+        crate::php::bindings::oxphp_bridge_read_attr_arg_name(
+            attr_ctx,
+            is_class_scope,
+            attr_name,
+            0, // first occurrence
+            arg_idx,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    };
+    if len == 0 {
+        return None;
     }
+    let s = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+    Some(Arc::from(s.as_ref()))
 }
 
 #[cfg(test)]

@@ -4380,6 +4380,31 @@ int oxphp_bridge_read_attr_arg_double(
     return ok;
 }
 
+size_t oxphp_bridge_read_attr_arg_name(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    char *out, size_t out_cap)
+{
+    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
+    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
+    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
+    if (!attr || arg_idx >= attr->argc || out_cap == 0) return 0;
+
+    /* Positional arguments carry a NULL name; only `name:`-style
+     * arguments record one. Zend stores args in source-call order, so
+     * the name is the only way to map them back to constructor params. */
+    zend_string *name = attr->args[arg_idx].name;
+    if (!name) return 0;
+    size_t src_len = ZSTR_LEN(name);
+    size_t copy = src_len < out_cap - 1 ? src_len : out_cap - 1;
+    memcpy(out, ZSTR_VAL(name), copy);
+    out[copy] = '\0';
+    return copy;
+}
+
 int oxphp_bridge_attr_arg_count(
     void *attr_resolver_ctx,
     int is_class_scope,

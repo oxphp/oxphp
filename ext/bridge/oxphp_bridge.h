@@ -1669,6 +1669,20 @@ int oxphp_bridge_read_attr_arg_double(
     uint32_t arg_idx,
     double *out);
 
+/* Read the parameter name of the `arg_idx`-th constructor argument
+ * (the `name:` in `#[Attr(name: value)]`) as a UTF-8 string. NUL-
+ * terminates; returns the bytes written (capped at out_cap-1).
+ * Returns 0 for a positional argument (NULL name in Zend) or when the
+ * attribute / arg doesn't exist. Lets callers map source-order args
+ * back to constructor parameters. */
+size_t oxphp_bridge_read_attr_arg_name(
+    void *attr_resolver_ctx,
+    int is_class_scope,
+    const char *attr_name,
+    uint32_t attr_idx,
+    uint32_t arg_idx,
+    char *out, size_t out_cap);
+
 /* Number of constructor arguments of the `attr_idx`-th occurrence of
  * `attr_name` in the given scope, or -1 if the attribute is absent. */
 int oxphp_bridge_attr_arg_count(
