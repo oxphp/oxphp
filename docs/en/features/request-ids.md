@@ -71,7 +71,7 @@ When access logging is enabled, every log entry includes the `request_id` field:
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }

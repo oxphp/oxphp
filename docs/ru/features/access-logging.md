@@ -37,7 +37,7 @@ OxPHP записывает структурированные JSON-логи до
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -57,7 +57,7 @@ OxPHP записывает структурированные JSON-логи до
     "path": "/api/orders",
     "status": 201,
     "duration_us": 8421,
-    "remote_addr": "10.0.0.1:54322",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -72,7 +72,7 @@ OxPHP записывает структурированные JSON-логи до
 | `path` | строка | Путь URI запроса |
 | `status` | число | Код статуса HTTP-ответа |
 | `duration_us` | число | Общее время обработки запроса в микросекундах |
-| `remote_addr` | строка | IP-адрес и порт клиента. Когда `TRUSTED_PROXIES` настроен, показывает реальный IP клиента, извлечённый из заголовков пересылки, а не IP прокси |
+| `remote_ip` | строка | IP-адрес клиента (без порта). Когда `TRUSTED_PROXIES` настроен, показывает реальный IP клиента, извлечённый из заголовков пересылки, а не IP прокси |
 | `trace_id` | строка | W3C trace ID (присутствует только при `TRACE_CONTEXT=true`) |
 | `span_id` | строка | W3C span ID (присутствует только при `TRACE_CONTEXT=true`) |
 

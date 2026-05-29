@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (access log):** the JSON access-log field `remote_addr` is renamed to `remote_ip` and now carries the client IP **without** a port. Previously, behind a configured `TRUSTED_PROXIES`, the field showed a synthetic `IP:0` (e.g. `10.0.0.1:0`) — the real source port belongs to the proxy, not the client, so it was zeroed — which broke log parsers that validate the port as `> 0` and diverged from nginx/Apache/Caddy, whose `$remote_addr` is IP-only. Update any log pipeline that keys on `remote_addr` to read `remote_ip`. The client/proxy source port is unchanged in PHP and still available via `$_SERVER['REMOTE_PORT']`.
+
 ### Fixed
 
 - `OxPHP\Http\Request::file()` and `Request::files()` now return the uploaded files instead of always `null` / `[]`. The object upload API documented in `docs/en/php/request-api.md` is wired to the request's parsed `$_FILES`: `file('avatar')` yields an `OxPHP\Http\UploadedFile` (or the first file of an array field `name="avatar[]"`, or `null` when the field is absent), `files('photos')` returns every file of one field, and `files()` returns a flat list of every upload. The scalar (`name="avatar"`), sequential-array (`name="avatar[]"`) and associative-array (`name="avatar[key]"`) `$_FILES` shapes are all handled. The `UploadedFile` accessors (`name()`, `clientType()`, content-detected `type()`, `size()`, `tmpPath()`, `error()`, `isValid()`, `moveTo()`) were already present; only the two `Request` entry points were stubbed, so code following the documented examples saw no files and had to fall back to the `$_FILES` superglobal.

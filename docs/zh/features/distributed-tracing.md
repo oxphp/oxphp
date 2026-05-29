@@ -123,7 +123,7 @@ $response = $client->get('https://api.example.com/users', [
     "path": "/api/users",
     "status": 200,
     "duration_us": 1523,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }

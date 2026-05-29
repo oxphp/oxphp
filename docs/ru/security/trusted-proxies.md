@@ -83,5 +83,5 @@ TCP peer: 10.0.0.1 (доверенный)
 ## См. также
 
 - [Ограничение запросов](../features/rate-limiting.md) — per-IP rate limiting использует определённый IP клиента
-- [Логирование доступа](../features/access-logging.md) — поле `remote_addr` показывает определённый IP клиента
+- [Логирование доступа](../features/access-logging.md) — поле `remote_ip` показывает определённый IP клиента
 - [Справочник конфигурации](../operations/configuration.md) — все переменные окружения

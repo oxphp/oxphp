@@ -41,7 +41,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
                 path = %event.path,
                 status = event.status,
                 duration_us = event.duration.as_micros() as u64,
-                remote_addr = %event.remote_addr,
+                remote_ip = %event.remote_addr.ip(),
                 "request completed"
             );
         } else {
@@ -52,7 +52,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
                 path = %event.path,
                 status = event.status,
                 duration_us = event.duration.as_micros() as u64,
-                remote_addr = %event.remote_addr,
+                remote_ip = %event.remote_addr.ip(),
                 "request completed"
             );
         }

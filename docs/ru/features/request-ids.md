@@ -71,7 +71,7 @@ curl_close($ch);
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
