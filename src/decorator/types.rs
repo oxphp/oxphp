@@ -66,58 +66,120 @@ pub enum AttrArg {
 }
 
 /// Decoded constructor arguments of one attribute occurrence, in
-/// declaration order. Read once at resolve time and handed to
+/// source-declaration order. Read once at resolve time and handed to
 /// [`Decorator::configure`]. Owned (no FFI / no lifetime) so decorators
 /// and tests can build and inspect it without the C bridge.
+///
+/// Each entry pairs the argument's value with its parameter name. The
+/// name is `Some` only for arguments written `name:`-style
+/// (`#[Attr(ms: 250)]`); positional arguments carry `None`. Zend stores
+/// attribute arguments in the order they appear in source, *not* in
+/// constructor-parameter order — so for any attribute with more than one
+/// argument, read named arguments by name ([`int_named`](Self::int_named)
+/// et al.) and positional arguments by index ([`int`](Self::int) et al.).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AttrArgs {
-    positional: Vec<AttrArg>,
+    args: Vec<(Option<Arc<str>>, AttrArg)>,
 }
 
 impl AttrArgs {
-    /// Build from positional values (used by the resolve layer and tests).
+    /// Build from positional values only — every argument's name is
+    /// `None`. Used by tests and the host build (where attribute args
+    /// are not read from Zend).
     pub fn positional(args: Vec<AttrArg>) -> Self {
-        Self { positional: args }
+        Self {
+            args: args.into_iter().map(|v| (None, v)).collect(),
+        }
+    }
+
+    /// Build from `(name, value)` pairs in source-declaration order.
+    /// `name` is `Some` for `name:`-style arguments, `None` for
+    /// positional ones. Used by the resolve layer.
+    pub fn from_pairs(args: Vec<(Option<Arc<str>>, AttrArg)>) -> Self {
+        Self { args }
     }
 
     /// Number of arguments.
     pub fn len(&self) -> usize {
-        self.positional.len()
+        self.args.len()
     }
 
     /// True when no arguments were supplied (a bare `#[Attr]`).
     pub fn is_empty(&self) -> bool {
-        self.positional.is_empty()
+        self.args.is_empty()
     }
 
     /// Integer at `idx`. Only an `Int` matches — no coercion.
     pub fn int(&self, idx: usize) -> Option<i64> {
-        match self.positional.get(idx) {
-            Some(AttrArg::Int(v)) => Some(*v),
+        match self.args.get(idx) {
+            Some((_, AttrArg::Int(v))) => Some(*v),
             _ => None,
         }
     }
 
     /// Float at `idx`. Accepts `Float` and integer-valued `Int`.
     pub fn float(&self, idx: usize) -> Option<f64> {
-        match self.positional.get(idx) {
-            Some(AttrArg::Float(v)) => Some(*v),
-            Some(AttrArg::Int(v)) => Some(*v as f64),
+        match self.args.get(idx) {
+            Some((_, AttrArg::Float(v))) => Some(*v),
+            Some((_, AttrArg::Int(v))) => Some(*v as f64),
             _ => None,
         }
     }
 
     /// String slice at `idx`.
     pub fn str(&self, idx: usize) -> Option<&str> {
-        match self.positional.get(idx) {
-            Some(AttrArg::Str(s)) => Some(s),
+        match self.args.get(idx) {
+            Some((_, AttrArg::Str(s))) => Some(s),
             _ => None,
         }
     }
 
     /// Boolean at `idx`. Only a `Bool` matches — no coercion.
     pub fn bool(&self, idx: usize) -> Option<bool> {
-        match self.positional.get(idx) {
+        match self.args.get(idx) {
+            Some((_, AttrArg::Bool(v))) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Value of the argument named `name`, or `None` if absent. Matches
+    /// only `name:`-style arguments.
+    fn named(&self, name: &str) -> Option<&AttrArg> {
+        self.args.iter().find_map(|(n, v)| match n {
+            Some(n) if n.as_ref() == name => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Integer of the argument named `name`. Only an `Int` matches.
+    pub fn int_named(&self, name: &str) -> Option<i64> {
+        match self.named(name) {
+            Some(AttrArg::Int(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Float of the argument named `name`. Accepts `Float` and
+    /// integer-valued `Int`.
+    pub fn float_named(&self, name: &str) -> Option<f64> {
+        match self.named(name) {
+            Some(AttrArg::Float(v)) => Some(*v),
+            Some(AttrArg::Int(v)) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    /// String slice of the argument named `name`.
+    pub fn str_named(&self, name: &str) -> Option<&str> {
+        match self.named(name) {
+            Some(AttrArg::Str(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Boolean of the argument named `name`. Only a `Bool` matches.
+    pub fn bool_named(&self, name: &str) -> Option<bool> {
+        match self.named(name) {
             Some(AttrArg::Bool(v)) => Some(*v),
             _ => None,
         }
@@ -146,6 +208,13 @@ pub trait Decorator: Send + Sync {
     /// call of the decorated function. The default returns `None`: no
     /// per-attribute configuration, the registered instance is shared
     /// as-is.
+    ///
+    /// `args` preserves source-declaration order, which is *not* the
+    /// constructor-parameter order when callers mix positions and
+    /// `name:`-style arguments. Read named arguments by name
+    /// ([`AttrArgs::int_named`] et al.) and positional ones by index
+    /// ([`AttrArgs::int`] et al.); for a single-argument attribute the
+    /// two are equivalent.
     fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
         let _ = args;
         None
@@ -257,6 +326,60 @@ mod tests {
         assert!(args.is_empty());
         assert_eq!(args.int(0), None);
         assert_eq!(args.str(0), None);
+        assert_eq!(args.int_named("ms"), None);
+        assert_eq!(args.str_named("label"), None);
+    }
+
+    #[test]
+    fn test_attr_args_named_accessors() {
+        // `#[Foo(ms: 250, label: "checkout", rate: 0.5, on: true)]`
+        let args = AttrArgs::from_pairs(vec![
+            (Some(Arc::from("ms")), AttrArg::Int(250)),
+            (
+                Some(Arc::from("label")),
+                AttrArg::Str(Arc::from("checkout")),
+            ),
+            (Some(Arc::from("rate")), AttrArg::Float(0.5)),
+            (Some(Arc::from("on")), AttrArg::Bool(true)),
+        ]);
+        assert_eq!(args.int_named("ms"), Some(250));
+        assert_eq!(args.str_named("label"), Some("checkout"));
+        assert_eq!(args.float_named("rate"), Some(0.5));
+        assert_eq!(args.bool_named("on"), Some(true));
+        // Int coerces to float through the named accessor too.
+        assert_eq!(args.float_named("ms"), Some(250.0));
+        // Type mismatch and unknown name both read as None.
+        assert_eq!(args.str_named("ms"), None);
+        assert_eq!(args.int_named("missing"), None);
+        // Positional accessors still index by source order.
+        assert_eq!(args.int(0), Some(250));
+        assert_eq!(args.str(1), Some("checkout"));
+    }
+
+    #[test]
+    fn test_attr_args_reordered_named_map_by_name_not_index() {
+        // `#[Foo(b: 1, a: 2)]` on `__construct($a, $b)`: Zend keeps
+        // source order, so positional reads see them swapped, but
+        // name lookup recovers the intended mapping.
+        let args = AttrArgs::from_pairs(vec![
+            (Some(Arc::from("b")), AttrArg::Int(1)),
+            (Some(Arc::from("a")), AttrArg::Int(2)),
+        ]);
+        // Positional: index 0 is `b`, index 1 is `a` (the bug this fixes).
+        assert_eq!(args.int(0), Some(1));
+        assert_eq!(args.int(1), Some(2));
+        // Named: `a` and `b` resolve correctly regardless of order.
+        assert_eq!(args.int_named("a"), Some(2));
+        assert_eq!(args.int_named("b"), Some(1));
+    }
+
+    #[test]
+    fn test_attr_args_positional_have_no_names() {
+        // `positional()` records no names — named lookup misses,
+        // index lookup hits.
+        let args = AttrArgs::positional(vec![AttrArg::Int(7)]);
+        assert_eq!(args.int(0), Some(7));
+        assert_eq!(args.int_named("anything"), None);
     }
 
     #[test]

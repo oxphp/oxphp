@@ -67,7 +67,11 @@ impl Decorator for MarkDecorator {
     fn on_end(&self, _ctx: &DecoratorCallContext, _result: &DecoratorCallResult) {}
 
     fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
-        let label = args.str(0).map(Arc::from);
+        // `#[Mark(label: "x")]` (named) or `#[Mark("x")]` (positional).
+        let label = args
+            .str_named("label")
+            .or_else(|| args.str(0))
+            .map(Arc::from);
         Some(Arc::new(Self { label }))
     }
 }
@@ -124,7 +128,12 @@ impl Decorator for SlowThresholdDecorator {
     }
 
     fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
-        let ms = args.int(0).map(|v| v.max(0) as u64).unwrap_or(self.ms);
+        // `#[SlowThreshold(ms: N)]` (named) or `#[SlowThreshold(N)]`.
+        let ms = args
+            .int_named("ms")
+            .or_else(|| args.int(0))
+            .map(|v| v.max(0) as u64)
+            .unwrap_or(self.ms);
         Some(Arc::new(Self { ms }))
     }
 }
@@ -181,7 +190,12 @@ impl Decorator for MemoryThresholdDecorator {
     }
 
     fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
-        let kb = args.int(0).map(|v| v.max(0) as u64).unwrap_or(self.kb);
+        // `#[MemoryThreshold(kb: N)]` (named) or `#[MemoryThreshold(N)]`.
+        let kb = args
+            .int_named("kb")
+            .or_else(|| args.int(0))
+            .map(|v| v.max(0) as u64)
+            .unwrap_or(self.kb);
         Some(Arc::new(Self { kb }))
     }
 }
@@ -511,6 +525,54 @@ mod tests {
             let span = ctx.get_mut(id).expect("open");
             assert_eq!(span.events.len(), 1);
             assert_eq!(span.events[0].name, "App\\Order::pay");
+        });
+    }
+
+    /// The built-ins read their argument by parameter name, so a
+    /// `name:`-style attribute (`#[Mark(label: "x")]`,
+    /// `#[SlowThreshold(ms: N)]`) configures correctly even though the
+    /// name is the only thing distinguishing it.
+    #[test]
+    fn builtins_read_named_arguments() {
+        let labelled = MarkDecorator { label: None }
+            .configure(&AttrArgs::from_pairs(vec![(
+                Some(Arc::from("label")),
+                AttrArg::Str(Arc::from("checkout")),
+            )]))
+            .expect("configure yields an instance");
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("App\\Order::pay".into(), vec![]);
+            labelled.on_begin(&dummy_ctx("App\\Order::pay"));
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            assert_eq!(span.events[0].name, "checkout");
+        });
+
+        let fast = SlowThresholdDecorator { ms: 1_000_000 }
+            .configure(&AttrArgs::from_pairs(vec![(
+                Some(Arc::from("ms")),
+                AttrArg::Int(0),
+            )]))
+            .expect("configure yields an instance");
+        PROFILING_CONTEXT.with(|cell| {
+            cell.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ProfileAll,
+                "t".into(),
+                "r".into(),
+            );
+            let id = cell.borrow_mut().push("op".into(), vec![]);
+            fast.on_begin(&dummy_ctx("op"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            fast.on_end(&dummy_ctx("op"), &dummy_result());
+            let mut ctx = cell.borrow_mut();
+            let span = ctx.get_mut(id).expect("open");
+            // Named ms:0 gates, not the 1_000_000 default → slow event.
+            assert_eq!(span.events.len(), 1);
         });
     }
 }
