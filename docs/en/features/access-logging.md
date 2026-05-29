@@ -37,7 +37,7 @@ Every access log entry is a single JSON line written to stdout:
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -57,7 +57,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
     "path": "/api/orders",
     "status": 201,
     "duration_us": 8421,
-    "remote_addr": "10.0.0.1:54322",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -72,7 +72,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 | `path` | string | Request URI path |
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
-| `remote_addr` | string | Client IP address and port. When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
+| `remote_ip` | string | Client IP address (no port). When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
 | `trace_id` | string | W3C trace ID (present only when `TRACE_CONTEXT=true`) |
 | `span_id` | string | W3C span ID (present only when `TRACE_CONTEXT=true`) |
 

@@ -83,5 +83,5 @@ TCP peer: 10.0.0.1（受信任）
 ## 另请参阅
 
 - [速率限制](../features/rate-limiting.md) — per-IP 速率限制使用解析后的客户端 IP
-- [访问日志](../features/access-logging.md) — `remote_addr` 字段显示解析后的客户端 IP
+- [访问日志](../features/access-logging.md) — `remote_ip` 字段显示解析后的客户端 IP
 - [配置参考](../operations/configuration.md) — 所有环境变量

@@ -83,5 +83,5 @@ The `private` shorthand includes:
 ## See Also
 
 - [Rate Limiting](../features/rate-limiting.md) — per-IP rate limiting uses the resolved client IP
-- [Access Logging](../features/access-logging.md) — `remote_addr` field shows the resolved client IP
+- [Access Logging](../features/access-logging.md) — `remote_ip` field shows the resolved client IP
 - [Configuration Reference](../operations/configuration.md) — all environment variables

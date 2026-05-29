@@ -37,7 +37,7 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -57,7 +57,7 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
     "path": "/api/orders",
     "status": 201,
     "duration_us": 8421,
-    "remote_addr": "10.0.0.1:54322",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -72,9 +72,9 @@ OxPHP 为每个 HTTP 请求输出结构化 JSON 访问日志，写入标准输�
 | `path` | string | 请求 URI 路径 |
 | `status` | number | HTTP 响应状态码 |
 | `duration_us` | number | 请求总处理时间（微秒） |
-| `remote_addr` | string | 客户端 IP 地址和端口 |
+| `remote_ip` | string | 客户端 IP 地址（不含端口） |
 
-> 配置 `TRUSTED_PROXIES` 后，`remote_addr` 显示从转发头中提取的真实客户端 IP，而非代理 IP。
+> 配置 `TRUSTED_PROXIES` 后，`remote_ip` 显示从转发头中提取的真实客户端 IP，而非代理 IP。
 | `trace_id` | string | W3C trace ID（仅在 `TRACE_CONTEXT=true` 时存在） |
 | `span_id` | string | W3C span ID（仅在 `TRACE_CONTEXT=true` 时存在） |
 
