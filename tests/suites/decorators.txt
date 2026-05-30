@@ -8,3 +8,4 @@ decorators/test_before_after_called
 decorators/test_dispatch_order
 decorators/test_context_properties
 decorators/test_rejected_exception
+decorators/test_stack_overflow

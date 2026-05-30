@@ -49,6 +49,7 @@ static zend_class_entry *oxphp_http_uploaded_file_ce = NULL;
 static zend_class_entry *oxphp_decorator_interface_ce = NULL;
 static zend_class_entry *oxphp_decorator_context_ce = NULL;
 static zend_class_entry *oxphp_decorator_rejected_ce = NULL;
+static zend_class_entry *oxphp_decorator_stack_overflow_ce = NULL;
 
 /* HTTP Interface class entries */
 static zend_class_entry *oxphp_http_request_iface_ce = NULL;
@@ -2078,6 +2079,17 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(
 
 static void oxphp_decorator_begin(zend_execute_data *execute_data) {
     oxphp_decorator_ctx_t *dctx = oxphp_decorator_ctx_push();
+    if (!dctx) {
+        /* Stack overflow: more than OXPHP_DECORATOR_CTX_STACK_MAX levels of
+         * nested decorated calls. Fail loud instead of silently reusing the
+         * top slot and corrupting outer frames' context. The matching end()
+         * (always called — see oxphp_decorator_end) unwinds the depth. */
+        zend_throw_exception_ex(oxphp_decorator_stack_overflow_ce, 0,
+            "Decorator context stack overflow: more than %d levels of "
+            "nested decorated calls", OXPHP_DECORATOR_CTX_STACK_MAX);
+        oxphp_force_exception_on_current_frame();
+        return;
+    }
     zend_function *func = execute_data->func;
 
     dctx->fn_id = (uintptr_t)func;
@@ -2180,7 +2192,13 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
 
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
     oxphp_decorator_ctx_t *dctx = oxphp_decorator_ctx_peek();
-    if (!dctx) return;
+    if (!dctx) {
+        /* peek() is NULL either at depth underflow (no-op pop) or for an
+         * overflow frame whose begin() threw StackOverflowException without
+         * pushing — unwind the depth counter so begin/end stay balanced. */
+        oxphp_decorator_ctx_pop();
+        return;
+    }
 
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -3705,6 +3723,13 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         zend_class_entry tmp_ce;
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Decorator", "RejectedException", NULL);
         oxphp_decorator_rejected_ce = zend_register_internal_class_ex(&tmp_ce, zend_ce_exception);
+    }
+
+    /* OxPHP\Decorator\StackOverflowException */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Decorator", "StackOverflowException", NULL);
+        oxphp_decorator_stack_overflow_ce = zend_register_internal_class_ex(&tmp_ce, zend_ce_exception);
     }
 
     /* Register decorator observer */

@@ -294,7 +294,7 @@ For more on APM tracing, see [Distributed Tracing & APM](distributed-tracing.md)
 - **User functions only** — built-in PHP functions cannot be decorated. Only functions and methods defined in PHP code are interceptable
 - **Registration before first call** — decorators must be registered before the first invocation of any function they target. Register during bootstrap
 - **Scalar constructor arguments** — attribute constructor arguments are evaluated once at first call. Complex expressions or runtime values in attributes are not supported
-- **Max 32 nesting levels** — the decorator context stack supports up to 32 levels of nested decorated function calls
+- **Max 256 nesting levels** — the decorator context stack supports up to 256 levels of nested decorated function calls. Beyond that, the call throws `OxPHP\Decorator\StackOverflowException` instead of silently corrupting decorator context
 
 ## Troubleshooting
 

@@ -1495,15 +1495,21 @@ static __thread oxphp_decorator_ctx_t decorator_ctx_stack[OXPHP_DECORATOR_CTX_ST
 static __thread int decorator_ctx_depth = 0;
 
 oxphp_decorator_ctx_t *oxphp_decorator_ctx_push(void) {
-    if (decorator_ctx_depth >= OXPHP_DECORATOR_CTX_STACK_MAX) {
-        return &decorator_ctx_stack[OXPHP_DECORATOR_CTX_STACK_MAX - 1];
+    /* Always advance depth — even past the array bound — so the matching
+     * pop() unwinds it and begin/end stay balanced. On overflow we return
+     * NULL; the caller throws OxPHP\Decorator\StackOverflowException instead
+     * of silently reusing the top slot and corrupting outer frames' context. */
+    int idx = decorator_ctx_depth++;
+    if (idx >= OXPHP_DECORATOR_CTX_STACK_MAX) {
+        return NULL;
     }
-    return &decorator_ctx_stack[decorator_ctx_depth++];
+    return &decorator_ctx_stack[idx];
 }
 
 oxphp_decorator_ctx_t *oxphp_decorator_ctx_peek(void) {
-    if (decorator_ctx_depth <= 0) return NULL;
-    return &decorator_ctx_stack[decorator_ctx_depth - 1];
+    int idx = decorator_ctx_depth - 1;
+    if (idx < 0 || idx >= OXPHP_DECORATOR_CTX_STACK_MAX) return NULL;
+    return &decorator_ctx_stack[idx];
 }
 
 void oxphp_decorator_ctx_pop(void) {
@@ -1809,6 +1815,15 @@ void oxphp_bridge_reset_request_ctx(void) {
     ctx.stream_mode = false;
     ctx.headers_sent = false;
     ctx.finished = false;
+    /* Decorator context stack: balanced begin/end leaves depth at 0, but
+     * push() now advances depth unconditionally (returning NULL past the
+     * bound), so a hypothetical begin-without-end imbalance would otherwise
+     * accumulate across requests on a long-lived worker thread and could
+     * eventually overflow the signed counter into a negative array index.
+     * Resetting here — the single per-request choke point shared by both
+     * traditional and worker modes — bounds depth to a single request and
+     * keeps the stack index structurally in range. */
+    decorator_ctx_depth = 0;
     /* Note: requests_done and worker_start_time are deliberately NOT
      * touched here — they are thread-persistent and only mutated by
      * oxphp_bridge_increment_requests_done() / set_worker_start_time(),
