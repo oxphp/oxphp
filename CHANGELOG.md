@@ -4,6 +4,11 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Behind a configured `TRUSTED_PROXIES`, `$_SERVER['SERVER_PORT']` (and the object-API `Request::port()`) now honors the `X-Forwarded-Port` header. Previously the public port was derived only from the port suffix of `X-Forwarded-Host` / `Forwarded: host=`, defaulting to 443/80 by scheme — so a proxy listening on a non-standard public port (e.g. AWS ALB on 8443, or nginx with `proxy_set_header X-Forwarded-Port $server_port;`) that sent a portless `X-Forwarded-Host` could not convey that port to PHP, and absolute-URL builders produced links to 443/80. Port resolution priority is now `X-Forwarded-Port` → port suffix of the forwarded/`Host` header → 443/80 by scheme. The header is read only from trusted peers, must be a single value in `1..=65535`, and is ignored when an RFC 7239 `Forwarded` header is present (consistent with `X-Forwarded-*` being ignored in that case).
+- `$_SERVER['REMOTE_PORT']` is now populated from an RFC 7239 `Forwarded: for=ip:port` node when the trusted proxy supplies one. It remains `"0"` behind a proxy otherwise — `X-Forwarded-For` carries no source port, so the value is zeroed rather than guessed.
+
 ### Changed
 
 - **Breaking (access log):** the JSON access-log field `remote_addr` is renamed to `remote_ip` and now carries the client IP **without** a port. Previously, behind a configured `TRUSTED_PROXIES`, the field showed a synthetic `IP:0` (e.g. `10.0.0.1:0`) — the real source port belongs to the proxy, not the client, so it was zeroed — which broke log parsers that validate the port as `> 0` and diverged from nginx/Apache/Caddy, whose `$remote_addr` is IP-only. Update any log pipeline that keys on `remote_addr` to read `remote_ip`. The client/proxy source port is unchanged in PHP and still available via `$_SERVER['REMOTE_PORT']`.

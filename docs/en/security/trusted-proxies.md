@@ -24,7 +24,7 @@ When unset, OxPHP ignores all forwarding headers — this is the safe default.
 When a request arrives from a trusted IP, OxPHP inspects forwarding headers in priority order:
 
 1. **`Forwarded`** ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) — the standardized header
-2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`** — de-facto fallback
+2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Port`** — de-facto fallback
 
 If the `Forwarded` header is present, `X-Forwarded-*` headers are ignored.
 
@@ -51,12 +51,15 @@ When `TRUSTED_PROXIES` is configured and the connecting IP is trusted:
 | Component | Without trusted proxies | With trusted proxies |
 |-----------|------------------------|---------------------|
 | `$_SERVER['REMOTE_ADDR']` | Proxy IP | Real client IP |
+| `$_SERVER['REMOTE_PORT']` | Proxy source port | Client port from `Forwarded: for=ip:port`, otherwise `0` |
 | `$_SERVER['HTTPS']` | Based on OxPHP's TLS config | From `Forwarded: proto=` or `X-Forwarded-Proto` |
 | `$_SERVER['REQUEST_SCHEME']` | `http` or `https` from TLS | From forwarded protocol |
 | `$_SERVER['SERVER_NAME']` | From `Host` header | From `Forwarded: host=` or `X-Forwarded-Host` |
-| `$_SERVER['SERVER_PORT']` | From `Host` header | From forwarded host |
+| `$_SERVER['SERVER_PORT']` | From `Host` header | From `X-Forwarded-Port`, else port of `X-Forwarded-Host` / `Forwarded: host=`, else 443/80 |
 | Rate limiting | Per-proxy IP | Per-client IP |
 | Access log | Proxy IP | Real client IP |
+
+`REMOTE_PORT` is `0` behind a proxy unless an RFC 7239 `Forwarded: for=ip:port` node carries the client's source port — `X-Forwarded-For` has no port field, so the rewritten value cannot be reconstructed and is zeroed instead of guessed.
 
 ## `private` Networks
 

@@ -24,7 +24,7 @@ TRUSTED_PROXIES="private"
 Когда запрос приходит от доверенного IP, OxPHP проверяет заголовки в порядке приоритета:
 
 1. **`Forwarded`** ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) — стандартизованный заголовок
-2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`** — де-факто стандарт
+2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Port`** — де-факто стандарт
 
 Если заголовок `Forwarded` присутствует, `X-Forwarded-*` игнорируются.
 
@@ -51,12 +51,15 @@ TCP peer: 10.0.0.1 (доверенный)
 | Компонент | Без доверенных прокси | С доверенными прокси |
 |-----------|----------------------|---------------------|
 | `$_SERVER['REMOTE_ADDR']` | IP прокси | Реальный IP клиента |
+| `$_SERVER['REMOTE_PORT']` | Исходный порт прокси | Порт клиента из `Forwarded: for=ip:port`, иначе `0` |
 | `$_SERVER['HTTPS']` | По настройке TLS OxPHP | Из `Forwarded: proto=` или `X-Forwarded-Proto` |
 | `$_SERVER['REQUEST_SCHEME']` | `http` или `https` по TLS | Из протокола пересылки |
 | `$_SERVER['SERVER_NAME']` | Из заголовка `Host` | Из `Forwarded: host=` или `X-Forwarded-Host` |
-| `$_SERVER['SERVER_PORT']` | Из заголовка `Host` | Из хоста пересылки |
+| `$_SERVER['SERVER_PORT']` | Из заголовка `Host` | Из `X-Forwarded-Port`, иначе порт из `X-Forwarded-Host` / `Forwarded: host=`, иначе 443/80 |
 | Rate limiting | По IP прокси | По IP клиента |
 | Access log | IP прокси | Реальный IP клиента |
+
+`REMOTE_PORT` за прокси равен `0`, если только узел RFC 7239 `Forwarded: for=ip:port` не передаёт исходный порт клиента — у `X-Forwarded-For` поля порта нет, поэтому переписанное значение нельзя восстановить и оно обнуляется, а не угадывается.
 
 ## Сети `private`
 
