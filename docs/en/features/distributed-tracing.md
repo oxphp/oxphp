@@ -162,6 +162,19 @@ Exported spans include standard HTTP semantic convention attributes:
 
 5xx responses are marked as error spans.
 
+### Span Events
+
+Child spans also carry **span events** — timestamped annotations exported as
+OpenTelemetry events and rendered natively by Jaeger, Grafana Tempo, and other
+OTLP backends. A `oxphp.event.kind` attribute on each event identifies its type:
+
+| `oxphp.event.kind` | Source | Event attributes |
+|--------------------|--------|------------------|
+| `exception` | A `#[OxPHP\Apm\Trace]` function that threw | `exception.type` |
+| `mark` | `oxphp_apm_event()` / profiler `#[Mark]` | user-supplied |
+| `slow` | profiler `#[SlowThreshold]` breach | `threshold_ms`, `elapsed_ms` |
+| `memory_spike` | profiler `#[MemoryThreshold]` breach | `threshold_kb`, `delta_bytes` |
+
 ### Request ID with OTel
 
 When the OTel plugin is active, request IDs are derived from the trace context: the first 16 characters of the trace ID and first 8 characters of the span ID, separated by a dash. This appears in logs, the `X-Request-ID` response header, and `oxphp_request_id()` in PHP.
