@@ -777,7 +777,7 @@ oxphp_php_dec_cache_key_fn_t oxphp_bridge_get_php_decorator_cache_key(void);
 void oxphp_bridge_set_decorator_class_buf(const char *s, size_t len);
 const char *oxphp_bridge_get_decorator_class_buf(void);
 
-#define OXPHP_DECORATOR_CTX_STACK_MAX 32
+#define OXPHP_DECORATOR_CTX_STACK_MAX 256
 
 typedef struct {
     uintptr_t fn_id;

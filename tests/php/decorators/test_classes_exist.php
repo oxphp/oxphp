@@ -18,5 +18,9 @@ $t->assertTrue(
     "class_exists('OxPHP\\Decorator\\RejectedException')",
     class_exists(\OxPHP\Decorator\RejectedException::class)
 );
+$t->assertTrue(
+    "class_exists('OxPHP\\Decorator\\StackOverflowException')",
+    class_exists(\OxPHP\Decorator\StackOverflowException::class)
+);
 
 $t->done();

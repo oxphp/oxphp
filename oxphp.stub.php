@@ -1008,6 +1008,13 @@ namespace OxPHP\Decorator {
      * via DecoratorAction::Reject.
      */
     class RejectedException extends \Exception {}
+
+    /**
+     * Thrown when nested decorated calls exceed the decorator context
+     * stack depth (256 levels). Fails loud instead of silently corrupting
+     * decorator context for the overflowing frame.
+     */
+    class StackOverflowException extends \Exception {}
 }
 
 // ═══════════════════════════════════════════════════════════════
