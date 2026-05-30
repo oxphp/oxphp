@@ -4354,4 +4354,76 @@ mod tests {
     fn parse_host_ipv4_without_port() {
         assert_eq!(parse_host("127.0.0.1", "80"), ("127.0.0.1", "80"));
     }
+
+    #[test]
+    fn denied_path_server_var_keeps_leading_slash() {
+        // `OXPHP_DENIED_PATH` must carry a leading `/` — the same form as
+        // `PATH_INFO`, both built from the one `original_path` buffer. A
+        // SIEM/honeypot fallback script compares this value verbatim, so
+        // silently dropping the `/` would blind path-based alert rules. The
+        // matched glob in `OXPHP_DENIED_PATTERN` stays glob-normalized (no
+        // leading `/`). End-to-end coverage also lives in
+        // tests/fixtures/php_deny/public/_security/denied.php.
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+
+        let req = ScriptRequest {
+            request_id: "test-denied".to_string(),
+            script_path: std::path::PathBuf::from("/var/www/html/_security/denied.php"),
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/uploads/shell.php"),
+            query_string: String::new(),
+            headers: http::HeaderMap::new(),
+            body: Bytes::new(),
+            remote_addr: "127.0.0.1:0".parse().unwrap(),
+            document_root: Arc::new(std::path::PathBuf::from("/var/www/html")),
+            cancel_state: Arc::new(crate::bridge::cancel::CancellationState::new()),
+            trace_id: String::new(),
+            span_id: String::new(),
+            parent_span_id: String::new(),
+            is_tls: false,
+            version: http::Version::HTTP_11,
+            path_info: None,
+            forwarded_proto: None,
+            forwarded_host: None,
+            denied_meta: Some(Arc::new(crate::config::DeniedMeta {
+                path: "uploads/shell.php".to_string(),
+                pattern: "uploads/**".to_string(),
+                fallback_script_uri: "/_security/denied.php".to_string(),
+            })),
+            profiling_mode: crate::profiling::ProfilingMode::Off,
+            profiling_run_id: None,
+        };
+
+        set_request_data(&req);
+
+        let lookup = |key: &[u8]| -> Option<String> {
+            REQUEST_DATA.with(|rd| {
+                rd.borrow()
+                    .server_vars
+                    .iter()
+                    .find(|(k, _)| k.as_bytes() == key)
+                    .map(|(_, v)| String::from_utf8_lossy(v.as_bytes()).into_owned())
+            })
+        };
+
+        assert_eq!(
+            lookup(b"OXPHP_DENIED_PATH").as_deref(),
+            Some("/uploads/shell.php"),
+            "OXPHP_DENIED_PATH must keep the leading slash (PATH_INFO/CGI form)"
+        );
+        // Built from the same buffer as OXPHP_DENIED_PATH — they must agree.
+        assert_eq!(
+            lookup(b"PATH_INFO").as_deref(),
+            Some("/uploads/shell.php"),
+            "PATH_INFO and OXPHP_DENIED_PATH must agree on the leading slash"
+        );
+        // The matched glob is normalized without a leading slash.
+        assert_eq!(
+            lookup(b"OXPHP_DENIED_PATTERN").as_deref(),
+            Some("uploads/**"),
+            "OXPHP_DENIED_PATTERN is glob-normalized without a leading slash"
+        );
+
+        clear_request_data();
+    }
 }
