@@ -162,6 +162,19 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 5xx 响应会被标记为错误 span。
 
+### Span 事件
+
+子 span 还携带 **span 事件**——带时间戳的注解，作为 OpenTelemetry 事件导出，
+并由 Jaeger、Grafana Tempo 及其他 OTLP 后端原生渲染。每个事件上的
+`oxphp.event.kind` 属性标识其类型：
+
+| `oxphp.event.kind` | 来源 | 事件属性 |
+|--------------------|------|----------|
+| `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数 | `exception.type` |
+| `mark` | `oxphp_apm_event()` / 性能分析器 `#[Mark]` | 用户提供 |
+| `slow` | 性能分析器 `#[SlowThreshold]` 超阈值 | `threshold_ms`、`elapsed_ms` |
+| `memory_spike` | 性能分析器 `#[MemoryThreshold]` 超阈值 | `threshold_kb`、`delta_bytes` |
+
 ### OTel 与请求 ID
 
 OTel 插件激活时，请求 ID 从 trace context 派生：trace ID 的前 16 个字符和 span ID 的前 8 个字符，以连字符分隔。这会出现在日志、`X-Request-ID` 响应头以及 PHP 中的 `oxphp_request_id()` 中。

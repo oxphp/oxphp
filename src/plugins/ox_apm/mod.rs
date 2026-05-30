@@ -156,6 +156,38 @@ impl PluginRequestHandler for ApmRequestHandler {
     }
 }
 
+/// Stable string tag for a span event's semantic kind. Emitted as the
+/// `oxphp.event.kind` attribute on the exported OTel event so backends
+/// (Jaeger / Tempo / Grafana) can distinguish `slow` / `memory_spike` /
+/// `mark` / `exception` events that would otherwise differ only by name.
+fn event_kind_str(kind: SpanEventKind) -> &'static str {
+    match kind {
+        SpanEventKind::Mark => "mark",
+        SpanEventKind::Sql => "sql",
+        SpanEventKind::Http => "http",
+        SpanEventKind::Exception => "exception",
+        SpanEventKind::Slow => "slow",
+        SpanEventKind::MemorySpike => "memory_spike",
+        SpanEventKind::Alloc => "alloc",
+        SpanEventKind::Custom => "custom",
+    }
+}
+
+/// Map a profiling [`SpanEvent`] to an OpenTelemetry span event. The
+/// event's `kind` is preserved as the `oxphp.event.kind` attribute since
+/// OTel events carry no kind field of their own; the timestamp is the
+/// Unix-epoch nanosecond clock the profiler records.
+fn map_span_event(ev: &SpanEvent) -> opentelemetry::trace::Event {
+    let mut attributes: Vec<KeyValue> = ev
+        .attributes
+        .iter()
+        .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+        .collect();
+    attributes.push(KeyValue::new("oxphp.event.kind", event_kind_str(ev.kind)));
+    let timestamp = UNIX_EPOCH + std::time::Duration::from_nanos(ev.timestamp_ns);
+    opentelemetry::trace::Event::new(ev.name.clone(), timestamp, attributes, 0)
+}
+
 /// Completion handler that logs PHP errors and exports child spans to OTel.
 struct ApmCompleteHandler {
     #[allow(dead_code)]
@@ -231,6 +263,14 @@ impl PluginCompleteHandler for ApmCompleteHandler {
                     _ => Status::Unset,
                 };
 
+                // Span events (slow / memory_spike / mark / exception /
+                // custom) carry the threshold and label data attached by
+                // the profiler decorators and the APM hooks. Map them to
+                // OTel span events so they surface in Jaeger / Tempo /
+                // Grafana instead of being dropped on export.
+                let events: Vec<opentelemetry::trace::Event> =
+                    span.events.iter().map(map_span_event).collect();
+
                 use opentelemetry::trace::Span as _;
 
                 let mut builder = SpanBuilder::from_name(span.name.to_string())
@@ -240,6 +280,9 @@ impl PluginCompleteHandler for ApmCompleteHandler {
                     .with_start_time(start_time)
                     .with_attributes(attributes)
                     .with_status(status);
+                if !events.is_empty() {
+                    builder = builder.with_events(events);
+                }
 
                 if let Some(parent_sid) = parent_span_id {
                     use opentelemetry::trace::{SpanContext, TraceContextExt};
@@ -647,6 +690,54 @@ mod tests {
         );
 
         handler.handle(&view); // should not panic even without TracerProvider
+    }
+
+    #[test]
+    fn map_span_event_preserves_name_attributes_kind_and_timestamp() {
+        use crate::profiling::SpanEvent;
+
+        let ev = SpanEvent {
+            name: "slow".into(),
+            attributes: vec![
+                (Arc::from("threshold_ms"), Arc::from("1")),
+                (Arc::from("elapsed_ms"), Arc::from("150")),
+            ],
+            timestamp_ns: 1_700_000_000_000_000_000,
+            kind: SpanEventKind::Slow,
+        };
+
+        let otel = map_span_event(&ev);
+
+        assert_eq!(otel.name.as_ref(), "slow");
+        // threshold_ms + elapsed_ms + the synthesised oxphp.event.kind.
+        assert_eq!(otel.attributes.len(), 3);
+
+        let attr = |key: &str| {
+            otel.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.as_str().into_owned())
+        };
+        assert_eq!(attr("threshold_ms").as_deref(), Some("1"));
+        assert_eq!(attr("elapsed_ms").as_deref(), Some("150"));
+        assert_eq!(attr("oxphp.event.kind").as_deref(), Some("slow"));
+
+        assert_eq!(
+            otel.timestamp,
+            UNIX_EPOCH + std::time::Duration::from_nanos(1_700_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn event_kind_str_covers_every_variant() {
+        assert_eq!(event_kind_str(SpanEventKind::Mark), "mark");
+        assert_eq!(event_kind_str(SpanEventKind::Sql), "sql");
+        assert_eq!(event_kind_str(SpanEventKind::Http), "http");
+        assert_eq!(event_kind_str(SpanEventKind::Exception), "exception");
+        assert_eq!(event_kind_str(SpanEventKind::Slow), "slow");
+        assert_eq!(event_kind_str(SpanEventKind::MemorySpike), "memory_spike");
+        assert_eq!(event_kind_str(SpanEventKind::Alloc), "alloc");
+        assert_eq!(event_kind_str(SpanEventKind::Custom), "custom");
     }
 
     #[test]
