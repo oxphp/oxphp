@@ -579,21 +579,27 @@ pub fn set_request_data(req: &ScriptRequest) {
                 if effective_tls { "https" } else { "http" },
             );
 
-            // SERVER_NAME and SERVER_PORT: forwarded host takes priority
+            // SERVER_NAME and SERVER_PORT. Port priority: X-Forwarded-Port >
+            // port suffix of forwarded/Host header > scheme default.
             let default_port = if effective_tls { "443" } else { "80" };
+            let fwd_port = req.forwarded_port.map(|p| p.to_string());
             if let Some(ref fwd_host) = req.forwarded_host {
                 let (name, port) = parse_host(fwd_host, default_port);
                 push_server_var(vars, "SERVER_NAME", name);
-                push_server_var(vars, "SERVER_PORT", port);
+                push_server_var(vars, "SERVER_PORT", fwd_port.as_deref().unwrap_or(port));
             } else if let Some(host) = req.headers.get(header::HOST) {
                 if let Ok(host_str) = host.to_str() {
                     let (name, port) = parse_host(host_str, default_port);
                     push_server_var(vars, "SERVER_NAME", name);
-                    push_server_var(vars, "SERVER_PORT", port);
+                    push_server_var(vars, "SERVER_PORT", fwd_port.as_deref().unwrap_or(port));
                 }
             } else {
                 push_server_var(vars, "SERVER_NAME", "localhost");
-                push_server_var(vars, "SERVER_PORT", default_port);
+                push_server_var(
+                    vars,
+                    "SERVER_PORT",
+                    fwd_port.as_deref().unwrap_or(default_port),
+                );
             }
 
             // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
@@ -708,6 +714,11 @@ pub fn set_request_data(req: &ScriptRequest) {
             } else {
                 data.host_str.push_str(host_val);
             }
+        }
+
+        // X-Forwarded-Port overrides any port derived from the host above.
+        if let Some(p) = req.forwarded_port {
+            data.port_val = p;
         }
 
         data.query_string_raw.clear();
@@ -4385,6 +4396,7 @@ mod tests {
             path_info: None,
             forwarded_proto: None,
             forwarded_host: None,
+            forwarded_port: None,
             denied_meta: Some(Arc::new(crate::config::DeniedMeta {
                 path: "uploads/shell.php".to_string(),
                 pattern: "uploads/**".to_string(),

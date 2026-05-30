@@ -124,8 +124,9 @@ pub async fn handle_request(
         request_id: String::new(),
         early_response: None,
         // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
-        // + tracestate + peer_addr + forwarded_proto + forwarded_host ≈ 9 entries
-        metadata: Vec::with_capacity(10),
+        // + tracestate + peer_addr + forwarded_proto + forwarded_host + forwarded_port
+        // ≈ 10 entries
+        metadata: Vec::with_capacity(11),
         profiling_mode: None,
         profiling_run_id: None,
     };
@@ -469,6 +470,10 @@ async fn dispatch_request(
                     .iter()
                     .find(|(k, _)| k == "forwarded_host")
                     .map(|(_, v)| v.clone()),
+                forwarded_port: metadata
+                    .iter()
+                    .find(|(k, _)| k == "forwarded_port")
+                    .and_then(|(_, v)| v.parse::<u16>().ok()),
                 denied_meta,
                 profiling_mode,
                 profiling_run_id: profiling_run_id.clone(),

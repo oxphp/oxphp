@@ -59,12 +59,15 @@ Cookie: session=xyz          -> HTTP_COOKIE
 | Переменная | Значение, когда пир доверенный | Значение в остальных случаях |
 |------------|--------------------------------|------------------------------|
 | `REMOTE_ADDR` | Самый правый недоверенный адрес из `X-Forwarded-For` / `Forwarded` | IP прямого пира |
+| `REMOTE_PORT` | Исходный порт клиента из `Forwarded: for=ip:port`, иначе `0` | Порт прямого пира |
 | `HTTPS` | `"on"`, когда `X-Forwarded-Proto: https` | Устанавливается только если пир-соединение использует TLS |
 | `REQUEST_SCHEME` | `"https"` / `"http"` из `X-Forwarded-Proto` | По фактическому состоянию TLS |
 | `SERVER_NAME` | Hostname из `X-Forwarded-Host` | Hostname из заголовка `Host` |
-| `SERVER_PORT` | Порт из `X-Forwarded-Host` или 443/80 по схеме | Порт из `Host` или 443/80 |
+| `SERVER_PORT` | `X-Forwarded-Port`, иначе порт из `X-Forwarded-Host`, иначе 443/80 по схеме | Порт из `Host` или 443/80 |
 
-Сырые ключи `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST` и `HTTP_FORWARDED` остаются в `$_SERVER` без изменений — доступны и переписанные значения, и оригинальные заголовки.
+Сырые ключи `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PORT` и `HTTP_FORWARDED` остаются в `$_SERVER` без изменений — доступны и переписанные значения, и оригинальные заголовки.
+
+`REMOTE_PORT` за доверенным прокси равен `"0"`, если только прокси не передаёт RFC 7239 `Forwarded: for=ip:port` — ни `X-Forwarded-For`, ни выбор самого правого недоверенного адреса не несут исходный порт клиента, поэтому синтетическое значение обнуляется, а не угадывается.
 
 Когда `TRUSTED_PROXIES` **не** задано, переписывание не выполняется и `REMOTE_ADDR` всегда содержит IP прямого пира — как правило, вашего балансировщика, а не конечного клиента. Разбирать `X-Forwarded-For` вручную легко ошибиться (leftmost против rightmost, отсутствие CIDR-проверки доверия); предпочтительно настроить `TRUSTED_PROXIES`. Алгоритм доверия и синтаксис конфигурации — в разделе [Доверенные прокси](../security/trusted-proxies.md).
 
