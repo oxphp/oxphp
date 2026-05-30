@@ -81,8 +81,10 @@ PHP_DENY_FALLBACK="/_security/denied.php"
 
 | Ключ `$_SERVER` | Значение |
 |---|---|
-| `OXPHP_DENIED_PATH` | Исходный санитизированный URI (без ведущего `/`) |
+| `OXPHP_DENIED_PATH` | Исходный санитизированный URI, с ведущим `/` (тот же вид, что и `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | Совпавший glob-паттерн |
+
+`OXPHP_DENIED_PATTERN` хранится **без** ведущего `/` (нормализован как glob), а `OXPHP_DENIED_PATH` сохраняет `/` из URI запроса. Если сравниваете путь с паттерном, сначала сделайте `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')`, чтобы оба были в одном виде.
 
 Пример honeypot:
 

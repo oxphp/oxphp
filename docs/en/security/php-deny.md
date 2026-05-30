@@ -81,8 +81,10 @@ The script is validated at startup — it must exist, canonicalize inside `DOCUM
 
 | `$_SERVER` key | Value |
 |---|---|
-| `OXPHP_DENIED_PATH` | Original sanitized URI (without leading `/`) |
+| `OXPHP_DENIED_PATH` | Original sanitized URI, with a leading `/` (same form as `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | The glob pattern that matched |
+
+`OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI. If you compare the path against the pattern, `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` first so both are in the same form.
 
 Example honeypot:
 

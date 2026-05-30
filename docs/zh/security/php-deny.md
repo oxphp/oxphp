@@ -81,8 +81,10 @@ PHP_DENY_FALLBACK="/_security/denied.php"
 
 | `$_SERVER` 键 | 含义 |
 |---|---|
-| `OXPHP_DENIED_PATH` | 原始的规范化 URI（无开头 `/`） |
+| `OXPHP_DENIED_PATH` | 原始的规范化 URI，带开头 `/`（与 `PATH_INFO` 形式相同） |
 | `OXPHP_DENIED_PATTERN` | 匹配到的 glob 模式 |
+
+`OXPHP_DENIED_PATTERN` 存储时**不带**开头 `/`（按 glob 规范化），而 `OXPHP_DENIED_PATH` 保留请求 URI 的 `/`。若要将路径与模式比较，请先 `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')`，使两者形式一致。
 
 honeypot 示例：
 
