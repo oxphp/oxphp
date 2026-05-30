@@ -11,11 +11,18 @@
 use crate::config::Config;
 use crate::types::BoxError;
 
+/// Options for the `serve` role. Empty for now — a placeholder the
+/// privilege-drop work extends with a `--user` target without reshaping
+/// [`Command`].
+#[derive(Debug, PartialEq, Eq, Default)]
+pub struct ServeOptions {}
+
 /// Parsed command from the process arguments.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
-    /// Start the HTTP server (default when no args are given).
-    Run,
+    /// Start the HTTP server. This is the default role when no command is
+    /// given — bare `oxphp` is an implicit `oxphp serve`.
+    Serve(ServeOptions),
     /// Print top-level help and exit 0.
     Help,
     /// Print version information and exit 0.
@@ -28,9 +35,10 @@ pub enum Command {
 }
 
 /// Parse `argv`, run any terminal command (help / version / config), and
-/// return to `main` only when the server should actually start.
+/// return the parsed [`ServeOptions`] to `main` only when the server should
+/// actually start.
 ///
-/// This function **does not return** for non-`Run` commands — it calls
+/// This function **does not return** for non-`Serve` commands — it calls
 /// `std::process::exit` with the appropriate code. That is safe here because
 /// `dispatch` runs before any significant resources are allocated in `main`
 /// (no logging guards, no Tokio runtime, no plugin state), so skipping
@@ -40,9 +48,9 @@ pub enum Command {
 ///   - `0` — help printed, version printed, or `config --check` passed
 ///   - `1` — `config --check` found problems
 ///   - `2` — unknown or conflicting CLI arguments
-pub fn dispatch() {
+pub fn dispatch() -> ServeOptions {
     match parse() {
-        Ok(Command::Run) => {}
+        Ok(Command::Serve(opts)) => opts,
         Ok(Command::Help) => {
             print_help();
             std::process::exit(0);
@@ -89,6 +97,14 @@ where
         let next = match arg {
             Short('h') | Long("help") => Command::Help,
             Short('v') | Long("version") => Command::Version,
+            Value(v) if v == "serve" => {
+                // The HTTP role. Like `config`, it cannot follow a top-level
+                // flag — `oxphp --help serve` is nonsense.
+                if command.is_some() {
+                    return Err("unexpected subcommand 'serve' after top-level option".into());
+                }
+                return parse_serve_subcommand(&mut parser);
+            }
             Value(v) if v == "config" => {
                 // Hand off remaining args to the `config` subcommand parser.
                 // `config` cannot be combined with top-level flags — if one
@@ -116,7 +132,18 @@ where
         command = Some(next);
     }
 
-    Ok(command.unwrap_or(Command::Run))
+    Ok(command.unwrap_or(Command::Serve(ServeOptions::default())))
+}
+
+/// Parse the tail of arguments after `oxphp serve`. The parser is reused
+/// mid-stream, mirroring [`parse_config_subcommand`].
+fn parse_serve_subcommand(parser: &mut lexopt::Parser) -> Result<Command, BoxError> {
+    // `serve` accepts no flags yet — the privilege-drop work adds `--user`
+    // here. Until then any argument is unexpected.
+    if let Some(arg) = parser.next()? {
+        return Err(format!("unexpected argument to 'serve': {}", format_arg(&arg)).into());
+    }
+    Ok(Command::Serve(ServeOptions::default()))
 }
 
 /// Parse the tail of arguments after `oxphp config`. The parser is reused
@@ -176,6 +203,7 @@ OPTIONS:
     -v, --version   Print version information and exit
 
 COMMANDS:
+    serve           Start the HTTP server (default; same as bare 'oxphp')
     config          Configuration utilities (see 'oxphp config --help')
 
 Without options or a command, OxPHP starts the HTTP server.",
@@ -269,8 +297,35 @@ mod tests {
     }
 
     #[test]
-    fn no_args_runs_server() {
-        assert_eq!(parse_from(args(&[])).unwrap(), Command::Run);
+    fn no_args_serves() {
+        // Bare `oxphp` stays an implicit `serve` — hard backward-compat
+        // constraint; the published image runs `CMD ["oxphp"]`.
+        assert_eq!(
+            parse_from(args(&[])).unwrap(),
+            Command::Serve(ServeOptions::default())
+        );
+    }
+
+    #[test]
+    fn serve_subcommand() {
+        assert_eq!(
+            parse_from(args(&["serve"])).unwrap(),
+            Command::Serve(ServeOptions::default())
+        );
+    }
+
+    #[test]
+    fn serve_rejects_unknown_flag() {
+        // `serve` takes zero flags for now; any extra arg is an error.
+        let err = parse_from(args(&["serve", "--bogus"])).unwrap_err();
+        assert!(err.to_string().contains("'serve'"));
+    }
+
+    #[test]
+    fn serve_cannot_follow_top_level_flag() {
+        // `oxphp --help serve` is nonsense — reject, mirroring `config`.
+        let err = parse_from(args(&["--help", "serve"])).unwrap_err();
+        assert!(err.to_string().contains("serve"));
     }
 
     #[test]
