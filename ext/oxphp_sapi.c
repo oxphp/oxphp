@@ -3834,6 +3834,18 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * so a stranded entry can't bleed into a new request. */
     oxphp_bridge_aggregate_clear();
 
+    /* Mark the decorator instance cache uninitialized so the first decorator
+     * of this request re-creates it in fresh request-scoped memory.
+     * The HashTable is allocated non-persistent (its arData lives in the Zend
+     * MM request arena), so php_request_shutdown of the *previous* request
+     * freed arData — but the __thread `initialized` flag persists across
+     * requests. Without this reset, ensure_init() would skip re-init and
+     * zend_hash_index_find() would dereference the freed arData (a
+     * use-after-free that crashes under amd64 heap reuse, stays latent on
+     * arm64). RSHUTDOWN still runs zend_hash_clean() to dtor cached instances
+     * while they are valid; this only forces a fresh table next request. */
+    decorator_instance_cache_initialized = 0;
+
     return SUCCESS;
 }
 /* }}} */
