@@ -1567,6 +1567,33 @@ void oxphp_bridge_set_request_info(
     SG(request_info).content_length = content_length;
 }
 
+/* ── CLI one-shot (oxphp run) ── */
+
+void oxphp_bridge_set_cli_args(int argc, char **argv) {
+    /* php_build_argv() (called during php_request_startup when
+     * register_argc_argv is on) reads these to build $argv/$argc. The
+     * caller owns the array and must keep it alive past php_request_startup. */
+    SG(request_info).argc = argc;
+    SG(request_info).argv = argv;
+}
+
+int oxphp_bridge_get_exit_status(void) {
+    return EG(exit_status);
+}
+
+/* Compile + execute a PHP snippet under zend_try protection. Used to define
+ * the CLI STDIN/STDOUT/STDERR constants. Returns 1 on success, 0 on bailout. */
+int oxphp_bridge_eval(const char *code) {
+    int ok = 0;
+    zend_try {
+        zend_eval_string(code, NULL, "oxphp-cli-bootstrap");
+        ok = 1;
+    } zend_catch {
+        ok = 0;
+    } zend_end_try();
+    return ok;
+}
+
 /* ── SAPI response code ── */
 
 int oxphp_bridge_get_response_code(void) {

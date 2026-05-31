@@ -830,6 +830,21 @@ void oxphp_bridge_set_request_info(
 /** Read SG(sapi_headers).http_response_code from the C side (correct TSRM context). */
 int oxphp_bridge_get_response_code(void);
 
+/* ── CLI one-shot (oxphp run) ── */
+
+/** Point SG(request_info).argc/argv at a caller-owned argv array so PHP's
+ *  php_build_argv() populates $argv/$argc during php_request_startup. The
+ *  array and its strings must outlive php_request_startup(). */
+void oxphp_bridge_set_cli_args(int argc, char **argv);
+
+/** Return EG(exit_status) — the script's exit code (set by exit()/die(),
+ *  0 on normal completion). Read after php_execute_script(). */
+int oxphp_bridge_get_exit_status(void);
+
+/** Compile + execute a PHP snippet (zend_try-guarded). Used to define the CLI
+ *  STDIN/STDOUT/STDERR constants. Returns 1 on success, 0 on bailout. */
+int oxphp_bridge_eval(const char *code);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */

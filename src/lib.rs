@@ -5,6 +5,7 @@ pub mod config;
 pub mod decorator;
 pub mod events;
 pub mod executor;
+pub mod frontend;
 pub mod handlers;
 pub mod metrics;
 pub mod php;

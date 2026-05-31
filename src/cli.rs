@@ -8,6 +8,9 @@
 //! version formatting, and the `config --check` validator live here so
 //! `main.rs` stays focused on the server startup sequence.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use crate::config::Config;
 use crate::types::BoxError;
 
@@ -17,12 +20,41 @@ use crate::types::BoxError;
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct ServeOptions {}
 
+/// Options for the `run` role — execute one PHP file to completion under CLI
+/// semantics, then exit with the script's exit code.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RunOptions {
+    /// Path to the PHP script to execute.
+    pub script: PathBuf,
+    /// The script's argument tail (everything after the script path on the
+    /// command line). Passed through verbatim to PHP as `$argv[1..]`; flags
+    /// like `--verbose` reach the script, not the oxphp argument parser.
+    pub args: Vec<OsString>,
+    /// `-d key=value` ini overrides, applied before the script runs (php-CLI
+    /// parity). These are oxphp's own flags, consumed before the script path.
+    pub ini: Vec<(String, String)>,
+}
+
+/// The runtime role selected by [`dispatch`]. Exactly one role runs per
+/// process — there is no HTTP listener in the `Run` role, and no one-shot
+/// execution in the `Serve` role.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Start the HTTP server.
+    Serve(ServeOptions),
+    /// Execute a single PHP script under CLI semantics and exit.
+    Run(RunOptions),
+}
+
 /// Parsed command from the process arguments.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     /// Start the HTTP server. This is the default role when no command is
     /// given — bare `oxphp` is an implicit `oxphp serve`.
     Serve(ServeOptions),
+    /// Execute a single PHP script under CLI semantics and exit with the
+    /// script's exit code.
+    Run(RunOptions),
     /// Print top-level help and exit 0.
     Help,
     /// Print version information and exit 0.
@@ -35,22 +67,23 @@ pub enum Command {
 }
 
 /// Parse `argv`, run any terminal command (help / version / config), and
-/// return the parsed [`ServeOptions`] to `main` only when the server should
-/// actually start.
+/// return the selected [`Role`] to `main` only when the process should
+/// actually run (start the server or execute a script).
 ///
-/// This function **does not return** for non-`Serve` commands — it calls
-/// `std::process::exit` with the appropriate code. That is safe here because
-/// `dispatch` runs before any significant resources are allocated in `main`
-/// (no logging guards, no Tokio runtime, no plugin state), so skipping
-/// destructors has no observable effect.
+/// This function **does not return** for terminal commands (help / version /
+/// `config --check` / bad args) — it calls `std::process::exit` with the
+/// appropriate code. That is safe here because `dispatch` runs before any
+/// significant resources are allocated in `main` (no logging guards, no Tokio
+/// runtime, no plugin state), so skipping destructors has no observable effect.
 ///
 /// Exit codes:
 ///   - `0` — help printed, version printed, or `config --check` passed
 ///   - `1` — `config --check` found problems
 ///   - `2` — unknown or conflicting CLI arguments
-pub fn dispatch() -> ServeOptions {
+pub fn dispatch() -> Role {
     match parse() {
-        Ok(Command::Serve(opts)) => opts,
+        Ok(Command::Serve(opts)) => Role::Serve(opts),
+        Ok(Command::Run(opts)) => Role::Run(opts),
         Ok(Command::Help) => {
             print_help();
             std::process::exit(0);
@@ -105,6 +138,14 @@ where
                 }
                 return parse_serve_subcommand(&mut parser);
             }
+            Value(v) if v == "run" => {
+                // The one-shot CLI role. Like `serve`/`config`, it cannot
+                // follow a top-level flag — `oxphp --help run` is nonsense.
+                if command.is_some() {
+                    return Err("unexpected subcommand 'run' after top-level option".into());
+                }
+                return parse_run_subcommand(&mut parser);
+            }
             Value(v) if v == "config" => {
                 // Hand off remaining args to the `config` subcommand parser.
                 // `config` cannot be combined with top-level flags — if one
@@ -144,6 +185,56 @@ fn parse_serve_subcommand(parser: &mut lexopt::Parser) -> Result<Command, BoxErr
         return Err(format!("unexpected argument to 'serve': {}", format_arg(&arg)).into());
     }
     Ok(Command::Serve(ServeOptions::default()))
+}
+
+/// Parse the tail of arguments after `oxphp run`.
+///
+/// oxphp's own flags (`-d key=value`, repeatable) are consumed up to the first
+/// positional argument. That positional is the script path; everything after
+/// it is the script's argument tail (raw passthrough — no further oxphp option
+/// parsing), so script flags like `--verbose` reach PHP rather than lexopt.
+/// This is an implicit `--` at the script positional, matching `php`.
+fn parse_run_subcommand(parser: &mut lexopt::Parser) -> Result<Command, BoxError> {
+    use lexopt::prelude::*;
+
+    let mut ini: Vec<(String, String)> = Vec::new();
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Short('d') => {
+                // `-d key=value` (or attached `-dkey=value`). A bare `-d key`
+                // with no `=` sets the value to "1", matching `php`.
+                let raw = parser.value()?;
+                let text = raw.to_string_lossy();
+                let (key, value) = match text.split_once('=') {
+                    Some((k, v)) => (k.to_string(), v.to_string()),
+                    None => (text.into_owned(), "1".to_string()),
+                };
+                ini.push((key, value));
+            }
+            Short('h') | Long("help") => {
+                // `oxphp run --help` (before the script) prints help. A
+                // `--help` *after* the script is the script's own argument.
+                return Ok(Command::Help);
+            }
+            Value(script) => {
+                // First positional is the script. Everything after it is the
+                // script's argv tail — drain it raw so script flags are not
+                // interpreted as oxphp options (implicit `--`).
+                let args = parser.raw_args()?.collect::<Vec<OsString>>();
+                return Ok(Command::Run(RunOptions {
+                    script: PathBuf::from(script),
+                    args,
+                    ini,
+                }));
+            }
+            other => {
+                return Err(format!("unexpected argument to 'run': {}", format_arg(&other)).into());
+            }
+        }
+    }
+
+    Err("'run' requires a script path: oxphp run <script.php> [args…]".into())
 }
 
 /// Parse the tail of arguments after `oxphp config`. The parser is reused
@@ -197,6 +288,7 @@ pub fn print_help() {
 USAGE:
     oxphp [OPTIONS]
     oxphp <COMMAND> [OPTIONS]
+    oxphp run [-d key=value]... <script.php> [args]...
 
 OPTIONS:
     -h, --help      Print this help and exit
@@ -204,7 +296,15 @@ OPTIONS:
 
 COMMANDS:
     serve           Start the HTTP server (default; same as bare 'oxphp')
+    run             Execute a single PHP script under CLI semantics and exit
     config          Configuration utilities (see 'oxphp config --help')
+
+RUN:
+    Executes <script.php> to completion under the OxPHP engine — fibers,
+    ox_shared, and the engine plugins are available (full async dispatch via
+    oxphp_async() needs ASYNC_WORKERS>0) — and exits with the script's code.
+    -d key=value    Set a php.ini directive for this run (repeatable)
+    Arguments after the script path are passed to PHP as $argv.
 
 Without options or a command, OxPHP starts the HTTP server.",
         version = env!("CARGO_PKG_VERSION"),
@@ -346,6 +446,99 @@ mod tests {
     #[test]
     fn long_version() {
         assert_eq!(parse_from(args(&["--version"])).unwrap(), Command::Version);
+    }
+
+    fn run_opts(cmd: Command) -> RunOptions {
+        match cmd {
+            Command::Run(opts) => opts,
+            other => panic!("expected Command::Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_subcommand_basic() {
+        let opts = run_opts(parse_from(args(&["run", "hello.php"])).unwrap());
+        assert_eq!(opts.script, PathBuf::from("hello.php"));
+        assert!(opts.args.is_empty());
+        assert!(opts.ini.is_empty());
+    }
+
+    #[test]
+    fn run_captures_script_args() {
+        let opts = run_opts(parse_from(args(&["run", "s.php", "a", "b", "c"])).unwrap());
+        assert_eq!(opts.script, PathBuf::from("s.php"));
+        assert_eq!(opts.args, args(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn run_script_flags_pass_through_to_php() {
+        // Flags after the script path are the script's argv, not oxphp's —
+        // an implicit `--` at the script positional. `--verbose` must reach PHP.
+        let opts = run_opts(parse_from(args(&["run", "s.php", "--verbose", "-x"])).unwrap());
+        assert_eq!(opts.args, args(&["--verbose", "-x"]));
+    }
+
+    #[test]
+    fn run_d_ini_override_separate() {
+        let opts =
+            run_opts(parse_from(args(&["run", "-d", "memory_limit=512M", "s.php"])).unwrap());
+        assert_eq!(
+            opts.ini,
+            vec![("memory_limit".to_string(), "512M".to_string())]
+        );
+        assert_eq!(opts.script, PathBuf::from("s.php"));
+    }
+
+    #[test]
+    fn run_d_ini_override_attached() {
+        let opts = run_opts(parse_from(args(&["run", "-dmemory_limit=512M", "s.php"])).unwrap());
+        assert_eq!(
+            opts.ini,
+            vec![("memory_limit".to_string(), "512M".to_string())]
+        );
+    }
+
+    #[test]
+    fn run_d_repeatable() {
+        let opts = run_opts(parse_from(args(&["run", "-d", "a=1", "-d", "b=2", "s.php"])).unwrap());
+        assert_eq!(
+            opts.ini,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn run_d_without_value_defaults_to_one() {
+        // `php -d foo` sets foo=1.
+        let opts = run_opts(parse_from(args(&["run", "-d", "opcache.enable", "s.php"])).unwrap());
+        assert_eq!(
+            opts.ini,
+            vec![("opcache.enable".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn run_d_after_script_is_script_arg() {
+        // Everything after the script is raw passthrough — `-d` here is the
+        // script's argument, not an oxphp ini override.
+        let opts = run_opts(parse_from(args(&["run", "s.php", "-d", "x=y"])).unwrap());
+        assert!(opts.ini.is_empty());
+        assert_eq!(opts.args, args(&["-d", "x=y"]));
+    }
+
+    #[test]
+    fn run_requires_a_script() {
+        let err = parse_from(args(&["run"])).unwrap_err();
+        assert!(err.to_string().contains("run"));
+    }
+
+    #[test]
+    fn run_cannot_follow_top_level_flag() {
+        let err = parse_from(args(&["--help", "run"])).unwrap_err();
+        assert!(err.to_string().contains("run"));
     }
 
     #[test]
