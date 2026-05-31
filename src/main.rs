@@ -29,12 +29,18 @@ use oxphp::types;
 
 fn main() -> Result<(), types::BoxError> {
     // Handle CLI flags before any expensive startup (plugin init, PHP MINIT,
-    // Tokio runtime, listener bind). Returns the parsed serve options only for
-    // the `serve` command (and bare `oxphp`); terminal commands (--help,
-    // --version, `config --check`, bad args) exit directly from inside
-    // dispatch() with plain-text UX output. `ServeOptions` is empty today, so
-    // the binding is `_`-prefixed until it carries options startup consumes.
-    let _serve_opts = cli::dispatch();
+    // Tokio runtime, listener bind). Terminal commands (--help, --version,
+    // `config --check`, bad args) exit directly from inside dispatch() with
+    // plain-text UX output. The returned role selects what `main` does next:
+    // `serve` falls through to the HTTP startup below; `run` executes a single
+    // PHP script under CLI semantics and exits with the script's code —
+    // entirely separate from the HTTP path (no JSON logging on stdout, no
+    // listener). `ServeOptions` is empty today, so the binding is `_`-prefixed
+    // until it carries options startup consumes.
+    let _serve_opts = match cli::dispatch() {
+        cli::Role::Serve(opts) => opts,
+        cli::Role::Run(opts) => std::process::exit(oxphp::frontend::run_cli(opts)),
+    };
 
     // JSON logging active from here on — every subsequent startup error is
     // structured. Guard held in main() so the non-blocking writer drains on

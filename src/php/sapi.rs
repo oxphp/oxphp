@@ -282,6 +282,32 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
     });
 }
 
+/// Populate `$_SERVER` for the one-shot CLI role (`oxphp run`). Mirrors the
+/// variable set of PHP's own CLI SAPI: PHP_SELF / SCRIPT_NAME /
+/// SCRIPT_FILENAME / PATH_TRANSLATED point at the script, DOCUMENT_ROOT is
+/// empty, and the process environment is folded in (the shared
+/// `oxphp_register_server_variables` callback registers it when `sg_enabled`).
+/// `$argv` / `$argc` are NOT set here — PHP builds those from
+/// `SG(request_info).argc/argv` during `php_request_startup`. Must be called
+/// before `php_request_startup()`.
+pub fn set_cli_request_data(script_path: &std::path::Path) {
+    REQUEST_DATA.with(|rd| {
+        let mut data = rd.borrow_mut();
+        data.server_vars.clear();
+
+        let script = script_path.to_string_lossy();
+        let vars = &mut data.server_vars;
+        push_server_var(vars, "PHP_SELF", &script);
+        push_server_var(vars, "SCRIPT_NAME", &script);
+        push_server_var(vars, "SCRIPT_FILENAME", &script);
+        push_server_var(vars, "PATH_TRANSLATED", &script);
+        push_server_var(vars, "DOCUMENT_ROOT", "");
+
+        data.sg_enabled = true;
+        data.active = true;
+    });
+}
+
 /// Store a oneshot sender for early response delivery.
 /// Called from the worker thread before `execute_request()`.
 pub fn set_early_tx(start: Instant, tx: oneshot::Sender<ScriptResponse>) {
@@ -961,6 +987,145 @@ pub fn build_sapi_module() -> sapi_module_struct {
         #[cfg(php_v8_5)]
         pre_request_init: None,
     }
+}
+
+/// Build the CLI-personality SAPI module for the one-shot `oxphp run` role.
+///
+/// Mirrors PHP's own `sapi/cli/php_cli.c`: the SAPI name is `"cli"` (so
+/// `PHP_SAPI === 'cli'` and `php_sapi_name()` returns `"cli"`), output goes
+/// straight to stdout, errors to stderr, and header handling is a no-op
+/// (there is no HTTP response). `register_server_variables` is shared with
+/// the web module — the CLI variable set is staged via
+/// [`set_cli_request_data`]. `$argv`/`$argc` come from
+/// `SG(request_info).argc/argv` (see [`bindings::oxphp_bridge_set_cli_args`]).
+///
+/// `ini_entries` is a newline-separated `key=value` block (CLI defaults plus
+/// any `-d` overrides); the pointer must remain valid for the process
+/// lifetime. Unlike the web module this does NOT install the bridge
+/// ub_write/flush trampolines — CLI output bypasses the per-request buffer.
+pub fn build_cli_sapi_module(ini_entries: *const c_char) -> sapi_module_struct {
+    sapi_module_struct {
+        name: c"cli".as_ptr() as *mut c_char,
+        pretty_name: c"OxPHP CLI".as_ptr() as *mut c_char,
+
+        startup: Some(oxphp_startup),
+        shutdown: Some(oxphp_shutdown),
+
+        activate: Some(oxphp_activate),
+        deactivate: Some(oxphp_deactivate),
+
+        ub_write: Some(cli_ub_write),
+        flush: Some(cli_flush),
+        get_stat: None,
+        getenv: None,
+
+        sapi_error: zend_error as *mut c_void,
+
+        // No HTTP response in CLI: headers are ignored.
+        header_handler: None,
+        send_headers: Some(cli_send_headers),
+        send_header: None,
+
+        // php://input from stdin is out of scope for the one-shot role.
+        read_post: None,
+        read_cookies: None,
+
+        register_server_variables: Some(oxphp_register_server_variables),
+        log_message: Some(cli_log_message),
+        get_request_time: Some(oxphp_get_request_time),
+        terminate_process: None,
+
+        php_ini_path_override: std::ptr::null_mut(),
+        default_post_reader: None,
+        treat_data: None,
+        executable_location: std::ptr::null_mut(),
+
+        php_ini_ignore: 0,
+        php_ini_ignore_cwd: 0,
+
+        get_fd: None,
+        force_http_10: None,
+        get_target_uid: None,
+        get_target_gid: None,
+        input_filter: None,
+        ini_defaults: None,
+        // php-cli sets this to 1 so phpinfo() emits plain text, not HTML
+        // (sapi/cli/php_cli.c).
+        phpinfo_as_text: 1,
+
+        ini_entries,
+
+        additional_functions: std::ptr::null(),
+        input_filter_init: None,
+        #[cfg(php_v8_5)]
+        pre_request_init: None,
+    }
+}
+
+// ─── CLI SAPI Callbacks (oxphp run) ──────────────────────────
+
+/// Write `buf` to `fd`, returning the number of bytes actually written.
+/// Retries on a signal interrupt (php-cli does the same — a SIGALRM or SIGCHLD
+/// mid-write must not truncate output) and waits for writability on EAGAIN
+/// (non-blocking fd); gives up on any other error or on a 0-length write.
+unsafe fn write_all_fd(fd: c_int, buf: &[u8]) -> usize {
+    let mut written = 0usize;
+    while written < buf.len() {
+        let n = libc::write(
+            fd,
+            buf.as_ptr().add(written) as *const std::ffi::c_void,
+            buf.len() - written,
+        );
+        if n > 0 {
+            written += n as usize;
+            continue;
+        }
+        if n == 0 {
+            break;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => {
+                let mut pfd = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                libc::poll(&mut pfd, 1, -1);
+                continue;
+            }
+            _ => break,
+        }
+    }
+    written
+}
+
+/// Write script output straight to stdout (fd 1). `write(2)` is unbuffered,
+/// so `implicit_flush` semantics hold without an explicit flush.
+unsafe extern "C" fn cli_ub_write(str: *const c_char, str_length: usize) -> usize {
+    if str.is_null() || str_length == 0 {
+        return 0;
+    }
+    let buf = std::slice::from_raw_parts(str as *const u8, str_length);
+    write_all_fd(1, buf)
+}
+
+/// No-op: stdout writes via `write(2)` are not buffered at the libc level.
+unsafe extern "C" fn cli_flush(_server_context: *mut c_void) {}
+
+/// CLI has no HTTP headers; report them as sent so PHP proceeds.
+unsafe extern "C" fn cli_send_headers(_sapi_headers: *mut sapi_headers_struct) -> c_int {
+    1 // SAPI_HEADER_SENT_SUCCESSFULLY
+}
+
+/// Route PHP log/error messages to stderr (fd 2), matching php-cli.
+unsafe extern "C" fn cli_log_message(message: *const c_char, _syslog_type: c_int) {
+    if message.is_null() {
+        return;
+    }
+    let msg = std::ffi::CStr::from_ptr(message);
+    write_all_fd(2, msg.to_bytes());
+    write_all_fd(2, b"\n");
 }
 
 // ─── SAPI Callbacks: Superglobals ────────────────────────────
