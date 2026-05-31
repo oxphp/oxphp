@@ -2135,6 +2135,14 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                 zval *dec_instance = oxphp_get_cached_decorator(cls, func, i);
                 if (!dec_instance) continue;
 
+                /* before() below runs arbitrary PHP that may instantiate more
+                 * decorators and resize decorator_instance_cache_ht, which
+                 * reallocates its arData and invalidates this bucket pointer.
+                 * Hold an owned copy (refcount-bumped) so the instance survives
+                 * a resize for the duration of the call. */
+                zval dec_local;
+                ZVAL_COPY(&dec_local, dec_instance);
+
                 /* Create context for before() */
                 zval ctx_zval;
                 oxphp_create_decorator_context(&ctx_zval, dctx, 0, NULL);
@@ -2143,10 +2151,11 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                 zval retval;
                 ZVAL_UNDEF(&retval);
                 zend_call_method_with_1_params(
-                    Z_OBJ_P(dec_instance), Z_OBJCE_P(dec_instance),
+                    Z_OBJ_P(&dec_local), Z_OBJCE_P(&dec_local),
                     NULL, "before", &retval, &ctx_zval);
                 zval_ptr_dtor(&retval);
                 zval_ptr_dtor(&ctx_zval);
+                zval_ptr_dtor(&dec_local);
 
                 if (EG(exception)) {
                     /* Cleanup: call after() on previously-succeeded decorators in reverse */
@@ -2160,16 +2169,22 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                             &decorator_instance_cache_ht, prev_key);
                         if (!prev_cached || Z_TYPE_P(prev_cached) != IS_OBJECT) continue;
 
+                        /* Own a copy — after() may resize the cache and
+                         * invalidate this bucket pointer (see before()). */
+                        zval prev_local;
+                        ZVAL_COPY(&prev_local, prev_cached);
+
                         zval cleanup_ret;
                         ZVAL_UNDEF(&cleanup_ret);
                         /* Save and clear exception to allow after() to run */
                         zend_object *saved_exception = EG(exception);
                         EG(exception) = NULL;
                         zend_call_method_with_1_params(
-                            Z_OBJ_P(prev_cached),
-                            Z_OBJCE_P(prev_cached),
+                            Z_OBJ_P(&prev_local),
+                            Z_OBJCE_P(&prev_local),
                             NULL, "after", &cleanup_ret, &cleanup_ctx);
                         zval_ptr_dtor(&cleanup_ret);
+                        zval_ptr_dtor(&prev_local);
                         /* Restore original exception */
                         if (EG(exception) && saved_exception) {
                             /* Discard cleanup exception, keep original */
@@ -2237,13 +2252,19 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
                     &decorator_instance_cache_ht, key);
                 if (!cached || Z_TYPE_P(cached) != IS_OBJECT) continue;
 
+                /* Own a copy — after() may resize the cache and invalidate
+                 * this bucket pointer (see before()). */
+                zval cached_local;
+                ZVAL_COPY(&cached_local, cached);
+
                 zval after_ret;
                 ZVAL_UNDEF(&after_ret);
                 zend_call_method_with_1_params(
-                    Z_OBJ_P(cached),
-                    Z_OBJCE_P(cached),
+                    Z_OBJ_P(&cached_local),
+                    Z_OBJCE_P(&cached_local),
                     NULL, "after", &after_ret, &ctx_zval);
                 zval_ptr_dtor(&after_ret);
+                zval_ptr_dtor(&cached_local);
 
                 /* If after() throws, stop dispatching remaining decorators */
                 if (EG(exception)) break;
