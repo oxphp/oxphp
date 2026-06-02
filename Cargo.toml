@@ -142,6 +142,11 @@ plugin-profiler = ["dep:rand", "dep:subtle", "dep:reqwest"]
 # Shared primitives depend on synthetic promises (waker lists for Channel,
 # Mutex::with(timeout), etc.), which live in the ox_async module.
 plugin-shared = ["plugin-async"]
+# Test-only: registers a repeatable, ALL-target decorator that surfaces its
+# per-occurrence constructor argument to PHP, so the integration suite can
+# exercise per-(name, scope) attribute-occurrence resolution end-to-end. Not
+# part of `php`; enable explicitly for the decorators test image.
+decorator-test = ["plugin-profiler"]
 
 [profile.release]
 lto = "fat"

@@ -1,0 +1,32 @@
+# Decorator suite: built with the `decorator-test` cargo feature so the
+# integration tests can exercise the temporary `#[OxPHP\Test\Mark]` decorator
+# (repeatable, ALL-target) that surfaces per-occurrence attribute arguments to
+# PHP. Otherwise identical to the default (traditional) routing profile.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.decorators.yml up
+services:
+  oxphp-decorators:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        CARGO_FEATURES: "plugin-apm,plugin-async,plugin-shared,decorator-test"
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/static:/var/www/html/public/test_static
+      - ./fixtures/uploads:/var/www/html/fixtures/uploads

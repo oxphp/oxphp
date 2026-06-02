@@ -75,8 +75,10 @@ extern "C" {
         f: Option<
             unsafe extern "C" fn(
                 fn_id: usize,
-                attr_names: *const *const c_char,
-                attr_count: u32,
+                fn_attr_names: *const *const c_char,
+                fn_attr_count: u32,
+                class_attr_names: *const *const c_char,
+                class_attr_count: u32,
                 attr_ctx: *mut c_void,
             ) -> c_int,
         >,
