@@ -1,5 +1,7 @@
 #[cfg(feature = "php")]
 pub mod bindings;
+#[cfg(feature = "php")]
+pub mod bootstrap;
 pub mod fiber;
 pub mod header_match;
 pub mod heartbeat;
