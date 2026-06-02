@@ -45,28 +45,48 @@ pub fn install_bridge_callbacks(registry: Arc<DecoratorRegistry>) {
     }
 }
 
+/// Collect a C array of `count` C-string pointers into owned `String`s,
+/// skipping any that aren't valid UTF-8. Null base pointer (the C side
+/// passes NULL when the count is 0) yields an empty vec.
+///
+/// # Safety
+/// `names` must point to `count` valid `*const c_char` entries, each a
+/// valid null-terminated C string, or be null when `count` is 0.
+unsafe fn collect_names(names: *const *const c_char, count: u32) -> Vec<String> {
+    if names.is_null() || count == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let ptr = *names.add(i);
+        if let Ok(s) = CStr::from_ptr(ptr).to_str() {
+            out.push(s.to_string());
+        }
+    }
+    out
+}
+
 /// Called by observer init — resolve which decorators apply to this function.
 /// Returns 1 if decorators found, 0 otherwise.
 ///
-/// `attr_ctx` is the C-side attribute resolver context (an
-/// `ox_attr_resolver_ctx_t*`), forwarded to the registry so each matched
-/// decorator can read its attribute's constructor arguments.
+/// Function/method and class attribute names arrive in separate arrays so the
+/// registry can count occurrences independently per scope. `attr_ctx` is the
+/// C-side attribute resolver context (an `ox_attr_resolver_ctx_t*`), forwarded
+/// to the registry so each matched decorator can read its attribute's
+/// constructor arguments.
 #[allow(dead_code)]
 unsafe extern "C" fn resolve_callback(
     fn_id: usize,
-    attr_names: *const *const c_char,
-    attr_count: u32,
+    fn_attr_names: *const *const c_char,
+    fn_attr_count: u32,
+    class_attr_names: *const *const c_char,
+    class_attr_count: u32,
     attr_ctx: *mut std::os::raw::c_void,
 ) -> c_int {
     let registry = get_registry();
-    let mut names = Vec::with_capacity(attr_count as usize);
-    for i in 0..attr_count as usize {
-        let ptr = *attr_names.add(i);
-        if let Ok(s) = CStr::from_ptr(ptr).to_str() {
-            names.push(s.to_string());
-        }
-    }
-    if registry.resolve(fn_id, &names, attr_ctx) {
+    let fn_names = collect_names(fn_attr_names, fn_attr_count);
+    let class_names = collect_names(class_attr_names, class_attr_count);
+    if registry.resolve(fn_id, &fn_names, &class_names, attr_ctx) {
         1
     } else {
         0
@@ -267,7 +287,7 @@ mod tests {
         registry.register_rust(dec);
 
         let attrs = vec!["Test\\Counter".to_string()];
-        assert!(registry.resolve(0x1, &attrs, std::ptr::null_mut()));
+        assert!(registry.resolve(0x1, &attrs, &[], std::ptr::null_mut()));
 
         let resolved = registry.get_resolved(0x1).unwrap();
         let ctx = DecoratorCallContext {

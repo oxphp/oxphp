@@ -215,6 +215,72 @@ fn current_memory_usage_bytes() -> i64 {
     }
 }
 
+// ─── #[OxPHP\Test\Mark] — integration-test decorator ──────────
+//
+// Temporary, feature-gated (`decorator-test`) decorator used only by the
+// integration suite to prove per-`(name, scope)` attribute-occurrence
+// resolution. Unlike the shipped profiler decorators it is `.repeatable()`
+// and `ALL`-target, so `#[Mark("a")] #[Mark("b")]` and class+method
+// placements exercise the previously-latent occurrence/scope paths. Each
+// invocation records its configured label into a thread-local list that the
+// `OxPHP\Test\decorator_labels` PHP function drains — making the resolved
+// per-occurrence arguments observable from PHP.
+
+#[cfg(feature = "decorator-test")]
+thread_local! {
+    static TEST_DECORATOR_LABELS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Drain the per-thread observation list, joining labels with `,`. Backs the
+/// `OxPHP\Test\decorator_labels` PHP function.
+#[cfg(feature = "decorator-test")]
+pub fn drain_test_decorator_labels() -> String {
+    TEST_DECORATOR_LABELS.with(|cell| {
+        let mut labels = cell.borrow_mut();
+        let joined = labels.join(",");
+        labels.clear();
+        joined
+    })
+}
+
+#[cfg(feature = "decorator-test")]
+pub struct TestMarkDecorator {
+    /// Label from `#[OxPHP\Test\Mark("x")]` / `#[...Mark(label: "x")]`;
+    /// `None` on the registered template and for a bare attribute (falls
+    /// back to the function target).
+    pub label: Option<Arc<str>>,
+}
+
+#[cfg(feature = "decorator-test")]
+impl Decorator for TestMarkDecorator {
+    fn attribute_name(&self) -> &str {
+        "OxPHP\\Test\\Mark"
+    }
+
+    fn targets(&self) -> AttributeTargets {
+        AttributeTargets::ALL
+    }
+
+    fn on_begin(&self, ctx: &DecoratorCallContext) -> DecoratorAction {
+        let label = match &self.label {
+            Some(l) => l.to_string(),
+            None => ctx.target.to_string(),
+        };
+        TEST_DECORATOR_LABELS.with(|cell| cell.borrow_mut().push(label));
+        DecoratorAction::Continue
+    }
+
+    fn on_end(&self, _ctx: &DecoratorCallContext, _result: &DecoratorCallResult) {}
+
+    fn configure(&self, args: &AttrArgs) -> Option<Arc<dyn Decorator>> {
+        let label = args
+            .str_named("label")
+            .or_else(|| args.str(0))
+            .map(Arc::from);
+        Some(Arc::new(Self { label }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

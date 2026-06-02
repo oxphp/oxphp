@@ -714,8 +714,10 @@ oxphp_native_dispatch_fn_t oxphp_bridge_get_native_dispatch(void);
 
 typedef int (*oxphp_decorator_resolve_fn_t)(
     uintptr_t fn_id,
-    const char **attr_names,
-    uint32_t attr_count,
+    const char *const *fn_attr_names,
+    uint32_t fn_attr_count,
+    const char *const *class_attr_names,
+    uint32_t class_attr_count,
     void *attr_ctx
 );
 

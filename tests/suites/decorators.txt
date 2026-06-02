@@ -1,4 +1,4 @@
-# profile: default
+# profile: decorators
 # description: Decorator system
 
 decorators/test_classes_exist
@@ -9,3 +9,4 @@ decorators/test_dispatch_order
 decorators/test_context_properties
 decorators/test_rejected_exception
 decorators/test_stack_overflow
+decorators/test_repeatable_args

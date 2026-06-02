@@ -308,6 +308,38 @@ impl Plugin for ProfilerPlugin {
             ));
         }
 
+        // ── Test-only decorator (feature `decorator-test`) ──
+        // Registered before the enabled-guard so it is independent of profiler
+        // config: a repeatable, ALL-target decorator whose per-occurrence label
+        // is drained back to PHP via `OxPHP\Test\decorator_labels`, letting the
+        // integration suite verify per-(name, scope) attribute resolution.
+        // Never compiled into shipped images.
+        #[cfg(feature = "decorator-test")]
+        {
+            use crate::plugin::builders::attribute::{
+                ATTR_TARGET_CLASS, ATTR_TARGET_FUNCTION, ATTR_TARGET_METHOD,
+            };
+            use crate::plugin::types::PhpType;
+
+            ctx.register_attribute("OxPHP\\Test\\Mark")
+                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD | ATTR_TARGET_CLASS)
+                .repeatable()
+                .optional_param(
+                    "label",
+                    PhpType::Nullable(Box::new(PhpType::String)),
+                    crate::plugin::types::PhpValue::Null,
+                )
+                .build()?;
+            ctx.register_decorator(crate::profiling::decorators::TestMarkDecorator { label: None });
+            ctx.function("OxPHP\\Test\\decorator_labels")
+                .returns(PhpType::String)
+                .handler(|call: &mut crate::bridge::call::NativeCall| {
+                    let labels = crate::profiling::decorators::drain_test_decorator_labels();
+                    call.ret_str(&labels);
+                    Ok(())
+                })?;
+        }
+
         if !self.enabled {
             tracing::info!(
                 plugin = "profiler",

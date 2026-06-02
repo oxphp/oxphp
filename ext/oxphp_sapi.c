@@ -2029,30 +2029,34 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(
         return (zend_observer_fcall_handlers){NULL, NULL};
     }
 
-    const char *attr_names[64];
-    uint32_t attr_count = 0;
-
-    /* Function/method attributes */
+    /* Function/method and class attributes are kept in separate arrays so
+     * Rust can count attribute occurrences independently per scope. A flat
+     * list would lose the fn/class boundary, causing a repeated or
+     * dual-scope attribute name to alias occurrence 0. */
+    const char *fn_attr_names[64];
+    uint32_t fn_attr_count = 0;
     if (func->common.attributes) {
         zend_attribute *attr;
         ZEND_HASH_FOREACH_PTR(func->common.attributes, attr) {
-            if (attr_count < 64) {
-                attr_names[attr_count++] = ZSTR_VAL(attr->name);
+            if (fn_attr_count < 64) {
+                fn_attr_names[fn_attr_count++] = ZSTR_VAL(attr->name);
             }
         } ZEND_HASH_FOREACH_END();
     }
 
     /* Class attributes (for TARGET_CLASS) */
+    const char *class_attr_names[64];
+    uint32_t class_attr_count = 0;
     if (func->common.scope && func->common.scope->attributes) {
         zend_attribute *attr;
         ZEND_HASH_FOREACH_PTR(func->common.scope->attributes, attr) {
-            if (attr_count < 64) {
-                attr_names[attr_count++] = ZSTR_VAL(attr->name);
+            if (class_attr_count < 64) {
+                class_attr_names[class_attr_count++] = ZSTR_VAL(attr->name);
             }
         } ZEND_HASH_FOREACH_END();
     }
 
-    if (attr_count == 0) {
+    if (fn_attr_count == 0 && class_attr_count == 0) {
         return (zend_observer_fcall_handlers){NULL, NULL};
     }
 
@@ -2066,7 +2070,10 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(
     };
 
     uintptr_t fn_id = (uintptr_t)func;
-    int found = resolve(fn_id, attr_names, attr_count, &actx);
+    int found = resolve(fn_id,
+                        fn_attr_count > 0 ? fn_attr_names : NULL, fn_attr_count,
+                        class_attr_count > 0 ? class_attr_names : NULL, class_attr_count,
+                        &actx);
     if (!found) {
         return (zend_observer_fcall_handlers){NULL, NULL};
     }

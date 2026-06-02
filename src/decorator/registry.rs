@@ -67,31 +67,49 @@ impl DecoratorRegistry {
 
     /// Resolve decorators for a function ID. Returns true if decorators were found.
     /// Called by observer init — caches the result for subsequent calls.
-    /// `attr_names` is the list of attribute class names found on the function.
-    /// `attr_ctx` is the opaque C-side attribute resolver context used to read
-    /// each matched decorator's constructor arguments (null in host builds).
-    pub fn resolve(&self, fn_id: usize, attr_names: &[String], attr_ctx: *mut c_void) -> bool {
+    /// `fn_attr_names` / `class_attr_names` are the attribute class names found
+    /// on the function/method and on its declaring class respectively; they are
+    /// kept separate so each attribute's constructor arguments are read from the
+    /// correct scope and occurrence. `attr_ctx` is the opaque C-side attribute
+    /// resolver context used to read those arguments (null in host builds).
+    pub fn resolve(
+        &self,
+        fn_id: usize,
+        fn_attr_names: &[String],
+        class_attr_names: &[String],
+        attr_ctx: *mut c_void,
+    ) -> bool {
         #[cfg(not(feature = "php"))]
         let _ = attr_ctx;
         let mut decorators = Vec::new();
 
-        for (index, name) in attr_names.iter().enumerate() {
+        // `plan[i]` is the `(is_class_scope, occurrence)` for the i-th name in
+        // the concatenation `fn_attr_names ++ class_attr_names`. Function-scope
+        // attributes resolve first, preserving decorator execution order.
+        let plan = scope_occurrence_plan(fn_attr_names, class_attr_names);
+        let names = fn_attr_names.iter().chain(class_attr_names.iter());
+
+        for (flat_index, (name, &(is_class_scope, attr_idx))) in names.zip(plan.iter()).enumerate()
+        {
             if let Some(dec) = self.rust_decorators.get(name) {
                 let template = Arc::clone(dec.value());
-                // Decode the attribute's constructor args once and let the
-                // decorator build a configured instance. `configure`
-                // returning None means "no per-attribute config" — share
-                // the registered template as-is.
+                // Decode this attribute's constructor args once, from its own
+                // scope and occurrence, and let the decorator build a configured
+                // instance. `configure` returning None means "no per-attribute
+                // config" — share the registered template as-is.
                 #[cfg(feature = "php")]
-                let args = read_attr_args(attr_ctx, name);
+                let args = read_attr_args(attr_ctx, name, is_class_scope, attr_idx);
                 #[cfg(not(feature = "php"))]
-                let args = AttrArgs::default();
+                let args = {
+                    let _ = (is_class_scope, attr_idx);
+                    AttrArgs::default()
+                };
                 let inst = template.configure(&args).unwrap_or(template);
                 decorators.push(ResolvedDecorator::Rust(inst));
             } else if self.php_decorators.contains_key(name) {
                 decorators.push(ResolvedDecorator::Php {
                     class_name: name.clone(),
-                    cache_key: index as u64,
+                    cache_key: flat_index as u64,
                 });
             }
             // Unknown attributes (built-in PHP, unregistered) — silently skip.
@@ -164,13 +182,41 @@ impl Default for DecoratorRegistry {
     }
 }
 
-/// Decode the constructor arguments of attribute `attr_name` from the
-/// C-side resolver context. Tries the function scope first, then the
-/// class scope (matching how decorator attributes attach). Reads the
-/// first occurrence only. Returns empty args when the context is null
-/// or the attribute carries no arguments.
+/// For each attribute name across function scope then class scope, compute the
+/// `(is_class_scope, occurrence)` it should read its arguments from. Occurrences
+/// are counted independently per `(name, scope)` so a repeatable attribute
+/// (`#[Foo("a")] #[Foo("b")]`) reads its own occurrence, and the same name on
+/// both the method and its class never aliases occurrence 0.
+///
+/// The returned vec is parallel to the concatenation `fn_attr_names` followed
+/// by `class_attr_names`. `is_class_scope` is `0` for function/method scope,
+/// `1` for class scope — matching the bridge arg-reader convention.
+fn scope_occurrence_plan(fn_attr_names: &[String], class_attr_names: &[String]) -> Vec<(i32, u32)> {
+    use std::collections::HashMap;
+
+    let mut plan = Vec::with_capacity(fn_attr_names.len() + class_attr_names.len());
+    for (is_class_scope, names) in [(0_i32, fn_attr_names), (1_i32, class_attr_names)] {
+        let mut occurrences: HashMap<&str, u32> = HashMap::new();
+        for name in names {
+            let counter = occurrences.entry(name.as_str()).or_insert(0);
+            plan.push((is_class_scope, *counter));
+            *counter += 1;
+        }
+    }
+    plan
+}
+
+/// Decode the constructor arguments of the `attr_idx`-th occurrence of
+/// attribute `attr_name` in the given scope (`is_class_scope`: 0 = function,
+/// 1 = class) from the C-side resolver context. Returns empty args when the
+/// context is null or the attribute carries no arguments at that position.
 #[cfg(feature = "php")]
-fn read_attr_args(attr_ctx: *mut c_void, attr_name: &str) -> AttrArgs {
+fn read_attr_args(
+    attr_ctx: *mut c_void,
+    attr_name: &str,
+    is_class_scope: i32,
+    attr_idx: u32,
+) -> AttrArgs {
     use std::ffi::CString;
 
     if attr_ctx.is_null() {
@@ -181,30 +227,28 @@ fn read_attr_args(attr_ctx: *mut c_void, attr_name: &str) -> AttrArgs {
         Err(_) => return AttrArgs::default(),
     };
 
-    for is_class_scope in [0_i32, 1_i32] {
-        let count = unsafe {
-            crate::php::bindings::oxphp_bridge_attr_arg_count(
-                attr_ctx,
-                is_class_scope,
-                cname.as_ptr(),
-                0, // first occurrence
-            )
-        };
-        if count < 0 {
-            continue; // attribute not present in this scope
-        }
-        let mut args = Vec::with_capacity(count as usize);
-        for arg_idx in 0..count as u32 {
-            args.push(read_one_arg(
-                attr_ctx,
-                is_class_scope,
-                cname.as_ptr(),
-                arg_idx,
-            ));
-        }
-        return AttrArgs::from_pairs(args);
+    let count = unsafe {
+        crate::php::bindings::oxphp_bridge_attr_arg_count(
+            attr_ctx,
+            is_class_scope,
+            cname.as_ptr(),
+            attr_idx,
+        )
+    };
+    if count < 0 {
+        return AttrArgs::default(); // attribute not present at this (scope, occurrence)
     }
-    AttrArgs::default()
+    let mut args = Vec::with_capacity(count as usize);
+    for arg_idx in 0..count as u32 {
+        args.push(read_one_arg(
+            attr_ctx,
+            is_class_scope,
+            cname.as_ptr(),
+            attr_idx,
+            arg_idx,
+        ));
+    }
+    AttrArgs::from_pairs(args)
 }
 
 /// Read a single attribute argument as a `(name, value)` pair via the
@@ -215,6 +259,7 @@ fn read_one_arg(
     attr_ctx: *mut c_void,
     is_class_scope: i32,
     attr_name: *const std::os::raw::c_char,
+    attr_idx: u32,
     arg_idx: u32,
 ) -> (Option<Arc<str>>, AttrArg) {
     let mut out_long: i64 = 0;
@@ -226,7 +271,7 @@ fn read_one_arg(
             attr_ctx,
             is_class_scope,
             attr_name,
-            0, // first occurrence
+            attr_idx,
             arg_idx,
             &mut out_long,
             &mut out_double,
@@ -253,7 +298,7 @@ fn read_one_arg(
         _ => AttrArg::Null,
     };
     (
-        read_arg_name(attr_ctx, is_class_scope, attr_name, arg_idx),
+        read_arg_name(attr_ctx, is_class_scope, attr_name, attr_idx, arg_idx),
         value,
     )
 }
@@ -265,6 +310,7 @@ fn read_arg_name(
     attr_ctx: *mut c_void,
     is_class_scope: i32,
     attr_name: *const std::os::raw::c_char,
+    attr_idx: u32,
     arg_idx: u32,
 ) -> Option<Arc<str>> {
     let mut buf = [0 as std::os::raw::c_char; 128];
@@ -273,7 +319,7 @@ fn read_arg_name(
             attr_ctx,
             is_class_scope,
             attr_name,
-            0, // first occurrence
+            attr_idx,
             arg_idx,
             buf.as_mut_ptr(),
             buf.len(),
@@ -357,7 +403,7 @@ mod tests {
         }));
 
         let attrs = vec!["App\\Cfg".to_string()];
-        assert!(registry.resolve(0xc0, &attrs, std::ptr::null_mut()));
+        assert!(registry.resolve(0xc0, &attrs, &[], std::ptr::null_mut()));
 
         let resolved = registry.get_resolved(0xc0).unwrap();
         let ctx = DecoratorCallContext {
@@ -378,6 +424,54 @@ mod tests {
         // The configured instance ran, not the registered template.
         assert_eq!(configured_begins.load(Ordering::Relaxed), 1);
         assert_eq!(template_begins.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn scope_occurrence_plan_counts_repeatable_per_scope() {
+        // A repeatable attribute on the function gets distinct occurrence
+        // indices within the function scope.
+        let fn_names = vec!["Foo".to_string(), "Foo".to_string()];
+        let plan = scope_occurrence_plan(&fn_names, &[]);
+        assert_eq!(plan, vec![(0, 0), (0, 1)]);
+    }
+
+    #[test]
+    fn scope_occurrence_plan_separates_fn_and_class_scope() {
+        // The same name on both the method and its class must not alias
+        // occurrence 0 — each scope counts independently.
+        let fn_names = vec!["Foo".to_string()];
+        let class_names = vec!["Foo".to_string()];
+        let plan = scope_occurrence_plan(&fn_names, &class_names);
+        assert_eq!(plan, vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn scope_occurrence_plan_preserves_order_and_mixed_names() {
+        let fn_names = vec!["A".to_string(), "B".to_string(), "A".to_string()];
+        let class_names = vec!["A".to_string(), "C".to_string()];
+        let plan = scope_occurrence_plan(&fn_names, &class_names);
+        // fn scope first: A#0, B#0, A#1; then class scope: A#0, C#0.
+        assert_eq!(plan, vec![(0, 0), (0, 0), (0, 1), (1, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn resolve_same_attr_on_fn_and_class_yields_two_in_order() {
+        // An ALL-target decorator placed on both the method and its class
+        // resolves to two instances, function scope first.
+        let registry = DecoratorRegistry::new();
+        registry.register_rust(Arc::new(MockDecorator {
+            name: "App\\Dual",
+            targets: AttributeTargets::ALL,
+        }));
+
+        let fn_names = vec!["App\\Dual".to_string()];
+        let class_names = vec!["App\\Dual".to_string()];
+        assert!(registry.resolve(0xd0, &fn_names, &class_names, std::ptr::null_mut()));
+
+        let resolved = registry.get_resolved(0xd0).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(matches!(resolved[0], ResolvedDecorator::Rust(_)));
+        assert!(matches!(resolved[1], ResolvedDecorator::Rust(_)));
     }
 
     #[test]
@@ -416,7 +510,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Unknown".to_string(),
         ];
-        let found = registry.resolve(42, &attrs, std::ptr::null_mut());
+        let found = registry.resolve(42, &attrs, &[], std::ptr::null_mut());
         assert!(found);
 
         let resolved = registry.get_resolved(42).unwrap();
@@ -433,7 +527,7 @@ mod tests {
     fn test_resolve_no_decorators_returns_false() {
         let registry = DecoratorRegistry::new();
         let attrs = vec!["PHP\\Attribute".to_string(), "App\\Unknown".to_string()];
-        let found = registry.resolve(99, &attrs, std::ptr::null_mut());
+        let found = registry.resolve(99, &attrs, &[], std::ptr::null_mut());
         assert!(!found);
         assert!(registry.get_resolved(99).is_none());
     }
@@ -448,7 +542,7 @@ mod tests {
         registry.register_rust(dec);
 
         let attrs = vec!["App\\Profiler".to_string()];
-        registry.resolve(7, &attrs, std::ptr::null_mut());
+        registry.resolve(7, &attrs, &[], std::ptr::null_mut());
 
         let cached = registry.get_resolved(7);
         assert!(cached.is_some());
@@ -466,7 +560,7 @@ mod tests {
         registry.register_php("App\\Cache".to_string(), AttributeTargets::METHOD);
 
         let attrs = vec!["App\\Timer".to_string()];
-        registry.resolve(1, &attrs, std::ptr::null_mut());
+        registry.resolve(1, &attrs, &[], std::ptr::null_mut());
         assert!(registry.get_resolved(1).is_some());
 
         registry.clear_cache();
@@ -494,7 +588,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Log".to_string(),
         ];
-        registry.resolve(10, &attrs, std::ptr::null_mut());
+        registry.resolve(10, &attrs, &[], std::ptr::null_mut());
 
         // Only PHP decorators counted (App\\Cache and App\\Log)
         assert_eq!(registry.php_decorator_count(10), 2);
@@ -518,7 +612,7 @@ mod tests {
             "App\\Cache".to_string(),
             "App\\Log".to_string(),
         ];
-        registry.resolve(20, &attrs, std::ptr::null_mut());
+        registry.resolve(20, &attrs, &[], std::ptr::null_mut());
 
         // Index 0 = first PHP decorator (App\\Cache)
         let (name, _key) = registry.php_decorator_at(20, 0).unwrap();
@@ -545,7 +639,7 @@ mod tests {
         registry.register_rust(rust_dec);
 
         let attrs = vec!["App\\Timer".to_string()];
-        registry.resolve(30, &attrs, std::ptr::null_mut());
+        registry.resolve(30, &attrs, &[], std::ptr::null_mut());
 
         assert_eq!(registry.php_decorator_count(30), 0);
         assert!(registry.php_decorator_at(30, 0).is_none());
