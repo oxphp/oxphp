@@ -276,7 +276,7 @@ services:
       - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
@@ -291,7 +291,7 @@ services:
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
 | `./src` | `/var/www/html` | Application files (PHP scripts, static assets). Use `:ro` in production |
-| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP runtime configuration (OPcache, sessions, JIT). Use `:ro` |
+| `./custom.ini` | `/usr/local/etc/php/conf.d/custom.ini` | PHP runtime configuration (OPcache, sessions, JIT). Use `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | TLS certificate and private key. Use `:ro` |
 
 ## Port Reference
@@ -306,7 +306,7 @@ services:
 
 ## PHP Configuration
 
-Customize PHP settings by creating an `oxphp.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
+Customize PHP settings by creating an `custom.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
 
 ```ini
 ; Do NOT add zend_extension=opcache — OPcache is already compiled into the

@@ -139,7 +139,7 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 
 ```bash
 docker run -p 80:80 \
-  -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
+  -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
   ghcr.io/oxphp/oxphp:0.6.0
 ```
 
@@ -148,7 +148,7 @@ docker run -p 80:80 \
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.6.0
 
-COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
@@ -161,7 +161,7 @@ services:
     ports:
       - "80:80"
     volumes:
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
       - ./src:/var/www/html
 ```
 

@@ -42,8 +42,8 @@ docker pull ghcr.io/oxphp/oxphp:0.6.0
 │       └── oxphp_sapi.so                            # PHP-расширение OxPHP
 ├── etc/php/
 │   └── conf.d/
-│       ├── oxphp.ini                                # настройки PHP для OxPHP
-│       └── extension.ini                            # extension=oxphp_sapi.so
+│       ├── custom.ini                                # настройки PHP для OxPHP
+│       └── oxphp.ini                                # extension=oxphp_sapi.so
 ```
 
 > **Значение `<ABI>` зависит от минора PHP.** PHP 8.4 использует `20240924`, у PHP 8.5 другая дата. В примерах ниже жёстко прописан `20240924`, потому что в их `FROM` указан `php:8.4-zts-alpine3.23` — поменяете FROM, придётся менять и дату. Чтобы получить её портабельно прямо в сборке:

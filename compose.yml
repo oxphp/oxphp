@@ -20,7 +20,7 @@ services:
       - "9090:9090"
     volumes:
       - ./www:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./docker/custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
       - ./certs:/etc/ssl/oxphp:ro
     environment:
       # ── Server ────────────────────────────────────────────────────

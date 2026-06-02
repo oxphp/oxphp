@@ -126,8 +126,8 @@ COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 # extensions dir provided by the PHP base image)
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 
-# Enable the SAPI extension. Production intentionally does NOT ship an
-# oxphp.ini — production users mount their own PHP config.
+# Enable the SAPI extension. Production intentionally does NOT ship a
+# custom.ini — production users mount their own PHP config.
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Build-time assert: bare `php` CLI must dlopen the extension successfully.

@@ -80,7 +80,7 @@ RUN chmod +x /opt/fg/*.pl
 
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
-COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+COPY docker/custom.ini /usr/local/etc/php/conf.d/custom.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 ENV LD_LIBRARY_PATH=/usr/local/lib
 COPY --from=builder /build/target/release/oxphp /usr/local/bin/oxphp
