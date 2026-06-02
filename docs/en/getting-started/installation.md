@@ -42,8 +42,8 @@ File layout of the runtime image:
 │       └── oxphp_sapi.so                            # OxPHP PHP extension
 ├── etc/php/
 │   └── conf.d/
-│       ├── oxphp.ini                                # PHP settings for OxPHP
-│       └── extension.ini                            # extension=oxphp_sapi.so
+│       ├── custom.ini                                # PHP settings for OxPHP
+│       └── oxphp.ini                                # extension=oxphp_sapi.so
 ```
 
 > **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.23` — switch the FROM and you must switch the date too. To derive it portably inside the build:

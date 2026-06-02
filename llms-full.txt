@@ -278,7 +278,7 @@ services:
       - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
@@ -293,7 +293,7 @@ services:
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
 | `./src` | `/var/www/html` | Application files (PHP scripts, static assets). Use `:ro` in production |
-| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP runtime configuration (OPcache, sessions, JIT). Use `:ro` |
+| `./custom.ini` | `/usr/local/etc/php/conf.d/custom.ini` | PHP runtime configuration (OPcache, sessions, JIT). Use `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | TLS certificate and private key. Use `:ro` |
 
 ## Port Reference
@@ -308,7 +308,7 @@ services:
 
 ## PHP Configuration
 
-Customize PHP settings by creating an `oxphp.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
+Customize PHP settings by creating an `custom.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
 
 ```ini
 ; Do NOT add zend_extension=opcache — OPcache is already compiled into the
@@ -415,8 +415,8 @@ File layout of the runtime image:
 │       └── oxphp_sapi.so                            # OxPHP PHP extension
 ├── etc/php/
 │   └── conf.d/
-│       ├── oxphp.ini                                # PHP settings for OxPHP
-│       └── extension.ini                            # extension=oxphp_sapi.so
+│       ├── custom.ini                                # PHP settings for OxPHP
+│       └── oxphp.ini                                # extension=oxphp_sapi.so
 ```
 
 > **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.23` — switch the FROM and you must switch the date too. To derive it portably inside the build:
@@ -774,7 +774,7 @@ Every access log entry is a single JSON line written to stdout:
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -794,7 +794,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
     "path": "/api/orders",
     "status": 201,
     "duration_us": 8421,
-    "remote_addr": "10.0.0.1:54322",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -809,7 +809,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 | `path` | string | Request URI path |
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
-| `remote_addr` | string | Client IP address and port. When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
+| `remote_ip` | string | Client IP address (no port). When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
 | `trace_id` | string | W3C trace ID (present only when `TRACE_CONTEXT=true`) |
 | `span_id` | string | W3C span ID (present only when `TRACE_CONTEXT=true`) |
 
@@ -1753,7 +1753,7 @@ For more on APM tracing, see [Distributed Tracing & APM](distributed-tracing.md)
 - **User functions only** — built-in PHP functions cannot be decorated. Only functions and methods defined in PHP code are interceptable
 - **Registration before first call** — decorators must be registered before the first invocation of any function they target. Register during bootstrap
 - **Scalar constructor arguments** — attribute constructor arguments are evaluated once at first call. Complex expressions or runtime values in attributes are not supported
-- **Max 32 nesting levels** — the decorator context stack supports up to 32 levels of nested decorated function calls
+- **Max 256 nesting levels** — the decorator context stack supports up to 256 levels of nested decorated function calls. Beyond that, the call throws `OxPHP\Decorator\StackOverflowException` instead of silently corrupting decorator context
 
 ## Troubleshooting
 
@@ -1981,7 +1981,7 @@ When trace context is enabled, structured JSON access logs include `trace_id` an
     "path": "/api/users",
     "status": 200,
     "duration_us": 1523,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -2019,6 +2019,19 @@ Exported spans include standard HTTP semantic convention attributes:
 | `http.response.body.size` | Response body size in bytes (if non-zero) |
 
 5xx responses are marked as error spans.
+
+### Span Events
+
+Child spans also carry **span events** — timestamped annotations exported as
+OpenTelemetry events and rendered natively by Jaeger, Grafana Tempo, and other
+OTLP backends. A `oxphp.event.kind` attribute on each event identifies its type:
+
+| `oxphp.event.kind` | Source | Event attributes |
+|--------------------|--------|------------------|
+| `exception` | A `#[OxPHP\Apm\Trace]` function that threw | `exception.type` |
+| `mark` | `oxphp_apm_event()` / profiler `#[Mark]` | user-supplied |
+| `slow` | profiler `#[SlowThreshold]` breach | `threshold_ms`, `elapsed_ms` |
+| `memory_spike` | profiler `#[MemoryThreshold]` breach | `threshold_kb`, `delta_bytes` |
 
 ### Request ID with OTel
 
@@ -4407,7 +4420,7 @@ When access logging is enabled, every log entry includes the `request_id` field:
     "path": "/api/users",
     "status": 200,
     "duration_us": 1234,
-    "remote_addr": "10.0.0.1:54321",
+    "remote_ip": "10.0.0.1",
     "message": "request completed"
   }
 }
@@ -7246,6 +7259,8 @@ The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in
 - **`GET /__ox_shared/entries?type=Channel`** lists channel entries with their registry IDs.
 - **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
+The `ops` counter (and the registry-wide `oxphp_shared_ops_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
+
 Prometheus exposition on `/metrics`:
 
 ```text
@@ -8909,8 +8924,10 @@ The script is validated at startup — it must exist, canonicalize inside `DOCUM
 
 | `$_SERVER` key | Value |
 |---|---|
-| `OXPHP_DENIED_PATH` | Original sanitized URI (without leading `/`) |
+| `OXPHP_DENIED_PATH` | Original sanitized URI, with a leading `/` (same form as `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | The glob pattern that matched |
+
+`OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI. If you compare the path against the pattern, `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` first so both are in the same form.
 
 Example honeypot:
 
@@ -9100,7 +9117,7 @@ When unset, OxPHP ignores all forwarding headers — this is the safe default.
 When a request arrives from a trusted IP, OxPHP inspects forwarding headers in priority order:
 
 1. **`Forwarded`** ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) — the standardized header
-2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host`** — de-facto fallback
+2. **`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-Port`** — de-facto fallback
 
 If the `Forwarded` header is present, `X-Forwarded-*` headers are ignored.
 
@@ -9127,12 +9144,15 @@ When `TRUSTED_PROXIES` is configured and the connecting IP is trusted:
 | Component | Without trusted proxies | With trusted proxies |
 |-----------|------------------------|---------------------|
 | `$_SERVER['REMOTE_ADDR']` | Proxy IP | Real client IP |
+| `$_SERVER['REMOTE_PORT']` | Proxy source port | Client port from `Forwarded: for=ip:port`, otherwise `0` |
 | `$_SERVER['HTTPS']` | Based on OxPHP's TLS config | From `Forwarded: proto=` or `X-Forwarded-Proto` |
 | `$_SERVER['REQUEST_SCHEME']` | `http` or `https` from TLS | From forwarded protocol |
 | `$_SERVER['SERVER_NAME']` | From `Host` header | From `Forwarded: host=` or `X-Forwarded-Host` |
-| `$_SERVER['SERVER_PORT']` | From `Host` header | From forwarded host |
+| `$_SERVER['SERVER_PORT']` | From `Host` header | From `X-Forwarded-Port`, else port of `X-Forwarded-Host` / `Forwarded: host=`, else 443/80 |
 | Rate limiting | Per-proxy IP | Per-client IP |
 | Access log | Proxy IP | Real client IP |
+
+`REMOTE_PORT` is `0` behind a proxy unless an RFC 7239 `Forwarded: for=ip:port` node carries the client's source port — `X-Forwarded-For` has no port field, so the rewritten value cannot be reconstructed and is zeroed instead of guessed.
 
 ## `private` Networks
 
@@ -9159,7 +9179,7 @@ The `private` shorthand includes:
 ## See Also
 
 - [Rate Limiting](../features/rate-limiting.md) — per-IP rate limiting uses the resolved client IP
-- [Access Logging](../features/access-logging.md) — `remote_addr` field shows the resolved client IP
+- [Access Logging](../features/access-logging.md) — `remote_ip` field shows the resolved client IP
 - [Configuration Reference](../operations/configuration.md) — all environment variables
 
 ---
@@ -10083,7 +10103,7 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 
 ```bash
 docker run -p 80:80 \
-  -v ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro \
+  -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
   ghcr.io/oxphp/oxphp:0.6.0
 ```
 
@@ -10092,7 +10112,7 @@ docker run -p 80:80 \
 ```dockerfile
 FROM ghcr.io/oxphp/oxphp:0.6.0
 
-COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
@@ -10105,7 +10125,7 @@ services:
     ports:
       - "80:80"
     volumes:
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
       - ./src:/var/www/html
 ```
 
@@ -11375,12 +11395,15 @@ When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set,
 | Variable | Value when peer is trusted | Value otherwise |
 |----------|----------------------------|------------------|
 | `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded` | Direct peer IP |
+| `REMOTE_PORT` | Client source port from `Forwarded: for=ip:port`, otherwise `0` | Direct peer port |
 | `HTTPS` | `"on"` when `X-Forwarded-Proto: https` | Set only when the peer connection is TLS |
 | `REQUEST_SCHEME` | `"https"` / `"http"` from `X-Forwarded-Proto` | Based on actual TLS state |
 | `SERVER_NAME` | Host portion of `X-Forwarded-Host` | Host portion of the `Host` header |
-| `SERVER_PORT` | Port portion of `X-Forwarded-Host`, or 443/80 by scheme | Port portion of `Host`, or 443/80 |
+| `SERVER_PORT` | `X-Forwarded-Port`, else port portion of `X-Forwarded-Host`, else 443/80 by scheme | Port portion of `Host`, or 443/80 |
 
-The raw `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, and `HTTP_FORWARDED` keys remain in `$_SERVER` unchanged — both the rewritten values and the original headers are available.
+The raw `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PORT`, and `HTTP_FORWARDED` keys remain in `$_SERVER` unchanged — both the rewritten values and the original headers are available.
+
+`REMOTE_PORT` is `"0"` behind a trusted proxy unless the proxy sends RFC 7239 `Forwarded: for=ip:port` — neither `X-Forwarded-For` nor the rightmost-non-trusted selection carry a client source port, so the synthetic value is zeroed rather than guessed.
 
 When `TRUSTED_PROXIES` is **not** set, no rewriting occurs and `REMOTE_ADDR` is always the direct peer — typically your load balancer, not the end client. Parsing `X-Forwarded-For` manually is error-prone (leftmost vs rightmost, no CIDR trust check); prefer configuring `TRUSTED_PROXIES`. See [Trusted Proxies](../security/trusted-proxies.md) for the trust algorithm and configuration syntax.
 

@@ -275,7 +275,7 @@ services:
       - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
@@ -290,7 +290,7 @@ services:
 | 宿主机路径 | 容器路径 | 用途 |
 |-----------|---------|------|
 | `./src` | `/var/www/html` | 应用文件（PHP 脚本、静态资源）。生产环境建议使用 `:ro` |
-| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | PHP 运行时配置（OPcache、会话、JIT）。建议使用 `:ro` |
+| `./custom.ini` | `/usr/local/etc/php/conf.d/custom.ini` | PHP 运行时配置（OPcache、会话、JIT）。建议使用 `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | TLS 证书和私钥。建议使用 `:ro` |
 
 ## 端口说明
@@ -305,7 +305,7 @@ services:
 
 ## PHP 配置
 
-创建 `oxphp.ini` 文件并将其挂载到容器中，可自定义 PHP 设置。这是配置 OPcache、JIT、会话及其他 PHP 运行时参数的推荐方式。
+创建 `custom.ini` 文件并将其挂载到容器中，可自定义 PHP 设置。这是配置 OPcache、JIT、会话及其他 PHP 运行时参数的推荐方式。
 
 ```ini
 ; 请勿添加 zend_extension=opcache —— OPcache 已静态编译到

@@ -42,8 +42,8 @@ docker pull ghcr.io/oxphp/oxphp:0.6.0
 │       └── oxphp_sapi.so                            # OxPHP PHP 扩展
 ├── etc/php/
 │   └── conf.d/
-│       ├── oxphp.ini                                # OxPHP 的 PHP 配置
-│       └── extension.ini                            # extension=oxphp_sapi.so
+│       ├── custom.ini                                # OxPHP 的 PHP 配置
+│       └── oxphp.ini                                # extension=oxphp_sapi.so
 ```
 
 > **`<ABI>` 的取值依赖 PHP 小版本号。** PHP 8.4 使用 `20240924`，PHP 8.5 使用另一个日期戳。下面的示例硬编码 `20240924`，是因为它们的 `FROM` 行指向 `php:8.4-zts-alpine3.23` —— 切换 FROM 时也必须切换日期。要在构建中可移植地获取它：

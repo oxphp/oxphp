@@ -276,7 +276,7 @@ services:
       - "9090:9090"
     volumes:
       - ./src:/var/www/html:ro
-      - ./oxphp.ini:/usr/local/etc/php/conf.d/oxphp.ini:ro
+      - ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
     environment:
       - LISTEN_ADDR=0.0.0.0:80
       - DOCUMENT_ROOT=/var/www/html/public
@@ -291,7 +291,7 @@ services:
 | Путь на хосте | Путь в контейнере | Назначение |
 |---------------|-------------------|------------|
 | `./src` | `/var/www/html` | Файлы приложения (PHP-скрипты, статические ресурсы). Используйте `:ro` в продакшене |
-| `./oxphp.ini` | `/usr/local/etc/php/conf.d/oxphp.ini` | Конфигурация времени выполнения PHP (OPcache, сессии, JIT). Используйте `:ro` |
+| `./custom.ini` | `/usr/local/etc/php/conf.d/custom.ini` | Конфигурация времени выполнения PHP (OPcache, сессии, JIT). Используйте `:ro` |
 | `./certs` | `/etc/ssl/oxphp` | TLS-сертификат и приватный ключ. Используйте `:ro` |
 
 ## Справочник портов
@@ -306,7 +306,7 @@ services:
 
 ## Конфигурация PHP
 
-Настраивайте параметры PHP, создав файл `oxphp.ini` и монтируя его в контейнер. Это рекомендуемый способ конфигурации OPcache, JIT, сессий и других параметров времени выполнения PHP.
+Настраивайте параметры PHP, создав файл `custom.ini` и монтируя его в контейнер. Это рекомендуемый способ конфигурации OPcache, JIT, сессий и других параметров времени выполнения PHP.
 
 ```ini
 ; НЕ добавляйте zend_extension=opcache — OPcache уже скомпилирован в

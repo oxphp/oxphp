@@ -126,7 +126,7 @@ Both reset the per-request timer to N seconds from now.
 **8. `REQUEST_TIMEOUT_SECONDS` → `max_execution_time`**
 
 ```ini
-; php.ini (or oxphp.ini)
+; php.ini (or custom.ini)
 max_execution_time = 30
 ```
 

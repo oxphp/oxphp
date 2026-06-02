@@ -148,14 +148,14 @@ COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 # extensions directory provided by the PHP base image).
 COPY --from=ext-builder /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
 
-# PHP configuration — dev image ships oxphp.ini (OPcache + JIT + preloading)
-COPY oxphp.ini /usr/local/etc/php/conf.d/oxphp.ini
+# PHP configuration — dev image ships custom.ini (OPcache + JIT + preloading)
+COPY docker/custom.ini /usr/local/etc/php/conf.d/custom.ini
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/extension.ini
 
 # Build-time assert: bare `php` CLI must dlopen the extension successfully.
 # Same rationale as Dockerfile.alpine-release — turns a stale-cache or
 # upstream-PHP-bump silent breakage into a build failure with full context.
-# `-n` skips all ini scanning (oxphp.ini's preload.php is not yet copied at
+# `-n` skips all ini scanning (custom.ini's preload.php is not yet copied at
 # this point of the build) and `-d extension=` loads only the extension we
 # want to verify. We deliberately do NOT add `-d display_startup_errors=1`
 # because dlopen errors are emitted unconditionally to stderr; surfacing
