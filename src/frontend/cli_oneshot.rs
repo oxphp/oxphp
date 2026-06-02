@@ -14,7 +14,6 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::sync::Arc;
 
 use crate::cli::RunOptions;
 use crate::php::{bindings, sapi};
@@ -80,30 +79,12 @@ pub fn run(opts: RunOptions) -> i32 {
 
     // ── Register plugin functions / classes / decorators BEFORE MINIT so the
     //    PHP module startup can expose them to the compiler (OPcache needs them
-    //    at compile time). Mirrors the serve path's pre-startup wiring, minus
-    //    the HTTP request accessors. ──
-    unsafe {
-        bindings::oxphp_bridge_set_superglobals_enabled(true);
-    }
-
-    let native_fns = plugin_manager.take_native_php_functions();
-    if !native_fns.is_empty() {
-        sapi::register_native_plugin_functions(native_fns);
-    }
-    let php_defs = plugin_manager.take_php_definitions();
-    if !php_defs.classes.is_empty()
-        || !php_defs.interfaces.is_empty()
-        || !php_defs.enums.is_empty()
-        || !php_defs.attributes.is_empty()
-        || !php_defs.functions.is_empty()
-    {
-        sapi::register_php_definitions(php_defs);
-    }
-    let registry = Arc::new(crate::decorator::DecoratorRegistry::new());
-    for def in plugin_manager.take_decorators() {
-        registry.register_rust(Arc::from(def.decorator));
-    }
-    crate::decorator::dispatch::install_bridge_callbacks(Arc::clone(&registry));
+    //    at compile time). Shared with the serve path so a new plugin-artifact
+    //    kind can never reach only one frontend. Superglobals are forced `true`
+    //    here regardless of SUPERGLOBALS_ENABLED (an HTTP per-request perf
+    //    toggle): a one-shot script needs $argv / $_SERVER / $_ENV to be a
+    //    useful CLI. The HTTP request accessors are intentionally omitted. ──
+    let _registry = crate::php::bootstrap::register_plugin_artifacts(&mut plugin_manager, true);
 
     // ── PHP engine startup with the CLI SAPI personality. ──
     unsafe {

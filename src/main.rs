@@ -99,43 +99,17 @@ fn main() -> Result<(), types::BoxError> {
 
     #[cfg(feature = "php")]
     {
-        // Set superglobals flag before PHP startup (read during MINIT and request handling)
-        unsafe {
-            oxphp::php::bindings::oxphp_bridge_set_superglobals_enabled(
-                config.superglobals_enabled,
-            );
-        }
-
-        // Register request accessor callbacks for the HTTP Object API
+        // Register request accessor callbacks for the HTTP Object API. This is
+        // an HTTP-frontend concern (not a plugin artifact), so it lives here
+        // rather than in the shared pre-MINIT bootstrap below.
         oxphp::php::sapi::register_request_accessors();
 
-        let native_fns = plugin_manager.take_native_php_functions();
-        if !native_fns.is_empty() {
-            oxphp::php::sapi::register_native_plugin_functions(native_fns);
-        }
-
-        // Register plugin PHP definitions (classes, interfaces, enums, attributes, functions)
-        let php_defs = plugin_manager.take_php_definitions();
-        if !php_defs.classes.is_empty()
-            || !php_defs.interfaces.is_empty()
-            || !php_defs.enums.is_empty()
-            || !php_defs.attributes.is_empty()
-            || !php_defs.functions.is_empty()
-        {
-            oxphp::php::sapi::register_php_definitions(php_defs);
-        }
-    }
-
-    #[cfg(feature = "php")]
-    {
-        // Create decorator registry — always, even without Rust plugins,
-        // because PHP decorators register at runtime via oxphp_register_decorator()
-        let registry = std::sync::Arc::new(oxphp::decorator::DecoratorRegistry::new());
-        let decorator_defs = plugin_manager.take_decorators();
-        for def in decorator_defs {
-            registry.register_rust(std::sync::Arc::from(def.decorator));
-        }
-        oxphp::decorator::dispatch::install_bridge_callbacks(std::sync::Arc::clone(&registry));
+        // Register plugin functions / classes / decorators with Zend before
+        // MINIT (shared with the `oxphp run` frontend, single source of order).
+        let registry = oxphp::php::bootstrap::register_plugin_artifacts(
+            &mut plugin_manager,
+            config.superglobals_enabled,
+        );
         tracing::info!(
             rust_decorators = registry.rust_decorator_count(),
             "Decorator registry initialized"
