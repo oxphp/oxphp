@@ -285,9 +285,13 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
 /// Populate `$_SERVER` for the one-shot CLI role (`oxphp run`). Mirrors the
 /// variable set of PHP's own CLI SAPI: PHP_SELF / SCRIPT_NAME /
 /// SCRIPT_FILENAME / PATH_TRANSLATED point at the script, DOCUMENT_ROOT is
-/// empty, and the process environment is folded in (the shared
-/// `oxphp_register_server_variables` callback registers it when `sg_enabled`).
-/// `$argv` / `$argc` are NOT set here — PHP builds those from
+/// empty. This script-identity skeleton is registered unconditionally; the
+/// process-environment fold is gated by `sg_enabled` (the shared
+/// `oxphp_register_server_variables` callback folds env only when set). The
+/// flag is read back from the bridge — the single source of truth that the
+/// CLI frontend already populated from `SUPERGLOBALS_ENABLED` before MINIT —
+/// so the request side and the bridge always agree. `$argv` / `$argc` are NOT
+/// set here, and are unaffected by the flag: PHP builds those from
 /// `SG(request_info).argc/argv` during `php_request_startup`. Must be called
 /// before `php_request_startup()`.
 pub fn set_cli_request_data(script_path: &std::path::Path) {
@@ -303,7 +307,7 @@ pub fn set_cli_request_data(script_path: &std::path::Path) {
         push_server_var(vars, "PATH_TRANSLATED", &script);
         push_server_var(vars, "DOCUMENT_ROOT", "");
 
-        data.sg_enabled = true;
+        data.sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };
         data.active = true;
     });
 }

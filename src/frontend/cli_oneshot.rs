@@ -71,20 +71,26 @@ pub fn run(opts: RunOptions) -> i32 {
 
     let config = crate::config::Config::from_env().ok();
 
-    // ── Superglobals are always on for the CLI role, regardless of the
-    //    SUPERGLOBALS_ENABLED config (an HTTP per-request perf toggle). A
-    //    one-shot script needs $argv / $_SERVER / $_ENV to be a useful CLI, so
-    //    `set_cli_request_data` forces `sg_enabled = true` on the request side;
-    //    we force it on the bridge side here to match (they must agree). ──
+    // ── Honor SUPERGLOBALS_ENABLED on the CLI path too (defaults to `true`).
+    //    When an operator sets it `false`, the process-environment fold into
+    //    $_SERVER is skipped, matching the HTTP worker. The $_SERVER script
+    //    skeleton (PHP_SELF / SCRIPT_* / DOCUMENT_ROOT) and $argv / $argc are
+    //    unconditional, so a one-shot script stays a usable CLI either way.
+    //    `set_cli_request_data` reads the same flag back from the bridge, so
+    //    both sides always agree. ──
+    let superglobals_enabled = config
+        .as_ref()
+        .map(|c| c.superglobals_enabled)
+        .unwrap_or(true);
 
     // ── Register plugin functions / classes / decorators BEFORE MINIT so the
     //    PHP module startup can expose them to the compiler (OPcache needs them
     //    at compile time). Shared with the serve path so a new plugin-artifact
-    //    kind can never reach only one frontend. Superglobals are forced `true`
-    //    here regardless of SUPERGLOBALS_ENABLED (an HTTP per-request perf
-    //    toggle): a one-shot script needs $argv / $_SERVER / $_ENV to be a
-    //    useful CLI. The HTTP request accessors are intentionally omitted. ──
-    let _registry = crate::php::bootstrap::register_plugin_artifacts(&mut plugin_manager, true);
+    //    kind can never reach only one frontend. This also stores the
+    //    superglobals flag in the bridge (read during MINIT and request setup).
+    //    The HTTP request accessors are intentionally omitted. ──
+    let _registry =
+        crate::php::bootstrap::register_plugin_artifacts(&mut plugin_manager, superglobals_enabled);
 
     // ── PHP engine startup with the CLI SAPI personality. ──
     unsafe {

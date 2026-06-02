@@ -85,6 +85,24 @@ ferr="$(run fatal.php 2>&1 1>/dev/null)"
 	&& printf '%s' "$ferr" | grep -qi "this_function_does_not_exist"; } \
 	&& ok "fatal -> exit 255 + stderr" || bad "fatal (code=$fcode stdout='$fout' stderr='$ferr')"
 
+# 8c. SUPERGLOBALS_ENABLED honored: default (true) folds process env into
+#     $_SERVER; =false skips the fold but keeps the script skeleton and $argv.
+sg_default="$(docker run --rm -e OXPHP_SG_PROBE=present -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/superglobals.php)"
+sg_argc="$(printf '%s\n' "$sg_default" | sed -n 1p)"
+sg_skel="$(printf '%s\n' "$sg_default" | sed -n 2p)"
+sg_env="$(printf '%s\n' "$sg_default" | sed -n 3p)"
+{ [ "$sg_argc" = "1|/cli/superglobals.php" ] && [ "$sg_skel" = "skel-yes" ] && [ "$sg_env" = "env-yes" ]; } \
+	&& ok "SUPERGLOBALS_ENABLED default: env folded + skeleton + argv" \
+	|| bad "sg default (argc='$sg_argc' skel='$sg_skel' env='$sg_env')"
+
+sg_off="$(docker run --rm -e OXPHP_SG_PROBE=present -e SUPERGLOBALS_ENABLED=false -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/superglobals.php)"
+off_argc="$(printf '%s\n' "$sg_off" | sed -n 1p)"
+off_skel="$(printf '%s\n' "$sg_off" | sed -n 2p)"
+off_env="$(printf '%s\n' "$sg_off" | sed -n 3p)"
+{ [ "$off_argc" = "1|/cli/superglobals.php" ] && [ "$off_skel" = "skel-yes" ] && [ "$off_env" = "env-no" ]; } \
+	&& ok "SUPERGLOBALS_ENABLED=false: env fold skipped, skeleton + argv kept" \
+	|| bad "sg off (argc='$off_argc' skel='$off_skel' env='$off_env')"
+
 # 9. regression: HTTP serve role still boots and answers
 name="oxphp-serve-smoke-$$"
 docker run -d --rm --name "$name" -e LISTEN_ADDR=0.0.0.0:18080 -p 127.0.0.1:18080:18080 "$IMAGE" >/dev/null 2>&1
