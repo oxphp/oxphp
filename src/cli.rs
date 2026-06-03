@@ -254,7 +254,7 @@ pub enum Command {
 /// Exit codes:
 ///   - `0` — help printed, version printed, or `config --check` passed
 ///   - `1` — `config --check` found problems
-///   - `2` — unknown or conflicting CLI arguments
+///   - `2` — unknown, malformed, or out-of-role CLI arguments
 pub fn dispatch() -> Role {
     match parse() {
         Ok(Command::Serve(opts)) => Role::Serve(opts),
@@ -285,7 +285,7 @@ pub fn dispatch() -> Role {
 
 /// Parse process arguments into a [`Command`].
 ///
-/// Unknown flags and conflicting commands return an error describing the
+/// Unknown flags and out-of-role options return an error describing the
 /// problem. Normally callers should prefer [`dispatch`] — this is exposed
 /// mainly for testing.
 pub fn parse() -> Result<Command, BoxError> {
@@ -313,9 +313,7 @@ where
             Short('v') | Long("version") => return Ok(Command::Version),
             // Cross-cutting collected flags.
             Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => {
-                user = Some(parser.value()?.to_string_lossy().parse::<DropTarget>()?);
-            }
+            Long("user") => user = Some(parse_user(&mut parser)?),
             // Reserved keywords (exact match) select a subcommand role.
             Value(v) if v == "serve" => return finish_serve(&mut parser, ini, user),
             Value(v) if v == "run" => return finish_run(&mut parser, ini, user),
@@ -331,9 +329,7 @@ where
 
     // No positional → serve. `-d` has no meaning without a script to run.
     if !ini.is_empty() {
-        return Err(
-            "'-d' sets an ini directive for a script to run; it is not valid for the server".into(),
-        );
+        return Err(d_requires_script("serve"));
     }
     Ok(Command::Serve(ServeOptions { drop_to: user }))
 }
@@ -347,6 +343,18 @@ fn parse_ini_define(raw: OsString) -> (String, String) {
     }
 }
 
+/// Parse a `--user=<spec>` value into a resolved `DropTarget`. The per-flag
+/// parsing lives in one place (mirrors `parse_ini_define`).
+fn parse_user(parser: &mut lexopt::Parser) -> Result<DropTarget, BoxError> {
+    let raw = parser.value()?;
+    raw.to_string_lossy().parse::<DropTarget>()
+}
+
+/// One error text for `-d` given where no script will run (`serve` / `config`).
+fn d_requires_script(role: &str) -> BoxError {
+    format!("'-d' is not valid for '{role}'; it sets an ini directive for a script to run").into()
+}
+
 /// Reject cross-cutting script flags collected before a role that does not
 /// accept them (currently `config`).
 fn reject_script_flags(
@@ -355,7 +363,7 @@ fn reject_script_flags(
     user: &Option<DropTarget>,
 ) -> Result<(), BoxError> {
     if !ini.is_empty() {
-        return Err(format!("'-d' is not valid for '{role}'").into());
+        return Err(d_requires_script(role));
     }
     if user.is_some() {
         return Err(format!("'--user' is not valid for '{role}'").into());
@@ -372,7 +380,7 @@ fn finish_serve(
 ) -> Result<Command, BoxError> {
     use lexopt::prelude::*;
     if !ini.is_empty() {
-        return Err("'-d' is not valid for 'serve'; it sets an ini directive for a script".into());
+        return Err(d_requires_script("serve"));
     }
     while let Some(arg) = parser.next()? {
         match arg {
@@ -380,9 +388,7 @@ fn finish_serve(
             // user after binding. Resolved eagerly so an unknown user/group
             // fails here, before any startup. Requires starting as root —
             // that is enforced at drop time, not parse time.
-            Long("user") => {
-                user = Some(parser.value()?.to_string_lossy().parse::<DropTarget>()?);
-            }
+            Long("user") => user = Some(parse_user(parser)?),
             other => {
                 return Err(
                     format!("unexpected argument to 'serve': {}", format_arg(&other)).into(),
@@ -406,9 +412,7 @@ fn finish_run(
     while let Some(arg) = parser.next()? {
         match arg {
             Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => {
-                user = Some(parser.value()?.to_string_lossy().parse::<DropTarget>()?);
-            }
+            Long("user") => user = Some(parse_user(parser)?),
             Short('h') | Long("help") => {
                 // `oxphp run --help` (before the script) prints help. A
                 // `--help` *after* the script is the script's own argument.
