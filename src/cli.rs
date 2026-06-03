@@ -14,11 +14,181 @@ use std::path::PathBuf;
 use crate::config::Config;
 use crate::types::BoxError;
 
-/// Options for the `serve` role. Empty for now — a placeholder the
-/// privilege-drop work extends with a `--user` target without reshaping
-/// [`Command`].
+/// Options for the `serve` role.
 #[derive(Debug, PartialEq, Eq, Default)]
-pub struct ServeOptions {}
+pub struct ServeOptions {
+    /// Drop OS privileges to this user/group after binding the listeners.
+    /// `Some` only when `--user` was given. The bind happens as the starting
+    /// user (root, for privileged ports); the drop is irreversible.
+    pub drop_to: Option<DropTarget>,
+}
+
+/// Resolved target of `serve --user=<name|name:group|uid|uid:gid>`.
+///
+/// Parsing resolves names to numeric ids eagerly (at CLI-parse time) so an
+/// unknown user/group fails fast, before any startup work. The user name is
+/// kept for `initgroups()`; it is `None` only for a bare numeric uid with no
+/// matching passwd entry, in which case the privilege drop clears
+/// supplementary groups instead of expanding them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DropTarget {
+    pub uid: u32,
+    pub gid: u32,
+    pub user: Option<std::ffi::CString>,
+}
+
+#[cfg(unix)]
+impl std::str::FromStr for DropTarget {
+    type Err = BoxError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (user_part, group_part) = match s.split_once(':') {
+            Some((u, g)) => (u, Some(g)),
+            None => (s, None),
+        };
+        if user_part.is_empty() {
+            return Err(format!("--user: empty user in '{s}'").into());
+        }
+
+        // Resolve the user → (uid, its primary gid, its name for initgroups).
+        // A numeric uid is taken verbatim (Docker `--user` convention) and
+        // reverse-resolved for its name/default gid; a name must resolve.
+        let (uid, primary_gid, name) = if let Ok(uid) = user_part.parse::<u32>() {
+            match lookup_passwd_by_uid(uid) {
+                Some(pw) => (uid, Some(pw.gid), Some(pw.name)),
+                None => (uid, None, None),
+            }
+        } else {
+            let pw = lookup_passwd_by_name(user_part)
+                .ok_or_else(|| format!("--user: unknown user '{user_part}'"))?;
+            (pw.uid, Some(pw.gid), Some(pw.name))
+        };
+
+        // Resolve the group: explicit (numeric or name) or the user's primary.
+        let gid = match group_part {
+            Some("") => {
+                return Err(format!("--user: empty group in '{s}'").into());
+            }
+            Some(g) => match g.parse::<u32>() {
+                Ok(gid) => gid,
+                Err(_) => {
+                    lookup_group_by_name(g).ok_or_else(|| format!("--user: unknown group '{g}'"))?
+                }
+            },
+            None => primary_gid.ok_or_else(|| {
+                format!(
+                    "--user: cannot determine group for uid {uid} (no passwd entry); use uid:gid"
+                )
+            })?,
+        };
+
+        Ok(DropTarget {
+            uid,
+            gid,
+            user: name,
+        })
+    }
+}
+
+#[cfg(not(unix))]
+impl std::str::FromStr for DropTarget {
+    type Err = BoxError;
+
+    fn from_str(_s: &str) -> Result<Self, Self::Err> {
+        Err("--user is not supported on this platform".into())
+    }
+}
+
+#[cfg(unix)]
+struct PasswdEntry {
+    uid: u32,
+    gid: u32,
+    name: std::ffi::CString,
+}
+
+/// Look up a passwd entry by name via `getpwnam_r`. Mirrors the buffer pattern
+/// in `startup_identity` (fixed 1024-byte buffer, no ERANGE retry).
+#[cfg(unix)]
+fn lookup_passwd_by_name(name: &str) -> Option<PasswdEntry> {
+    let c_name = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0u8; 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwnam_r writes into `pwd`/`buf` (owned here); `result` is set
+    // to NULL on miss / non-zero return.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            c_name.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: pw_name points into `buf` for the lifetime of `pwd`.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }.to_owned();
+    Some(PasswdEntry {
+        uid: pwd.pw_uid,
+        gid: pwd.pw_gid,
+        name,
+    })
+}
+
+/// Look up a passwd entry by uid via `getpwuid_r` (reverse resolution for a
+/// numeric `--user`, to recover the name for `initgroups` and a default gid).
+#[cfg(unix)]
+fn lookup_passwd_by_uid(uid: u32) -> Option<PasswdEntry> {
+    let mut buf = vec![0u8; 1024];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: same contract as lookup_passwd_by_name.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: pw_name points into `buf` for the lifetime of `pwd`.
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }.to_owned();
+    Some(PasswdEntry {
+        uid: pwd.pw_uid,
+        gid: pwd.pw_gid,
+        name,
+    })
+}
+
+/// Look up a group's gid by name via `getgrnam_r`.
+#[cfg(unix)]
+fn lookup_group_by_name(name: &str) -> Option<u32> {
+    let c_name = std::ffi::CString::new(name).ok()?;
+    let mut buf = vec![0u8; 1024];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: getgrnam_r writes into `grp`/`buf` (owned here); `result` is set
+    // to NULL on miss / non-zero return.
+    let rc = unsafe {
+        libc::getgrnam_r(
+            c_name.as_ptr(),
+            &mut grp,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() {
+        return None;
+    }
+    Some(grp.gr_gid)
+}
 
 /// Options for the `run` role — execute one PHP file to completion under CLI
 /// semantics, then exit with the script's exit code.
@@ -179,12 +349,27 @@ where
 /// Parse the tail of arguments after `oxphp serve`. The parser is reused
 /// mid-stream, mirroring [`parse_config_subcommand`].
 fn parse_serve_subcommand(parser: &mut lexopt::Parser) -> Result<Command, BoxError> {
-    // `serve` accepts no flags yet — the privilege-drop work adds `--user`
-    // here. Until then any argument is unexpected.
-    if let Some(arg) = parser.next()? {
-        return Err(format!("unexpected argument to 'serve': {}", format_arg(&arg)).into());
+    use lexopt::prelude::*;
+
+    let mut opts = ServeOptions::default();
+    while let Some(arg) = parser.next()? {
+        match arg {
+            // `--user=<name|name:group|uid|uid:gid>`: drop privileges to this
+            // user after binding. Resolved eagerly so an unknown user/group
+            // fails here, before any startup. Requires starting as root —
+            // that is enforced at drop time, not parse time.
+            Long("user") => {
+                let raw = parser.value()?;
+                opts.drop_to = Some(raw.to_string_lossy().parse::<DropTarget>()?);
+            }
+            other => {
+                return Err(
+                    format!("unexpected argument to 'serve': {}", format_arg(&other)).into(),
+                );
+            }
+        }
     }
-    Ok(Command::Serve(ServeOptions::default()))
+    Ok(Command::Serve(opts))
 }
 
 /// Parse the tail of arguments after `oxphp run`.
@@ -288,6 +473,7 @@ pub fn print_help() {
 USAGE:
     oxphp [OPTIONS]
     oxphp <COMMAND> [OPTIONS]
+    oxphp serve [--user=<name|uid[:gid]>]
     oxphp run [-d key=value]... <script.php> [args]...
 
 OPTIONS:
@@ -298,6 +484,12 @@ COMMANDS:
     serve           Start the HTTP server (default; same as bare 'oxphp')
     run             Execute a single PHP script under CLI semantics and exit
     config          Configuration utilities (see 'oxphp config --help')
+
+SERVE:
+    --user <spec>   Bind the listeners as the starting user (root, for ports
+                    below 1024), then permanently drop to <spec> before any
+                    traffic is served. <spec> is a user name, name:group, uid,
+                    or uid:gid. Requires starting as root.
 
 RUN:
     Executes <script.php> to completion under the OxPHP engine — fibers,
@@ -608,5 +800,118 @@ mod tests {
     #[test]
     fn repeated_same_flag_is_ok() {
         assert_eq!(parse_from(args(&["-h", "--help"])).unwrap(), Command::Help);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod privilege_drop_tests {
+    use super::*;
+    use std::ffi::{CString, OsString};
+
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    fn serve_opts(cmd: Command) -> ServeOptions {
+        match cmd {
+            Command::Serve(opts) => opts,
+            other => panic!("expected Command::Serve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_numeric_uid_gid() {
+        // High uid/gid with no passwd/group entry: host-independent. With no
+        // passwd entry the user name resolves to None.
+        let t: DropTarget = "1000001:1000002".parse().unwrap();
+        assert_eq!(t.uid, 1000001);
+        assert_eq!(t.gid, 1000002);
+        assert_eq!(t.user, None);
+    }
+
+    #[test]
+    fn bare_numeric_uid_with_passwd_resolves_gid_and_name() {
+        // uid 0 always has a passwd entry (root); its primary gid is 0 on both
+        // Linux and macOS, and the name reverse-resolves for initgroups().
+        let t: DropTarget = "0".parse().unwrap();
+        assert_eq!(t.uid, 0);
+        assert_eq!(t.gid, 0);
+        assert_eq!(t.user, Some(CString::new("root").unwrap()));
+    }
+
+    #[test]
+    fn bare_numeric_uid_without_passwd_is_rejected() {
+        // No passwd entry → no primary gid to default to → must be explicit.
+        let err = "1000001".parse::<DropTarget>().unwrap_err();
+        assert!(err.to_string().contains("group") || err.to_string().contains("uid:gid"));
+    }
+
+    #[test]
+    fn resolves_user_name() {
+        let t: DropTarget = "root".parse().unwrap();
+        assert_eq!(t.uid, 0);
+        assert_eq!(t.user, Some(CString::new("root").unwrap()));
+    }
+
+    #[test]
+    fn resolves_name_with_numeric_group() {
+        let t: DropTarget = "root:0".parse().unwrap();
+        assert_eq!(t.uid, 0);
+        assert_eq!(t.gid, 0);
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!("".parse::<DropTarget>().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_user() {
+        assert!(":5".parse::<DropTarget>().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_group() {
+        assert!("root:".parse::<DropTarget>().is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_user() {
+        assert!("oxphp-nonexistent-user-98765"
+            .parse::<DropTarget>()
+            .is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_group() {
+        assert!("root:oxphp-nonexistent-group-98765"
+            .parse::<DropTarget>()
+            .is_err());
+    }
+
+    #[test]
+    fn serve_user_flag_attached() {
+        let opts = serve_opts(parse_from(args(&["serve", "--user=1000001:1000002"])).unwrap());
+        let t = opts.drop_to.expect("drop_to should be set");
+        assert_eq!(t.uid, 1000001);
+        assert_eq!(t.gid, 1000002);
+    }
+
+    #[test]
+    fn serve_user_flag_separate_value() {
+        let opts = serve_opts(parse_from(args(&["serve", "--user", "1000001:1000002"])).unwrap());
+        assert_eq!(opts.drop_to.expect("drop_to should be set").uid, 1000001);
+    }
+
+    #[test]
+    fn serve_without_user_has_no_drop() {
+        let opts = serve_opts(parse_from(args(&["serve"])).unwrap());
+        assert!(opts.drop_to.is_none());
+    }
+
+    #[test]
+    fn serve_user_rejects_bad_value() {
+        let err = parse_from(args(&["serve", "--user=oxphp-nonexistent-user-98765"])).unwrap_err();
+        assert!(err.to_string().contains("user") || err.to_string().contains("--user"));
     }
 }

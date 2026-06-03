@@ -226,9 +226,11 @@ async fn test_rate_limiting_429() {
 
 #[tokio::test]
 async fn test_internal_server_health() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bind a non-blocking std listener and hand it to the internal server,
+    // mirroring how main() pre-binds before any privilege drop.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener); // free the port for internal server
 
     let metrics = Arc::new(oxphp::metrics::Metrics::new());
     let config = Arc::new(oxphp::config::Config::from_env().unwrap());
@@ -236,10 +238,9 @@ async fn test_internal_server_health() {
         Arc::new(oxphp::executor::stub::StubExecutor::new());
 
     let plugin_manager = Arc::new(oxphp::plugin::PluginManager::new());
-    let addr_str = addr.to_string();
     tokio::spawn(async move {
         let _ = oxphp::server::internal::run_internal_server(
-            &addr_str,
+            listener,
             metrics,
             config,
             executor,
@@ -262,9 +263,9 @@ async fn test_internal_server_health() {
 
 #[tokio::test]
 async fn test_internal_server_metrics() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
 
     let metrics = Arc::new(oxphp::metrics::Metrics::new());
     let config = Arc::new(oxphp::config::Config::from_env().unwrap());
@@ -272,10 +273,9 @@ async fn test_internal_server_metrics() {
         Arc::new(oxphp::executor::stub::StubExecutor::new());
 
     let plugin_manager = Arc::new(oxphp::plugin::PluginManager::new());
-    let addr_str = addr.to_string();
     tokio::spawn(async move {
         let _ = oxphp::server::internal::run_internal_server(
-            &addr_str,
+            listener,
             metrics,
             config,
             executor,

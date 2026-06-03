@@ -233,6 +233,41 @@ docker run --rm --user www-data \
 
 `www-data` 用户（uid 82，gid 82）由基础镜像预先创建，且 `/var/www/html` 在构建时已 `chown` 给它，所以上述任意降权路径都指向可读的 webroot。
 
+### 在 80 端口以非 root 运行（`serve --user`）
+
+在编排层降权（见上）有一个限制：以 `www-data` 启动的进程无法绑定特权端口（低于 1024）。否则要监听 `:80`/`:443`，你需要 `CAP_NET_BIND_SERVICE`、类似 `su-exec` 的 entrypoint，或在端口映射后使用高端口（如 `:8080`）。
+
+`oxphp serve --user=<spec>` 把这些收拢到单个进程里：OxPHP **以 root** 绑定监听套接字，然后在接受任何连接或启动任何 PHP worker **之前**，永久降权到目标用户。你既得到特权端口，又让请求处理以非 root 运行，且无需额外 capabilities。
+
+**以 root 启动容器** —— 同时不要设置 `user:`，因为绑定需要 root —— 并通过 `command` 传入该标志：
+
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:0.6.0
+    command: ["oxphp", "serve", "--user=www-data"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - LISTEN_ADDR=0.0.0.0:80
+```
+
+`<spec>` 接受用户名、`name:group`、数字 `uid` 或 `uid:gid`。降权按 `initgroups → setgid → setuid` 执行，并校验无法重新获得 root，且不可逆；在 Linux 上还会设置 `no_new_privs`。如果进程**不是**以 root 启动，`serve --user` 会报错退出，而不是悄悄以 root 继续运行。
+
+> 只选**一种**模型，不要两者并用。当 `:80` 由高端口或外部负载均衡器终结时，用编排层降权（`user:` / `runAsUser`）；当你希望由 OxPHP 自己掌管特权绑定时，用 `serve --user`。同时设置 `user:` **和** `serve --user` 会导致绑定失败——此时容器已不是 root。
+
+**降权用户的文件权限清单。** 降权后，OxPHP 运行时接触的一切都必须对 `<spec>` 可访问：
+
+| 资源 | 要求 |
+|------|------|
+| `DOCUMENT_ROOT` | 可读。`/var/www/html` 在构建镜像时已 `chown` 给 `www-data`，因此默认即满足。 |
+| 会话保存路径（`session.save_path`，默认 `/tmp`） | 可写。 |
+| 上传临时目录（`upload_tmp_dir`） | 使用文件上传时需可写。 |
+| OPcache 文件缓存（`opcache.file_cache`） | 启用二级文件缓存时需可写。 |
+| 基于文件的访问日志 | 当日志写入文件而非 stdout 时需可写。 |
+| TLS 私钥（`TLS_KEY`） | **降权用户需可读** —— 对组或所有人可读，而非仅 root 的 `0600`。私钥在降权*之后*读取，因此仅 root 可读的私钥会导致 TLS 启动失败。 |
+
 ## Docker Compose
 
 ### 生产环境

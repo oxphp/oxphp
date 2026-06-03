@@ -2,6 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod logging;
+mod privdrop;
 mod startup_identity;
 
 use std::path::Path;
@@ -29,15 +30,13 @@ use oxphp::types;
 
 fn main() -> Result<(), types::BoxError> {
     // Handle CLI flags before any expensive startup (plugin init, PHP MINIT,
-    // Tokio runtime, listener bind). Terminal commands (--help, --version,
-    // `config --check`, bad args) exit directly from inside dispatch() with
-    // plain-text UX output. The returned role selects what `main` does next:
-    // `serve` falls through to the HTTP startup below; `run` executes a single
-    // PHP script under CLI semantics and exits with the script's code —
-    // entirely separate from the HTTP path (no JSON logging on stdout, no
-    // listener). `ServeOptions` is empty today, so the binding is `_`-prefixed
-    // until it carries options startup consumes.
-    let _serve_opts = match cli::dispatch() {
+    // Tokio runtime). Terminal commands (--help, --version, `config --check`,
+    // bad args) exit directly from inside dispatch() with plain-text UX output.
+    // The returned role selects what `main` does next: `serve` falls through to
+    // the HTTP startup below; `run` executes a single PHP script under CLI
+    // semantics and exits with the script's code — entirely separate from the
+    // HTTP path (no JSON logging on stdout, no listener).
+    let serve_opts = match cli::dispatch() {
         cli::Role::Serve(opts) => opts,
         cli::Role::Run(opts) => std::process::exit(oxphp::frontend::run_cli(opts)),
     };
@@ -47,10 +46,6 @@ fn main() -> Result<(), types::BoxError> {
     // normal shutdown and the tokio runtime panic path alike.
     let _log_guard = logging::init()?;
 
-    // Log effective uid/gid + supplementary groups before anything else, so
-    // a "running as root" warning shows up before the rest of the startup.
-    startup_identity::log_startup_identity();
-
     let mut config = Arc::new(match config::Config::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -58,6 +53,39 @@ fn main() -> Result<(), types::BoxError> {
             std::process::exit(1);
         }
     });
+
+    // ── Bind + privilege drop, while still single-threaded ──
+    // Bind every listener now, before spawning anything (supervisor, executor
+    // workers, Tokio runtime, async pool), so a privileged port (:80/:443) can
+    // be bound under the starting user's privileges and the process can then
+    // drop to a non-root user. The sockets are non-blocking std sockets that
+    // the Tokio runtime re-attaches via `from_std` once it is built. With only
+    // the main thread (plus the logging writer) alive, the drop sidesteps the
+    // cross-thread `setuid` broadcast. `serve --user` requires starting as
+    // root; the drop is irreversible and happens before any request-handling
+    // thread exists, so nothing in the request path ever runs as root.
+    let http_listener = std::net::TcpListener::bind(&config.server.listen_addr)
+        .map_err(|e| format!("failed to bind {}: {e}", config.server.listen_addr))?;
+    http_listener.set_nonblocking(true)?;
+
+    let internal_listener = match &config.internal_addr {
+        Some(addr) => {
+            let listener = std::net::TcpListener::bind(addr)
+                .map_err(|e| format!("failed to bind internal address {addr}: {e}"))?;
+            listener.set_nonblocking(true)?;
+            Some(listener)
+        }
+        None => None,
+    };
+
+    if let Some(target) = &serve_opts.drop_to {
+        privdrop::drop_to(target)?;
+    }
+
+    // Report effective uid/gid + supplementary groups AFTER any privilege drop,
+    // so the log reflects the post-drop identity and the "running as root"
+    // warning stays silent once we have dropped.
+    startup_identity::log_startup_identity();
 
     // Create metrics early — needed by executor for worker metrics. Sized
     // by `max_worker_count()` rather than the initial pool size: dynamic-mode
@@ -174,9 +202,12 @@ fn main() -> Result<(), types::BoxError> {
         dispatcher,
         plugin_manager,
         async_pool,
+        http_listener,
+        internal_listener,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn async_main(
     config: Arc<config::Config>,
     executor: Arc<dyn executor::ScriptExecutor>,
@@ -184,6 +215,8 @@ async fn async_main(
     mut dispatcher: EventDispatcher,
     plugin_manager: PluginManager,
     mut async_pool: Option<executor::async_pool::AsyncWorkerPool>,
+    http_listener: std::net::TcpListener,
+    internal_listener: Option<std::net::TcpListener>,
 ) -> Result<(), types::BoxError> {
     TOKIO_HANDLE
         .set(Handle::current())
@@ -345,24 +378,26 @@ async fn async_main(
     let dispatcher = Arc::new(dispatcher);
     let plugin_manager = Arc::new(plugin_manager);
 
-    let listener = TcpListener::bind(&config.server.listen_addr).await?;
+    // Re-attach the listener bound in main() (before the privilege drop) to the
+    // Tokio reactor. It is already non-blocking, as `from_std` requires.
+    let listener = TcpListener::from_std(http_listener)?;
     let local_addr = listener.local_addr()?;
 
     tracing::info!(addr = %local_addr, "Server listening");
 
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-    // Spawn internal server if configured (before Server::new consumes executor)
-    let internal_handle = if let Some(ref internal_addr) = config.internal_addr {
+    // Spawn internal server if configured (before Server::new consumes
+    // executor). The listener was bound in main(), before the privilege drop.
+    let internal_handle = if let Some(internal_listener) = internal_listener {
         let metrics_ref = Arc::clone(&metrics);
         let config_ref = Arc::clone(&config);
         let executor_ref = Arc::clone(&executor);
         let pm_ref = Arc::clone(&plugin_manager);
         let shutdown_ref = Arc::clone(&shutdown_flag);
-        let addr = internal_addr.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = server::internal::run_internal_server(
-                &addr,
+                internal_listener,
                 metrics_ref,
                 config_ref,
                 executor_ref,

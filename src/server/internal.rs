@@ -18,16 +18,18 @@ use crate::plugin::PluginManager;
 use crate::types::{full_body, ResponseBody};
 
 /// Run the internal HTTP server for health, metrics, and config endpoints.
-/// This server listens on a separate port and is only started when `INTERNAL_ADDR` is set.
+/// This server listens on a separate port and is only started when
+/// `INTERNAL_ADDR` is set. The listener is bound in `main()` before any
+/// privilege drop and handed here as a non-blocking std socket.
 pub async fn run_internal_server(
-    addr: &str,
+    listener: std::net::TcpListener,
     metrics: Arc<Metrics>,
     config: Arc<Config>,
     executor: Arc<dyn ScriptExecutor>,
     plugin_manager: Arc<PluginManager>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), crate::types::BoxError> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::from_std(listener)?;
     let local_addr = listener.local_addr()?;
     tracing::info!(addr = %local_addr, "Internal server listening");
 
