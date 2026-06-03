@@ -234,6 +234,41 @@ The prod image has no `USER` directive, so the container runs as root by default
 
 The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths lands on a readable webroot.
 
+### Run as non-root on port 80 (`serve --user`)
+
+Dropping privileges at the orchestrator level (above) has one limitation: a process that starts as `www-data` cannot bind a privileged port (below 1024). To serve on `:80`/`:443` you would otherwise need `CAP_NET_BIND_SERVICE`, a `su-exec`-style entrypoint, or a high port (such as `:8080`) behind a port mapping.
+
+`oxphp serve --user=<spec>` collapses this into a single process: OxPHP binds the listeners **as root**, then permanently drops to the target user **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities.
+
+Start the container **as root** — do not also set `user:`, because the bind needs root — and pass the flag via `command`:
+
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:0.6.0
+    command: ["oxphp", "serve", "--user=www-data"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - LISTEN_ADDR=0.0.0.0:80
+```
+
+`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. If the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root.
+
+> Choose **one** model, not both. Use the orchestrator drop (`user:` / `runAsUser`) when a high port or an external load balancer terminates `:80`. Use `serve --user` when you want OxPHP itself to own the privileged bind. Setting `user:` **and** `serve --user` makes the bind fail — the container is no longer root.
+
+**File-permission checklist for the dropped user.** After the drop, everything OxPHP touches at runtime must be accessible to `<spec>`:
+
+| Resource | Requirement |
+|----------|-------------|
+| `DOCUMENT_ROOT` | Readable. `/var/www/html` is chowned to `www-data` at image build, so this is satisfied by default. |
+| Session save path (`session.save_path`, default `/tmp`) | Writable. |
+| Upload tmp dir (`upload_tmp_dir`) | Writable, when file uploads are used. |
+| OPcache file cache (`opcache.file_cache`) | Writable, when a secondary file cache is enabled. |
+| File-based access log | Writable, when logging to a file rather than stdout. |
+| TLS private key (`TLS_KEY`) | **Readable by the dropped user** — group- or world-readable, not root-only `0600`. The key is read *after* the drop, so a root-only key makes TLS startup fail. |
+
 ## Docker Compose
 
 ### Production
