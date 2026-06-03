@@ -218,6 +218,14 @@ fn run_cli_oneshot(script: &Path, args: &[std::ffi::OsString]) -> i32 {
         return 1;
     }
 
+    // php-cli parity: skip a leading `#!` shebang line when compiling the
+    // script (CG(skip_shebang)=1, sapi/cli/php_cli.c). Without it the shebang
+    // line is emitted as inline text and leaks into the script's output, so
+    // `#!/usr/bin/env oxphp` extensionless scripts misbehave.
+    unsafe {
+        bindings::oxphp_bridge_skip_shebang();
+    }
+
     // Define STDIN / STDOUT / STDERR for php-cli parity (composer, artisan and
     // friends expect them). Guarded, so harmless if a script defines its own.
     let bootstrap = c"defined('STDIN')||define('STDIN',fopen('php://stdin','rb'));\
