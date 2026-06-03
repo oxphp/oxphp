@@ -114,10 +114,17 @@ out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp /cli/shebang)"
 [ "$out" = "shebang-ok" ] && ok "shebang skipped (extensionless)" \
 	|| bad "shebang (got '$out' — leaked shebang means CG(skip_shebang) not set)"
 
-# 8f. --user on the run path: container starts as root, drops to uid 82
-#     (www-data); the script observes the dropped uid.
-out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.php)"
+# 8f. --user on the run path: force the container to start as root (the image's
+#     default user is www-data), oxphp drops to uid 82, the script sees the
+#     dropped uid.
+out="$(docker run --rm --user 0:0 -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.php)"
 [ "$out" = "82" ] && ok "--user drop on run (uid 82)" || bad "--user run drop (got '$out')"
+
+# 8g. --user while NOT root is a hard error (exit 1), never a silent no-op — the
+#     image's default user is www-data (non-root), so no --user override here.
+gerr="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.php 2>&1 1>/dev/null)"; gcode=$?
+{ [ $gcode -ne 0 ] && printf '%s' "$gerr" | grep -qi "root"; } \
+	&& ok "--user as non-root is a hard error" || bad "--user non-root guard (code=$gcode err='$gerr')"
 
 # 9. regression: HTTP serve role still boots and answers
 name="oxphp-serve-smoke-$$"

@@ -21,7 +21,7 @@ use oxphp::types::BoxError;
 pub fn drop_to(t: &DropTarget) -> Result<(), BoxError> {
     // SAFETY: geteuid is async-signal-safe and never fails.
     if unsafe { libc::geteuid() } != 0 {
-        return Err("serve --user requires starting as root".into());
+        return Err("--user requires starting as root".into());
     }
 
     // 1. Supplementary groups FIRST — this needs root and would fail once the
