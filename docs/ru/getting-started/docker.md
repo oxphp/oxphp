@@ -12,7 +12,7 @@ OxPHP разработан для запуска в контейнере. Это
 Простейший способ контейнеризировать ваше приложение:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.6.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.7.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -168,7 +168,7 @@ docker build --target prod -t myapp:prod .
 Минимальный рабочий пример:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -183,7 +183,7 @@ CMD ["oxphp"]
 
 ### Лучшая практика (два этапа, меньший образ)
 
-Для минимального итогового образа собирайте расширения в отдельном builder-этапе и копируйте в runtime-этап только готовые `.so`-файлы. Разбор [Многоэтапный Dockerfile](#многоэтапный-dockerfile) выше использует `FROM ghcr.io/oxphp/oxphp:0.6.0 AS prod` — простой, переносимый и рекомендуемый в качестве стартовой точки.
+Для минимального итогового образа собирайте расширения в отдельном builder-этапе и копируйте в runtime-этап только готовые `.so`-файлы. Разбор [Многоэтапный Dockerfile](#многоэтапный-dockerfile) выше использует `FROM ghcr.io/oxphp/oxphp:0.7.0 AS prod` — простой, переносимый и рекомендуемый в качестве стартовой точки.
 
 `examples/dockerfile/Dockerfile` в репозитории идёт дальше: его `prod`-таргет основан на чистом `alpine` с явным списком `apk`-зависимостей — в образ копируются только бинарь `oxphp`, `libphp.so`, скомпилированные PHP-расширения и необходимые разделяемые библиотеки. Это уменьшает базовый образ с ~188 МБ до ~76 МБ (~60% экономии, без кода приложения) ценой отслеживания обновлений PHP/Alpine в `apk`-списке. В том же файле есть `prod-cli`-таргет — короткоживущий образ для `php artisan migrate`, Composer'а и других сервисных команд, которые не должны жить в serving-пути.
 
@@ -199,13 +199,13 @@ CMD ["oxphp"]
 # доступ на запись к смонтированным томам, принадлежащим root.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.6.0 \
+    ghcr.io/oxphp/oxphp:0.7.0 \
     php artisan migrate
 
 # Если смонтированный том принадлежит www-data, используйте Docker --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.6.0 \
+    ghcr.io/oxphp/oxphp:0.7.0 \
     php artisan migrate
 ```
 
@@ -215,12 +215,12 @@ docker run --rm --user www-data \
 
 В продакшен-образе нет директивы `USER`, поэтому контейнер по умолчанию работает от root. Это сделано намеренно и совпадает с конвенциями `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine`. В продакшене **обязательно** сбрасывайте привилегии на уровне оркестратора:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.6.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.6.0
+      image: ghcr.io/oxphp/oxphp:0.7.0
       user: www-data
   ```
 - **Kubernetes:**
@@ -245,7 +245,7 @@ docker run --rm --user www-data \
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     command: ["oxphp", "serve", "--user=www-data"]
     ports:
       - "80:80"

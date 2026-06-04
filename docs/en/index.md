@@ -42,6 +42,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Installation](getting-started/installation.md) — system requirements and installation options
 - [Quick Start](getting-started/quick-start.md) — build and run your first OxPHP application in under 5 minutes
 - [Docker Guide](getting-started/docker.md) — Dockerfiles, Compose configuration, volumes, and deployment patterns
+- [Command-Line Interface](getting-started/cli.md) — the `oxphp` command grammar: `serve`, `run` a single PHP script, `config`, and `--user` privilege drop
 
 ## Features
 

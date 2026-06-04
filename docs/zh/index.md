@@ -42,6 +42,7 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [安装](getting-started/installation.md) —— 系统要求和安装方式
 - [快速开始](getting-started/quick-start.md) —— 5 分钟内构建并运行第一个 OxPHP 应用
 - [Docker 指南](getting-started/docker.md) —— Dockerfile、Compose 配置、数据卷和部署模式
+- [命令行接口](getting-started/cli.md) —— `oxphp` 命令语法：`serve`、`run` 运行单个 PHP 脚本、`config` 以及 `--user` 降权
 
 ## 功能特性
 

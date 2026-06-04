@@ -42,7 +42,7 @@
 Two lines. That's it.
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```

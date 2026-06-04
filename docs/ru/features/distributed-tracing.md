@@ -338,7 +338,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -353,7 +353,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -376,7 +376,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -402,7 +402,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:

@@ -42,6 +42,7 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [Установка](getting-started/installation.md) — системные требования и варианты установки
 - [Быстрый старт](getting-started/quick-start.md) — сборка и запуск первого приложения OxPHP менее чем за 5 минут
 - [Руководство по Docker](getting-started/docker.md) — Dockerfiles, конфигурация Compose, тома и паттерны развёртывания
+- [Интерфейс командной строки](getting-started/cli.md) — грамматика команд `oxphp`: `serve`, `run` для одного PHP-скрипта, `config` и сброс привилегий через `--user`
 
 ## Возможности
 

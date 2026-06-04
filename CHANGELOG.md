@@ -2,19 +2,40 @@
 
 All notable changes to OxPHP are documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-06-05
+
+### Migration from 0.6.0
+
+One breaking change, in the JSON access log only — every PHP-facing API is unchanged.
+
+**Access-log field `remote_addr` → `remote_ip`.** The client-IP field is renamed and now carries the IP without a port. Behind a configured `TRUSTED_PROXIES` it previously emitted a synthetic `IP:0` (the real source port belongs to the proxy, not the client), which broke parsers that validate the port and diverged from nginx/Apache/Caddy. Update any log pipeline that keys on the old name:
+
+| Before | After |
+| --- | --- |
+| `{"remote_addr": "10.0.0.1:0", …}` | `{"remote_ip": "10.0.0.1", …}` |
+
+The client/proxy source port stays available to PHP via `$_SERVER['REMOTE_PORT']`.
 
 ### Added
 
+- **PHP-style CLI: `oxphp serve`, `oxphp run`, and implicit run.** `oxphp serve` is the explicit HTTP-server role; bare `oxphp` (and the published `CMD ["oxphp"]`) still starts the server unchanged, so nothing breaks. `oxphp run <script.php> [args…]` executes a single PHP file to completion under CLI semantics (`PHP_SAPI === 'cli'`, `phpinfo()` prints text) on the main thread with no listener or worker pool, exiting with the script's own exit code — the full OxPHP engine (fibers, `OxPHP\Shared\*`, engine plugins) is available underneath. `oxphp <script.php>` is shorthand for `oxphp run`, and a leading `#!` line is skipped, so an extensionless `#!/usr/bin/env oxphp` script runs directly. The role is chosen by keyword: the exact tokens `serve`/`run`/`config` select a subcommand, any other first positional is treated as a script path (resolved by file content, not extension). `-d key[=value]` ini overrides are accepted on the run path (repeatable; folded into the SAPI before module startup, so they beat `php.ini` for every directive type), and flags after the script path pass through to PHP as `$argv`. An unopenable script is rejected with `Could not open input file: <path>` (exit 1) before engine startup, matching `php`. `oxphp run` also honors `SUPERGLOBALS_ENABLED` instead of forcing superglobals on.
+- **In-binary privilege drop via `--user`.** `oxphp serve --user=<name|name:group|uid|uid:gid>` (and the same flag on the `run` path) drops OS privileges before any request-handling thread is spawned — while the process is still single-threaded — in the fixed order `initgroups` → `setgid` → `setuid` → a `setuid(0)` re-acquisition probe → best-effort `PR_SET_NO_NEW_PRIVS`. `setuid` (not `seteuid`) drops the real, effective, and saved IDs irreversibly, and the probe aborts startup if root can be regained. Names resolve via `getpwnam_r`/`getgrnam_r` at CLI-parse time so an unknown user/group fails before startup; numeric uids are taken verbatim (Docker `--user` convention). Starting as non-root with `--user` is a hard error, never a silent no-op. This lets a container start as root to bind a privileged port and then serve traffic as an unprivileged user without an orchestrator-level drop.
 - Behind a configured `TRUSTED_PROXIES`, `$_SERVER['SERVER_PORT']` (and the object-API `Request::port()`) now honors the `X-Forwarded-Port` header. Previously the public port was derived only from the port suffix of `X-Forwarded-Host` / `Forwarded: host=`, defaulting to 443/80 by scheme — so a proxy listening on a non-standard public port (e.g. AWS ALB on 8443, or nginx with `proxy_set_header X-Forwarded-Port $server_port;`) that sent a portless `X-Forwarded-Host` could not convey that port to PHP, and absolute-URL builders produced links to 443/80. Port resolution priority is now `X-Forwarded-Port` → port suffix of the forwarded/`Host` header → 443/80 by scheme. The header is read only from trusted peers, must be a single value in `1..=65535`, and is ignored when an RFC 7239 `Forwarded` header is present (consistent with `X-Forwarded-*` being ignored in that case).
 - `$_SERVER['REMOTE_PORT']` is now populated from an RFC 7239 `Forwarded: for=ip:port` node when the trusted proxy supplies one. It remains `"0"` behind a proxy otherwise — `X-Forwarded-For` carries no source port, so the value is zeroed rather than guessed.
 
 ### Changed
 
 - **Breaking (access log):** the JSON access-log field `remote_addr` is renamed to `remote_ip` and now carries the client IP **without** a port. Previously, behind a configured `TRUSTED_PROXIES`, the field showed a synthetic `IP:0` (e.g. `10.0.0.1:0`) — the real source port belongs to the proxy, not the client, so it was zeroed — which broke log parsers that validate the port as `> 0` and diverged from nginx/Apache/Caddy, whose `$remote_addr` is IP-only. Update any log pipeline that keys on `remote_addr` to read `remote_ip`. The client/proxy source port is unchanged in PHP and still available via `$_SERVER['REMOTE_PORT']`.
+- The `Shared\Channel` operations metric now counts every `recv` attempt — an empty/closed `tryRecv` and a timed-out `recvTimeout` included, not only successful pops — matching the existing send-side accounting. Workloads that poll empty channels will see a higher recv op count; the counter is otherwise unchanged.
 
 ### Fixed
 
+- Fixed two worker crashes (`SIGSEGV` in `zend_hash_index_find`) in the function-decorator path, both observed on amd64 and latent on arm64 (different allocator reuse). The per-thread decorator instance cache kept its bucket storage in the request memory arena but a persistent "initialized" flag, so once request shutdown freed the arena the next request dereferenced freed memory — the cache is now re-created every request. Separately, `before()`/`after()` held raw `zval*` pointers into that cache across PHP calls that could resize and reallocate it; each cached instance is now refcount-copied for the duration of its dispatch, so a resize can no longer dangle the pointer.
+- The built-in profiler decorators `#[OxPHP\Profile\SlowThreshold(ms: N)]`, `#[OxPHP\Profile\MemoryThreshold(kb: N)]`, and `#[OxPHP\Profile\Mark(label: …)]` now honor their constructor arguments. Each was previously a single shared instance carrying a hardcoded default (`ms: 100` / `kb: 64` / no label), so the value written in the source was ignored and every occurrence behaved identically. Each attribute occurrence now builds its own configured instance, named arguments map by name even when written out of declaration order, and a repeated or dual (method + class) attribute resolves each occurrence independently instead of reading the first one twice.
+- Span events recorded by `#[OxPHP\Apm\Trace]` (`Slow`, `MemorySpike`, `Mark`, and uncaught-exception events) are now exported through the APM OpenTelemetry exporter instead of being silently dropped, so they render natively in Jaeger / Tempo / Grafana. The event kind is preserved as the `oxphp.event.kind` span-event attribute.
+- A `Shared\*` value returned from an `oxphp_async()` closure could be freed before the awaiting fiber materialized it, so `await` resolved a dead reference to `NULL`. The async return path now pins nested shared references into a keepalive before deep-freeing the return `zval` and releases it only after the fiber deserializes — mirroring the same in-transit fix already present on the channel path.
+- Decorator nesting overflow now fails loudly. Past the nesting limit (raised 32 → 256) the per-thread context stack silently reused its top slot, corrupting outer frames' context during unwind; `begin()` now throws the new `OxPHP\Decorator\StackOverflowException` and `begin`/`end` stay balanced. The depth counter is reset per request so it cannot accumulate on a long-lived worker.
+- `OxPHP\Shared\Map\KeyCursor::key()` is declared as `mixed` rather than the union `int|string`. The bridge's return-type wire format cannot encode a union, so the union degraded to "no return type" and tripped PHP's tentative-return-type deprecation against the `Iterator::key(): mixed` contract; `mixed` matches the interface (the stub keeps the precise `int|string` hint for IDEs and static analysis).
 - `OxPHP\Http\Request::file()` and `Request::files()` now return the uploaded files instead of always `null` / `[]`. The object upload API documented in `docs/en/php/request-api.md` is wired to the request's parsed `$_FILES`: `file('avatar')` yields an `OxPHP\Http\UploadedFile` (or the first file of an array field `name="avatar[]"`, or `null` when the field is absent), `files('photos')` returns every file of one field, and `files()` returns a flat list of every upload. The scalar (`name="avatar"`), sequential-array (`name="avatar[]"`) and associative-array (`name="avatar[key]"`) `$_FILES` shapes are all handled. The `UploadedFile` accessors (`name()`, `clientType()`, content-detected `type()`, `size()`, `tmpPath()`, `error()`, `isValid()`, `moveTo()`) were already present; only the two `Request` entry points were stubbed, so code following the documented examples saw no files and had to fall back to the `$_FILES` superglobal.
 
 ## [0.6.0] - 2026-05-28
@@ -635,6 +656,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.7.0]: https://github.com/oxphp/oxphp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/oxphp/oxphp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/oxphp/oxphp/releases/tag/v0.5.0
 [0.4.0]: https://github.com/oxphp/oxphp/releases/tag/v0.4.0

@@ -10,7 +10,7 @@ description: 5 分钟内启动 OxPHP。创建项目、编写 PHP 应用、启动
 如果你已有一个包含 `public/` 目录的 PHP 项目：
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 打开 `http://localhost/` —— 你的应用已在运行。
@@ -18,7 +18,7 @@ docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
 如需启用内部服务器（健康检查、指标、配置）：
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 ---
@@ -36,12 +36,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. 创建 Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-官方镜像包含服务器二进制文件、PHP 8.4 或 8.5 ZTS（默认 8.5；如需 8.4，请拉取 `:0.6.0-php8.4` 或任意 `*-php8.4*` 标签）、OxPHP PHP 扩展及所有运行时依赖。
+官方镜像包含服务器二进制文件、PHP 8.4 或 8.5 ZTS（默认 8.5；如需 8.4，请拉取 `:0.7.0-php8.4` 或任意 `*-php8.4*` 标签）、OxPHP PHP 扩展及所有运行时依赖。
 
 > **提示：** 如果你的应用需要自定义 PHP 扩展（pdo_pgsql、intl、xdebug 等），请参阅仓库中的 [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) —— 一个开箱即用的多阶段 Dockerfile，包含独立的 `dev` 和 `prod` 构建目标。
 
@@ -107,7 +107,7 @@ curl http://localhost/
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.6.0</p>
+<p>Version: 0.7.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 

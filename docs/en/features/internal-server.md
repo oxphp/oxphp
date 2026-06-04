@@ -196,7 +196,7 @@ The `/config` endpoint reveals operational details (document root, rate limits, 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -210,7 +210,7 @@ For production, bind the internal server to localhost and use Kubernetes probes:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:

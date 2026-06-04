@@ -5,6 +5,165 @@
 ---
 
 
+# Command-Line Interface
+
+The `oxphp` binary has three roles: **serve** an HTTP server, **run** a single PHP script to completion, and **config** utilities. Bare `oxphp` with no arguments is an implicit `serve`, so the published image's `CMD ["oxphp"]` keeps starting the server unchanged.
+
+```
+USAGE:
+    oxphp [OPTIONS]
+    oxphp <COMMAND> [OPTIONS]
+    oxphp serve [--user=<name|uid[:gid]>]
+    oxphp run [-d key=value]... [--user=<spec>] <script.php> [args]...
+    oxphp [-d key=value]... [--user=<spec>] <script.php> [args]...
+
+OPTIONS:
+    -h, --help      Print this help and exit
+    -v, --version   Print version information and exit
+
+COMMANDS:
+    serve           Start the HTTP server (default; same as bare 'oxphp')
+    run             Execute a single PHP script under CLI semantics and exit
+    config          Configuration utilities (see 'oxphp config --help')
+```
+
+The role is chosen by keyword. The exact tokens `serve`, `run`, and `config` select a subcommand; **any other first positional argument is treated as a script path** — so `oxphp ./bin/migrate.php` is shorthand for `oxphp run ./bin/migrate.php`. There is no extension heuristic: PHP executes by file content, so an extensionless script runs too. A missing file is reported by the filesystem, exactly like `php`.
+
+## `oxphp serve`
+
+Starts the HTTP application server — the default role. `oxphp` and `oxphp serve` are equivalent. Configuration is via [environment variables](../operations/configuration.md); `serve` itself takes only `--user`.
+
+```bash
+oxphp                 # implicit serve
+oxphp serve           # explicit
+oxphp serve --user=www-data
+```
+
+`--user` binds the listeners as the starting user (root, so it can bind ports below 1024) and then permanently drops to the target user before any traffic is served. See [Run as non-root on port 80](docker.md#run-as-non-root-on-port-80-serve---user) for the full pattern, the `<spec>` grammar, and the file-permission checklist.
+
+## `oxphp run`
+
+`oxphp run <script.php> [args…]` executes a single PHP file to completion and exits with the script's own exit code. It runs on the main thread — there is no listener, no worker pool, and no request queue. `PHP_SAPI === 'cli'`, and `phpinfo()` prints text rather than HTML, matching the stock `php` CLI.
+
+```bash
+oxphp run migrate.php
+oxphp run bin/console.php cache:clear
+oxphp run -d memory_limit=512M import.php data.csv
+```
+
+This is the role to use for migrations, cron jobs, queue consumers, and `artisan`/`console`-style commands — in the **same image** that serves your application, with no second PHP installation.
+
+The full OxPHP engine is available underneath the script: [fibers](../features/fiber-multiplexing.md) (`oxphp_sleep()`) and [shared state](../shared-state/shared-state.md) (`OxPHP\Shared\*`) work out of the box. [Async promises](../features/async-promises.md) (`oxphp_async()`) work when `ASYNC_WORKERS` is greater than `0`; the default invocation starts no async pool and therefore no background runtime.
+
+`$argv` and `$argc` are populated (`$argv[0]` is the script path), and `STDIN` / `STDOUT` / `STDERR` are defined, so Composer- and Symfony-Console-style entry points run unmodified.
+
+**The script path is the separator.** Every token after the script path is handed to PHP verbatim — including `--`-prefixed ones — so for ordinary arguments you do not need an explicit `--`. Flags meant for `oxphp` itself (`-d`, `--user`) must come *before* the script path; anything after it belongs to the script.
+
+```bash
+oxphp run console.php migrate --force --pretend
+#            ▲ script  └──────────────┬──────────┘
+#                        $argv[1..], passed to PHP verbatim (oxphp parses nothing here)
+```
+
+So `oxphp run console.php --force` gives the script `--force` in `$argv`, whereas `oxphp run --force console.php` is an error — `--force` precedes the script path, where `oxphp` only accepts `-d` / `--user` / `--help`.
+
+### The `--` end-of-options marker
+
+`oxphp` honors the standard `--` end-of-options marker, and it matters in exactly one place: **before the script path**, when the script path itself begins with a dash. `--` stops option parsing so the next token is taken as the script path, and `oxphp` consumes it — it is not forwarded to PHP.
+
+```bash
+oxphp run -- -odd-name.php      # runs the script "-odd-name.php"
+oxphp -- -odd-name.php          # same, implicit form
+oxphp run -odd-name.php         # error: parsed as options → "unexpected argument to 'run': -o"
+```
+
+After the script path there are no options left to terminate, so a `--` there is ordinary data and is passed to PHP literally, exactly like `php`:
+
+```bash
+oxphp run app.php -- --raw      # $argv = ["app.php", "--", "--raw"]
+```
+
+### Shebang scripts
+
+A leading `#!` line is skipped before compilation, so an executable, extensionless script with an `oxphp` shebang runs directly:
+
+```php
+#!/usr/bin/env oxphp
+<?php
+echo "hello from a shebang script\n";
+```
+
+```bash
+chmod +x ./greet
+./greet
+```
+
+### `-d` ini overrides
+
+`-d key[=value]` sets a `php.ini` directive for this run. It is repeatable, and a bare `-d key` sets the value to `"1"`. These overrides are applied before module startup, so they win over `php.ini` for **every** directive type — including `PHP_INI_SYSTEM` / `PHP_INI_PERDIR` directives (`opcache.*`, `register_argc_argv`, …) that a runtime `ini_set()` cannot change.
+
+```bash
+oxphp run -d memory_limit=1G -d display_errors=1 report.php
+```
+
+### Default ini for `run`
+
+The `run` role applies CLI-oriented defaults before your `-d` overrides and `php.ini`:
+
+| Directive | Default | Why |
+|---|---|---|
+| `max_execution_time` | `0` | A one-shot job (migration, importer, daemon) must not be killed by `SIGALRM`. |
+| `max_input_time` | `-1` | No input-parsing deadline for CLI. |
+| `display_errors` | `stderr` | Errors go to standard error, not standard output. |
+| `html_errors` | `0` | Plain-text errors for a terminal. |
+| `output_buffering` | `0` | Output is written as it is produced. |
+| `implicit_flush` | `1` | Each write is flushed immediately. |
+| `register_argc_argv` | `1` | `$argv` / `$argc` are available. |
+
+[Superglobals](../php/superglobals.md) are always enabled for `run` — a one-shot script needs `$argv`, `$_SERVER`, and `$_ENV` — regardless of the `SUPERGLOBALS_ENABLED` toggle that applies to the HTTP server.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| script's own | `exit($code)` / `die($code)`, or `0` on a clean finish. |
+| `255` | Fatal error, uncaught exception, or parse error. |
+| `1` | The script path could not be opened (`oxphp: Could not open input file: <path>`). |
+| `2` | An invalid `-d` argument. |
+
+The unopenable-file case is checked before engine startup, so a missing or unreadable script fails fast with the `php`-style message rather than spinning up the engine to die with a compile error.
+
+### `--user` on the run path
+
+`oxphp run --user=<spec> <script.php>` drops OS privileges before the script executes, so a one-shot job started as root can run as an unprivileged user. The `<spec>` grammar and drop mechanics are identical to [`serve --user`](docker.md#run-as-non-root-on-port-80-serve---user); starting as non-root with `--user` is a hard error.
+
+## `oxphp config`
+
+Configuration utilities. `--check` validates the environment-variable configuration and reports problems without starting the server.
+
+```bash
+oxphp config --check
+```
+
+```
+config: OK
+```
+
+The check covers filesystem sanity only — path existence and file/directory kind (`DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`, …). PHP runtime, the TLS handshake, and network binding are out of scope. It exits non-zero and prints `config: INVALID` with one line per problem when validation fails, which makes it suitable as a pre-start gate in an entrypoint or CI job.
+
+## `--help` and `--version`
+
+```bash
+oxphp --help            # full usage
+oxphp config --help     # config subcommand usage
+oxphp --version         # version and the feature flags compiled into this binary
+```
+
+`oxphp --version` reports the build's enabled features (for example `php, plugin-apm, plugin-async`), which is the quickest way to confirm whether an image was built with APM, async, or other optional plugins.
+
+---
+
+
 # Docker Guide
 
 OxPHP is designed to run as a container. This guide covers everything you need to build, configure, and operate OxPHP with Docker — from a minimal single-stage image to a full multi-stage setup with separate development and production targets.
@@ -14,7 +173,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -55,7 +214,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.6.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.7.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -170,7 +329,7 @@ Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`p
 The shortest useful example:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -185,7 +344,7 @@ The container starts as root. In production, drop privileges at the orchestrator
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.6.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.7.0 AS prod` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
@@ -201,13 +360,13 @@ The same prod image can run `php` CLI commands for migrations, Composer, or ad-h
 # root-owned mounted volumes.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.6.0 \
+    ghcr.io/oxphp/oxphp:0.7.0 \
     php artisan migrate
 
 # If the mounted volume is owned by www-data, pass Docker's --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.6.0 \
+    ghcr.io/oxphp/oxphp:0.7.0 \
     php artisan migrate
 ```
 
@@ -217,12 +376,12 @@ docker run --rm --user www-data \
 
 The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.6.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.6.0
+      image: ghcr.io/oxphp/oxphp:0.7.0
       user: www-data
   ```
 - **Kubernetes:**
@@ -235,6 +394,41 @@ The prod image has no `USER` directive, so the container runs as root by default
   `runAsNonRoot: true` is defense-in-depth: if `runAsUser` is ever removed or overridden to `0`, the kubelet rejects the pod instead of silently running as root.
 
 The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths lands on a readable webroot.
+
+### Run as non-root on port 80 (`serve --user`)
+
+Dropping privileges at the orchestrator level (above) has one limitation: a process that starts as `www-data` cannot bind a privileged port (below 1024). To serve on `:80`/`:443` you would otherwise need `CAP_NET_BIND_SERVICE`, a `su-exec`-style entrypoint, or a high port (such as `:8080`) behind a port mapping.
+
+`oxphp serve --user=<spec>` collapses this into a single process: OxPHP binds the listeners **as root**, then permanently drops to the target user **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities.
+
+Start the container **as root** — do not also set `user:`, because the bind needs root — and pass the flag via `command`:
+
+```yaml
+services:
+  oxphp:
+    image: ghcr.io/oxphp/oxphp:0.7.0
+    command: ["oxphp", "serve", "--user=www-data"]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - LISTEN_ADDR=0.0.0.0:80
+```
+
+`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. If the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root.
+
+> Choose **one** model, not both. Use the orchestrator drop (`user:` / `runAsUser`) when a high port or an external load balancer terminates `:80`. Use `serve --user` when you want OxPHP itself to own the privileged bind. Setting `user:` **and** `serve --user` makes the bind fail — the container is no longer root.
+
+**File-permission checklist for the dropped user.** After the drop, everything OxPHP touches at runtime must be accessible to `<spec>`:
+
+| Resource | Requirement |
+|----------|-------------|
+| `DOCUMENT_ROOT` | Readable. `/var/www/html` is chowned to `www-data` at image build, so this is satisfied by default. |
+| Session save path (`session.save_path`, default `/tmp`) | Writable. |
+| Upload tmp dir (`upload_tmp_dir`) | Writable, when file uploads are used. |
+| OPcache file cache (`opcache.file_cache`) | Writable, when a secondary file cache is enabled. |
+| File-based access log | Writable, when logging to a file rather than stdout. |
+| TLS private key (`TLS_KEY`) | **Readable by the dropped user** — group- or world-readable, not root-only `0600`. The key is read *after* the drop, so a root-only key makes TLS startup fail. |
 
 ## Docker Compose
 
@@ -378,14 +572,14 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.6.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.6.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.7.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.7.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
 
 ## Docker (Recommended)
 
 Pull the official image from the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.6.0
+docker pull ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 The image includes:
@@ -396,7 +590,7 @@ The image includes:
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
 - **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.6.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -453,9 +647,9 @@ The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already co
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.6.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.6.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.6.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -480,7 +674,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 # Runtime dependencies for extensions
 USER root
@@ -505,7 +699,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 If your application does not need additional extensions, this is sufficient:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -603,7 +797,7 @@ A healthy server returns `200` with JSON status. A degraded server returns `503`
 If you already have a PHP project with a `public/` directory:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 Open `http://localhost/` — your application is running.
@@ -611,7 +805,7 @@ Open `http://localhost/` — your application is running.
 To enable the internal server (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.6.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 ---
@@ -629,12 +823,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Create a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.6.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
+The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.7.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
 > **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
@@ -700,7 +894,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.6.0</p>
+<p>Version: 0.7.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
@@ -863,7 +1057,7 @@ And ensure your upstream client or load balancer sends a `traceparent` header on
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -1115,7 +1309,7 @@ Additional constraints:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -1303,7 +1497,7 @@ If your build pipeline generates `.br` files and sets the `Content-Encoding: br`
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:80"
     volumes:
@@ -1405,7 +1599,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.6.0
+  ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 ### A 429 response still shows the default body
@@ -1417,7 +1611,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:8080"
     volumes:
@@ -2195,7 +2389,7 @@ Enable W3C trace propagation without an external backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -2210,7 +2404,7 @@ Full observability stack with Jaeger as the tracing backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -2233,7 +2427,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -2259,7 +2453,7 @@ Full observability with automatic instrumentation of database queries, HTTP call
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -2678,7 +2872,7 @@ PHP VM stacks (used for function call frames) are allocated fresh per request an
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -2955,7 +3149,7 @@ The `/config` endpoint reveals operational details (document root, rate limits, 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -2969,7 +3163,7 @@ For production, bind the internal server to localhost and use Kubernetes probes:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     environment:
@@ -3036,7 +3230,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -3532,7 +3726,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.6.0",
+  "oxphp_version": "0.7.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
@@ -4319,7 +4513,7 @@ OxPHP tracks up to 100,000 unique IP addresses. When this limit is reached, expi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:80"
     environment:
@@ -4681,7 +4875,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:80"
     volumes:
@@ -4881,7 +5075,7 @@ SSE endpoints require PHP's execution timer to be disabled or set high. Each act
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:8080"
     volumes:
@@ -5036,7 +5230,7 @@ A 304 means the client already has the current version. This is correct behavior
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:80"
     volumes:
@@ -5181,7 +5375,7 @@ OPcache recompilation adds latency on the first request after a file change. Thi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:8080"
     environment:
@@ -5351,7 +5545,7 @@ OxPHP listens on a single port. To support both protocols simultaneously, use a 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "443:443"
     environment:
@@ -5506,7 +5700,7 @@ If your database server closes idle connections, reconnect attempts in the next 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "8080:80"
     volumes:
@@ -10104,13 +10298,13 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 ```bash
 docker run -p 80:80 \
   -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
-  ghcr.io/oxphp/oxphp:0.6.0
+  ghcr.io/oxphp/oxphp:0.7.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.6.0
+FROM ghcr.io/oxphp/oxphp:0.7.0
 
 COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -10121,7 +10315,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     ports:
       - "80:80"
     volumes:
@@ -12211,7 +12405,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.6.0
+          image: ghcr.io/oxphp/oxphp:0.7.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -12245,7 +12439,7 @@ Or set it in your Compose file:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"
