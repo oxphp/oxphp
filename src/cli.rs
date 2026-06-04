@@ -25,8 +25,9 @@ pub struct ServeOptions {
 
 /// Resolved target of `serve --user=<name|name:group|uid|uid:gid>`.
 ///
-/// Parsing resolves names to numeric ids eagerly (at CLI-parse time) so an
-/// unknown user/group fails fast, before any startup work. The user name is
+/// Names resolve to numeric ids during argument parsing (at role finalize, so
+/// a terminal flag like `--help` can still preempt) — an unknown user/group
+/// fails fast, before any startup work. The user name is
 /// kept for `initgroups()`; it is `None` only for a bare numeric uid with no
 /// matching passwd entry, in which case the privilege drop clears
 /// supplementary groups instead of expanding them.
@@ -304,7 +305,10 @@ where
     // to whichever role the first positional resolves to, then validated
     // against that role's allow-set.
     let mut ini: Vec<(String, String)> = Vec::new();
-    let mut user: Option<DropTarget> = None;
+    // Raw `--user` spec, resolved at role finalize (not here) so terminal
+    // flags (`--help`/`--version`) and `config` rejection don't force a
+    // passwd lookup on a spec that will never be used.
+    let mut user: Option<OsString> = None;
 
     while let Some(arg) = parser.next()? {
         match arg {
@@ -313,7 +317,7 @@ where
             Short('v') | Long("version") => return Ok(Command::Version),
             // Cross-cutting collected flags.
             Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => user = Some(parse_user(&mut parser)?),
+            Long("user") => user = Some(parser.value()?),
             // Reserved keywords (exact match) select a subcommand role.
             Value(v) if v == "serve" => return finish_serve(&mut parser, ini, user),
             Value(v) if v == "run" => return finish_run(&mut parser, ini, user),
@@ -327,11 +331,14 @@ where
         }
     }
 
-    // No positional → serve. `-d` has no meaning without a script to run.
+    // No positional → serve. `-d` has no meaning without a script to run;
+    // the user never typed a role here, so keep the message role-neutral.
     if !ini.is_empty() {
-        return Err(d_requires_script("serve"));
+        return Err(d_requires_no_script());
     }
-    Ok(Command::Serve(ServeOptions { drop_to: user }))
+    Ok(Command::Serve(ServeOptions {
+        drop_to: resolve_user(user)?,
+    }))
 }
 
 /// Parse one `-d key[=value]` token. A bare key (no `=`) maps to "1" (php-cli).
@@ -343,16 +350,28 @@ fn parse_ini_define(raw: OsString) -> (String, String) {
     }
 }
 
-/// Parse a `--user=<spec>` value into a resolved `DropTarget`. The per-flag
-/// parsing lives in one place (mirrors `parse_ini_define`).
-fn parse_user(parser: &mut lexopt::Parser) -> Result<DropTarget, BoxError> {
-    let raw = parser.value()?;
-    raw.to_string_lossy().parse::<DropTarget>()
+/// Resolve a raw `--user` spec (collected during parsing) into a `DropTarget`.
+/// Deferred from collection time so terminal flags (`--help`/`--version`) and
+/// out-of-role rejection (`config`) act without forcing a passwd lookup on a
+/// spec that will never be used. Still runs inside `parse_from`, so an unknown
+/// user for a real `serve`/`run` role fails fast, before any startup work.
+fn resolve_user(raw: Option<OsString>) -> Result<Option<DropTarget>, BoxError> {
+    match raw {
+        Some(spec) => Ok(Some(spec.to_string_lossy().parse::<DropTarget>()?)),
+        None => Ok(None),
+    }
 }
 
-/// One error text for `-d` given where no script will run (`serve` / `config`).
+/// One error text for `-d` given an explicit role that runs no script
+/// (`serve` / `config`).
 fn d_requires_script(role: &str) -> BoxError {
     format!("'-d' is not valid for '{role}'; it sets an ini directive for a script to run").into()
+}
+
+/// Role-neutral variant for bare `oxphp -d …` — no script and no role keyword,
+/// so don't name `serve` the user never typed.
+fn d_requires_no_script() -> BoxError {
+    "'-d' requires a script to run; it sets a php.ini directive for that script".into()
 }
 
 /// Reject cross-cutting script flags collected before a role that does not
@@ -360,7 +379,7 @@ fn d_requires_script(role: &str) -> BoxError {
 fn reject_script_flags(
     role: &str,
     ini: &[(String, String)],
-    user: &Option<DropTarget>,
+    user: &Option<OsString>,
 ) -> Result<(), BoxError> {
     if !ini.is_empty() {
         return Err(d_requires_script(role));
@@ -376,7 +395,7 @@ fn reject_script_flags(
 fn finish_serve(
     parser: &mut lexopt::Parser,
     ini: Vec<(String, String)>,
-    mut user: Option<DropTarget>,
+    mut user: Option<OsString>,
 ) -> Result<Command, BoxError> {
     use lexopt::prelude::*;
     if !ini.is_empty() {
@@ -385,10 +404,13 @@ fn finish_serve(
     while let Some(arg) = parser.next()? {
         match arg {
             // `--user=<name|name:group|uid|uid:gid>`: drop privileges to this
-            // user after binding. Resolved eagerly so an unknown user/group
-            // fails here, before any startup. Requires starting as root —
-            // that is enforced at drop time, not parse time.
-            Long("user") => user = Some(parse_user(parser)?),
+            // user after binding. Collected raw and resolved below, so an
+            // unknown user/group fails before any startup. Requires starting
+            // as root — that is enforced at drop time, not parse time.
+            Long("user") => user = Some(parser.value()?),
+            // `-d` sets an ini directive for a script; `serve` runs none. Give
+            // the same explanation as `oxphp -d … serve`, not a generic error.
+            Short('d') => return Err(d_requires_script("serve")),
             other => {
                 return Err(
                     format!("unexpected argument to 'serve': {}", format_arg(&other)).into(),
@@ -396,7 +418,9 @@ fn finish_serve(
             }
         }
     }
-    Ok(Command::Serve(ServeOptions { drop_to: user }))
+    Ok(Command::Serve(ServeOptions {
+        drop_to: resolve_user(user)?,
+    }))
 }
 
 /// Continue after the explicit `run` keyword. Accepts `-d`/`--user` before the
@@ -406,13 +430,13 @@ fn finish_serve(
 fn finish_run(
     parser: &mut lexopt::Parser,
     mut ini: Vec<(String, String)>,
-    mut user: Option<DropTarget>,
+    mut user: Option<OsString>,
 ) -> Result<Command, BoxError> {
     use lexopt::prelude::*;
     while let Some(arg) = parser.next()? {
         match arg {
             Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => user = Some(parse_user(parser)?),
+            Long("user") => user = Some(parser.value()?),
             Short('h') | Long("help") => {
                 // `oxphp run --help` (before the script) prints help. A
                 // `--help` *after* the script is the script's own argument.
@@ -434,7 +458,7 @@ fn build_run(
     script: OsString,
     parser: &mut lexopt::Parser,
     ini: Vec<(String, String)>,
-    user: Option<DropTarget>,
+    user: Option<OsString>,
 ) -> Result<Command, BoxError> {
     if script == "-" {
         return Err("reading the script from stdin ('-') is not yet supported".into());
@@ -444,7 +468,7 @@ fn build_run(
         script: PathBuf::from(script),
         args,
         ini,
-        user,
+        user: resolve_user(user)?,
     }))
 }
 
@@ -500,6 +524,7 @@ USAGE:
     oxphp [OPTIONS]
     oxphp <COMMAND> [OPTIONS]
     oxphp serve [--user=<name|uid[:gid]>]
+    oxphp run [-d key=value]... [--user=<spec>] <script.php> [args]...
     oxphp [-d key=value]... [--user=<spec>] <script.php> [args]...
 
 OPTIONS:
@@ -852,10 +877,12 @@ mod tests {
 
     #[test]
     fn d_without_script_is_error() {
-        // `-d` sets an ini directive for a script; with no script (resolves to
-        // serve) it is an error.
+        // `-d` sets an ini directive for a script; with no script it is an
+        // error. The user never typed a role, so the message stays neutral.
         let err = parse_from(args(&["-d", "memory_limit=512M"])).unwrap_err();
-        assert!(err.to_string().contains("-d"));
+        let msg = err.to_string();
+        assert!(msg.contains("-d"));
+        assert!(!msg.contains("serve"));
     }
 
     #[test]
@@ -880,6 +907,31 @@ mod tests {
     #[test]
     fn repeated_same_flag_is_ok() {
         assert_eq!(parse_from(args(&["-h", "--help"])).unwrap(), Command::Help);
+    }
+
+    #[test]
+    fn serve_with_d_flag_explains() {
+        // `oxphp serve -d x=1` gives the same role-specific explanation as
+        // `oxphp -d x=1 serve`, not a generic "unexpected argument".
+        let err = parse_from(args(&["serve", "-d", "x=1"])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'-d'"));
+        assert!(msg.contains("serve"));
+    }
+
+    #[test]
+    fn terminal_flag_preempts_user_resolution() {
+        // `--user` is collected raw and only resolved at role finalize, so a
+        // following `--help`/`--version` wins even when the spec is bogus —
+        // help must never fail on an unrelated argument.
+        assert_eq!(
+            parse_from(args(&["--user=oxphp-nonexistent-user-98765", "--help"])).unwrap(),
+            Command::Help
+        );
+        assert_eq!(
+            parse_from(args(&["--user=oxphp-nonexistent-user-98765", "--version"])).unwrap(),
+            Command::Version
+        );
     }
 }
 
@@ -1022,5 +1074,21 @@ mod privilege_drop_tests {
     fn config_rejects_collected_user() {
         let err = parse_from(args(&["--user=1000001:1000002", "config", "--check"])).unwrap_err();
         assert!(err.to_string().contains("--user") && err.to_string().contains("config"));
+    }
+
+    #[test]
+    fn user_flag_last_wins() {
+        // Duplicate `--user`: the last spec wins (overwrite, not accumulate).
+        let opts = run_opts(
+            parse_from(args(&[
+                "--user=1000001:1000002",
+                "--user=1000003:1000004",
+                "app.php",
+            ]))
+            .unwrap(),
+        );
+        let t = opts.user.expect("user should be set");
+        assert_eq!(t.uid, 1000003);
+        assert_eq!(t.gid, 1000004);
     }
 }
