@@ -10,7 +10,7 @@
 # aliases (e.g. 0.3.0-php8.4, 0.3-php8.4).
 
 oxphp_versions:
-  - "0.6.0"   # latest
+  - "0.7.0"   # latest
 
 php_versions:
   - "8.4"
@@ -20,6 +20,6 @@ alpine_versions:
   - "3.23"
 
 # The PHP version that receives the default-PHP aliases (`latest`,
-# `0.6.0`, etc.). Must be present in php_versions. Bumped to a newer
+# `0.7.0`, etc.). Must be present in php_versions. Bumped to a newer
 # minor only after that version has soaked on the opt-in tags.
 default_php: "8.5"

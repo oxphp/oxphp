@@ -22,7 +22,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.6.0
+    image: ghcr.io/oxphp/oxphp:0.7.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -518,7 +518,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.6.0",
+  "oxphp_version": "0.7.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
