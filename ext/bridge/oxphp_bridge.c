@@ -1594,6 +1594,13 @@ int oxphp_bridge_eval(const char *code) {
     return ok;
 }
 
+/* Skip a leading `#!` shebang line when compiling the next script (php-cli
+ * parity, sapi/cli/php_cli.c). Without this the shebang line is emitted as
+ * inline text and leaks into the script's output. */
+void oxphp_bridge_skip_shebang(void) {
+    CG(skip_shebang) = 1;
+}
+
 /* ── SAPI response code ── */
 
 int oxphp_bridge_get_response_code(void) {

@@ -234,6 +234,15 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
     }
     file_handle.primary_script = true;
 
+    // php-cli parity: skip a leading `#!` shebang line when compiling the file
+    // (CG(skip_shebang)=1, sapi/cli/php_cli.c). Set immediately before the
+    // compile — robust regardless of what the bootstrap block above compiled —
+    // otherwise the shebang line is emitted as inline text and leaks into the
+    // script's output, breaking `#!/usr/bin/env oxphp` extensionless scripts.
+    unsafe {
+        bindings::oxphp_bridge_skip_shebang();
+    }
+
     // oxphp_execute_script_safe wraps php_execute_script in zend_try only as a
     // last-resort guard against a stray bailout escaping FFI. In PHP 8.4+ that
     // is effectively unreachable: exit()/die() is an ordinary function that does

@@ -38,7 +38,20 @@ fn main() -> Result<(), types::BoxError> {
     // HTTP path (no JSON logging on stdout, no listener).
     let serve_opts = match cli::dispatch() {
         cli::Role::Serve(opts) => opts,
-        cli::Role::Run(opts) => std::process::exit(oxphp::frontend::run_cli(opts)),
+        cli::Role::Run(opts) => {
+            // Drop privileges before MINIT / script execution when `--user` was
+            // given (k8s Job as non-root). The one-shot path is single-threaded
+            // and binds no socket, so the drop is simpler than serve's. Logging
+            // is not initialised yet, so the drop's tracing line is silent — the
+            // run role uses plain stderr UX, not JSON logs.
+            if let Some(target) = &opts.user {
+                if let Err(e) = privdrop::drop_to(target) {
+                    eprintln!("oxphp: {e}");
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(oxphp::frontend::run_cli(opts))
+        }
     };
 
     // JSON logging active from here on — every subsequent startup error is

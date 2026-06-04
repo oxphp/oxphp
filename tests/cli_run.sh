@@ -103,6 +103,29 @@ off_env="$(printf '%s\n' "$sg_off" | sed -n 3p)"
 	&& ok "SUPERGLOBALS_ENABLED=false: env fold skipped, skeleton + argv kept" \
 	|| bad "sg off (argc='$off_argc' skel='$off_skel' env='$off_env')"
 
+# 8d. implicit run: `oxphp <script>` with no `run` keyword.
+out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp /cli/hello.php)"; code=$?
+{ [ "$out" = "hello from oxphp run" ] && [ $code -eq 0 ]; } \
+	&& ok "implicit run (no 'run' keyword)" || bad "implicit run (out='$out' code=$code)"
+
+# 8e. extensionless shebang script: implicit run + CG(skip_shebang). The `#!`
+#     line must NOT leak into output.
+out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp /cli/shebang)"
+[ "$out" = "shebang-ok" ] && ok "shebang skipped (extensionless)" \
+	|| bad "shebang (got '$out' — leaked shebang means CG(skip_shebang) not set)"
+
+# 8f. --user on the run path: force the container to start as root (the image's
+#     default user is www-data), oxphp drops to uid 82, the script sees the
+#     dropped uid.
+out="$(docker run --rm --user 0:0 -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.php)"
+[ "$out" = "82" ] && ok "--user drop on run (uid 82)" || bad "--user run drop (got '$out')"
+
+# 8g. --user while NOT root is a hard error (exit 1), never a silent no-op — the
+#     image's default user is www-data (non-root), so no --user override here.
+gerr="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.php 2>&1 1>/dev/null)"; gcode=$?
+{ [ $gcode -ne 0 ] && printf '%s' "$gerr" | grep -qi "root"; } \
+	&& ok "--user as non-root is a hard error" || bad "--user non-root guard (code=$gcode err='$gerr')"
+
 # 9. regression: HTTP serve role still boots and answers
 name="oxphp-serve-smoke-$$"
 docker run -d --rm --name "$name" -e LISTEN_ADDR=0.0.0.0:18080 -p 127.0.0.1:18080:18080 "$IMAGE" >/dev/null 2>&1

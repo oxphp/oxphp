@@ -389,4 +389,5 @@ extern "C" {
     pub fn oxphp_bridge_set_cli_args(argc: c_int, argv: *mut *mut c_char);
     pub fn oxphp_bridge_get_exit_status() -> c_int;
     pub fn oxphp_bridge_eval(code: *const c_char) -> c_int;
+    pub fn oxphp_bridge_skip_shebang();
 }

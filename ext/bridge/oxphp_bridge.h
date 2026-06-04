@@ -847,6 +847,11 @@ int oxphp_bridge_get_exit_status(void);
  *  STDIN/STDOUT/STDERR constants. Returns 1 on success, 0 on bailout. */
 int oxphp_bridge_eval(const char *code);
 
+/** Tell the Zend compiler to skip a leading `#!` shebang line when compiling
+ *  the next script (php-cli parity; CG(skip_shebang)). Call after
+ *  php_request_startup() and before php_execute_script(). */
+void oxphp_bridge_skip_shebang(void);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */
