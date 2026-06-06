@@ -447,6 +447,7 @@ async fn async_main(
 
     let server = Arc::new(server::Server::new(
         &config.server,
+        &config.h2,
         executor,
         Arc::clone(&metrics),
         dispatcher,
