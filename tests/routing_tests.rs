@@ -50,6 +50,7 @@ async fn start_server_with_options(
 
     let server = Arc::new(oxphp::server::Server::new(
         &config,
+        &oxphp::config::H2Config::default(),
         executor,
         metrics,
         Arc::new(dispatcher),
