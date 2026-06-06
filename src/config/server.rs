@@ -38,3 +38,152 @@ impl ServerConfig {
         })
     }
 }
+
+/// HTTP/2 connection-level limits. All fields map 1-to-1 to hyper's
+/// `Http2` builder methods and are applied once per server instance.
+#[derive(Debug)]
+pub struct H2Config {
+    /// Max simultaneous open streams per connection. Default: `max_worker_count * 4`
+    /// (floor 16). A single connection cannot hold more streams than this, bounding
+    /// per-connection queue amplification on a blocking worker-pool backend.
+    pub max_concurrent_streams: u32,
+    /// Max RST_STREAM frames queued before the connection is closed. Explicit value
+    /// keeps the Rapid Reset (CVE-2023-44487) defence documented and operator-visible.
+    pub max_pending_accept_reset: usize,
+    /// Max total decoded bytes across all headers in one request (HPACK bomb guard).
+    pub max_header_list_bytes: u32,
+    /// PING keepalive interval. `None` disables keepalive.
+    pub keepalive_interval: Option<Duration>,
+    /// How long to wait for a PING reply before closing the connection.
+    pub keepalive_timeout: Duration,
+}
+
+impl H2Config {
+    /// Build from environment variables; `max_worker_count` drives the default
+    /// for `max_concurrent_streams` when `H2_MAX_CONCURRENT_STREAMS` is not set.
+    pub fn from_env(max_worker_count: usize) -> Self {
+        let default_streams = (max_worker_count * 4).max(16) as u32;
+
+        let max_concurrent_streams = std::env::var("H2_MAX_CONCURRENT_STREAMS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(default_streams);
+
+        let max_pending_accept_reset = std::env::var("H2_MAX_PENDING_RESET")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(20); // h2 crate DEFAULT_REMOTE_RESET_STREAM_MAX
+
+        let max_header_list_bytes = std::env::var("H2_MAX_HEADER_LIST_BYTES")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(64 * 1024);
+
+        let keepalive_interval_secs = std::env::var("H2_KEEPALIVE_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20);
+        let keepalive_interval = if keepalive_interval_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(keepalive_interval_secs))
+        };
+
+        let keepalive_timeout = Duration::from_secs(
+            std::env::var("H2_KEEPALIVE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(10),
+        );
+
+        Self {
+            max_concurrent_streams,
+            max_pending_accept_reset,
+            max_header_list_bytes,
+            keepalive_interval,
+            keepalive_timeout,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env vars are process-global; this lock serializes all env-touching tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> =
+            vars.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        for (k, v) in vars {
+            std::env::set_var(k, v);
+        }
+        f();
+        for (k, orig) in &saved {
+            match orig {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    #[test]
+    fn h2_defaults_are_worker_aware() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = H2Config::from_env(8);
+        // 8 workers * 4 = 32
+        assert_eq!(cfg.max_concurrent_streams, 32);
+        assert_eq!(cfg.max_pending_accept_reset, 20);
+        assert_eq!(cfg.max_header_list_bytes, 65536);
+        assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(20)));
+        assert_eq!(cfg.keepalive_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn h2_minimum_concurrent_streams() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Even with 1 worker, floor at 16
+        let cfg = H2Config::from_env(1);
+        assert_eq!(cfg.max_concurrent_streams, 16);
+    }
+
+    #[test]
+    fn h2_env_overrides() {
+        with_env(
+            &[
+                ("H2_MAX_CONCURRENT_STREAMS", "50"),
+                ("H2_MAX_PENDING_RESET", "40"),
+                ("H2_MAX_HEADER_LIST_BYTES", "32768"),
+                ("H2_KEEPALIVE_INTERVAL_SECS", "30"),
+                ("H2_KEEPALIVE_TIMEOUT_SECS", "15"),
+            ],
+            || {
+                let cfg = H2Config::from_env(8);
+                assert_eq!(cfg.max_concurrent_streams, 50);
+                assert_eq!(cfg.max_pending_accept_reset, 40);
+                assert_eq!(cfg.max_header_list_bytes, 32768);
+                assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(30)));
+                assert_eq!(cfg.keepalive_timeout, Duration::from_secs(15));
+            },
+        );
+    }
+
+    #[test]
+    fn h2_keepalive_interval_zero_disables() {
+        with_env(&[("H2_KEEPALIVE_INTERVAL_SECS", "0")], || {
+            let cfg = H2Config::from_env(8);
+            assert_eq!(cfg.keepalive_interval, None);
+        });
+    }
+
+    #[test]
+    fn h2_invalid_env_falls_back_to_default() {
+        with_env(&[("H2_MAX_CONCURRENT_STREAMS", "not_a_number")], || {
+            let cfg = H2Config::from_env(8);
+            assert_eq!(cfg.max_concurrent_streams, 32);
+        });
+    }
+}
