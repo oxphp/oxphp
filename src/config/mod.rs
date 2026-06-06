@@ -13,7 +13,7 @@ pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
 pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny};
 pub use proxy::TrustedProxyConfig;
-pub use server::ServerConfig;
+pub use server::{H2Config, ServerConfig};
 pub use symlink_allow::SymlinkAllowList;
 pub use workers::{parse_php_workers, WorkerMode};
 
@@ -94,6 +94,8 @@ pub struct Config {
     /// Trusted reverse proxy networks (CIDR). When set, X-Forwarded-* and
     /// Forwarded headers from these peers are trusted for client IP extraction.
     pub trusted_proxies: Option<TrustedProxyConfig>,
+    /// HTTP/2 protocol tuning (stream limits, flow control, keep-alive).
+    pub h2: H2Config,
 }
 
 /// Parse a duration string like `"30s"`, `"5m"`, `"2h"`, `"30d"`, `"1w"`,
@@ -325,6 +327,8 @@ impl Config {
         let trusted_proxies = TrustedProxyConfig::from_env()
             .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
 
+        let h2 = H2Config::from_env(worker_mode.max_worker_count());
+
         Ok(Self {
             server,
             log_level,
@@ -355,6 +359,7 @@ impl Config {
             tokio_workers,
             queue_capacity,
             trusted_proxies,
+            h2,
         })
     }
 
@@ -398,6 +403,13 @@ impl Config {
             tokio_workers: 1,
             queue_capacity: 128,
             trusted_proxies: None,
+            h2: H2Config {
+                max_concurrent_streams: 16,
+                max_pending_accept_reset: 20,
+                max_header_list_bytes: 64 * 1024,
+                keepalive_interval: Some(std::time::Duration::from_secs(20)),
+                keepalive_timeout: std::time::Duration::from_secs(10),
+            },
         }
     }
 
