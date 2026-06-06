@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 
 use std::path::PathBuf;
 
-use crate::config::ServerConfig;
+use crate::config::{H2Config, ServerConfig};
 use crate::events::EventDispatcher;
 use crate::executor::ScriptExecutor;
 use crate::metrics::Metrics;
@@ -58,6 +58,7 @@ impl Server {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &ServerConfig,
+        h2: &H2Config,
         executor: Arc<dyn ScriptExecutor>,
         metrics: Arc<Metrics>,
         dispatcher: Arc<EventDispatcher>,
@@ -103,14 +104,20 @@ impl Server {
         // max_concurrent_streams caps per-connection parallelism, bounding the
         // number of stalled streams an attacker can hold open simultaneously.
         // max_header_list_size limits total decoded header bytes (HPACK bomb).
-        http_builder
-            .http2()
-            .initial_connection_window_size(8 * 1024 * 1024)
-            .initial_stream_window_size(4 * 1024 * 1024)
-            .keep_alive_interval(Duration::from_secs(20))
-            .keep_alive_timeout(Duration::from_secs(10))
-            .max_concurrent_streams(200)
-            .max_header_list_size(64 * 1024);
+        // max_pending_accept_reset_streams: explicit Rapid Reset (CVE-2023-44487) cap
+        {
+            let mut h2b = http_builder.http2();
+            h2b.timer(hyper_util::rt::TokioTimer::new())
+                .initial_connection_window_size(8 * 1024 * 1024)
+                .initial_stream_window_size(4 * 1024 * 1024)
+                .max_concurrent_streams(h2.max_concurrent_streams)
+                .max_pending_accept_reset_streams(h2.max_pending_accept_reset)
+                .max_header_list_size(h2.max_header_list_bytes);
+            if let Some(interval) = h2.keepalive_interval {
+                h2b.keep_alive_interval(interval)
+                    .keep_alive_timeout(h2.keepalive_timeout);
+            }
+        }
 
         Self {
             route_config: Arc::new(route_config),

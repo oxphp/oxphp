@@ -61,6 +61,36 @@ curl --http2-prior-knowledge -I http://localhost/
 
 Look for `HTTP/2 200` in the response line.
 
+### Connection Limits
+
+OxPHP applies per-connection HTTP/2 limits to bound the amplification a single
+TCP connection can exert on the PHP worker pool. Each accepted stream becomes a
+queued PHP request, so an unbounded stream count from one connection would
+saturate the pool on its own.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 32) | Maximum simultaneous open streams per connection. Excess streams receive `REFUSED_STREAM` |
+| `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before the connection is closed (CVE-2023-44487 Rapid Reset protection) |
+| `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request (HPACK bomb guard) |
+| `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables keepalive |
+| `H2_KEEPALIVE_TIMEOUT_SECS` | `10` | Seconds to wait for a PING reply before closing the connection |
+
+`PHP_WORKERS_MAX` is the maximum worker count set by `PHP_WORKERS`. For a
+dynamic range like `4:16`, the maximum (16) is used. The default scales with
+workers so that legitimate concurrent page loads on one connection do not create
+more queue pressure than the pool can absorb.
+
+> **Trade-off:** `H2_MAX_CONCURRENT_STREAMS` is intentionally tuned to pool
+> capacity, not to browser multiplexing behaviour. Browsers send dozens of
+> asset requests over a single HTTP/2 connection; those that exceed the cap
+> receive `REFUSED_STREAM` and are automatically retried by the browser in
+> the next batch. This adds a small latency penalty on heavy fan-out pages
+> (many assets per connection) but prevents a single connection from filling
+> the PHP request queue. If your site has many large-asset pages and the
+> default causes measurable latency, raise `H2_MAX_CONCURRENT_STREAMS`
+> explicitly rather than increasing `PHP_WORKERS`.
+
 ## Supported Key Types
 
 The private key file must contain a single PEM-encoded key in one of the following formats:
