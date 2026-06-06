@@ -1452,6 +1452,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.2",
  "globset",
+ "h2",
  "http",
  "http-body-util",
  "httpdate",
