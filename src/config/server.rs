@@ -93,7 +93,8 @@ impl H2Config {
             std::env::var("H2_KEEPALIVE_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(10),
+                .unwrap_or(10)
+                .max(1), // 0 would make every PING fail immediately
         );
 
         Self {

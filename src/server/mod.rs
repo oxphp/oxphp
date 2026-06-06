@@ -112,10 +112,10 @@ impl Server {
                 .initial_stream_window_size(4 * 1024 * 1024)
                 .max_concurrent_streams(h2.max_concurrent_streams)
                 .max_pending_accept_reset_streams(h2.max_pending_accept_reset)
-                .max_header_list_size(h2.max_header_list_bytes)
-                .keep_alive_timeout(h2.keepalive_timeout);
+                .max_header_list_size(h2.max_header_list_bytes);
             if let Some(interval) = h2.keepalive_interval {
-                h2b.keep_alive_interval(interval);
+                h2b.keep_alive_interval(interval)
+                    .keep_alive_timeout(h2.keepalive_timeout);
             }
         }
 
