@@ -146,8 +146,10 @@ mod tests {
     /// so a CI environment with H2_* already set does not pollute other tests.
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<String>)> =
-            vars.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        let saved: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
         for (k, v) in vars {
             std::env::set_var(k, v);
         }
@@ -164,8 +166,10 @@ mod tests {
     /// CI sets H2_* in the environment.
     fn without_h2_env<F: FnOnce()>(f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<String>)> =
-            H2_VARS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        let saved: Vec<(&str, Option<String>)> = H2_VARS
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
         for k in H2_VARS {
             std::env::remove_var(k);
         }
