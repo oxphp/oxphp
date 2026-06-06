@@ -69,7 +69,7 @@ OxPHP 在 HTTP/2 连接层面施加限制，以约束单个 TCP 连接对 PHP �
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4`（最小 16） | 每个连接允许的最大并发流数。超出上限的流将收到 `REFUSED_STREAM` |
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4`（最小 32） | 每个连接允许的最大并发流数。超出上限的流将收到 `REFUSED_STREAM` |
 | `H2_MAX_PENDING_RESET` | `20` | 关闭连接前允许排队的 `RST_STREAM` 帧数量上限（CVE-2023-44487 Rapid Reset 防护） |
 | `H2_MAX_HEADER_LIST_BYTES` | `65536` | 单次请求所有解码后请求头的最大总字节数（HPACK 炸弹防护） |
 | `H2_KEEPALIVE_INTERVAL_SECS` | `20` | 发送 PING 帧的时间间隔（秒）；`0` 表示禁用 keepalive |

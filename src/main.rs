@@ -450,6 +450,7 @@ async fn async_main(
         max_pending_reset = config.h2.max_pending_accept_reset,
         max_header_list_bytes = config.h2.max_header_list_bytes,
         keepalive_interval_secs = config.h2.keepalive_interval.map(|d| d.as_secs()),
+        keepalive_timeout_secs = config.h2.keepalive_timeout.as_secs(),
         "HTTP/2 limits"
     );
 

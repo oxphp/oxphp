@@ -122,7 +122,7 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4`（最小 16） | 每个 HTTP/2 连接允许的最大并发流数 |
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4`（最小 32） | 每个 HTTP/2 连接允许的最大并发流数 |
 | `H2_MAX_PENDING_RESET` | `20` | 关闭连接前允许排队的 `RST_STREAM` 帧数量上限（Rapid Reset 防护） |
 | `H2_MAX_HEADER_LIST_BYTES` | `65536` | 单次请求所有解码后请求头的最大总字节数 |
 | `H2_KEEPALIVE_INTERVAL_SECS` | `20` | 发送 PING 帧的时间间隔（秒）；`0` 表示禁用 |

@@ -70,7 +70,7 @@ saturate the pool on its own.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 16) | Maximum simultaneous open streams per connection. Excess streams receive `REFUSED_STREAM` |
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 32) | Maximum simultaneous open streams per connection. Excess streams receive `REFUSED_STREAM` |
 | `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before the connection is closed (CVE-2023-44487 Rapid Reset protection) |
 | `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request (HPACK bomb guard) |
 | `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables keepalive |
@@ -80,6 +80,16 @@ saturate the pool on its own.
 dynamic range like `4:16`, the maximum (16) is used. The default scales with
 workers so that legitimate concurrent page loads on one connection do not create
 more queue pressure than the pool can absorb.
+
+> **Trade-off:** `H2_MAX_CONCURRENT_STREAMS` is intentionally tuned to pool
+> capacity, not to browser multiplexing behaviour. Browsers send dozens of
+> asset requests over a single HTTP/2 connection; those that exceed the cap
+> receive `REFUSED_STREAM` and are automatically retried by the browser in
+> the next batch. This adds a small latency penalty on heavy fan-out pages
+> (many assets per connection) but prevents a single connection from filling
+> the PHP request queue. If your site has many large-asset pages and the
+> default causes measurable latency, raise `H2_MAX_CONCURRENT_STREAMS`
+> explicitly rather than increasing `PHP_WORKERS`.
 
 ## Supported Key Types
 

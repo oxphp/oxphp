@@ -41,11 +41,16 @@ impl ServerConfig {
 
 /// HTTP/2 connection-level limits. All fields map 1-to-1 to hyper's
 /// `Http2` builder methods and are applied once per server instance.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct H2Config {
     /// Max simultaneous open streams per connection. Default: `max_worker_count * 4`
-    /// (floor 16). A single connection cannot hold more streams than this, bounding
-    /// per-connection queue amplification on a blocking worker-pool backend.
+    /// (floor 32). Tuned for a blocking worker-pool backend where each open stream
+    /// directly maps to a queued PHP request — one connection cannot hold more
+    /// streams than this floor, bounding single-source queue amplification.
+    ///
+    /// Note: this is intentionally ≈ pool capacity, not a browser-multiplex target.
+    /// Browsers respect SETTINGS and retry REFUSED_STREAM automatically, so raising
+    /// this beyond the worker count only increases queue pressure per connection.
     pub max_concurrent_streams: u32,
     /// Max RST_STREAM frames queued before the connection is closed. Explicit value
     /// keeps the Rapid Reset (CVE-2023-44487) defence documented and operator-visible.
@@ -58,11 +63,25 @@ pub struct H2Config {
     pub keepalive_timeout: Duration,
 }
 
+impl Default for H2Config {
+    /// Returns hardcoded floor defaults (equivalent to `from_env(1)` with no env set).
+    /// Use in tests and anywhere a concrete default is needed without reading env.
+    fn default() -> Self {
+        Self {
+            max_concurrent_streams: 32,
+            max_pending_accept_reset: 20,
+            max_header_list_bytes: 64 * 1024,
+            keepalive_interval: Some(Duration::from_secs(20)),
+            keepalive_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
 impl H2Config {
     /// Build from environment variables; `max_worker_count` drives the default
     /// for `max_concurrent_streams` when `H2_MAX_CONCURRENT_STREAMS` is not set.
     pub fn from_env(max_worker_count: usize) -> Self {
-        let default_streams = (max_worker_count * 4).max(16) as u32;
+        let default_streams = (max_worker_count * 4).max(32) as u32;
 
         let max_concurrent_streams = std::env::var("H2_MAX_CONCURRENT_STREAMS")
             .ok()
@@ -115,6 +134,16 @@ mod tests {
     // Env vars are process-global; this lock serializes all env-touching tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    const H2_VARS: &[&str] = &[
+        "H2_MAX_CONCURRENT_STREAMS",
+        "H2_MAX_PENDING_RESET",
+        "H2_MAX_HEADER_LIST_BYTES",
+        "H2_KEEPALIVE_INTERVAL_SECS",
+        "H2_KEEPALIVE_TIMEOUT_SECS",
+    ];
+
+    /// Lock + set vars + run + restore. Also snapshots any pre-existing values
+    /// so a CI environment with H2_* already set does not pollute other tests.
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved: Vec<(&str, Option<String>)> =
@@ -131,24 +160,53 @@ mod tests {
         }
     }
 
+    /// Lock + clear all H2_* vars + run + restore. Guarantees defaults even when
+    /// CI sets H2_* in the environment.
+    fn without_h2_env<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> =
+            H2_VARS.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for k in H2_VARS {
+            std::env::remove_var(k);
+        }
+        f();
+        for (k, orig) in &saved {
+            match orig {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
     #[test]
     fn h2_defaults_are_worker_aware() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = H2Config::from_env(8);
-        // 8 workers * 4 = 32
-        assert_eq!(cfg.max_concurrent_streams, 32);
-        assert_eq!(cfg.max_pending_accept_reset, 20);
-        assert_eq!(cfg.max_header_list_bytes, 65536);
-        assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(20)));
-        assert_eq!(cfg.keepalive_timeout, Duration::from_secs(10));
+        without_h2_env(|| {
+            let cfg = H2Config::from_env(8);
+            // 8 workers * 4 = 32, exactly at the floor
+            assert_eq!(cfg.max_concurrent_streams, 32);
+            assert_eq!(cfg.max_pending_accept_reset, 20);
+            assert_eq!(cfg.max_header_list_bytes, 65536);
+            assert_eq!(cfg.keepalive_interval, Some(Duration::from_secs(20)));
+            assert_eq!(cfg.keepalive_timeout, Duration::from_secs(10));
+        });
     }
 
     #[test]
     fn h2_minimum_concurrent_streams() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Even with 1 worker, floor at 16
-        let cfg = H2Config::from_env(1);
-        assert_eq!(cfg.max_concurrent_streams, 16);
+        without_h2_env(|| {
+            // Even with 1 worker, floor at 32
+            let cfg = H2Config::from_env(1);
+            assert_eq!(cfg.max_concurrent_streams, 32);
+        });
+    }
+
+    #[test]
+    fn h2_above_floor() {
+        without_h2_env(|| {
+            // 9 workers * 4 = 36 > floor 32
+            let cfg = H2Config::from_env(9);
+            assert_eq!(cfg.max_concurrent_streams, 36);
+        });
     }
 
     #[test]
@@ -181,10 +239,29 @@ mod tests {
     }
 
     #[test]
+    fn h2_keepalive_timeout_zero_clamped_to_one() {
+        with_env(&[("H2_KEEPALIVE_TIMEOUT_SECS", "0")], || {
+            let cfg = H2Config::from_env(8);
+            assert_eq!(cfg.keepalive_timeout, Duration::from_secs(1));
+        });
+    }
+
+    #[test]
     fn h2_invalid_env_falls_back_to_default() {
         with_env(&[("H2_MAX_CONCURRENT_STREAMS", "not_a_number")], || {
             let cfg = H2Config::from_env(8);
+            // 8 workers * 4 = 32
             assert_eq!(cfg.max_concurrent_streams, 32);
         });
+    }
+
+    #[test]
+    fn h2_default_impl_matches_floor() {
+        let d = H2Config::default();
+        assert_eq!(d.max_concurrent_streams, 32);
+        assert_eq!(d.max_pending_accept_reset, 20);
+        assert_eq!(d.max_header_list_bytes, 64 * 1024);
+        assert_eq!(d.keepalive_interval, Some(Duration::from_secs(20)));
+        assert_eq!(d.keepalive_timeout, Duration::from_secs(10));
     }
 }

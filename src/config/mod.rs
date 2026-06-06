@@ -403,13 +403,7 @@ impl Config {
             tokio_workers: 1,
             queue_capacity: 128,
             trusted_proxies: None,
-            h2: H2Config {
-                max_concurrent_streams: 16,
-                max_pending_accept_reset: 20,
-                max_header_list_bytes: 64 * 1024,
-                keepalive_interval: Some(std::time::Duration::from_secs(20)),
-                keepalive_timeout: std::time::Duration::from_secs(10),
-            },
+            h2: H2Config::default(),
         }
     }
 

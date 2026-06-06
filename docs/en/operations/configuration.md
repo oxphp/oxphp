@@ -122,7 +122,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 16) | Maximum simultaneous open streams per HTTP/2 connection |
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 32) | Maximum simultaneous open streams per HTTP/2 connection |
 | `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before a connection is closed (Rapid Reset protection) |
 | `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request |
 | `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables |
