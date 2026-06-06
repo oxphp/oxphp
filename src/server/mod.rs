@@ -96,10 +96,21 @@ impl Server {
         // HTTP/2: increase flow-control windows from default 64KB to avoid stalls
         // on typical PHP responses (10-500KB). Connection window bounds total
         // concurrent transfer; per-stream window bounds individual responses.
+        //
+        // keep_alive PING/PONG detects dead connections (not Window Stall — a
+        // client that responds to PINGs but holds flow window at 0 still pins
+        // memory; that requires L4 enforcement or a CDN in front).
+        // max_concurrent_streams caps per-connection parallelism, bounding the
+        // number of stalled streams an attacker can hold open simultaneously.
+        // max_header_list_size limits total decoded header bytes (HPACK bomb).
         http_builder
             .http2()
             .initial_connection_window_size(8 * 1024 * 1024)
-            .initial_stream_window_size(4 * 1024 * 1024);
+            .initial_stream_window_size(4 * 1024 * 1024)
+            .keep_alive_interval(Duration::from_secs(20))
+            .keep_alive_timeout(Duration::from_secs(10))
+            .max_concurrent_streams(200)
+            .max_header_list_size(64 * 1024);
 
         Self {
             route_config: Arc::new(route_config),
