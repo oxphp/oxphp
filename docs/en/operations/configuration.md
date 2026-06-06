@@ -118,6 +118,16 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | `TLS_CERT` | *(unset)* | Path to PEM-encoded TLS certificate. Both `TLS_CERT` and `TLS_KEY` must be set to enable TLS |
 | `TLS_KEY` | *(unset)* | Path to PEM-encoded TLS private key |
 
+## HTTP/2
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 16) | Maximum simultaneous open streams per HTTP/2 connection |
+| `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before a connection is closed (Rapid Reset protection) |
+| `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request |
+| `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables |
+| `H2_KEEPALIVE_TIMEOUT_SECS` | `10` | Seconds to wait for a PING reply before closing the connection |
+
 ## Static Files
 
 | Variable | Default | Description |
