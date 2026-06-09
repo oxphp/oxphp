@@ -47,10 +47,10 @@ impl Mode {
         }
     }
 
-    async fn resolve_static_miss(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
+    async fn resolve_static_miss(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         match self {
             Mode::Traditional(r) => r.resolve_static_miss(ctx).await,
-            Mode::Framework(_) => RouteResult::NotFound,
+            Mode::Framework(r) => r.resolve_static_miss(sanitized, ctx).await,
             Mode::Spa(_) => RouteResult::NotFound,
         }
     }
@@ -295,7 +295,7 @@ impl RouteConfig {
                 if file_cache.is_file(&candidate.to_string_lossy()).await {
                     RouteResult::Serve(candidate)
                 } else {
-                    self.mode.resolve_static_miss(&ctx).await
+                    self.mode.resolve_static_miss(sanitized, &ctx).await
                 }
             }
         };

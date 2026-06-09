@@ -6,15 +6,16 @@ use super::{ResolveCtx, RouteResult};
 ///
 /// Nginx equivalent:
 /// ```nginx
-/// location ~ \.(?!php$)[a-zA-Z0-9]+$ { try_files $uri =404; }
+/// location ~ \.(?!php$)[a-zA-Z0-9]+$ { try_files $uri /index.php; }
 /// location / { rewrite ^ /index.php last; }
 /// location = /index.php { fastcgi_param PATH_INFO $request_uri; ... }
 /// ```
 ///
 /// Semantics:
-/// - Any request with a non-.php extension → must be a real static file on disk
-///   (handled by common layer's disk check for `UriKind::OtherExtension`);
-///   miss → hard 404.
+/// - A request with a non-.php extension is served as a static file when it
+///   exists on disk (handled by the common layer's disk check for
+///   `UriKind::OtherExtension`); on a miss it falls back to the front
+///   controller, matching the canonical `try_files $uri /index.php` config.
 /// - Everything else (no extension, `.php`, or `.php/extra`) → rewrites to
 ///   `/index.php` with `PATH_INFO` set to the original URI.
 pub(crate) struct FrameworkRouter {
@@ -72,6 +73,18 @@ impl FrameworkRouter {
     }
 
     pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
+        self.rewrite(sanitized, ctx).await
+    }
+
+    /// Static-asset miss — fall back to the front controller instead of a hard
+    /// 404. The original URI (with its extension) becomes `PATH_INFO`, so the
+    /// application router sees the request and can render its own 404. Mirrors
+    /// the canonical `try_files $uri /index.php` front-controller config.
+    pub(crate) async fn resolve_static_miss(
+        &self,
+        sanitized: &str,
+        ctx: &ResolveCtx<'_>,
+    ) -> RouteResult {
         self.rewrite(sanitized, ctx).await
     }
 }
