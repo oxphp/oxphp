@@ -155,7 +155,7 @@ Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at
 
 | Step | Behavior |
 |---|---|
-| Static assets (`.css`, `.png`, …) | Served directly from disk if present, else hard 404 |
+| Static assets (`.css`, `.png`, …) | Served directly from disk if present; a missing asset falls through to the worker `ENTRY_FILE` (not a hard 404) |
 | Anything else | Dispatched to the worker `ENTRY_FILE` |
 
 Startup-time validation rejects two combinations:
