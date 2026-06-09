@@ -73,7 +73,7 @@ PATH_INFO 拆分在 Traditional 模式下**始终启用**。没有环境变量�
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
-    try_files $uri =404;          # 静态资源：不存在即硬 404
+    try_files $uri /index.php;    # 静态资源：回退到前端控制器
 }
 location / {
     rewrite ^ /index.php last;    # 其他一切 → 前端控制器
@@ -88,7 +88,7 @@ location = /index.php {
 
 | URI 类型 | 行为 |
 |---|---|
-| `.css`、`.png`、`.js`……（任何非 php 扩展） | 文件存在则提供，否则**硬 404** |
+| `.css`、`.png`、`.js`……（任何非 php 扩展） | 文件存在则提供，否则重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
 | `.php`（任何路径） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
 | 无扩展名（`/api/users`、`/`） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
 
@@ -97,7 +97,7 @@ location = /index.php {
 | 请求 | 结果 | `$_SERVER['PATH_INFO']` |
 |---|---|---|
 | `/style.css`（存在） | 提供 `style.css` | — |
-| `/style.css`（不存在） | **404**（无回退） | — |
+| `/style.css`（不存在） | 执行 `index.php` | `/style.css` |
 | `/api/users` | 执行 `index.php` | `/api/users` |
 | `/about.php` | 执行 `index.php` | `/about.php` |
 | `/api.php/v1/users` | 执行 `index.php` | `/api.php/v1/users` |
@@ -105,6 +105,8 @@ location = /index.php {
 | `/` | 执行 `index.php` | `/` |
 
 前端控制器始终在 `PATH_INFO` 中收到**原始 URI**，您的路由器无需单独检查 `REQUEST_URI` 即可决定如何处理。直接访问 `/index.php` 不再被阻止——重写到 `/index.php` 是幂等的，因此直接访问与访问 `/` 的结果相同。
+
+缺失的静态资源会回退到前端控制器，而不是返回快速 404——这与 Laravel 和 Symfony 默认的 `try_files $uri /index.php` 行为一致，因此由您的应用自行为缺失资源渲染 404。代价是每个对不存在资源的请求现在都会运行 PHP；如果前端控制器本身也无内容可提供（`/index.php` 缺失），请求将返回硬 404。
 
 ## SPA 模式
 
@@ -200,7 +202,7 @@ docker exec <container> ls /var/www/html/public
 
 ### 缺失的静态资源返回 404 而非 SPA shell
 
-这在 Framework 和 SPA 模式下是有意为之。缺失的 `/style.css` 是硬 404，而非静默回退到 `index.html`。这能在早期捕获损坏的资源引用。如果您需要回退，请使用 Traditional 模式。
+这在 SPA 模式下是有意为之：缺失的 `/style.css` 是硬 404，而非静默回退到 `index.html`，从而在早期捕获损坏的资源引用。在 Framework 和 Traditional 模式下，缺失的静态文件会回退到前端控制器（`/index.php`），由您的应用路由器渲染 404。如果您希望缺失资源返回硬 404，请使用 SPA 模式。
 
 ### 直接访问 `/index.php` 不再返回 404
 

@@ -73,7 +73,7 @@ Active when `ENTRY_FILE=index.php` (or any value ending in `.php`) and `WORKER_M
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
-    try_files $uri =404;          # static assets: hard 404 if missing
+    try_files $uri /index.php;    # static assets: fall back to front controller
 }
 location / {
     rewrite ^ /index.php last;    # everything else → front controller
@@ -88,7 +88,7 @@ location = /index.php {
 
 | URI kind | Behavior |
 |---|---|
-| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise **hard 404** |
+| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise rewrite to `/index.php` with `PATH_INFO` set to the original URI |
 | `.php` (any path) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
 | no extension (`/api/users`, `/`) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
 
@@ -97,7 +97,7 @@ location = /index.php {
 | Request | Result | `$_SERVER['PATH_INFO']` |
 |---|---|---|
 | `/style.css` (exists) | Serve `style.css` | — |
-| `/style.css` (missing) | **404** (no fallback) | — |
+| `/style.css` (missing) | Execute `index.php` | `/style.css` |
 | `/api/users` | Execute `index.php` | `/api/users` |
 | `/about.php` | Execute `index.php` | `/about.php` |
 | `/api.php/v1/users` | Execute `index.php` | `/api.php/v1/users` |
@@ -105,6 +105,8 @@ location = /index.php {
 | `/` | Execute `index.php` | `/` |
 
 The front controller always receives the **original URI** in `PATH_INFO`, letting your router decide what to do without inspecting `REQUEST_URI` separately. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
+
+A missing static asset falls back to the front controller rather than returning a fast 404 — the same `try_files $uri /index.php` behavior Laravel and Symfony ship by default, so your application renders its own 404 for missing assets. The trade-off is that every request to a non-existent asset now runs PHP; if the front controller still has nothing to serve (`/index.php` itself absent), the request returns a hard 404.
 
 ## SPA Mode
 
@@ -200,7 +202,7 @@ docker exec <container> ls /var/www/html/public
 
 ### Missing static asset returns 404 instead of the SPA shell
 
-This is intentional in Framework and SPA modes. A missing `/style.css` is a hard 404, not a silent fallback to `index.html`. This catches broken asset references early. If you want fallthrough, use Traditional mode.
+This is intentional in SPA mode: a missing `/style.css` is a hard 404, not a silent fallback to `index.html`, which catches broken asset references early. In Framework and Traditional modes a missing static file falls back to the front controller (`/index.php`), so your application router renders the 404. Use SPA mode if you want hard 404s on missing assets.
 
 ### Direct `/index.php` no longer returns 404
 

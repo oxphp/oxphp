@@ -403,9 +403,28 @@ async fn test_framework_static_file_served() {
 }
 
 #[tokio::test]
-async fn test_framework_missing_static_hard_404() {
-    // Non-.php extension with no file on disk → hard 404 (no fallback)
+async fn test_framework_missing_static_falls_back_to_entry() {
+    // Non-.php extension with no file on disk → fall back to the front
+    // controller (`try_files $uri /index.php`); original URI in PATH_INFO.
     let dir = setup_test_dir();
+    let rc = make_config(dir.path(), Some("index.php"));
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/missing.png", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, Some(pi), _) => {
+            assert!(path.ends_with("index.php"));
+            assert_eq!(pi, "/missing.png");
+        }
+        other => panic!("expected Execute(index.php, /missing.png), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_framework_missing_static_hard_404_when_entry_missing() {
+    // If the front controller itself is absent, a static miss has nothing to
+    // fall back to → hard 404 (no worker route configured).
+    let dir = setup_test_dir();
+    fs::remove_file(dir.path().join("index.php")).unwrap();
     let rc = make_config(dir.path(), Some("index.php"));
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/missing.png", &cache).await;
