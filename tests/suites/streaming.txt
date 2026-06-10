@@ -2,5 +2,6 @@
 # description: Streaming and SSE
 
 streaming/test_stream_flush | GET | | 200 | transfer-encoding:chunked
+streaming/test_stream_flush_brotli | GET | -H "Accept-Encoding: br" | 200 | transfer-encoding:chunked, content-encoding:missing
 streaming/test_sse_autodetect
 streaming/test_sse_output_format | GET | | 200 | content-type:~text/event-stream
