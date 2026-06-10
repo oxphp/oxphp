@@ -1,11 +1,28 @@
-//! PHP execution deny-list for Traditional routing mode.
+//! PHP execution deny-list for direct-mapping routing modes.
 //!
 //! Matches sanitized URI paths against a `GlobSet` built from `PHP_DENY_PATHS`
 //! and produces a `DenyFallback` (HTTP status or PHP script redirect) when
 //! a request would otherwise execute PHP inside a denied path.
+//!
+//! The feature applies in the modes where a URI maps directly to a `.php`
+//! file on disk — Traditional and SPA. Framework and Worker modes route every
+//! request through a single trusted script and never execute arbitrary `.php`
+//! files directly, so the deny-list is redundant there and is ignored with a
+//! startup warning.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+
+/// Routing mode as seen by the deny-list loader. Determines whether
+/// `PHP_DENY_PATHS` can apply (direct-mapping modes) or is redundant by
+/// construction (single-entry modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingModeKind {
+    Traditional,
+    Framework,
+    Spa,
+    Worker,
+}
 
 use globset::{GlobSet, GlobSetBuilder};
 
@@ -64,28 +81,36 @@ pub struct PhpDeny {
 impl PhpDeny {
     /// Parse from environment. Returns `Ok(None)` when `PHP_DENY_PATHS` is
     /// unset or empty. Returns `Err` for malformed input. Emits a
-    /// warn-and-disable path when an `entry_file` is configured —
-    /// front-controller, SPA, and worker modes route every request through
-    /// one trusted script, so arbitrary `.php` files in denied paths cannot
-    /// be invoked directly.
+    /// warn-and-disable path in Framework and Worker modes — both route every
+    /// request through one trusted script and never execute arbitrary `.php`
+    /// files directly, so the deny-list is redundant by construction (and in
+    /// Framework mode would break application routes ending in `.php`).
     ///
     /// `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup
     /// warning. When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS`
     /// is reported as ignored.
-    pub fn from_env(
-        document_root: &Path,
-        entry_file: Option<&Path>,
-    ) -> Result<Option<Self>, BoxError> {
+    pub fn from_env(document_root: &Path, mode: RoutingModeKind) -> Result<Option<Self>, BoxError> {
         let (raw, source) = match Self::resolve_env_source() {
             Some(v) => v,
             None => return Ok(None),
         };
 
-        if entry_file.is_some() {
-            tracing::warn!(
-                "{source} is set but ENTRY_FILE is also set — feature is direct-mapping-only, ignoring {source}"
-            );
-            return Ok(None);
+        match mode {
+            RoutingModeKind::Framework => {
+                tracing::warn!(
+                    "{source} is set but the front controller already blocks direct .php execution, \
+                     and denying would break framework routes ending in .php — ignoring {source}"
+                );
+                return Ok(None);
+            }
+            RoutingModeKind::Worker => {
+                tracing::warn!(
+                    "{source} is set but worker mode dispatches every non-static request to the \
+                     worker script and never executes arbitrary .php files directly — ignoring {source}"
+                );
+                return Ok(None);
+            }
+            RoutingModeKind::Traditional | RoutingModeKind::Spa => {}
         }
 
         let patterns: Vec<String> = raw
@@ -408,7 +433,7 @@ mod tests {
             &[("PHP_DENY_PATHS", None), ("PHP_DENY_FALLBACK", None)],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).unwrap();
                 assert!(deny.is_none());
             },
         );
@@ -420,14 +445,14 @@ mod tests {
             &[("PHP_DENY_PATHS", Some("")), ("PHP_DENY_FALLBACK", None)],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).unwrap();
                 assert!(deny.is_none());
             },
         );
     }
 
     #[test]
-    fn env_with_entry_file_warns_and_disables() {
+    fn env_framework_mode_warns_and_disables() {
         with_env(
             &[
                 ("PHP_DENY_PATHS", Some("/uploads/**")),
@@ -435,9 +460,40 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let entry = Path::new("/var/www/html/public/index.php");
-                let deny = PhpDeny::from_env(dir.path(), Some(entry)).unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Framework).unwrap();
                 assert!(deny.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn env_worker_mode_warns_and_disables() {
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            || {
+                let dir = TempDir::new().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Worker).unwrap();
+                assert!(deny.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn env_spa_mode_is_active() {
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            || {
+                let dir = TempDir::new().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Spa)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(deny.matches("uploads/shell.php"), Some("uploads/**"));
             },
         );
     }
@@ -451,7 +507,9 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
+                    .unwrap()
+                    .unwrap();
                 assert!(matches!(deny.fallback(), DenyFallback::Status(404)));
             },
         );
@@ -466,7 +524,9 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
+                    .unwrap()
+                    .unwrap();
                 assert!(matches!(deny.fallback(), DenyFallback::Status(403)));
             },
         );
@@ -481,7 +541,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                assert!(PhpDeny::from_env(dir.path(), None).is_err());
+                assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
             },
         );
         with_env(
@@ -491,7 +551,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                assert!(PhpDeny::from_env(dir.path(), None).is_err());
+                assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
             },
         );
     }
@@ -506,7 +566,7 @@ mod tests {
                 ("PHP_DENY_FALLBACK", Some("/_security/denied.php")),
             ],
             || {
-                let deny = PhpDeny::from_env(Path::new(&doc_root), None)
+                let deny = PhpDeny::from_env(Path::new(&doc_root), RoutingModeKind::Traditional)
                     .unwrap()
                     .unwrap();
                 match deny.fallback() {
@@ -528,7 +588,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                assert!(PhpDeny::from_env(dir.path(), None).is_err());
+                assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
             },
         );
     }
@@ -543,7 +603,8 @@ mod tests {
                 ("PHP_DENY_FALLBACK", Some("/uploads/denied.php")),
             ],
             || {
-                let err = PhpDeny::from_env(Path::new(&doc_root), None).unwrap_err();
+                let err = PhpDeny::from_env(Path::new(&doc_root), RoutingModeKind::Traditional)
+                    .unwrap_err();
                 let msg = err.to_string();
                 assert!(msg.contains("loop avoided"), "message was: {msg}");
             },
@@ -560,7 +621,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                assert!(PhpDeny::from_env(dir.path(), None).is_err());
+                assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
             },
         );
     }
@@ -574,7 +635,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                assert!(PhpDeny::from_env(dir.path(), None).is_err());
+                assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
             },
         );
     }
@@ -591,7 +652,9 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
+                    .unwrap()
+                    .unwrap();
                 assert_eq!(deny.matches("uploads/shell.php"), Some("uploads/**"));
             },
         );
@@ -607,7 +670,7 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).unwrap();
                 assert!(deny.is_none());
             },
         );
@@ -623,7 +686,9 @@ mod tests {
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), None).unwrap().unwrap();
+                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
+                    .unwrap()
+                    .unwrap();
                 // PHP_DENY_PATHS wins → /uploads/** is active, /cache/** is not.
                 assert_eq!(deny.matches("uploads/x.php"), Some("uploads/**"));
                 assert_eq!(deny.matches("cache/x.php"), None);

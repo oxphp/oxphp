@@ -45,17 +45,12 @@ impl FrameworkRouter {
 
     /// Rewrite target: `Execute(index.php)`. PATH_INFO is set only for an
     /// explicit `/index.php/extra` request (honest CGI split), else `None`.
-    /// Falls back to `worker_route` when the front controller is missing on
-    /// disk, otherwise returns `NotFound`. The file_cache probe is O(1) on
-    /// cache hit — in Framework mode the same `index.php` is resolved on
-    /// every request, so the entry stays pinned in the meta cache.
+    /// Returns `NotFound` when the front controller is missing on disk.
+    /// The file_cache probe is O(1) on cache hit — in Framework mode the
+    /// same `index.php` is resolved on every request, so the entry stays
+    /// pinned in the meta cache.
     async fn rewrite(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
         if !ctx.file_cache.is_file(&self.index_file_key).await {
-            // Front controller missing — admin-configured worker wins
-            // if present, otherwise hard 404.
-            if let Some(wr) = ctx.worker_route {
-                return wr.clone();
-            }
             return RouteResult::NotFound;
         }
 

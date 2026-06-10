@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use super::{ResolveCtx, RouteResult};
 
@@ -17,8 +16,7 @@ use super::{ResolveCtx, RouteResult};
 /// 3. PATH_INFO split when URI contains `.php/`
 /// 4. Root `/index.php` fallback
 /// 5. Root `/index.html` fallback
-/// 6. Worker route (if configured)
-/// 7. NotFound
+/// 6. NotFound
 pub(crate) struct TraditionalRouter {
     root_index_php: PathBuf,
     root_index_html: PathBuf,
@@ -40,16 +38,13 @@ impl TraditionalRouter {
         }
     }
 
-    /// Shared fallback chain: root `/index.php` → `/index.html` → worker → NotFound.
+    /// Shared fallback chain: root `/index.php` → `/index.html` → NotFound.
     async fn root_fallback(&self, ctx: &ResolveCtx<'_>) -> RouteResult {
         if ctx.file_cache.is_file(&self.root_index_php_key).await {
             return RouteResult::Execute(self.root_index_php.clone(), None, None);
         }
         if ctx.file_cache.is_file(&self.root_index_html_key).await {
             return RouteResult::Serve(self.root_index_html.clone());
-        }
-        if let Some(wr) = ctx.worker_route {
-            return wr.clone();
         }
         RouteResult::NotFound
     }
@@ -135,34 +130,8 @@ impl TraditionalRouter {
     }
 
     pub(crate) async fn resolve_php(&self, sanitized: &str, ctx: &ResolveCtx<'_>) -> RouteResult {
-        // PHP_DENY_PATHS check — runs *before* disk I/O so we never leak
-        // existence info via timing. Only applied in Traditional mode; the
-        // router itself is Traditional-specific.
-        if let Some(deny) = ctx.php_deny {
-            if let Some(pattern) = deny.matches(sanitized) {
-                tracing::info!(
-                    path = %sanitized,
-                    pattern = %pattern,
-                    "PHP execution denied by PHP_DENY_PATHS"
-                );
-                return match deny.fallback() {
-                    crate::config::DenyFallback::Status(code) => RouteResult::Denied(*code),
-                    crate::config::DenyFallback::Script { path, uri } => RouteResult::Execute(
-                        path.clone(),
-                        // path_info=None: SAPI reads the original URI from
-                        // `denied_meta.path` instead — avoids a duplicate
-                        // String allocation on the fallback path.
-                        None,
-                        Some(Arc::new(crate::config::DeniedMeta {
-                            path: sanitized.to_string(),
-                            pattern: pattern.to_string(),
-                            fallback_script_uri: uri.clone(),
-                        })),
-                    ),
-                };
-            }
-        }
-
+        // PHP_DENY_PATHS is enforced by the common layer (`resolve_request`)
+        // before dispatch reaches this method.
         let file_path = ctx.document_root.join(sanitized);
         let file_key = file_path.to_string_lossy();
 
