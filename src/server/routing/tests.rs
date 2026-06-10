@@ -290,6 +290,32 @@ async fn test_traditional_split_path_info_missing_script_falls_back() {
 }
 
 #[tokio::test]
+async fn test_traditional_missing_php_prefix_yields_no_path_info() {
+    // `/cvdvfdv.php/dwvrb` where `cvdvfdv.php` does NOT exist on disk.
+    // try_split_path_info finds the `.php` marker but the prefix script is
+    // absent, so it gives up and the request falls through root_fallback to
+    // index.php with `path_info = None`. The original `/cvdvfdv.php/dwvrb` is
+    // therefore NOT surfaced as `$_SERVER['PATH_INFO']` — the front
+    // controller must read `REQUEST_URI` instead. This mirrors stock
+    // nginx + php-fpm, where a `try_files … /index.php` rewrite also leaves
+    // PATH_INFO unset.
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), None);
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/cvdvfdv.php/dwvrb", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("index.php"), "got {:?}", path);
+            assert_eq!(
+                *path_info, None,
+                "missing-prefix fallback must not carry PATH_INFO"
+            );
+        }
+        other => panic!("Expected fallback Execute(index.php), got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn test_traditional_subdirectory_file() {
     let dir = setup_test_dir();
     let rc = make_config(dir.path(), None);
@@ -337,26 +363,26 @@ async fn test_framework_unknown_route_goes_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/unknown/path", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/unknown/path");
+            assert_eq!(*path_info, None, "app route carries no PATH_INFO");
         }
-        other => panic!("Expected Execute with PATH_INFO, got {:?}", other),
+        other => panic!("Expected Execute(index.php), got {:?}", other),
     }
 }
 
 #[tokio::test]
-async fn test_framework_root_goes_to_index_php_with_slash_path_info() {
+async fn test_framework_root_goes_to_index_php_no_path_info() {
     let dir = setup_test_dir();
     let rc = make_config(dir.path(), Some("index.php"));
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/");
+            assert_eq!(*path_info, None, "root carries no PATH_INFO");
         }
-        other => panic!("Expected Execute with PATH_INFO=/, got {:?}", other),
+        other => panic!("Expected Execute(index.php), got {:?}", other),
     }
 }
 
@@ -369,9 +395,9 @@ async fn test_framework_direct_php_rewrites_to_index_php() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/about.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/about.php");
+            assert_eq!(*path_info, None, "non-entry .php carries no PATH_INFO");
         }
         other => panic!("Expected rewrite to index.php, got {:?}", other),
     }
@@ -385,9 +411,9 @@ async fn test_framework_direct_index_php_allowed() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/index.php", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/index.php");
+            assert_eq!(*path_info, None, "bare entry carries no PATH_INFO");
         }
         other => panic!("Expected Execute(index.php), got {:?}", other),
     }
@@ -411,11 +437,11 @@ async fn test_framework_missing_static_falls_back_to_entry() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/missing.png", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/missing.png");
+            assert_eq!(*path_info, None, "static fallback carries no PATH_INFO");
         }
-        other => panic!("expected Execute(index.php, /missing.png), got {other:?}"),
+        other => panic!("expected Execute(index.php), got {other:?}"),
     }
 }
 
@@ -432,18 +458,70 @@ async fn test_framework_missing_static_hard_404_when_entry_missing() {
 }
 
 #[tokio::test]
-async fn test_framework_php_path_info() {
-    // /api.php/v1/users → rewrite to index.php with PATH_INFO=/api.php/v1/users
+async fn test_framework_non_entry_php_path_no_path_info() {
+    // /api.php/v1/users → rewrite to index.php. api.php is NOT the entry file,
+    // so the request does not explicitly name the front controller → no PATH_INFO.
     let dir = setup_test_dir();
     let rc = make_config(dir.path(), Some("index.php"));
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/api.php/v1/users", &cache).await;
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/api.php/v1/users");
+            assert_eq!(*path_info, None);
         }
         other => panic!("Expected index.php rewrite, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_framework_explicit_entry_sets_path_info() {
+    // /index.php/news/local explicitly names the front controller → honest
+    // CGI PATH_INFO = the trailing segment.
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), Some("index.php"));
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/index.php/news/local", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("index.php"));
+            assert_eq!(path_info.as_deref(), Some("/news/local"));
+        }
+        other => panic!("Expected Execute(index.php, /news/local), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_framework_entry_prefix_not_a_segment_no_path_info() {
+    // /index.phpfoo must NOT match the entry prefix (next char is not `/`).
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), Some("index.php"));
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/index.phpfoo", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("index.php"));
+            assert_eq!(*path_info, None);
+        }
+        other => panic!("Expected Execute(index.php), got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_framework_entry_trailing_slash_no_path_info() {
+    // /index.php/ — `sanitize` collapses the empty trailing segment to
+    // `index.php`, so there is no segment left to expose. Locked behavior: no
+    // PATH_INFO (a trailing-slash redirect is left to the application).
+    let dir = setup_test_dir();
+    let rc = make_config(dir.path(), Some("index.php"));
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/index.php/", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("index.php"));
+            assert_eq!(*path_info, None);
+        }
+        other => panic!("Expected Execute(index.php), got {:?}", other),
     }
 }
 
@@ -886,11 +964,12 @@ async fn test_resolve_well_known_missing_file_in_framework_rewrites() {
     let result = rc
         .resolve_request("/.well-known/openid-configuration", &cache)
         .await;
-    // no extension → resolve_no_extension → rewrite to index.php
+    // no extension → resolve_no_extension → rewrite to index.php.
+    // App route (does not name the entry file) → no PATH_INFO.
     match &*result {
-        RouteResult::Execute(path, Some(pi), _) => {
+        RouteResult::Execute(path, path_info, _) => {
             assert!(path.ends_with("index.php"));
-            assert_eq!(pi, "/.well-known/openid-configuration");
+            assert_eq!(*path_info, None);
         }
         other => panic!("Expected rewrite to index.php, got {:?}", other),
     }
@@ -1106,6 +1185,66 @@ async fn test_resolve_blocks_percent_encoded_dotfile_after_unicode() {
         )
         .await;
     assert!(matches!(*result, RouteResult::NotFound));
+}
+
+#[tokio::test]
+async fn test_worker_mode_route_never_carries_path_info() {
+    // Worker mode routes every unmatched request to the persistent worker
+    // script via `set_worker_route`, which is hardcoded to `path_info = None`
+    // (see RouteConfig::set_worker_route). A worker therefore never receives
+    // `$_SERVER['PATH_INFO']` — not even the original URI — and must dispatch
+    // on `REQUEST_URI`. This test pins that behaviour.
+    //
+    // The document root deliberately has no `index.php` / `index.html`, so
+    // `root_fallback` skips the directory-index probes and reaches the worker
+    // route. With an index present, an unmatched request would be absorbed by
+    // index.php before ever hitting the worker.
+    let dir = TempDir::new().unwrap();
+    let worker = dir.path().join("worker.php");
+    fs::write(&worker, "<?php echo 'worker';").unwrap();
+
+    // Build the config inside a block so the `ENV_LOCK` guard is dropped
+    // before any `.await` below (clippy::await_holding_lock). The lock only
+    // needs to cover `RouteConfig::new`, which reads `SYMLINK_ALLOW_PATHS`.
+    let mut rc = {
+        let _lock = crate::config::symlink_allow::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
+        std::env::remove_var("SYMLINK_ALLOW_PATHS");
+        let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
+        let rc = RouteConfig::new(&config, Some(worker.as_path()), true);
+        match prev {
+            Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
+            None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
+        }
+        rc
+    };
+    rc.set_worker_route(worker.clone());
+
+    let cache = Arc::new(FileCache::new(200));
+
+    // Plain unmatched path.
+    let result = rc.resolve_request("/some/random/path", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("worker.php"), "got {:?}", path);
+            assert_eq!(*path_info, None, "worker route must not carry PATH_INFO");
+        }
+        other => panic!("Expected worker Execute, got {:?}", other),
+    }
+
+    // Even a `.php/extra` URI (which would split in plain Traditional mode)
+    // carries no PATH_INFO once the prefix is missing and it lands on the
+    // worker.
+    let result = rc.resolve_request("/api.php/v1/users", &cache).await;
+    match &*result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("worker.php"), "got {:?}", path);
+            assert_eq!(*path_info, None, "worker route must not carry PATH_INFO");
+        }
+        other => panic!("Expected worker Execute, got {:?}", other),
+    }
 }
 
 #[cfg(test)]

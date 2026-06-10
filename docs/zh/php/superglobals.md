@@ -122,8 +122,10 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 | 路由模式 | 何时设置 | 值 |
 |---|---|---|
 | **Traditional**（未设置 `ENTRY_FILE`） | 仅当 URI 包含 `.php/` 且脚本前缀在磁盘上存在时 | 脚本段之后的尾部 |
-| **Framework**（`ENTRY_FILE=index.php`） | **始终** — 每个请求都被重写到前端控制器 | 完整的原始 URI |
+| **Framework**（`ENTRY_FILE=index.php`） | 仅当请求显式指定入口文件并带有尾部段时（`/index.php/extra`） | 入口文件之后的尾部，例如 `/news` |
 | **SPA**（`ENTRY_FILE=index.html`） | 永不 — PHP 仅对精确的 `.php` 文件运行，无 PATH_INFO | — |
+
+`SCRIPT_NAME` 始终标识实际执行的脚本（相对于文档根的已解析文件），因此在正常路由下 `PATH_INFO` 仅在 `SCRIPT_NAME` 是请求路径的字面前缀时才存在。当请求被重写到 URL 中未指定的前端控制器（应用路由、目录索引、静态未命中回退）时，`PATH_INFO` 不存在，原始路径保留在 `REQUEST_URI` 中。（`PHP_DENY_DIRS` 回退是有意的例外：它将原始的规范化 URI 设置为 `PATH_INFO`，以便回退脚本据此路由。）
 
 #### Traditional 模式示例
 
@@ -138,14 +140,14 @@ OxPHP 从左到右扫描 URI，查找第一个对应磁盘上实际文件的 `.p
 
 #### Framework 模式示例
 
-每个非静态请求都会被重写到 `index.php`，`PATH_INFO` 携带原始 URI。您的前端控制器读取 `PATH_INFO` 来分发路由。
+每个非静态请求都会被重写到 `index.php`。`PATH_INFO` 仅在请求显式指定入口文件并带有尾部段时才设置；对于应用路由，原始路径从 `REQUEST_URI` 读取。
 
 | 请求 URI | `SCRIPT_NAME` | `PATH_INFO` |
 |---|---|---|
-| `/api/users` | `/index.php` | `/api/users` |
-| `/about.php` | `/index.php` | `/about.php` |
-| `/api.php/v1/users` | `/index.php` | `/api.php/v1/users` |
-| `/` | `/index.php` | `/` |
+| `/api/users` | `/index.php` | *（不存在）* |
+| `/about.php` | `/index.php` | *（不存在）* |
+| `/index.php/news/local` | `/index.php` | `/news/local` |
+| `/index.php` | `/index.php` | *（不存在）* |
 
 > **注意：** `PATH_TRANSLATED` 不会被填充。它在实践中很少使用，nginx 和 PHP-FPM 默认也不设置此变量。
 

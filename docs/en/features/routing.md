@@ -79,7 +79,8 @@ location / {
     rewrite ^ /index.php last;    # everything else → front controller
 }
 location = /index.php {
-    fastcgi_param PATH_INFO $request_uri;
+    fastcgi_split_path_info ^(.+\.php)(/.*)$;
+    fastcgi_param PATH_INFO $fastcgi_path_info;
     fastcgi_pass ...;
 }
 ```
@@ -88,23 +89,25 @@ location = /index.php {
 
 | URI kind | Behavior |
 |---|---|
-| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise rewrite to `/index.php` with `PATH_INFO` set to the original URI |
-| `.php` (any path) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
-| no extension (`/api/users`, `/`) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
+| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise rewrite to `/index.php` |
+| `.php` (any path) | Rewrite to `/index.php` |
+| no extension (`/api/users`, `/`) | Rewrite to `/index.php` |
+
+`PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/extra`); for application routes the original path is read from `REQUEST_URI`.
 
 **Examples:**
 
 | Request | Result | `$_SERVER['PATH_INFO']` |
 |---|---|---|
 | `/style.css` (exists) | Serve `style.css` | — |
-| `/style.css` (missing) | Execute `index.php` | `/style.css` |
-| `/api/users` | Execute `index.php` | `/api/users` |
-| `/about.php` | Execute `index.php` | `/about.php` |
-| `/api.php/v1/users` | Execute `index.php` | `/api.php/v1/users` |
-| `/index.php` (direct) | Execute `index.php` | `/index.php` |
-| `/` | Execute `index.php` | `/` |
+| `/style.css` (missing) | Execute `index.php` | *(absent)* |
+| `/api/users` | Execute `index.php` | *(absent)* |
+| `/about.php` | Execute `index.php` | *(absent)* |
+| `/index.php/news/local` | Execute `index.php` | `/news/local` |
+| `/index.php` (direct) | Execute `index.php` | *(absent)* |
+| `/` | Execute `index.php` | *(absent)* |
 
-The front controller always receives the **original URI** in `PATH_INFO`, letting your router decide what to do without inspecting `REQUEST_URI` separately. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
+For application routes the original path is exposed via `REQUEST_URI`, so your router reads `$_SERVER['REQUEST_URI']` to dispatch. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
 
 A missing static asset falls back to the front controller rather than returning a fast 404 — the same `try_files $uri /index.php` behavior Laravel and Symfony ship by default, so your application renders its own 404 for missing assets. The trade-off is that every request to a non-existent asset now runs PHP; if the front controller still has nothing to serve (`/index.php` itself absent), the request returns a hard 404.
 
@@ -172,10 +175,10 @@ See [Worker Mode](worker-mode.md) for full configuration details.
 | Mode | When set | Value |
 |---|---|---|
 | Traditional | Only when the URI contains `.php/` (PATH_INFO split) | Tail after the script segment, e.g. `/users/42` |
-| Framework | **Always** | Full original URI, e.g. `/api/users` |
+| Framework | Only for an explicit `/index.php/extra` request | Tail after the entry file, e.g. `/news` |
 | SPA | Never | (PHP is only invoked for exact `.php` files; no PATH_INFO) |
 
-In Traditional mode, splitting is always on — the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed. If you want PATH_INFO routing, use Traditional mode and place a `.php` script as the prefix.
+`PATH_INFO` follows CGI semantics: it is present only when `SCRIPT_NAME` (the executed script) is a literal prefix of the request path. A front-controller rewrite that the URL does not name — an application route, a directory index, a static-miss fallback — carries no `PATH_INFO`; read `REQUEST_URI` instead. In Traditional mode the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed.
 
 ## Path Security
 
@@ -206,11 +209,11 @@ This is intentional in SPA mode: a missing `/style.css` is a hard 404, not a sil
 
 ### Direct `/index.php` no longer returns 404
 
-In Framework mode, direct access to the front controller is now allowed (the rewrite to `/index.php` is idempotent). If you previously relied on the 404 to detect direct hits, switch to checking `PATH_INFO` from inside the controller.
+In Framework mode, direct access to the front controller is now allowed (the rewrite to `/index.php` is idempotent). If you previously relied on the 404 to detect direct hits, switch to checking `REQUEST_URI` from inside the controller.
 
 ### `PATH_INFO` is empty in Framework mode
 
-Make sure `ENTRY_FILE` ends in `.php`. If it doesn't, OxPHP picks SPA mode, which doesn't populate `PATH_INFO`. The variable is now set unconditionally in Framework mode — you no longer need any feature flag.
+This is expected for application routes. Framework mode follows CGI semantics: `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`). For a normal app route like `/users/42`, the front controller is reached by an internal rewrite it does not name, so `PATH_INFO` is absent — read the path from `$_SERVER['REQUEST_URI']`. (If `ENTRY_FILE` does not end in `.php`, OxPHP picks SPA mode, which never populates `PATH_INFO`.)
 
 ### Symlink inside document root returns 404
 

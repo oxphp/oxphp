@@ -526,8 +526,7 @@ pub fn set_request_data(req: &ScriptRequest) {
             };
             push_server_var(vars, "SERVER_PROTOCOL", protocol);
 
-            // SCRIPT_NAME, PHP_SELF, PATH_INFO
-            let uri_path = req.uri.path();
+            // SCRIPT_NAME, PHP_SELF, PATH_INFO, DOCUMENT_URI
             if let Some(meta) = &req.denied_meta {
                 // Deny-fallback: a different script runs than the URI requested.
                 // SCRIPT_NAME must identify the fallback script (CGI contract),
@@ -563,17 +562,56 @@ pub fn set_request_data(req: &ScriptRequest) {
                 push_server_var(vars, "PATH_INFO", &original_path);
                 push_server_var(vars, "OXPHP_DENIED_PATH", &original_path);
                 push_server_var(vars, "OXPHP_DENIED_PATTERN", &meta.pattern);
-            } else if let Some(ref path_info) = req.path_info {
-                // With PATH_INFO splitting: SCRIPT_NAME = URI minus PATH_INFO suffix
-                let script_name = &uri_path[..uri_path.len() - path_info.len()];
-                push_server_var(vars, "SCRIPT_NAME", script_name);
-                push_server_var(vars, "PHP_SELF", uri_path);
-                push_server_var(vars, "DOCUMENT_URI", script_name);
-                push_server_var(vars, "PATH_INFO", path_info);
             } else {
-                push_server_var(vars, "SCRIPT_NAME", uri_path);
-                push_server_var(vars, "PHP_SELF", uri_path);
-                push_server_var(vars, "DOCUMENT_URI", uri_path);
+                // SCRIPT_NAME is the resolved script path relative to the
+                // document root — both decoded, since `script_path` is built by
+                // joining the *decoded* sanitized URI onto `document_root`. The
+                // old code subtracted the decoded PATH_INFO length from the raw
+                // percent-encoded URI, which produced an empty SCRIPT_NAME in
+                // Framework mode and mis-sliced under percent-encoding.
+                let script_name = req
+                    .script_path
+                    .strip_prefix(&*req.document_root)
+                    .ok()
+                    .map(|rel| {
+                        let rel = rel.to_string_lossy();
+                        let mut s = String::with_capacity(rel.len() + 1);
+                        s.push('/');
+                        // On Unix the path separator is already `/`, so push the
+                        // borrowed slice directly — no extra scan/allocation on
+                        // the hot path. Only Windows needs separator translation.
+                        #[cfg(windows)]
+                        s.push_str(&rel.replace('\\', "/"));
+                        #[cfg(not(windows))]
+                        s.push_str(&rel);
+                        s
+                    })
+                    .unwrap_or_else(|| {
+                        // Worker script configured outside the document root —
+                        // fall back to its basename.
+                        let base = req
+                            .script_path
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let mut s = String::with_capacity(base.len() + 1);
+                        s.push('/');
+                        s.push_str(&base);
+                        s
+                    });
+
+                push_server_var(vars, "SCRIPT_NAME", &script_name);
+                push_server_var(vars, "DOCUMENT_URI", &script_name);
+
+                if let Some(ref path_info) = req.path_info {
+                    let mut php_self = String::with_capacity(script_name.len() + path_info.len());
+                    php_self.push_str(&script_name);
+                    php_self.push_str(path_info);
+                    push_server_var(vars, "PHP_SELF", &php_self);
+                    push_server_var(vars, "PATH_INFO", path_info);
+                } else {
+                    push_server_var(vars, "PHP_SELF", &script_name);
+                }
             }
 
             // SCRIPT_FILENAME: absolute filesystem path to the script

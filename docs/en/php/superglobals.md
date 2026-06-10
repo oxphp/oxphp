@@ -125,8 +125,10 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 | Routing mode | When set | Value |
 |---|---|---|
 | **Traditional** (`ENTRY_FILE` unset) | Only when the URI contains `.php/` and the script prefix exists on disk | Tail after the script segment |
-| **Framework** (`ENTRY_FILE=index.php`) | **Always** — every request is rewritten onto the front controller | Full original URI |
+| **Framework** (`ENTRY_FILE=index.php`) | Only when the request explicitly names the entry file with a trailing segment (`/index.php/extra`) | Tail after the entry file, e.g. `/news` |
 | **SPA** (`ENTRY_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
+
+`SCRIPT_NAME` always identifies the executed script (the resolved file relative to the document root), so in normal routing `PATH_INFO` is present only when `SCRIPT_NAME` is a literal prefix of the request path. When a request is rewritten to a front controller it does not name (an application route, a directory index, a static-miss fallback), `PATH_INFO` is absent and the original path lives in `REQUEST_URI`. (The `PHP_DENY_DIRS` fallback is a deliberate exception: it sets `PATH_INFO` to the original sanitized URI so the fallback script can route on it.)
 
 #### Traditional mode examples
 
@@ -141,14 +143,14 @@ OxPHP scans the URI left-to-right for the first `.php` segment that corresponds 
 
 #### Framework mode examples
 
-Every non-static request is rewritten onto `index.php`, with `PATH_INFO` carrying the original URI. Your front controller reads `PATH_INFO` to dispatch routes.
+Every non-static request is rewritten onto `index.php`. `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment; for application routes the original path is read from `REQUEST_URI`.
 
 | Request URI | `SCRIPT_NAME` | `PATH_INFO` |
 |---|---|---|
-| `/api/users` | `/index.php` | `/api/users` |
-| `/about.php` | `/index.php` | `/about.php` |
-| `/api.php/v1/users` | `/index.php` | `/api.php/v1/users` |
-| `/` | `/index.php` | `/` |
+| `/api/users` | `/index.php` | *(absent)* |
+| `/about.php` | `/index.php` | *(absent)* |
+| `/index.php/news/local` | `/index.php` | `/news/local` |
+| `/index.php` | `/index.php` | *(absent)* |
 
 > **Note:** `PATH_TRANSLATED` is not populated. It is rarely used in practice and is not set by nginx or PHP-FPM by default.
 
