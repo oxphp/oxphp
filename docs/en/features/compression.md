@@ -63,6 +63,7 @@ Responses are sent without compression when any of the following conditions are 
 - The response already has a `Content-Encoding` header (e.g. pre-compressed content)
 - The response body is smaller than 256 bytes or larger than 3 MB
 - The content type is not in the compressible list (e.g. `image/png`, `image/jpeg`, `font/woff2`, `application/zip` — these formats already use internal compression)
+- The response is streamed — its length is unknown when headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events). Compressing a stream would require buffering it entirely in memory, destroying time-to-first-byte, so streamed responses always pass through uncompressed
 
 ## Response Headers
 

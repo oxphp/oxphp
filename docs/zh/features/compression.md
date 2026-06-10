@@ -63,6 +63,7 @@ OxPHP 默认使用 Brotli 编码压缩 HTTP 响应。对于文本类内容类型
 - 响应已有 `Content-Encoding` 头（如预压缩内容）
 - 响应体小于 256 字节或大于 3 MB
 - 内容类型不在可压缩列表中（如 `image/png`、`image/jpeg`、`font/woff2`、`application/zip`——这些格式内部已使用压缩）
+- 响应为流式传输——发送响应头时长度未知（使用 `oxphp_stream_flush()` 的 PHP 脚本、Server-Sent Events）。压缩流式响应需要将其完全缓冲到内存中，会破坏首字节时间，因此流式响应始终不经压缩直接发送
 
 ## 响应头
 

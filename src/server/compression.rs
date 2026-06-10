@@ -58,11 +58,15 @@ pub async fn maybe_compress(
     // Split response and check body size hint before collecting
     let (parts, body) = response.into_parts();
 
-    // Use body size hint to skip collect when size is known upfront
-    if let Some(upper) = hyper::body::Body::size_hint(&body).upper() {
-        if !(MIN_COMPRESS_SIZE as u64..=MAX_COMPRESS_SIZE as u64).contains(&upper) {
-            return Response::from_parts(parts, body);
-        }
+    // Streaming bodies have no upper size bound: compressing one would mean
+    // buffering the entire stream in memory until it ends, destroying
+    // time-to-first-byte for flush()-style PHP responses. Pass them through.
+    // Buffered bodies (`Full`) always report an exact upper bound.
+    let Some(upper) = hyper::body::Body::size_hint(&body).upper() else {
+        return Response::from_parts(parts, body);
+    };
+    if !(MIN_COMPRESS_SIZE as u64..=MAX_COMPRESS_SIZE as u64).contains(&upper) {
+        return Response::from_parts(parts, body);
     }
 
     let body_bytes = match body.collect().await {
@@ -314,6 +318,52 @@ mod tests {
             result.headers().get(header::CONTENT_ENCODING).unwrap(),
             "gzip"
         );
+    }
+
+    #[tokio::test]
+    async fn test_skip_streaming_body() {
+        // Streaming bodies (unknown upper size hint) must never be compressed —
+        // compressing would require buffering the whole stream.
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(Bytes::from("x".repeat(500))).await.unwrap();
+        drop(tx);
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .body(crate::types::stream_body(Bytes::new(), rx))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        let collected = result.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_streaming_body_not_buffered() {
+        // The sender stays open: if maybe_compress buffered the stream it
+        // would await channel close and never return within the timeout.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .body(crate::types::stream_body(Bytes::from_static(b"first"), rx))
+            .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            maybe_compress(response, 4),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "maybe_compress buffered a live stream instead of passing it through"
+        );
+        drop(tx);
     }
 
     #[tokio::test]
