@@ -243,7 +243,11 @@ pub async fn handle_request(
     };
 
     // ── ResponseBuilding event ──
-    // Handlers: TraceContextResponseHandler (-95), ErrorPagesHandler (60), ServerHeaderHandler (100)
+    // Handlers: TraceContextResponseHandler (-95), ErrorPagesHandler (60),
+    // ServerHeaderHandler (100), SecurityHeadersHandler (100).
+    // ErrorPagesHandler must run before SecurityHeadersHandler: a custom error
+    // page replaces the response (dropping app headers), and the security
+    // fallbacks are re-applied only because they run later.
     let mut building_event = ResponseBuilding {
         request_id, // move in (handlers only read &str)
         response,
