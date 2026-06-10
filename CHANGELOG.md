@@ -2,6 +2,20 @@
 
 All notable changes to OxPHP are documented in this file.
 
+## [Unreleased]
+
+### Migration
+
+**`PATH_INFO` in Framework mode no longer mirrors the full request URI.** In a `ENTRY_FILE=*.php` (front-controller) setup, `$_SERVER['PATH_INFO']` previously carried the entire original path for every request (`/users/42` → `PATH_INFO=/users/42`). It now follows CGI semantics: it is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`); a bare application route carries no `PATH_INFO`. Front controllers that routed on `PATH_INFO` should read `$_SERVER['REQUEST_URI']` instead. For the same reason, `$_SERVER['PHP_SELF']` on an application route now reports the front controller (`/index.php`) rather than the full request path (`/users/42`) — apps that built form actions or routed on `PHP_SELF` should also switch to `REQUEST_URI`. This matches nginx + PHP-FPM. Conversely, classic `/index.php/route` applications (which expect the tail *after* `index.php`) now receive the correct value.
+
+### Changed
+
+- In Framework mode, `$_SERVER['PATH_INFO']` is set only for an explicit `/index.php/extra` request (honest CGI path-info), not for every request. Application routes are exposed through `REQUEST_URI`; `SCRIPT_NAME` always identifies the executed front controller.
+
+### Fixed
+
+- `$_SERVER['SCRIPT_NAME']` (and `DOCUMENT_URI` / `PHP_SELF`) are now correct in all routing modes. They are derived from the resolved script path relative to the document root instead of by subtracting the decoded `PATH_INFO` length from the raw percent-encoded URI. The old computation produced an **empty** `SCRIPT_NAME` in Framework mode and a mis-sliced one when the path contained percent-encoded characters (`/a.php/u%20ser` yielded `/a.php/u` rather than `/a.php`). `PATH_INFO` is likewise percent-decoded, consistent with PHP-FPM.
+
 ## [0.7.0] - 2026-06-05
 
 ### Migration from 0.6.0

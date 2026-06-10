@@ -69,10 +69,12 @@ pub struct ScriptRequest {
     pub is_tls: bool,
     /// HTTP version of the request (e.g., HTTP/1.0, HTTP/1.1, HTTP/2).
     pub version: Version,
-    /// Extra path after the script component. In Traditional mode this is the
-    /// segment after a `.php` prefix (e.g. `/user/42` for `/app.php/user/42`).
-    /// In Framework mode this is the full original URI rewritten onto the
-    /// front controller.
+    /// Extra path after the script component (CGI `PATH_INFO`). In Traditional
+    /// mode this is the segment after a `.php` prefix (e.g. `/user/42` for
+    /// `/app.php/user/42`). In Framework mode it is set only when the request
+    /// explicitly names the entry file with a trailing segment (`/index.php/news`
+    /// → `/news`); an application route carries `None` and exposes the path via
+    /// `REQUEST_URI`.
     pub path_info: Option<String>,
     /// Original protocol from trusted proxy (e.g. "https").
     /// Set from `Forwarded: proto=` or `X-Forwarded-Proto` header.

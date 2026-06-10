@@ -8,7 +8,10 @@ use super::{ResolveCtx, RouteResult};
 /// ```nginx
 /// location ~ \.(?!php$)[a-zA-Z0-9]+$ { try_files $uri /index.php; }
 /// location / { rewrite ^ /index.php last; }
-/// location = /index.php { fastcgi_param PATH_INFO $request_uri; ... }
+/// location = /index.php {
+///     fastcgi_split_path_info ^(.+\.php)(/.*)$;
+///     fastcgi_param PATH_INFO $fastcgi_path_info; ...
+/// }
 /// ```
 ///
 /// Semantics:
@@ -17,10 +20,16 @@ use super::{ResolveCtx, RouteResult};
 ///   `UriKind::OtherExtension`); on a miss it falls back to the front
 ///   controller, matching the canonical `try_files $uri /index.php` config.
 /// - Everything else (no extension, `.php`, or `.php/extra`) → rewrites to
-///   `/index.php` with `PATH_INFO` set to the original URI.
+///   `/index.php`. `PATH_INFO` is set only when the request explicitly names
+///   the entry file with a trailing segment (`/index.php/extra` → `/extra`);
+///   for app routes the original path is exposed via `REQUEST_URI`.
 pub(crate) struct FrameworkRouter {
     index_file_path: PathBuf,
     index_file_key: String,
+    /// Front-controller filename, e.g. `index.php` (no leading slash, matching
+    /// the leading-slash-free sanitized request path). Used to split honest CGI
+    /// PATH_INFO from an explicit `/index.php/extra` request.
+    entry_segment: String,
 }
 
 impl FrameworkRouter {
@@ -30,10 +39,12 @@ impl FrameworkRouter {
         Self {
             index_file_path,
             index_file_key,
+            entry_segment: index_file.to_string(),
         }
     }
 
-    /// Rewrite target: `Execute(index.php)` with PATH_INFO=`/` + sanitized.
+    /// Rewrite target: `Execute(index.php)`. PATH_INFO is set only for an
+    /// explicit `/index.php/extra` request (honest CGI split), else `None`.
     /// Falls back to `worker_route` when the front controller is missing on
     /// disk, otherwise returns `NotFound`. The file_cache probe is O(1) on
     /// cache hit — in Framework mode the same `index.php` is resolved on
@@ -48,18 +59,20 @@ impl FrameworkRouter {
             return RouteResult::NotFound;
         }
 
-        // PATH_INFO carries the original URI (with leading `/`). Empty sanitized
-        // means root — PATH_INFO is `/`.
-        let path_info = if sanitized.is_empty() {
-            String::from("/")
-        } else {
-            let mut s = String::with_capacity(sanitized.len() + 1);
-            s.push('/');
-            s.push_str(sanitized);
-            s
-        };
+        // Honest CGI PATH_INFO: set only when the entry file is explicitly
+        // addressed with a trailing segment (`/index.php/news` → `/news`).
+        // A bare app route (`/users/42`), the entry itself (`/index.php`), or a
+        // trailing slash (`/index.php/`, which `sanitize` collapses) carries no
+        // PATH_INFO — the original path lives in REQUEST_URI. `sanitized` has no
+        // leading slash, so match against the entry segment (the front-
+        // controller filename); the remainder must open a new `/` segment.
+        // This allocates only on a real match — the common case skips it.
+        let path_info = sanitized
+            .strip_prefix(self.entry_segment.as_str())
+            .filter(|rest| rest.starts_with('/'))
+            .map(str::to_string);
 
-        RouteResult::Execute(self.index_file_path.clone(), Some(path_info), None)
+        RouteResult::Execute(self.index_file_path.clone(), path_info, None)
     }
 }
 
@@ -77,9 +90,10 @@ impl FrameworkRouter {
     }
 
     /// Static-asset miss — fall back to the front controller instead of a hard
-    /// 404. The original URI (with its extension) becomes `PATH_INFO`, so the
-    /// application router sees the request and can render its own 404. Mirrors
-    /// the canonical `try_files $uri /index.php` front-controller config.
+    /// 404, so the application router sees the request and can render its own
+    /// 404. The original URI is read from `REQUEST_URI` (no `PATH_INFO`, since
+    /// the rewrite target is not named in the URL). Mirrors the canonical
+    /// `try_files $uri /index.php` front-controller config.
     pub(crate) async fn resolve_static_miss(
         &self,
         sanitized: &str,

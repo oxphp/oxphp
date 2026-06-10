@@ -4,3 +4,4 @@
 pathinfo/test_path_info_split >> /extra/path
 pathinfo/test_php_self_full >> /extra/path
 pathinfo/test_no_path_info
+pathinfo/test_pathinfo_encoded >> /u%20ser

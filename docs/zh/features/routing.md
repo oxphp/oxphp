@@ -79,7 +79,8 @@ location / {
     rewrite ^ /index.php last;    # 其他一切 → 前端控制器
 }
 location = /index.php {
-    fastcgi_param PATH_INFO $request_uri;
+    fastcgi_split_path_info ^(.+\.php)(/.*)$;
+    fastcgi_param PATH_INFO $fastcgi_path_info;
     fastcgi_pass ...;
 }
 ```
@@ -88,23 +89,25 @@ location = /index.php {
 
 | URI 类型 | 行为 |
 |---|---|
-| `.css`、`.png`、`.js`……（任何非 php 扩展） | 文件存在则提供，否则重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
-| `.php`（任何路径） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
-| 无扩展名（`/api/users`、`/`） | 重写到 `/index.php`，`PATH_INFO` 设置为原始 URI |
+| `.css`、`.png`、`.js`……（任何非 php 扩展） | 文件存在则提供，否则重写到 `/index.php` |
+| `.php`（任何路径） | 重写到 `/index.php` |
+| 无扩展名（`/api/users`、`/`） | 重写到 `/index.php` |
+
+`PATH_INFO` 仅在请求显式指定入口文件并带有尾部段时才设置（`/index.php/extra`）；对于应用路由，原始路径从 `REQUEST_URI` 读取。
 
 **示例：**
 
 | 请求 | 结果 | `$_SERVER['PATH_INFO']` |
 |---|---|---|
 | `/style.css`（存在） | 提供 `style.css` | — |
-| `/style.css`（不存在） | 执行 `index.php` | `/style.css` |
-| `/api/users` | 执行 `index.php` | `/api/users` |
-| `/about.php` | 执行 `index.php` | `/about.php` |
-| `/api.php/v1/users` | 执行 `index.php` | `/api.php/v1/users` |
-| `/index.php`（直接） | 执行 `index.php` | `/index.php` |
-| `/` | 执行 `index.php` | `/` |
+| `/style.css`（不存在） | 执行 `index.php` | *（不存在）* |
+| `/api/users` | 执行 `index.php` | *（不存在）* |
+| `/about.php` | 执行 `index.php` | *（不存在）* |
+| `/index.php/news/local` | 执行 `index.php` | `/news/local` |
+| `/index.php`（直接） | 执行 `index.php` | *（不存在）* |
+| `/` | 执行 `index.php` | *（不存在）* |
 
-前端控制器始终在 `PATH_INFO` 中收到**原始 URI**，您的路由器无需单独检查 `REQUEST_URI` 即可决定如何处理。直接访问 `/index.php` 不再被阻止——重写到 `/index.php` 是幂等的，因此直接访问与访问 `/` 的结果相同。
+对于应用路由，原始路径通过 `REQUEST_URI` 暴露，因此您的路由器读取 `$_SERVER['REQUEST_URI']` 来分发。直接访问 `/index.php` 不再被阻止——重写到 `/index.php` 是幂等的，因此直接访问与访问 `/` 的结果相同。
 
 缺失的静态资源会回退到前端控制器，而不是返回快速 404——这与 Laravel 和 Symfony 默认的 `try_files $uri /index.php` 行为一致，因此由您的应用自行为缺失资源渲染 404。代价是每个对不存在资源的请求现在都会运行 PHP；如果前端控制器本身也无内容可提供（`/index.php` 缺失），请求将返回硬 404。
 
@@ -172,10 +175,10 @@ location / {
 | 模式 | 何时设置 | 值 |
 |---|---|---|
 | Traditional | 仅当 URI 包含 `.php/`（PATH_INFO 拆分）时 | 脚本段之后的尾部，例如 `/users/42` |
-| Framework | **始终** | 完整的原始 URI，例如 `/api/users` |
+| Framework | 仅对显式的 `/index.php/extra` 请求 | 入口文件之后的尾部，例如 `/news` |
 | SPA | 永不 | （PHP 仅对精确的 `.php` 文件调用；无 PATH_INFO） |
 
-在 Traditional 模式下，拆分始终启用——之前的 `SPLIT_PATH_INFO_ENABLED` 环境变量已被移除。如果您需要基于 PATH_INFO 的路由，请使用 Traditional 模式并将 `.php` 脚本作为前缀。
+`PATH_INFO` 遵循 CGI 语义：仅当 `SCRIPT_NAME`（执行的脚本）是请求路径的字面前缀时才存在。重写到 URL 中未指定的前端控制器——应用路由、目录索引、静态未命中回退——不携带 `PATH_INFO`；请读取 `REQUEST_URI`。在 Traditional 模式下，`SPLIT_PATH_INFO_ENABLED` 环境变量已被移除。
 
 ## 路径安全
 
@@ -206,11 +209,11 @@ docker exec <container> ls /var/www/html/public
 
 ### 直接访问 `/index.php` 不再返回 404
 
-在 Framework 模式下，现在允许直接访问前端控制器（重写到 `/index.php` 是幂等的）。如果您之前依赖 404 来检测直接命中，请改为在控制器内部检查 `PATH_INFO`。
+在 Framework 模式下，现在允许直接访问前端控制器（重写到 `/index.php` 是幂等的）。如果您之前依赖 404 来检测直接命中，请改为在控制器内部检查 `REQUEST_URI`。
 
 ### Framework 模式下 `PATH_INFO` 为空
 
-确保 `ENTRY_FILE` 以 `.php` 结尾。否则 OxPHP 会选择 SPA 模式，而 SPA 模式不填充 `PATH_INFO`。在 Framework 模式下，该变量现在无条件设置 —— 不再需要任何功能开关。
+对于应用路由这是预期行为。Framework 模式遵循 CGI 语义：`PATH_INFO` 仅在请求显式指定入口文件并带有尾部段时设置（`/index.php/news` → `/news`）。对于像 `/users/42` 这样的普通应用路由，前端控制器通过 URL 中未指定的内部重写到达，因此 `PATH_INFO` 不存在 —— 请从 `$_SERVER['REQUEST_URI']` 读取路径。（如果 `ENTRY_FILE` 不以 `.php` 结尾，OxPHP 会选择 SPA 模式，它根本不填充 `PATH_INFO`。）
 
 ### 文档根目录内的符号链接返回 404
 
