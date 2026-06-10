@@ -51,8 +51,7 @@ location ~ \.php$ {
 3. **PATH_INFO 拆分** — 当 URI 包含 `.php/` 时，匹配磁盘上的脚本前缀，剩余部分成为 `PATH_INFO`（例如 `/api.php/users/42` → 脚本 `api.php`，`PATH_INFO=/users/42`）
 4. **`/index.php`** — 根前端控制器回退
 5. **`/index.html`** — 根静态索引回退
-6. **Worker 回退** — 如果 `WORKER_MODE_ENABLED=true`，分发到 Worker 的 `ENTRY_FILE`
-7. **404**
+6. **404**
 
 **示例：**
 
@@ -152,14 +151,20 @@ location / {
 - **无扩展名路径不访问磁盘** — SPA 模式从不询问"`/dashboard` 在磁盘上是否存在？"它始终返回索引。这对于客户端路由器是正确的，并避免了不必要的 `stat()` 调用。
 - **缺失的静态文件是硬 404，而非回退** — 缺失的 `/style.css` 不会静默地提供 `index.html`。这能在早期捕获损坏的资源引用，而不是在 JS 期望 CSS 的地方返回 HTML。
 
+由于 SPA 模式会直接执行磁盘上已存在的 `.php` 文件，[`PHP_DENY_PATHS`](../security/php-deny.md) 在此模式下生效——可用它阻止 `/uploads` 等可写目录中的脚本执行。
+
 ## Worker 模式
 
-当 `WORKER_MODE_ENABLED=true` 且 `ENTRY_FILE` 指向 `.php` 脚本时，Worker 模式生效。路由器以直接文件映射方式处理静态资源，所有未匹配的请求会分发到 Worker 的 `ENTRY_FILE`，而不是返回 404。
+当 `WORKER_MODE_ENABLED=true` 且 `ENTRY_FILE` 指向 `.php` 脚本时，Worker 模式生效。路由器从磁盘提供静态资源，其余所有请求都分发到 Worker 的 `ENTRY_FILE`——Worker 是唯一的前端控制器。
 
 | 步骤 | 行为 |
 |---|---|
-| 静态资源（`.css`、`.png`、…） | 若文件存在则直接从磁盘提供；缺失的文件会回退到 Worker 的 `ENTRY_FILE`（而非硬 404） |
-| 其他所有请求 | 分发到 Worker 的 `ENTRY_FILE` |
+| 静态资源（`.css`、`.png`、… —— 任何非 `.php` 扩展名） | 若文件存在则直接从磁盘提供；缺失的文件会回退到 Worker 的 `ENTRY_FILE`（而非硬 404） |
+| 其他所有请求（`.php` URI、无扩展名路径、`/`） | 分发到 Worker 的 `ENTRY_FILE` |
+
+在 Worker 模式下，`DOCUMENT_ROOT` 中的任意 `.php` 文件**从不被直接执行**——即使 `about.php` 存在于磁盘上，对 `/about.php` 的请求也会像其他路由一样到达 worker 回调。也不存在目录索引查找和根 `index.php` 回退；这些请求由 worker 自行处理。
+
+两个例外（均为在模式分发之前运行的服务器级防御）：点段路径（`/.git/config`、`/.env`、裸 `/.well-known`）被[点路径拦截](../security/dot-path-blocking.md)拒绝；`/.well-known/` 下的 `.php` URI 作为纵深防御被拒绝。两者都返回 404，永远不会到达 worker。
 
 启动时校验拒绝两种组合：
 

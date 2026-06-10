@@ -12,6 +12,7 @@ use crate::server::response::static_file::FileCache;
 mod framework;
 mod spa;
 mod traditional;
+mod worker;
 
 #[cfg(test)]
 mod tests;
@@ -19,6 +20,7 @@ mod tests;
 use framework::FrameworkRouter;
 use spa::SpaRouter;
 use traditional::TraditionalRouter;
+use worker::WorkerRouter;
 
 /// Routing mode dispatch. An enum rather than `Box<dyn ModeRouter>` so
 /// each call site becomes a static `match` that rustc can inline, and
@@ -28,6 +30,7 @@ pub(crate) enum Mode {
     Traditional(TraditionalRouter),
     Framework(FrameworkRouter),
     Spa(SpaRouter),
+    Worker(WorkerRouter),
 }
 
 impl Mode {
@@ -36,6 +39,7 @@ impl Mode {
             Mode::Traditional(r) => r.resolve_no_extension(sanitized, ctx).await,
             Mode::Framework(r) => r.resolve_no_extension(sanitized, ctx).await,
             Mode::Spa(r) => r.resolve_no_extension(ctx).await,
+            Mode::Worker(r) => r.resolve_no_extension(ctx).await,
         }
     }
 
@@ -44,6 +48,7 @@ impl Mode {
             Mode::Traditional(r) => r.resolve_php(sanitized, ctx).await,
             Mode::Framework(r) => r.resolve_php(sanitized, ctx).await,
             Mode::Spa(r) => r.resolve_php(sanitized, ctx).await,
+            Mode::Worker(r) => r.resolve_php(ctx).await,
         }
     }
 
@@ -52,6 +57,17 @@ impl Mode {
             Mode::Traditional(r) => r.resolve_static_miss(ctx).await,
             Mode::Framework(r) => r.resolve_static_miss(sanitized, ctx).await,
             Mode::Spa(_) => RouteResult::NotFound,
+            Mode::Worker(r) => r.resolve_static_miss(ctx).await,
+        }
+    }
+
+    /// Mode kind for config decisions (`PhpDeny::from_env` gating).
+    fn kind(&self) -> crate::config::RoutingModeKind {
+        match self {
+            Mode::Traditional(_) => crate::config::RoutingModeKind::Traditional,
+            Mode::Framework(_) => crate::config::RoutingModeKind::Framework,
+            Mode::Spa(_) => crate::config::RoutingModeKind::Spa,
+            Mode::Worker(_) => crate::config::RoutingModeKind::Worker,
         }
     }
 }
@@ -102,8 +118,8 @@ pub(crate) enum UriKind {
 pub(crate) struct ResolveCtx<'a> {
     pub document_root: &'a Path,
     pub file_cache: &'a Arc<FileCache>,
+    /// Worker entry dispatch target — consumed by `WorkerRouter` only.
     pub worker_route: Option<&'a RouteResult>,
-    pub php_deny: Option<&'a crate::config::PhpDeny>,
 }
 
 /// Routing configuration with mode dispatch and caching layers.
@@ -130,8 +146,9 @@ impl RouteConfig {
     /// Create route config.
     ///
     /// Router selection is driven by `(worker_mode_enabled, entry_file extension)`:
-    /// - worker mode → `TraditionalRouter`; the worker route fallback (set later
-    ///   via [`set_worker_route`]) catches every unmatched request,
+    /// - worker mode → `WorkerRouter`; static assets are served from disk,
+    ///   every other request is dispatched to the worker entry (set later
+    ///   via [`set_worker_route`]),
     /// - non-worker mode + `*.php` entry → `FrameworkRouter` (front controller),
     /// - non-worker mode + non-`.php` entry → `SpaRouter` (static fallback),
     /// - non-worker mode + no entry → `TraditionalRouter` (direct file mapping).
@@ -155,7 +172,7 @@ impl RouteConfig {
         let document_root = Arc::new(config.document_root.clone());
 
         let mode = if worker_mode_enabled {
-            Mode::Traditional(TraditionalRouter::new(&document_root))
+            Mode::Worker(WorkerRouter)
         } else {
             match entry_file.and_then(|p| {
                 let ext = p.extension().and_then(|s| s.to_str())?;
@@ -170,7 +187,7 @@ impl RouteConfig {
             }
         };
 
-        let php_deny = crate::config::PhpDeny::from_env(&canonical_root, entry_file)
+        let php_deny = crate::config::PhpDeny::from_env(&canonical_root, mode.kind())
             .unwrap_or_else(|e| {
                 panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
             });
@@ -208,10 +225,42 @@ impl RouteConfig {
         Arc::clone(&self.document_root)
     }
 
-    /// Set the worker entry script for worker-mode routing. When set, all
-    /// unmatched requests fall back to this PHP file before returning NotFound.
+    /// Set the worker entry script for worker-mode routing. When set, every
+    /// request that does not resolve to a static file is dispatched to this
+    /// PHP file.
     pub fn set_worker_route(&mut self, path: PathBuf) {
         self.worker_route = Some(RouteResult::Execute(path, None, None));
+    }
+
+    /// Apply `PHP_DENY_PATHS` to a candidate path and build the deny route on
+    /// a match. `candidate` is what the globs run against — the sanitized URI
+    /// on the pre-dispatch screen, or the resolved script path relative to
+    /// the document root on the post-dispatch screen. `original_uri` is the
+    /// sanitized request URI, preserved in `DeniedMeta` for `$_SERVER`.
+    fn deny_check(&self, candidate: &str, original_uri: &str) -> Option<RouteResult> {
+        let deny = self.php_deny.as_ref()?;
+        let pattern = deny.matches(candidate)?;
+        tracing::info!(
+            path = %original_uri,
+            matched = %candidate,
+            pattern = %pattern,
+            "PHP execution denied by PHP_DENY_PATHS"
+        );
+        Some(match deny.fallback() {
+            crate::config::DenyFallback::Status(code) => RouteResult::Denied(*code),
+            crate::config::DenyFallback::Script { path, uri } => RouteResult::Execute(
+                path.clone(),
+                // path_info=None: SAPI reads the original URI from
+                // `denied_meta.path` instead — avoids a duplicate
+                // String allocation on the fallback path.
+                None,
+                Some(Arc::new(crate::config::DeniedMeta {
+                    path: original_uri.to_string(),
+                    pattern: pattern.to_string(),
+                    fallback_script_uri: uri.clone(),
+                })),
+            ),
+        })
     }
 
     /// Resolve a URI path to a route result using the file cache.
@@ -282,15 +331,20 @@ impl RouteConfig {
             document_root: &self.document_root,
             file_cache,
             worker_route: self.worker_route.as_ref(),
-            php_deny: self.php_deny.as_ref(),
         };
 
         let result = match classify_uri_with_php(sanitized, has_php) {
             UriKind::NoExtension => self.mode.resolve_no_extension(sanitized, &ctx).await,
-            UriKind::Php => self.mode.resolve_php(sanitized, &ctx).await,
+            // PHP_DENY_PATHS screen runs *before* disk I/O so denied paths
+            // produce the same response whether the file exists or not
+            // (no existence oracle).
+            UriKind::Php => match self.deny_check(sanitized, sanitized) {
+                Some(denied) => denied,
+                None => self.mode.resolve_php(sanitized, &ctx).await,
+            },
             UriKind::OtherExtension => {
                 // Common disk check for non-.php extensions — done once here,
-                // shared across all three modes via file_cache.
+                // shared across all modes via file_cache.
                 let candidate = self.document_root.join(sanitized);
                 if file_cache.is_file(&candidate.to_string_lossy()).await {
                     RouteResult::Serve(candidate)
@@ -298,6 +352,31 @@ impl RouteConfig {
                     self.mode.resolve_static_miss(sanitized, &ctx).await
                 }
             }
+        };
+
+        // Post-dispatch deny screen: a router may resolve a URI to a PHP
+        // script the URI-based pre-dispatch screen cannot see — directory
+        // index (`/uploads/` → `uploads/index.php`), root fallback, or a
+        // PATH_INFO split whose script part matches where the full URI did
+        // not. Re-match the resolved script path relative to the document
+        // root. Deny-fallback executions (`denied_meta` set) are exempt: the
+        // fallback script is validated against the patterns at startup. The
+        // worker entry is never denied — in worker mode `php_deny` is `None`
+        // by construction. The `is_some()` guard keeps the hot path free of
+        // the strip_prefix + UTF-8 walk when the feature is disabled.
+        let result = match &result {
+            RouteResult::Execute(path, _, None) if self.php_deny.is_some() => {
+                match path.strip_prefix(&**self.document_root) {
+                    Ok(rel) => match self.deny_check(&rel.to_string_lossy(), sanitized) {
+                        Some(denied) => denied,
+                        None => result,
+                    },
+                    // Outside DOCUMENT_ROOT (worker entry layout) — patterns
+                    // are root-relative and cannot apply.
+                    Err(_) => result,
+                }
+            }
+            _ => result,
         };
 
         // Symlink-escape protection: the resolved path must live inside

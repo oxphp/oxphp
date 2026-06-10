@@ -6,15 +6,20 @@ All notable changes to OxPHP are documented in this file.
 
 ### Migration
 
+**Worker mode no longer executes `.php` files from the document root per-request.** Previously the worker-mode router ran the full Traditional resolution chain with the worker as the last fallback: an existing `/about.php` was executed per-request instead of reaching the worker, `/blog/` resolved to `blog/index.php`, and — most surprisingly — a root `index.php` in the document root absorbed every unmatched request so the worker never saw them. The router now matches the documented contract (and the FrankenPHP / RoadRunner worker model): static assets are served from disk, and *every* other request — `.php` URIs, extensionless paths, directory indexes, `/` — is dispatched to the worker `ENTRY_FILE`. Deployments that relied on mixing per-request `.php` scripts with a worker in one document root should either move those scripts behind the worker's router or serve them from a separate non-worker instance.
+
 **`PATH_INFO` in Framework mode no longer mirrors the full request URI.** In a `ENTRY_FILE=*.php` (front-controller) setup, `$_SERVER['PATH_INFO']` previously carried the entire original path for every request (`/users/42` → `PATH_INFO=/users/42`). It now follows CGI semantics: it is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`); a bare application route carries no `PATH_INFO`. Front controllers that routed on `PATH_INFO` should read `$_SERVER['REQUEST_URI']` instead. For the same reason, `$_SERVER['PHP_SELF']` on an application route now reports the front controller (`/index.php`) rather than the full request path (`/users/42`) — apps that built form actions or routed on `PHP_SELF` should also switch to `REQUEST_URI`. This matches nginx + PHP-FPM. Conversely, classic `/index.php/route` applications (which expect the tail *after* `index.php`) now receive the correct value.
 
 ### Changed
 
 - In Framework mode, `$_SERVER['PATH_INFO']` is set only for an explicit `/index.php/extra` request (honest CGI path-info), not for every request. Application routes are exposed through `REQUEST_URI`; `SCRIPT_NAME` always identifies the executed front controller.
+- Worker mode routing follows the documented "static or worker" contract: static assets are served from disk, everything else is dispatched to the worker `ENTRY_FILE`. Arbitrary `.php` files, directory indexes, and the root `index.php` fallback are no longer resolved per-request in worker mode (see Migration above).
+- `PHP_DENY_PATHS` now applies in SPA mode. SPA executes existing `.php` files directly — the same uploaded-shell exposure as Traditional mode — but the deny-list was previously force-disabled whenever `ENTRY_FILE` was set. It remains ignored (with a startup warning) in Framework and Worker modes, where arbitrary `.php` files are never executed directly.
 
 ### Fixed
 
 - `$_SERVER['SCRIPT_NAME']` (and `DOCUMENT_URI` / `PHP_SELF`) are now correct in all routing modes. They are derived from the resolved script path relative to the document root instead of by subtracting the decoded `PATH_INFO` length from the raw percent-encoded URI. The old computation produced an **empty** `SCRIPT_NAME` in Framework mode and a mis-sliced one when the path contained percent-encoded characters (`/a.php/u%20ser` yielded `/a.php/u` rather than `/a.php`). `PATH_INFO` is likewise percent-decoded, consistent with PHP-FPM.
+- `PHP_DENY_PATHS` covers scripts reached through directory-index resolution. A request to `/uploads/` that resolved to `uploads/index.php` previously bypassed the deny-list entirely, because only the request URI was matched — the resolved script path is now re-checked after routing.
 
 ## [0.7.0] - 2026-06-05
 

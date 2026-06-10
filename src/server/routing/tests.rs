@@ -32,14 +32,23 @@ fn setup_test_dir() -> TempDir {
 /// while holding the lock themselves; calling this helper while already
 /// holding the lock would deadlock.
 fn make_config(dir: &Path, entry_file: Option<&str>) -> RouteConfig {
+    build_config_clean_env(dir, entry_file.map(|name| dir.join(name)), false)
+}
+
+/// Shared builder behind `make_config` / `make_worker_config`: constructs a
+/// `RouteConfig` with the env hygiene described above.
+fn build_config_clean_env(
+    dir: &Path,
+    entry_path: Option<std::path::PathBuf>,
+    worker_mode: bool,
+) -> RouteConfig {
     let _lock = crate::config::symlink_allow::tests::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
     std::env::remove_var("SYMLINK_ALLOW_PATHS");
     let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.to_path_buf());
-    let entry_path = entry_file.map(|name| dir.join(name));
-    let rc = RouteConfig::new(&config, entry_path.as_deref(), false);
+    let rc = RouteConfig::new(&config, entry_path.as_deref(), worker_mode);
     match prev {
         Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
         None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
@@ -610,6 +619,100 @@ async fn test_spa_php_with_path_info_hard_404_when_missing() {
     let cache = Arc::new(FileCache::new(200));
     let result = rc.resolve_request("/missing.php/foo", &cache).await;
     assert!(matches!(*result, RouteResult::NotFound));
+}
+
+// --- Worker mode ---
+
+/// Build a worker-mode `RouteConfig` with the worker entry wired up.
+/// Same `SYMLINK_ALLOW_PATHS` hygiene as `make_config`. The worker script
+/// must already exist under `dir`.
+fn make_worker_config(dir: &Path, worker_file: &str) -> RouteConfig {
+    let worker_path = dir.join(worker_file);
+    let mut rc = build_config_clean_env(dir, Some(worker_path.clone()), true);
+    rc.set_worker_route(worker_path);
+    rc
+}
+
+fn setup_worker_dir() -> TempDir {
+    let dir = setup_test_dir();
+    fs::write(dir.path().join("worker.php"), "<?php // worker bootstrap").unwrap();
+    dir
+}
+
+fn assert_worker_execute(result: &RouteResult) {
+    match result {
+        RouteResult::Execute(path, path_info, _) => {
+            assert!(path.ends_with("worker.php"), "got {path:?}");
+            assert_eq!(*path_info, None, "worker route must not carry PATH_INFO");
+        }
+        other => panic!("expected worker Execute, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_worker_existing_php_dispatches_to_worker() {
+    // about.php exists on disk, but worker mode never executes arbitrary
+    // .php files per-request — the worker is the single front controller.
+    let dir = setup_worker_dir();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/about.php", &cache).await;
+    assert_worker_execute(&result);
+}
+
+#[tokio::test]
+async fn test_worker_root_index_php_does_not_absorb() {
+    // Root index.php exists, yet `/` and unmatched routes still go to the
+    // worker — the Traditional root fallback must not absorb requests
+    // before the worker sees them.
+    let dir = setup_worker_dir();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    assert_worker_execute(&*rc.resolve_request("/", &cache).await);
+    assert_worker_execute(&*rc.resolve_request("/api/users", &cache).await);
+}
+
+#[tokio::test]
+async fn test_worker_directory_index_goes_to_worker() {
+    // `/blog/` with blog/index.php on disk → worker, not a per-request
+    // execution of the directory index.
+    let dir = setup_worker_dir();
+    fs::create_dir_all(dir.path().join("blog")).unwrap();
+    fs::write(dir.path().join("blog/index.php"), "<?php echo 'blog';").unwrap();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    assert_worker_execute(&*rc.resolve_request("/blog/", &cache).await);
+}
+
+#[tokio::test]
+async fn test_worker_static_file_served() {
+    let dir = setup_worker_dir();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/style.css", &cache).await;
+    match &*result {
+        RouteResult::Serve(path) => assert!(path.ends_with("style.css")),
+        other => panic!("expected Serve, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_worker_static_miss_goes_to_worker() {
+    // Missing assets fall through to the worker, not a hard 404.
+    let dir = setup_worker_dir();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    assert_worker_execute(&*rc.resolve_request("/missing.png", &cache).await);
+}
+
+#[tokio::test]
+async fn test_worker_php_path_info_goes_to_worker() {
+    // `.php/extra` URIs do not PATH_INFO-split in worker mode — straight
+    // to the worker, no per-request script resolution.
+    let dir = setup_worker_dir();
+    let rc = make_worker_config(dir.path(), "worker.php");
+    let cache = Arc::new(FileCache::new(200));
+    assert_worker_execute(&*rc.resolve_request("/about.php/v1/users", &cache).await);
 }
 
 // --- Security tests ---
@@ -1189,16 +1292,11 @@ async fn test_resolve_blocks_percent_encoded_dotfile_after_unicode() {
 
 #[tokio::test]
 async fn test_worker_mode_route_never_carries_path_info() {
-    // Worker mode routes every unmatched request to the persistent worker
+    // Worker mode routes every non-static request to the persistent worker
     // script via `set_worker_route`, which is hardcoded to `path_info = None`
     // (see RouteConfig::set_worker_route). A worker therefore never receives
     // `$_SERVER['PATH_INFO']` — not even the original URI — and must dispatch
     // on `REQUEST_URI`. This test pins that behaviour.
-    //
-    // The document root deliberately has no `index.php` / `index.html`, so
-    // `root_fallback` skips the directory-index probes and reaches the worker
-    // route. With an index present, an unmatched request would be absorbed by
-    // index.php before ever hitting the worker.
     let dir = TempDir::new().unwrap();
     let worker = dir.path().join("worker.php");
     fs::write(&worker, "<?php echo 'worker';").unwrap();
@@ -1264,6 +1362,15 @@ mod php_deny_integration {
         env: &[(&str, Option<&str>)],
         entry_file: Option<&str>,
     ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
+        setup_mode(dir_layout, env, entry_file, false)
+    }
+
+    fn setup_mode(
+        dir_layout: &[(&str, &[u8])],
+        env: &[(&str, Option<&str>)],
+        entry_file: Option<&str>,
+        worker_mode: bool,
+    ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
         // Hold the lock for the full setup so env mutations don't race other tests.
         // Guard is dropped on function exit — by then RouteConfig has captured
         // whatever PhpDeny it needed, so the env can be safely restored.
@@ -1295,7 +1402,10 @@ mod php_deny_integration {
         };
         let entry_path = entry_file.map(|name| dir.path().join(name));
         let cache = Arc::new(FileCache::new(1024));
-        let rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), false);
+        let mut rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), worker_mode);
+        if worker_mode {
+            rc.set_worker_route(entry_path.clone().expect("worker mode requires entry"));
+        }
 
         // Restore env so other tests aren't polluted.
         for (k, prev_val) in prev {
@@ -1389,6 +1499,147 @@ mod php_deny_integration {
                 assert_eq!(meta.fallback_script_uri, "/_security/denied.php");
             }
             other => panic!("expected Execute with DeniedMeta, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_path_info_split_caught_by_resolved_path_screen() {
+        // Single-star pattern: the full URI `uploads/shell.php/x` does NOT
+        // match `/uploads/*.php` (literal separator), so the pre-dispatch
+        // screen passes. The PATH_INFO split resolves the script part to
+        // `uploads/shell.php`, which the post-dispatch resolved-path screen
+        // must deny.
+        let (_dir, cache, rc) = setup(
+            &[("uploads/shell.php", b"<?php echo 'pwned';")],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/*.php")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/shell.php/x", &cache).await;
+        assert!(matches!(&*result, RouteResult::Denied(404)));
+    }
+
+    #[tokio::test]
+    async fn deny_spa_blocks_uploaded_php() {
+        // SPA mode maps .php URIs directly to disk — the deny-list applies.
+        let (_dir, cache, rc) = setup(
+            &[
+                ("index.html", b"<html></html>"),
+                ("uploads/shell.php", b"<?php echo 'pwned';"),
+            ],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            Some("index.html"),
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        assert!(matches!(&*result, RouteResult::Denied(404)));
+    }
+
+    #[tokio::test]
+    async fn deny_spa_leaves_other_php_alone() {
+        let (_dir, cache, rc) = setup(
+            &[
+                ("index.html", b"<html></html>"),
+                ("api.php", b"<?php echo 'api';"),
+            ],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            Some("index.html"),
+        );
+        let result = rc.resolve_request("/api.php", &cache).await;
+        match &*result {
+            RouteResult::Execute(path, _, None) => assert!(path.ends_with("api.php")),
+            other => panic!("expected Execute, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_directory_index_blocked() {
+        // `/uploads/` resolves to `uploads/index.php` via the directory-index
+        // lookup — a non-.php URI the pre-dispatch screen cannot see. The
+        // post-dispatch screen must catch the resolved script path.
+        let (_dir, cache, rc) = setup(
+            &[("uploads/index.php", b"<?php echo 'pwned';")],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/", &cache).await;
+        assert!(matches!(&*result, RouteResult::Denied(404)));
+    }
+
+    #[tokio::test]
+    async fn deny_directory_index_script_fallback_carries_meta() {
+        let (_dir, cache, rc) = setup(
+            &[
+                ("uploads/index.php", b"<?php echo 'pwned';"),
+                ("_security/denied.php", b"<?php http_response_code(404);"),
+            ],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", Some("/_security/denied.php")),
+            ],
+            None,
+        );
+        let result = rc.resolve_request("/uploads/", &cache).await;
+        match &*result {
+            RouteResult::Execute(_, _, Some(meta)) => {
+                // `meta.path` keeps the original request URI, not the
+                // resolved directory-index path.
+                assert_eq!(meta.path, "uploads");
+                assert_eq!(meta.pattern, "uploads/**");
+            }
+            other => panic!("expected Execute with DeniedMeta, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_framework_mode_ignored() {
+        // Framework mode: deny-list is disabled at startup; .php URIs route
+        // to the front controller as application routes.
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php echo 'app';")],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            Some("index.php"),
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        match &*result {
+            RouteResult::Execute(path, _, None) => assert!(path.ends_with("index.php")),
+            other => panic!("expected front-controller Execute, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_worker_mode_ignored() {
+        // Worker mode: deny-list is disabled at startup; .php URIs dispatch
+        // to the worker and are never executed directly anyway.
+        let (_dir, cache, rc) = setup_mode(
+            &[
+                ("worker.php", b"<?php // worker bootstrap"),
+                ("uploads/shell.php", b"<?php echo 'pwned';"),
+            ],
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", None),
+            ],
+            Some("worker.php"),
+            true,
+        );
+        let result = rc.resolve_request("/uploads/shell.php", &cache).await;
+        match &*result {
+            RouteResult::Execute(path, _, None) => assert!(path.ends_with("worker.php")),
+            other => panic!("expected worker Execute, got {other:?}"),
         }
     }
 }

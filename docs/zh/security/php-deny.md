@@ -11,14 +11,18 @@ description: 阻止在指定 URI 路径执行 PHP，加固遗留应用，防御�
 
 ## 适用范围
 
-仅适用于直接文件映射模式。一旦设置了 `ENTRY_FILE`（前端控制器、SPA 或 Worker 模式），所有请求都已经通过单一受信入口脚本路由——`DOCUMENT_ROOT` 中的任意 `.php` 文件都无法被直接调用，拒绝名单因而是冗余的。同时设置 `PHP_DENY_PATHS` 与 `ENTRY_FILE` 会在启动时输出 warning 并禁用该检查。
+适用于直接文件映射模式——即 URI 直接解析到磁盘上 `.php` 文件的模式：
 
 | 路由模式 | `PHP_DENY_PATHS` 是否生效 |
 |---|---|
 | Traditional（未设置 `ENTRY_FILE`） | 是 |
+| SPA（`ENTRY_FILE=index.html`） | 是 —— SPA 会直接执行磁盘上已存在的 `.php` 文件，因此拒绝名单适用 |
 | Framework（`ENTRY_FILE=index.php`） | 否 —— 警告并忽略 |
-| SPA（`ENTRY_FILE=index.html`） | 否 —— 警告并忽略 |
 | Worker（`WORKER_MODE_ENABLED=true`） | 否 —— 警告并忽略 |
+
+在 Framework 模式下，每个请求都被重写到前端控制器，任意 `.php` 文件从不被直接执行；拒绝名单只会破坏以 `.php` 结尾的应用路由。在 Worker 模式下，每个非静态请求都被分发到 worker 脚本，拒绝名单无可拒绝之物。在这两种模式下设置 `PHP_DENY_PATHS` 会在启动时输出 warning 并禁用该检查。
+
+拒绝名单也覆盖*间接*到达的脚本：当 `uploads/**` 在名单中时，对 `/uploads/` 的请求若经目录索引查找解析到 `uploads/index.php`，同样会被拒绝——模式匹配的对象包括解析后的脚本路径，而不仅是请求 URI。对于此类拒绝，`OXPHP_DENIED_PATH` 携带去除尾部斜杠的净化请求 URI（`/uploads/` 报告为 `/uploads`）。
 
 ## 配置
 
@@ -108,6 +112,8 @@ echo "Not Found";
 ## 无 existence oracle
 
 状态码和脚本两种 fallback 都不触碰文件系统返回。对 `/uploads/never-uploaded.php` 与 `/uploads/actually-on-disk.php` 的请求产生完全相同的响应——既无时间差异，也无主体差异。扫描上传 shell 的攻击者无法利用拒绝名单来枚举真实存在的文件名。
+
+解析路径检查是唯一的例外：它必须在路由解析之后运行，因此其拒绝依赖于文件是否存在。只有当 `uploads/index.php` 真实存在于磁盘上时，`/uploads/` 才会被拒绝；同样，对于 `/uploads/*.php` 这样的单星号模式，PATH_INFO 请求 `/uploads/shell.php/x` 只有在 `uploads/shell.php` 存在时才被拒绝（完整 URI 不匹配该模式——解析出的脚本才匹配）。攻击者用来探测的直接 URI 检查依然没有 existence oracle。
 
 ## 可观测性
 

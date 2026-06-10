@@ -51,8 +51,7 @@ location ~ \.php$ {
 3. **PATH_INFO split** — when the URI contains `.php/`, the script prefix is matched on disk and the remainder becomes `PATH_INFO` (e.g. `/api.php/users/42` → script `api.php`, `PATH_INFO=/users/42`)
 4. **`/index.php`** — root front-controller fallback
 5. **`/index.html`** — root static index fallback
-6. **Worker fallback** — if `WORKER_MODE_ENABLED=true`, dispatch to the worker `ENTRY_FILE`
-7. **404**
+6. **404**
 
 **Examples:**
 
@@ -152,14 +151,20 @@ Two semantics worth highlighting:
 - **No-extension paths skip the disk** — the SPA mode never asks "does `/dashboard` exist on disk?" It always returns the index. This is correct for client-side routers and avoids unnecessary `stat()` calls.
 - **Missing static files are hard 404, not fallthrough** — a missing `/style.css` does not silently serve `index.html`. This catches broken asset references early instead of returning HTML where JS expected CSS.
 
+Because SPA mode executes existing `.php` files directly, [`PHP_DENY_PATHS`](../security/php-deny.md) applies — use it to block execution inside writable directories such as `/uploads`.
+
 ## Worker Mode
 
-Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at a `.php` script. The router runs Traditional-style direct-mapping for static assets, then dispatches every unmatched request to the worker `ENTRY_FILE` instead of returning 404.
+Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at a `.php` script. The router serves static assets from disk and dispatches every other request to the worker `ENTRY_FILE` — the worker is the single front controller.
 
-| Step | Behavior |
+| URI kind | Behavior |
 |---|---|
-| Static assets (`.css`, `.png`, …) | Served directly from disk if present; a missing asset falls through to the worker `ENTRY_FILE` (not a hard 404) |
-| Anything else | Dispatched to the worker `ENTRY_FILE` |
+| Static assets (`.css`, `.png`, … — any non-`.php` extension) | Served directly from disk if present; a missing asset falls through to the worker `ENTRY_FILE` (not a hard 404) |
+| Anything else (`.php` URIs, extensionless paths, `/`) | Dispatched to the worker `ENTRY_FILE` |
+
+Arbitrary `.php` files in the document root are **never executed directly** in worker mode — a request to `/about.php` reaches the worker callback like any other route, even if `about.php` exists on disk. There is no directory-index lookup and no root `index.php` fallback either; the worker sees those requests itself.
+
+Two exceptions, both server-level defenses that run before mode dispatch: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth. Both return 404 and never reach the worker.
 
 Startup-time validation rejects two combinations:
 

@@ -38,9 +38,6 @@ impl SpaRouter {
         if ctx.file_cache.is_file(&self.index_file_key).await {
             return RouteResult::Serve(self.index_file_path.clone());
         }
-        if let Some(wr) = ctx.worker_route {
-            return wr.clone();
-        }
         RouteResult::NotFound
     }
 

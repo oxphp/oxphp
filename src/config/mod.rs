@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 #[allow(unused_imports)] // consumed by feature-gated plugins
 pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
-pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny};
+pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny, RoutingModeKind};
 pub use proxy::TrustedProxyConfig;
 pub use server::{H2Config, ServerConfig};
 pub use symlink_allow::SymlinkAllowList;

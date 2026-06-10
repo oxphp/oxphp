@@ -11,14 +11,18 @@ The check runs **before any disk I/O**, so denied paths return the same response
 
 ## When It Applies
 
-Direct file mapping mode only. With `ENTRY_FILE` set (front-controller, SPA, or worker mode), every request already routes through one trusted entry script — arbitrary `.php` files in the document root cannot be invoked directly, so the deny-list is redundant. Setting `PHP_DENY_PATHS` together with `ENTRY_FILE` emits a startup warning and disables the check.
+Direct-mapping modes — the modes where a URI resolves straight to a `.php` file on disk:
 
 | Routing mode | `PHP_DENY_PATHS` honored? |
 |---|---|
 | Traditional (no `ENTRY_FILE`) | Yes |
+| SPA (`ENTRY_FILE=index.html`) | Yes — SPA executes existing `.php` files directly, so the deny-list applies |
 | Framework (`ENTRY_FILE=index.php`) | No — warned and ignored |
-| SPA (`ENTRY_FILE=index.html`) | No — warned and ignored |
 | Worker (`WORKER_MODE_ENABLED=true`) | No — warned and ignored |
+
+In Framework mode every request is rewritten to the front controller and arbitrary `.php` files are never executed directly; a deny-list would only break application routes that happen to end in `.php`. In Worker mode every non-static request is dispatched to the worker script, so there is nothing for the deny-list to deny. Setting `PHP_DENY_PATHS` in either mode emits a startup warning and disables the check.
+
+The deny-list also covers scripts reached *indirectly*: a request to `/uploads/` that would resolve to `uploads/index.php` through the directory-index lookup is denied when `uploads/**` is on the list — the resolved script path is matched against the patterns, not just the request URI. For such denials `OXPHP_DENIED_PATH` carries the sanitized request URI without the trailing slash (`/uploads/` is reported as `/uploads`).
 
 ## Configuration
 
@@ -108,6 +112,8 @@ This lets you decide the response per-request (return 404 to attackers, 403 to a
 ## No Existence Oracle
 
 Both `Status` and `Script` fallbacks are returned without touching the filesystem. A request to `/uploads/never-uploaded.php` and a request to `/uploads/actually-on-disk.php` produce identical responses — no timing difference, no body difference. An attacker scanning for uploaded shells cannot use the deny-list to enumerate which filenames exist.
+
+The resolved-path screen is the one exception: it necessarily runs after route resolution, so its denials are existence-dependent. `/uploads/` is denied only when `uploads/index.php` actually exists on disk; likewise, with a single-star pattern such as `/uploads/*.php`, a PATH_INFO request `/uploads/shell.php/x` is denied only when `uploads/shell.php` exists (the full URI does not match the pattern — the resolved script does). The direct-URI screen — the path attackers probe with — stays oracle-free.
 
 ## Observability
 
