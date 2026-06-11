@@ -113,6 +113,8 @@ run_runner_test() {
             test_cache_control)     url="${base_url}/test_static/style.css" ;;
             test_last_modified)     url="${base_url}/test_static/style.css" ;;
             test_conditional_304)   url="${base_url}/test_static/style.css" ;;
+            test_accept_ranges_*)   url="${base_url}/test_static/range.txt" ;;
+            test_range_*)           url="${base_url}/test_static/range.txt" ;;
             *)                      url="${base_url}/test_static/style.css" ;;
         esac
     else
@@ -133,6 +135,17 @@ run_runner_test() {
         etag_value=$(printf '%s' "$etag_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headers',{}).get('etag',''))" 2>/dev/null)
         if [ -n "$etag_value" ]; then
             full_curl_args+=(-H "If-None-Match: $etag_value")
+        fi
+    fi
+
+    # For the If-Range match test, fetch the current ETag and attach it —
+    # the strong ETag must validate and the range must be honored (206).
+    if [[ "$test_name" == "test_range_if_range_match" ]]; then
+        local ir_response ir_etag
+        ir_response=$(http_request "$url" 2>/dev/null)
+        ir_etag=$(printf '%s' "$ir_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headers',{}).get('etag',''))" 2>/dev/null)
+        if [ -n "$ir_etag" ]; then
+            full_curl_args+=(-H "If-Range: $ir_etag")
         fi
     fi
 

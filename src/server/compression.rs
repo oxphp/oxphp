@@ -30,6 +30,13 @@ pub async fn maybe_compress(
     response: Response<ResponseBody>,
     quality: i32,
 ) -> Response<ResponseBody> {
+    // 206 bodies must not be re-encoded: Content-Range offsets refer to the
+    // unencoded representation (RFC 9110 §14.4), so compressing a partial
+    // response would corrupt client-side range reassembly.
+    if response.status() == http::StatusCode::PARTIAL_CONTENT {
+        return response;
+    }
+
     // Check Content-Type
     let content_type = response
         .headers()
@@ -364,6 +371,24 @@ mod tests {
             "maybe_compress buffered a live stream instead of passing it through"
         );
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn test_skip_partial_content() {
+        // 206 must never be compressed: Content-Range refers to unencoded bytes.
+        let body = "a".repeat(500); // would otherwise qualify for compression
+        let response = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::CONTENT_RANGE, "bytes 0-499/1000")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        let collected = result.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 500);
     }
 
     #[tokio::test]

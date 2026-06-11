@@ -321,13 +321,138 @@ async fn verify_canonical(
     }
 }
 
-/// Generate a weak ETag from file size and modification time.
+/// Generate a strong ETag from file size and modification time.
+/// Strong (no `W/` prefix) so it can satisfy `If-Range`, which requires
+/// strong comparison per RFC 9110 §13.1.5. Size + mtime fully identify the
+/// byte content of a static file, matching nginx's static ETag semantics.
 fn generate_etag(size: u64, modified: &SystemTime) -> String {
     let dur = modified
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let mtime_hex = dur.as_secs();
-    format!("W/\"{size}-{mtime_hex:x}\"")
+    format!("\"{size}-{mtime_hex:x}\"")
+}
+
+/// How a request's `Range` header maps onto a representation of `size` bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum RangePlan {
+    /// No applicable range — serve the full body with 200.
+    Full,
+    /// Serve bytes `start..=end` with 206 Partial Content.
+    Partial { start: u64, end: u64 },
+    /// Syntactically valid but unsatisfiable range — respond 416.
+    NotSatisfiable,
+}
+
+/// Parse a single-range `Range` header value (RFC 9110 §14.1.2) against a
+/// representation of `size` bytes.
+///
+/// Returns `None` when the header must be ignored (unknown unit, multiple
+/// ranges, malformed spec) — the caller serves the full body with 200.
+/// Multiple ranges are deliberately not supported in this iteration;
+/// ignoring them and returning the full representation is RFC-permitted.
+fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
+    let (unit, spec) = value.split_once('=')?;
+    if !unit.trim().eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return None; // multipart/byteranges not supported — serve full
+    }
+
+    if let Some(suffix) = spec.strip_prefix('-') {
+        // suffix-range: last N bytes
+        let n: u64 = suffix.parse().ok()?;
+        if n == 0 || size == 0 {
+            return Some(RangePlan::NotSatisfiable);
+        }
+        let start = size.saturating_sub(n);
+        return Some(RangePlan::Partial {
+            start,
+            end: size - 1,
+        });
+    }
+
+    let (first, last) = spec.split_once('-')?;
+    let start: u64 = first.parse().ok()?;
+    if start >= size {
+        return Some(RangePlan::NotSatisfiable);
+    }
+    let end = if last.is_empty() {
+        size - 1
+    } else {
+        let last: u64 = last.parse().ok()?;
+        if last < start {
+            return None; // invalid spec — ignore the header
+        }
+        last.min(size - 1)
+    };
+    Some(RangePlan::Partial { start, end })
+}
+
+/// RFC 9110 §13.1.5: apply `Range` only when the `If-Range` validator matches.
+/// ETag comparison is strong (weak validators never match); date comparison
+/// is exact. Absent header means the range applies unconditionally.
+fn if_range_matches(headers: &HeaderMap, etag: &str, modified: &SystemTime) -> bool {
+    let Some(if_range) = headers.get(header::IF_RANGE) else {
+        return true;
+    };
+    let Ok(value) = if_range.to_str() else {
+        return false;
+    };
+    let value = value.trim();
+    if value.starts_with("W/") {
+        return false; // weak entity tag never strong-matches
+    }
+    if value.starts_with('"') {
+        return value == etag;
+    }
+    // HTTP-date validator: exact match with Last-Modified (second precision)
+    match httpdate::parse_http_date(value) {
+        Ok(if_range_time) => {
+            let mod_secs = modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let ir_secs = if_range_time
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            mod_secs == ir_secs
+        }
+        Err(_) => false,
+    }
+}
+
+/// Decide how to serve a static representation given the request's range
+/// headers. Range handling is defined for GET only (RFC 9110 §14.2).
+fn plan_range(
+    method: &http::Method,
+    headers: &HeaderMap,
+    size: u64,
+    etag: &str,
+    modified: &SystemTime,
+) -> RangePlan {
+    if method != http::Method::GET {
+        return RangePlan::Full;
+    }
+    let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
+        return RangePlan::Full;
+    };
+    if !if_range_matches(headers, etag, modified) {
+        return RangePlan::Full;
+    }
+    parse_range(range, size).unwrap_or(RangePlan::Full)
+}
+
+/// Build a 416 Range Not Satisfiable response advertising the actual size.
+fn build_416(size: u64) -> Result<Response<ResponseBody>, http::Error> {
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(full_body(Bytes::from_static(b"416 Range Not Satisfiable")))
 }
 
 /// Check if the request has matching conditional headers (If-None-Match or If-Modified-Since).
@@ -390,9 +515,55 @@ fn add_cache_headers(
         .header(header::CACHE_CONTROL, cache_control)
 }
 
+/// Build a 200 or 206 response for a fully buffered body, honoring the
+/// request's range plan. Used by both the content-cache hit path and the
+/// small-file read path.
+#[allow(clippy::too_many_arguments)]
+fn respond_bytes(
+    bytes: Bytes,
+    mime_type: &str,
+    etag: &str,
+    last_modified_str: &str,
+    modified: &SystemTime,
+    cache_control: Option<&str>,
+    method: &http::Method,
+    request_headers: &HeaderMap,
+) -> Result<Response<ResponseBody>, http::Error> {
+    let size = bytes.len() as u64;
+    match plan_range(method, request_headers, size, etag, modified) {
+        RangePlan::Full => {
+            let mut builder = Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, mime_type)
+                .header(header::CONTENT_LENGTH, bytes.len())
+                .header(header::ACCEPT_RANGES, "bytes");
+            if let Some(cc) = cache_control {
+                builder = add_cache_headers(builder, etag, last_modified_str, cc);
+            }
+            builder.body(full_body(bytes))
+        }
+        RangePlan::Partial { start, end } => {
+            let slice = bytes.slice(start as usize..(end + 1) as usize);
+            let mut builder = Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, mime_type)
+                .header(header::CONTENT_LENGTH, slice.len())
+                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+                .header(header::ACCEPT_RANGES, "bytes");
+            if let Some(cc) = cache_control {
+                builder = add_cache_headers(builder, etag, last_modified_str, cc);
+            }
+            builder.body(full_body(slice))
+        }
+        RangePlan::NotSatisfiable => build_416(size),
+    }
+}
+
 /// Serve a static file with MIME type detection, content caching, and streaming.
 ///
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
+/// Single-range `Range` requests (RFC 9110 §14) are honored for GET with
+/// 206/416; multi-range requests fall back to the full 200 response.
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
 pub async fn serve(
@@ -400,6 +571,7 @@ pub async fn serve(
     cache: &FileCache,
     canonical_root: &Path,
     allow_list: &crate::config::SymlinkAllowList,
+    method: &http::Method,
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
@@ -415,20 +587,19 @@ pub async fn serve(
     }
 
     // 2. Check content cache (already validated at insertion time)
-    if let Some((cached_bytes, cached_mime, _modified, etag, last_modified_str)) =
+    if let Some((cached_bytes, cached_mime, modified, etag, last_modified_str)) =
         cache.get_content(&cache_key)
     {
-        let len = cached_bytes.len();
-        let mut builder = Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, &*cached_mime)
-            .header(header::CONTENT_LENGTH, len);
-
-        if let Some(cc) = cache_control {
-            builder = add_cache_headers(builder, &etag, &last_modified_str, cc);
-        }
-
-        return Ok(builder.body(full_body(cached_bytes))?);
+        return Ok(respond_bytes(
+            cached_bytes,
+            &cached_mime,
+            &etag,
+            &last_modified_str,
+            &modified,
+            cache_control,
+            method,
+            request_headers,
+        )?);
     }
 
     // Cache miss — compute MIME type
@@ -506,20 +677,26 @@ pub async fn serve(
             last_modified_arc.clone(),
         );
 
-        let mut builder = Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, &*mime_type)
-            .header(header::CONTENT_LENGTH, bytes.len());
-
-        if let Some(cc) = cache_control {
-            builder = add_cache_headers(builder, &etag, &last_modified_str, cc);
-        }
-
-        return Ok(builder.body(full_body(bytes))?);
+        return Ok(respond_bytes(
+            bytes,
+            &mime_type,
+            &etag,
+            &last_modified_str,
+            &modified,
+            cache_control,
+            method,
+            request_headers,
+        )?);
     }
 
     // 5. Large file: stream from disk
-    let file = match tokio::fs::File::open(file_path).await {
+    let size = metadata.len();
+    let range_plan = plan_range(method, request_headers, size, &etag, &modified);
+    if matches!(range_plan, RangePlan::NotSatisfiable) {
+        return Ok(build_416(size)?);
+    }
+
+    let mut file = match tokio::fs::File::open(file_path).await {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Response::builder()
@@ -530,16 +707,30 @@ pub async fn serve(
         Err(e) => return Err(e.into()),
     };
 
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, &*mime_type)
+        .header(header::ACCEPT_RANGES, "bytes");
+
+    // Range request: seek to the start and cap the read at the range length.
+    let body_len = if let RangePlan::Partial { start, end } = range_plan {
+        use tokio::io::AsyncSeekExt;
+        file.seek(io::SeekFrom::Start(start)).await?;
+        builder = builder
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+        end - start + 1
+    } else {
+        builder = builder.status(StatusCode::OK);
+        size
+    };
+    builder = builder.header(header::CONTENT_LENGTH, body_len);
+
     // 64KB read buffer for large file streaming (default is 4KB).
     // Reduces read syscalls by ~16x for typical large static files.
-    let stream = ReaderStream::with_capacity(file, 64 * 1024);
+    let stream =
+        ReaderStream::with_capacity(tokio::io::AsyncReadExt::take(file, body_len), 64 * 1024);
     let stream_body =
         StreamBody::new(stream.map(|result: Result<Bytes, io::Error>| result.map(Frame::data)));
-
-    let mut builder = Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, &*mime_type)
-        .header(header::CONTENT_LENGTH, file_size);
 
     if let Some(cc) = cache_control {
         builder = add_cache_headers(builder, &etag, &last_modified_str, cc);
@@ -665,6 +856,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -687,6 +879,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -710,6 +903,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -733,6 +927,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -906,6 +1101,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -924,6 +1120,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -940,9 +1137,9 @@ mod tests {
         let etag1 = generate_etag(1024, &modified);
         let etag2 = generate_etag(1024, &modified);
         assert_eq!(etag1, etag2);
-        assert!(etag1.starts_with("W/\""));
+        assert!(etag1.starts_with('"'), "static ETag must be strong");
         assert!(etag1.ends_with('"'));
-        assert_eq!(etag1, "W/\"1024-65a1b2c3\"");
+        assert_eq!(etag1, "\"1024-65a1b2c3\"");
     }
 
     #[test]
@@ -1038,6 +1235,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=3600"),
         )
@@ -1070,6 +1268,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             None,
         )
@@ -1096,6 +1295,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1117,6 +1317,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1139,6 +1340,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1161,6 +1363,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
         )
@@ -1182,6 +1385,7 @@ mod tests {
             &cache,
             &canonical_root(&dir),
             &empty_allow(),
+            &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
         )
@@ -1291,5 +1495,408 @@ mod tests {
             cache.check_not_modified(&key, &headers).is_none(),
             "check_not_modified should detect mtime change and evict"
         );
+    }
+
+    // --- Range request tests ---
+
+    #[test]
+    fn test_parse_range_basic() {
+        assert_eq!(
+            parse_range("bytes=0-4", 100),
+            Some(RangePlan::Partial { start: 0, end: 4 })
+        );
+        assert_eq!(
+            parse_range("bytes=10-", 100),
+            Some(RangePlan::Partial { start: 10, end: 99 })
+        );
+        assert_eq!(
+            parse_range("bytes=-5", 100),
+            Some(RangePlan::Partial { start: 95, end: 99 })
+        );
+    }
+
+    #[test]
+    fn test_parse_range_clamps_end_to_eof() {
+        assert_eq!(
+            parse_range("bytes=50-1000", 100),
+            Some(RangePlan::Partial { start: 50, end: 99 })
+        );
+    }
+
+    #[test]
+    fn test_parse_range_suffix_larger_than_file() {
+        // Suffix longer than the file → entire representation as 206
+        assert_eq!(
+            parse_range("bytes=-500", 100),
+            Some(RangePlan::Partial { start: 0, end: 99 })
+        );
+    }
+
+    #[test]
+    fn test_parse_range_unsatisfiable() {
+        // Start at/past EOF
+        assert_eq!(
+            parse_range("bytes=100-", 100),
+            Some(RangePlan::NotSatisfiable)
+        );
+        assert_eq!(
+            parse_range("bytes=200-300", 100),
+            Some(RangePlan::NotSatisfiable)
+        );
+        // Zero-length suffix
+        assert_eq!(
+            parse_range("bytes=-0", 100),
+            Some(RangePlan::NotSatisfiable)
+        );
+        // Empty file: nothing is satisfiable
+        assert_eq!(parse_range("bytes=0-", 0), Some(RangePlan::NotSatisfiable));
+        assert_eq!(parse_range("bytes=-5", 0), Some(RangePlan::NotSatisfiable));
+    }
+
+    #[test]
+    fn test_parse_range_ignored() {
+        // Unknown unit
+        assert_eq!(parse_range("items=0-4", 100), None);
+        // Multiple ranges — not supported, serve full
+        assert_eq!(parse_range("bytes=0-4,10-14", 100), None);
+        // Malformed specs
+        assert_eq!(parse_range("bytes=", 100), None);
+        assert_eq!(parse_range("bytes=abc-def", 100), None);
+        assert_eq!(parse_range("bytes=5", 100), None);
+        // Inverted range
+        assert_eq!(parse_range("bytes=10-5", 100), None);
+    }
+
+    #[test]
+    fn test_parse_range_single_byte() {
+        assert_eq!(
+            parse_range("bytes=0-0", 1),
+            Some(RangePlan::Partial { start: 0, end: 0 })
+        );
+    }
+
+    #[test]
+    fn test_if_range_etag_strong_match() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_RANGE, etag.parse().unwrap());
+        assert!(if_range_matches(&headers, &etag, &modified));
+    }
+
+    #[test]
+    fn test_if_range_etag_mismatch() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_RANGE, "\"other\"".parse().unwrap());
+        assert!(!if_range_matches(&headers, &etag, &modified));
+    }
+
+    #[test]
+    fn test_if_range_weak_etag_never_matches() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let weak = format!("W/{etag}");
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_RANGE, weak.parse().unwrap());
+        assert!(!if_range_matches(&headers, &etag, &modified));
+    }
+
+    #[test]
+    fn test_if_range_date_exact_match() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let date = httpdate::fmt_http_date(modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_RANGE, date.parse().unwrap());
+        assert!(if_range_matches(&headers, &etag, &modified));
+
+        // A different date must not match (exact comparison, not <=)
+        let older = httpdate::fmt_http_date(modified - std::time::Duration::from_secs(60));
+        headers.insert(header::IF_RANGE, older.parse().unwrap());
+        assert!(!if_range_matches(&headers, &etag, &modified));
+    }
+
+    #[test]
+    fn test_if_range_absent_applies_range() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        assert!(if_range_matches(&HeaderMap::new(), &etag, &modified));
+    }
+
+    #[test]
+    fn test_plan_range_get_only() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, "bytes=0-4".parse().unwrap());
+
+        assert_eq!(
+            plan_range(&http::Method::GET, &headers, 100, &etag, &modified),
+            RangePlan::Partial { start: 0, end: 4 }
+        );
+        assert_eq!(
+            plan_range(&http::Method::POST, &headers, 100, &etag, &modified),
+            RangePlan::Full
+        );
+        assert_eq!(
+            plan_range(&http::Method::HEAD, &headers, 100, &etag, &modified),
+            RangePlan::Full
+        );
+    }
+
+    async fn serve_with(
+        file_path: &std::path::Path,
+        dir: &TempDir,
+        cache: &FileCache,
+        headers: HeaderMap,
+    ) -> Response<ResponseBody> {
+        serve(
+            file_path,
+            cache,
+            &canonical_root(dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &headers,
+            Some("public, max-age=86400"),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn body_bytes(response: Response<ResponseBody>) -> Bytes {
+        use http_body_util::BodyExt;
+        response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    fn range_headers(range: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::RANGE, range.parse().unwrap());
+        headers
+    }
+
+    #[tokio::test]
+    async fn test_serve_accept_ranges_on_200() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("plain.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serve_206_small_file_and_cached() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+
+        // First request: small-file read path (also populates the cache)
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=2-5")).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 2-5/10"
+        );
+        assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "4");
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+        assert_eq!(body_bytes(response).await, &b"2345"[..]);
+
+        // Second request: content-cache hit path
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=-3")).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 7-9/10"
+        );
+        assert_eq!(body_bytes(response).await, &b"789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_206_streamed_large_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("large.bin");
+        // > MAX_CACHE_FILE_SIZE so the streaming path is taken
+        let mut data = vec![0u8; MAX_CACHE_FILE_SIZE + 100];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        fs::write(&file_path, &data).unwrap();
+
+        let cache = FileCache::new(10);
+        let start = MAX_CACHE_FILE_SIZE as u64 + 10;
+        let end = start + 49;
+        let response = serve_with(
+            &file_path,
+            &dir,
+            &cache,
+            range_headers(&format!("bytes={start}-{end}")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("bytes {start}-{end}/{}", data.len())
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH).unwrap(),
+            "50"
+        );
+        let body = body_bytes(response).await;
+        assert_eq!(&body[..], &data[start as usize..=end as usize]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_416_unsatisfiable() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=100-")).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes */10"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serve_416_streamed_large_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("large.bin");
+        let size = MAX_CACHE_FILE_SIZE + 1;
+        fs::write(&file_path, vec![0u8; size]).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(
+            &file_path,
+            &dir,
+            &cache,
+            range_headers(&format!("bytes={size}-")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_RANGE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("bytes */{size}")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serve_if_range_mismatch_returns_full() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let mut headers = range_headers("bytes=0-4");
+        headers.insert(header::IF_RANGE, "\"stale-etag\"".parse().unwrap());
+        let response = serve_with(&file_path, &dir, &cache, headers).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, &b"0123456789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_if_range_match_returns_partial() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+
+        // Fetch the current ETag first
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut headers = range_headers("bytes=0-4");
+        headers.insert(header::IF_RANGE, etag.parse().unwrap());
+        let response = serve_with(&file_path, &dir, &cache, headers).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(body_bytes(response).await, &b"01234"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_multi_range_falls_back_to_full() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=0-1,4-5")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, &b"0123456789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_range_ignored_for_post() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::POST,
+            &range_headers("bytes=0-4"),
+            Some("public, max-age=86400"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, &b"0123456789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_304_takes_precedence_over_range() {
+        // RFC 9110 §13.2.2: If-None-Match is evaluated before Range
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut headers = range_headers("bytes=0-4");
+        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        let response = serve_with(&file_path, &dir, &cache, headers).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     }
 }
