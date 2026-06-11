@@ -455,15 +455,26 @@ fn build_416(size: u64) -> Result<Response<ResponseBody>, http::Error> {
         .body(full_body(Bytes::from_static(b"416 Range Not Satisfiable")))
 }
 
+/// Weak entity-tag comparison (RFC 9110 §8.8.3.2): tags match if their
+/// opaque parts are equal, ignoring the `W/` weakness prefix on either side.
+fn etag_weak_eq(a: &str, b: &str) -> bool {
+    fn strip(t: &str) -> &str {
+        t.strip_prefix("W/").unwrap_or(t)
+    }
+    strip(a) == strip(b)
+}
+
 /// Check if the request has matching conditional headers (If-None-Match or If-Modified-Since).
 fn check_not_modified(headers: &HeaderMap, etag: &str, modified: &SystemTime) -> bool {
     // If-None-Match takes priority per RFC 7232 §3.3
     if let Some(inm) = headers.get(header::IF_NONE_MATCH) {
         if let Ok(val) = inm.to_str() {
-            // Support both exact match and comma-separated list
+            // Weak comparison: a client may hold a weakened tag (the
+            // compression layer downgrades the ETag on encoded responses)
+            // that must still revalidate against the strong original.
             return val.split(',').any(|tag| {
                 let t = tag.trim();
-                t == etag || t == "*"
+                t == "*" || etag_weak_eq(t, etag)
             });
         }
     }
@@ -626,9 +637,13 @@ pub async fn serve(
             .body(full_body(Bytes::from_static(b"404 Not Found")))?);
     }
 
-    // 3. Get file metadata for size and modification time
-    let metadata = match tokio::fs::metadata(file_path).await {
-        Ok(m) => m,
+    // 3. Open the file and take metadata from the handle so that size,
+    //    mtime, ETag, and the bytes served all describe the same inode.
+    //    A stat() on the path followed by a separate open() would let a
+    //    concurrent deploy swap the file in between, silently pairing new
+    //    bytes with the old validator and mis-slicing Range responses.
+    let mut file = match tokio::fs::File::open(file_path).await {
+        Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Response::builder()
                 .status(StatusCode::NOT_FOUND)
@@ -637,10 +652,11 @@ pub async fn serve(
         }
         Err(e) => return Err(e.into()),
     };
+    let metadata = file.metadata().await?;
 
-    let file_size = metadata.len() as usize;
+    let file_size = metadata.len();
     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-    let etag_str = generate_etag(metadata.len(), &modified);
+    let etag_str = generate_etag(file_size, &modified);
     let last_modified_str = httpdate::fmt_http_date(modified);
 
     // Check for 304 before reading file content (no Arc allocation yet)
@@ -654,18 +670,16 @@ pub async fn serve(
     let etag: Arc<str> = etag_str.as_str().into();
     let last_modified_arc: Arc<str> = last_modified_str.as_str().into();
 
-    // 4. Small file: read fully, cache, return buffered body
-    if file_size <= MAX_CACHE_FILE_SIZE {
-        let contents = match tokio::fs::read(file_path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                    .body(full_body(Bytes::from_static(b"404 Not Found")))?);
-            }
-            Err(e) => return Err(e.into()),
-        };
+    // 4. Small file: read fully, cache, return buffered body.
+    //    The read is capped at the fstat'ed size so a file growing mid-read
+    //    cannot produce a body longer than the validator describes.
+    if file_size <= MAX_CACHE_FILE_SIZE as u64 {
+        use tokio::io::AsyncReadExt;
+        let mut contents = Vec::with_capacity(file_size as usize);
+        (&mut file)
+            .take(file_size)
+            .read_to_end(&mut contents)
+            .await?;
 
         let bytes = Bytes::from(contents);
         cache.insert_content(
@@ -689,23 +703,11 @@ pub async fn serve(
         )?);
     }
 
-    // 5. Large file: stream from disk
-    let size = metadata.len();
-    let range_plan = plan_range(method, request_headers, size, &etag, &modified);
+    // 5. Large file: stream from the already-open handle
+    let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
     if matches!(range_plan, RangePlan::NotSatisfiable) {
-        return Ok(build_416(size)?);
+        return Ok(build_416(file_size)?);
     }
-
-    let mut file = match tokio::fs::File::open(file_path).await {
-        Ok(f) => f,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(full_body(Bytes::from_static(b"404 Not Found")))?);
-        }
-        Err(e) => return Err(e.into()),
-    };
 
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, &*mime_type)
@@ -715,13 +717,14 @@ pub async fn serve(
     let body_len = if let RangePlan::Partial { start, end } = range_plan {
         use tokio::io::AsyncSeekExt;
         file.seek(io::SeekFrom::Start(start)).await?;
-        builder = builder
-            .status(StatusCode::PARTIAL_CONTENT)
-            .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
+        builder = builder.status(StatusCode::PARTIAL_CONTENT).header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{file_size}"),
+        );
         end - start + 1
     } else {
         builder = builder.status(StatusCode::OK);
-        size
+        file_size
     };
     builder = builder.header(header::CONTENT_LENGTH, body_len);
 
@@ -1171,6 +1174,17 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, "W/\"wrong\"".parse().unwrap());
         assert!(!check_not_modified(&headers, &etag, &modified));
+    }
+
+    #[test]
+    fn test_check_not_modified_weak_client_tag_matches_strong() {
+        // A client that received a compressed response holds the weakened
+        // tag W/"…" and must still revalidate to 304 (weak comparison).
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, format!("W/{etag}").parse().unwrap());
+        assert!(check_not_modified(&headers, &etag, &modified));
     }
 
     #[test]

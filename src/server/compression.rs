@@ -116,6 +116,21 @@ pub async fn maybe_compress(
     response
         .headers_mut()
         .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    // The compressed bytes are a different representation than the identity
+    // bytes the ETag was computed from; a strong tag shared by both would let
+    // a client resume a brotli download with identity 206 fragments
+    // (If-Range requires strong comparison, RFC 9110 §13.1.5). Downgrade to
+    // weak — nginx's gzip filter does the same. Weak tags still revalidate
+    // via If-None-Match, which uses weak comparison.
+    let weakened = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|tag| !tag.starts_with("W/"))
+        .and_then(|tag| HeaderValue::from_str(&format!("W/{tag}")).ok());
+    if let Some(weak_etag) = weakened {
+        response.headers_mut().insert(header::ETAG, weak_etag);
+    }
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
@@ -371,6 +386,45 @@ mod tests {
             "maybe_compress buffered a live stream instead of passing it through"
         );
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn test_compress_weakens_strong_etag() {
+        // The br body is a different representation than the identity bytes
+        // the strong ETag described — the tag must be downgraded to weak so
+        // If-Range can never strong-match across representations.
+        let body = "a".repeat(500);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::ETAG, "\"500-abc\"")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert_eq!(
+            result.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+        assert_eq!(result.headers().get(header::ETAG).unwrap(), "W/\"500-abc\"");
+    }
+
+    #[tokio::test]
+    async fn test_uncompressed_keeps_strong_etag() {
+        // When compression is skipped the representation is unchanged —
+        // the strong ETag must survive so If-Range resume keeps working.
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png") // not compressible
+            .header(header::ETAG, "\"500-abc\"")
+            .body(full_body(Bytes::from(vec![0u8; 500])))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(result.headers().get(header::ETAG).unwrap(), "\"500-abc\"");
     }
 
     #[tokio::test]

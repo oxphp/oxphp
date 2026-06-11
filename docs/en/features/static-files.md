@@ -70,7 +70,7 @@ The `max-age` value is the TTL converted to seconds. Set `STATIC_MAX_AGE=off` to
 
 Every static file response includes:
 
-- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely.
+- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served brotli-compressed, the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
 - **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
 These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
