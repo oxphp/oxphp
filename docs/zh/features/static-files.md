@@ -15,7 +15,7 @@ OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服�
 2. **MIME 检测** — 根据文件扩展名确定内容类型
 3. **缓存检查** — 在访问文件系统之前检查文件缓存
 4. **条件检查** — 如果请求携带 `If-None-Match` 或 `If-Modified-Since`，OxPHP 会评估条件，并可能在不发送响应体的情况下返回 `304 Not Modified`
-5. **Range 检查** — 如果 GET 或 HEAD 请求携带 `Range` 头，OxPHP 仅以 `206 Partial Content` 返回请求的字节范围
+5. **Range 检查** — 如果 GET 或 HEAD 请求携带 `Range` 头，OxPHP 以 `206 Partial Content` 响应：GET 仅收到请求的字节范围，HEAD 收到相同的范围头但没有响应体
 6. **响应** — 1 MiB 以内的文件从内存缓存提供；更大的文件直接从磁盘流式传输
 
 ## 配置

@@ -15,7 +15,7 @@ When a request matches a static file:
 2. **MIME detection** — the content type is determined from the file extension
 3. **Cache check** — the file cache is checked before touching the filesystem
 4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
-5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP serves only the requested byte range with `206 Partial Content`
+5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP responds with `206 Partial Content`: GET receives only the requested byte range, HEAD the same range headers with no body
 6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
 
 ## Configuration
