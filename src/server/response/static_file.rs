@@ -577,18 +577,23 @@ fn respond_bytes(
     cache_control: Option<&str>,
     method: &http::Method,
     request_headers: &HeaderMap,
+    allow_ranges: bool,
 ) -> Result<Response<ResponseBody>, http::Error> {
     let size = bytes.len() as u64;
-    let (status, body, content_range) =
-        match plan_range(method, request_headers, size, etag, modified) {
-            RangePlan::Full => (StatusCode::OK, bytes, None),
-            RangePlan::Partial { start, end } => (
-                StatusCode::PARTIAL_CONTENT,
-                bytes.slice(start as usize..(end + 1) as usize),
-                Some(format!("bytes {start}-{end}/{size}")),
-            ),
-            RangePlan::NotSatisfiable => return build_416(size),
-        };
+    let plan = if allow_ranges {
+        plan_range(method, request_headers, size, etag, modified)
+    } else {
+        RangePlan::Full
+    };
+    let (status, body, content_range) = match plan {
+        RangePlan::Full => (StatusCode::OK, bytes, None),
+        RangePlan::Partial { start, end } => (
+            StatusCode::PARTIAL_CONTENT,
+            bytes.slice(start as usize..(end + 1) as usize),
+            Some(format!("bytes {start}-{end}/{size}")),
+        ),
+        RangePlan::NotSatisfiable => return build_416(size),
+    };
 
     let mut builder = Response::builder()
         .status(status)
@@ -607,10 +612,17 @@ fn respond_bytes(
 /// Serve a static file with MIME type detection, content caching, and streaming.
 ///
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
-/// Single-range `Range` requests (RFC 9110 §14) are honored for GET with
+/// Single-range `Range` requests (RFC 9110 §14) are honored for GET/HEAD with
 /// 206/416; multi-range requests fall back to the full 200 response.
+/// When `supports_brotli` is set and the representation would be compressed
+/// (compressible MIME type within the compression size window), range
+/// handling is disabled entirely — the client's stored copy may be a brotli
+/// body that identity 206 fragments would corrupt, and neither If-Range form
+/// can distinguish the representations (nginx clears `allow_ranges` in its
+/// gzip filter for the same reason).
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     file_path: &Path,
     cache: &FileCache,
@@ -619,6 +631,7 @@ pub async fn serve(
     method: &http::Method,
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
+    supports_brotli: bool,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
     let cache_key = file_path.to_string_lossy();
 
@@ -647,6 +660,8 @@ pub async fn serve(
     if let Some((cached_bytes, cached_mime, modified, etag, last_modified_str)) =
         cache.get_content(&cache_key)
     {
+        let allow_ranges = !(supports_brotli
+            && crate::server::compression::would_compress(&cached_mime, cached_bytes.len() as u64));
         return Ok(respond_bytes(
             cached_bytes,
             &cached_mime,
@@ -656,6 +671,7 @@ pub async fn serve(
             cache_control,
             method,
             request_headers,
+            allow_ranges,
         )?);
     }
 
@@ -755,6 +771,8 @@ pub async fn serve(
             last_modified_arc.clone(),
         );
 
+        let allow_ranges =
+            !(supports_brotli && crate::server::compression::would_compress(&mime_type, file_size));
         return Ok(respond_bytes(
             bytes,
             &mime_type,
@@ -764,11 +782,18 @@ pub async fn serve(
             cache_control,
             method,
             request_headers,
+            allow_ranges,
         )?);
     }
 
     // 5. Large file: stream from the already-open handle
-    let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
+    let allow_ranges =
+        !(supports_brotli && crate::server::compression::would_compress(&mime_type, file_size));
+    let range_plan = if allow_ranges {
+        plan_range(method, request_headers, file_size, &etag, &modified)
+    } else {
+        RangePlan::Full
+    };
     if matches!(range_plan, RangePlan::NotSatisfiable) {
         return Ok(build_416(file_size)?);
     }
@@ -926,6 +951,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -949,6 +975,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -973,6 +1000,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -997,6 +1025,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1171,6 +1200,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1190,6 +1220,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1316,6 +1347,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=3600"),
+            false,
         )
         .await
         .unwrap();
@@ -1349,6 +1381,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             None,
+            false,
         )
         .await
         .unwrap();
@@ -1376,6 +1409,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1398,6 +1432,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1421,6 +1456,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1444,6 +1480,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1466,6 +1503,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -1766,6 +1804,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap()
@@ -2026,6 +2065,7 @@ mod tests {
             &http::Method::HEAD,
             &range_headers("bytes=0-0"),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -2052,6 +2092,7 @@ mod tests {
             &http::Method::POST,
             &range_headers("bytes=0-4"),
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -2087,6 +2128,7 @@ mod tests {
             &http::Method::POST,
             &headers,
             Some("public, max-age=86400"),
+            false,
         )
         .await
         .unwrap();
@@ -2105,6 +2147,78 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
         assert!(body_bytes(response).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_serve_no_range_for_compressible_when_brotli_accepted() {
+        // A brotli-accepting client may hold a compressed copy of this
+        // representation; identity 206 fragments would corrupt it (and no
+        // If-Range form can tell the copies apart). Ranges are disabled for
+        // would-be-compressed responses, like nginx's gzip filter.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        let body = "x".repeat(500); // compressible type, within compress window
+        fs::write(&file_path, &body).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &range_headers("bytes=0-9"),
+            Some("public, max-age=86400"),
+            true, // client accepts brotli
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await.len(), 500);
+
+        // Same request without brotli support gets the range.
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &range_headers("bytes=0-9"),
+            Some("public, max-age=86400"),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn test_serve_range_for_non_compressible_with_brotli() {
+        // Non-compressible types are never encoded — ranges stay enabled
+        // even for brotli-accepting clients (the case that matters: video,
+        // archives, images).
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.bin");
+        fs::write(&file_path, vec![7u8; 500]).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &range_headers("bytes=0-9"),
+            Some("public, max-age=86400"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 0-9/500"
+        );
     }
 
     #[tokio::test]

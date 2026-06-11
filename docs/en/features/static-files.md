@@ -15,7 +15,7 @@ When a request matches a static file:
 2. **MIME detection** — the content type is determined from the file extension
 3. **Cache check** — the file cache is checked before touching the filesystem
 4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
-5. **Range check** — if a GET request carries a `Range` header, OxPHP serves only the requested byte range with `206 Partial Content`
+5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP serves only the requested byte range with `206 Partial Content`
 6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
 
 ## Configuration
@@ -103,7 +103,7 @@ This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget
 - **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment.
 - Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
 - **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
-- Responses served **brotli-compressed** do not advertise `Accept-Ranges` — byte offsets refer to the uncompressed file, so ranges apply only to uncompressed responses.
+- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be compressed (compressible MIME types within the compression size window), and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Ranges always work for the content that actually needs them: video, archives, images, and any file above the compression size limit.
 - `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
 
 Example: resume an interrupted download with curl:

@@ -195,6 +195,7 @@ pub async fn handle_request(
             profiling_mode,
             profiling_run_id,
             cancel_state.clone(),
+            supports_brotli,
         );
 
         // Drop guard fires cancel_request(ClientAbort) if the dispatch future
@@ -317,6 +318,7 @@ async fn dispatch_request(
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
     profiling_run_id: Option<String>,
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
+    supports_brotli: bool,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -340,6 +342,7 @@ async fn dispatch_request(
                 &parts.method,
                 &parts.headers,
                 server.static_cache_control.as_deref(),
+                supports_brotli,
             )
             .await?;
 

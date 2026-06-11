@@ -147,6 +147,17 @@ pub async fn maybe_compress(
     response
 }
 
+/// Would a 200 response with this MIME type and size be brotli-compressed
+/// for a client that accepts it? Static serving uses this to disable range
+/// handling for such representations: a client resuming a compressed
+/// download (with or without If-Range) would otherwise receive identity
+/// bytes to splice onto a brotli prefix. nginx does the same by clearing
+/// `allow_ranges` in its gzip filter.
+pub(crate) fn would_compress(content_type: &str, size: u64) -> bool {
+    is_compressible(content_type)
+        && (MIN_COMPRESS_SIZE as u64..=MAX_COMPRESS_SIZE as u64).contains(&size)
+}
+
 pub(crate) fn accepts_brotli(accept_encoding: &str) -> bool {
     accept_encoding.split(',').any(|enc| {
         let name = enc.trim().split(';').next().unwrap_or("").trim();

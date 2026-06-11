@@ -127,6 +127,7 @@ run_runner_test() {
             test_last_modified)     url="${base_url}/test_static/style.css" ;;
             test_conditional_304)   url="${base_url}/test_static/style.css" ;;
             test_accept_ranges_*)   url="${base_url}/test_static/range.txt" ;;
+            test_range_*_compressible_*) url="${base_url}/test_static/big.css" ;;
             test_range_*)           url="${base_url}/test_static/range.txt" ;;
             *)                      url="${base_url}/test_static/style.css" ;;
         esac
