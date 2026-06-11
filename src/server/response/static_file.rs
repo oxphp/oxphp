@@ -423,7 +423,10 @@ fn if_range_matches(headers: &HeaderMap, etag: &str, modified: &SystemTime) -> b
 }
 
 /// Decide how to serve a static representation given the request's range
-/// headers. Range handling is defined for GET only (RFC 9110 §14.2).
+/// headers. RFC 9110 §14.2 defines range handling for GET; HEAD is included
+/// for nginx/Apache parity — §9.3.2 wants HEAD to mirror GET's headers, so
+/// download managers probing resumability with `HEAD + Range` see the same
+/// 206/Content-Range they would get from nginx (hyper elides the body).
 fn plan_range(
     method: &http::Method,
     headers: &HeaderMap,
@@ -431,7 +434,7 @@ fn plan_range(
     etag: &str,
     modified: &SystemTime,
 ) -> RangePlan {
-    if method != http::Method::GET {
+    if method != http::Method::GET && method != http::Method::HEAD {
         return RangePlan::Full;
     }
     let mut range_lines = headers.get_all(header::RANGE).iter();
@@ -673,19 +676,26 @@ pub async fn serve(
             .await?;
 
         let bytes = Bytes::from(contents);
-        // Don't cache if the file shrank between fstat and the read — the
-        // bytes no longer match the validator computed from the handle
-        // metadata, and the poisoned pair would persist until eviction.
-        if bytes.len() as u64 == file_size {
-            cache.insert_content(
-                cache_key.into_owned(),
-                bytes.clone(),
-                mime_type.clone(),
-                modified,
-                etag.clone(),
-                last_modified_arc.clone(),
-            );
+        // File truncated between fstat and the read: the validator no longer
+        // describes these bytes. Serve them as an uncacheable full response —
+        // no ETag/Last-Modified that would mislabel the body downstream, no
+        // range slicing against an uncertain size, no cache insert. The next
+        // request re-fstats and heals.
+        if bytes.len() as u64 != file_size {
+            return Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, &*mime_type)
+                .header(header::CONTENT_LENGTH, bytes.len())
+                .body(full_body(bytes))?);
         }
+        cache.insert_content(
+            cache_key.into_owned(),
+            bytes.clone(),
+            mime_type.clone(),
+            modified,
+            etag.clone(),
+            last_modified_arc.clone(),
+        );
 
         return Ok(respond_bytes(
             bytes,
@@ -1639,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_range_get_only() {
+    fn test_plan_range_method_gating() {
         let modified = test_modified();
         let etag = generate_etag(100, &modified);
         let mut headers = HeaderMap::new();
@@ -1649,12 +1659,13 @@ mod tests {
             plan_range(&http::Method::GET, &headers, 100, &etag, &modified),
             RangePlan::Partial { start: 0, end: 4 }
         );
-        assert_eq!(
-            plan_range(&http::Method::POST, &headers, 100, &etag, &modified),
-            RangePlan::Full
-        );
+        // HEAD mirrors GET's headers (nginx/Apache parity) — hyper elides the body
         assert_eq!(
             plan_range(&http::Method::HEAD, &headers, 100, &etag, &modified),
+            RangePlan::Partial { start: 0, end: 4 }
+        );
+        assert_eq!(
+            plan_range(&http::Method::POST, &headers, 100, &etag, &modified),
             RangePlan::Full
         );
     }
@@ -1880,6 +1891,32 @@ mod tests {
         let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=0-1,4-5")).await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_bytes(response).await, &b"0123456789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_head_range_returns_206_headers() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "0123456789").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::HEAD,
+            &range_headers("bytes=0-0"),
+            Some("public, max-age=86400"),
+        )
+        .await
+        .unwrap();
+        // The body is elided on the wire by hyper; the headers must match GET's.
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes 0-0/10"
+        );
     }
 
     #[tokio::test]

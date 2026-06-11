@@ -131,6 +131,12 @@ pub async fn maybe_compress(
     if let Some(weak_etag) = weakened {
         response.headers_mut().insert(header::ETAG, weak_etag);
     }
+    // Drop Accept-Ranges: byte offsets are meaningless against the encoded
+    // body, and a date-form If-Range (which the weak ETag cannot guard)
+    // would otherwise let a client resume this brotli download with
+    // identity 206 fragments. nginx's gzip filter clears the header the
+    // same way (ngx_http_clear_accept_ranges).
+    response.headers_mut().remove(header::ACCEPT_RANGES);
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
@@ -398,6 +404,7 @@ mod tests {
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html")
             .header(header::ETAG, "\"500-abc\"")
+            .header(header::ACCEPT_RANGES, "bytes")
             .body(full_body(Bytes::from(body)))
             .unwrap();
 
@@ -408,6 +415,10 @@ mod tests {
             "br"
         );
         assert_eq!(result.headers().get(header::ETAG).unwrap(), "W/\"500-abc\"");
+        // Byte offsets don't apply to the encoded body, and a date-form
+        // If-Range cannot be guarded by the weakened ETag — advertise no
+        // range support for this representation (nginx gzip-filter behavior).
+        assert!(result.headers().get(header::ACCEPT_RANGES).is_none());
     }
 
     #[tokio::test]
@@ -418,6 +429,7 @@ mod tests {
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "image/png") // not compressible
             .header(header::ETAG, "\"500-abc\"")
+            .header(header::ACCEPT_RANGES, "bytes")
             .body(full_body(Bytes::from(vec![0u8; 500])))
             .unwrap();
 
@@ -425,6 +437,10 @@ mod tests {
 
         assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
         assert_eq!(result.headers().get(header::ETAG).unwrap(), "\"500-abc\"");
+        assert_eq!(
+            result.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
     }
 
     #[tokio::test]

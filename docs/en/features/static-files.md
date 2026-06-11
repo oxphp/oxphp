@@ -102,6 +102,8 @@ This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget
 - A range that cannot be satisfied (start beyond the end of file) returns `416 Range Not Satisfiable` with `Content-Range: bytes */<size>`.
 - **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment.
 - Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
+- **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
+- Responses served **brotli-compressed** do not advertise `Accept-Ranges` — byte offsets refer to the uncompressed file, so ranges apply only to uncompressed responses.
 - `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
 
 Example: resume an interrupted download with curl:

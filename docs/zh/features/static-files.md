@@ -102,6 +102,8 @@ Content-Length: 51380224
 - 无法满足的范围（起点超出文件末尾）返回 `416 Range Not Satisfiable`，并带有 `Content-Range: bytes */<size>`。
 - 支持 **If-Range**：当客户端发送其部分副本的 ETag（或 `Last-Modified` 日期）而文件此后已更改时，OxPHP 返回完整的 `200` 响应，而不是不匹配的片段。
 - 携带**多个范围**（`bytes=0-1,4-5`）的请求会以 `200 OK` 收到完整文件 — 不生成 `multipart/byteranges` 响应。
+- 携带 `Range` 头的 **HEAD** 请求会收到与 GET 相同的 `206`/`Content-Range` 头但没有响应体，与 nginx 和 Apache 行为一致。
+- 以 **brotli 压缩**形式提供的响应不声明 `Accept-Ranges` — 字节偏移指向未压缩的文件，因此范围请求仅适用于未压缩的响应。
 - `206` 响应永远不会被压缩；Range 处理也不适用于 PHP 响应 — 仅适用于静态文件。
 
 示例：使用 curl 续传中断的下载：
