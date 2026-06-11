@@ -26,10 +26,17 @@ impl EventHandler<ResponseBuilding> for ErrorPagesHandler {
                 // Swap only the body and its describing headers. Rebuilding
                 // the response from scratch would drop semantically required
                 // headers the body does not own — Content-Range on 416,
-                // Retry-After on 429/529, Allow on 405.
+                // Retry-After on 429/529, Allow on 405. Headers coupled to
+                // the ORIGINAL body must go with it: a PHP 404 compressed by
+                // ob_gzhandler carries Content-Encoding: gzip that would
+                // mislabel the plain HTML page (and ETag/Last-Modified would
+                // validate it in caches).
                 let len = page_bytes.len();
                 *event.response.body_mut() = full_body(page_bytes);
                 let headers = event.response.headers_mut();
+                headers.remove(http::header::CONTENT_ENCODING);
+                headers.remove(http::header::ETAG);
+                headers.remove(http::header::LAST_MODIFIED);
                 headers.insert(
                     http::header::CONTENT_TYPE,
                     HeaderValue::from_static("text/html; charset=utf-8"),
@@ -171,6 +178,39 @@ mod tests {
                 .get(http::header::CONTENT_LENGTH)
                 .unwrap(),
             "18"
+        );
+    }
+
+    #[test]
+    fn test_drops_body_coupled_headers() {
+        // The swapped-in HTML page is uncompressed and is not the entity the
+        // app's validators describe: Content-Encoding/ETag/Last-Modified of
+        // the original body must not survive (e.g. a PHP 404 compressed by
+        // ob_gzhandler would otherwise label plain HTML as gzip).
+        let pages = make_error_pages();
+        let handler = ErrorPagesHandler::new(pages);
+
+        let response = Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(http::header::CONTENT_ENCODING, "gzip")
+            .header(http::header::ETAG, "\"app-etag\"")
+            .header(http::header::LAST_MODIFIED, "Tue, 01 Jan 2030 00:00:00 GMT")
+            .body(full_body(Bytes::from_static(b"\x1f\x8b...")))
+            .unwrap();
+        let mut event = ResponseBuilding {
+            request_id: "test".to_string(),
+            response,
+            metadata: Vec::new(),
+        };
+
+        handler.handle(&mut event);
+        let headers = event.response.headers();
+        assert!(headers.get(http::header::CONTENT_ENCODING).is_none());
+        assert!(headers.get(http::header::ETAG).is_none());
+        assert!(headers.get(http::header::LAST_MODIFIED).is_none());
+        assert_eq!(
+            headers.get(http::header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
         );
     }
 

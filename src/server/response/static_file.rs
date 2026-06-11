@@ -366,6 +366,13 @@ fn parse_range_pos(s: &str) -> Option<u64> {
 /// Multiple ranges are deliberately not supported in this iteration;
 /// ignoring them and returning the full representation is RFC-permitted.
 fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
+    // Empty representation: serve the full (empty) 200 instead of 416 —
+    // RFC 9110 permits either, nginx skips its range filter at zero length,
+    // and probing clients (players, download managers sending `bytes=0-`)
+    // handle an empty 200 more gracefully than a 416.
+    if size == 0 {
+        return None;
+    }
     let (unit, spec) = value.split_once('=')?;
     if !unit.trim().eq_ignore_ascii_case("bytes") {
         return None;
@@ -378,7 +385,7 @@ fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
     if let Some(suffix) = spec.strip_prefix('-') {
         // suffix-range: last N bytes
         let n = parse_range_pos(suffix)?;
-        if n == 0 || size == 0 {
+        if n == 0 {
             return Some(RangePlan::NotSatisfiable);
         }
         let start = size.saturating_sub(n);
@@ -615,16 +622,24 @@ pub async fn serve(
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
     let cache_key = file_path.to_string_lossy();
 
+    // Conditional (304) evaluation applies to GET/HEAD only: RFC 9110
+    // §13.1.2-3 reserves 304 for those methods (other methods would get 412
+    // semantics, which don't apply to a plain static fetch), and nginx
+    // likewise skips not-modified handling for them.
+    let conditional = method == http::Method::GET || method == http::Method::HEAD;
+
     // 1. Fast 304 check — single cache access returns etag + last_modified_str
-    if let Some(cc) = cache_control {
-        if let Some((etag, last_modified_str)) =
-            cache.check_304_headers(&cache_key, request_headers)
-        {
-            return Ok(build_304(
-                &etag_for_304(request_headers, &etag),
-                &last_modified_str,
-                cc,
-            ));
+    if conditional {
+        if let Some(cc) = cache_control {
+            if let Some((etag, last_modified_str)) =
+                cache.check_304_headers(&cache_key, request_headers)
+            {
+                return Ok(build_304(
+                    &etag_for_304(request_headers, &etag),
+                    &last_modified_str,
+                    cc,
+                ));
+            }
         }
     }
 
@@ -691,13 +706,15 @@ pub async fn serve(
     let last_modified_str = httpdate::fmt_http_date(modified);
 
     // Check for 304 before reading file content (no Arc allocation yet)
-    if let Some(cc) = cache_control {
-        if check_not_modified(request_headers, &etag_str, &modified) {
-            return Ok(build_304(
-                &etag_for_304(request_headers, &etag_str),
-                &last_modified_str,
-                cc,
-            ));
+    if conditional {
+        if let Some(cc) = cache_control {
+            if check_not_modified(request_headers, &etag_str, &modified) {
+                return Ok(build_304(
+                    &etag_for_304(request_headers, &etag_str),
+                    &last_modified_str,
+                    cc,
+                ));
+            }
         }
     }
 
@@ -1609,9 +1626,15 @@ mod tests {
             parse_range("bytes=-0", 100),
             Some(RangePlan::NotSatisfiable)
         );
-        // Empty file: nothing is satisfiable
-        assert_eq!(parse_range("bytes=0-", 0), Some(RangePlan::NotSatisfiable));
-        assert_eq!(parse_range("bytes=-5", 0), Some(RangePlan::NotSatisfiable));
+    }
+
+    #[test]
+    fn test_parse_range_empty_file_serves_full() {
+        // Any Range against a 0-byte file is ignored — full (empty) 200,
+        // matching nginx, which skips its range filter at zero length.
+        assert_eq!(parse_range("bytes=0-", 0), None);
+        assert_eq!(parse_range("bytes=-5", 0), None);
+        assert_eq!(parse_range("bytes=0-4", 0), None);
     }
 
     #[test]
@@ -2034,6 +2057,54 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_bytes(response).await, &b"0123456789"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_post_conditional_not_304() {
+        // RFC 9110 §13.1.2-3: 304 is a GET/HEAD response — a POST carrying a
+        // matching If-None-Match still gets the full 200.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "hello").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::POST,
+            &headers,
+            Some("public, max-age=86400"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, &b"hello"[..]);
+    }
+
+    #[tokio::test]
+    async fn test_serve_range_on_empty_file_returns_200() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("empty.txt");
+        fs::write(&file_path, "").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=0-")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(header::CONTENT_LENGTH).unwrap(), "0");
+        assert!(body_bytes(response).await.is_empty());
     }
 
     #[tokio::test]
