@@ -564,6 +564,17 @@ fn add_cache_headers(
         .header(header::CACHE_CONTROL, cache_control)
 }
 
+/// Should range handling apply to a buffered response with this MIME type
+/// and size? Disabled when the client accepts brotli and the representation
+/// would be served compressed instead: the client's stored copy may be a
+/// brotli body that identity 206 fragments would corrupt, and neither
+/// If-Range form can distinguish the representations (nginx clears
+/// `allow_ranges` in its gzip filter for the same reason). Only buffered
+/// responses are ever compressed — the streaming path is exempt.
+fn ranges_allowed(supports_brotli: bool, mime_type: &str, size: u64) -> bool {
+    !(supports_brotli && crate::server::compression::would_compress(mime_type, size))
+}
+
 /// Build a 200 or 206 response for a fully buffered body, honoring the
 /// request's range plan. Used by both the content-cache hit path and the
 /// small-file read path.
@@ -598,8 +609,14 @@ fn respond_bytes(
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, mime_type)
-        .header(header::CONTENT_LENGTH, body.len())
-        .header(header::ACCEPT_RANGES, "bytes");
+        .header(header::CONTENT_LENGTH, body.len());
+    // Advertise ranges only when this request would actually honor them.
+    // Compression removes the header too, but brotli can decline to encode
+    // (output not smaller) — relying on that removal would leave an identity
+    // response advertising ranges the server just ignored.
+    if allow_ranges {
+        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
     if let Some(cr) = content_range {
         builder = builder.header(header::CONTENT_RANGE, cr);
     }
@@ -614,12 +631,9 @@ fn respond_bytes(
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
 /// Single-range `Range` requests (RFC 9110 §14) are honored for GET/HEAD with
 /// 206/416; multi-range requests fall back to the full 200 response.
-/// When `supports_brotli` is set and the representation would be compressed
-/// (compressible MIME type within the compression size window), range
-/// handling is disabled entirely — the client's stored copy may be a brotli
-/// body that identity 206 fragments would corrupt, and neither If-Range form
-/// can distinguish the representations (nginx clears `allow_ranges` in its
-/// gzip filter for the same reason).
+/// When `supports_brotli` is set and a buffered response would be served
+/// compressed, range handling is disabled for it (see [`ranges_allowed`]);
+/// streamed files are never compressed, so their ranges always work.
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
 #[allow(clippy::too_many_arguments)]
@@ -660,8 +674,7 @@ pub async fn serve(
     if let Some((cached_bytes, cached_mime, modified, etag, last_modified_str)) =
         cache.get_content(&cache_key)
     {
-        let allow_ranges = !(supports_brotli
-            && crate::server::compression::would_compress(&cached_mime, cached_bytes.len() as u64));
+        let allow_ranges = ranges_allowed(supports_brotli, &cached_mime, cached_bytes.len() as u64);
         return Ok(respond_bytes(
             cached_bytes,
             &cached_mime,
@@ -771,8 +784,7 @@ pub async fn serve(
             last_modified_arc.clone(),
         );
 
-        let allow_ranges =
-            !(supports_brotli && crate::server::compression::would_compress(&mime_type, file_size));
+        let allow_ranges = ranges_allowed(supports_brotli, &mime_type, file_size);
         return Ok(respond_bytes(
             bytes,
             &mime_type,
@@ -786,14 +798,12 @@ pub async fn serve(
         )?);
     }
 
-    // 5. Large file: stream from the already-open handle
-    let allow_ranges =
-        !(supports_brotli && crate::server::compression::would_compress(&mime_type, file_size));
-    let range_plan = if allow_ranges {
-        plan_range(method, request_headers, file_size, &etag, &modified)
-    } else {
-        RangePlan::Full
-    };
+    // 5. Large file: stream from the already-open handle.
+    //    Streamed responses are never compressed (the compression layer
+    //    passes through bodies without an exact size hint), so the identity
+    //    bytes are the only representation that exists — ranges are always
+    //    safe here, even for compressible MIME types and brotli clients.
+    let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
     if matches!(range_plan, RangePlan::NotSatisfiable) {
         return Ok(build_416(file_size)?);
     }
@@ -2174,6 +2184,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // The header must not advertise ranges the server just ignored —
+        // even if brotli later declines to encode (output not smaller),
+        // leaving the response uncompressed.
+        assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
         assert_eq!(body_bytes(response).await.len(), 500);
 
         // Same request without brotli support gets the range.
@@ -2219,6 +2233,41 @@ mod tests {
             response.headers().get(header::CONTENT_RANGE).unwrap(),
             "bytes 0-9/500"
         );
+    }
+
+    #[tokio::test]
+    async fn test_serve_range_for_streamed_compressible_with_brotli() {
+        // Files above the cache limit stream from disk and are never
+        // compressed, so no brotli representation of them exists anywhere —
+        // disabling ranges there would break resumption for zero benefit.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.js");
+        let size = MAX_CACHE_FILE_SIZE + 1;
+        fs::write(&file_path, vec![b'x'; size]).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &file_path,
+            &cache,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &range_headers("bytes=0-9"),
+            Some("public, max-age=86400"),
+            true, // client accepts brotli — irrelevant on the streaming path
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            format!("bytes 0-9/{size}").as_str()
+        );
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+        assert_eq!(body_bytes(response).await.len(), 10);
     }
 
     #[tokio::test]

@@ -16,5 +16,5 @@ static_files/test_range_unsatisfiable | GET | -H "Range: bytes=999-" | 416 | con
 static_files/test_range_multi_returns_full | GET | -H "Range: bytes=0-1,4-5" | 200 | content-range:missing, content-length:64
 static_files/test_range_if_range_mismatch | GET | -H "Range: bytes=0-15" -H "If-Range: \"stale-etag\"" | 200 | content-length:64
 static_files/test_range_if_range_match | GET | -H "Range: bytes=0-15" | 206 | content-range:bytes 0-15/64
-static_files/test_range_br_compressible_full | GET | -H "Range: bytes=0-9" -H "Accept-Encoding: br" | 200 | content-range:missing
+static_files/test_range_br_compressible_full | GET | -H "Range: bytes=0-9" -H "Accept-Encoding: br" | 200 | content-range:missing, accept-ranges:missing
 static_files/test_range_no_br_compressible_206 | GET | -H "Range: bytes=0-9" | 206 | content-range:bytes 0-9/520
