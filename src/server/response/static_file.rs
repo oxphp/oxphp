@@ -321,15 +321,19 @@ async fn verify_canonical(
     }
 }
 
+/// Whole seconds since the Unix epoch (HTTP dates have second precision).
+fn secs_since_epoch(t: &SystemTime) -> u64 {
+    t.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Generate a strong ETag from file size and modification time.
 /// Strong (no `W/` prefix) so it can satisfy `If-Range`, which requires
 /// strong comparison per RFC 9110 §13.1.5. Size + mtime fully identify the
 /// byte content of a static file, matching nginx's static ETag semantics.
 fn generate_etag(size: u64, modified: &SystemTime) -> String {
-    let dur = modified
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let mtime_hex = dur.as_secs();
+    let mtime_hex = secs_since_epoch(modified);
     format!("\"{size}-{mtime_hex:x}\"")
 }
 
@@ -376,18 +380,21 @@ fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
 
     let (first, last) = spec.split_once('-')?;
     let start: u64 = first.parse().ok()?;
+    let last: Option<u64> = if last.is_empty() {
+        None
+    } else {
+        Some(last.parse().ok()?)
+    };
+    // Syntactic validity before satisfiability: an inverted range is invalid
+    // regardless of the representation size (RFC 9110 §14.1.1) — ignore the
+    // header, same as any other malformed spec.
+    if last.is_some_and(|l| l < start) {
+        return None;
+    }
     if start >= size {
         return Some(RangePlan::NotSatisfiable);
     }
-    let end = if last.is_empty() {
-        size - 1
-    } else {
-        let last: u64 = last.parse().ok()?;
-        if last < start {
-            return None; // invalid spec — ignore the header
-        }
-        last.min(size - 1)
-    };
+    let end = last.map_or(size - 1, |l| l.min(size - 1));
     Some(RangePlan::Partial { start, end })
 }
 
@@ -410,17 +417,7 @@ fn if_range_matches(headers: &HeaderMap, etag: &str, modified: &SystemTime) -> b
     }
     // HTTP-date validator: exact match with Last-Modified (second precision)
     match httpdate::parse_http_date(value) {
-        Ok(if_range_time) => {
-            let mod_secs = modified
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let ir_secs = if_range_time
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            mod_secs == ir_secs
-        }
+        Ok(if_range_time) => secs_since_epoch(modified) == secs_since_epoch(&if_range_time),
         Err(_) => false,
     }
 }
@@ -437,9 +434,16 @@ fn plan_range(
     if method != http::Method::GET {
         return RangePlan::Full;
     }
-    let Some(range) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) else {
+    let mut range_lines = headers.get_all(header::RANGE).iter();
+    let Some(range) = range_lines.next().and_then(|v| v.to_str().ok()) else {
         return RangePlan::Full;
     };
+    // Multiple Range header lines are semantically one comma-joined list,
+    // i.e. a multi-range request — fall back to the full response like any
+    // other multi-range.
+    if range_lines.next().is_some() {
+        return RangePlan::Full;
+    }
     if !if_range_matches(headers, etag, modified) {
         return RangePlan::Full;
     }
@@ -484,16 +488,7 @@ fn check_not_modified(headers: &HeaderMap, etag: &str, modified: &SystemTime) ->
         if let Ok(val) = ims.to_str() {
             if let Ok(ims_time) = httpdate::parse_http_date(val) {
                 // File not modified if mtime <= If-Modified-Since
-                // Truncate to second precision (HTTP dates have second granularity)
-                let mod_secs = modified
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let ims_secs = ims_time
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                return mod_secs <= ims_secs;
+                return secs_since_epoch(modified) <= secs_since_epoch(&ims_time);
             }
         }
     }
@@ -541,33 +536,29 @@ fn respond_bytes(
     request_headers: &HeaderMap,
 ) -> Result<Response<ResponseBody>, http::Error> {
     let size = bytes.len() as u64;
-    match plan_range(method, request_headers, size, etag, modified) {
-        RangePlan::Full => {
-            let mut builder = Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, mime_type)
-                .header(header::CONTENT_LENGTH, bytes.len())
-                .header(header::ACCEPT_RANGES, "bytes");
-            if let Some(cc) = cache_control {
-                builder = add_cache_headers(builder, etag, last_modified_str, cc);
-            }
-            builder.body(full_body(bytes))
-        }
-        RangePlan::Partial { start, end } => {
-            let slice = bytes.slice(start as usize..(end + 1) as usize);
-            let mut builder = Response::builder()
-                .status(StatusCode::PARTIAL_CONTENT)
-                .header(header::CONTENT_TYPE, mime_type)
-                .header(header::CONTENT_LENGTH, slice.len())
-                .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
-                .header(header::ACCEPT_RANGES, "bytes");
-            if let Some(cc) = cache_control {
-                builder = add_cache_headers(builder, etag, last_modified_str, cc);
-            }
-            builder.body(full_body(slice))
-        }
-        RangePlan::NotSatisfiable => build_416(size),
+    let (status, body, content_range) =
+        match plan_range(method, request_headers, size, etag, modified) {
+            RangePlan::Full => (StatusCode::OK, bytes, None),
+            RangePlan::Partial { start, end } => (
+                StatusCode::PARTIAL_CONTENT,
+                bytes.slice(start as usize..(end + 1) as usize),
+                Some(format!("bytes {start}-{end}/{size}")),
+            ),
+            RangePlan::NotSatisfiable => return build_416(size),
+        };
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, mime_type)
+        .header(header::CONTENT_LENGTH, body.len())
+        .header(header::ACCEPT_RANGES, "bytes");
+    if let Some(cr) = content_range {
+        builder = builder.header(header::CONTENT_RANGE, cr);
     }
+    if let Some(cc) = cache_control {
+        builder = add_cache_headers(builder, etag, last_modified_str, cc);
+    }
+    builder.body(full_body(body))
 }
 
 /// Serve a static file with MIME type detection, content caching, and streaming.
@@ -682,14 +673,19 @@ pub async fn serve(
             .await?;
 
         let bytes = Bytes::from(contents);
-        cache.insert_content(
-            cache_key.into_owned(),
-            bytes.clone(),
-            mime_type.clone(),
-            modified,
-            etag.clone(),
-            last_modified_arc.clone(),
-        );
+        // Don't cache if the file shrank between fstat and the read — the
+        // bytes no longer match the validator computed from the handle
+        // metadata, and the poisoned pair would persist until eviction.
+        if bytes.len() as u64 == file_size {
+            cache.insert_content(
+                cache_key.into_owned(),
+                bytes.clone(),
+                mime_type.clone(),
+                modified,
+                etag.clone(),
+                last_modified_arc.clone(),
+            );
+        }
 
         return Ok(respond_bytes(
             bytes,
@@ -1577,8 +1573,11 @@ mod tests {
         assert_eq!(parse_range("bytes=", 100), None);
         assert_eq!(parse_range("bytes=abc-def", 100), None);
         assert_eq!(parse_range("bytes=5", 100), None);
-        // Inverted range
+        // Inverted range is syntactically invalid (RFC 9110 §14.1.1) and is
+        // ignored regardless of where it sits relative to the file size —
+        // validity is checked before satisfiability.
         assert_eq!(parse_range("bytes=10-5", 100), None);
+        assert_eq!(parse_range("bytes=200-100", 100), None);
     }
 
     #[test]
@@ -1656,6 +1655,20 @@ mod tests {
         );
         assert_eq!(
             plan_range(&http::Method::HEAD, &headers, 100, &etag, &modified),
+            RangePlan::Full
+        );
+    }
+
+    #[test]
+    fn test_plan_range_multiple_header_lines_full() {
+        // Two Range lines are semantically one multi-range list — serve full.
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+        let mut headers = HeaderMap::new();
+        headers.append(header::RANGE, "bytes=0-0".parse().unwrap());
+        headers.append(header::RANGE, "bytes=5-9".parse().unwrap());
+        assert_eq!(
+            plan_range(&http::Method::GET, &headers, 100, &etag, &modified),
             RangePlan::Full
         );
     }
