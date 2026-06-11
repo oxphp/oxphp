@@ -59,6 +59,19 @@ run_php_test() {
     fi
 }
 
+# attach_etag_header <url> <header_name> <args_array_name>
+# Fetches the ETag of a plain GET and appends "-H '<header_name>: <etag>'"
+# to the named curl-args array. No-op if the response carries no ETag.
+attach_etag_header() {
+    local url="$1" header_name="$2" array_name="$3"
+    local response etag_value
+    response=$(http_request "$url" 2>/dev/null)
+    etag_value=$(printf '%s' "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headers',{}).get('etag',''))" 2>/dev/null)
+    if [ -n "$etag_value" ]; then
+        eval "$array_name+=(-H \"\$header_name: \$etag_value\")"
+    fi
+}
+
 # run_runner_test <base_url> <test_line>
 # Runs a runner-side test with pipe-separated fields:
 # path | method | extra_curl_args | expected_status | header_checks
@@ -127,27 +140,12 @@ run_runner_test() {
         eval "full_curl_args+=($curl_args)"
     fi
 
-    # For conditional 304 test, first get the ETag then resend with If-None-Match
-    if [[ "$test_name" == "test_conditional_304" ]]; then
-        local etag_response
-        etag_response=$(http_request "$url" 2>/dev/null)
-        local etag_value
-        etag_value=$(printf '%s' "$etag_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headers',{}).get('etag',''))" 2>/dev/null)
-        if [ -n "$etag_value" ]; then
-            full_curl_args+=(-H "If-None-Match: $etag_value")
-        fi
-    fi
-
-    # For the If-Range match test, fetch the current ETag and attach it —
-    # the strong ETag must validate and the range must be honored (206).
-    if [[ "$test_name" == "test_range_if_range_match" ]]; then
-        local ir_response ir_etag
-        ir_response=$(http_request "$url" 2>/dev/null)
-        ir_etag=$(printf '%s' "$ir_response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('headers',{}).get('etag',''))" 2>/dev/null)
-        if [ -n "$ir_etag" ]; then
-            full_curl_args+=(-H "If-Range: $ir_etag")
-        fi
-    fi
+    # Conditional tests prefetch the current ETag and resend it in the
+    # matching conditional header (304 revalidation / If-Range 206).
+    case "$test_name" in
+        test_conditional_304)      attach_etag_header "$url" "If-None-Match" full_curl_args ;;
+        test_range_if_range_match) attach_etag_header "$url" "If-Range" full_curl_args ;;
+    esac
 
     local response
     response=$(http_request "$url" "${full_curl_args[@]}" 2>/dev/null) || response='{"status":0,"headers":{},"body":""}'

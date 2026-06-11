@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use http::{Response, StatusCode};
+use http::HeaderValue;
 
 use crate::events::{EventHandler, Priority, Propagation, ResponseBuilding};
 use crate::server::error_pages::ErrorPages;
@@ -23,14 +23,18 @@ impl EventHandler<ResponseBuilding> for ErrorPagesHandler {
         let status = event.response.status().as_u16();
         if status >= 400 {
             if let Some(page_bytes) = self.pages.get(status) {
-                event.response = Response::builder()
-                    .status(
-                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-                    )
-                    .header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")
-                    .header(http::header::CONTENT_LENGTH, page_bytes.len())
-                    .body(full_body(page_bytes))
-                    .unwrap();
+                // Swap only the body and its describing headers. Rebuilding
+                // the response from scratch would drop semantically required
+                // headers the body does not own — Content-Range on 416,
+                // Retry-After on 429/529, Allow on 405.
+                let len = page_bytes.len();
+                *event.response.body_mut() = full_body(page_bytes);
+                let headers = event.response.headers_mut();
+                headers.insert(
+                    http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                );
+                headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from(len));
             }
         }
         Propagation::Continue
@@ -47,6 +51,7 @@ mod tests {
     use crate::events::EventHandler;
     use crate::types::ResponseBody;
     use bytes::Bytes;
+    use http::{Response, StatusCode};
     use tempfile::TempDir;
 
     fn make_error_pages() -> Arc<ErrorPages> {
@@ -117,6 +122,56 @@ mod tests {
         // 403 has no custom page, should not be modified
         assert_eq!(event.response.status(), StatusCode::FORBIDDEN);
         assert!(event.response.headers().get("content-type").is_none());
+    }
+
+    #[test]
+    fn test_keeps_semantic_headers() {
+        // A custom error page replaces the body, not the response semantics:
+        // Content-Range on 416 (RFC 9110 §14.4) must survive the swap.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("416.html"), "<h1>Bad range</h1>").unwrap();
+        let path = dir.path().to_path_buf();
+        std::mem::forget(dir);
+        let handler = ErrorPagesHandler::new(Arc::new(ErrorPages::load(&path).unwrap()));
+
+        let response = Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(http::header::CONTENT_RANGE, "bytes */1000")
+            .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(full_body(Bytes::from_static(b"416 Range Not Satisfiable")))
+            .unwrap();
+        let mut event = ResponseBuilding {
+            request_id: "test".to_string(),
+            response,
+            metadata: Vec::new(),
+        };
+
+        handler.handle(&mut event);
+        assert_eq!(event.response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            event
+                .response
+                .headers()
+                .get(http::header::CONTENT_RANGE)
+                .unwrap(),
+            "bytes */1000"
+        );
+        assert_eq!(
+            event
+                .response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            event
+                .response
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .unwrap(),
+            "18"
+        );
     }
 
     #[test]

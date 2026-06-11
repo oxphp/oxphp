@@ -348,6 +348,16 @@ enum RangePlan {
     NotSatisfiable,
 }
 
+/// Parse a range position: the RFC 9110 grammar allows only DIGIT, while
+/// `u64::from_str` also accepts a leading `+` — reject that liberality so
+/// `bytes=+5-+9` is ignored like any other malformed spec (nginx parity).
+fn parse_range_pos(s: &str) -> Option<u64> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
 /// Parse a single-range `Range` header value (RFC 9110 §14.1.2) against a
 /// representation of `size` bytes.
 ///
@@ -367,7 +377,7 @@ fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
 
     if let Some(suffix) = spec.strip_prefix('-') {
         // suffix-range: last N bytes
-        let n: u64 = suffix.parse().ok()?;
+        let n = parse_range_pos(suffix)?;
         if n == 0 || size == 0 {
             return Some(RangePlan::NotSatisfiable);
         }
@@ -379,11 +389,11 @@ fn parse_range(value: &str, size: u64) -> Option<RangePlan> {
     }
 
     let (first, last) = spec.split_once('-')?;
-    let start: u64 = first.parse().ok()?;
+    let start = parse_range_pos(first)?;
     let last: Option<u64> = if last.is_empty() {
         None
     } else {
-        Some(last.parse().ok()?)
+        Some(parse_range_pos(last)?)
     };
     // Syntactic validity before satisfiability: an inverted range is invalid
     // regardless of the representation size (RFC 9110 §14.1.1) — ignore the
@@ -499,6 +509,29 @@ fn check_not_modified(headers: &HeaderMap, etag: &str, modified: &SystemTime) ->
     false
 }
 
+/// ETag to send on a 304: if the client's matching `If-None-Match` tag was
+/// weak, it cached a representation whose tag the compression layer
+/// downgraded — echo the weak form. Answering with the strong tag would let
+/// the cache "re-strengthen" the stored entry's validator (RFC 9111 §4.3.4
+/// header update), re-opening the If-Range representation-mixing hole the
+/// downgrade exists to close.
+fn etag_for_304(headers: &HeaderMap, etag: &str) -> String {
+    let client_tag_weak = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|val| {
+            val.split(',').any(|tag| {
+                let t = tag.trim();
+                t.starts_with("W/") && etag_weak_eq(t, etag)
+            })
+        });
+    if client_tag_weak {
+        format!("W/{etag}")
+    } else {
+        etag.to_string()
+    }
+}
+
 /// Build a 304 Not Modified response with caching headers.
 fn build_304(etag: &str, last_modified_str: &str, cache_control: &str) -> Response<ResponseBody> {
     Response::builder()
@@ -587,7 +620,11 @@ pub async fn serve(
         if let Some((etag, last_modified_str)) =
             cache.check_304_headers(&cache_key, request_headers)
         {
-            return Ok(build_304(&etag, &last_modified_str, cc));
+            return Ok(build_304(
+                &etag_for_304(request_headers, &etag),
+                &last_modified_str,
+                cc,
+            ));
         }
     }
 
@@ -656,7 +693,11 @@ pub async fn serve(
     // Check for 304 before reading file content (no Arc allocation yet)
     if let Some(cc) = cache_control {
         if check_not_modified(request_headers, &etag_str, &modified) {
-            return Ok(build_304(&etag_str, &last_modified_str, cc));
+            return Ok(build_304(
+                &etag_for_304(request_headers, &etag_str),
+                &last_modified_str,
+                cc,
+            ));
         }
     }
 
@@ -1588,6 +1629,10 @@ mod tests {
         // validity is checked before satisfiability.
         assert_eq!(parse_range("bytes=10-5", 100), None);
         assert_eq!(parse_range("bytes=200-100", 100), None);
+        // The grammar allows only DIGIT — a leading `+` (accepted by
+        // u64::from_str) must be rejected like any malformed spec.
+        assert_eq!(parse_range("bytes=+5-+9", 100), None);
+        assert_eq!(parse_range("bytes=-+5", 100), None);
     }
 
     #[test]
@@ -1712,6 +1757,56 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::RANGE, range.parse().unwrap());
         headers
+    }
+
+    #[test]
+    fn test_etag_for_304_echoes_client_weakness() {
+        let modified = test_modified();
+        let etag = generate_etag(100, &modified);
+
+        // Client revalidates a compressed copy with the weakened tag —
+        // the 304 must echo the weak form, not re-strengthen it.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, format!("W/{etag}").parse().unwrap());
+        assert_eq!(etag_for_304(&headers, &etag), format!("W/{etag}"));
+
+        // Client with an identity copy keeps the strong tag.
+        headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
+        assert_eq!(etag_for_304(&headers, &etag), etag);
+
+        // No If-None-Match (date-based 304): strong tag.
+        assert_eq!(etag_for_304(&HeaderMap::new(), &etag), etag);
+    }
+
+    #[tokio::test]
+    async fn test_serve_304_weak_inm_echoes_weak_etag() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("data.txt");
+        fs::write(&file_path, "hello").unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        let etag = response
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, format!("W/{etag}").parse().unwrap());
+        let response = serve_with(&file_path, &dir, &cache, headers).await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ETAG)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("W/{etag}")
+        );
     }
 
     #[tokio::test]
