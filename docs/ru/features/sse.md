@@ -184,7 +184,7 @@ SSE-эндпоинты требуют отключения таймера вып
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:

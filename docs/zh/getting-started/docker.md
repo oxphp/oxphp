@@ -12,7 +12,7 @@ OxPHP 专为容器化运行而设计。本指南涵盖使用 Docker 构建、配
 将应用容器化最简单的方式：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.7.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.8.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -168,7 +168,7 @@ docker build --target prod -t myapp:prod .
 最简可用示例：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -183,7 +183,7 @@ CMD ["oxphp"]
 
 ### 最佳实践（双阶段，更小的镜像）
 
-为获得最小的最终镜像，请在独立的构建阶段编译扩展，仅将编译好的 `.so` 文件复制到运行时阶段。上方的 [多阶段 Dockerfile](#多阶段-dockerfile) 使用 `FROM ghcr.io/oxphp/oxphp:0.7.0 AS prod` —— 简单、可移植，推荐作为起点。
+为获得最小的最终镜像，请在独立的构建阶段编译扩展，仅将编译好的 `.so` 文件复制到运行时阶段。上方的 [多阶段 Dockerfile](#多阶段-dockerfile) 使用 `FROM ghcr.io/oxphp/oxphp:0.8.0 AS prod` —— 简单、可移植，推荐作为起点。
 
 仓库中的 `examples/dockerfile/Dockerfile` 走得更远：其 `prod` 目标基于纯净 `alpine`，通过显式 `apk` 依赖清单，只把 `oxphp` 二进制、`libphp.so`、编译好的 PHP 扩展以及必要的共享库复制进镜像。基础镜像从 ~188 MB 降到 ~76 MB（约 60%，不含应用代码），代价是需要在 PHP/Alpine 升级时维护 `apk` 清单。同一文件还提供 `prod-cli` 目标 —— 用于 `php artisan migrate`、Composer 以及其他不应留在 serving 路径上的短期维护命令。
 
@@ -198,13 +198,13 @@ CMD ["oxphp"]
 # 容器默认以 root 运行 —— CLI 对 root 所有的挂载卷拥有写权限。
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.7.0 \
+    ghcr.io/oxphp/oxphp:0.8.0 \
     php artisan migrate
 
 # 如果挂载卷归 www-data 所有，使用 Docker 的 --user：
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.7.0 \
+    ghcr.io/oxphp/oxphp:0.8.0 \
     php artisan migrate
 ```
 
@@ -214,12 +214,12 @@ docker run --rm --user www-data \
 
 生产镜像没有 `USER` 指令，因此容器默认以 root 运行。这是有意为之，与 `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` 的约定一致。生产环境中**必须**在编排层降权：
 
-- **Docker：** `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
+- **Docker：** `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
 - **Compose：**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.7.0
+      image: ghcr.io/oxphp/oxphp:0.8.0
       user: www-data
   ```
 - **Kubernetes：**
@@ -244,7 +244,7 @@ docker run --rm --user www-data \
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     command: ["oxphp", "serve", "--user=www-data"]
     ports:
       - "80:80"

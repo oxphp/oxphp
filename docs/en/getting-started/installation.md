@@ -5,14 +5,14 @@ description: Install OxPHP via Docker image or build from source. Covers prerequ
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.7.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.7.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.8.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.8.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
 
 ## Docker (Recommended)
 
 Pull the official image from the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.7.0
+docker pull ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 The image includes:
@@ -23,7 +23,7 @@ The image includes:
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
 - **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -80,9 +80,9 @@ The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already co
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -107,7 +107,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 # Runtime dependencies for extensions
 USER root
@@ -132,7 +132,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 If your application does not need additional extensions, this is sufficient:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```

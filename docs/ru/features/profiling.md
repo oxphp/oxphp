@@ -22,7 +22,7 @@ PHP и не прибавляет значимых накладных расхо�
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -510,7 +510,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — превысили PROFILER_MAX_SPANS
-  "oxphp_version": "0.7.0",
+  "oxphp_version": "0.8.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
