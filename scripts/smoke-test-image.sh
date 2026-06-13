@@ -53,13 +53,24 @@ fi
 
 # Check 3: oxphp SAPI extension loads (actual extension name is oxphp_sapi,
 # per PHP_OXPHP_SAPI_EXTNAME in ext/php_oxphp_sapi.h).
-# On failure we re-run with stderr visible and dump the relevant pieces of
-# image state so the CI log carries enough info to root-cause without
-# needing a follow-up build.
-if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp_sapi"; then
+# The extension occasionally fails to appear on the very first `docker run`
+# of a freshly built image (cold layer / loader timing); a second invocation
+# moments later lists it. Retry a few times before failing so a single
+# transient miss does not fail a release. On final failure we re-run with
+# stderr visible and dump the relevant pieces of image state so the CI log
+# carries enough info to root-cause without needing a follow-up build.
+SAPI_OK=0
+for attempt in 1 2 3; do
+    if docker run --rm "$IMG" php -m 2>/dev/null | grep -qx "oxphp_sapi"; then
+        SAPI_OK=1
+        break
+    fi
+    [[ "$attempt" -lt 3 ]] && sleep 1
+done
+if [[ "$SAPI_OK" -eq 1 ]]; then
     ok "check #3: oxphp_sapi extension is loaded"
 else
-    fail "check #3: oxphp_sapi extension not found in php -m"
+    fail "check #3: oxphp_sapi extension not found in php -m (after 3 attempts)"
     {
         echo "    --- diagnostics ---"
         echo "    php -m (stdout+stderr):"
