@@ -11,7 +11,7 @@ OxPHP serves branded HTML error pages for 4xx and 5xx responses. Error pages are
 
 1. At startup, OxPHP reads the directory specified by `ERROR_PAGES_DIR` and loads every valid `{status}.html` file into memory.
 2. Files must be named with a numeric HTTP status code in the 400–599 range (for example, `404.html`, `503.html`). Files with non-numeric names, status codes outside that range (including `200.html`), or non-`.html` extensions are silently ignored.
-3. When OxPHP generates a 4xx or 5xx response, it checks for a matching pre-loaded error page. If one exists, the response body is replaced with the custom HTML and the `Content-Type` is set to `text/html; charset=utf-8`.
+3. When OxPHP generates a 4xx or 5xx response, it checks for a matching pre-loaded error page. If one exists, OxPHP replaces only the body and the headers that describe it: `Content-Type` is set to `text/html; charset=utf-8`, `Content-Length` to the page size, and headers coupled to the original body (`Content-Encoding`, `ETag`, `Last-Modified`) are dropped so they cannot mislabel or revalidate the replacement (for example a PHP error body compressed by `ob_gzhandler` will not leave the HTML page tagged `Content-Encoding: gzip`). Headers that describe the response semantics rather than the body are preserved into the custom page — `Content-Range` on a `416 Range Not Satisfiable`, `Retry-After` on a `529 Site is overloaded`, and `Allow` on a `405 Method Not Allowed`.
 4. If the directory does not exist or cannot be read at startup, OxPHP logs a warning and continues without custom error pages. Error responses fall back to plain-text bodies until the directory is fixed and the server is restarted.
 
 ## Configuration
@@ -86,7 +86,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.7.0
+  ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 ### A 429 response still shows the default body
@@ -98,7 +98,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:

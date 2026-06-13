@@ -11,7 +11,7 @@ OxPHP 为 4xx 和 5xx 响应提供品牌化 HTML 错误页面。错误页面在�
 
 1. 启动时，OxPHP 读取 `ERROR_PAGES_DIR` 指定的目录，并将所有有效的 `{status}.html` 文件加载到内存中。
 2. 文件必须以 400–599 范围内的数字 HTTP 状态码命名（例如 `404.html`、`503.html`）。文件名非数字、状态码超出该范围（包括 `200.html`）或扩展名非 `.html` 的文件会被静默忽略。
-3. 当 OxPHP 生成 4xx 或 5xx 响应时，会查找匹配的预加载错误页面。如果存在，响应体将替换为自定义 HTML，并将 `Content-Type` 设置为 `text/html; charset=utf-8`。
+3. 当 OxPHP 生成 4xx 或 5xx 响应时，会查找匹配的预加载错误页面。如果存在，OxPHP 仅替换响应体及描述它的头部：将 `Content-Type` 设置为 `text/html; charset=utf-8`，将 `Content-Length` 设置为页面大小，并移除与原始响应体耦合的头部（`Content-Encoding`、`ETag`、`Last-Modified`），以免它们错误地标记或重新验证替换内容（例如被 `ob_gzhandler` 压缩的 PHP 错误响应体不会让 HTML 页面残留 `Content-Encoding: gzip`）。描述响应语义而非响应体的头部会保留到自定义页面中——`416 Range Not Satisfiable` 的 `Content-Range`、`529 Site is overloaded` 的 `Retry-After`，以及 `405 Method Not Allowed` 的 `Allow`。
 4. 如果目录在启动时不存在或无法读取，OxPHP 会记录警告并在没有自定义错误页面的情况下继续运行。错误响应将回退到纯文本正文，直到目录修复并重启服务器为止。
 
 ## 配置
@@ -86,7 +86,7 @@ docker logs my-app 2>&1 | grep "error page"
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.7.0
+  ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 ### 429 响应仍显示默认正文
@@ -98,7 +98,7 @@ docker run --rm -v ./errors:/var/www/errors:ro \
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:
