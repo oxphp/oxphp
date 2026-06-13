@@ -523,18 +523,6 @@ extern "C" {
         prepare_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
     );
 
-    // Async task execution
-    pub fn oxphp_execute_async_task(
-        op_array: *const c_void,
-        static_vars: *const c_void,
-        this_ptr: *mut c_void,
-        argc: u32,
-        args: *mut c_void,
-        retval: *mut c_void,
-        exc_class: *mut *mut c_char,
-        exc_message: *mut *mut c_char,
-    ) -> c_int;
-
     // ─── Plugin Class Registry ──────────────────────────────────
     pub fn oxphp_bridge_register_class(
         fqn: *const c_char,

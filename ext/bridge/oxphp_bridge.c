@@ -3550,8 +3550,9 @@ int oxphp_bridge_is_async_worker(void) {
 /* ─── Async Fatal Error Capture ────────────────────────────── */
 /* Thread-local buffer to capture the error message from zend_error_cb
  * before zend_bailout() is called. The Rust error callback writes here
- * for fatal errors on async worker threads; the zend_catch block in
- * oxphp_execute_async_task reads and parses it. */
+ * for fatal errors on async worker threads; the task scheduler's
+ * fatal-capture path (task_capture_fatal in oxphp_fiber.c) reads and
+ * parses it via oxphp_bridge_pop_fatal(). */
 static __thread char *captured_fatal_msg = NULL;
 
 void oxphp_bridge_capture_fatal(const char *msg, size_t len) {
@@ -3693,102 +3694,6 @@ int oxphp_reconstruct_async_closure(
         return -1;
     }
     return 0;
-}
-
-/* === Async Promise: Execute Async Task === */
-
-int oxphp_execute_async_task(
-    zend_op_array *op_array,
-    HashTable *static_vars,
-    zval *this_ptr,
-    uint32_t argc,
-    zval *args,
-    zval *retval,
-    char **exc_class,
-    char **exc_message
-) {
-    zval closure;
-    zend_fcall_info fci;
-    zend_fcall_info_cache fcc;
-
-    *exc_class = NULL;
-    *exc_message = NULL;
-    ZVAL_NULL(retval);
-
-    if (oxphp_reconstruct_async_closure(op_array, static_vars, this_ptr,
-                                        &closure, &fci, &fcc,
-                                        exc_class, exc_message) != 0) {
-        return -1;
-    }
-
-    fci.retval = retval;
-    fci.param_count = argc;
-    fci.params = args;
-
-    int result = 0;
-
-    zend_try {
-        if (zend_call_function(&fci, &fcc) != SUCCESS) {
-            *exc_class = strdup("RuntimeException");
-            *exc_message = strdup("Failed to call async closure");
-            result = -1;
-        } else if (EG(exception)) {
-            /* Capture exception details */
-            zend_object *ex = EG(exception);
-            zend_class_entry *ce = ex->ce;
-            *exc_class = strdup(ZSTR_VAL(ce->name));
-
-            /* Get message via property read */
-            zval rv;
-            zval *msg_zv = zend_read_property(ce, ex, "message", sizeof("message") - 1, 1, &rv);
-            if (msg_zv && Z_TYPE_P(msg_zv) == IS_STRING) {
-                *exc_message = strdup(Z_STRVAL_P(msg_zv));
-            } else {
-                *exc_message = strdup("(unknown)");
-            }
-
-            zend_clear_exception();
-            result = -1;
-        }
-    } zend_catch {
-        /* Fatal error / zend_bailout — EG(exception) is cleared by zend_exception_error
-         * before bailout, but our error callback captured the formatted message. */
-        char *fatal_msg = oxphp_bridge_pop_fatal();
-        if (fatal_msg && strncmp(fatal_msg, "Uncaught ", 9) == 0) {
-            /* Parse "Uncaught ClassName: message in /path/to/file.php:NN" */
-            const char *class_start = fatal_msg + 9;
-            const char *colon = strchr(class_start, ':');
-            if (colon && colon > class_start) {
-                *exc_class = strndup(class_start, (size_t)(colon - class_start));
-                /* Skip ": " after class name */
-                const char *msg_start = colon + 2;
-                /* Find " in " to strip the file location */
-                const char *in_pos = strstr(msg_start, " in ");
-                if (in_pos) {
-                    *exc_message = strndup(msg_start, (size_t)(in_pos - msg_start));
-                } else {
-                    *exc_message = strdup(msg_start);
-                }
-            } else {
-                /* Uncaught but no colon — use full message */
-                *exc_class = strdup("Error");
-                *exc_message = strdup(fatal_msg);
-            }
-            free(fatal_msg);
-        } else if (fatal_msg) {
-            /* Non-uncaught fatal: die()/exit() or other fatal */
-            *exc_class = strdup("Error");
-            *exc_message = fatal_msg; /* transfer ownership */
-        } else {
-            *exc_class = strdup("Error");
-            *exc_message = strdup("Fatal error in async closure");
-        }
-        CG(unclean_shutdown) = 0;
-        result = -1;
-    } zend_end_try();
-
-    zval_ptr_dtor(&closure);
-    return result;
 }
 
 /* === Async Promise: Borrow Proxy === */

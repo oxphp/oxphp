@@ -616,21 +616,6 @@ pub unsafe fn oxphp_bridge_set_fiber_callbacks(
 ) {
 }
 
-// Async task execution
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn oxphp_execute_async_task(
-    _op_array: *const c_void,
-    _static_vars: *const c_void,
-    _this_ptr: *mut c_void,
-    _argc: u32,
-    _args: *mut c_void,
-    _retval: *mut c_void,
-    _exc_class: *mut *mut c_char,
-    _exc_message: *mut *mut c_char,
-) -> c_int {
-    0
-}
-
 // ─── Plugin Class Registry ──────────────────────────────────
 
 pub unsafe fn oxphp_bridge_register_class(

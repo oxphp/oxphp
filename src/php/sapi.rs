@@ -1540,9 +1540,9 @@ unsafe extern "C" fn oxphp_error_cb(
 
         // On async worker threads, capture the error message for exception propagation.
         // When an uncaught exception triggers zend_exception_error → zend_bailout,
-        // EG(exception) is cleared before bailout. The zend_catch block in
-        // oxphp_execute_async_task reads this captured message to extract the
-        // original exception class and message.
+        // EG(exception) is cleared before bailout. The task scheduler's
+        // fatal-capture path (task_capture_fatal in oxphp_fiber.c) reads this
+        // captured message to extract the original exception class and message.
         if is_async_worker() && !message.is_null() {
             let raw = (*message).as_bytes();
             crate::bridge::ffi::oxphp_bridge_capture_fatal(

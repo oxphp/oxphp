@@ -600,8 +600,8 @@ static inline oxphp_fiber_scheduler *oxphp_task_sched_get(void) {
 }
 
 /* Capture a pending PHP exception (EG(exception)) into malloc'd strings on
- * the fiber, then clear it. Mirrors the graceful-exception branch of
- * oxphp_execute_async_task. */
+ * the fiber, then clear it, so the result can be propagated to the awaiter
+ * after the task fiber unwinds. */
 static void task_capture_exception(oxphp_request_fiber *fiber) {
     zend_object *ex = EG(exception);
     zend_class_entry *ce = ex->ce;
@@ -617,8 +617,9 @@ static void task_capture_exception(oxphp_request_fiber *fiber) {
     zend_clear_exception();
 }
 
-/* Capture a fatal error (zend_bailout) into malloc'd strings on the fiber.
- * Mirrors the zend_catch branch of oxphp_execute_async_task. */
+/* Capture a fatal error (zend_bailout) into malloc'd strings on the fiber,
+ * parsing the message the Rust error callback stashed via
+ * oxphp_bridge_capture_fatal before the bailout. */
 static void task_capture_fatal(oxphp_request_fiber *fiber) {
     char *fatal_msg = oxphp_bridge_pop_fatal();
     if (fatal_msg && strncmp(fatal_msg, "Uncaught ", 9) == 0) {
