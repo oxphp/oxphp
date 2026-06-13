@@ -3377,6 +3377,26 @@ unsafe fn set_bridge_internal_error(message: &str) {
     ffi::oxphp_bridge_set_async_exception(cls.as_ptr(), msg.as_ptr());
 }
 
+/// Break a running async task out of a CPU-bound loop after its awaiter has
+/// given up. The cancel flag (`cancelled.cancelled`) must already be set: the
+/// scheduler loop polls it to unwind a *suspended* fiber, but a busy-looping
+/// fiber never returns to that loop. Kicking the worker's `EG(vm_interrupt)`
+/// cross-thread breaks it out at the next opcode boundary; the interrupt
+/// handler then throws into the matching fiber (per-fiber `cancel_cell`),
+/// unwinding it. `worker_interrupt == 0` means the task hasn't been picked up
+/// by a worker yet — nothing is running to interrupt, so this is a no-op.
+///
+/// # Safety
+/// Calls into the C bridge; must run on a PHP thread.
+unsafe fn kick_worker_interrupt(cancelled: &CancelShared) {
+    let addr = cancelled
+        .worker_interrupt
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if addr != 0 {
+        crate::bridge::ffi::oxphp_bridge_request_interrupt_at(addr as *mut c_void);
+    }
+}
+
 /// Rust-side callback invoked from C when PHP calls `oxphp_async_await()`.
 ///
 /// Blocks on the oneshot receiver until the async result arrives,
@@ -3462,22 +3482,9 @@ pub unsafe extern "C" fn await_dispatch_callback(
                         cancelled
                             .cancelled
                             .store(true, std::sync::atomic::Ordering::Relaxed);
-                        // A CPU-bound fiber never yields back to that loop, so the
-                        // flag alone can't reach it. Kick the running worker's
-                        // EG(vm_interrupt) cross-thread to break it out at the next
-                        // opcode boundary; the interrupt handler then throws into
-                        // the fiber, unwinding it. 0 = task not yet picked up by a
-                        // worker (nothing running to interrupt).
-                        let addr = cancelled
-                            .worker_interrupt
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        if addr != 0 {
-                            unsafe {
-                                crate::bridge::ffi::oxphp_bridge_request_interrupt_at(
-                                    addr as *mut c_void,
-                                )
-                            };
-                        }
+                        // The flag alone reaches only a suspended fiber; a
+                        // CPU-bound one needs the cross-thread interrupt kick.
+                        unsafe { kick_worker_interrupt(&cancelled) };
                         return -2;
                     }
                 }
@@ -3733,6 +3740,9 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
                 cancelled
                     .cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Break any CPU-bound task out of its loop — the flag alone
+                // reaches only suspended fibers.
+                unsafe { kick_worker_interrupt(&cancelled) };
                 stash_stranded(id, rx, cancelled);
             }
             if let Some(m) = get_async_metrics() {
@@ -4233,6 +4243,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 cancelled
                     .cancelled
                     .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Break any CPU-bound task out of its loop — the flag alone
+                // reaches only suspended fibers.
+                unsafe { kick_worker_interrupt(&cancelled) };
                 stash_stranded(id, rx, cancelled);
             }
 
