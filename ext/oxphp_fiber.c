@@ -885,6 +885,24 @@ int oxphp_async_sched_tick(void) {
         }
     }
 
+    /* Force-resume sleeping fibers that were cancelled (awaiter gave up) —
+     * the suspend point unwinds on cancellation instead of waiting out the
+     * timer. Mirrors the await branch above; without it a task parked in
+     * oxphp_sleep()/oxphp_usleep() would sleep its full duration before
+     * unwinding. */
+    {
+        oxphp_request_fiber *fiber = sched->fibers_head;
+        while (fiber) {
+            oxphp_request_fiber *next = fiber->next;
+            if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
+                && fiber->cancel_requested) {
+                fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                oxphp_task_resume_fiber(sched, fiber, NULL);
+            }
+            fiber = next;
+        }
+    }
+
     /* Resume fibers whose sleep timer expired */
     {
         uint64_t ready_ids[32];

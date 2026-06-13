@@ -1213,7 +1213,8 @@ PHP_FUNCTION(oxphp_stream_flush)
 
 /* Internal: register timer and suspend current fiber.
  * duration_us is the sleep duration in microseconds.
- * Returns 1 if fiber-suspended, 0 if no fiber (use blocking fallback). */
+ * Returns 1 if fiber-suspended (timer expired), 0 if no fiber (use blocking
+ * fallback), -1 if the task was cancelled while sleeping (caller throws). */
 static int oxphp_fiber_sleep_us(uint64_t duration_us)
 {
     if (oxphp_current_fiber == NULL) return 0;
@@ -1221,19 +1222,27 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
 
+    oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(duration_ms);
 
-    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_SLEEP;
-    oxphp_current_fiber->suspend_data.timer_id = timer_id;
+    self->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    self->suspend_data.timer_id = timer_id;
 
     zend_fiber_transfer transfer = {
-        .context = oxphp_current_fiber->scheduler,
+        .context = self->scheduler,
         .flags = 0
     };
     ZVAL_NULL(&transfer.value);
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
+    /* --- RESUMED on timer expiry, OR force-resumed by the scheduler when the
+     * task was cancelled (awaiter gave up). On cancellation, signal the caller
+     * to throw instead of returning normally. */
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -1; /* cancelled */
+    }
     return 1;
 }
 
@@ -1250,7 +1259,13 @@ PHP_FUNCTION(oxphp_sleep)
     if (seconds <= 0.0) return;
 
     uint64_t duration_us = (uint64_t)(seconds * 1000000.0);
-    if (oxphp_fiber_sleep_us(duration_us)) return;
+    int rc = oxphp_fiber_sleep_us(duration_us);
+    if (rc < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return;
+    }
+    if (rc) return;
 
     usleep((useconds_t)duration_us);
 }
@@ -1268,7 +1283,13 @@ PHP_FUNCTION(oxphp_usleep)
 
     if (microseconds <= 0) return;
 
-    if (oxphp_fiber_sleep_us((uint64_t)microseconds)) return;
+    int rc = oxphp_fiber_sleep_us((uint64_t)microseconds);
+    if (rc < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return;
+    }
+    if (rc) return;
 
     usleep((useconds_t)microseconds);
 }
