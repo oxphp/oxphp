@@ -1,11 +1,11 @@
 ---
 title: Static Files
-description: OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, and conditional 304 responses.
+description: OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
 ---
 
 # Static Files
 
-OxPHP serves static files directly from the document root without invoking PHP. Files are served with automatic MIME type detection, an in-memory cache for fast repeated access, and full HTTP caching support including ETags and conditional requests.
+OxPHP serves static files directly from the document root without invoking PHP. Files are served with automatic MIME type detection, an in-memory cache for fast repeated access, and full HTTP caching support including ETags, conditional requests, and Range requests for partial downloads.
 
 ## How It Works
 
@@ -15,7 +15,8 @@ When a request matches a static file:
 2. **MIME detection** — the content type is determined from the file extension
 3. **Cache check** — the file cache is checked before touching the filesystem
 4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
-5. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
+5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP responds with `206 Partial Content`: GET receives only the requested byte range, HEAD the same range headers with no body
+6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
 
 ## Configuration
 
@@ -69,7 +70,7 @@ The `max-age` value is the TTL converted to seconds. Set `STATIC_MAX_AGE=off` to
 
 Every static file response includes:
 
-- **ETag** — a weak ETag in the format `W/"<size>-<mtime_hex>"`, derived from the file size and last modification time
+- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served brotli-compressed, the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
 - **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
 These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
@@ -82,6 +83,34 @@ OxPHP evaluates conditional request headers to avoid sending unchanged file cont
 - **If-Modified-Since** — the client sends a timestamp. If the file has not been modified since that time, OxPHP returns 304.
 
 `If-None-Match` takes priority over `If-Modified-Since` per RFC 7232. For files already in the in-memory cache, the conditional check runs without any disk I/O.
+
+### Range Requests (206)
+
+Static file responses advertise `Accept-Ranges: bytes`, and GET requests with a single-range `Range` header receive only the requested bytes:
+
+```http
+GET /videos/intro.mp4 HTTP/1.1
+Range: bytes=1048576-
+
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 1048576-52428799/52428800
+Content-Length: 51380224
+```
+
+This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget -c`, download managers), and partial PDF loading. All three range forms from RFC 9110 are supported: `bytes=N-M`, `bytes=N-` (from offset to end), and `bytes=-N` (last N bytes).
+
+- A range that cannot be satisfied (start beyond the end of file) returns `416 Range Not Satisfiable` with `Content-Range: bytes */<size>`.
+- **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment. The date form is only accepted once the file's modification second has fully elapsed — a just-written file could change again within the same second without moving the date, so it is not yet a strong validator (RFC 9110).
+- Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
+- **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
+- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Only files served from the in-memory cache (up to 1 MiB) are ever compressed, so ranges always work for the content that actually needs them: video, archives, images, and every file streamed from disk. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
+- `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
+
+Example: resume an interrupted download with curl:
+
+```bash
+curl -C - -O https://example.com/dist/app-installer.dmg
+```
 
 ### Disabling Caching
 

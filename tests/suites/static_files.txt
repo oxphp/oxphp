@@ -8,3 +8,13 @@ static_files/test_etag_present | GET | | 200 | etag:exists
 static_files/test_cache_control | GET | | 200 | cache-control:exists
 static_files/test_last_modified | GET | | 200 | last-modified:exists
 static_files/test_conditional_304 | GET | | 304 |
+static_files/test_accept_ranges_present | GET | | 200 | accept-ranges:bytes
+static_files/test_range_basic | GET | -H "Range: bytes=0-15" | 206 | content-range:bytes 0-15/64, content-length:16, accept-ranges:bytes, vary:missing
+static_files/test_range_open_ended | GET | -H "Range: bytes=48-" | 206 | content-range:bytes 48-63/64, content-length:16
+static_files/test_range_suffix | GET | -H "Range: bytes=-16" | 206 | content-range:bytes 48-63/64
+static_files/test_range_unsatisfiable | GET | -H "Range: bytes=999-" | 416 | content-range:bytes */64
+static_files/test_range_multi_returns_full | GET | -H "Range: bytes=0-1,4-5" | 200 | content-range:missing, content-length:64
+static_files/test_range_if_range_mismatch | GET | -H "Range: bytes=0-15" -H "If-Range: \"stale-etag\"" | 200 | content-length:64
+static_files/test_range_if_range_match | GET | -H "Range: bytes=0-15" | 206 | content-range:bytes 0-15/64
+static_files/test_range_br_compressible_full | GET | -H "Range: bytes=0-9" -H "Accept-Encoding: br" | 200 | content-range:missing, accept-ranges:missing, vary:Accept-Encoding
+static_files/test_range_no_br_compressible_206 | GET | -H "Range: bytes=0-9" | 206 | content-range:bytes 0-9/520, vary:Accept-Encoding

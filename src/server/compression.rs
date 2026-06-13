@@ -30,6 +30,13 @@ pub async fn maybe_compress(
     response: Response<ResponseBody>,
     quality: i32,
 ) -> Response<ResponseBody> {
+    // 206 bodies must not be re-encoded: Content-Range offsets refer to the
+    // unencoded representation (RFC 9110 §14.4), so compressing a partial
+    // response would corrupt client-side range reassembly.
+    if response.status() == http::StatusCode::PARTIAL_CONTENT {
+        return response;
+    }
+
     // Check Content-Type
     let content_type = response
         .headers()
@@ -109,14 +116,60 @@ pub async fn maybe_compress(
     response
         .headers_mut()
         .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
+    // The compressed bytes are a different representation than the identity
+    // bytes the ETag was computed from; a strong tag shared by both would let
+    // a client resume a brotli download with identity 206 fragments
+    // (If-Range requires strong comparison, RFC 9110 §13.1.5). Downgrade to
+    // weak — nginx's gzip filter does the same. Weak tags still revalidate
+    // via If-None-Match, which uses weak comparison.
+    let weakened = response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|tag| !tag.starts_with("W/"))
+        .and_then(|tag| HeaderValue::from_str(&format!("W/{tag}")).ok());
+    if let Some(weak_etag) = weakened {
+        response.headers_mut().insert(header::ETAG, weak_etag);
+    }
+    // Drop Accept-Ranges: byte offsets are meaningless against the encoded
+    // body, and a date-form If-Range (which the weak ETag cannot guard)
+    // would otherwise let a client resume this brotli download with
+    // identity 206 fragments. nginx's gzip filter clears the header the
+    // same way (ngx_http_clear_accept_ranges).
+    response.headers_mut().remove(header::ACCEPT_RANGES);
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
-    // Append Vary: Accept-Encoding so caches store both compressed and uncompressed
+    // Append Vary: Accept-Encoding so caches store both compressed and
+    // uncompressed variants — unless the origin already declared it (static
+    // serving does, on representations whose range behavior depends on the
+    // encoding).
+    let already_varies = response
+        .headers()
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|member| member.trim().eq_ignore_ascii_case("accept-encoding"));
+    if !already_varies {
+        response
+            .headers_mut()
+            .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     response
-        .headers_mut()
-        .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
-    response
+}
+
+/// Would a buffered 200 response with this MIME type and size be
+/// brotli-compressed for a client that accepts it? Static serving uses this
+/// to disable range handling for such representations: a client resuming a
+/// compressed download (with or without If-Range) would otherwise receive
+/// identity bytes to splice onto a brotli prefix. nginx does the same by
+/// clearing `allow_ranges` in its gzip filter. Streaming bodies are never
+/// compressed regardless of this answer, so the streaming path must not
+/// consult it.
+pub(crate) fn would_compress(content_type: &str, size: u64) -> bool {
+    is_compressible(content_type)
+        && (MIN_COMPRESS_SIZE as u64..=MAX_COMPRESS_SIZE as u64).contains(&size)
 }
 
 pub(crate) fn accepts_brotli(accept_encoding: &str) -> bool {
@@ -364,6 +417,102 @@ mod tests {
             "maybe_compress buffered a live stream instead of passing it through"
         );
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn test_compress_does_not_duplicate_vary() {
+        // Static serving already declares Vary: Accept-Encoding on
+        // compression-eligible representations — encoding one must not
+        // append a second copy.
+        let body = "a".repeat(500);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::VARY, "Accept-Encoding")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert_eq!(
+            result.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+        let accept_encoding_members = result
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .flat_map(|v| v.to_str().unwrap().split(','))
+            .filter(|m| m.trim().eq_ignore_ascii_case("accept-encoding"))
+            .count();
+        assert_eq!(accept_encoding_members, 1);
+    }
+
+    #[tokio::test]
+    async fn test_compress_weakens_strong_etag() {
+        // The br body is a different representation than the identity bytes
+        // the strong ETag described — the tag must be downgraded to weak so
+        // If-Range can never strong-match across representations.
+        let body = "a".repeat(500);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::ETAG, "\"500-abc\"")
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert_eq!(
+            result.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+        assert_eq!(result.headers().get(header::ETAG).unwrap(), "W/\"500-abc\"");
+        // Byte offsets don't apply to the encoded body, and a date-form
+        // If-Range cannot be guarded by the weakened ETag — advertise no
+        // range support for this representation (nginx gzip-filter behavior).
+        assert!(result.headers().get(header::ACCEPT_RANGES).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_uncompressed_keeps_strong_etag() {
+        // When compression is skipped the representation is unchanged —
+        // the strong ETag must survive so If-Range resume keeps working.
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "image/png") // not compressible
+            .header(header::ETAG, "\"500-abc\"")
+            .header(header::ACCEPT_RANGES, "bytes")
+            .body(full_body(Bytes::from(vec![0u8; 500])))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(result.headers().get(header::ETAG).unwrap(), "\"500-abc\"");
+        assert_eq!(
+            result.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skip_partial_content() {
+        // 206 must never be compressed: Content-Range refers to unencoded bytes.
+        let body = "a".repeat(500); // would otherwise qualify for compression
+        let response = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::CONTENT_RANGE, "bytes 0-499/1000")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        let collected = result.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(collected.len(), 500);
     }
 
     #[tokio::test]

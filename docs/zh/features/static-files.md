@@ -1,11 +1,11 @@
 ---
 title: 静态文件
-description: OxPHP 提供自动 MIME 检测、内存缓存、HTTP 缓存头和条件 304 响应的静态文件服务。
+description: OxPHP 提供自动 MIME 检测、内存缓存、HTTP 缓存头、条件 304 响应和 Range 请求的静态文件服务。
 ---
 
 # 静态文件
 
-OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服务具备自动 MIME 类型检测、用于快速重复访问的内存缓存，以及完整的 HTTP 缓存支持（包括 ETag 和条件请求）。
+OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服务具备自动 MIME 类型检测、用于快速重复访问的内存缓存，以及完整的 HTTP 缓存支持（包括 ETag、条件请求和用于部分下载的 Range 请求）。
 
 ## 工作原理
 
@@ -15,7 +15,8 @@ OxPHP 直接从文档根目录提供静态文件，无需调用 PHP。文件服�
 2. **MIME 检测** — 根据文件扩展名确定内容类型
 3. **缓存检查** — 在访问文件系统之前检查文件缓存
 4. **条件检查** — 如果请求携带 `If-None-Match` 或 `If-Modified-Since`，OxPHP 会评估条件，并可能在不发送响应体的情况下返回 `304 Not Modified`
-5. **响应** — 1 MiB 以内的文件从内存缓存提供；更大的文件直接从磁盘流式传输
+5. **Range 检查** — 如果 GET 或 HEAD 请求携带 `Range` 头，OxPHP 以 `206 Partial Content` 响应：GET 仅收到请求的字节范围，HEAD 收到相同的范围头但没有响应体
+6. **响应** — 1 MiB 以内的文件从内存缓存提供；更大的文件直接从磁盘流式传输
 
 ## 配置
 
@@ -69,7 +70,7 @@ Cache-Control: public, max-age=2592000
 
 每个静态文件响应都包含：
 
-- **ETag** — 格式为 `W/"<size>-<mtime_hex>"` 的弱 ETag，由文件大小和最后修改时间派生
+- **ETag** — 格式为 `"<size>-<mtime_hex>"` 的强 ETag，由文件大小和最后修改时间派生。强验证器同样满足 `If-Range`，因此中断的下载可以安全续传。当响应以 brotli 压缩形式提供时，标签会弱化为 `W/"…"` — 压缩字节是另一种表示；弱标签仍可完成重新验证（304），但可防止在续传时混合压缩与未压缩的片段。
 - **Last-Modified** — 基于文件修改时间的 RFC 7231 HTTP 日期
 
 这些头允许浏览器和 CDN 在不重新下载文件的情况下验证缓存副本。
@@ -82,6 +83,34 @@ OxPHP 评估条件请求头，以避免发送未更改的文件内容：
 - **If-Modified-Since** — 客户端发送一个时间戳。如果文件在该时间之后未被修改，OxPHP 返回 304。
 
 按照 RFC 7232，`If-None-Match` 优先于 `If-Modified-Since`。对于已在内存缓存中的文件，条件检查无需任何磁盘 I/O 即可完成。
+
+### Range 请求（206）
+
+静态文件响应会声明 `Accept-Ranges: bytes`，携带单一范围 `Range` 头的 GET 请求只会收到请求的字节：
+
+```http
+GET /videos/intro.mp4 HTTP/1.1
+Range: bytes=1048576-
+
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 1048576-52428799/52428800
+Content-Length: 51380224
+```
+
+这支持浏览器中 `<video>`/`<audio>` 的进度拖动、断点续传（`wget -c`、下载管理器）以及 PDF 的部分加载。支持 RFC 9110 的全部三种范围形式：`bytes=N-M`、`bytes=N-`（从偏移到结尾）和 `bytes=-N`（最后 N 字节）。
+
+- 无法满足的范围（起点超出文件末尾）返回 `416 Range Not Satisfiable`，并带有 `Content-Range: bytes */<size>`。
+- 支持 **If-Range**：当客户端发送其部分副本的 ETag（或 `Last-Modified` 日期）而文件此后已更改时，OxPHP 返回完整的 `200` 响应，而不是不匹配的片段。日期形式仅在文件修改所在的那一秒完全过去后才被接受 — 刚写入的文件可能在同一秒内再次更改而日期不变，因此该日期尚不是强验证器（RFC 9110）。
+- 携带**多个范围**（`bytes=0-1,4-5`）的请求会以 `200 OK` 收到完整文件 — 不生成 `multipart/byteranges` 响应。
+- 携带 `Range` 头的 **HEAD** 请求会收到与 GET 相同的 `206`/`Content-Range` 头但没有响应体，与 nginx 和 Apache 行为一致。
+- **范围请求与压缩互斥。** 对于接受 brotli 的客户端，会以压缩形式提供的表示将禁用范围处理，且压缩响应不声明 `Accept-Ranges` — 否则续传可能将未压缩字节拼接到压缩前缀上。只有从内存缓存提供的文件（1 MiB 以内）才会被压缩，因此范围请求始终适用于真正需要它的内容：视频、归档、图片以及所有从磁盘流式传输的文件。符合压缩条件的文件的响应始终携带 `Vary: Accept-Encoding` — 即使以未压缩形式提供 — 以便共享缓存区分不同变体。
+- `206` 响应永远不会被压缩；Range 处理也不适用于 PHP 响应 — 仅适用于静态文件。
+
+示例：使用 curl 续传中断的下载：
+
+```bash
+curl -C - -O https://example.com/dist/app-installer.dmg
+```
 
 ### 禁用缓存
 
