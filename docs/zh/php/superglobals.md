@@ -17,7 +17,7 @@ OxPHP 遵循 CGI/1.1 规范，根据传入的 HTTP 请求构建 `$_SERVER`。进
 |------|------|------|
 | `SCRIPT_FILENAME` | 正在执行的 PHP 脚本的绝对文件系统路径 | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | 通过 `DOCUMENT_ROOT` 环境变量配置的 Web 根目录 | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | 服务器标识符 | `OxPHP/0.1.0` |
+| `SERVER_SOFTWARE` | 服务器标识符（包含运行中的 OxPHP 版本） | `OxPHP/0.8.0` |
 | `SERVER_PROTOCOL` | 始终为 `HTTP/1.1` | `HTTP/1.1` |
 | `REQUEST_METHOD` | HTTP 方法 | `GET` |
 | `REQUEST_URI` | 包含查询字符串的完整 URI | `/app?page=2` |
@@ -125,7 +125,7 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 | **Framework**（`ENTRY_FILE=index.php`） | 仅当请求显式指定入口文件并带有尾部段时（`/index.php/extra`） | 入口文件之后的尾部，例如 `/news` |
 | **SPA**（`ENTRY_FILE=index.html`） | 永不 — PHP 仅对精确的 `.php` 文件运行，无 PATH_INFO | — |
 
-`SCRIPT_NAME` 始终标识实际执行的脚本（相对于文档根的已解析文件），因此在正常路由下 `PATH_INFO` 仅在 `SCRIPT_NAME` 是请求路径的字面前缀时才存在。当请求被重写到 URL 中未指定的前端控制器（应用路由、目录索引、静态未命中回退）时，`PATH_INFO` 不存在，原始路径保留在 `REQUEST_URI` 中。（`PHP_DENY_DIRS` 回退是有意的例外：它将原始的规范化 URI 设置为 `PATH_INFO`，以便回退脚本据此路由。）
+`SCRIPT_NAME` 始终标识实际执行的脚本（相对于文档根的已解析文件），因此在正常路由下 `PATH_INFO` 仅在 `SCRIPT_NAME` 是请求路径的字面前缀时才存在。当请求被重写到 URL 中未指定的前端控制器（应用路由、目录索引、静态未命中回退）时，`PATH_INFO` 不存在，原始路径保留在 `REQUEST_URI` 中。（`PHP_DENY_PATHS` 回退是有意的例外：它将原始的规范化 URI 设置为 `PATH_INFO`，以便回退脚本据此路由。）
 
 #### Traditional 模式示例
 

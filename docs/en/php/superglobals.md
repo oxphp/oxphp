@@ -17,7 +17,7 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier | `OxPHP/0.1.0` |
+| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.8.0` |
 | `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
@@ -128,7 +128,7 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 | **Framework** (`ENTRY_FILE=index.php`) | Only when the request explicitly names the entry file with a trailing segment (`/index.php/extra`) | Tail after the entry file, e.g. `/news` |
 | **SPA** (`ENTRY_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
 
-`SCRIPT_NAME` always identifies the executed script (the resolved file relative to the document root), so in normal routing `PATH_INFO` is present only when `SCRIPT_NAME` is a literal prefix of the request path. When a request is rewritten to a front controller it does not name (an application route, a directory index, a static-miss fallback), `PATH_INFO` is absent and the original path lives in `REQUEST_URI`. (The `PHP_DENY_DIRS` fallback is a deliberate exception: it sets `PATH_INFO` to the original sanitized URI so the fallback script can route on it.)
+`SCRIPT_NAME` always identifies the executed script (the resolved file relative to the document root), so in normal routing `PATH_INFO` is present only when `SCRIPT_NAME` is a literal prefix of the request path. When a request is rewritten to a front controller it does not name (an application route, a directory index, a static-miss fallback), `PATH_INFO` is absent and the original path lives in `REQUEST_URI`. (The `PHP_DENY_PATHS` fallback is a deliberate exception: it sets `PATH_INFO` to the original sanitized URI so the fallback script can route on it.)
 
 #### Traditional mode examples
 

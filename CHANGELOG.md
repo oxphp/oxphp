@@ -4,7 +4,9 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
-### Migration
+## [0.8.0] - 2026-06-13
+
+### Migration from 0.7.0
 
 **Worker mode no longer executes `.php` files from the document root per-request.** Previously the worker-mode router ran the full Traditional resolution chain with the worker as the last fallback: an existing `/about.php` was executed per-request instead of reaching the worker, `/blog/` resolved to `blog/index.php`, and — most surprisingly — a root `index.php` in the document root absorbed every unmatched request so the worker never saw them. The router now matches the documented contract (and the FrankenPHP / RoadRunner worker model): static assets are served from disk, and *every* other request — `.php` URIs, extensionless paths, directory indexes, `/` — is dispatched to the worker `ENTRY_FILE`. Deployments that relied on mixing per-request `.php` scripts with a worker in one document root should either move those scripts behind the worker's router or serve them from a separate non-worker instance.
 
@@ -13,6 +15,7 @@ All notable changes to OxPHP are documented in this file.
 ### Added
 
 - **HTTP Range requests for static files (RFC 9110 §14).** Static responses now advertise `Accept-Ranges: bytes`; a GET with a single-range `Range` header (`bytes=N-M`, `bytes=N-`, `bytes=-N`) receives `206 Partial Content` with `Content-Range`, enabling `<video>`/`<audio>` seeking, resumable downloads (`curl -C -`, `wget -c`), and partial PDF loading. Unsatisfiable ranges return `416` with `Content-Range: bytes */<size>`. `If-Range` is honored with strong ETag comparison and exact-date `Last-Modified` comparison; the date form is only accepted once the file's modification second has elapsed, since a fresher `Last-Modified` is not yet a strong validator per RFC 9110. Multi-range requests fall back to the full `200` response (no `multipart/byteranges`), and ranges apply only to static files — never to PHP responses, matching nginx + FastCGI behavior. Ranges and compression are mutually exclusive, also matching nginx: `206` responses are never compressed, and for clients that accept brotli, range handling is disabled on representations that would be served compressed — a resumed download could otherwise splice unencoded bytes onto a compressed prefix. Only in-memory-cached files (up to 1 MiB) are ever compressed, so ranges always apply to non-compressible content (video, archives, images) and to every file streamed from disk. Because the response form for compression-eligible files (encoding, range handling, even 200 vs 416) depends on `Accept-Encoding`, those responses always carry `Vary: Accept-Encoding`, including when served uncompressed — otherwise a shared cache could store an identity response unkeyed and serve it to brotli clients.
+- **Configurable HTTP/2 connection limits.** Five environment variables bound per-connection resource use; they are read once at startup and the resolved values are logged (`HTTP/2 limits`). `H2_MAX_CONCURRENT_STREAMS` caps simultaneously-open streams (default `max_workers × 4`, floored at 32 — sized to the blocking worker pool, since each open stream maps to a queued PHP request, so the cap also bounds single-connection queue amplification). `H2_MAX_PENDING_RESET` bounds pending reset streams (default 20). `H2_MAX_HEADER_LIST_BYTES` bounds total decoded header bytes per request (default 64 KiB). `H2_KEEPALIVE_INTERVAL_SECS` sets the PING keepalive interval (default 20; `0` disables keepalive). `H2_KEEPALIVE_TIMEOUT_SECS` sets the PONG deadline (default 10, clamped to ≥1 s so a `0` value can't make every PING fail immediately). Unparsable values fall back to the default rather than aborting startup.
 
 ### Changed
 
@@ -21,6 +24,7 @@ All notable changes to OxPHP are documented in this file.
 - In Framework mode, `$_SERVER['PATH_INFO']` is set only for an explicit `/index.php/extra` request (honest CGI path-info), not for every request. Application routes are exposed through `REQUEST_URI`; `SCRIPT_NAME` always identifies the executed front controller.
 - Worker mode routing follows the documented "static or worker" contract: static assets are served from disk, everything else is dispatched to the worker `ENTRY_FILE`. Arbitrary `.php` files, directory indexes, and the root `index.php` fallback are no longer resolved per-request in worker mode (see Migration above).
 - `PHP_DENY_PATHS` now applies in SPA mode. SPA executes existing `.php` files directly — the same uploaded-shell exposure as Traditional mode — but the deny-list was previously force-disabled whenever `ENTRY_FILE` was set. It remains ignored (with a startup warning) in Framework and Worker modes, where arbitrary `.php` files are never executed directly.
+- In Framework mode a missing static asset now falls back to the front controller (`ENTRY_FILE`) with the original URI as `PATH_INFO`, instead of returning a hard 404. This matches the canonical `try_files $uri /index.php` nginx front-controller config and aligns Framework with Traditional mode, which already falls back on a static miss; the trade-off is that a request for a non-existent asset now costs a PHP dispatch. SPA mode keeps the hard 404 — a static shell has no PHP router to handle the missing path. A hard 404 is still returned when the front controller itself is absent.
 
 ### Fixed
 
@@ -29,6 +33,11 @@ All notable changes to OxPHP are documented in this file.
 - Conditional requests (`If-None-Match` / `If-Modified-Since`) on static files produce 304 only for GET and HEAD, per RFC 9110 — other methods receive the full response instead of a bodyless 304.
 - `$_SERVER['SCRIPT_NAME']` (and `DOCUMENT_URI` / `PHP_SELF`) are now correct in all routing modes. They are derived from the resolved script path relative to the document root instead of by subtracting the decoded `PATH_INFO` length from the raw percent-encoded URI. The old computation produced an **empty** `SCRIPT_NAME` in Framework mode and a mis-sliced one when the path contained percent-encoded characters (`/a.php/u%20ser` yielded `/a.php/u` rather than `/a.php`). `PATH_INFO` is likewise percent-decoded, consistent with PHP-FPM.
 - `PHP_DENY_PATHS` covers scripts reached through directory-index resolution. A request to `/uploads/` that resolved to `uploads/index.php` previously bypassed the deny-list entirely, because only the request URI was matched — the resolved script path is now re-checked after routing.
+- Streamed responses are no longer buffered by the compression layer. A `flush()`-streamed PHP response (`oxphp_stream_flush()`, Server-Sent Events) with a compressible content type and a brotli-capable client was silently collected in full before compression — destroying time-to-first-byte and holding the entire stream in memory until the script ended (the size cap was checked only after the collect). Responses whose length is unknown when headers are sent now pass through uncompressed, matching the documented invariant; buffered responses, which always report an exact size, are unaffected.
+
+### Security
+
+- **HTTP/2 hardened against denial-of-service amplification.** Several single-connection attack classes are now bounded by the limits above. HPACK indexed-reference bombs are capped by `H2_MAX_HEADER_LIST_BYTES`, which bounds total decoded header bytes per request. Rapid Reset (CVE-2023-44487) is bounded by `H2_MAX_PENDING_RESET`: a connection that floods `HEADERS`+`RST_STREAM` to churn server-side work without ever hitting the stream concurrency cap is closed with `GOAWAY ENHANCE_YOUR_CALM` while other connections keep being served. Window Stall — holding many streams open with a zero receive window to pin server memory — is bounded by `H2_MAX_CONCURRENT_STREAMS`, whose worker-aware default ties the cap to the backend's actual capacity. Dead and half-open connections are detected and closed via PING/PONG keepalive (`H2_KEEPALIVE_INTERVAL_SECS` / `H2_KEEPALIVE_TIMEOUT_SECS`), reclaiming stream slots an attacker could otherwise hold by going silent. The Rapid Reset defence was previously implicit in the `h2` crate default; it is now an explicit, operator-visible, and tunable value.
 
 ## [0.7.0] - 2026-06-05
 
@@ -684,6 +693,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.8.0]: https://github.com/oxphp/oxphp/releases/tag/v0.8.0
 [0.7.0]: https://github.com/oxphp/oxphp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/oxphp/oxphp/releases/tag/v0.6.0
 [0.5.0]: https://github.com/oxphp/oxphp/releases/tag/v0.5.0
