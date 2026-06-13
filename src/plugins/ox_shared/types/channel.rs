@@ -912,6 +912,12 @@ impl ChannelInner {
                     self.drop_pending();
                     self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
+                    // Slot just freed — hand it to a parked fiber send-waiter,
+                    // which awaits a synthetic promise and does NOT observe
+                    // `notify_send`. Mirrors `try_recv`; without it a parked
+                    // sender strands until some consumer hits the `try_recv`
+                    // fast path.
+                    self.drain_one_send_waiter_on_slot_free();
                     return Ok(Some(p));
                 }
                 Err(TryRecvError::Empty) => {
@@ -982,6 +988,10 @@ impl ChannelInner {
                     self.drop_pending();
                     self.index_remove(&p.keepalive);
                     self.notify_send.notify_one();
+                    // Same slot-free handoff as the fast path: a fiber
+                    // send-waiter parked while we polled the buffer must be
+                    // woken here, not just via `notify_send`.
+                    self.drain_one_send_waiter_on_slot_free();
                     return Ok(Some(p));
                 }
                 Err(RecvTimeoutError::Timeout) => {
@@ -3680,6 +3690,35 @@ mod tests {
             let _ = ch2.try_recv().unwrap();
         });
         let got = rx.await.unwrap();
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 0);
+    }
+
+    #[tokio::test]
+    async fn register_send_waiter_fires_on_recv_blocking() {
+        // Mirror of `register_send_waiter_fires_on_try_recv` for the
+        // thread-blocking recv path. A fiber send-waiter awaits a synthetic
+        // promise and does NOT observe `notify_send`, so `recv_blocking` must
+        // hand the freed slot to it via `drain_one_send_waiter_on_slot_free`
+        // — exactly as `try_recv` does. Without that, the parked send-waiter
+        // strands until some consumer happens to take the `try_recv` fast
+        // path, and `rx.await` below never resolves.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+        let (id, rx) = synthetic::alloc();
+        ch.register_send_waiter(id);
+        let ch2 = ch.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = ch2.recv_blocking(Wait::Try).unwrap();
+        });
+        // Bound the wait so a regression strands the waiter into a clean
+        // failure rather than a hang.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("send-waiter was not woken by recv_blocking (slot-free drain missing)")
+            .unwrap();
         assert!(got.success);
         assert_eq!(got.serialized_value_len, 0);
     }
