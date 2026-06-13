@@ -401,6 +401,7 @@ extern "C" {
         this_ptr: *mut c_void,
         argc: u32,
         args: *mut c_void,
+        cancel_cell: *mut c_void,
     ) -> i64;
     pub fn oxphp_bridge_async_tick() -> c_int;
     pub fn oxphp_bridge_async_poll_completed(

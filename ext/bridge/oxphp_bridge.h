@@ -1878,7 +1878,7 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  */
 typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
     void *op_array, void *static_vars, void *this_ptr,
-    uint32_t argc, void *args);
+    uint32_t argc, void *args, void *cancel_cell);
 typedef int (*oxphp_async_sched_tick_fn_t)(void);
 typedef int64_t (*oxphp_async_sched_poll_fn_t)(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);
@@ -1894,7 +1894,7 @@ void oxphp_bridge_set_async_sched_callbacks(
 
 int64_t oxphp_bridge_async_spawn(
     void *op_array, void *static_vars, void *this_ptr,
-    uint32_t argc, void *args);
+    uint32_t argc, void *args, void *cancel_cell);
 int     oxphp_bridge_async_tick(void);
 int64_t oxphp_bridge_async_poll_completed(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);

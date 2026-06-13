@@ -10,7 +10,7 @@ use http::header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
-use crate::async_types::{AsyncResult, AsyncTask, PromiseCleanup};
+use crate::async_types::{AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
@@ -80,7 +80,7 @@ thread_local! {
 /// Per-promise pending state: oneshot receiver paired with a cancellation flag.
 type PromiseEntry = (
     tokio::sync::oneshot::Receiver<AsyncResult>,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<CancelShared>,
 );
 
 thread_local! {
@@ -2889,7 +2889,7 @@ pub fn next_promise_id() -> u64 {
 pub fn store_promise(
     id: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled: std::sync::Arc<CancelShared>,
 ) {
     PROMISE_MAP.with(|m| {
         m.borrow_mut().insert(id, (rx, cancelled));
@@ -2911,7 +2911,7 @@ pub fn store_promise(
 pub(crate) fn register_synthetic_receiver(
     id: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancelled: std::sync::Arc<CancelShared>,
 ) {
     store_promise(id, rx, cancelled);
 }
@@ -2920,7 +2920,7 @@ pub fn take_promise(
     id: u64,
 ) -> Option<(
     tokio::sync::oneshot::Receiver<AsyncResult>,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<CancelShared>,
 )> {
     PROMISE_MAP.with(|m| m.borrow_mut().remove(&id))
 }
@@ -2960,7 +2960,7 @@ pub fn outstanding_promise_ids() -> Vec<u64> {
 fn stash_stranded(
     id: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancelled: Arc<CancelShared>,
 ) {
     PROMISE_STRANDED.with(|m| {
         m.borrow_mut().insert(id, (rx, cancelled));
@@ -3212,7 +3212,7 @@ pub unsafe extern "C" fn async_dispatch_callback(
 
     // 6. Create oneshot channel
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = Arc::new(CancelShared::new());
 
     // 7. Copy op_array struct bytes into a system-malloc'd buffer.
     //    This eliminates cross-thread reads — the async worker uses this local copy
@@ -3387,8 +3387,28 @@ pub unsafe extern "C" fn await_dispatch_callback(
                         // Note: rx was consumed by the timeout future, so we can't
                         // re-store it. The PROMISE_CLEANUP data remains and will be
                         // cleaned up by RSHUTDOWN (cleanup_outstanding_promises).
-                        // The cancelled flag tells the worker to stop early.
-                        cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // The cancelled flag tells the worker to stop early (the
+                        // worker's scheduler loop polls it to unwind a SUSPENDED
+                        // fiber).
+                        cancelled
+                            .cancelled
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        // A CPU-bound fiber never yields back to that loop, so the
+                        // flag alone can't reach it. Kick the running worker's
+                        // EG(vm_interrupt) cross-thread to break it out at the next
+                        // opcode boundary; the interrupt handler then throws into
+                        // the fiber, unwinding it. 0 = task not yet picked up by a
+                        // worker (nothing running to interrupt).
+                        let addr = cancelled
+                            .worker_interrupt
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        if addr != 0 {
+                            unsafe {
+                                crate::bridge::ffi::oxphp_bridge_request_interrupt_at(
+                                    addr as *mut c_void,
+                                )
+                            };
+                        }
                         return -2;
                     }
                 }
@@ -3501,8 +3521,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
 
     // Take all receivers and cancelled flags from PROMISE_MAP.
     let mut id_map: Vec<u64> = Vec::with_capacity(ids.len());
-    let mut cancel_map: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
-        Vec::with_capacity(ids.len());
+    let mut cancel_map: Vec<std::sync::Arc<CancelShared>> = Vec::with_capacity(ids.len());
     let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> = Vec::with_capacity(ids.len());
 
     for &id in &ids {
@@ -3642,7 +3661,9 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             // async_tasks_stranded so the stall risk shows up in metrics.
             let stranded_count = rxs.len() as u64;
             for ((id, rx), cancelled) in id_map.into_iter().zip(rxs).zip(cancel_map) {
-                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                cancelled
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 stash_stranded(id, rx, cancelled);
             }
             if let Some(m) = get_async_metrics() {
@@ -3922,8 +3943,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 
     // Pull receivers + cancel flags out of PROMISE_MAP.
     let mut id_vec: Vec<u64> = Vec::with_capacity(input_ids.len());
-    let mut cancel_vec: Vec<Arc<std::sync::atomic::AtomicBool>> =
-        Vec::with_capacity(input_ids.len());
+    let mut cancel_vec: Vec<Arc<CancelShared>> = Vec::with_capacity(input_ids.len());
     let mut rxs: Vec<tokio::sync::oneshot::Receiver<AsyncResult>> =
         Vec::with_capacity(input_ids.len());
 
@@ -4141,7 +4161,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             let pending_ids: Vec<i64> = id_vec.iter().map(|&id| id as i64).collect();
             let stranded_count = pending_ids.len() as u64;
             for ((id, rx), cancelled) in id_vec.into_iter().zip(rxs).zip(cancel_vec) {
-                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                cancelled
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 stash_stranded(id, rx, cancelled);
             }
 
@@ -4214,7 +4236,9 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
         let entry = take_promise(id).or_else(|| take_stranded(id));
         if let Some((rx, cancelled)) = entry {
             // Signal cancellation
-            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            cancelled
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             // Block with 5-second timeout per promise to avoid indefinite hang
             if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
                 let _ = handle.block_on(async {
@@ -4675,7 +4699,7 @@ mod tests {
     #[test]
     fn await_poll_returns_true_when_result_sent() {
         let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = std::sync::Arc::new(CancelShared::new());
         let promise_id = 42424242u64;
 
         // Store the promise
@@ -4713,7 +4737,7 @@ mod tests {
     #[test]
     fn await_poll_returns_false_when_sender_dropped() {
         let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = std::sync::Arc::new(CancelShared::new());
         let promise_id = 77777777u64;
 
         store_promise(promise_id, rx, cancelled);

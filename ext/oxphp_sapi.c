@@ -17,6 +17,7 @@
 #include "ext/session/php_session.h"
 #include <limits.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <time.h>
 
 /* HTTP Request class */
@@ -3078,6 +3079,23 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
+    /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
+     * running task fiber's shared cancel cell and kicks this worker thread's
+     * vm_interrupt cross-thread (the scheduler loop can't reach a CPU-bound
+     * fiber). The kick fires in whichever fiber is running, so unwind only if
+     * it is the cancelled one — throwing a PHP exception that the VM propagates
+     * up this fiber's stack to its scheduler entry (rejected task), exactly like
+     * a suspend-point cancel. cancel_cell is NULL for HTTP request fibers and
+     * for the scheduler context, so this is a no-op there. */
+    if (oxphp_current_fiber != NULL
+        && oxphp_current_fiber->cancel_cell != NULL
+        && atomic_load_explicit(oxphp_current_fiber->cancel_cell,
+                                memory_order_relaxed)) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return; /* VM checks EG(exception) on return → unwinds this fiber only */
+    }
+
     /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
      * alongside vm_interrupt. Convert it to the unified cancellation
      * reason and claim the flag so zend_timeout()'s default

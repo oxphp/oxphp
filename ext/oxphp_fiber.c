@@ -770,7 +770,8 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
 }
 
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
-                                void *this_ptr, uint32_t argc, void *args) {
+                                void *this_ptr, uint32_t argc, void *args,
+                                void *cancel_cell) {
     oxphp_fiber_scheduler *sched = oxphp_task_sched_get();
 
     if (sched->fiber_count >= OXPHP_MAX_FIBERS) {
@@ -802,6 +803,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->fiber_id = sched->next_fiber_id++;
     fiber->task_mode = true;
     fiber->cancel_requested = false;
+    fiber->cancel_cell = (_Atomic(uint8_t) *)cancel_cell;
     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
     fiber->completed = false;
     fiber->handler_failed = false;

@@ -103,10 +103,12 @@ impl Drop for AsyncWorkerPool {
 #[cfg(feature = "php")]
 struct InFlight {
     result_tx: tokio::sync::oneshot::Sender<crate::async_types::AsyncResult>,
-    /// Shared with the promise: flipped when the awaiter gives up (await
-    /// timeout). The driver then asks the scheduler to unwind the suspended
-    /// fiber instead of letting it run to completion unobserved.
-    cancelled: Arc<AtomicBool>,
+    /// Shared with the promise: its `cancelled` flag is flipped when the awaiter
+    /// gives up (await timeout). The driver then asks the scheduler to unwind the
+    /// suspended fiber instead of letting it run to completion unobserved. Held
+    /// here so the allocation (and the fiber's borrowed pointer into its
+    /// `cancelled` cell) stays alive until the fiber is released and drained.
+    cancelled: Arc<crate::async_types::CancelShared>,
 }
 
 /// Main loop for each async worker thread.
@@ -163,6 +165,14 @@ fn async_worker_thread(
         return;
     }
 
+    // Capture this worker thread's &EG(vm_interrupt) so a CPU-bound task fiber
+    // can be interrupted cross-thread by an awaiter that times out (Path B).
+    // The address is stable for the thread's lifetime once the request is up.
+    let worker_interrupt_addr = unsafe {
+        ffi::oxphp_capture_vm_interrupt();
+        ffi::oxphp_bridge_vm_interrupt_addr() as usize
+    };
+
     tracing::info!(worker = %thread_name, "Async worker thread started");
 
     // 3. Task loop — fiber-driven.
@@ -207,7 +217,7 @@ fn async_worker_thread(
 
             'task: {
                 // Cancelled before we even start?
-                if task.cancelled.load(Ordering::Relaxed) {
+                if task.cancelled.cancelled.load(Ordering::Relaxed) {
                     free_task_args(&task);
                     free_op_array_buf(&task);
                     let _ = task.result_tx.send(AsyncResult {
@@ -315,6 +325,18 @@ fn async_worker_thread(
                     std::ptr::null_mut()
                 };
 
+                // Publish this worker's interrupt address into the shared cancel
+                // state so a timed-out awaiter can break into this fiber if it
+                // goes CPU-bound (Path B). `cancel_cell` is a stable pointer into
+                // that same allocation — the scheduler stores it on the fiber and
+                // the interrupt handler reads it to decide whether to unwind. The
+                // allocation outlives the fiber via InFlight (inserted below).
+                task.cancelled
+                    .worker_interrupt
+                    .store(worker_interrupt_addr, Ordering::Relaxed);
+                let cancel_cell = &task.cancelled.cancelled as *const std::sync::atomic::AtomicBool
+                    as *mut c_void;
+
                 // Spawn the task into a scheduler fiber. The closure is
                 // reconstructed and run to its first suspend or completion
                 // inside the call; args / static_vars / op_array are consumed
@@ -326,6 +348,7 @@ fn async_worker_thread(
                         task.this_ptr,
                         task.argc,
                         local_args,
+                        cancel_cell,
                     )
                 };
 
@@ -368,7 +391,7 @@ fn async_worker_thread(
             // unwind the still-suspended fiber rather than run it to
             // completion with no one waiting for the result.
             for (&fiber_id, entry) in in_flight.iter() {
-                if entry.cancelled.load(Ordering::Relaxed) {
+                if entry.cancelled.cancelled.load(Ordering::Relaxed) {
                     unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
                 }
             }

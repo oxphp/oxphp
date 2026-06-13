@@ -559,6 +559,7 @@ pub unsafe fn oxphp_bridge_async_spawn(
     _this_ptr: *mut c_void,
     _argc: u32,
     _args: *mut c_void,
+    _cancel_cell: *mut c_void,
 ) -> i64 {
     -1
 }

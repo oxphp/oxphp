@@ -2395,10 +2395,10 @@ void oxphp_bridge_set_async_sched_callbacks(
 
 int64_t oxphp_bridge_async_spawn(
     void *op_array, void *static_vars, void *this_ptr,
-    uint32_t argc, void *args
+    uint32_t argc, void *args, void *cancel_cell
 ) {
     if (sched_async_spawn != NULL) {
-        return sched_async_spawn(op_array, static_vars, this_ptr, argc, args);
+        return sched_async_spawn(op_array, static_vars, this_ptr, argc, args, cancel_cell);
     }
     return -1; /* no scheduler registered */
 }

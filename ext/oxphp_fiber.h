@@ -109,6 +109,10 @@ typedef struct _oxphp_request_fiber {
      * completed result has been drained). */
     bool task_mode;
     bool cancel_requested;          /* set cross-path; checked at suspend points + interrupt handler */
+    _Atomic(uint8_t) *cancel_cell;  /* borrowed: &CancelShared.cancelled (Rust AtomicBool).
+                                     * The awaiter sets it cross-thread and kicks vm_interrupt; the
+                                     * interrupt handler reads it to unwind a CPU-bound task fiber.
+                                     * NULL for HTTP request fibers. */
     zval task_closure;              /* owned: dtor at finalize */
     zend_fcall_info task_fci;
     zend_fcall_info_cache task_fcc;
@@ -191,7 +195,8 @@ void oxphp_fiber_init_request_state(void);
  * for the contract. Stub bodies land first; the real per-thread task
  * scheduler fills them in. */
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
-                                void *this_ptr, uint32_t argc, void *args);
+                                void *this_ptr, uint32_t argc, void *args,
+                                void *cancel_cell);
 int     oxphp_async_sched_tick(void);
 int64_t oxphp_async_sched_poll_completed(void **out_retval,
                                          const char **out_exc_class,
