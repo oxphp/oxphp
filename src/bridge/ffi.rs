@@ -335,6 +335,10 @@ extern "C" {
     pub fn oxphp_ht_has_non_shareable_objects(ht: *mut c_void) -> c_int;
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_in_fiber() -> c_int;
+    /// Cooperatively yield the current task fiber for one scheduler cycle.
+    /// Returns 1 if it suspended (in a fiber), 0 if not in a fiber, -3 if
+    /// the task was cancelled while yielded.
+    pub fn oxphp_bridge_fiber_yield() -> c_int;
 
     /// Returns 1 iff the zval is an object implementing OxPHP\Shared\Shareable.
     /// Returns 0 for non-objects, non-implementers, or if the CE isn't

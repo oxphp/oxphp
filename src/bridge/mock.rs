@@ -490,6 +490,9 @@ pub unsafe fn oxphp_bridge_fiber_await(
 pub unsafe fn oxphp_bridge_in_fiber() -> c_int {
     0
 }
+pub unsafe fn oxphp_bridge_fiber_yield() -> c_int {
+    0 // not in fiber — blocking path on host
+}
 pub unsafe fn oxphp_is_shareable(_z: *const c_void) -> c_int {
     0 // no CE registered in host tests
 }

@@ -1211,6 +1211,7 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
 
 typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
 typedef int (*oxphp_in_fiber_check_fn_t)(void);
+typedef int (*oxphp_fiber_yield_fn_t)(void);
 
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
@@ -1219,6 +1220,14 @@ void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn);
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
+
+/** Register the SAPI cooperative-yield helper, and call it. Yields the
+ *  current task fiber for one scheduler cycle so the fiber-aware
+ *  await_race / await_any poll loops do not pin the worker. Returns 1 if it
+ *  suspended (in a fiber), 0 if not in a fiber, -3 if cancelled while
+ *  yielded. */
+void oxphp_bridge_set_fiber_yield(oxphp_fiber_yield_fn_t fn);
+int oxphp_bridge_fiber_yield(void);
 
 /** Register the SAPI predicate that decides whether the calling thread
  *  is inside an oxphp-managed scheduler fiber. The bridge has no way

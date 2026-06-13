@@ -2340,6 +2340,19 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
     return 1; /* not in fiber — caller should do blocking await */
 }
 
+static oxphp_fiber_yield_fn_t sapi_fiber_yield = NULL;
+
+void oxphp_bridge_set_fiber_yield(oxphp_fiber_yield_fn_t fn) {
+    sapi_fiber_yield = fn;
+}
+
+int oxphp_bridge_fiber_yield(void) {
+    if (sapi_fiber_yield != NULL) {
+        return sapi_fiber_yield();
+    }
+    return 0; /* not in fiber — caller should fall back to blocking */
+}
+
 static oxphp_in_fiber_check_fn_t sapi_in_fiber_check = NULL;
 
 void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn) {

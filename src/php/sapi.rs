@@ -3493,6 +3493,12 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
         .map(|i| *promise_ids.add(i) as u64)
         .collect();
 
+    // Inside a task fiber, race cooperatively (poll + yield) so the worker
+    // is not pinned while several promises are outstanding.
+    if ffi::oxphp_bridge_in_fiber() == 1 {
+        return await_race_in_fiber(&ids, timeout, out_winner_id, retval);
+    }
+
     // Take all receivers and cancelled flags from PROMISE_MAP.
     let mut id_map: Vec<u64> = Vec::with_capacity(ids.len());
     let mut cancel_map: Vec<std::sync::Arc<std::sync::atomic::AtomicBool>> =
@@ -3654,6 +3660,221 @@ struct AggregateRejection {
     message: String,
 }
 
+/// Push accumulated rejections into the C-bridge aggregate buffer in input-
+/// array position order (mirrors the blocking await_any ordering). Unlike the
+/// blocking path this does NOT call `cleanup_promise` — the fiber poll loops
+/// already clean up each promise as they record its rejection.
+///
+/// # Safety
+/// Calls into the C bridge; must run on the PHP worker thread.
+unsafe fn push_aggregate_rejections(collected: &mut Vec<AggregateRejection>, input_ids: &[u64]) {
+    use crate::bridge::ffi;
+    let position: std::collections::HashMap<u64, usize> = input_ids
+        .iter()
+        .enumerate()
+        .map(|(i, &id)| (id, i))
+        .collect();
+    let mut sorted = std::mem::take(collected);
+    sorted.sort_by_key(|r| position.get(&r.promise_id).copied().unwrap_or(usize::MAX));
+    ffi::oxphp_bridge_aggregate_clear();
+    for r in &sorted {
+        let cls = CString::new(r.exception_class.as_str()).unwrap_or_default();
+        let msg = CString::new(r.message.as_str()).unwrap_or_default();
+        ffi::oxphp_bridge_aggregate_push(cls.as_ptr(), msg.as_ptr(), r.promise_id as i64);
+    }
+}
+
+/// Yield the current task fiber for one scheduler cycle. Returns true if the
+/// task was cancelled while yielded (the cancellation exception is set in
+/// bridge TLS and the caller should abort with -1); false to keep looping.
+///
+/// # Safety
+/// Must run inside an oxphp task fiber (callers guarantee this).
+unsafe fn yield_or_cancel() -> bool {
+    use crate::bridge::ffi;
+    match ffi::oxphp_bridge_fiber_yield() {
+        -3 => {
+            let cls = CString::new("OxPHP\\Async\\AsyncException").unwrap_or_default();
+            let msg = CString::new("Async task cancelled").unwrap_or_default();
+            ffi::oxphp_bridge_set_async_exception(cls.as_ptr(), msg.as_ptr());
+            true
+        }
+        0 => {
+            // Not in a fiber (should be impossible — caller checked). Abort
+            // rather than spin hot.
+            set_bridge_internal_error("await fan-out: fiber yield outside a fiber");
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Fiber-cooperative `oxphp_async_await_race`: poll the promises
+/// non-destructively and suspend the task fiber between scans instead of
+/// blocking the worker. The first promise to SETTLE (fulfil or reject) wins;
+/// the losers are left untouched in PROMISE_MAP (still awaitable). Return
+/// codes match `await_race_dispatch_callback`: 0 success, -1 error (exception
+/// in bridge TLS), -2 timeout.
+///
+/// # Safety
+/// `out_winner_id` / `retval` must be valid writable pointers, and the call
+/// must run inside an oxphp task fiber.
+unsafe fn await_race_in_fiber(
+    ids: &[u64],
+    timeout: f64,
+    out_winner_id: *mut i64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    let deadline =
+        (timeout > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64(timeout));
+
+    loop {
+        for &id in ids {
+            if !await_is_ready(id) {
+                continue;
+            }
+            // First to settle wins.
+            *out_winner_id = id as i64;
+            let mut result = match take_ready_result(id) {
+                Some(r) => r,
+                None => {
+                    set_bridge_internal_error("await_race: winner result missing");
+                    return -1;
+                }
+            };
+            cleanup_promise(id);
+            if result.success {
+                if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                    let rc = ffi::oxphp_portable_deserialize(
+                        result.serialized_value,
+                        result.serialized_value_len,
+                        1,
+                        retval,
+                    );
+                    ffi::oxphp_portable_free(result.serialized_value);
+                    result.serialized_value = std::ptr::null_mut();
+                    if rc != 0 {
+                        return -1;
+                    }
+                }
+                return 0;
+            }
+            // Winner rejected — propagate its exception.
+            if let (Some(cls), Some(msg)) = (&result.exception_class, &result.exception_message) {
+                let cls_c = CString::new(cls.as_str()).unwrap_or_default();
+                let msg_c = CString::new(msg.as_str()).unwrap_or_default();
+                ffi::oxphp_bridge_set_async_exception(cls_c.as_ptr(), msg_c.as_ptr());
+            }
+            return -1;
+        }
+
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                return -2;
+            }
+        }
+
+        if yield_or_cancel() {
+            return -1;
+        }
+    }
+}
+
+/// Fiber-cooperative `oxphp_async_await_any`: poll non-destructively and
+/// suspend between scans. The first promise to FULFIL wins; rejections
+/// accumulate. If every promise rejects, throws `AggregateAsyncException`
+/// (returns -3). On timeout, throws `TimeoutException` carrying the partial
+/// errors plus the still-pending ids (returns -2). Still-pending promises are
+/// left in PROMISE_MAP — awaitable individually, and cleaned up safely at
+/// RSHUTDOWN, which waits for their workers before unfreezing captures.
+///
+/// # Safety
+/// As `await_race_in_fiber`.
+unsafe fn await_any_in_fiber(
+    ids: &[u64],
+    timeout: f64,
+    out_winner_id: *mut i64,
+    retval: *mut c_void,
+) -> c_int {
+    use crate::bridge::ffi;
+    let deadline =
+        (timeout > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64(timeout));
+    let mut collected: Vec<AggregateRejection> = Vec::new();
+    let mut remaining: Vec<u64> = ids.to_vec();
+
+    loop {
+        let mut i = 0;
+        while i < remaining.len() {
+            let id = remaining[i];
+            if !await_is_ready(id) {
+                i += 1;
+                continue;
+            }
+            let mut result = match take_ready_result(id) {
+                Some(r) => r,
+                None => {
+                    set_bridge_internal_error("await_any: result missing");
+                    return -1;
+                }
+            };
+            cleanup_promise(id);
+            if result.success {
+                *out_winner_id = id as i64;
+                if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
+                    let rc = ffi::oxphp_portable_deserialize(
+                        result.serialized_value,
+                        result.serialized_value_len,
+                        1,
+                        retval,
+                    );
+                    ffi::oxphp_portable_free(result.serialized_value);
+                    result.serialized_value = std::ptr::null_mut();
+                    if rc != 0 {
+                        return -1;
+                    }
+                }
+                return 0;
+            }
+            // Rejection — record it and drop the promise from the poll set.
+            let cls = result
+                .exception_class
+                .clone()
+                .unwrap_or_else(|| "OxPHP\\Async\\AsyncException".to_string());
+            let msg = result
+                .exception_message
+                .clone()
+                .unwrap_or_else(|| "promise rejected without message".to_string());
+            collected.push(AggregateRejection {
+                promise_id: id,
+                exception_class: cls,
+                message: msg,
+            });
+            remaining.remove(i); // do not advance i — next element shifts down
+        }
+
+        if remaining.is_empty() {
+            // Every promise rejected.
+            push_aggregate_rejections(&mut collected, ids);
+            ffi::oxphp_bridge_aggregate_throw();
+            return -3;
+        }
+
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                push_aggregate_rejections(&mut collected, ids);
+                let pending: Vec<i64> = remaining.iter().map(|&id| id as i64).collect();
+                ffi::oxphp_bridge_aggregate_throw_timeout(pending.as_ptr(), pending.len() as u32);
+                return -2;
+            }
+        }
+
+        if yield_or_cancel() {
+            return -1;
+        }
+    }
+}
+
 /// Rust-side callback for `oxphp_async_await_any()`.
 ///
 /// Promise.any semantics:
@@ -3692,6 +3913,12 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
     let input_ids: Vec<u64> = (0..count as usize)
         .map(|i| *promise_ids.add(i) as u64)
         .collect();
+
+    // Inside a task fiber, resolve cooperatively (poll + yield) so the worker
+    // is not pinned while waiting for one of several promises to fulfil.
+    if ffi::oxphp_bridge_in_fiber() == 1 {
+        return await_any_in_fiber(&input_ids, timeout, out_winner_id, retval);
+    }
 
     // Pull receivers + cancel flags out of PROMISE_MAP.
     let mut id_vec: Vec<u64> = Vec::with_capacity(input_ids.len());

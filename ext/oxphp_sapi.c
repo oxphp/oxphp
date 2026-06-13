@@ -2326,6 +2326,38 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     return rc; /* 0 = success, -1 = error, -2 = timeout */
 }
 
+/* Cooperative yield: suspend the current task fiber for one scheduler cycle
+ * (a ~1ms timer) so other fibers / nested tasks can make progress, then
+ * resume. Used by the fiber-aware await_race / await_any poll loops to avoid
+ * pinning the worker while waiting for one of several promises to settle.
+ * Returns 1 if it suspended (in a fiber), 0 if not in a fiber (caller falls
+ * back to blocking), -3 if the task was cancelled while yielded. */
+int oxphp_fiber_suspend_for_yield(void) {
+    if (oxphp_current_fiber == NULL) {
+        return 0; /* not in a fiber */
+    }
+
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
+    self->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    self->suspend_data.timer_id = timer_id;
+
+    zend_fiber_transfer transfer = {
+        .context = self->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    /* --- RESUMED on the next scheduler tick once the timer expires --- */
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -3; /* cancelled */
+    }
+    return 1;
+}
+
 /* ─── Request arginfo ────────────────────────────────────── */
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_method, 0, 0, IS_STRING, 0)
 ZEND_END_ARG_INFO()
@@ -3803,6 +3835,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
+    oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
 
     /* Register async-task scheduler callbacks (stub bodies for now; the
      * Rust fiber-mode async driver reaches the scheduler through these). */
