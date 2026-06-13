@@ -135,12 +135,9 @@ fn handler_async(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
         return Err(async_disabled());
     }
 
-    // Cannot call oxphp_async from inside an async worker
-    if unsafe { ffi::oxphp_bridge_is_async_worker() != 0 } {
-        return Err(async_err(
-            "Cannot call oxphp_async() from within an async worker",
-        ));
-    }
+    // Nested oxphp_async() from inside an async worker is allowed: the task
+    // runs in a scheduler fiber, so an await on the nested promise suspends
+    // the fiber and frees the worker to run the nested task (async composition).
 
     // Get the closure zval (arg 0)
     let closure_zval = unsafe { call.raw_arg_ptr(0) };

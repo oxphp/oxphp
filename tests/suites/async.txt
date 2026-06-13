@@ -2,6 +2,7 @@
 # description: Async promise system
 
 async/test_basic_dispatch
+async/test_nested_composition
 async/test_with_args
 async/test_return_types
 async/test_await_all
