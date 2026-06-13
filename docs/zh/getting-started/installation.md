@@ -5,14 +5,14 @@ description: 通过 Docker 镜像安装 OxPHP 或从源码构建，涵盖前置�
 
 # 安装
 
-OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 或 8.5 ZTS、OxPHP 扩展以及所有运行时依赖。默认的 `:0.7.0` 和 `:latest` 标签随附 PHP 8.5；如需 PHP 8.4，请使用 `:0.7.0-php8.4`、`:php8.4` 或任意 `*-php8.4*` 标签变体。
+OxPHP 以 Docker 镜像的形式分发 —— 这是开始提供 PHP 应用服务最快、最推荐的方式。该镜像在 Alpine Linux 上捆绑了服务器二进制文件、PHP 8.4 或 8.5 ZTS、OxPHP 扩展以及所有运行时依赖。默认的 `:0.8.0` 和 `:latest` 标签随附 PHP 8.5；如需 PHP 8.4，请使用 `:0.8.0-php8.4`、`:php8.4` 或任意 `*-php8.4*` 标签变体。
 
 ## Docker（推荐）
 
 从 GitHub Container Registry 拉取官方镜像：
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.7.0
+docker pull ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 该镜像包含：
@@ -23,7 +23,7 @@ docker pull ghcr.io/oxphp/oxphp:0.7.0
 - **Bridge 库**（`liboxphp_bridge.so`）—— 连接 Rust 服务器与 PHP 运行时
 - **Alpine Linux** 基础镜像 —— 最小化运行时占用
 - **不设置 `USER` 指令** —— 镜像默认以 **root** 运行，与 `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine` 保持一致。`www-data` 用户（UID 82，GID 82）已预先创建，并在构建时将 `/var/www/html` 的所有权切换给它；部署时请在编排层下放权限：
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
   - Compose：`services.app.user: www-data`
   - Kubernetes：`securityContext.runAsUser: 82`
 
@@ -80,9 +80,9 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -107,7 +107,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # 生产环境
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 # 扩展的运行时依赖
 USER root
@@ -132,7 +132,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 如果应用不需要额外扩展，以下配置即可：
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```

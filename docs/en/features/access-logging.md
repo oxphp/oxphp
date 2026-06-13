@@ -126,7 +126,7 @@ And ensure your upstream client or load balancer sends a `traceparent` header on
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
       - "9090:9090"

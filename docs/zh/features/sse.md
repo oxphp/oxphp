@@ -184,7 +184,7 @@ SSE 端点需要禁用 PHP 执行计时器或将其设置得足够高。每个�
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:

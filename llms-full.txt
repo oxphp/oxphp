@@ -173,7 +173,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -214,7 +214,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.7.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.8.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -329,7 +329,7 @@ Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`p
 The shortest useful example:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -344,7 +344,7 @@ The container starts as root. In production, drop privileges at the orchestrator
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.7.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.8.0 AS prod` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
@@ -360,13 +360,13 @@ The same prod image can run `php` CLI commands for migrations, Composer, or ad-h
 # root-owned mounted volumes.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.7.0 \
+    ghcr.io/oxphp/oxphp:0.8.0 \
     php artisan migrate
 
 # If the mounted volume is owned by www-data, pass Docker's --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.7.0 \
+    ghcr.io/oxphp/oxphp:0.8.0 \
     php artisan migrate
 ```
 
@@ -376,12 +376,12 @@ docker run --rm --user www-data \
 
 The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.7.0
+      image: ghcr.io/oxphp/oxphp:0.8.0
       user: www-data
   ```
 - **Kubernetes:**
@@ -406,7 +406,7 @@ Start the container **as root** — do not also set `user:`, because the bind ne
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     command: ["oxphp", "serve", "--user=www-data"]
     ports:
       - "80:80"
@@ -572,14 +572,14 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.7.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.7.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.8.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.8.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
 
 ## Docker (Recommended)
 
 Pull the official image from the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.7.0
+docker pull ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 The image includes:
@@ -590,7 +590,7 @@ The image includes:
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
 - **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.7.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -647,9 +647,9 @@ The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already co
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.7.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -674,7 +674,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 # Runtime dependencies for extensions
 USER root
@@ -699,7 +699,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 If your application does not need additional extensions, this is sufficient:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -797,7 +797,7 @@ A healthy server returns `200` with JSON status. A degraded server returns `503`
 If you already have a PHP project with a `public/` directory:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 Open `http://localhost/` — your application is running.
@@ -805,7 +805,7 @@ Open `http://localhost/` — your application is running.
 To enable the internal server (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.7.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 ---
@@ -823,12 +823,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Create a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.7.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
+The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.8.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
 > **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
@@ -894,7 +894,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.7.0</p>
+<p>Version: 0.8.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
@@ -1057,7 +1057,7 @@ And ensure your upstream client or load balancer sends a `traceparent` header on
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -1309,7 +1309,7 @@ Additional constraints:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -1449,6 +1449,7 @@ Responses are sent without compression when any of the following conditions are 
 - The response already has a `Content-Encoding` header (e.g. pre-compressed content)
 - The response body is smaller than 256 bytes or larger than 3 MB
 - The content type is not in the compressible list (e.g. `image/png`, `image/jpeg`, `font/woff2`, `application/zip` — these formats already use internal compression)
+- The response is streamed — its length is unknown when headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events). Compressing a stream would require buffering it entirely in memory, destroying time-to-first-byte, so streamed responses always pass through uncompressed
 
 ## Response Headers
 
@@ -1497,7 +1498,7 @@ If your build pipeline generates `.br` files and sets the `Content-Encoding: br`
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:80"
     volumes:
@@ -1524,7 +1525,7 @@ OxPHP serves branded HTML error pages for 4xx and 5xx responses. Error pages are
 
 1. At startup, OxPHP reads the directory specified by `ERROR_PAGES_DIR` and loads every valid `{status}.html` file into memory.
 2. Files must be named with a numeric HTTP status code in the 400–599 range (for example, `404.html`, `503.html`). Files with non-numeric names, status codes outside that range (including `200.html`), or non-`.html` extensions are silently ignored.
-3. When OxPHP generates a 4xx or 5xx response, it checks for a matching pre-loaded error page. If one exists, the response body is replaced with the custom HTML and the `Content-Type` is set to `text/html; charset=utf-8`.
+3. When OxPHP generates a 4xx or 5xx response, it checks for a matching pre-loaded error page. If one exists, OxPHP replaces only the body and the headers that describe it: `Content-Type` is set to `text/html; charset=utf-8`, `Content-Length` to the page size, and headers coupled to the original body (`Content-Encoding`, `ETag`, `Last-Modified`) are dropped so they cannot mislabel or revalidate the replacement (for example a PHP error body compressed by `ob_gzhandler` will not leave the HTML page tagged `Content-Encoding: gzip`). Headers that describe the response semantics rather than the body are preserved into the custom page — `Content-Range` on a `416 Range Not Satisfiable`, `Retry-After` on a `529 Site is overloaded`, and `Allow` on a `405 Method Not Allowed`.
 4. If the directory does not exist or cannot be read at startup, OxPHP logs a warning and continues without custom error pages. Error responses fall back to plain-text bodies until the directory is fixed and the server is restarted.
 
 ## Configuration
@@ -1599,7 +1600,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.7.0
+  ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 ### A 429 response still shows the default body
@@ -1611,7 +1612,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:
@@ -2389,7 +2390,7 @@ Enable W3C trace propagation without an external backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -2404,7 +2405,7 @@ Full observability stack with Jaeger as the tracing backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -2427,7 +2428,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -2453,7 +2454,7 @@ Full observability with automatic instrumentation of database queries, HTTP call
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -2872,7 +2873,7 @@ PHP VM stacks (used for function call frames) are allocated fresh per request an
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -3149,7 +3150,7 @@ The `/config` endpoint reveals operational details (document root, rate limits, 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -3163,7 +3164,7 @@ For production, bind the internal server to localhost and use Kubernetes probes:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     environment:
@@ -3230,7 +3231,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -3726,7 +3727,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.7.0",
+  "oxphp_version": "0.8.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
@@ -4513,7 +4514,7 @@ OxPHP tracks up to 100,000 unique IP addresses. When this limit is reached, expi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:80"
     environment:
@@ -4707,8 +4708,7 @@ location ~ \.php$ {
 3. **PATH_INFO split** — when the URI contains `.php/`, the script prefix is matched on disk and the remainder becomes `PATH_INFO` (e.g. `/api.php/users/42` → script `api.php`, `PATH_INFO=/users/42`)
 4. **`/index.php`** — root front-controller fallback
 5. **`/index.html`** — root static index fallback
-6. **Worker fallback** — if `WORKER_MODE_ENABLED=true`, dispatch to the worker `ENTRY_FILE`
-7. **404**
+6. **404**
 
 **Examples:**
 
@@ -4729,13 +4729,14 @@ Active when `ENTRY_FILE=index.php` (or any value ending in `.php`) and `WORKER_M
 
 ```nginx
 location ~ \.(?!php$)[a-zA-Z0-9]+$ {
-    try_files $uri =404;          # static assets: hard 404 if missing
+    try_files $uri /index.php;    # static assets: fall back to front controller
 }
 location / {
     rewrite ^ /index.php last;    # everything else → front controller
 }
 location = /index.php {
-    fastcgi_param PATH_INFO $request_uri;
+    fastcgi_split_path_info ^(.+\.php)(/.*)$;
+    fastcgi_param PATH_INFO $fastcgi_path_info;
     fastcgi_pass ...;
 }
 ```
@@ -4744,23 +4745,27 @@ location = /index.php {
 
 | URI kind | Behavior |
 |---|---|
-| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise **hard 404** |
-| `.php` (any path) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
-| no extension (`/api/users`, `/`) | Rewrite to `/index.php` with `PATH_INFO` set to the original URI |
+| `.css`, `.png`, `.js`, … (any non-php extension) | Serve the file if it exists, otherwise rewrite to `/index.php` |
+| `.php` (any path) | Rewrite to `/index.php` |
+| no extension (`/api/users`, `/`) | Rewrite to `/index.php` |
+
+`PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/extra`); for application routes the original path is read from `REQUEST_URI`.
 
 **Examples:**
 
 | Request | Result | `$_SERVER['PATH_INFO']` |
 |---|---|---|
 | `/style.css` (exists) | Serve `style.css` | — |
-| `/style.css` (missing) | **404** (no fallback) | — |
-| `/api/users` | Execute `index.php` | `/api/users` |
-| `/about.php` | Execute `index.php` | `/about.php` |
-| `/api.php/v1/users` | Execute `index.php` | `/api.php/v1/users` |
-| `/index.php` (direct) | Execute `index.php` | `/index.php` |
-| `/` | Execute `index.php` | `/` |
+| `/style.css` (missing) | Execute `index.php` | *(absent)* |
+| `/api/users` | Execute `index.php` | *(absent)* |
+| `/about.php` | Execute `index.php` | *(absent)* |
+| `/index.php/news/local` | Execute `index.php` | `/news/local` |
+| `/index.php` (direct) | Execute `index.php` | *(absent)* |
+| `/` | Execute `index.php` | *(absent)* |
 
-The front controller always receives the **original URI** in `PATH_INFO`, letting your router decide what to do without inspecting `REQUEST_URI` separately. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
+For application routes the original path is exposed via `REQUEST_URI`, so your router reads `$_SERVER['REQUEST_URI']` to dispatch. Direct access to `/index.php` is no longer blocked — the rewrite is idempotent, so hitting it directly produces the same result as hitting `/`.
+
+A missing static asset falls back to the front controller rather than returning a fast 404 — the same `try_files $uri /index.php` behavior Laravel and Symfony ship by default, so your application renders its own 404 for missing assets. The trade-off is that every request to a non-existent asset now runs PHP; if the front controller still has nothing to serve (`/index.php` itself absent), the request returns a hard 404.
 
 ## SPA Mode
 
@@ -4803,14 +4808,20 @@ Two semantics worth highlighting:
 - **No-extension paths skip the disk** — the SPA mode never asks "does `/dashboard` exist on disk?" It always returns the index. This is correct for client-side routers and avoids unnecessary `stat()` calls.
 - **Missing static files are hard 404, not fallthrough** — a missing `/style.css` does not silently serve `index.html`. This catches broken asset references early instead of returning HTML where JS expected CSS.
 
+Because SPA mode executes existing `.php` files directly, [`PHP_DENY_PATHS`](../security/php-deny.md) applies — use it to block execution inside writable directories such as `/uploads`.
+
 ## Worker Mode
 
-Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at a `.php` script. The router runs Traditional-style direct-mapping for static assets, then dispatches every unmatched request to the worker `ENTRY_FILE` instead of returning 404.
+Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at a `.php` script. The router serves static assets from disk and dispatches every other request to the worker `ENTRY_FILE` — the worker is the single front controller.
 
-| Step | Behavior |
+| URI kind | Behavior |
 |---|---|
-| Static assets (`.css`, `.png`, …) | Served directly from disk if present, else hard 404 |
-| Anything else | Dispatched to the worker `ENTRY_FILE` |
+| Static assets (`.css`, `.png`, … — any non-`.php` extension) | Served directly from disk if present; a missing asset falls through to the worker `ENTRY_FILE` (not a hard 404) |
+| Anything else (`.php` URIs, extensionless paths, `/`) | Dispatched to the worker `ENTRY_FILE` |
+
+Arbitrary `.php` files in the document root are **never executed directly** in worker mode — a request to `/about.php` reaches the worker callback like any other route, even if `about.php` exists on disk. There is no directory-index lookup and no root `index.php` fallback either; the worker sees those requests itself.
+
+Two exceptions, both server-level defenses that run before mode dispatch: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth. Both return 404 and never reach the worker.
 
 Startup-time validation rejects two combinations:
 
@@ -4826,10 +4837,10 @@ See [Worker Mode](worker-mode.md) for full configuration details.
 | Mode | When set | Value |
 |---|---|---|
 | Traditional | Only when the URI contains `.php/` (PATH_INFO split) | Tail after the script segment, e.g. `/users/42` |
-| Framework | **Always** | Full original URI, e.g. `/api/users` |
+| Framework | Only for an explicit `/index.php/extra` request | Tail after the entry file, e.g. `/news` |
 | SPA | Never | (PHP is only invoked for exact `.php` files; no PATH_INFO) |
 
-In Traditional mode, splitting is always on — the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed. If you want PATH_INFO routing, use Traditional mode and place a `.php` script as the prefix.
+`PATH_INFO` follows CGI semantics: it is present only when `SCRIPT_NAME` (the executed script) is a literal prefix of the request path. A front-controller rewrite that the URL does not name — an application route, a directory index, a static-miss fallback — carries no `PATH_INFO`; read `REQUEST_URI` instead. In Traditional mode the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed.
 
 ## Path Security
 
@@ -4840,7 +4851,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 - **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
-- **PHP execution deny-list** — in Traditional mode, `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)
+- **PHP execution deny-list** — in the direct-mapping modes (Traditional and SPA), `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 
@@ -4856,15 +4867,15 @@ docker exec <container> ls /var/www/html/public
 
 ### Missing static asset returns 404 instead of the SPA shell
 
-This is intentional in Framework and SPA modes. A missing `/style.css` is a hard 404, not a silent fallback to `index.html`. This catches broken asset references early. If you want fallthrough, use Traditional mode.
+This is intentional in SPA mode: a missing `/style.css` is a hard 404, not a silent fallback to `index.html`, which catches broken asset references early. In Framework and Traditional modes a missing static file falls back to the front controller (`/index.php`), so your application router renders the 404. Use SPA mode if you want hard 404s on missing assets.
 
 ### Direct `/index.php` no longer returns 404
 
-In Framework mode, direct access to the front controller is now allowed (the rewrite to `/index.php` is idempotent). If you previously relied on the 404 to detect direct hits, switch to checking `PATH_INFO` from inside the controller.
+In Framework mode, direct access to the front controller is now allowed (the rewrite to `/index.php` is idempotent). If you previously relied on the 404 to detect direct hits, switch to checking `REQUEST_URI` from inside the controller.
 
 ### `PATH_INFO` is empty in Framework mode
 
-Make sure `ENTRY_FILE` ends in `.php`. If it doesn't, OxPHP picks SPA mode, which doesn't populate `PATH_INFO`. The variable is now set unconditionally in Framework mode — you no longer need any feature flag.
+This is expected for application routes. Framework mode follows CGI semantics: `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`). For a normal app route like `/users/42`, the front controller is reached by an internal rewrite it does not name, so `PATH_INFO` is absent — read the path from `$_SERVER['REQUEST_URI']`. (If `ENTRY_FILE` does not end in `.php`, OxPHP picks SPA mode, which never populates `PATH_INFO`.)
 
 ### Symlink inside document root returns 404
 
@@ -4875,7 +4886,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:80"
     volumes:
@@ -5075,7 +5086,7 @@ SSE endpoints require PHP's execution timer to be disabled or set high. Each act
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     volumes:
@@ -5114,7 +5125,7 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 
 # Static Files
 
-OxPHP serves static files directly from the document root without invoking PHP. Files are served with automatic MIME type detection, an in-memory cache for fast repeated access, and full HTTP caching support including ETags and conditional requests.
+OxPHP serves static files directly from the document root without invoking PHP. Files are served with automatic MIME type detection, an in-memory cache for fast repeated access, and full HTTP caching support including ETags, conditional requests, and Range requests for partial downloads.
 
 ## How It Works
 
@@ -5124,7 +5135,8 @@ When a request matches a static file:
 2. **MIME detection** — the content type is determined from the file extension
 3. **Cache check** — the file cache is checked before touching the filesystem
 4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
-5. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
+5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP responds with `206 Partial Content`: GET receives only the requested byte range, HEAD the same range headers with no body
+6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
 
 ## Configuration
 
@@ -5178,7 +5190,7 @@ The `max-age` value is the TTL converted to seconds. Set `STATIC_MAX_AGE=off` to
 
 Every static file response includes:
 
-- **ETag** — a weak ETag in the format `W/"<size>-<mtime_hex>"`, derived from the file size and last modification time
+- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served brotli-compressed, the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
 - **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
 These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
@@ -5191,6 +5203,34 @@ OxPHP evaluates conditional request headers to avoid sending unchanged file cont
 - **If-Modified-Since** — the client sends a timestamp. If the file has not been modified since that time, OxPHP returns 304.
 
 `If-None-Match` takes priority over `If-Modified-Since` per RFC 7232. For files already in the in-memory cache, the conditional check runs without any disk I/O.
+
+### Range Requests (206)
+
+Static file responses advertise `Accept-Ranges: bytes`, and GET requests with a single-range `Range` header receive only the requested bytes:
+
+```http
+GET /videos/intro.mp4 HTTP/1.1
+Range: bytes=1048576-
+
+HTTP/1.1 206 Partial Content
+Content-Range: bytes 1048576-52428799/52428800
+Content-Length: 51380224
+```
+
+This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget -c`, download managers), and partial PDF loading. All three range forms from RFC 9110 are supported: `bytes=N-M`, `bytes=N-` (from offset to end), and `bytes=-N` (last N bytes).
+
+- A range that cannot be satisfied (start beyond the end of file) returns `416 Range Not Satisfiable` with `Content-Range: bytes */<size>`.
+- **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment. The date form is only accepted once the file's modification second has fully elapsed — a just-written file could change again within the same second without moving the date, so it is not yet a strong validator (RFC 9110).
+- Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
+- **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
+- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Only files served from the in-memory cache (up to 1 MiB) are ever compressed, so ranges always work for the content that actually needs them: video, archives, images, and every file streamed from disk. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
+- `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
+
+Example: resume an interrupted download with curl:
+
+```bash
+curl -C - -O https://example.com/dist/app-installer.dmg
+```
 
 ### Disabling Caching
 
@@ -5230,7 +5270,7 @@ A 304 means the client already has the current version. This is correct behavior
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:80"
     volumes:
@@ -5375,7 +5415,7 @@ OPcache recompilation adds latency on the first request after a file change. Thi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:8080"
     environment:
@@ -5464,6 +5504,36 @@ curl --http2-prior-knowledge -I http://localhost/
 
 Look for `HTTP/2 200` in the response line.
 
+### Connection Limits
+
+OxPHP applies per-connection HTTP/2 limits to bound the amplification a single
+TCP connection can exert on the PHP worker pool. Each accepted stream becomes a
+queued PHP request, so an unbounded stream count from one connection would
+saturate the pool on its own.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 32) | Maximum simultaneous open streams per connection. Excess streams receive `REFUSED_STREAM` |
+| `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before the connection is closed (CVE-2023-44487 Rapid Reset protection) |
+| `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request (HPACK bomb guard) |
+| `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables keepalive |
+| `H2_KEEPALIVE_TIMEOUT_SECS` | `10` | Seconds to wait for a PING reply before closing the connection |
+
+`PHP_WORKERS_MAX` is the maximum worker count set by `PHP_WORKERS`. For a
+dynamic range like `4:16`, the maximum (16) is used. The default scales with
+workers so that legitimate concurrent page loads on one connection do not create
+more queue pressure than the pool can absorb.
+
+> **Trade-off:** `H2_MAX_CONCURRENT_STREAMS` is intentionally tuned to pool
+> capacity, not to browser multiplexing behaviour. Browsers send dozens of
+> asset requests over a single HTTP/2 connection; those that exceed the cap
+> receive `REFUSED_STREAM` and are automatically retried by the browser in
+> the next batch. This adds a small latency penalty on heavy fan-out pages
+> (many assets per connection) but prevents a single connection from filling
+> the PHP request queue. If your site has many large-asset pages and the
+> default causes measurable latency, raise `H2_MAX_CONCURRENT_STREAMS`
+> explicitly rather than increasing `PHP_WORKERS`.
+
 ## Supported Key Types
 
 The private key file must contain a single PEM-encoded key in one of the following formats:
@@ -5545,7 +5615,7 @@ OxPHP listens on a single port. To support both protocols simultaneously, use a 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "443:443"
     environment:
@@ -5700,7 +5770,7 @@ If your database server closes idle connections, reconnect attempts in the next 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "8080:80"
     volumes:
@@ -9048,14 +9118,18 @@ The check runs **before any disk I/O**, so denied paths return the same response
 
 ## When It Applies
 
-Direct file mapping mode only. With `ENTRY_FILE` set (front-controller, SPA, or worker mode), every request already routes through one trusted entry script — arbitrary `.php` files in the document root cannot be invoked directly, so the deny-list is redundant. Setting `PHP_DENY_PATHS` together with `ENTRY_FILE` emits a startup warning and disables the check.
+Direct-mapping modes — the modes where a URI resolves straight to a `.php` file on disk:
 
 | Routing mode | `PHP_DENY_PATHS` honored? |
 |---|---|
 | Traditional (no `ENTRY_FILE`) | Yes |
+| SPA (`ENTRY_FILE=index.html`) | Yes — SPA executes existing `.php` files directly, so the deny-list applies |
 | Framework (`ENTRY_FILE=index.php`) | No — warned and ignored |
-| SPA (`ENTRY_FILE=index.html`) | No — warned and ignored |
 | Worker (`WORKER_MODE_ENABLED=true`) | No — warned and ignored |
+
+In Framework mode every request is rewritten to the front controller and arbitrary `.php` files are never executed directly; a deny-list would only break application routes that happen to end in `.php`. In Worker mode every non-static request is dispatched to the worker script, so there is nothing for the deny-list to deny. Setting `PHP_DENY_PATHS` in either mode emits a startup warning and disables the check.
+
+The deny-list also covers scripts reached *indirectly*: a request to `/uploads/` that would resolve to `uploads/index.php` through the directory-index lookup is denied when `uploads/**` is on the list — the resolved script path is matched against the patterns, not just the request URI. For such denials `OXPHP_DENIED_PATH` carries the sanitized request URI without the trailing slash (`/uploads/` is reported as `/uploads`).
 
 ## Configuration
 
@@ -9145,6 +9219,8 @@ This lets you decide the response per-request (return 404 to attackers, 403 to a
 ## No Existence Oracle
 
 Both `Status` and `Script` fallbacks are returned without touching the filesystem. A request to `/uploads/never-uploaded.php` and a request to `/uploads/actually-on-disk.php` produce identical responses — no timing difference, no body difference. An attacker scanning for uploaded shells cannot use the deny-list to enumerate which filenames exist.
+
+The resolved-path screen is the one exception: it necessarily runs after route resolution, so its denials are existence-dependent. `/uploads/` is denied only when `uploads/index.php` actually exists on disk; likewise, with a single-star pattern such as `/uploads/*.php`, a PATH_INFO request `/uploads/shell.php/x` is denied only when `uploads/shell.php` exists (the full URI does not match the pattern — the resolved script does). The direct-URI screen — the path attackers probe with — stays oracle-free.
 
 ## Observability
 
@@ -10298,13 +10374,13 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 ```bash
 docker run -p 80:80 \
   -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
-  ghcr.io/oxphp/oxphp:0.7.0
+  ghcr.io/oxphp/oxphp:0.8.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.7.0
+FROM ghcr.io/oxphp/oxphp:0.8.0
 
 COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -10315,7 +10391,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     ports:
       - "80:80"
     volumes:
@@ -11547,7 +11623,7 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier | `OxPHP/0.1.0` |
+| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.8.0` |
 | `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
@@ -11655,8 +11731,10 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 | Routing mode | When set | Value |
 |---|---|---|
 | **Traditional** (`ENTRY_FILE` unset) | Only when the URI contains `.php/` and the script prefix exists on disk | Tail after the script segment |
-| **Framework** (`ENTRY_FILE=index.php`) | **Always** — every request is rewritten onto the front controller | Full original URI |
+| **Framework** (`ENTRY_FILE=index.php`) | Only when the request explicitly names the entry file with a trailing segment (`/index.php/extra`) | Tail after the entry file, e.g. `/news` |
 | **SPA** (`ENTRY_FILE=index.html`) | Never — PHP only runs for exact `.php` files, no PATH_INFO |  — |
+
+`SCRIPT_NAME` always identifies the executed script (the resolved file relative to the document root), so in normal routing `PATH_INFO` is present only when `SCRIPT_NAME` is a literal prefix of the request path. When a request is rewritten to a front controller it does not name (an application route, a directory index, a static-miss fallback), `PATH_INFO` is absent and the original path lives in `REQUEST_URI`. (The `PHP_DENY_PATHS` fallback is a deliberate exception: it sets `PATH_INFO` to the original sanitized URI so the fallback script can route on it.)
 
 #### Traditional mode examples
 
@@ -11671,14 +11749,14 @@ OxPHP scans the URI left-to-right for the first `.php` segment that corresponds 
 
 #### Framework mode examples
 
-Every non-static request is rewritten onto `index.php`, with `PATH_INFO` carrying the original URI. Your front controller reads `PATH_INFO` to dispatch routes.
+Every non-static request is rewritten onto `index.php`. `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment; for application routes the original path is read from `REQUEST_URI`.
 
 | Request URI | `SCRIPT_NAME` | `PATH_INFO` |
 |---|---|---|
-| `/api/users` | `/index.php` | `/api/users` |
-| `/about.php` | `/index.php` | `/about.php` |
-| `/api.php/v1/users` | `/index.php` | `/api.php/v1/users` |
-| `/` | `/index.php` | `/` |
+| `/api/users` | `/index.php` | *(absent)* |
+| `/about.php` | `/index.php` | *(absent)* |
+| `/index.php/news/local` | `/index.php` | `/news/local` |
+| `/index.php` | `/index.php` | *(absent)* |
 
 > **Note:** `PATH_TRANSLATED` is not populated. It is rarely used in practice and is not set by nginx or PHP-FPM by default.
 
@@ -12093,9 +12171,9 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FRAME_OPTIONS` | `DENY` | Clickjacking protection. `DENY` blocks all framing, `SAMEORIGIN` allows same-origin framing, `off` disables (use when managing framing via your own CSP). Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` |
+| `FRAME_OPTIONS` | `DENY` | Clickjacking protection. `DENY` blocks all framing, `SAMEORIGIN` allows same-origin framing, `off` disables (use when managing framing via your own CSP). Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors`. Server security headers are fallbacks: values set by the application (e.g. PHP `header()`) take precedence and are never overwritten. The framing pair is linked both ways — an application-set `X-Frame-Options` suppresses the server `Content-Security-Policy: frame-ancestors` (CSP overrides `X-Frame-Options` in modern browsers), and an application CSP containing a `frame-ancestors` directive suppresses the server `X-Frame-Options`. Note this precedence also applies to `X-Content-Type-Options`: an application-set value is kept as-is even though `nosniff` is its only valid value — an invalid value disables the protection |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
-| `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Direct-mapping (no `ENTRY_FILE`) only — ignored with a startup warning when `ENTRY_FILE` is set, since front-controller, SPA, and worker modes already route every request through one trusted script. Matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
+| `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention) |
 | `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
@@ -12107,6 +12185,16 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 |----------|---------|-------------|
 | `TLS_CERT` | *(unset)* | Path to PEM-encoded TLS certificate. Both `TLS_CERT` and `TLS_KEY` must be set to enable TLS |
 | `TLS_KEY` | *(unset)* | Path to PEM-encoded TLS private key |
+
+## HTTP/2
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `H2_MAX_CONCURRENT_STREAMS` | `PHP_WORKERS_MAX × 4` (min 32) | Maximum simultaneous open streams per HTTP/2 connection |
+| `H2_MAX_PENDING_RESET` | `20` | Maximum `RST_STREAM` frames queued before a connection is closed (Rapid Reset protection) |
+| `H2_MAX_HEADER_LIST_BYTES` | `65536` | Maximum total decoded header bytes per request |
+| `H2_KEEPALIVE_INTERVAL_SECS` | `20` | Seconds between HTTP/2 PING frames; `0` disables |
+| `H2_KEEPALIVE_TIMEOUT_SECS` | `10` | Seconds to wait for a PING reply before closing the connection |
 
 ## Static Files
 
@@ -12405,7 +12493,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.7.0
+          image: ghcr.io/oxphp/oxphp:0.8.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -12439,7 +12527,7 @@ Or set it in your Compose file:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"

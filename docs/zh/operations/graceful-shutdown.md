@@ -63,7 +63,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.7.0
+          image: ghcr.io/oxphp/oxphp:0.8.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -97,7 +97,7 @@ docker stop --time 45 my-oxphp-container
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.7.0
+    image: ghcr.io/oxphp/oxphp:0.8.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"
