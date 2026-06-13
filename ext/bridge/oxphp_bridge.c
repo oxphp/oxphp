@@ -3563,24 +3563,19 @@ static void oxphp_fixup_run_time_cache(zend_op_array *op) {
     op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
 }
 
-/* === Async Promise: Execute Async Task === */
+/* === Async Promise: Reconstruct closure (shared sync + fiber path) === */
 
-int oxphp_execute_async_task(
+int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
     zval *this_ptr,
-    uint32_t argc,
-    zval *args,
-    zval *retval,
+    zval *out_closure,
+    zend_fcall_info *fci,
+    zend_fcall_info_cache *fcc,
     char **exc_class,
     char **exc_message
 ) {
-    zval closure;
     zend_function func;
-
-    *exc_class = NULL;
-    *exc_message = NULL;
-    ZVAL_NULL(retval);
 
     /* Reconstruct closure from op_array + static_vars */
     memcpy(&func, op_array, sizeof(zend_op_array));
@@ -3609,19 +3604,44 @@ int oxphp_execute_async_task(
         ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, static_vars);
     }
 
-    zend_create_closure(&closure, &func,
+    zend_create_closure(out_closure, &func,
         NULL, /* scope */
         NULL, /* called_scope */
         this_ptr /* this_ptr, may be NULL */
     );
 
-    /* Set up call info */
-    zend_fcall_info fci;
-    zend_fcall_info_cache fcc;
-    if (zend_fcall_info_init(&closure, 0, &fci, &fcc, NULL, NULL) != SUCCESS) {
-        zval_ptr_dtor(&closure);
+    if (zend_fcall_info_init(out_closure, 0, fci, fcc, NULL, NULL) != SUCCESS) {
+        zval_ptr_dtor(out_closure);
         *exc_class = strdup("RuntimeException");
         *exc_message = strdup("Failed to initialize async closure call");
+        return -1;
+    }
+    return 0;
+}
+
+/* === Async Promise: Execute Async Task === */
+
+int oxphp_execute_async_task(
+    zend_op_array *op_array,
+    HashTable *static_vars,
+    zval *this_ptr,
+    uint32_t argc,
+    zval *args,
+    zval *retval,
+    char **exc_class,
+    char **exc_message
+) {
+    zval closure;
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+
+    *exc_class = NULL;
+    *exc_message = NULL;
+    ZVAL_NULL(retval);
+
+    if (oxphp_reconstruct_async_closure(op_array, static_vars, this_ptr,
+                                        &closure, &fci, &fcc,
+                                        exc_class, exc_message) != 0) {
         return -1;
     }
 

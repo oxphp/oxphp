@@ -101,6 +101,23 @@ typedef struct _oxphp_request_fiber {
     bool started;            /* true after first start — reused fibers skip zend_fiber_init_context */
     int consecutive_errors;
 
+    /* ── Async-task mode (oxphp_async fiber, not an HTTP request) ──
+     * When task_mode is true the fiber runs a single per-task closure and
+     * captures its result instead of producing an HTTP response. The closure
+     * and call-info are owned by the fiber and torn down at finalize; args /
+     * op_array / static_vars are borrowed (the Rust driver frees them once the
+     * completed result has been drained). */
+    bool task_mode;
+    bool cancel_requested;          /* set cross-path; checked at suspend points + interrupt handler */
+    zval task_closure;              /* owned: dtor at finalize */
+    zend_fcall_info task_fci;
+    zend_fcall_info_cache task_fcc;
+    zval *task_args;                /* borrowed (Rust-owned) */
+    uint32_t task_argc;
+    zval task_retval;               /* ZVAL_UNDEF until completed */
+    char *task_exc_class;           /* malloc'd, NULL if none */
+    char *task_exc_message;         /* malloc'd, NULL if none */
+
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
     struct _oxphp_request_fiber *prev;

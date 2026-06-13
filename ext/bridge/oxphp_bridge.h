@@ -1411,6 +1411,23 @@ void oxphp_arr_add_zval(zval *arr, const char *key, zval *val);
 /* Copy a zval into an array at an integer index (ZVAL_COPY semantics). */
 void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 
+/* Reconstruct an async closure from a transferred op_array + static_vars on
+ * THIS thread's heap (run_time_cache + static_variables MAP_PTR fixups for
+ * cross-thread safety). Fills *out_closure (caller dtors with zval_ptr_dtor),
+ * fci, fcc. Returns 0 on success; -1 on failure (fills exc_class/message with
+ * malloc'd strings and dtors the closure). Shared by the synchronous async
+ * path and the fiber-mode async scheduler. */
+int oxphp_reconstruct_async_closure(
+    zend_op_array *op_array,
+    HashTable *static_vars,
+    zval *this_ptr,
+    zval *out_closure,
+    zend_fcall_info *fci,
+    zend_fcall_info_cache *fcc,
+    char **exc_class,
+    char **exc_message
+);
+
 /* Execute an async task on an async worker thread.
  * Returns 0 on success, -1 on exception.
  * On exception: exc_class, exc_message are malloc'd strings (caller frees). */
