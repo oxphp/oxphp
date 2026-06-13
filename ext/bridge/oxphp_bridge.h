@@ -1828,6 +1828,70 @@ int     oxphp_async_synthetic_promise_reject(int64_t id,
                                               const char *message);
 int     oxphp_async_synthetic_promise_cancel(int64_t id);
 
+/* ─── Async-task fiber scheduler callbacks ──────────────────
+ *
+ * The fiber-mode async worker runs each oxphp_async task inside a
+ * scheduler fiber so one worker thread can hold many tasks in-flight,
+ * suspending each at its await / sleep / channel boundary. The scheduler
+ * lives in the extension (it owns the zend_fiber contexts); the Rust
+ * driver loop reaches it only through these bridge forwarders.
+ *
+ * The extension registers the five implementations once at MINIT via
+ * oxphp_bridge_set_async_sched_callbacks (mirrors set_fiber_await). Rust
+ * calls the oxphp_bridge_async_* wrappers; each forwards through the
+ * stored pointer, or returns a not-registered sentinel when the
+ * extension is absent (unit tests, bare CLI).
+ *
+ * Pointer params are opaque (void*) so this stays outside the PHP_H
+ * block. op_array / static_vars / this_ptr / args are borrowed
+ * (Rust-owned); out_retval points at a zval inside the fiber's storage.
+ *
+ *   spawn()   create a task fiber for one reconstructed closure + args
+ *             and enqueue it. Returns the fiber_id (>= 0) or -1 (at
+ *             capacity / reconstruction failed).
+ *   tick()    advance the scheduler one iteration (start new fibers,
+ *             resume ready ones, run each to its next suspend or
+ *             completion). Returns the number of fibers still in-flight
+ *             (queued + suspended + completed-but-undrained), or -1 if
+ *             no scheduler is registered.
+ *   poll()    report one completed-but-undrained task fiber. Returns its
+ *             fiber_id (>= 0) and fills the out-params with pointers into
+ *             the fiber's owned storage (*out_retval is ZVAL_UNDEF if the
+ *             task threw; *out_exc_class / *out_exc_message are NULL when
+ *             no exception). Returns -1 when nothing is ready to drain.
+ *             The fiber stays alive until release().
+ *   release() tear down a drained task fiber (dtor closure/retval/exc,
+ *             recycle it). The Rust-owned args / op_array / static_vars
+ *             are NOT touched — the caller frees those after release
+ *             returns.
+ *   cancel()  request cancellation of an in-flight fiber. Returns 1 if
+ *             the fiber was found and flagged, 0 otherwise.
+ */
+typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args);
+typedef int (*oxphp_async_sched_tick_fn_t)(void);
+typedef int64_t (*oxphp_async_sched_poll_fn_t)(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message);
+typedef void (*oxphp_async_sched_release_fn_t)(int64_t fiber_id);
+typedef int (*oxphp_async_sched_cancel_fn_t)(int64_t fiber_id);
+
+void oxphp_bridge_set_async_sched_callbacks(
+    oxphp_async_sched_spawn_fn_t spawn,
+    oxphp_async_sched_tick_fn_t tick,
+    oxphp_async_sched_poll_fn_t poll,
+    oxphp_async_sched_release_fn_t release,
+    oxphp_async_sched_cancel_fn_t cancel);
+
+int64_t oxphp_bridge_async_spawn(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args);
+int     oxphp_bridge_async_tick(void);
+int64_t oxphp_bridge_async_poll_completed(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message);
+void    oxphp_bridge_async_release(int64_t fiber_id);
+int     oxphp_bridge_async_cancel(int64_t fiber_id);
+
 /* ─── Shared wrapper cross-thread helpers ────────────────────
  *
  * Bridge between a PHP-side Shared\* wrapper object and the Rust-side

@@ -554,3 +554,47 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
 
     return work_done;
 }
+
+/* ─── Async-task scheduler — stub implementations ──────────────
+ * Plumbing only: establishes the Rust→bridge→extension call path so the
+ * fiber-mode async driver can reach the scheduler. The real per-thread
+ * task scheduler (task_fiber_coroutine + spawn/tick/poll/release/cancel)
+ * replaces these bodies. Until then spawn/tick report "nothing in
+ * flight" and poll/cancel are no-ops. */
+int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
+                                void *this_ptr, uint32_t argc, void *args) {
+    (void)op_array;
+    (void)static_vars;
+    (void)this_ptr;
+    (void)argc;
+    (void)args;
+    return -1;
+}
+
+int oxphp_async_sched_tick(void) {
+    return 0;
+}
+
+int64_t oxphp_async_sched_poll_completed(void **out_retval,
+                                         const char **out_exc_class,
+                                         const char **out_exc_message) {
+    if (out_retval != NULL) {
+        *out_retval = NULL;
+    }
+    if (out_exc_class != NULL) {
+        *out_exc_class = NULL;
+    }
+    if (out_exc_message != NULL) {
+        *out_exc_message = NULL;
+    }
+    return -1;
+}
+
+void oxphp_async_sched_release(int64_t fiber_id) {
+    (void)fiber_id;
+}
+
+int oxphp_async_sched_cancel(int64_t fiber_id) {
+    (void)fiber_id;
+    return 0;
+}

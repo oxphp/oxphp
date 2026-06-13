@@ -548,6 +548,41 @@ pub unsafe fn oxphp_bridge_set_async_synth_reject(
 }
 pub unsafe fn oxphp_bridge_set_async_synth_cancel(_f: extern "C" fn(i64) -> c_int) {}
 
+// ── Async-task fiber scheduler (Rust-driven) ──
+
+pub unsafe fn oxphp_bridge_async_spawn(
+    _op_array: *const c_void,
+    _static_vars: *mut c_void,
+    _this_ptr: *mut c_void,
+    _argc: u32,
+    _args: *mut c_void,
+) -> i64 {
+    -1
+}
+pub unsafe fn oxphp_bridge_async_tick() -> c_int {
+    -1
+}
+pub unsafe fn oxphp_bridge_async_poll_completed(
+    out_retval: *mut *mut c_void,
+    out_exc_class: *mut *const c_char,
+    out_exc_message: *mut *const c_char,
+) -> i64 {
+    if !out_retval.is_null() {
+        *out_retval = std::ptr::null_mut();
+    }
+    if !out_exc_class.is_null() {
+        *out_exc_class = std::ptr::null();
+    }
+    if !out_exc_message.is_null() {
+        *out_exc_message = std::ptr::null();
+    }
+    -1
+}
+pub unsafe fn oxphp_bridge_async_release(_fiber_id: i64) {}
+pub unsafe fn oxphp_bridge_async_cancel(_fiber_id: i64) -> c_int {
+    0
+}
+
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
 pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {

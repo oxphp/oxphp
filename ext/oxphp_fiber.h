@@ -185,4 +185,18 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
  * It only initializes fresh superglobals and SAPI headers for the new request. */
 void oxphp_fiber_init_request_state(void);
 
+/* ─── Async-task scheduler (Rust-driven via bridge callbacks) ───
+ * Registered into the bridge at MINIT via
+ * oxphp_bridge_set_async_sched_callbacks. See ext/bridge/oxphp_bridge.h
+ * for the contract. Stub bodies land first; the real per-thread task
+ * scheduler fills them in. */
+int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
+                                void *this_ptr, uint32_t argc, void *args);
+int     oxphp_async_sched_tick(void);
+int64_t oxphp_async_sched_poll_completed(void **out_retval,
+                                         const char **out_exc_class,
+                                         const char **out_exc_message);
+void    oxphp_async_sched_release(int64_t fiber_id);
+int     oxphp_async_sched_cancel(int64_t fiber_id);
+
 #endif /* OXPHP_FIBER_H */

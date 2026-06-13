@@ -383,6 +383,30 @@ extern "C" {
     );
     pub fn oxphp_bridge_set_async_synth_cancel(f: extern "C" fn(i64) -> c_int);
 
+    // ── Async-task fiber scheduler (Rust-driven) ──
+    //
+    // The extension owns the scheduler (zend_fiber contexts) and registers
+    // the implementations at MINIT; the Rust driver reaches them through
+    // these bridge forwarders. See ext/bridge/oxphp_bridge.h for the
+    // spawn/tick/poll/release/cancel contract. Pointer params are opaque:
+    // op_array/static_vars/this_ptr/args are Rust-owned (borrowed by the
+    // fiber); out_retval points into the fiber's owned storage.
+    pub fn oxphp_bridge_async_spawn(
+        op_array: *const c_void,
+        static_vars: *mut c_void,
+        this_ptr: *mut c_void,
+        argc: u32,
+        args: *mut c_void,
+    ) -> i64;
+    pub fn oxphp_bridge_async_tick() -> c_int;
+    pub fn oxphp_bridge_async_poll_completed(
+        out_retval: *mut *mut c_void,
+        out_exc_class: *mut *const c_char,
+        out_exc_message: *mut *const c_char,
+    ) -> i64;
+    pub fn oxphp_bridge_async_release(fiber_id: i64);
+    pub fn oxphp_bridge_async_cancel(fiber_id: i64) -> c_int;
+
     // ── Shared\* synchronous invoke shims ──────────────
 
     pub fn oxphp_shared_invoke_0_portbuf(

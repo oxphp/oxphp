@@ -2356,6 +2356,69 @@ int oxphp_bridge_in_fiber(void) {
     return 0;
 }
 
+/* ─── Async-task fiber scheduler callbacks ─────────────────── */
+
+/* Set once at startup (MINIT) before any worker threads spawn — same
+ * non-__thread, no-data-race pattern as the other SAPI callbacks. */
+static oxphp_async_sched_spawn_fn_t   sched_async_spawn   = NULL;
+static oxphp_async_sched_tick_fn_t    sched_async_tick    = NULL;
+static oxphp_async_sched_poll_fn_t    sched_async_poll    = NULL;
+static oxphp_async_sched_release_fn_t sched_async_release = NULL;
+static oxphp_async_sched_cancel_fn_t  sched_async_cancel  = NULL;
+
+void oxphp_bridge_set_async_sched_callbacks(
+    oxphp_async_sched_spawn_fn_t spawn,
+    oxphp_async_sched_tick_fn_t tick,
+    oxphp_async_sched_poll_fn_t poll,
+    oxphp_async_sched_release_fn_t release,
+    oxphp_async_sched_cancel_fn_t cancel
+) {
+    sched_async_spawn   = spawn;
+    sched_async_tick    = tick;
+    sched_async_poll    = poll;
+    sched_async_release = release;
+    sched_async_cancel  = cancel;
+}
+
+int64_t oxphp_bridge_async_spawn(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args
+) {
+    if (sched_async_spawn != NULL) {
+        return sched_async_spawn(op_array, static_vars, this_ptr, argc, args);
+    }
+    return -1; /* no scheduler registered */
+}
+
+int oxphp_bridge_async_tick(void) {
+    if (sched_async_tick != NULL) {
+        return sched_async_tick();
+    }
+    return -1;
+}
+
+int64_t oxphp_bridge_async_poll_completed(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message
+) {
+    if (sched_async_poll != NULL) {
+        return sched_async_poll(out_retval, out_exc_class, out_exc_message);
+    }
+    return -1;
+}
+
+void oxphp_bridge_async_release(int64_t fiber_id) {
+    if (sched_async_release != NULL) {
+        sched_async_release(fiber_id);
+    }
+}
+
+int oxphp_bridge_async_cancel(int64_t fiber_id) {
+    if (sched_async_cancel != NULL) {
+        return sched_async_cancel(fiber_id);
+    }
+    return 0;
+}
+
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
     uint32_t argc, void *args, void *closure_zval

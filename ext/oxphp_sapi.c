@@ -3797,6 +3797,15 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
 
+    /* Register async-task scheduler callbacks (stub bodies for now; the
+     * Rust fiber-mode async driver reaches the scheduler through these). */
+    oxphp_bridge_set_async_sched_callbacks(
+        oxphp_async_sched_spawn,
+        oxphp_async_sched_tick,
+        oxphp_async_sched_poll_completed,
+        oxphp_async_sched_release,
+        oxphp_async_sched_cancel);
+
     /* Sub-design A: chain into Zend's interrupt mechanism so cancellation
      * reasons cause clean bailout at the next opcode boundary. */
     orig_zend_interrupt_function = zend_interrupt_function;
