@@ -855,6 +855,15 @@ pub async fn serve(
         builder = builder.status(StatusCode::OK);
         file_size
     };
+    // Unlike the buffered path, which bails when the read comes up short
+    // (file truncated between fstat and read), Content-Length here is committed
+    // to the wire before the body streams. A concurrent truncation therefore
+    // cannot be caught in time: the stream ends short and hyper aborts the
+    // connection. That abort is the correct signal for an unfulfillable
+    // Content-Length, and it is identical to the pre-existing full-response
+    // streaming behavior (and to nginx/Apache). The same-inode open above keeps
+    // an atomic rename-swap deploy from hitting this; only an in-place truncate
+    // of the open file can, which a normal deploy does not do.
     builder = builder.header(header::CONTENT_LENGTH, body_len);
 
     // 64KB read buffer for large file streaming (default is 4KB).
