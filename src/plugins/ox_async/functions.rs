@@ -320,7 +320,15 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
         let mut temp = TempZval([0u8; 16]);
         let temp_ptr = &mut temp as *mut TempZval as *mut c_void;
 
-        let rc = unsafe { ffi::oxphp_bridge_await_dispatch(pid, timeout, temp_ptr) };
+        // Suspend on each promise in turn when inside a task fiber, falling
+        // back to a blocking await otherwise. The promises already run
+        // concurrently on the pool, so awaiting them sequentially still yields
+        // parallel wall-time — and crucially, suspending frees the worker so
+        // the awaited (possibly nested) tasks can make progress.
+        let mut rc = unsafe { ffi::oxphp_bridge_fiber_await(pid, timeout, temp_ptr) };
+        if rc == 1 {
+            rc = unsafe { ffi::oxphp_bridge_await_dispatch(pid, timeout, temp_ptr) };
+        }
 
         match rc {
             0 => {
@@ -331,6 +339,9 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
                 return Err(timeout_err(format!(
                     "oxphp_async_await_all(): promise {pid} timed out"
                 )));
+            }
+            -3 => {
+                return Err(async_err("Async task cancelled"));
             }
             _ => {
                 return Err(read_bridge_exception());
