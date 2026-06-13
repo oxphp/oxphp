@@ -869,7 +869,11 @@ int oxphp_async_sched_tick(void) {
         while (fiber) {
             oxphp_request_fiber *next = fiber->next;
             if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_AWAIT) {
-                if (oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
+                /* Resume when the awaited promise is ready, or when the task
+                 * was cancelled — the suspend point unwinds on cancellation
+                 * regardless of whether a result has arrived. */
+                if (fiber->cancel_requested
+                    || oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
                     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
                     oxphp_task_resume_fiber(sched, fiber, NULL);
                 }

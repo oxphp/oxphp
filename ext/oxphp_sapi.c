@@ -2302,18 +2302,25 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
         return 1; /* Not in fiber — caller should do blocking await */
     }
 
-    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_AWAIT;
-    oxphp_current_fiber->suspend_data.promise_id = promise_id;
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    self->suspend_reason = OXPHP_SUSPEND_AWAIT;
+    self->suspend_data.promise_id = promise_id;
 
     zend_fiber_transfer transfer = {
-        .context = oxphp_current_fiber->scheduler,
+        .context = self->scheduler,
         .flags = 0
     };
     ZVAL_NULL(&transfer.value);
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
-    /* --- RESUMED by scheduler when promise result is ready --- */
+    /* --- RESUMED by scheduler when promise result is ready, or when the
+     * task was cancelled (awaiter gave up). On cancellation, unwind by
+     * signalling the caller to throw instead of consuming a result. */
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -3; /* cancelled */
+    }
 
     int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, (zval *)retval);
     return rc; /* 0 = success, -1 = error, -2 = timeout */

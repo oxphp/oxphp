@@ -263,6 +263,8 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
         -2 => Err(timeout_err(format!(
             "oxphp_async_await(): promise {promise_id} timed out"
         ))),
+        // -3 = the task was cancelled while suspended (awaiter gave up)
+        -3 => Err(async_err("Async task cancelled")),
         // -1 or other = error
         _ => Err(read_bridge_exception()),
     }

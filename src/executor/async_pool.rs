@@ -97,6 +97,18 @@ impl Drop for AsyncWorkerPool {
     }
 }
 
+/// A task fiber currently in flight (suspended at an await/sleep or completing)
+/// in an async worker. Tracked by fiber id so the driver can deliver the result
+/// and propagate cancellation.
+#[cfg(feature = "php")]
+struct InFlight {
+    result_tx: tokio::sync::oneshot::Sender<crate::async_types::AsyncResult>,
+    /// Shared with the promise: flipped when the awaiter gives up (await
+    /// timeout). The driver then asks the scheduler to unwind the suspended
+    /// fiber instead of letting it run to completion unobserved.
+    cancelled: Arc<AtomicBool>,
+}
+
 /// Main loop for each async worker thread.
 ///
 /// Each worker initialises TSRM, performs a single `php_request_startup()`,
@@ -161,9 +173,8 @@ fn async_worker_thread(
     // their result and releasing the fiber. Several tasks can be in-flight at
     // once when they suspend, so we track each pending result by fiber id.
     use std::collections::HashMap;
-    type ResultTx = tokio::sync::oneshot::Sender<AsyncResult>;
 
-    let mut in_flight: HashMap<i64, ResultTx> = HashMap::new();
+    let mut in_flight: HashMap<i64, InFlight> = HashMap::new();
     let mut tasks_executed: u64 = 0;
 
     loop {
@@ -340,12 +351,28 @@ fn async_worker_thread(
                     break 'task;
                 }
 
-                in_flight.insert(fiber_id, task.result_tx);
+                in_flight.insert(
+                    fiber_id,
+                    InFlight {
+                        result_tx: task.result_tx,
+                        cancelled: task.cancelled.clone(),
+                    },
+                );
             }
         }
 
         // Drive suspended fibers, then drain any that completed.
         if !in_flight.is_empty() {
+            // Propagate cancellation: a promise whose awaiter has given up
+            // (await timeout) flips its cancel flag. Ask the scheduler to
+            // unwind the still-suspended fiber rather than run it to
+            // completion with no one waiting for the result.
+            for (&fiber_id, entry) in in_flight.iter() {
+                if entry.cancelled.load(Ordering::Relaxed) {
+                    unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
+                }
+            }
+
             unsafe { ffi::oxphp_bridge_async_tick() };
             if drain_completed(&mut in_flight, &metrics, &mut tasks_executed) {
                 progressed = true;
@@ -374,10 +401,7 @@ fn async_worker_thread(
 /// fiber was drained.
 #[cfg(feature = "php")]
 fn drain_completed(
-    in_flight: &mut std::collections::HashMap<
-        i64,
-        tokio::sync::oneshot::Sender<crate::async_types::AsyncResult>,
-    >,
+    in_flight: &mut std::collections::HashMap<i64, InFlight>,
     metrics: &Option<Arc<Metrics>>,
     tasks_executed: &mut u64,
 ) -> bool {
@@ -479,8 +503,8 @@ fn drain_completed(
                 m.async_task_failed();
             }
         }
-        if let Some(tx) = in_flight.remove(&fiber_id) {
-            let _ = tx.send(result);
+        if let Some(entry) = in_flight.remove(&fiber_id) {
+            let _ = entry.result_tx.send(result);
         }
         *tasks_executed += 1;
         drained = true;
