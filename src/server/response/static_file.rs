@@ -432,9 +432,18 @@ fn if_range_matches(headers: &HeaderMap, etag: &str, modified: &SystemTime) -> b
     if value.starts_with('"') {
         return value == etag;
     }
-    // HTTP-date validator: exact match with Last-Modified (second precision)
+    // HTTP-date validator: exact match with Last-Modified (second precision).
+    // RFC 9110 §13.1.5 only allows a date here when it is a strong validator,
+    // and a Last-Modified is only provably strong (§8.8.2.2) once its second
+    // has fully elapsed — a file written this second could change again
+    // without moving the date, splicing fragments of the new bytes onto the
+    // client's old prefix.
     match httpdate::parse_http_date(value) {
-        Ok(if_range_time) => secs_since_epoch(modified) == secs_since_epoch(&if_range_time),
+        Ok(if_range_time) => {
+            let mtime = secs_since_epoch(modified);
+            mtime == secs_since_epoch(&if_range_time)
+                && mtime < secs_since_epoch(&SystemTime::now())
+        }
         Err(_) => false,
     }
 }
@@ -591,6 +600,13 @@ fn respond_bytes(
     allow_ranges: bool,
 ) -> Result<Response<ResponseBody>, http::Error> {
     let size = bytes.len() as u64;
+    // A representation in the compression window is answered differently
+    // depending on Accept-Encoding: encoded body with ranges disabled for
+    // brotli clients, identity with ranges (200/206/416) otherwise. Shared
+    // caches must key on the header for every variant — the compression
+    // layer only appends Vary when it actually encodes, which would let an
+    // identity response be cached without it and served to brotli clients.
+    let varies_by_encoding = crate::server::compression::would_compress(mime_type, size);
     let plan = if allow_ranges {
         plan_range(method, request_headers, size, etag, modified)
     } else {
@@ -603,7 +619,18 @@ fn respond_bytes(
             bytes.slice(start as usize..(end + 1) as usize),
             Some(format!("bytes {start}-{end}/{size}")),
         ),
-        RangePlan::NotSatisfiable => return build_416(size),
+        RangePlan::NotSatisfiable => {
+            // A brotli client would have gotten a full 200 here (ranges
+            // disabled), so even the 416 varies by Accept-Encoding.
+            let mut response = build_416(size)?;
+            if varies_by_encoding {
+                response.headers_mut().insert(
+                    header::VARY,
+                    http::HeaderValue::from_static("Accept-Encoding"),
+                );
+            }
+            return Ok(response);
+        }
     };
 
     let mut builder = Response::builder()
@@ -616,6 +643,9 @@ fn respond_bytes(
     // response advertising ranges the server just ignored.
     if allow_ranges {
         builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
+    if varies_by_encoding {
+        builder = builder.header(header::VARY, "Accept-Encoding");
     }
     if let Some(cr) = content_range {
         builder = builder.header(header::CONTENT_RANGE, cr);
@@ -1758,6 +1788,21 @@ mod tests {
     }
 
     #[test]
+    fn test_if_range_date_fresh_mtime_not_strong() {
+        // A Last-Modified whose second has not yet elapsed is a weak
+        // validator (RFC 9110 §8.8.2.2): the file could change again within
+        // that second without moving the date. The +1s mtime stands in for a
+        // freshly written file at evaluation time (and covers future clock
+        // skew) without racing the wall clock.
+        let modified = SystemTime::now() + std::time::Duration::from_secs(1);
+        let etag = generate_etag(100, &modified);
+        let date = httpdate::fmt_http_date(modified);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_RANGE, date.parse().unwrap());
+        assert!(!if_range_matches(&headers, &etag, &modified));
+    }
+
+    #[test]
     fn test_if_range_absent_applies_range() {
         let modified = test_modified();
         let etag = generate_etag(100, &modified);
@@ -2233,6 +2278,8 @@ mod tests {
             response.headers().get(header::CONTENT_RANGE).unwrap(),
             "bytes 0-9/500"
         );
+        // Never compressed for any client — nothing varies by encoding.
+        assert!(response.headers().get(header::VARY).is_none());
     }
 
     #[tokio::test]
@@ -2267,7 +2314,44 @@ mod tests {
             response.headers().get(header::ACCEPT_RANGES).unwrap(),
             "bytes"
         );
+        // Streamed responses are identity for every client — no Vary.
+        assert!(response.headers().get(header::VARY).is_none());
         assert_eq!(body_bytes(response).await.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_serve_vary_for_compression_eligible_identity() {
+        // For a representation in the compression window the response form
+        // (encoding, 200 vs 206 vs 416, Accept-Ranges) depends on
+        // Accept-Encoding — identity responses must carry Vary too, or a
+        // shared cache would serve them to brotli clients unkeyed.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        fs::write(&file_path, "x".repeat(500)).unwrap();
+
+        let cache = FileCache::new(10);
+        // serve_with passes supports_brotli = false → identity response
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=0-9")).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+
+        // A brotli client would have gotten 200 here — the 416 varies too.
+        let response = serve_with(&file_path, &dir, &cache, range_headers("bytes=999-")).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
     }
 
     #[tokio::test]

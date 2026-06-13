@@ -140,10 +140,22 @@ pub async fn maybe_compress(
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
-    // Append Vary: Accept-Encoding so caches store both compressed and uncompressed
-    response
-        .headers_mut()
-        .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    // Append Vary: Accept-Encoding so caches store both compressed and
+    // uncompressed variants — unless the origin already declared it (static
+    // serving does, on representations whose range behavior depends on the
+    // encoding).
+    let already_varies = response
+        .headers()
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|member| member.trim().eq_ignore_ascii_case("accept-encoding"));
+    if !already_varies {
+        response
+            .headers_mut()
+            .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
     response
 }
 
@@ -405,6 +417,35 @@ mod tests {
             "maybe_compress buffered a live stream instead of passing it through"
         );
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn test_compress_does_not_duplicate_vary() {
+        // Static serving already declares Vary: Accept-Encoding on
+        // compression-eligible representations — encoding one must not
+        // append a second copy.
+        let body = "a".repeat(500);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::VARY, "Accept-Encoding")
+            .body(full_body(Bytes::from(body)))
+            .unwrap();
+
+        let result = maybe_compress(response, 4).await;
+
+        assert_eq!(
+            result.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+        let accept_encoding_members = result
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .flat_map(|v| v.to_str().unwrap().split(','))
+            .filter(|m| m.trim().eq_ignore_ascii_case("accept-encoding"))
+            .count();
+        assert_eq!(accept_encoding_members, 1);
     }
 
     #[tokio::test]
