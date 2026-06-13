@@ -111,6 +111,26 @@ struct InFlight {
     cancelled: Arc<crate::async_types::CancelShared>,
 }
 
+/// Returns the in-flight permit a dequeued task holds (reserved at dispatch) on
+/// drop unless `committed`. The worker creates one per task; every early-exit
+/// path from task handling gives the permit back, while the spawn-and-insert
+/// path commits it so the `InFlight` entry owns it and `drain_completed`
+/// releases it at completion. Mirrors the dispatch-side guard so the
+/// process-global counter stays balanced across both halves of a task's life.
+#[cfg(feature = "php")]
+struct WorkerPermitGuard {
+    committed: bool,
+}
+
+#[cfg(feature = "php")]
+impl Drop for WorkerPermitGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            crate::php::sapi::async_inflight_release();
+        }
+    }
+}
+
 /// Main loop for each async worker thread.
 ///
 /// Each worker initialises TSRM, performs a single `php_request_startup()`,
@@ -214,6 +234,12 @@ fn async_worker_thread(
         if let Some(task) = maybe_task {
             progressed = true;
             let zval_size = unsafe { ffi::oxphp_zval_size() };
+
+            // The dequeued task holds one in-flight permit (reserved at
+            // dispatch). Return it on any early exit from the block below; on
+            // the spawn-and-insert path we commit so the InFlight entry owns it
+            // and drain_completed releases it once the task completes.
+            let mut task_permit = WorkerPermitGuard { committed: false };
 
             'task: {
                 // Cancelled before we even start?
@@ -381,6 +407,8 @@ fn async_worker_thread(
                         cancelled: task.cancelled.clone(),
                     },
                 );
+                // The InFlight entry now owns the permit; drain releases it.
+                task_permit.committed = true;
             }
         }
 
@@ -528,6 +556,8 @@ fn drain_completed(
         }
         if let Some(entry) = in_flight.remove(&fiber_id) {
             let _ = entry.result_tx.send(result);
+            // Task is done — return the in-flight permit it held since dispatch.
+            crate::php::sapi::async_inflight_release();
         }
         *tasks_executed += 1;
         drained = true;

@@ -3086,6 +3086,41 @@ pub fn get_global_async_tx(
     GLOBAL_ASYNC_TX.get()
 }
 
+// ─── Async In-Flight Cap ─────────────────────────────────────
+
+/// Process-global bound on `queued + running` async tasks. Installed once
+/// alongside the pool; a dispatch reserves a permit and a completed task
+/// releases one. When no counter is installed (pool disabled / unit tests),
+/// acquisition is unbounded.
+static GLOBAL_ASYNC_INFLIGHT: OnceLock<Arc<crate::executor::async_fiber::InFlightCounter>> =
+    OnceLock::new();
+
+/// Install the process-global in-flight counter. Called once from the pool
+/// setup, with the same `Arc` the worker threads release through.
+pub fn set_global_async_inflight(counter: Arc<crate::executor::async_fiber::InFlightCounter>) {
+    GLOBAL_ASYNC_INFLIGHT
+        .set(counter)
+        .ok()
+        .expect("GLOBAL_ASYNC_INFLIGHT already set");
+}
+
+/// Reserve one in-flight permit at dispatch. Returns `false` (reject) when the
+/// process-global cap is reached. With no counter installed, always `true`.
+pub fn async_inflight_try_acquire() -> bool {
+    match GLOBAL_ASYNC_INFLIGHT.get() {
+        Some(c) => c.try_acquire(),
+        None => true,
+    }
+}
+
+/// Release one in-flight permit reserved by a prior `async_inflight_try_acquire`.
+/// No-op when no counter is installed.
+pub fn async_inflight_release() {
+    if let Some(c) = GLOBAL_ASYNC_INFLIGHT.get() {
+        c.release();
+    }
+}
+
 // ─── Async Tokio Handle ──────────────────────────────────────
 
 /// Process-global Tokio runtime handle for async promise await operations.
@@ -3123,6 +3158,22 @@ fn get_async_metrics() -> Option<&'static Arc<crate::metrics::Metrics>> {
 
 // ─── Async Dispatch Callbacks ──────────────────────────────────
 
+/// Releases a reserved in-flight permit on drop unless `committed`. Used by
+/// `async_dispatch_callback` so every early-return path between reserving the
+/// permit and successfully enqueuing the task gives it back; on success the
+/// worker takes ownership and releases it at task completion instead.
+struct InflightPermitGuard {
+    committed: bool,
+}
+
+impl Drop for InflightPermitGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            async_inflight_release();
+        }
+    }
+}
+
 /// Rust-side callback invoked from C when PHP calls `oxphp_async()`.
 ///
 /// Freezes static variables, borrows objects, deep-copies arguments,
@@ -3147,6 +3198,21 @@ pub unsafe extern "C" fn async_dispatch_callback(
         Some(tx) => tx,
         None => return -1,
     };
+
+    // 1b. Reserve an in-flight permit. The process-global cap bounds queued +
+    // running tasks; past it we reject (non-blocking) so fan-out composition
+    // can't deadlock. Done before any serialization so a reject stays cheap.
+    if !async_inflight_try_acquire() {
+        if let Some(m) = get_async_metrics() {
+            m.async_task_rejected();
+        }
+        return -1;
+    }
+    // The permit is released by the worker once the task completes (drain). Until
+    // the task is successfully enqueued, this guard releases it on every early
+    // return below — serialization failures and a full/closed queue alike —
+    // unless we hand ownership to the worker by committing it on success.
+    let mut permit = InflightPermitGuard { committed: false };
 
     // 2. Generate promise ID
     let promise_id = next_promise_id();
@@ -3241,6 +3307,9 @@ pub unsafe extern "C" fn async_dispatch_callback(
 
     match tx.try_send(task) {
         Ok(()) => {
+            // Task is enqueued; the worker now owns the permit and releases it
+            // when the task completes. Don't let the guard give it back.
+            permit.committed = true;
             store_promise(promise_id, result_rx, cancelled);
             store_promise_cleanup(promise_id, cleanup);
             if let Some(m) = get_async_metrics() {

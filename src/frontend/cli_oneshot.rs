@@ -133,6 +133,7 @@ pub fn run(opts: RunOptions) -> i32 {
     //    no runtime — and no extra OS thread — is spawned. ──
     let async_workers = config.as_ref().map(|c| c.async_workers).unwrap_or(0);
     let async_queue = config.as_ref().map(|c| c.async_queue_capacity).unwrap_or(0);
+    let async_max_fibers = config.as_ref().map(|c| c.async_max_fibers).unwrap_or(256);
     let mut async_pool =
         crate::executor::async_pool::AsyncWorkerPool::new(async_workers, async_queue, None);
 
@@ -155,6 +156,10 @@ pub fn run(opts: RunOptions) -> i32 {
     if let (Some(pool), Some(rt)) = (async_pool.as_mut(), runtime.as_ref()) {
         pool.start();
         sapi::set_global_async_tx(pool.task_sender());
+        let inflight_cap = async_max_fibers.saturating_mul(pool.worker_count());
+        sapi::set_global_async_inflight(std::sync::Arc::new(
+            crate::executor::async_fiber::InFlightCounter::new(inflight_cap),
+        ));
         sapi::set_async_tokio_handle(rt.handle().clone());
         sapi::register_async_callbacks();
     }

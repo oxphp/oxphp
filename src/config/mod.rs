@@ -76,6 +76,10 @@ pub struct Config {
     pub async_workers: usize,
     /// Bounded channel capacity for pending async tasks. 0 = auto (async_workers * 64).
     pub async_queue_capacity: usize,
+    /// Per-worker bound on in-flight (queued + running) async tasks. The
+    /// process-global cap is this value × async_workers; dispatches past it are
+    /// rejected (non-blocking) with AsyncException. Default 256.
+    pub async_max_fibers: usize,
     /// W3C Trace Context propagation enabled.
     pub trace_context: bool,
     /// Whether PHP superglobals ($_GET, $_POST, etc.) are populated.
@@ -291,6 +295,11 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
+        let async_max_fibers: usize = std::env::var("ASYNC_MAX_FIBERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(256);
 
         let trace_context = parse_env_bool("TRACE_CONTEXT", false)?;
         let superglobals_enabled = parse_env_bool("SUPERGLOBALS_ENABLED", true)?;
@@ -351,6 +360,7 @@ impl Config {
             static_revalidate,
             async_workers,
             async_queue_capacity,
+            async_max_fibers,
             trace_context,
             superglobals_enabled,
             worker_mode,
@@ -395,6 +405,7 @@ impl Config {
             static_revalidate: false,
             async_workers: 0,
             async_queue_capacity: 0,
+            async_max_fibers: 256,
             trace_context: false,
             superglobals_enabled: true,
             worker_mode: WorkerMode::Static(1),
@@ -449,6 +460,8 @@ impl Config {
             } else {
                 self.async_workers * 64
             },
+            "async_max_fibers": self.async_max_fibers,
+            "async_in_flight_cap": self.async_max_fibers * self.async_workers,
             "trace_context": self.trace_context,
             "superglobals_enabled": self.superglobals_enabled,
             "trusted_proxies": self.trusted_proxies.is_some(),

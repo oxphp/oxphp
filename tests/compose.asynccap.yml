@@ -1,0 +1,32 @@
+# Async workers with a SINGLE worker and a low in-flight cap:
+# ASYNC_WORKERS=1, ASYNC_MAX_FIBERS=2.
+#
+# Proves the process-global in-flight bound (queued + running =
+# ASYNC_MAX_FIBERS × workers) rejects dispatches past capacity with a
+# non-blocking AsyncException, and frees capacity again once tasks drain.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asynccap.yml up
+services:
+  oxphp-asynccap:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 1
+      ASYNC_MAX_FIBERS: 2
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

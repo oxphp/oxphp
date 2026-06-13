@@ -1,0 +1,4 @@
+# profile: asynccap
+# description: Async in-flight capacity cap rejects dispatch past the bound
+
+async/test_async_cap_reject
