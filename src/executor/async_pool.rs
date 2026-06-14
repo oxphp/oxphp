@@ -207,15 +207,47 @@ fn async_worker_thread(
     let mut in_flight: HashMap<i64, InFlight> = HashMap::new();
     let mut tasks_executed: u64 = 0;
     let mut warned_output = false;
+    // Set once shutdown is observed with fibers still in flight: the drain has
+    // until this instant to finish before stragglers are abandoned.
+    let mut shutdown_drain_deadline: Option<std::time::Instant> = None;
 
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
+        let shutting_down = shutdown.load(Ordering::Relaxed);
+
+        // Exit only once every in-flight fiber is drained. On shutdown we stop
+        // accepting new work but keep ticking and cancelling suspended fibers so
+        // their PHP stacks unwind (finally / destructors run), awaiters receive a
+        // result, and in-flight permits are released — instead of abandoning the
+        // fibers. Bounded by a short deadline so a task that refuses to unwind
+        // (e.g. heavy work in a finally block) can't hang shutdown forever.
+        if shutting_down {
+            if in_flight.is_empty() {
+                break;
+            }
+            let deadline = *shutdown_drain_deadline.get_or_insert_with(|| {
+                std::time::Instant::now() + std::time::Duration::from_secs(2)
+            });
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    worker = id,
+                    abandoned = in_flight.len(),
+                    "async shutdown drain timed out; abandoning in-flight fibers"
+                );
+                break;
+            }
+            // Cancel every still-running fiber so the scheduler unwinds it on the
+            // next tick. Re-issued each iteration to catch a fiber that re-parks
+            // (the resume clears its cancel flag).
+            for &fiber_id in in_flight.keys() {
+                unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
+            }
         }
 
         // Block for new work only when idle; when fibers are in flight, poll
         // non-blocking so we keep driving them to completion.
-        let maybe_task = if in_flight.is_empty() {
+        let maybe_task = if shutting_down {
+            None
+        } else if in_flight.is_empty() {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                 Ok(t) => Some(t),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
