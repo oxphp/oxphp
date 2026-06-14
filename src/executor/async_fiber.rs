@@ -52,6 +52,13 @@ impl InFlightCounter {
     pub fn current(&self) -> usize {
         self.current.load(Ordering::Relaxed)
     }
+
+    /// Configured cap (`ASYNC_MAX_FIBERS` × worker count). Constant for the
+    /// process lifetime; exposed so `/metrics` can publish the saturation
+    /// ceiling alongside the live in-flight count.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
 }
 
 #[cfg(test)]
@@ -72,5 +79,11 @@ mod tests {
     fn cap_zero_means_disabled_pool_never_acquires() {
         let c = InFlightCounter::new(0);
         assert!(!c.try_acquire());
+    }
+
+    #[test]
+    fn limit_reports_configured_cap() {
+        let c = InFlightCounter::new(7);
+        assert_eq!(c.limit(), 7);
     }
 }

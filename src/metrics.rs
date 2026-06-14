@@ -183,6 +183,11 @@ pub struct Metrics {
     /// to size that risk.
     async_tasks_stranded: AtomicU64,
 
+    /// Live process-global async in-flight bound (`queued + running`).
+    /// Wired only in server mode (the async pool), so it renders the gauge
+    /// pair lazily — absent when no pool is running.
+    async_inflight: std::sync::OnceLock<Arc<crate::executor::async_fiber::InFlightCounter>>,
+
     // ── Per-worker observability (supervisor-driven) ──
     /// Age of the in-flight request per worker, in microseconds.
     /// Written each scan; idle workers carry 0.
@@ -293,6 +298,7 @@ impl Metrics {
             async_tasks_cancelled: AtomicU64::new(0),
             async_tasks_rejected: AtomicU64::new(0),
             async_tasks_stranded: AtomicU64::new(0),
+            async_inflight: std::sync::OnceLock::new(),
             worker_request_age_us: mk_vec(),
             worker_long_running_total: mk_vec(),
             worker_stuck_total_io: mk_vec(),
@@ -485,6 +491,10 @@ impl Metrics {
 
     pub fn worker_metrics(&self) -> Option<&Arc<WorkerMetrics>> {
         self.worker_metrics.get()
+    }
+
+    pub fn set_async_inflight(&self, inflight: Arc<crate::executor::async_fiber::InFlightCounter>) {
+        self.async_inflight.set(inflight).ok();
     }
 
     pub fn uptime(&self) -> Duration {
@@ -866,6 +876,24 @@ impl Metrics {
                 "oxphp_async_tasks_stranded_total {}",
                 self.async_tasks_stranded.load(Ordering::Relaxed)
             );
+        }
+
+        // Live in-flight gauge pair — rendered whenever the async pool wired its
+        // counter, independent of whether any task has been dispatched yet.
+        if let Some(c) = self.async_inflight.get() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_in_flight Async tasks currently queued or running."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_in_flight gauge");
+            let _ = writeln!(out, "oxphp_async_tasks_in_flight {}", c.current());
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_in_flight_limit Maximum concurrent async tasks (ASYNC_MAX_FIBERS times worker count)."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_in_flight_limit gauge");
+            let _ = writeln!(out, "oxphp_async_tasks_in_flight_limit {}", c.limit());
         }
 
         // ── Worker Mode Metrics ──
@@ -1459,5 +1487,28 @@ mod tests {
         assert!(prom.contains("oxphp_async_tasks_failed_total 1"));
         assert!(prom.contains("oxphp_async_tasks_cancelled_total 1"));
         assert!(prom.contains("oxphp_async_tasks_rejected_total 1"));
+    }
+
+    #[test]
+    fn test_async_in_flight_gauge() {
+        use crate::executor::async_fiber::InFlightCounter;
+        let m = Metrics::new();
+        let inflight = Arc::new(InFlightCounter::new(16));
+        assert!(inflight.try_acquire());
+        assert!(inflight.try_acquire()); // current = 2
+        m.set_async_inflight(inflight);
+
+        let prom = m.to_prometheus();
+        assert!(prom.contains("# TYPE oxphp_async_tasks_in_flight gauge"));
+        assert!(prom.contains("oxphp_async_tasks_in_flight 2"));
+        assert!(prom.contains("# TYPE oxphp_async_tasks_in_flight_limit gauge"));
+        assert!(prom.contains("oxphp_async_tasks_in_flight_limit 16"));
+    }
+
+    #[test]
+    fn test_no_async_inflight_no_gauge() {
+        let m = Metrics::new();
+        let prom = m.to_prometheus();
+        assert!(!prom.contains("oxphp_async_tasks_in_flight"));
     }
 }

@@ -240,9 +240,11 @@ async fn async_main(
         pool.start();
         oxphp::php::sapi::set_global_async_tx(pool.task_sender());
         let inflight_cap = config.async_max_fibers.saturating_mul(pool.worker_count());
-        oxphp::php::sapi::set_global_async_inflight(Arc::new(
-            oxphp::executor::async_fiber::InFlightCounter::new(inflight_cap),
+        let inflight = Arc::new(oxphp::executor::async_fiber::InFlightCounter::new(
+            inflight_cap,
         ));
+        metrics.set_async_inflight(Arc::clone(&inflight));
+        oxphp::php::sapi::set_global_async_inflight(inflight);
         oxphp::php::sapi::set_async_tokio_handle(Handle::current());
         oxphp::php::sapi::register_async_callbacks();
         oxphp::php::sapi::set_async_metrics(Arc::clone(&metrics));
