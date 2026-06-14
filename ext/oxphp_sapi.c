@@ -2361,6 +2361,20 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
     self->suspend_data.promise_id = promise_id;
 
+    /* Arm a per-call deadline so the scheduler can unwind this await if the
+     * awaited promise does not settle in time. timeout <= 0 means "wait
+     * forever" (no deadline). Without this the cooperative fiber path would
+     * ignore the timeout entirely and block until the promise settles or the
+     * outer await budget elapsed — losing the inner timeout in composition. */
+    if (timeout > 0.0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        self->await_deadline_ns = now_ns + (uint64_t)(timeout * 1000000000.0);
+    } else {
+        self->await_deadline_ns = 0;
+    }
+
     zend_fiber_transfer transfer = {
         .context = self->scheduler,
         .flags = 0
@@ -2369,12 +2383,18 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
-    /* --- RESUMED by scheduler when promise result is ready, or when the
-     * task was cancelled (awaiter gave up). On cancellation, unwind by
-     * signalling the caller to throw instead of consuming a result. */
+    /* --- RESUMED by scheduler when promise result is ready, when the task was
+     * cancelled (awaiter gave up), or when the per-call deadline elapsed. Disarm
+     * the deadline first; then unwind on cancel/timeout by signalling the caller
+     * to throw instead of consuming a result. */
+    self->await_deadline_ns = 0;
     if (self->cancel_requested) {
         self->cancel_requested = false;
         return -3; /* cancelled */
+    }
+    if (self->timed_out) {
+        self->timed_out = false;
+        return -2; /* timed out */
     }
 
     int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, (zval *)retval);

@@ -117,6 +117,11 @@ typedef struct _oxphp_request_fiber {
      * completed result has been drained). */
     bool task_mode;
     bool cancel_requested;          /* set cross-path; checked at suspend points + interrupt handler */
+    bool timed_out;                 /* set by the scheduler when the awaited promise's per-call
+                                     * timeout elapses while suspended; checked at the await suspend
+                                     * point, which unwinds the await as a timeout instead of a result */
+    uint64_t await_deadline_ns;     /* CLOCK_MONOTONIC deadline for the current AWAIT suspend.
+                                     * 0 = no deadline (timeout <= 0, i.e. wait forever). */
     _Atomic(uint8_t) *cancel_cell;  /* borrowed: &CancelShared.cancelled (Rust AtomicBool).
                                      * The awaiter sets it cross-thread and kicks vm_interrupt; the
                                      * interrupt handler reads it to unwind a CPU-bound task fiber.

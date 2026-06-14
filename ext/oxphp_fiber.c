@@ -21,6 +21,7 @@
 #include "ext/standard/basic_functions.h"
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
+#include <time.h>   /* clock_gettime/CLOCK_MONOTONIC for per-call await deadlines */
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
 
@@ -814,6 +815,8 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->fiber_id = sched->next_fiber_id++;
     fiber->task_mode = true;
     fiber->cancel_requested = false;
+    fiber->timed_out = false;
+    fiber->await_deadline_ns = 0;
     fiber->cancel_cell = (_Atomic(uint8_t) *)cancel_cell;
     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
     fiber->completed = false;
@@ -884,11 +887,26 @@ int oxphp_async_sched_tick(void) {
             if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_AWAIT) {
                 /* Resume when the awaited promise is ready, or when the task
                  * was cancelled — the suspend point unwinds on cancellation
-                 * regardless of whether a result has arrived. */
+                 * regardless of whether a result has arrived. A ready result or
+                 * a cancellation takes precedence over the deadline so a promise
+                 * that settles on the same tick still delivers its value. */
                 if (fiber->cancel_requested
                     || oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
                     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
                     oxphp_task_resume_fiber(sched, fiber, NULL);
+                } else if (fiber->await_deadline_ns != 0) {
+                    /* Per-call await timeout: unwind the await once the deadline
+                     * elapses so the cooperative fiber path honours the timeout
+                     * instead of blocking until the promise settles. */
+                    struct timespec ts;
+                    clock_gettime(CLOCK_MONOTONIC, &ts);
+                    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL
+                                      + (uint64_t)ts.tv_nsec;
+                    if (now_ns >= fiber->await_deadline_ns) {
+                        fiber->timed_out = true;
+                        fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                        oxphp_task_resume_fiber(sched, fiber, NULL);
+                    }
                 }
             }
             fiber = next;
