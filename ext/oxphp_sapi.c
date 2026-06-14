@@ -3107,7 +3107,19 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * it is the cancelled one — throwing a PHP exception that the VM propagates
      * up this fiber's stack to its scheduler entry (rejected task), exactly like
      * a suspend-point cancel. cancel_cell is NULL for HTTP request fibers and
-     * for the scheduler context, so this is a no-op there. */
+     * for the scheduler context, so this is a no-op there.
+     *
+     * Latency bound: the kick is honoured only at opcode boundaries (loop
+     * backedges, call boundaries). A fiber stuck inside a single long C call —
+     * a catastrophic preg_match, a large gzuncompress, a blocking
+     * fread/fwrite/PDO query — is interrupted only when that call returns,
+     * because C functions do not poll vm_interrupt from inside their own loops.
+     * This is the same limit as PHP's own max_execution_time (SIGALRM sets
+     * EG(timed_out), also acted on at opcode boundaries); a threaded SAPI
+     * cannot kill a worker mid-C-call without corrupting Zend allocator state.
+     * So for a cancelled task: side effects across opcode boundaries are
+     * prevented (the throw lands before the next PHP statement), but those
+     * inside the one in-flight C call complete before the fiber unwinds. */
     if (oxphp_current_fiber != NULL
         && oxphp_current_fiber->cancel_cell != NULL
         && atomic_load_explicit(oxphp_current_fiber->cancel_cell,
