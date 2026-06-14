@@ -2,3 +2,4 @@
 # description: Async in-flight capacity cap rejects dispatch past the bound
 
 async/test_async_cap_reject
+async/test_async_cap_error_paths
