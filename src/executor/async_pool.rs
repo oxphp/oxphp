@@ -243,8 +243,9 @@ fn async_worker_thread(
             let mut task_permit = WorkerPermitGuard { committed: false };
 
             'task: {
-                // Cancelled before we even start?
-                if task.cancelled.cancelled.load(Ordering::Relaxed) {
+                // Cancelled before we even start? (Acquire pairs with the
+                // awaiter's Release store of the flag.)
+                if task.cancelled.cancelled.load(Ordering::Acquire) {
                     free_task_args(&task);
                     free_op_array_buf(&task);
                     let _ = task.result_tx.send(AsyncResult {
@@ -358,9 +359,12 @@ fn async_worker_thread(
                 // that same allocation — the scheduler stores it on the fiber and
                 // the interrupt handler reads it to decide whether to unwind. The
                 // allocation outlives the fiber via InFlight (inserted below).
+                // Release: publishes the address to the awaiter's Acquire load
+                // in kick_worker_interrupt, so a timed-out awaiter never reads a
+                // stale 0 and skips the kick on weakly-ordered hardware.
                 task.cancelled
                     .worker_interrupt
-                    .store(worker_interrupt_addr, Ordering::Relaxed);
+                    .store(worker_interrupt_addr, Ordering::Release);
                 let cancel_cell = &task.cancelled.cancelled as *const std::sync::atomic::AtomicBool
                     as *mut c_void;
 
@@ -421,7 +425,8 @@ fn async_worker_thread(
             // unwind the still-suspended fiber rather than run it to
             // completion with no one waiting for the result.
             for (&fiber_id, entry) in in_flight.iter() {
-                if entry.cancelled.cancelled.load(Ordering::Relaxed) {
+                // Acquire pairs with the awaiter's Release store of the flag.
+                if entry.cancelled.cancelled.load(Ordering::Acquire) {
                     unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
                 }
             }

@@ -3406,9 +3406,12 @@ unsafe fn set_bridge_internal_error(message: &str) {
 /// # Safety
 /// Calls into the C bridge; must run on a PHP thread.
 unsafe fn kick_worker_interrupt(cancelled: &CancelShared) {
+    // Acquire pairs with the worker's Release store of this address (async
+    // pool, task pickup): once we observe a non-zero address, the publish is
+    // visible — no stale 0 read past the synchronization on weak hardware.
     let addr = cancelled
         .worker_interrupt
-        .load(std::sync::atomic::Ordering::Relaxed);
+        .load(std::sync::atomic::Ordering::Acquire);
     if addr != 0 {
         crate::bridge::ffi::oxphp_bridge_request_interrupt_at(addr as *mut c_void);
     }
@@ -3496,9 +3499,11 @@ pub unsafe extern "C" fn await_dispatch_callback(
                         // The cancelled flag tells the worker to stop early (the
                         // worker's scheduler loop polls it to unwind a SUSPENDED
                         // fiber).
+                        // Release: pairs with the worker's Acquire load of the
+                        // cancel flag (scheduler poll and the C interrupt handler).
                         cancelled
                             .cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                            .store(true, std::sync::atomic::Ordering::Release);
                         // The flag alone reaches only a suspended fiber; a
                         // CPU-bound one needs the cross-thread interrupt kick.
                         unsafe { kick_worker_interrupt(&cancelled) };
@@ -3754,9 +3759,10 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             // async_tasks_stranded so the stall risk shows up in metrics.
             let stranded_count = rxs.len() as u64;
             for ((id, rx), cancelled) in id_map.into_iter().zip(rxs).zip(cancel_map) {
+                // Release: pairs with the worker's Acquire load of the cancel flag.
                 cancelled
                     .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                    .store(true, std::sync::atomic::Ordering::Release);
                 // Break any CPU-bound task out of its loop — the flag alone
                 // reaches only suspended fibers.
                 unsafe { kick_worker_interrupt(&cancelled) };
@@ -4257,9 +4263,10 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             let pending_ids: Vec<i64> = id_vec.iter().map(|&id| id as i64).collect();
             let stranded_count = pending_ids.len() as u64;
             for ((id, rx), cancelled) in id_vec.into_iter().zip(rxs).zip(cancel_vec) {
+                // Release: pairs with the worker's Acquire load of the cancel flag.
                 cancelled
                     .cancelled
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                    .store(true, std::sync::atomic::Ordering::Release);
                 // Break any CPU-bound task out of its loop — the flag alone
                 // reaches only suspended fibers.
                 unsafe { kick_worker_interrupt(&cancelled) };
@@ -4334,10 +4341,10 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
         // freed memory.
         let entry = take_promise(id).or_else(|| take_stranded(id));
         if let Some((rx, cancelled)) = entry {
-            // Signal cancellation
+            // Signal cancellation (Release pairs with the worker's Acquire load).
             cancelled
                 .cancelled
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+                .store(true, std::sync::atomic::Ordering::Release);
             // Block with 5-second timeout per promise to avoid indefinite hang
             if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
                 let _ = handle.block_on(async {

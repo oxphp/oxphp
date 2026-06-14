@@ -3153,10 +3153,13 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * So for a cancelled task: side effects across opcode boundaries are
      * prevented (the throw lands before the next PHP statement), but those
      * inside the one in-flight C call complete before the fiber unwinds. */
+    /* memory_order_acquire pairs with the awaiter's Release store of the cancel
+     * flag (Rust side): once we observe it set, the publish is visible without
+     * relying on vm_interrupt's barrier to carry it. */
     if (oxphp_current_fiber != NULL
         && oxphp_current_fiber->cancel_cell != NULL
         && atomic_load_explicit(oxphp_current_fiber->cancel_cell,
-                                memory_order_relaxed)) {
+                                memory_order_acquire)) {
         oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                               "Async task cancelled", 0);
         return; /* VM checks EG(exception) on return → unwinds this fiber only */
