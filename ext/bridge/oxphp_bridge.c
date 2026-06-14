@@ -2378,19 +2378,22 @@ static oxphp_async_sched_tick_fn_t    sched_async_tick    = NULL;
 static oxphp_async_sched_poll_fn_t    sched_async_poll    = NULL;
 static oxphp_async_sched_release_fn_t sched_async_release = NULL;
 static oxphp_async_sched_cancel_fn_t  sched_async_cancel  = NULL;
+static oxphp_async_sched_drain_fn_t   sched_async_drain   = NULL;
 
 void oxphp_bridge_set_async_sched_callbacks(
     oxphp_async_sched_spawn_fn_t spawn,
     oxphp_async_sched_tick_fn_t tick,
     oxphp_async_sched_poll_fn_t poll,
     oxphp_async_sched_release_fn_t release,
-    oxphp_async_sched_cancel_fn_t cancel
+    oxphp_async_sched_cancel_fn_t cancel,
+    oxphp_async_sched_drain_fn_t drain
 ) {
     sched_async_spawn   = spawn;
     sched_async_tick    = tick;
     sched_async_poll    = poll;
     sched_async_release = release;
     sched_async_cancel  = cancel;
+    sched_async_drain   = drain;
 }
 
 int64_t oxphp_bridge_async_spawn(
@@ -2430,6 +2433,13 @@ int oxphp_bridge_async_cancel(int64_t fiber_id) {
         return sched_async_cancel(fiber_id);
     }
     return 0;
+}
+
+uint64_t oxphp_bridge_async_drain_output(void) {
+    if (sched_async_drain != NULL) {
+        return sched_async_drain();
+    }
+    return 0; /* no scheduler registered */
 }
 
 int64_t oxphp_bridge_async_dispatch(

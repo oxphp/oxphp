@@ -1870,13 +1870,15 @@ typedef int64_t (*oxphp_async_sched_poll_fn_t)(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);
 typedef void (*oxphp_async_sched_release_fn_t)(int64_t fiber_id);
 typedef int (*oxphp_async_sched_cancel_fn_t)(int64_t fiber_id);
+typedef uint64_t (*oxphp_async_sched_drain_fn_t)(void);
 
 void oxphp_bridge_set_async_sched_callbacks(
     oxphp_async_sched_spawn_fn_t spawn,
     oxphp_async_sched_tick_fn_t tick,
     oxphp_async_sched_poll_fn_t poll,
     oxphp_async_sched_release_fn_t release,
-    oxphp_async_sched_cancel_fn_t cancel);
+    oxphp_async_sched_cancel_fn_t cancel,
+    oxphp_async_sched_drain_fn_t drain);
 
 int64_t oxphp_bridge_async_spawn(
     void *op_array, void *static_vars, void *this_ptr,
@@ -1886,6 +1888,7 @@ int64_t oxphp_bridge_async_poll_completed(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);
 void    oxphp_bridge_async_release(int64_t fiber_id);
 int     oxphp_bridge_async_cancel(int64_t fiber_id);
+uint64_t oxphp_bridge_async_drain_output(void);
 
 /* ─── Shared wrapper cross-thread helpers ────────────────────
  *

@@ -206,6 +206,7 @@ fn async_worker_thread(
 
     let mut in_flight: HashMap<i64, InFlight> = HashMap::new();
     let mut tasks_executed: u64 = 0;
+    let mut warned_output = false;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -413,7 +414,8 @@ fn async_worker_thread(
         }
 
         // Drive suspended fibers, then drain any that completed.
-        if !in_flight.is_empty() {
+        let had_fibers = !in_flight.is_empty();
+        if had_fibers {
             // Propagate cancellation: a promise whose awaiter has given up
             // (await timeout) flips its cancel flag. Ask the scheduler to
             // unwind the still-suspended fiber rather than run it to
@@ -427,6 +429,28 @@ fn async_worker_thread(
             unsafe { ffi::oxphp_bridge_async_tick() };
             if drain_completed(&mut in_flight, &metrics, &mut tasks_executed) {
                 progressed = true;
+            }
+        }
+
+        // The worker just went idle: a background task may have left output in
+        // the shared PHP output buffer (and the Rust RESPONSE buffer). No fiber
+        // is running now, so it is safe to discard it and reclaim the memory.
+        if had_fibers && in_flight.is_empty() {
+            let discarded = unsafe { ffi::oxphp_bridge_async_drain_output() }
+                + crate::php::sapi::clear_response_output() as u64;
+            if discarded > 0 {
+                if let Some(ref m) = metrics {
+                    m.async_output_discarded(discarded);
+                }
+                if !warned_output {
+                    warned_output = true;
+                    tracing::warn!(
+                        worker = id,
+                        bytes = discarded,
+                        "async task wrote output that has no client; discarded \
+                         (remove echo/print from async task bodies)"
+                    );
+                }
             }
         }
 

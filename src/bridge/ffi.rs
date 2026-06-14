@@ -411,6 +411,7 @@ extern "C" {
     ) -> i64;
     pub fn oxphp_bridge_async_release(fiber_id: i64);
     pub fn oxphp_bridge_async_cancel(fiber_id: i64) -> c_int;
+    pub fn oxphp_bridge_async_drain_output() -> u64;
 
     // ── Shared\* synchronous invoke shims ──────────────
 

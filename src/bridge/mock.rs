@@ -586,6 +586,9 @@ pub unsafe fn oxphp_bridge_async_release(_fiber_id: i64) {}
 pub unsafe fn oxphp_bridge_async_cancel(_fiber_id: i64) -> c_int {
     0
 }
+pub unsafe fn oxphp_bridge_async_drain_output() -> u64 {
+    0
+}
 
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}

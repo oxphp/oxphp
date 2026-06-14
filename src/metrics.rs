@@ -182,6 +182,9 @@ pub struct Metrics {
     /// in `cleanup_outstanding_promises_callback`). Watch this counter
     /// to size that risk.
     async_tasks_stranded: AtomicU64,
+    /// Total bytes of background-task output discarded at worker idle
+    /// (echo/print inside an async task has no client). Monotonic counter.
+    async_output_discarded_bytes: AtomicU64,
 
     /// Live process-global async in-flight bound (`queued + running`).
     /// Wired only in server mode (the async pool), so it renders the gauge
@@ -298,6 +301,7 @@ impl Metrics {
             async_tasks_cancelled: AtomicU64::new(0),
             async_tasks_rejected: AtomicU64::new(0),
             async_tasks_stranded: AtomicU64::new(0),
+            async_output_discarded_bytes: AtomicU64::new(0),
             async_inflight: std::sync::OnceLock::new(),
             worker_request_age_us: mk_vec(),
             worker_long_running_total: mk_vec(),
@@ -479,6 +483,11 @@ impl Metrics {
     /// timeout — see the field doc for context.
     pub fn async_tasks_stranded(&self, n: u64) {
         self.async_tasks_stranded.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn async_output_discarded(&self, n: u64) {
+        self.async_output_discarded_bytes
+            .fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn workers_current(&self) -> usize {
@@ -875,6 +884,22 @@ impl Metrics {
                 out,
                 "oxphp_async_tasks_stranded_total {}",
                 self.async_tasks_stranded.load(Ordering::Relaxed)
+            );
+        }
+
+        let async_discarded = self.async_output_discarded_bytes.load(Ordering::Relaxed);
+        if async_discarded > 0 {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_output_discarded_bytes_total Bytes of async-task output discarded at worker idle (echo in an async task has no client)."
+            );
+            let _ = writeln!(
+                out,
+                "# TYPE oxphp_async_output_discarded_bytes_total counter"
+            );
+            let _ = writeln!(
+                out,
+                "oxphp_async_output_discarded_bytes_total {async_discarded}"
             );
         }
 
@@ -1510,5 +1535,22 @@ mod tests {
         let m = Metrics::new();
         let prom = m.to_prometheus();
         assert!(!prom.contains("oxphp_async_tasks_in_flight"));
+    }
+
+    #[test]
+    fn test_async_output_discarded_metric() {
+        let m = Metrics::new();
+        m.async_output_discarded(4096);
+        m.async_output_discarded(1000);
+        let prom = m.to_prometheus();
+        assert!(prom.contains("# TYPE oxphp_async_output_discarded_bytes_total counter"));
+        assert!(prom.contains("oxphp_async_output_discarded_bytes_total 5096"));
+    }
+
+    #[test]
+    fn test_no_async_output_discarded_no_line() {
+        let m = Metrics::new();
+        let prom = m.to_prometheus();
+        assert!(!prom.contains("oxphp_async_output_discarded_bytes_total"));
     }
 }

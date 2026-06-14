@@ -1638,6 +1638,23 @@ pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
     })
 }
 
+/// Drop any output a background async task left in this worker thread's
+/// RESPONSE buffer, releasing a large backing allocation. Returns the byte
+/// count cleared. Safe only when no task is mid-write — the async driver calls
+/// it when the worker is idle. A fire-and-forget task has no client, so any
+/// bytes here are leaked output.
+pub fn clear_response_output() -> usize {
+    RESPONSE.with(|r| {
+        let out = &mut r.borrow_mut().output;
+        let n = out.len();
+        out.clear();
+        if out.capacity() > 65536 {
+            out.shrink_to_fit();
+        }
+        n
+    })
+}
+
 pub fn clear_buffers() {
     RESPONSE.with(|r| {
         let mut resp = r.borrow_mut();

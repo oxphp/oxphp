@@ -1297,6 +1297,39 @@ PHP_FUNCTION(oxphp_usleep)
 
 /* ─── Worker Mode: soft reset between requests ─────────────── */
 
+/* Discard any output a background async task left in the shared PHP output
+ * buffer, freeing the backing allocation, and restart a clean default buffer.
+ * Called by the async driver only when the worker is idle (no fiber running),
+ * so nothing is mid-write. DISCARDS (does not flush) — the bytes have no
+ * client. Returns the bytes discarded from the active buffer (the metric
+ * undercounts nested ob_start leftovers; discard_all still frees them). */
+static uint64_t oxphp_async_sched_drain_output(void) {
+    int lvl = php_output_get_level();
+    if (lvl <= 0) {
+        return 0;
+    }
+
+    zval zlen;
+    uint64_t used = 0;
+    if (php_output_get_length(&zlen) == SUCCESS && Z_TYPE(zlen) == IS_LONG
+        && Z_LVAL(zlen) > 0) {
+        used = (uint64_t) Z_LVAL(zlen);
+    }
+
+    if (lvl > 1 || used > 0) {
+        php_output_discard_all(); /* pop+free all buffers, no flush */
+        if (PG(output_buffering)) {
+            /* restore the default buffer exactly as php_request_startup does */
+            php_output_start_user(
+                NULL,
+                PG(output_buffering) > 1 ? PG(output_buffering) : 0,
+                PHP_OUTPUT_HANDLER_STDFLAGS);
+        }
+        return used;
+    }
+    return 0;
+}
+
 /**
  * Reset per-request PHP state without destroying the PHP heap.
  * Called between worker mode requests to prevent response bleed.
@@ -3895,7 +3928,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         oxphp_async_sched_tick,
         oxphp_async_sched_poll_completed,
         oxphp_async_sched_release,
-        oxphp_async_sched_cancel);
+        oxphp_async_sched_cancel,
+        oxphp_async_sched_drain_output);
 
     /* Sub-design A: chain into Zend's interrupt mechanism so cancellation
      * reasons cause clean bailout at the next opcode boundary. */
