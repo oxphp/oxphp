@@ -3016,7 +3016,7 @@ pub fn is_async_worker() -> bool {
 ///    - `try_recv()` on the oneshot receiver:
 ///      - `Ok(result)` → move to `READY_RESULTS`, return true.
 ///      - `TryRecvError::Empty` → put back into `PROMISE_MAP`, return false.
-///      - `TryRecvError::Closed` → drop (task was cancelled/dropped), return false.
+///      - `TryRecvError::Closed` → synthesize a rejection result, return true.
 pub fn await_is_ready(promise_id: u64) -> bool {
     // Fast path: already pre-fetched
     let already = READY_RESULTS.with(|m| m.borrow().contains_key(&promise_id));
@@ -3049,8 +3049,30 @@ pub fn await_is_ready(promise_id: u64) -> bool {
                 false
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                // Sender dropped (task was cancelled or pool shut down)
-                false
+                // Sender dropped without ever sending a result — the task fiber
+                // was abandoned (a worker panic). Synthesize a rejection and
+                // report ready, so the awaiter throws instead of seeing the
+                // promise as perpetually-not-ready. The latter livelocks the
+                // fiber await_race / await_any poll loops — and spins a worker
+                // forever when timeout <= 0 — because they only ever observe
+                // `false` for this id and never settle it. Matches the blocking
+                // await path's "promise channel closed unexpectedly" error.
+                READY_RESULTS.with(|m| {
+                    m.borrow_mut().insert(
+                        promise_id,
+                        AsyncResult {
+                            success: false,
+                            serialized_value: std::ptr::null_mut(),
+                            serialized_value_len: 0,
+                            exception_class: Some("OxPHP\\Async\\AsyncException".to_string()),
+                            exception_message: Some(
+                                "promise channel closed unexpectedly".to_string(),
+                            ),
+                            keepalive: None,
+                        },
+                    );
+                });
+                true
             }
         },
         None => false, // Unknown promise ID
