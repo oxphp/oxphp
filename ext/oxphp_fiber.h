@@ -217,4 +217,8 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
 void    oxphp_async_sched_release(int64_t fiber_id);
 int     oxphp_async_sched_cancel(int64_t fiber_id);
 
+/* Destroy this thread's task scheduler (frees fiber C stacks + task payload).
+ * Called from the extension RSHUTDOWN; a no-op if no task ever spawned. */
+void    oxphp_async_sched_shutdown(void);
+
 #endif /* OXPHP_FIBER_H */

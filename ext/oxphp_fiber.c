@@ -89,6 +89,31 @@ void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     sched->next_fiber_id = 1;
 }
 
+/* Free task-mode payload owned by a fiber: the reconstructed closure, the
+ * captured return value, and the captured-exception strings. The borrowed
+ * task_args belong to the Rust driver and are NOT touched here. A no-op for
+ * HTTP request fibers, whose task_* fields stay zeroed/UNDEF. Single source of
+ * truth shared by oxphp_async_sched_release and oxphp_scheduler_destroy so both
+ * paths free the same set of fields. */
+static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
+    if (!Z_ISUNDEF(fiber->task_closure)) {
+        zval_ptr_dtor(&fiber->task_closure);
+        ZVAL_UNDEF(&fiber->task_closure);
+    }
+    if (!Z_ISUNDEF(fiber->task_retval)) {
+        zval_ptr_dtor(&fiber->task_retval);
+        ZVAL_UNDEF(&fiber->task_retval);
+    }
+    if (fiber->task_exc_class) {
+        free(fiber->task_exc_class);
+        fiber->task_exc_class = NULL;
+    }
+    if (fiber->task_exc_message) {
+        free(fiber->task_exc_message);
+        fiber->task_exc_message = NULL;
+    }
+}
+
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     /* Free any remaining active fibers */
     oxphp_request_fiber *fiber = sched->fibers_head;
@@ -96,13 +121,18 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
         oxphp_request_fiber *next = fiber->next;
         zend_fiber_destroy_context(&fiber->context);
         oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
+        oxphp_fiber_free_task_payload(fiber);
         efree(fiber);
         fiber = next;
     }
-    /* Free the free list */
+    /* Free the free list. Recycled fibers keep a live (suspended) looping
+     * coroutine, so their mmap'd C stack must be released too — a bare efree
+     * would leak the stack. */
     fiber = sched->free_list;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
+        zend_fiber_destroy_context(&fiber->context);
+        oxphp_fiber_free_task_payload(fiber);
         efree(fiber);
         fiber = next;
     }
@@ -1002,22 +1032,7 @@ void oxphp_async_sched_release(int64_t fiber_id) {
     }
 
     /* Tear down task-owned state (the driver has already drained retval) */
-    if (!Z_ISUNDEF(fiber->task_closure)) {
-        zval_ptr_dtor(&fiber->task_closure);
-        ZVAL_UNDEF(&fiber->task_closure);
-    }
-    if (!Z_ISUNDEF(fiber->task_retval)) {
-        zval_ptr_dtor(&fiber->task_retval);
-        ZVAL_UNDEF(&fiber->task_retval);
-    }
-    if (fiber->task_exc_class) {
-        free(fiber->task_exc_class);
-        fiber->task_exc_class = NULL;
-    }
-    if (fiber->task_exc_message) {
-        free(fiber->task_exc_message);
-        fiber->task_exc_message = NULL;
-    }
+    oxphp_fiber_free_task_payload(fiber);
     fiber->task_args = NULL;
     fiber->task_argc = 0;
 
@@ -1053,4 +1068,19 @@ int oxphp_async_sched_cancel(int64_t fiber_id) {
         }
     }
     return 0;
+}
+
+void oxphp_async_sched_shutdown(void) {
+    /* Tear down this thread's lazily-created task scheduler. The async worker
+     * reaches this once via its single php_request_shutdown at thread exit
+     * (through the extension RSHUTDOWN), while the executor heap is still live
+     * for the zval dtors. Frees every active and free-list fiber's mmap'd C
+     * stack and task payload. A no-op on threads that never spawned a task
+     * (HTTP workers, bare CLI), and idempotent — `inited` is cleared so a
+     * second shutdown finds nothing. */
+    if (!oxphp_task_sched_inited) {
+        return;
+    }
+    oxphp_scheduler_destroy(&oxphp_task_sched);
+    oxphp_task_sched_inited = false;
 }

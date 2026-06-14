@@ -4017,6 +4017,12 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
 /* {{{ RSHUTDOWN — cleanup outstanding async promises */
 PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
 {
+    /* Tear down this thread's async task scheduler (if any). The async worker
+     * runs a single long-lived request, so this fires once at thread exit while
+     * the heap is still live — freeing fiber C stacks and task payload that
+     * would otherwise leak across worker respawns. No-op on HTTP/CLI threads. */
+    oxphp_async_sched_shutdown();
+
     /* Cleanup any outstanding promises not awaited by user code. */
     oxphp_bridge_cleanup_outstanding_promises();
 
