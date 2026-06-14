@@ -335,6 +335,10 @@ extern "C" {
     pub fn oxphp_ht_has_non_shareable_objects(ht: *mut c_void) -> c_int;
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_in_fiber() -> c_int;
+    /// Cooperatively yield the current task fiber for one scheduler cycle.
+    /// Returns 1 if it suspended (in a fiber), 0 if not in a fiber, -3 if
+    /// the task was cancelled while yielded.
+    pub fn oxphp_bridge_fiber_yield() -> c_int;
 
     /// Returns 1 iff the zval is an object implementing OxPHP\Shared\Shareable.
     /// Returns 0 for non-objects, non-implementers, or if the CE isn't
@@ -382,6 +386,32 @@ extern "C" {
         f: extern "C" fn(i64, *const c_char, *const c_char) -> c_int,
     );
     pub fn oxphp_bridge_set_async_synth_cancel(f: extern "C" fn(i64) -> c_int);
+
+    // ── Async-task fiber scheduler (Rust-driven) ──
+    //
+    // The extension owns the scheduler (zend_fiber contexts) and registers
+    // the implementations at MINIT; the Rust driver reaches them through
+    // these bridge forwarders. See ext/bridge/oxphp_bridge.h for the
+    // spawn/tick/poll/release/cancel contract. Pointer params are opaque:
+    // op_array/static_vars/this_ptr/args are Rust-owned (borrowed by the
+    // fiber); out_retval points into the fiber's owned storage.
+    pub fn oxphp_bridge_async_spawn(
+        op_array: *const c_void,
+        static_vars: *mut c_void,
+        this_ptr: *mut c_void,
+        argc: u32,
+        args: *mut c_void,
+        cancel_cell: *mut c_void,
+    ) -> i64;
+    pub fn oxphp_bridge_async_tick() -> c_int;
+    pub fn oxphp_bridge_async_poll_completed(
+        out_retval: *mut *mut c_void,
+        out_exc_class: *mut *const c_char,
+        out_exc_message: *mut *const c_char,
+    ) -> i64;
+    pub fn oxphp_bridge_async_release(fiber_id: i64);
+    pub fn oxphp_bridge_async_cancel(fiber_id: i64) -> c_int;
+    pub fn oxphp_bridge_async_drain_output() -> u64;
 
     // ── Shared\* synchronous invoke shims ──────────────
 
@@ -493,18 +523,6 @@ extern "C" {
         try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
         prepare_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
     );
-
-    // Async task execution
-    pub fn oxphp_execute_async_task(
-        op_array: *const c_void,
-        static_vars: *const c_void,
-        this_ptr: *mut c_void,
-        argc: u32,
-        args: *mut c_void,
-        retval: *mut c_void,
-        exc_class: *mut *mut c_char,
-        exc_message: *mut *mut c_char,
-    ) -> c_int;
 
     // ─── Plugin Class Registry ──────────────────────────────────
     pub fn oxphp_bridge_register_class(

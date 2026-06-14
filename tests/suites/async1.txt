@@ -1,0 +1,8 @@
+# profile: async1
+# description: Fan-out await composition on a single async worker
+
+async/test_await_all_compose
+async/test_await_all_timeout_in_fiber
+async/test_await_race_compose
+async/test_await_any_compose
+async/test_cancel_cpu_bound

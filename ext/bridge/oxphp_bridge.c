@@ -2340,6 +2340,19 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval) {
     return 1; /* not in fiber — caller should do blocking await */
 }
 
+static oxphp_fiber_yield_fn_t sapi_fiber_yield = NULL;
+
+void oxphp_bridge_set_fiber_yield(oxphp_fiber_yield_fn_t fn) {
+    sapi_fiber_yield = fn;
+}
+
+int oxphp_bridge_fiber_yield(void) {
+    if (sapi_fiber_yield != NULL) {
+        return sapi_fiber_yield();
+    }
+    return 0; /* not in fiber — caller should fall back to blocking */
+}
+
 static oxphp_in_fiber_check_fn_t sapi_in_fiber_check = NULL;
 
 void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn) {
@@ -2354,6 +2367,79 @@ int oxphp_bridge_in_fiber(void) {
         return sapi_in_fiber_check();
     }
     return 0;
+}
+
+/* ─── Async-task fiber scheduler callbacks ─────────────────── */
+
+/* Set once at startup (MINIT) before any worker threads spawn — same
+ * non-__thread, no-data-race pattern as the other SAPI callbacks. */
+static oxphp_async_sched_spawn_fn_t   sched_async_spawn   = NULL;
+static oxphp_async_sched_tick_fn_t    sched_async_tick    = NULL;
+static oxphp_async_sched_poll_fn_t    sched_async_poll    = NULL;
+static oxphp_async_sched_release_fn_t sched_async_release = NULL;
+static oxphp_async_sched_cancel_fn_t  sched_async_cancel  = NULL;
+static oxphp_async_sched_drain_fn_t   sched_async_drain   = NULL;
+
+void oxphp_bridge_set_async_sched_callbacks(
+    oxphp_async_sched_spawn_fn_t spawn,
+    oxphp_async_sched_tick_fn_t tick,
+    oxphp_async_sched_poll_fn_t poll,
+    oxphp_async_sched_release_fn_t release,
+    oxphp_async_sched_cancel_fn_t cancel,
+    oxphp_async_sched_drain_fn_t drain
+) {
+    sched_async_spawn   = spawn;
+    sched_async_tick    = tick;
+    sched_async_poll    = poll;
+    sched_async_release = release;
+    sched_async_cancel  = cancel;
+    sched_async_drain   = drain;
+}
+
+int64_t oxphp_bridge_async_spawn(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *cancel_cell
+) {
+    if (sched_async_spawn != NULL) {
+        return sched_async_spawn(op_array, static_vars, this_ptr, argc, args, cancel_cell);
+    }
+    return -1; /* no scheduler registered */
+}
+
+int oxphp_bridge_async_tick(void) {
+    if (sched_async_tick != NULL) {
+        return sched_async_tick();
+    }
+    return -1;
+}
+
+int64_t oxphp_bridge_async_poll_completed(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message
+) {
+    if (sched_async_poll != NULL) {
+        return sched_async_poll(out_retval, out_exc_class, out_exc_message);
+    }
+    return -1;
+}
+
+void oxphp_bridge_async_release(int64_t fiber_id) {
+    if (sched_async_release != NULL) {
+        sched_async_release(fiber_id);
+    }
+}
+
+int oxphp_bridge_async_cancel(int64_t fiber_id) {
+    if (sched_async_cancel != NULL) {
+        return sched_async_cancel(fiber_id);
+    }
+    return 0;
+}
+
+uint64_t oxphp_bridge_async_drain_output(void) {
+    if (sched_async_drain != NULL) {
+        return sched_async_drain();
+    }
+    return 0; /* no scheduler registered */
 }
 
 int64_t oxphp_bridge_async_dispatch(
@@ -3474,8 +3560,9 @@ int oxphp_bridge_is_async_worker(void) {
 /* ─── Async Fatal Error Capture ────────────────────────────── */
 /* Thread-local buffer to capture the error message from zend_error_cb
  * before zend_bailout() is called. The Rust error callback writes here
- * for fatal errors on async worker threads; the zend_catch block in
- * oxphp_execute_async_task reads and parses it. */
+ * for fatal errors on async worker threads; the task scheduler's
+ * fatal-capture path (task_capture_fatal in oxphp_fiber.c) reads and
+ * parses it via oxphp_bridge_pop_fatal(). */
 static __thread char *captured_fatal_msg = NULL;
 
 void oxphp_bridge_capture_fatal(const char *msg, size_t len) {
@@ -3563,24 +3650,19 @@ static void oxphp_fixup_run_time_cache(zend_op_array *op) {
     op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
 }
 
-/* === Async Promise: Execute Async Task === */
+/* === Async Promise: Reconstruct closure (shared sync + fiber path) === */
 
-int oxphp_execute_async_task(
+int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
     zval *this_ptr,
-    uint32_t argc,
-    zval *args,
-    zval *retval,
+    zval *out_closure,
+    zend_fcall_info *fci,
+    zend_fcall_info_cache *fcc,
     char **exc_class,
     char **exc_message
 ) {
-    zval closure;
     zend_function func;
-
-    *exc_class = NULL;
-    *exc_message = NULL;
-    ZVAL_NULL(retval);
 
     /* Reconstruct closure from op_array + static_vars */
     memcpy(&func, op_array, sizeof(zend_op_array));
@@ -3609,90 +3691,19 @@ int oxphp_execute_async_task(
         ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, static_vars);
     }
 
-    zend_create_closure(&closure, &func,
+    zend_create_closure(out_closure, &func,
         NULL, /* scope */
         NULL, /* called_scope */
         this_ptr /* this_ptr, may be NULL */
     );
 
-    /* Set up call info */
-    zend_fcall_info fci;
-    zend_fcall_info_cache fcc;
-    if (zend_fcall_info_init(&closure, 0, &fci, &fcc, NULL, NULL) != SUCCESS) {
-        zval_ptr_dtor(&closure);
+    if (zend_fcall_info_init(out_closure, 0, fci, fcc, NULL, NULL) != SUCCESS) {
+        zval_ptr_dtor(out_closure);
         *exc_class = strdup("RuntimeException");
         *exc_message = strdup("Failed to initialize async closure call");
         return -1;
     }
-
-    fci.retval = retval;
-    fci.param_count = argc;
-    fci.params = args;
-
-    int result = 0;
-
-    zend_try {
-        if (zend_call_function(&fci, &fcc) != SUCCESS) {
-            *exc_class = strdup("RuntimeException");
-            *exc_message = strdup("Failed to call async closure");
-            result = -1;
-        } else if (EG(exception)) {
-            /* Capture exception details */
-            zend_object *ex = EG(exception);
-            zend_class_entry *ce = ex->ce;
-            *exc_class = strdup(ZSTR_VAL(ce->name));
-
-            /* Get message via property read */
-            zval rv;
-            zval *msg_zv = zend_read_property(ce, ex, "message", sizeof("message") - 1, 1, &rv);
-            if (msg_zv && Z_TYPE_P(msg_zv) == IS_STRING) {
-                *exc_message = strdup(Z_STRVAL_P(msg_zv));
-            } else {
-                *exc_message = strdup("(unknown)");
-            }
-
-            zend_clear_exception();
-            result = -1;
-        }
-    } zend_catch {
-        /* Fatal error / zend_bailout — EG(exception) is cleared by zend_exception_error
-         * before bailout, but our error callback captured the formatted message. */
-        char *fatal_msg = oxphp_bridge_pop_fatal();
-        if (fatal_msg && strncmp(fatal_msg, "Uncaught ", 9) == 0) {
-            /* Parse "Uncaught ClassName: message in /path/to/file.php:NN" */
-            const char *class_start = fatal_msg + 9;
-            const char *colon = strchr(class_start, ':');
-            if (colon && colon > class_start) {
-                *exc_class = strndup(class_start, (size_t)(colon - class_start));
-                /* Skip ": " after class name */
-                const char *msg_start = colon + 2;
-                /* Find " in " to strip the file location */
-                const char *in_pos = strstr(msg_start, " in ");
-                if (in_pos) {
-                    *exc_message = strndup(msg_start, (size_t)(in_pos - msg_start));
-                } else {
-                    *exc_message = strdup(msg_start);
-                }
-            } else {
-                /* Uncaught but no colon — use full message */
-                *exc_class = strdup("Error");
-                *exc_message = strdup(fatal_msg);
-            }
-            free(fatal_msg);
-        } else if (fatal_msg) {
-            /* Non-uncaught fatal: die()/exit() or other fatal */
-            *exc_class = strdup("Error");
-            *exc_message = fatal_msg; /* transfer ownership */
-        } else {
-            *exc_class = strdup("Error");
-            *exc_message = strdup("Fatal error in async closure");
-        }
-        CG(unclean_shutdown) = 0;
-        result = -1;
-    } zend_end_try();
-
-    zval_ptr_dtor(&closure);
-    return result;
+    return 0;
 }
 
 /* === Async Promise: Borrow Proxy === */

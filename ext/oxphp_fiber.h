@@ -25,13 +25,21 @@ typedef enum {
 /* Replicates zend_fiber_vm_state from zend_fibers.c (internal/static).
  * The low-level fiber API (zend_fiber_switch_context) does NOT save VM state —
  * only the high-level API (zend_fiber_start/resume) does. We must do it
- * ourselves for each context switch. */
+ * ourselves for each context switch. Field set mirrors upstream; the
+ * ZEND_CHECK_STACK_LIMIT stack_base/stack_limit pair is the only exception —
+ * we handle those separately via fiber->saved_stack_* (estimated from the C
+ * stack pointer at coroutine entry, since the fiber stack struct is opaque). */
 typedef struct {
     zend_vm_stack vm_stack;
     zval *vm_stack_top;
     zval *vm_stack_end;
+    size_t vm_stack_page_size;
     zend_execute_data *current_execute_data;
     int error_reporting;
+    /* JIT tracing: nonzero while the tracing JIT is recording a trace. Must be
+     * saved/restored per fiber so a fiber that suspends mid-trace does not leak
+     * its in-progress trace number into another fiber's run (trace corruption). */
+    uint32_t jit_trace_num;
     JMP_BUF *bailout;
     zend_fiber *active_fiber;
 } oxphp_fiber_vm_state;
@@ -101,6 +109,32 @@ typedef struct _oxphp_request_fiber {
     bool started;            /* true after first start — reused fibers skip zend_fiber_init_context */
     int consecutive_errors;
 
+    /* ── Async-task mode (oxphp_async fiber, not an HTTP request) ──
+     * When task_mode is true the fiber runs a single per-task closure and
+     * captures its result instead of producing an HTTP response. The closure
+     * and call-info are owned by the fiber and torn down at finalize; args /
+     * op_array / static_vars are borrowed (the Rust driver frees them once the
+     * completed result has been drained). */
+    bool task_mode;
+    bool cancel_requested;          /* set cross-path; checked at suspend points + interrupt handler */
+    bool timed_out;                 /* set by the scheduler when the awaited promise's per-call
+                                     * timeout elapses while suspended; checked at the await suspend
+                                     * point, which unwinds the await as a timeout instead of a result */
+    uint64_t await_deadline_ns;     /* CLOCK_MONOTONIC deadline for the current AWAIT suspend.
+                                     * 0 = no deadline (timeout <= 0, i.e. wait forever). */
+    _Atomic(uint8_t) *cancel_cell;  /* borrowed: &CancelShared.cancelled (Rust AtomicBool).
+                                     * The awaiter sets it cross-thread and kicks vm_interrupt; the
+                                     * interrupt handler reads it to unwind a CPU-bound task fiber.
+                                     * NULL for HTTP request fibers. */
+    zval task_closure;              /* owned: dtor at finalize */
+    zend_fcall_info task_fci;
+    zend_fcall_info_cache task_fcc;
+    zval *task_args;                /* borrowed (Rust-owned) */
+    uint32_t task_argc;
+    zval task_retval;               /* ZVAL_UNDEF until completed */
+    char *task_exc_class;           /* malloc'd, NULL if none */
+    char *task_exc_message;         /* malloc'd, NULL if none */
+
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
     struct _oxphp_request_fiber *prev;
@@ -167,5 +201,24 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
  * It only initializes fresh superglobals and SAPI headers for the new request. */
 void oxphp_fiber_init_request_state(void);
+
+/* ─── Async-task scheduler (Rust-driven via bridge callbacks) ───
+ * Registered into the bridge at MINIT via
+ * oxphp_bridge_set_async_sched_callbacks. See ext/bridge/oxphp_bridge.h
+ * for the contract. Stub bodies land first; the real per-thread task
+ * scheduler fills them in. */
+int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
+                                void *this_ptr, uint32_t argc, void *args,
+                                void *cancel_cell);
+int     oxphp_async_sched_tick(void);
+int64_t oxphp_async_sched_poll_completed(void **out_retval,
+                                         const char **out_exc_class,
+                                         const char **out_exc_message);
+void    oxphp_async_sched_release(int64_t fiber_id);
+int     oxphp_async_sched_cancel(int64_t fiber_id);
+
+/* Destroy this thread's task scheduler (frees fiber C stacks + task payload).
+ * Called from the extension RSHUTDOWN; a no-op if no task ever spawned. */
+void    oxphp_async_sched_shutdown(void);
 
 #endif /* OXPHP_FIBER_H */

@@ -5,8 +5,38 @@
 // executes the closures and returns results).
 
 use std::ffi::c_void;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
+
+/// Shared cancellation state for a single async task, reachable from both the
+/// originating PHP worker (the awaiter) and the async worker running the task.
+///
+/// `cancelled` carries the cancel intent: the awaiter sets it true when it gives
+/// up (await timeout). A SUSPENDED fiber is reached via the async worker's
+/// scheduler loop (it polls this flag). `worker_interrupt` carries the address
+/// of the running worker's `EG(vm_interrupt)` (as `usize`, 0 until the task is
+/// picked up): the awaiter writes the interrupt cross-thread so a CPU-bound
+/// fiber — which the scheduler loop cannot reach — is broken out of at the next
+/// opcode boundary and unwound by the interrupt handler.
+pub struct CancelShared {
+    pub cancelled: AtomicBool,
+    pub worker_interrupt: AtomicUsize,
+}
+
+impl CancelShared {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            worker_interrupt: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for CancelShared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// A task dispatched from a PHP worker thread to the async worker pool.
 ///
@@ -38,8 +68,10 @@ pub struct AsyncTask {
     pub serialized_args: *mut u8,
     /// Length of the serialized_args buffer.
     pub serialized_args_len: usize,
-    /// Shared cancellation flag — checked by the async worker before/during execution.
-    pub cancelled: Arc<AtomicBool>,
+    /// Shared cancellation state — the cancel flag plus the running worker's
+    /// `EG(vm_interrupt)` address. Checked by the async worker before/during
+    /// execution; the address lets the awaiter interrupt a CPU-bound fiber.
+    pub cancelled: Arc<CancelShared>,
     /// One-shot channel to send the result back to the originating PHP worker.
     pub result_tx: tokio::sync::oneshot::Sender<AsyncResult>,
 }
@@ -48,7 +80,7 @@ pub struct AsyncTask {
 // containing a snapshot of the zend_op_array struct. Its internal pointers reference
 // OPcache SHM or stable compiled-script memory (safe from any thread).
 // Serialization buffers are system-malloc'd and exclusively owned.
-// The Arc<AtomicBool> is inherently thread-safe. The oneshot::Sender is Send.
+// The Arc<CancelShared> is inherently thread-safe. The oneshot::Sender is Send.
 unsafe impl Send for AsyncTask {}
 
 /// The result of executing an async task, sent back to the originating PHP worker.
@@ -176,12 +208,12 @@ impl Default for PromiseCleanup {
 mod tests {
     use super::*;
     use std::ptr;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
     #[test]
     fn test_async_task_creation() {
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(CancelShared::new());
         let (tx, _rx) = tokio::sync::oneshot::channel::<AsyncResult>();
 
         let task = AsyncTask {
@@ -204,7 +236,7 @@ mod tests {
         assert!(task.this_ptr.is_null());
         assert_eq!(task.argc, 3);
         assert!(task.serialized_args.is_null());
-        assert!(!task.cancelled.load(Ordering::Relaxed));
+        assert!(!task.cancelled.cancelled.load(Ordering::Relaxed));
     }
 
     #[test]

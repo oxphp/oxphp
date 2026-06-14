@@ -108,7 +108,7 @@ pub fn alloc_and_register() -> i64 {
     // We cast i64 → u64 (reinterpret bits). Synthetic ids have the top
     // bit set, so they occupy a disjoint region of the u64 key space
     // from async-pool ids (which grow monotonically from 0).
-    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = std::sync::Arc::new(crate::async_types::CancelShared::new());
     crate::php::sapi::register_synthetic_receiver(id as u64, rx, cancelled);
     id
 }

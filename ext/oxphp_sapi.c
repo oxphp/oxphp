@@ -17,6 +17,7 @@
 #include "ext/session/php_session.h"
 #include <limits.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <time.h>
 
 /* HTTP Request class */
@@ -1212,7 +1213,8 @@ PHP_FUNCTION(oxphp_stream_flush)
 
 /* Internal: register timer and suspend current fiber.
  * duration_us is the sleep duration in microseconds.
- * Returns 1 if fiber-suspended, 0 if no fiber (use blocking fallback). */
+ * Returns 1 if fiber-suspended (timer expired), 0 if no fiber (use blocking
+ * fallback), -1 if the task was cancelled while sleeping (caller throws). */
 static int oxphp_fiber_sleep_us(uint64_t duration_us)
 {
     if (oxphp_current_fiber == NULL) return 0;
@@ -1220,19 +1222,27 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
 
+    oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(duration_ms);
 
-    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_SLEEP;
-    oxphp_current_fiber->suspend_data.timer_id = timer_id;
+    self->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    self->suspend_data.timer_id = timer_id;
 
     zend_fiber_transfer transfer = {
-        .context = oxphp_current_fiber->scheduler,
+        .context = self->scheduler,
         .flags = 0
     };
     ZVAL_NULL(&transfer.value);
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
+    /* --- RESUMED on timer expiry, OR force-resumed by the scheduler when the
+     * task was cancelled (awaiter gave up). On cancellation, signal the caller
+     * to throw instead of returning normally. */
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -1; /* cancelled */
+    }
     return 1;
 }
 
@@ -1249,7 +1259,13 @@ PHP_FUNCTION(oxphp_sleep)
     if (seconds <= 0.0) return;
 
     uint64_t duration_us = (uint64_t)(seconds * 1000000.0);
-    if (oxphp_fiber_sleep_us(duration_us)) return;
+    int rc = oxphp_fiber_sleep_us(duration_us);
+    if (rc < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return;
+    }
+    if (rc) return;
 
     usleep((useconds_t)duration_us);
 }
@@ -1267,13 +1283,52 @@ PHP_FUNCTION(oxphp_usleep)
 
     if (microseconds <= 0) return;
 
-    if (oxphp_fiber_sleep_us((uint64_t)microseconds)) return;
+    int rc = oxphp_fiber_sleep_us((uint64_t)microseconds);
+    if (rc < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return;
+    }
+    if (rc) return;
 
     usleep((useconds_t)microseconds);
 }
 /* }}} */
 
 /* ─── Worker Mode: soft reset between requests ─────────────── */
+
+/* Discard any output a background async task left in the shared PHP output
+ * buffer, freeing the backing allocation, and restart a clean default buffer.
+ * Called by the async driver only when the worker is idle (no fiber running),
+ * so nothing is mid-write. DISCARDS (does not flush) — the bytes have no
+ * client. Returns the bytes discarded from the active buffer (the metric
+ * undercounts nested ob_start leftovers; discard_all still frees them). */
+static uint64_t oxphp_async_sched_drain_output(void) {
+    int lvl = php_output_get_level();
+    if (lvl <= 0) {
+        return 0;
+    }
+
+    zval zlen;
+    uint64_t used = 0;
+    if (php_output_get_length(&zlen) == SUCCESS && Z_TYPE(zlen) == IS_LONG
+        && Z_LVAL(zlen) > 0) {
+        used = (uint64_t) Z_LVAL(zlen);
+    }
+
+    if (lvl > 1 || used > 0) {
+        php_output_discard_all(); /* pop+free all buffers, no flush */
+        if (PG(output_buffering)) {
+            /* restore the default buffer exactly as php_request_startup does */
+            php_output_start_user(
+                NULL,
+                PG(output_buffering) > 1 ? PG(output_buffering) : 0,
+                PHP_OUTPUT_HANDLER_STDFLAGS);
+        }
+        return used;
+    }
+    return 0;
+}
 
 /**
  * Reset per-request PHP state without destroying the PHP heap.
@@ -2302,21 +2357,80 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
         return 1; /* Not in fiber — caller should do blocking await */
     }
 
-    oxphp_current_fiber->suspend_reason = OXPHP_SUSPEND_AWAIT;
-    oxphp_current_fiber->suspend_data.promise_id = promise_id;
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    self->suspend_reason = OXPHP_SUSPEND_AWAIT;
+    self->suspend_data.promise_id = promise_id;
+
+    /* Arm a per-call deadline so the scheduler can unwind this await if the
+     * awaited promise does not settle in time. timeout <= 0 means "wait
+     * forever" (no deadline). Without this the cooperative fiber path would
+     * ignore the timeout entirely and block until the promise settles or the
+     * outer await budget elapsed — losing the inner timeout in composition. */
+    if (timeout > 0.0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        self->await_deadline_ns = now_ns + (uint64_t)(timeout * 1000000000.0);
+    } else {
+        self->await_deadline_ns = 0;
+    }
 
     zend_fiber_transfer transfer = {
-        .context = oxphp_current_fiber->scheduler,
+        .context = self->scheduler,
         .flags = 0
     };
     ZVAL_NULL(&transfer.value);
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
-    /* --- RESUMED by scheduler when promise result is ready --- */
+    /* --- RESUMED by scheduler when promise result is ready, when the task was
+     * cancelled (awaiter gave up), or when the per-call deadline elapsed. Disarm
+     * the deadline first; then unwind on cancel/timeout by signalling the caller
+     * to throw instead of consuming a result. */
+    self->await_deadline_ns = 0;
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -3; /* cancelled */
+    }
+    if (self->timed_out) {
+        self->timed_out = false;
+        return -2; /* timed out */
+    }
 
     int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, (zval *)retval);
     return rc; /* 0 = success, -1 = error, -2 = timeout */
+}
+
+/* Cooperative yield: suspend the current task fiber for one scheduler cycle
+ * (a ~1ms timer) so other fibers / nested tasks can make progress, then
+ * resume. Used by the fiber-aware await_race / await_any poll loops to avoid
+ * pinning the worker while waiting for one of several promises to settle.
+ * Returns 1 if it suspended (in a fiber), 0 if not in a fiber (caller falls
+ * back to blocking), -3 if the task was cancelled while yielded. */
+int oxphp_fiber_suspend_for_yield(void) {
+    if (oxphp_current_fiber == NULL) {
+        return 0; /* not in a fiber */
+    }
+
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
+    self->suspend_reason = OXPHP_SUSPEND_SLEEP;
+    self->suspend_data.timer_id = timer_id;
+
+    zend_fiber_transfer transfer = {
+        .context = self->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    /* --- RESUMED on the next scheduler tick once the timer expires --- */
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -3; /* cancelled */
+    }
+    return 1;
 }
 
 /* ─── Request arginfo ────────────────────────────────────── */
@@ -3039,6 +3153,38 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
+    /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
+     * running task fiber's shared cancel cell and kicks this worker thread's
+     * vm_interrupt cross-thread (the scheduler loop can't reach a CPU-bound
+     * fiber). The kick fires in whichever fiber is running, so unwind only if
+     * it is the cancelled one — throwing a PHP exception that the VM propagates
+     * up this fiber's stack to its scheduler entry (rejected task), exactly like
+     * a suspend-point cancel. cancel_cell is NULL for HTTP request fibers and
+     * for the scheduler context, so this is a no-op there.
+     *
+     * Latency bound: the kick is honoured only at opcode boundaries (loop
+     * backedges, call boundaries). A fiber stuck inside a single long C call —
+     * a catastrophic preg_match, a large gzuncompress, a blocking
+     * fread/fwrite/PDO query — is interrupted only when that call returns,
+     * because C functions do not poll vm_interrupt from inside their own loops.
+     * This is the same limit as PHP's own max_execution_time (SIGALRM sets
+     * EG(timed_out), also acted on at opcode boundaries); a threaded SAPI
+     * cannot kill a worker mid-C-call without corrupting Zend allocator state.
+     * So for a cancelled task: side effects across opcode boundaries are
+     * prevented (the throw lands before the next PHP statement), but those
+     * inside the one in-flight C call complete before the fiber unwinds. */
+    /* memory_order_acquire pairs with the awaiter's Release store of the cancel
+     * flag (Rust side): once we observe it set, the publish is visible without
+     * relying on vm_interrupt's barrier to carry it. */
+    if (oxphp_current_fiber != NULL
+        && oxphp_current_fiber->cancel_cell != NULL
+        && atomic_load_explicit(oxphp_current_fiber->cancel_cell,
+                                memory_order_acquire)) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return; /* VM checks EG(exception) on return → unwinds this fiber only */
+    }
+
     /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
      * alongside vm_interrupt. Convert it to the unified cancellation
      * reason and claim the flag so zend_timeout()'s default
@@ -3796,6 +3942,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
+    oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
+
+    /* Register async-task scheduler callbacks (stub bodies for now; the
+     * Rust fiber-mode async driver reaches the scheduler through these). */
+    oxphp_bridge_set_async_sched_callbacks(
+        oxphp_async_sched_spawn,
+        oxphp_async_sched_tick,
+        oxphp_async_sched_poll_completed,
+        oxphp_async_sched_release,
+        oxphp_async_sched_cancel,
+        oxphp_async_sched_drain_output);
 
     /* Sub-design A: chain into Zend's interrupt mechanism so cancellation
      * reasons cause clean bailout at the next opcode boundary. */
@@ -3860,6 +4017,12 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
 /* {{{ RSHUTDOWN — cleanup outstanding async promises */
 PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
 {
+    /* Tear down this thread's async task scheduler (if any). The async worker
+     * runs a single long-lived request, so this fires once at thread exit while
+     * the heap is still live — freeing fiber C stacks and task payload that
+     * would otherwise leak across worker respawns. No-op on HTTP/CLI threads. */
+    oxphp_async_sched_shutdown();
+
     /* Cleanup any outstanding promises not awaited by user code. */
     oxphp_bridge_cleanup_outstanding_promises();
 

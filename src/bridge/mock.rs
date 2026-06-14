@@ -490,6 +490,9 @@ pub unsafe fn oxphp_bridge_fiber_await(
 pub unsafe fn oxphp_bridge_in_fiber() -> c_int {
     0
 }
+pub unsafe fn oxphp_bridge_fiber_yield() -> c_int {
+    0 // not in fiber — blocking path on host
+}
 pub unsafe fn oxphp_is_shareable(_z: *const c_void) -> c_int {
     0 // no CE registered in host tests
 }
@@ -548,6 +551,45 @@ pub unsafe fn oxphp_bridge_set_async_synth_reject(
 }
 pub unsafe fn oxphp_bridge_set_async_synth_cancel(_f: extern "C" fn(i64) -> c_int) {}
 
+// ── Async-task fiber scheduler (Rust-driven) ──
+
+pub unsafe fn oxphp_bridge_async_spawn(
+    _op_array: *const c_void,
+    _static_vars: *mut c_void,
+    _this_ptr: *mut c_void,
+    _argc: u32,
+    _args: *mut c_void,
+    _cancel_cell: *mut c_void,
+) -> i64 {
+    -1
+}
+pub unsafe fn oxphp_bridge_async_tick() -> c_int {
+    -1
+}
+pub unsafe fn oxphp_bridge_async_poll_completed(
+    out_retval: *mut *mut c_void,
+    out_exc_class: *mut *const c_char,
+    out_exc_message: *mut *const c_char,
+) -> i64 {
+    if !out_retval.is_null() {
+        *out_retval = std::ptr::null_mut();
+    }
+    if !out_exc_class.is_null() {
+        *out_exc_class = std::ptr::null();
+    }
+    if !out_exc_message.is_null() {
+        *out_exc_message = std::ptr::null();
+    }
+    -1
+}
+pub unsafe fn oxphp_bridge_async_release(_fiber_id: i64) {}
+pub unsafe fn oxphp_bridge_async_cancel(_fiber_id: i64) -> c_int {
+    0
+}
+pub unsafe fn oxphp_bridge_async_drain_output() -> u64 {
+    0
+}
+
 // Async fatal error capture
 pub unsafe fn oxphp_bridge_capture_fatal(_msg: *const c_char, _len: usize) {}
 pub unsafe fn oxphp_bridge_pop_fatal() -> *mut c_char {
@@ -575,21 +617,6 @@ pub unsafe fn oxphp_bridge_set_fiber_callbacks(
     _try_recv_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
     _prepare_fn: Option<unsafe extern "C" fn() -> std::os::raw::c_int>,
 ) {
-}
-
-// Async task execution
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn oxphp_execute_async_task(
-    _op_array: *const c_void,
-    _static_vars: *const c_void,
-    _this_ptr: *mut c_void,
-    _argc: u32,
-    _args: *mut c_void,
-    _retval: *mut c_void,
-    _exc_class: *mut *mut c_char,
-    _exc_message: *mut *mut c_char,
-) -> c_int {
-    0
 }
 
 // ─── Plugin Class Registry ──────────────────────────────────

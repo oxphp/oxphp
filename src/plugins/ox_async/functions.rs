@@ -135,12 +135,9 @@ fn handler_async(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
         return Err(async_disabled());
     }
 
-    // Cannot call oxphp_async from inside an async worker
-    if unsafe { ffi::oxphp_bridge_is_async_worker() != 0 } {
-        return Err(async_err(
-            "Cannot call oxphp_async() from within an async worker",
-        ));
-    }
+    // Nested oxphp_async() from inside an async worker is allowed: the task
+    // runs in a scheduler fiber, so an await on the nested promise suspends
+    // the fiber and frees the worker to run the nested task (async composition).
 
     // Get the closure zval (arg 0)
     let closure_zval = unsafe { call.raw_arg_ptr(0) };
@@ -266,6 +263,8 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
         -2 => Err(timeout_err(format!(
             "oxphp_async_await(): promise {promise_id} timed out"
         ))),
+        // -3 = the task was cancelled while suspended (awaiter gave up)
+        -3 => Err(async_err("Async task cancelled")),
         // -1 or other = error
         _ => Err(read_bridge_exception()),
     }
@@ -313,7 +312,7 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
     unsafe { ffi::oxphp_ret_array_init(retval, count) };
 
     // Await each promise and add its result to the array
-    for &pid in &ids {
+    for (i, &pid) in ids.iter().enumerate() {
         // Allocate a stack-aligned temporary zval for this promise's result.
         // PHP zval is 16 bytes on 64-bit with 8-byte alignment.
         #[repr(C, align(8))]
@@ -321,19 +320,39 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
         let mut temp = TempZval([0u8; 16]);
         let temp_ptr = &mut temp as *mut TempZval as *mut c_void;
 
-        let rc = unsafe { ffi::oxphp_bridge_await_dispatch(pid, timeout, temp_ptr) };
+        // Suspend on each promise in turn when inside a task fiber, falling
+        // back to a blocking await otherwise. The promises already run
+        // concurrently on the pool, so awaiting them sequentially still yields
+        // parallel wall-time — and crucially, suspending frees the worker so
+        // the awaited (possibly nested) tasks can make progress.
+        let mut rc = unsafe { ffi::oxphp_bridge_fiber_await(pid, timeout, temp_ptr) };
+        if rc == 1 {
+            rc = unsafe { ffi::oxphp_bridge_await_dispatch(pid, timeout, temp_ptr) };
+        }
 
         match rc {
             0 => {
                 // Success: add to return array keyed by promise ID
                 unsafe { ffi::oxphp_arr_add_index_zval(retval, pid as u64, temp_ptr) };
             }
+            // All-or-nothing bail: this promise timed out, was cancelled, or
+            // rejected, so await_all is abandoning the whole set. Cancel and
+            // strand the promises from here on (the current one plus any not
+            // yet awaited) so CPU-bound members don't keep running unobserved
+            // until RSHUTDOWN — matching await_race/await_any. Already-consumed
+            // promises in the range are a no-op. ids[..i] already completed.
             -2 => {
+                strand_promises(&ids[i..]);
                 return Err(timeout_err(format!(
                     "oxphp_async_await_all(): promise {pid} timed out"
                 )));
             }
+            -3 => {
+                strand_promises(&ids[i..]);
+                return Err(async_err("Async task cancelled"));
+            }
             _ => {
+                strand_promises(&ids[i..]);
                 return Err(read_bridge_exception());
             }
         }
@@ -341,6 +360,20 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
     Ok(())
 }
+
+/// Cancel and strand a set of still-pending promises that an `await_all` is
+/// abandoning, so their tasks stop running with no observer and RSHUTDOWN can
+/// drain them safely. Calling over already-completed/cancelled ids is harmless
+/// (each is a no-op once it has left the promise map).
+#[cfg(feature = "php")]
+fn strand_promises(ids: &[i64]) {
+    for &id in ids {
+        unsafe { crate::php::sapi::strand_and_cancel_promise(id as u64) };
+    }
+}
+
+#[cfg(not(feature = "php"))]
+fn strand_promises(_ids: &[i64]) {}
 
 // ─── handler_await_race ──────────────────────────────────────────────────────
 

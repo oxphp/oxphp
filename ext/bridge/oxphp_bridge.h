@@ -1211,6 +1211,7 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
 
 typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
 typedef int (*oxphp_in_fiber_check_fn_t)(void);
+typedef int (*oxphp_fiber_yield_fn_t)(void);
 
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
@@ -1219,6 +1220,14 @@ void oxphp_bridge_set_await_race_dispatch(oxphp_await_race_dispatch_fn_t fn);
 void oxphp_bridge_set_await_any_dispatch(oxphp_await_any_dispatch_fn_t fn);
 void oxphp_bridge_set_fiber_await(oxphp_fiber_await_fn_t fn);
 int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
+
+/** Register the SAPI cooperative-yield helper, and call it. Yields the
+ *  current task fiber for one scheduler cycle so the fiber-aware
+ *  await_race / await_any poll loops do not pin the worker. Returns 1 if it
+ *  suspended (in a fiber), 0 if not in a fiber, -3 if cancelled while
+ *  yielded. */
+void oxphp_bridge_set_fiber_yield(oxphp_fiber_yield_fn_t fn);
+int oxphp_bridge_fiber_yield(void);
 
 /** Register the SAPI predicate that decides whether the calling thread
  *  is inside an oxphp-managed scheduler fiber. The bridge has no way
@@ -1411,16 +1420,19 @@ void oxphp_arr_add_zval(zval *arr, const char *key, zval *val);
 /* Copy a zval into an array at an integer index (ZVAL_COPY semantics). */
 void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 
-/* Execute an async task on an async worker thread.
- * Returns 0 on success, -1 on exception.
- * On exception: exc_class, exc_message are malloc'd strings (caller frees). */
-int oxphp_execute_async_task(
+/* Reconstruct an async closure from a transferred op_array + static_vars on
+ * THIS thread's heap (run_time_cache + static_variables MAP_PTR fixups for
+ * cross-thread safety). Fills *out_closure (caller dtors with zval_ptr_dtor),
+ * fci, fcc. Returns 0 on success; -1 on failure (fills exc_class/message with
+ * malloc'd strings and dtors the closure). Used by the fiber-mode async
+ * scheduler to reconstruct a task closure on the worker thread. */
+int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
     zval *this_ptr,
-    uint32_t argc,
-    zval *args,
-    zval *retval,
+    zval *out_closure,
+    zend_fcall_info *fci,
+    zend_fcall_info_cache *fcc,
     char **exc_class,
     char **exc_message
 );
@@ -1810,6 +1822,73 @@ int     oxphp_async_synthetic_promise_reject(int64_t id,
                                               const char *cls_fqn,
                                               const char *message);
 int     oxphp_async_synthetic_promise_cancel(int64_t id);
+
+/* ─── Async-task fiber scheduler callbacks ──────────────────
+ *
+ * The fiber-mode async worker runs each oxphp_async task inside a
+ * scheduler fiber so one worker thread can hold many tasks in-flight,
+ * suspending each at its await / sleep / channel boundary. The scheduler
+ * lives in the extension (it owns the zend_fiber contexts); the Rust
+ * driver loop reaches it only through these bridge forwarders.
+ *
+ * The extension registers the five implementations once at MINIT via
+ * oxphp_bridge_set_async_sched_callbacks (mirrors set_fiber_await). Rust
+ * calls the oxphp_bridge_async_* wrappers; each forwards through the
+ * stored pointer, or returns a not-registered sentinel when the
+ * extension is absent (unit tests, bare CLI).
+ *
+ * Pointer params are opaque (void*) so this stays outside the PHP_H
+ * block. op_array / static_vars / this_ptr / args are borrowed
+ * (Rust-owned); out_retval points at a zval inside the fiber's storage.
+ *
+ *   spawn()   create a task fiber for one reconstructed closure + args
+ *             and enqueue it. Returns the fiber_id (>= 0) or -1 (at
+ *             capacity / reconstruction failed).
+ *   tick()    advance the scheduler one iteration (start new fibers,
+ *             resume ready ones, run each to its next suspend or
+ *             completion). Returns the number of fibers still in-flight
+ *             (queued + suspended + completed-but-undrained), or -1 if
+ *             no scheduler is registered.
+ *   poll()    report one completed-but-undrained task fiber. Returns its
+ *             fiber_id (>= 0) and fills the out-params with pointers into
+ *             the fiber's owned storage (*out_retval is ZVAL_UNDEF if the
+ *             task threw; *out_exc_class / *out_exc_message are NULL when
+ *             no exception). Returns -1 when nothing is ready to drain.
+ *             The fiber stays alive until release().
+ *   release() tear down a drained task fiber (dtor closure/retval/exc,
+ *             recycle it). The Rust-owned args / op_array / static_vars
+ *             are NOT touched — the caller frees those after release
+ *             returns.
+ *   cancel()  request cancellation of an in-flight fiber. Returns 1 if
+ *             the fiber was found and flagged, 0 otherwise.
+ */
+typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *cancel_cell);
+typedef int (*oxphp_async_sched_tick_fn_t)(void);
+typedef int64_t (*oxphp_async_sched_poll_fn_t)(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message);
+typedef void (*oxphp_async_sched_release_fn_t)(int64_t fiber_id);
+typedef int (*oxphp_async_sched_cancel_fn_t)(int64_t fiber_id);
+typedef uint64_t (*oxphp_async_sched_drain_fn_t)(void);
+
+void oxphp_bridge_set_async_sched_callbacks(
+    oxphp_async_sched_spawn_fn_t spawn,
+    oxphp_async_sched_tick_fn_t tick,
+    oxphp_async_sched_poll_fn_t poll,
+    oxphp_async_sched_release_fn_t release,
+    oxphp_async_sched_cancel_fn_t cancel,
+    oxphp_async_sched_drain_fn_t drain);
+
+int64_t oxphp_bridge_async_spawn(
+    void *op_array, void *static_vars, void *this_ptr,
+    uint32_t argc, void *args, void *cancel_cell);
+int     oxphp_bridge_async_tick(void);
+int64_t oxphp_bridge_async_poll_completed(
+    void **out_retval, const char **out_exc_class, const char **out_exc_message);
+void    oxphp_bridge_async_release(int64_t fiber_id);
+int     oxphp_bridge_async_cancel(int64_t fiber_id);
+uint64_t oxphp_bridge_async_drain_output(void);
 
 /* ─── Shared wrapper cross-thread helpers ────────────────────
  *

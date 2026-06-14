@@ -1,0 +1,4 @@
+# profile: asyncob
+# description: Async worker discards background-task output buffer at idle
+
+async/test_async_output_idle_drain

@@ -182,6 +182,14 @@ pub struct Metrics {
     /// in `cleanup_outstanding_promises_callback`). Watch this counter
     /// to size that risk.
     async_tasks_stranded: AtomicU64,
+    /// Total bytes of background-task output discarded at worker idle
+    /// (echo/print inside an async task has no client). Monotonic counter.
+    async_output_discarded_bytes: AtomicU64,
+
+    /// Live process-global async in-flight bound (`queued + running`).
+    /// Wired only in server mode (the async pool), so it renders the gauge
+    /// pair lazily — absent when no pool is running.
+    async_inflight: std::sync::OnceLock<Arc<crate::executor::async_fiber::InFlightCounter>>,
 
     // ── Per-worker observability (supervisor-driven) ──
     /// Age of the in-flight request per worker, in microseconds.
@@ -293,6 +301,8 @@ impl Metrics {
             async_tasks_cancelled: AtomicU64::new(0),
             async_tasks_rejected: AtomicU64::new(0),
             async_tasks_stranded: AtomicU64::new(0),
+            async_output_discarded_bytes: AtomicU64::new(0),
+            async_inflight: std::sync::OnceLock::new(),
             worker_request_age_us: mk_vec(),
             worker_long_running_total: mk_vec(),
             worker_stuck_total_io: mk_vec(),
@@ -475,6 +485,11 @@ impl Metrics {
         self.async_tasks_stranded.fetch_add(n, Ordering::Relaxed);
     }
 
+    pub fn async_output_discarded(&self, n: u64) {
+        self.async_output_discarded_bytes
+            .fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn workers_current(&self) -> usize {
         self.workers_current.load(Ordering::Relaxed)
     }
@@ -485,6 +500,10 @@ impl Metrics {
 
     pub fn worker_metrics(&self) -> Option<&Arc<WorkerMetrics>> {
         self.worker_metrics.get()
+    }
+
+    pub fn set_async_inflight(&self, inflight: Arc<crate::executor::async_fiber::InFlightCounter>) {
+        self.async_inflight.set(inflight).ok();
     }
 
     pub fn uptime(&self) -> Duration {
@@ -866,6 +885,40 @@ impl Metrics {
                 "oxphp_async_tasks_stranded_total {}",
                 self.async_tasks_stranded.load(Ordering::Relaxed)
             );
+        }
+
+        let async_discarded = self.async_output_discarded_bytes.load(Ordering::Relaxed);
+        if async_discarded > 0 {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_output_discarded_bytes_total Bytes of async-task output discarded at worker idle (echo in an async task has no client)."
+            );
+            let _ = writeln!(
+                out,
+                "# TYPE oxphp_async_output_discarded_bytes_total counter"
+            );
+            let _ = writeln!(
+                out,
+                "oxphp_async_output_discarded_bytes_total {async_discarded}"
+            );
+        }
+
+        // Live in-flight gauge pair — rendered whenever the async pool wired its
+        // counter, independent of whether any task has been dispatched yet.
+        if let Some(c) = self.async_inflight.get() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_in_flight Async tasks currently queued or running."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_in_flight gauge");
+            let _ = writeln!(out, "oxphp_async_tasks_in_flight {}", c.current());
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_async_tasks_in_flight_limit Maximum concurrent async tasks (ASYNC_MAX_FIBERS times worker count)."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_async_tasks_in_flight_limit gauge");
+            let _ = writeln!(out, "oxphp_async_tasks_in_flight_limit {}", c.limit());
         }
 
         // ── Worker Mode Metrics ──
@@ -1459,5 +1512,45 @@ mod tests {
         assert!(prom.contains("oxphp_async_tasks_failed_total 1"));
         assert!(prom.contains("oxphp_async_tasks_cancelled_total 1"));
         assert!(prom.contains("oxphp_async_tasks_rejected_total 1"));
+    }
+
+    #[test]
+    fn test_async_in_flight_gauge() {
+        use crate::executor::async_fiber::InFlightCounter;
+        let m = Metrics::new();
+        let inflight = Arc::new(InFlightCounter::new(16));
+        assert!(inflight.try_acquire());
+        assert!(inflight.try_acquire()); // current = 2
+        m.set_async_inflight(inflight);
+
+        let prom = m.to_prometheus();
+        assert!(prom.contains("# TYPE oxphp_async_tasks_in_flight gauge"));
+        assert!(prom.contains("oxphp_async_tasks_in_flight 2"));
+        assert!(prom.contains("# TYPE oxphp_async_tasks_in_flight_limit gauge"));
+        assert!(prom.contains("oxphp_async_tasks_in_flight_limit 16"));
+    }
+
+    #[test]
+    fn test_no_async_inflight_no_gauge() {
+        let m = Metrics::new();
+        let prom = m.to_prometheus();
+        assert!(!prom.contains("oxphp_async_tasks_in_flight"));
+    }
+
+    #[test]
+    fn test_async_output_discarded_metric() {
+        let m = Metrics::new();
+        m.async_output_discarded(4096);
+        m.async_output_discarded(1000);
+        let prom = m.to_prometheus();
+        assert!(prom.contains("# TYPE oxphp_async_output_discarded_bytes_total counter"));
+        assert!(prom.contains("oxphp_async_output_discarded_bytes_total 5096"));
+    }
+
+    #[test]
+    fn test_no_async_output_discarded_no_line() {
+        let m = Metrics::new();
+        let prom = m.to_prometheus();
+        assert!(!prom.contains("oxphp_async_output_discarded_bytes_total"));
     }
 }

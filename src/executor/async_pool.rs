@@ -97,6 +97,40 @@ impl Drop for AsyncWorkerPool {
     }
 }
 
+/// A task fiber currently in flight (suspended at an await/sleep or completing)
+/// in an async worker. Tracked by fiber id so the driver can deliver the result
+/// and propagate cancellation.
+#[cfg(feature = "php")]
+struct InFlight {
+    result_tx: tokio::sync::oneshot::Sender<crate::async_types::AsyncResult>,
+    /// Shared with the promise: its `cancelled` flag is flipped when the awaiter
+    /// gives up (await timeout). The driver then asks the scheduler to unwind the
+    /// suspended fiber instead of letting it run to completion unobserved. Held
+    /// here so the allocation (and the fiber's borrowed pointer into its
+    /// `cancelled` cell) stays alive until the fiber is released and drained.
+    cancelled: Arc<crate::async_types::CancelShared>,
+}
+
+/// Returns the in-flight permit a dequeued task holds (reserved at dispatch) on
+/// drop unless `committed`. The worker creates one per task; every early-exit
+/// path from task handling gives the permit back, while the spawn-and-insert
+/// path commits it so the `InFlight` entry owns it and `drain_completed`
+/// releases it at completion. Mirrors the dispatch-side guard so the
+/// process-global counter stays balanced across both halves of a task's life.
+#[cfg(feature = "php")]
+struct WorkerPermitGuard {
+    committed: bool,
+}
+
+#[cfg(feature = "php")]
+impl Drop for WorkerPermitGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            crate::php::sapi::async_inflight_release();
+        }
+    }
+}
+
 /// Main loop for each async worker thread.
 ///
 /// Each worker initialises TSRM, performs a single `php_request_startup()`,
@@ -113,7 +147,6 @@ fn async_worker_thread(
     use crate::bridge::ffi;
     use crate::php::{bindings, sapi};
     use std::ffi::c_void;
-    use std::os::raw::c_char;
 
     let thread_name = std::thread::current()
         .name()
@@ -152,178 +185,390 @@ fn async_worker_thread(
         return;
     }
 
+    // Capture this worker thread's &EG(vm_interrupt) so a CPU-bound task fiber
+    // can be interrupted cross-thread by an awaiter that times out (Path B).
+    // The address is stable for the thread's lifetime once the request is up.
+    let worker_interrupt_addr = unsafe {
+        ffi::oxphp_capture_vm_interrupt();
+        ffi::oxphp_bridge_vm_interrupt_addr() as usize
+    };
+
     tracing::info!(worker = %thread_name, "Async worker thread started");
 
-    // 3. Task loop
+    // 3. Task loop — fiber-driven.
+    //
+    // Each received task is spawned into a scheduler fiber, which runs to its
+    // first suspend (await / sleep / channel) or to completion. The driver
+    // then ticks suspended fibers and drains any that completed, serialising
+    // their result and releasing the fiber. Several tasks can be in-flight at
+    // once when they suspend, so we track each pending result by fiber id.
+    use std::collections::HashMap;
+
+    let mut in_flight: HashMap<i64, InFlight> = HashMap::new();
     let mut tasks_executed: u64 = 0;
+    let mut warned_output = false;
+    // Set once shutdown is observed with fibers still in flight: the drain has
+    // until this instant to finish before stragglers are abandoned.
+    let mut shutdown_drain_deadline: Option<std::time::Instant> = None;
+
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
+        let shutting_down = shutdown.load(Ordering::Relaxed);
 
-        let task = match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok(t) => t,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-        };
-
-        // Check if the task was cancelled before we even start
-        if task.cancelled.load(Ordering::Relaxed) {
-            free_task_args(&task);
-            free_op_array_buf(&task);
-            let _ = task.result_tx.send(AsyncResult {
-                success: false,
-                serialized_value: std::ptr::null_mut(),
-                serialized_value_len: 0,
-                exception_class: Some("OxPHP\\Async\\AsyncException".into()),
-                exception_message: Some("Task cancelled before execution".into()),
-                keepalive: None,
+        // Exit only once every in-flight fiber is drained. On shutdown we stop
+        // accepting new work but keep ticking and cancelling suspended fibers so
+        // their PHP stacks unwind (finally / destructors run), awaiters receive a
+        // result, and in-flight permits are released — instead of abandoning the
+        // fibers. Bounded by a short deadline so a task that refuses to unwind
+        // (e.g. heavy work in a finally block) can't hang shutdown forever.
+        if shutting_down {
+            if in_flight.is_empty() {
+                break;
+            }
+            let deadline = *shutdown_drain_deadline.get_or_insert_with(|| {
+                std::time::Instant::now() + std::time::Duration::from_secs(2)
             });
-            if let Some(ref m) = metrics {
-                m.async_task_cancelled();
+            if std::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    worker = id,
+                    abandoned = in_flight.len(),
+                    "async shutdown drain timed out; abandoning in-flight fibers"
+                );
+                break;
             }
-            continue;
+            // Cancel every still-running fiber so the scheduler unwinds it on the
+            // next tick. Re-issued each iteration to catch a fiber that re-parks
+            // (the resume clears its cancel flag).
+            for &fiber_id in in_flight.keys() {
+                unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
+            }
         }
 
-        // Reset PHP state between tasks (clear errors, output buffers, etc.)
-        unsafe { ffi::oxphp_async_reset() };
-
-        // Deserialize args on THIS thread's heap (correct emalloc)
-        let zval_size = unsafe { ffi::oxphp_zval_size() };
-        let local_args = if task.argc > 0 && !task.serialized_args.is_null() {
-            let layout = std::alloc::Layout::from_size_align(zval_size * task.argc as usize, 8)
-                .expect("invalid layout for args");
-            let buf = unsafe { std::alloc::alloc_zeroed(layout) };
-            if buf.is_null() {
-                free_task_args(&task);
-                let _ = task.result_tx.send(AsyncResult {
-                    success: false,
-                    serialized_value: std::ptr::null_mut(),
-                    serialized_value_len: 0,
-                    exception_class: Some("RuntimeException".into()),
-                    exception_message: Some("Failed to allocate args buffer".into()),
-                    keepalive: None,
-                });
-                continue;
+        // Block for new work only when idle; when fibers are in flight, poll
+        // non-blocking so we keep driving them to completion.
+        let maybe_task = if shutting_down {
+            None
+        } else if in_flight.is_empty() {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(t) => Some(t),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            let rc = unsafe {
-                ffi::oxphp_portable_deserialize(
-                    task.serialized_args,
-                    task.serialized_args_len,
-                    task.argc,
-                    buf as *mut c_void,
-                )
-            };
-            if rc != 0 {
-                unsafe { std::alloc::dealloc(buf, layout) };
-                free_task_args(&task);
-                let _ = task.result_tx.send(AsyncResult {
-                    success: false,
-                    serialized_value: std::ptr::null_mut(),
-                    serialized_value_len: 0,
-                    exception_class: Some("RuntimeException".into()),
-                    exception_message: Some("Failed to deserialize arguments".into()),
-                    keepalive: None,
-                });
-                continue;
-            }
-            // Free the serialized buffer now that we've deserialized
-            unsafe { ffi::oxphp_portable_free(task.serialized_args) };
-            buf as *mut c_void
         } else {
-            // Free empty serialized buffer if present
-            if !task.serialized_args.is_null() {
-                unsafe { ffi::oxphp_portable_free(task.serialized_args) };
+            match rx.try_recv() {
+                Ok(t) => Some(t),
+                Err(crossbeam_channel::TryRecvError::Empty) => None,
+                // No new tasks will arrive, but keep draining in-flight fibers.
+                Err(crossbeam_channel::TryRecvError::Disconnected) => None,
             }
-            std::ptr::null_mut()
         };
 
-        // Deserialize static_vars (closure use-vars) on THIS thread's heap
-        let local_static_vars =
-            if !task.serialized_static_vars.is_null() && task.serialized_static_vars_len > 0 {
-                let mut ht_ptr: *mut c_void = std::ptr::null_mut();
-                let rc = unsafe {
-                    ffi::oxphp_portable_deserialize_ht(
-                        task.serialized_static_vars,
-                        task.serialized_static_vars_len,
-                        &mut ht_ptr,
-                    )
-                };
-                unsafe { ffi::oxphp_portable_free(task.serialized_static_vars) };
-                if rc != 0 || ht_ptr.is_null() {
-                    free_local_args(local_args, task.argc, zval_size);
+        let mut progressed = false;
+
+        if let Some(task) = maybe_task {
+            progressed = true;
+            let zval_size = unsafe { ffi::oxphp_zval_size() };
+
+            // The dequeued task holds one in-flight permit (reserved at
+            // dispatch). Return it on any early exit from the block below; on
+            // the spawn-and-insert path we commit so the InFlight entry owns it
+            // and drain_completed releases it once the task completes.
+            let mut task_permit = WorkerPermitGuard { committed: false };
+
+            'task: {
+                // Cancelled before we even start? (Acquire pairs with the
+                // awaiter's Release store of the flag.)
+                if task.cancelled.cancelled.load(Ordering::Acquire) {
+                    free_task_args(&task);
+                    free_op_array_buf(&task);
                     let _ = task.result_tx.send(AsyncResult {
                         success: false,
                         serialized_value: std::ptr::null_mut(),
                         serialized_value_len: 0,
-                        exception_class: Some("RuntimeException".into()),
-                        exception_message: Some("Failed to deserialize static vars".into()),
+                        exception_class: Some("OxPHP\\Async\\AsyncException".into()),
+                        exception_message: Some("Task cancelled before execution".into()),
                         keepalive: None,
                     });
-                    continue;
+                    if let Some(ref m) = metrics {
+                        m.async_task_cancelled();
+                    }
+                    break 'task;
                 }
-                ht_ptr
-            } else {
-                if !task.serialized_static_vars.is_null() {
+
+                // Reset PHP state before a task only when the worker is idle —
+                // doing it while other fibers are suspended would clobber their
+                // output buffers / error state. Concurrent tasks share the
+                // worker's superglobals, as in the previous synchronous model.
+                if in_flight.is_empty() {
+                    unsafe { ffi::oxphp_async_reset() };
+                }
+
+                // Deserialize args on THIS thread's heap (correct emalloc)
+                let local_args = if task.argc > 0 && !task.serialized_args.is_null() {
+                    let layout =
+                        std::alloc::Layout::from_size_align(zval_size * task.argc as usize, 8)
+                            .expect("invalid layout for args");
+                    let buf = unsafe { std::alloc::alloc_zeroed(layout) };
+                    if buf.is_null() {
+                        free_task_args(&task);
+                        let _ = task.result_tx.send(AsyncResult {
+                            success: false,
+                            serialized_value: std::ptr::null_mut(),
+                            serialized_value_len: 0,
+                            exception_class: Some("RuntimeException".into()),
+                            exception_message: Some("Failed to allocate args buffer".into()),
+                            keepalive: None,
+                        });
+                        break 'task;
+                    }
+                    let rc = unsafe {
+                        ffi::oxphp_portable_deserialize(
+                            task.serialized_args,
+                            task.serialized_args_len,
+                            task.argc,
+                            buf as *mut c_void,
+                        )
+                    };
+                    if rc != 0 {
+                        unsafe { std::alloc::dealloc(buf, layout) };
+                        free_task_args(&task);
+                        let _ = task.result_tx.send(AsyncResult {
+                            success: false,
+                            serialized_value: std::ptr::null_mut(),
+                            serialized_value_len: 0,
+                            exception_class: Some("RuntimeException".into()),
+                            exception_message: Some("Failed to deserialize arguments".into()),
+                            keepalive: None,
+                        });
+                        break 'task;
+                    }
+                    // Free the serialized buffer now that we've deserialized
+                    unsafe { ffi::oxphp_portable_free(task.serialized_args) };
+                    buf as *mut c_void
+                } else {
+                    // Free empty serialized buffer if present
+                    if !task.serialized_args.is_null() {
+                        unsafe { ffi::oxphp_portable_free(task.serialized_args) };
+                    }
+                    std::ptr::null_mut()
+                };
+
+                // Deserialize static_vars (closure use-vars) on THIS thread's heap
+                let local_static_vars = if !task.serialized_static_vars.is_null()
+                    && task.serialized_static_vars_len > 0
+                {
+                    let mut ht_ptr: *mut c_void = std::ptr::null_mut();
+                    let rc = unsafe {
+                        ffi::oxphp_portable_deserialize_ht(
+                            task.serialized_static_vars,
+                            task.serialized_static_vars_len,
+                            &mut ht_ptr,
+                        )
+                    };
                     unsafe { ffi::oxphp_portable_free(task.serialized_static_vars) };
+                    if rc != 0 || ht_ptr.is_null() {
+                        free_local_args(local_args, task.argc, zval_size);
+                        let _ = task.result_tx.send(AsyncResult {
+                            success: false,
+                            serialized_value: std::ptr::null_mut(),
+                            serialized_value_len: 0,
+                            exception_class: Some("RuntimeException".into()),
+                            exception_message: Some("Failed to deserialize static vars".into()),
+                            keepalive: None,
+                        });
+                        break 'task;
+                    }
+                    ht_ptr
+                } else {
+                    if !task.serialized_static_vars.is_null() {
+                        unsafe { ffi::oxphp_portable_free(task.serialized_static_vars) };
+                    }
+                    std::ptr::null_mut()
+                };
+
+                // Publish this worker's interrupt address into the shared cancel
+                // state so a timed-out awaiter can break into this fiber if it
+                // goes CPU-bound (Path B). `cancel_cell` is a stable pointer into
+                // that same allocation — the scheduler stores it on the fiber and
+                // the interrupt handler reads it to decide whether to unwind. The
+                // allocation outlives the fiber via InFlight (inserted below).
+                // Release: publishes the address to the awaiter's Acquire load
+                // in kick_worker_interrupt, so a timed-out awaiter never reads a
+                // stale 0 and skips the kick on weakly-ordered hardware.
+                task.cancelled
+                    .worker_interrupt
+                    .store(worker_interrupt_addr, Ordering::Release);
+                let cancel_cell = &task.cancelled.cancelled as *const std::sync::atomic::AtomicBool
+                    as *mut c_void;
+
+                // Spawn the task into a scheduler fiber. The closure is
+                // reconstructed and run to its first suspend or completion
+                // inside the call; args / static_vars / op_array are consumed
+                // there, so free them immediately afterwards.
+                let fiber_id = unsafe {
+                    ffi::oxphp_bridge_async_spawn(
+                        task.op_array_buf as *const c_void,
+                        local_static_vars,
+                        task.this_ptr,
+                        task.argc,
+                        local_args,
+                        cancel_cell,
+                    )
+                };
+
+                free_local_args(local_args, task.argc, zval_size);
+                if !local_static_vars.is_null() {
+                    unsafe { ffi::oxphp_portable_free_ht(local_static_vars) };
                 }
-                std::ptr::null_mut()
-            };
+                free_op_array_buf(&task);
 
-        // Execute the closure via the C bridge (zend_try protected)
-        let mut exc_class: *mut c_char = std::ptr::null_mut();
-        let mut exc_message: *mut c_char = std::ptr::null_mut();
+                if fiber_id < 0 {
+                    // At per-worker fiber capacity (or allocation failure).
+                    let _ = task.result_tx.send(AsyncResult {
+                        success: false,
+                        serialized_value: std::ptr::null_mut(),
+                        serialized_value_len: 0,
+                        exception_class: Some("OxPHP\\Async\\AsyncException".into()),
+                        exception_message: Some("Async worker at fiber capacity".into()),
+                        keepalive: None,
+                    });
+                    if let Some(ref m) = metrics {
+                        m.async_task_failed();
+                    }
+                    break 'task;
+                }
 
-        // Allocate a zval for the return value
-        let retval_layout =
-            std::alloc::Layout::from_size_align(zval_size, 8).expect("invalid zval layout");
-        let retval_buf = unsafe { std::alloc::alloc_zeroed(retval_layout) };
-        if retval_buf.is_null() {
-            // Free local args (on this thread's heap — safe)
-            free_local_args(local_args, task.argc, zval_size);
-            let _ = task.result_tx.send(AsyncResult {
-                success: false,
-                serialized_value: std::ptr::null_mut(),
-                serialized_value_len: 0,
-                exception_class: Some("RuntimeException".into()),
-                exception_message: Some("Failed to allocate return value buffer".into()),
-                keepalive: None,
-            });
-            continue;
+                in_flight.insert(
+                    fiber_id,
+                    InFlight {
+                        result_tx: task.result_tx,
+                        cancelled: task.cancelled.clone(),
+                    },
+                );
+                // The InFlight entry now owns the permit; drain releases it.
+                task_permit.committed = true;
+            }
         }
 
-        let rc = unsafe {
-            ffi::oxphp_execute_async_task(
-                task.op_array_buf as *const c_void,
-                local_static_vars as *const c_void,
-                task.this_ptr,
-                task.argc,
-                local_args,
-                retval_buf as *mut c_void,
+        // Drive suspended fibers, then drain any that completed.
+        let had_fibers = !in_flight.is_empty();
+        if had_fibers {
+            // Propagate cancellation: a promise whose awaiter has given up
+            // (await timeout) flips its cancel flag. Ask the scheduler to
+            // unwind the still-suspended fiber rather than run it to
+            // completion with no one waiting for the result.
+            for (&fiber_id, entry) in in_flight.iter() {
+                // Acquire pairs with the awaiter's Release store of the flag.
+                if entry.cancelled.cancelled.load(Ordering::Acquire) {
+                    unsafe { ffi::oxphp_bridge_async_cancel(fiber_id) };
+                }
+            }
+
+            unsafe { ffi::oxphp_bridge_async_tick() };
+            if drain_completed(&mut in_flight, &metrics, &mut tasks_executed) {
+                progressed = true;
+            }
+        }
+
+        // The worker just went idle: a background task may have left output in
+        // the shared PHP output buffer (and the Rust RESPONSE buffer). No fiber
+        // is running now, so it is safe to discard it and reclaim the memory.
+        if had_fibers && in_flight.is_empty() {
+            let discarded = unsafe { ffi::oxphp_bridge_async_drain_output() }
+                + crate::php::sapi::clear_response_output() as u64;
+            if discarded > 0 {
+                if let Some(ref m) = metrics {
+                    m.async_output_discarded(discarded);
+                }
+                if !warned_output {
+                    warned_output = true;
+                    tracing::warn!(
+                        worker = id,
+                        bytes = discarded,
+                        "async task wrote output that has no client; discarded \
+                         (remove echo/print from async task bodies)"
+                    );
+                }
+            }
+        }
+
+        // When fibers are suspended but nothing was ready and no new task
+        // arrived, back off briefly to avoid a busy spin (timers are ms-grained).
+        if !progressed && !in_flight.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    // 4. Shutdown
+    unsafe { bindings::php_request_shutdown(std::ptr::null_mut()) };
+
+    tracing::info!(
+        worker = %thread_name,
+        tasks_executed,
+        "Async worker thread exiting"
+    );
+}
+
+/// Drain every task fiber that has completed: serialize its result, send it to
+/// the awaiting thread, and release the fiber. Returns true if at least one
+/// fiber was drained.
+#[cfg(feature = "php")]
+fn drain_completed(
+    in_flight: &mut std::collections::HashMap<i64, InFlight>,
+    metrics: &Option<Arc<Metrics>>,
+    tasks_executed: &mut u64,
+) -> bool {
+    use crate::async_types::AsyncResult;
+    use crate::bridge::ffi;
+    use std::ffi::c_void;
+    use std::os::raw::c_char;
+
+    let mut drained = false;
+    loop {
+        let mut retval_ptr: *mut c_void = std::ptr::null_mut();
+        let mut exc_class: *const c_char = std::ptr::null();
+        let mut exc_message: *const c_char = std::ptr::null();
+        let fiber_id = unsafe {
+            ffi::oxphp_bridge_async_poll_completed(
+                &mut retval_ptr,
                 &mut exc_class,
                 &mut exc_message,
             )
         };
+        if fiber_id < 0 {
+            break;
+        }
 
-        let result = if rc == 0 {
-            // Success — portable-serialize the retval for safe cross-thread transfer
+        let result = if !exc_class.is_null() {
+            // Task threw — copy the (fiber-owned) exception strings; the
+            // extension frees them on release.
+            let class_str = unsafe { cstr_ptr_to_string(exc_class) };
+            let message_str = unsafe { cstr_ptr_to_string(exc_message) };
+            AsyncResult {
+                success: false,
+                serialized_value: std::ptr::null_mut(),
+                serialized_value_len: 0,
+                exception_class: class_str,
+                exception_message: message_str,
+                keepalive: None,
+            }
+        } else {
+            // Success — portable-serialize the return value (a *zval into the
+            // fiber's storage) for safe cross-thread transfer. Pin any nested
+            // `Shared\*` entries the value references BEFORE release: the
+            // serialized bytes carry only tag-7 ids and the retval zval is the
+            // entries' last strong ref, so the resolve must run while release
+            // has not yet dtor'd it. The keepalive rides the result and drops
+            // only after the awaiting fiber deserializes it.
             let mut ser_buf: *mut u8 = std::ptr::null_mut();
             let mut ser_len: usize = 0;
             let ser_rc = unsafe {
                 ffi::oxphp_portable_serialize(
-                    retval_buf as *const c_void,
-                    1, // single return value
+                    retval_ptr as *const c_void,
+                    1,
                     &mut ser_buf,
                     &mut ser_len,
                 )
             };
-            // Pin any nested `Shared\*` entries the return value references
-            // BEFORE freeing the retval zval below. The serialized bytes carry
-            // only tag-7 ids; the retval zval is the entries' last strong ref,
-            // so the resolve must run while it still holds them — otherwise a
-            // fire-and-forget `Shared\*` is freed here and the awaiting fiber
-            // re-resolves a dead id to NULL. The keepalive rides the result and
-            // drops only after the fiber deserializes (in await_dispatch_callback).
             let keepalive: Option<Box<dyn std::any::Any + Send>> =
                 if ser_rc == 0 && !ser_buf.is_null() {
                     #[cfg(feature = "plugin-shared")]
@@ -338,12 +583,6 @@ fn async_worker_thread(
                 } else {
                     None
                 };
-
-            // Free the original retval contents (on this thread's heap — safe)
-            unsafe { ffi::oxphp_deep_free_zval(retval_buf as *mut c_void) };
-            // Free the Rust-allocated retval container
-            unsafe { std::alloc::dealloc(retval_buf, retval_layout) };
-
             if ser_rc != 0 || ser_buf.is_null() {
                 AsyncResult {
                     success: true,
@@ -363,36 +602,12 @@ fn async_worker_thread(
                     keepalive,
                 }
             }
-        } else {
-            // Failure — extract exception details from C-allocated strings
-            let class_str = unsafe { cstr_to_string_free(exc_class) };
-            let message_str = unsafe { cstr_to_string_free(exc_message) };
-
-            // Free the retval contents (may have been partially initialized)
-            unsafe { ffi::oxphp_deep_free_zval(retval_buf as *mut c_void) };
-            // Free the Rust-allocated retval container
-            unsafe { std::alloc::dealloc(retval_buf, retval_layout) };
-
-            AsyncResult {
-                success: false,
-                serialized_value: std::ptr::null_mut(),
-                serialized_value_len: 0,
-                exception_class: class_str,
-                exception_message: message_str,
-                keepalive: None,
-            }
         };
 
-        // Free local deserialized data (on this thread's heap — safe)
-        free_local_args(local_args, task.argc, zval_size);
-        if !local_static_vars.is_null() {
-            unsafe { ffi::oxphp_portable_free_ht(local_static_vars) };
-        }
+        // Release the fiber AFTER serialising (release dtors task_retval and
+        // the closure and recycles the fiber).
+        unsafe { ffi::oxphp_bridge_async_release(fiber_id) };
 
-        // Free the op_array copy (system malloc'd, thread-safe)
-        free_op_array_buf(&task);
-
-        // Track metrics
         if let Some(ref m) = metrics {
             if result.success {
                 m.async_task_completed();
@@ -400,21 +615,28 @@ fn async_worker_thread(
                 m.async_task_failed();
             }
         }
-
-        // Send result to awaiting thread
-        let _ = task.result_tx.send(result);
-
-        tasks_executed += 1;
+        if let Some(entry) = in_flight.remove(&fiber_id) {
+            let _ = entry.result_tx.send(result);
+            // Task is done — return the in-flight permit it held since dispatch.
+            crate::php::sapi::async_inflight_release();
+        }
+        *tasks_executed += 1;
+        drained = true;
     }
+    drained
+}
 
-    // 4. Shutdown
-    unsafe { bindings::php_request_shutdown(std::ptr::null_mut()) };
-
-    tracing::info!(
-        worker = %thread_name,
-        tasks_executed,
-        "Async worker thread exiting"
-    );
+/// Copy a NUL-terminated C string (owned by the extension) into an owned
+/// String without freeing it — the extension frees it on fiber release.
+///
+/// # Safety
+/// `ptr` must be null or a valid NUL-terminated C string.
+#[cfg(feature = "php")]
+unsafe fn cstr_ptr_to_string(ptr: *const std::os::raw::c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned())
 }
 
 /// Free the system-malloc'd op_array copy owned by an AsyncTask.
@@ -449,20 +671,6 @@ fn free_local_args(args: *mut std::ffi::c_void, argc: u32, zval_size: usize) {
             .expect("invalid layout");
         unsafe { std::alloc::dealloc(args as *mut u8, layout) };
     }
-}
-
-/// Convert a C `strdup`'d string to a Rust `Option<String>`, freeing the C allocation.
-///
-/// # Safety
-/// `ptr` must be null or a valid C string allocated with malloc/strdup.
-#[cfg(feature = "php")]
-unsafe fn cstr_to_string_free(ptr: *mut std::os::raw::c_char) -> Option<String> {
-    if ptr.is_null() {
-        return None;
-    }
-    let s = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
-    libc::free(ptr as *mut std::ffi::c_void);
-    Some(s)
 }
 
 #[cfg(test)]
