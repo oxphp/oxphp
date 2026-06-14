@@ -545,14 +545,32 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
         work_done = 1;
     }
 
-    /* 2. Check completed async awaits */
+    /* 2. Check completed async awaits (or expired per-call await deadlines). */
     {
+        /* Snapshot the clock once per tick, not per fiber. */
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
         oxphp_request_fiber *fiber = sched->fibers_head;
         while (fiber) {
             oxphp_request_fiber *next = fiber->next; /* save — finalize may unlink */
 
             if (fiber->suspend_reason == OXPHP_SUSPEND_AWAIT) {
-                if (oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
+                /* Resume when the awaited promise is ready or the fiber was
+                 * cancelled; otherwise unwind the await once its per-call
+                 * deadline elapses. Mirrors the task scheduler so a worker-mode
+                 * request fiber honours await($p, timeout) instead of blocking
+                 * until the promise settles — a ready result / cancellation
+                 * takes precedence over the deadline. */
+                bool ready = fiber->cancel_requested
+                             || oxphp_bridge_await_poll(fiber->suspend_data.promise_id);
+                bool deadline = !ready && fiber->await_deadline_ns != 0
+                                && now_ns >= fiber->await_deadline_ns;
+                if (deadline) {
+                    fiber->timed_out = true;
+                }
+                if (ready || deadline) {
                     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
                     oxphp_scheduler_resume_fiber(sched, fiber, NULL);
 
