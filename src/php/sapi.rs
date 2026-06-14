@@ -3417,6 +3417,32 @@ unsafe fn kick_worker_interrupt(cancelled: &CancelShared) {
     }
 }
 
+/// Strand a still-pending promise whose awaiter has abandoned it — e.g. an
+/// `await_all` that bailed out on timeout or a sibling's rejection, leaving the
+/// remaining members running on the pool with no one to receive their result.
+///
+/// Flips the cancel flag (so a suspended fiber unwinds at the next scheduler
+/// poll), kicks the running worker out of any CPU-bound loop (Path B), and
+/// stashes the receiver so `cleanup_outstanding_promises` drains it at RSHUTDOWN
+/// before releasing frozen captures — closing the same use-after-free window
+/// `await_race`/`await_any` guard for their stragglers.
+///
+/// No-op if the id is unknown, already completed, or already stranded (the
+/// promise is no longer in `PROMISE_MAP`), so it is safe to call over a range
+/// that includes promises already consumed by earlier awaits.
+///
+/// # Safety
+/// Calls into the C bridge (the interrupt kick); must run on a PHP worker thread.
+pub unsafe fn strand_and_cancel_promise(id: u64) {
+    if let Some((rx, cancelled)) = take_promise(id) {
+        cancelled
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        kick_worker_interrupt(&cancelled);
+        stash_stranded(id, rx, cancelled);
+    }
+}
+
 /// Rust-side callback invoked from C when PHP calls `oxphp_async_await()`.
 ///
 /// Blocks on the oneshot receiver until the async result arrives,
