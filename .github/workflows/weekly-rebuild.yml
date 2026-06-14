@@ -292,7 +292,10 @@ jobs:
           PHP_VERSION: ${{ matrix.php }}
         run: |
           set -eo pipefail
-          # Mirrors release.yml::php-suite scope. Keep in sync.
+          # Suites run against a fresh build of the released source checked out
+          # above. The list may name suites that only exist in newer versions;
+          # any suite file absent from an older released tag is skipped so this
+          # job stays green across every supported version.
           SUITES=(
             headers
             cookies
@@ -300,9 +303,17 @@ jobs:
             input
             pathinfo
             errors
+            async
+            async1
+            asynccap
+            asyncob
           )
           FAILED=()
           for suite in "${SUITES[@]}"; do
+            if [ ! -f "tests/suites/${suite}.txt" ]; then
+              echo "::notice::Suite ${suite} not present in this release — skipping"
+              continue
+            fi
             echo "::group::Suite: $suite"
             if ! ./tests/run_all.sh --no-build --suite="$suite"; then
               FAILED+=("$suite")
