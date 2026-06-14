@@ -45,8 +45,10 @@ static inline void oxphp_save_vm_state(oxphp_fiber_vm_state *state) {
     state->vm_stack = EG(vm_stack);
     state->vm_stack_top = EG(vm_stack_top);
     state->vm_stack_end = EG(vm_stack_end);
+    state->vm_stack_page_size = EG(vm_stack_page_size);
     state->current_execute_data = EG(current_execute_data);
     state->error_reporting = EG(error_reporting);
+    state->jit_trace_num = EG(jit_trace_num);
     state->bailout = EG(bailout);
     state->active_fiber = EG(active_fiber);
 }
@@ -55,8 +57,10 @@ static inline void oxphp_restore_vm_state(oxphp_fiber_vm_state *state) {
     EG(vm_stack) = state->vm_stack;
     EG(vm_stack_top) = state->vm_stack_top;
     EG(vm_stack_end) = state->vm_stack_end;
+    EG(vm_stack_page_size) = state->vm_stack_page_size;
     EG(current_execute_data) = state->current_execute_data;
     EG(error_reporting) = state->error_reporting;
+    EG(jit_trace_num) = state->jit_trace_num;
     EG(bailout) = state->bailout;
     EG(active_fiber) = state->active_fiber;
 }
@@ -137,6 +141,9 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
         EG(vm_stack_end) = EG(vm_stack)->end;
         EG(vm_stack_page_size) = ZEND_FIBER_VM_STACK_SIZE;
         EG(current_execute_data) = NULL;
+        /* Start uncoupled from any in-progress trace recording (upstream
+         * zend_fiber_execute does the same on coroutine entry). */
+        EG(jit_trace_num) = 0;
 
         /* Call the PHP handler with zend_try protection */
         zval retval;
@@ -673,6 +680,9 @@ static void task_fiber_coroutine(zend_fiber_transfer *transfer) {
         EG(vm_stack_end) = EG(vm_stack)->end;
         EG(vm_stack_page_size) = ZEND_FIBER_VM_STACK_SIZE;
         EG(current_execute_data) = NULL;
+        /* Start uncoupled from any in-progress trace recording (upstream
+         * zend_fiber_execute does the same on coroutine entry). */
+        EG(jit_trace_num) = 0;
 
         ZVAL_UNDEF(&fiber->task_retval);
 

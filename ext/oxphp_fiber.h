@@ -25,13 +25,21 @@ typedef enum {
 /* Replicates zend_fiber_vm_state from zend_fibers.c (internal/static).
  * The low-level fiber API (zend_fiber_switch_context) does NOT save VM state —
  * only the high-level API (zend_fiber_start/resume) does. We must do it
- * ourselves for each context switch. */
+ * ourselves for each context switch. Field set mirrors upstream; the
+ * ZEND_CHECK_STACK_LIMIT stack_base/stack_limit pair is the only exception —
+ * we handle those separately via fiber->saved_stack_* (estimated from the C
+ * stack pointer at coroutine entry, since the fiber stack struct is opaque). */
 typedef struct {
     zend_vm_stack vm_stack;
     zval *vm_stack_top;
     zval *vm_stack_end;
+    size_t vm_stack_page_size;
     zend_execute_data *current_execute_data;
     int error_reporting;
+    /* JIT tracing: nonzero while the tracing JIT is recording a trace. Must be
+     * saved/restored per fiber so a fiber that suspends mid-trace does not leak
+     * its in-progress trace number into another fiber's run (trace corruption). */
+    uint32_t jit_trace_num;
     JMP_BUF *bailout;
     zend_fiber *active_fiber;
 } oxphp_fiber_vm_state;
