@@ -208,16 +208,31 @@ fn main() -> Result<(), types::BoxError> {
             .enable_all()
             .build()?
     };
-    runtime.block_on(async_main(
+    let result = runtime.block_on(async_main(
         config,
-        executor,
+        Arc::clone(&executor),
         metrics,
         dispatcher,
         plugin_manager,
         async_pool,
         http_listener,
         internal_listener,
-    ))
+    ));
+
+    // Shutdown ordering is load-bearing. The PHP engine teardown
+    // (php_module_shutdown/sapi_shutdown/tsrm_shutdown) lives in
+    // SapiExecutor::drop and MUST run on the main thread — the same thread
+    // that called php_module_startup. Tokio tasks (HTTP serving + internal
+    // server) hold Arc<dyn ScriptExecutor> clones; if a task dropped the last
+    // reference on a worker thread, sapi_flush() would dereference a NULL SAPI
+    // context and crash the process during a graceful stop. Dropping the
+    // runtime first releases every task-held clone while this thread still
+    // owns one strong reference, so the executor's Drop is guaranteed to fire
+    // below, on the main thread.
+    drop(runtime);
+    drop(executor);
+
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
