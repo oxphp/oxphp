@@ -371,7 +371,7 @@ fn async_worker_thread(
                 let fiber_id = unsafe {
                     ffi::oxphp_bridge_async_spawn(
                         task.op_array_buf as *const c_void,
-                        local_static_vars as *mut c_void,
+                        local_static_vars,
                         task.this_ptr,
                         task.argc,
                         local_args,
