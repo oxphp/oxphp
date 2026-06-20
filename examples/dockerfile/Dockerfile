@@ -10,7 +10,7 @@
 # Prod:     Minimal runtime on bare alpine — no PHP CLI, no toolchain,
 #           no package manager clutter. Only the oxphp binary,
 #           libphp.so, required shared libraries, and your app code.
-#           Runs as www-data.
+#           Starts as root to bind :80/:443, then drops to www-data.
 # Prod-CLI: Short-lived image for migrations/artisan/maintenance.
 #           Run as `docker run --rm myapp:prod-cli php artisan migrate`.
 #           Keep out of the long-running serving path.
@@ -211,7 +211,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 # Base: alpine:${ALPINE_VERSION} — must match the alpine version
 #       baked into the OxPHP base image, otherwise musl/libc version
 #       skew can cause TLS corruption at startup.
-# User: www-data
+# User: starts as root, drops to www-data via `oxphp --user` after binding
 #
 # Size budget (smoke-tested on linux/arm64, without your app code):
 #   alpine rootfs         ~9 MB
@@ -317,11 +317,12 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 # Your app code
 COPY --chown=www-data:www-data . /var/www/html
 
-USER www-data
-
 EXPOSE 80 443
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 
-CMD ["oxphp"]
+# No `USER` directive: oxphp starts as root so it can bind the privileged
+# ports 80/443, then permanently drops to www-data via `--user` before any
+# traffic is served. A `USER www-data` here would block that bind instead.
+CMD ["oxphp", "serve", "--user=www-data"]
