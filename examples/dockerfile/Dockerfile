@@ -16,17 +16,21 @@
 #           Keep out of the long-running serving path.
 # ══════════════════════════════════════════════════════════════
 
-# Alpine version MUST match the one baked into the OxPHP image
-# (ghcr.io/oxphp/oxphp:0.3.0 is built on php:8.4-zts-alpine3.23).
-# A version mismatch changes the musl version behind the precompiled
-# libphp.so and the Rust-compiled oxphp binary, and can cause musl
-# TLS corruption or undefined-symbol errors at startup.
+# Pinned versions — single source of truth. The OxPHP image tag below is
+# derived from all three (canonical scheme: {ver}-php{minor}-alpine{alpine}),
+# so the PHP/Alpine versions of the OxPHP base image, the php-base stage, and
+# the prod runtime can never drift apart. That match matters: a mismatched
+# musl/PHP version behind the precompiled libphp.so and the Rust-compiled
+# oxphp binary can cause musl TLS corruption or undefined-symbol errors at
+# startup. Override any of them with --build-arg at build time.
+ARG OXPHP_VERSION=0.8.0
+ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
 # ══════════════════════════════════════════════════════════════
 # Stage: php-base — shared PHP extensions (pdo, intl)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine${ALPINE_VERSION} AS php-base
+FROM php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION} AS php-base
 
 RUN apk add --no-cache \
         icu-dev \
@@ -58,17 +62,18 @@ FROM composer:2 AS composer
 # ══════════════════════════════════════════════════════════════
 # Stage: oxphp — pull OxPHP artifacts
 #
-# For production hardening, pin by digest instead of tag:
-#   FROM ghcr.io/oxphp/oxphp:0.3.0@sha256:<digest> AS oxphp
-# Same applies to php:8.4-zts-alpine3.23 and composer:2 above —
-# tags are mutable, digests are not.
+# The tag is derived from the ARGs above, so its Alpine/PHP versions match the
+# php-base stage by construction. For production hardening, pin by digest
+# instead of tag (tags are mutable, digests are not):
+#   FROM ghcr.io/oxphp/oxphp:0.8.0-php8.4-alpine3.23@sha256:<digest> AS oxphp
+# The same applies to php:*-zts-alpine* and composer:2 above.
 # ══════════════════════════════════════════════════════════════
-FROM ghcr.io/oxphp/oxphp:0.3.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:${OXPHP_VERSION}-php${PHP_VERSION}-alpine${ALPINE_VERSION} AS oxphp
 
 # ══════════════════════════════════════════════════════════════
 # Target: dev
 #
-# Base: php:8.4-zts-alpine (PHP CLI available)
+# Base: php:${PHP_VERSION}-zts-alpine (PHP CLI available)
 # Extensions: pdo, intl, xdebug
 # OxPHP copied INTO this image
 # ══════════════════════════════════════════════════════════════
@@ -141,7 +146,7 @@ CMD ["oxphp"]
 # ad-hoc composer invocations. Run as `docker run --rm` or as a
 # Kubernetes Job — keep this image out of the serving path.
 #
-# Base:       php:8.4-zts-alpine + prod extensions (no OxPHP server)
+# Base:       php:${PHP_VERSION}-zts-alpine + prod extensions (no OxPHP server)
 # Extras:     Composer
 # User:       www-data
 # Entrypoint: inherited docker-php-entrypoint — pass the command at
@@ -217,9 +222,9 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 #   ---------------------------
 #   base total          ~76 MB
 #
-# For reference, the ghcr.io/oxphp/oxphp:0.3.0 base image is ~188 MB,
-# so this approach cuts ~60 % of the image size at the cost of an
-# explicit apk-deps list that must track PHP/Alpine version bumps.
+# For reference, the full ghcr.io/oxphp/oxphp base image is ~190 MB, so this
+# approach roughly halves the image size at the cost of an explicit apk-deps
+# list that must track PHP/Alpine version bumps.
 # ══════════════════════════════════════════════════════════════
 FROM alpine:${ALPINE_VERSION} AS prod
 
@@ -232,7 +237,7 @@ FROM alpine:${ALPINE_VERSION} AS prod
 #   ldd /usr/local/lib/libphp.so
 #   ldd /usr/local/lib/php/extensions/no-debug-zts-*/intl.so
 #   ldd /usr/local/lib/php/extensions/no-debug-zts-*/pdo_pgsql.so
-# inside the ghcr.io/oxphp/oxphp:0.3.0 image. Rerun after any PHP
+# inside the ghcr.io/oxphp/oxphp image you pull. Rerun after any PHP
 # or Alpine version bump and reconcile.
 #
 # Transitive curl/xml deps (xz-libs, c-ares, nghttp2, nghttp3, idn2,
