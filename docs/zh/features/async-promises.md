@@ -20,6 +20,7 @@ OxPHP 提供异步执行系统，在专用线程池（与 HTTP Worker 池相互�
 |----------|---------|-------------|
 | `ASYNC_WORKERS` | `0`（禁用） | 专用异步 Worker 线程数。设为 `0` 可完全禁用异步池 |
 | `ASYNC_QUEUE_CAPACITY` | `0`（自动） | 最大待处理异步任务数。为 `0` 时默认为 `ASYNC_WORKERS × 64` |
+| `ASYNC_MAX_FIBERS` | `256` | 每个 Worker 的并发异步任务 fiber 上限。进程级在途上限（排队 + 运行中）为 `ASYNC_MAX_FIBERS × ASYNC_WORKERS`；超出上限的分发会立即（非阻塞）以 `OxPHP\Async\AsyncException` 拒绝，因此 fan-out 组合不会死锁 |
 
 > **注意：** 异步池默认禁用（`ASYNC_WORKERS=0`）。池被禁用时，四个异步函数均已注册，但调用时会抛出 `OxPHP\Async\AsyncException`。将 `ASYNC_WORKERS` 设置为大于 `0` 的值即可启用后台执行。
 
@@ -195,6 +196,23 @@ oxphp_worker(function () {
 });
 ```
 
+## 组合（嵌套异步）
+
+异步任务自身也可以调用 `oxphp_async()` 并等待其结果。由于每个任务都在调度器 fiber 中运行，等待嵌套 Promise 会挂起*该任务自身*的 fiber，并释放其 Worker 去运行嵌套任务——因此任务可以在等待期间不占用 Worker 的情况下扇出（fan-out）到子任务。
+
+```php
+<?php
+$p = oxphp_async(function (): int {
+    // 在异步任务内部分发并等待
+    $inner = oxphp_async(fn () => 21);
+    return oxphp_async_await($inner) * 2;
+});
+
+$result = oxphp_async_await($p); // 42
+```
+
+`oxphp_async_await_all()`、`oxphp_async_await_race()` 和 `oxphp_async_await_any()` 同样可以在任务 fiber 内部调用。并发任务 fiber 的数量（排队 + 运行中）受 `ASYNC_MAX_FIBERS × ASYNC_WORKERS` 限制；超出上限的分发会立即以 `OxPHP\Async\AsyncException` 拒绝而非阻塞，因此扇出不会因等待自身占用的容量而死锁。
+
 ## 限制
 
 异步闭包在独立线程上运行，这对可以跨线程传递的数据施加了限制：
@@ -208,7 +226,6 @@ oxphp_worker(function () {
 
 其他限制：
 
-- **不支持嵌套异步** — 在异步闭包内调用 `oxphp_async()` 会抛出 `OxPHP\Async\AsyncException`
 - **仅限用户定义函数** — 闭包必须是用户定义的，不能是对内置函数的包装
 - **序列化开销** — 参数和返回值在线程边界间序列化。大数组或字符串会增加延迟
 - **普通 PHP 值不共享状态** — 每个异步 Worker 拥有独立的 PHP 环境。普通变量、数组和类实例会跨边界复制（或被拒绝）。使用[共享状态原语](../shared-state/shared-state.md)（`Shared\Counter`、`Shared\Map`、`Shared\Channel` 等）来传递在两个线程间都可见的引用
@@ -243,7 +260,7 @@ ASYNC_WORKERS=4
 
 ### "Failed to dispatch async task (pool full)"
 
-异步池正在运行，但所有队列槽位均已占满。
+异步池正在运行，但所有队列槽位均已占满，或已达到进程级在途上限（`ASYNC_MAX_FIBERS × ASYNC_WORKERS`，涵盖排队 + 运行中的任务）。两种情况在分发时都会抛出 `OxPHP\Async\AsyncException` 并递增 `oxphp_async_tasks_rejected_total`。
 
 **检查：** 验证池是否正在接受任务：
 
@@ -276,9 +293,9 @@ $promise = oxphp_async(function () use ($userId, $userName) { ... });
 
 **修复：** 使用 Worker 模式（`WORKER_MODE_ENABLED=true`），使 `oxphp_async_await()` 挂起 fiber 而不是阻塞线程。
 
-### 异步超时不会终止正在运行的任务
+### 超时会取消被放弃的任务
 
-`OxPHP\Async\TimeoutException` 在等待方抛出——闭包继续在异步池上运行，直到完成或请求结束。任务会在请求结束清理期间被取消。
+`OxPHP\Async\TimeoutException` 在截止时间到达的那一刻于等待方抛出。后台任务不再无人观察地继续运行：停在 `oxphp_sleep()` 中或挂起等待子 Promise 的任务会被恢复并展开（其 `finally` 块会执行），而从不让出的 CPU 密集型任务会在操作码边界被中断——因此取消是尽力而为、带有较小延迟上界的，而非瞬时完成。`oxphp_async_await_all()` 放弃的 Promise，以及 `oxphp_async_await_race()` / `oxphp_async_await_any()` 的落败者，都会被同样取消。仍然无法及时中断的任务会被*滞留*（stranded）——已取消，但在请求结束时排空，这可能将 `RSHUTDOWN` 延长数秒；请关注 `oxphp_async_tasks_stranded_total`。
 
 ## 最佳实践
 

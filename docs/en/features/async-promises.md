@@ -20,6 +20,7 @@ OxPHP provides an async execution system that runs PHP closures on a dedicated t
 |----------|---------|-------------|
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. Set to `0` to disable the async pool entirely |
 | `ASYNC_QUEUE_CAPACITY` | `0` (auto) | Maximum pending async tasks. When `0`, defaults to `ASYNC_WORKERS × 64` |
+| `ASYNC_MAX_FIBERS` | `256` | Per-worker cap on concurrent async task fibers. The process-global in-flight limit (queued + running tasks) is `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch past it is rejected immediately (non-blocking) with `OxPHP\Async\AsyncException`, so fan-out composition cannot deadlock waiting on capacity it holds |
 
 > **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\AsyncException` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
 
@@ -196,6 +197,23 @@ oxphp_worker(function () {
 });
 ```
 
+## Composition (Nested Async)
+
+An async task may itself call `oxphp_async()` and await the result. Because each task runs inside a scheduler fiber, awaiting a nested promise suspends the *task's* fiber and frees its worker to run the nested task — so a task can fan out to children without holding a worker while it waits.
+
+```php
+<?php
+$p = oxphp_async(function (): int {
+    // Dispatched and awaited from inside an async task
+    $inner = oxphp_async(fn () => 21);
+    return oxphp_async_await($inner) * 2;
+});
+
+$result = oxphp_async_await($p); // 42
+```
+
+`oxphp_async_await_all()`, `oxphp_async_await_race()`, and `oxphp_async_await_any()` may likewise be called from inside a task fiber. The number of concurrent task fibers (queued + running) is bounded by `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch that would exceed the cap is rejected immediately with `OxPHP\Async\AsyncException` instead of blocking, so a fan-out cannot deadlock by waiting on capacity it is itself holding.
+
 ## Limitations
 
 Async closures run on separate threads. This imposes restrictions on what data can cross the thread boundary:
@@ -209,7 +227,6 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 Additional constraints:
 
-- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\AsyncException`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
@@ -244,7 +261,7 @@ ASYNC_WORKERS=4
 
 ### "Failed to dispatch async task (pool full)"
 
-The async pool is running but all queue slots are occupied.
+The async pool is running but all queue slots are occupied, or the process-global in-flight cap (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`, covering queued + running tasks) has been reached. Both raise `OxPHP\Async\AsyncException` on dispatch and increment `oxphp_async_tasks_rejected_total`.
 
 **Check:** Verify the pool is accepting tasks:
 
@@ -277,9 +294,9 @@ In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP 
 
 **Fix:** Enable worker mode (`WORKER_MODE_ENABLED=true`) so that `oxphp_async_await()` suspends the fiber instead of blocking the thread.
 
-### Async timeout does not kill the running task
+### Timeouts cancel the abandoned task
 
-`OxPHP\Async\TimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
+`OxPHP\Async\TimeoutException` is raised on the await side the moment the deadline passes. The background task is no longer left running unobserved: a task parked in `oxphp_sleep()` or suspended awaiting a child promise is resumed and unwinds (its `finally` blocks run), and a CPU-bound task that never yields is interrupted at an opcode boundary — so cancellation is best-effort with a short latency bound, not instantaneous. The same cancellation applies to the promises `oxphp_async_await_all()` abandons and to the losers of `oxphp_async_await_race()` / `oxphp_async_await_any()`. A task that still cannot be interrupted in time is *stranded* — cancelled but drained at request end, which can extend `RSHUTDOWN` by up to a few seconds; watch `oxphp_async_tasks_stranded_total`.
 
 ## Best Practices
 

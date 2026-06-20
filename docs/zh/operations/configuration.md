@@ -187,6 +187,7 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 |----------|---------|-------------|
 | `ASYNC_WORKERS` | `0`（禁用） | 专用异步工作线程数。为 `0` 时，异步函数（`oxphp_async` 等）已注册但调用时抛出 `OxPHP\Async\AsyncException`。设为正整数可启用后台任务执行 |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | 异步队列中的最大待处理任务数。`0` = 自动（工作进程数 × 64） |
+| `ASYNC_MAX_FIBERS` | `256` | 每个 Worker 的并发异步任务 fiber 上限。进程级在途上限（排队 + 运行中）为 `ASYNC_MAX_FIBERS × ASYNC_WORKERS`；超出上限的分发会立即以 `OxPHP\Async\AsyncException` 拒绝，因此 fan-out 组合不会死锁 |
 
 异步工作进程池处理从 PHP 分发的即发即忘后台任务。它独立于 PHP 工作进程池，标准请求处理不需要它。
 
