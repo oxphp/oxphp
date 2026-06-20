@@ -142,8 +142,11 @@ curl http://localhost:9090/metrics
 | `oxphp_async_tasks_completed_total` | counter | Асинхронные задачи, завершившиеся успешно |
 | `oxphp_async_tasks_failed_total` | counter | Асинхронные задачи, завершившиеся с исключением |
 | `oxphp_async_tasks_cancelled_total` | counter | Отменённые асинхронные задачи |
-| `oxphp_async_tasks_rejected_total` | counter | Асинхронные задачи, отклонённые из-за переполнения очереди пула |
+| `oxphp_async_tasks_rejected_total` | counter | Асинхронные задачи, отклонённые при отправке — из-за переполнения очереди пула или достижения лимита in-flight (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) |
 | `oxphp_async_tasks_stranded_total` | counter | Воркеры, продолжившие работу после тайм-аута `await_race` / `await_any`. Каждая такая задача может продлить RSHUTDOWN до 5 секунд. |
+| `oxphp_async_tasks_in_flight` | gauge | Асинхронные задачи, сейчас находящиеся в очереди или выполняющиеся (публикуется после того, как пул подключит свой in-flight-счётчик) |
+| `oxphp_async_tasks_in_flight_limit` | gauge | Максимум одновременных асинхронных задач (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) |
+| `oxphp_async_output_discarded_bytes_total` | counter | Байты вывода асинхронных задач, отброшенные при простое воркера (`echo` в асинхронной задаче не имеет клиента-получателя) |
 
 ## Советы по дашборду Grafana
 

@@ -142,8 +142,11 @@ These metrics are only emitted when `ASYNC_WORKERS` is set to a non-zero value.
 | `oxphp_async_tasks_completed_total` | counter | Async tasks that completed successfully |
 | `oxphp_async_tasks_failed_total` | counter | Async tasks that threw an exception |
 | `oxphp_async_tasks_cancelled_total` | counter | Async tasks that were cancelled |
-| `oxphp_async_tasks_rejected_total` | counter | Async tasks rejected because the pool queue was full |
+| `oxphp_async_tasks_rejected_total` | counter | Async tasks rejected at dispatch — because the pool queue was full or the in-flight cap (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) was reached |
 | `oxphp_async_tasks_stranded_total` | counter | Workers left running past an `await_race` / `await_any` timeout. Each stranded task can extend RSHUTDOWN by up to 5 seconds. |
+| `oxphp_async_tasks_in_flight` | gauge | Async tasks currently queued or running (emitted once the pool wires its in-flight counter) |
+| `oxphp_async_tasks_in_flight_limit` | gauge | Maximum concurrent async tasks (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) |
+| `oxphp_async_output_discarded_bytes_total` | counter | Bytes of async-task output discarded at worker idle (an `echo` in an async task has no client to receive it) |
 
 ## Grafana Dashboard Tips
 

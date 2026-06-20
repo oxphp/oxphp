@@ -142,8 +142,11 @@ curl http://localhost:9090/metrics
 | `oxphp_async_tasks_completed_total` | counter | 成功完成的异步任务数 |
 | `oxphp_async_tasks_failed_total` | counter | 抛出异常的异步任务数 |
 | `oxphp_async_tasks_cancelled_total` | counter | 被取消的异步任务数 |
-| `oxphp_async_tasks_rejected_total` | counter | 因进程池队列已满而被拒绝的异步任务数 |
+| `oxphp_async_tasks_rejected_total` | counter | 在分发时被拒绝的异步任务数——因进程池队列已满，或达到在途上限（`ASYNC_MAX_FIBERS × ASYNC_WORKERS`） |
 | `oxphp_async_tasks_stranded_total` | counter | 超过 `await_race` / `await_any` 超时仍在运行的工作进程。每个滞留任务最多可延长 RSHUTDOWN 5 秒。 |
+| `oxphp_async_tasks_in_flight` | gauge | 当前排队或运行中的异步任务数（在池接入其在途计数器后才输出） |
+| `oxphp_async_tasks_in_flight_limit` | gauge | 并发异步任务的最大值（`ASYNC_MAX_FIBERS × ASYNC_WORKERS`） |
+| `oxphp_async_output_discarded_bytes_total` | counter | 在 Worker 空闲时丢弃的异步任务输出字节数（异步任务中的 `echo` 没有可接收的客户端） |
 
 ## Grafana 仪表板技巧
 
