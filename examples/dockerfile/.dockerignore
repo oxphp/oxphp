@@ -1,0 +1,36 @@
+# .dockerignore — copy this alongside the Dockerfile into your project root.
+#
+# It trims the build context and, more importantly, stops secrets, VCS
+# history, and local-only artifacts from leaking into the image through
+# `COPY . /var/www/html`.
+#
+# NOTE: vendor/ is intentionally NOT ignored — this template copies your
+# host-built tree as-is (it does not run `composer install` inside the
+# image). If you switch to an in-image `composer install`, add `vendor`
+# here so the host copy doesn't shadow the freshly resolved one.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Docker & CI definitions
+Dockerfile
+.dockerignore
+compose*.yml
+docker-compose*.yml
+.github
+
+# Secrets & local environment (keep the committed example)
+.env
+.env.*
+!.env.example
+
+# Front-end toolchain (not needed at runtime)
+node_modules
+
+# Editor / OS noise
+.idea
+.vscode
+*.swp
+.DS_Store

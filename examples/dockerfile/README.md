@@ -1,6 +1,6 @@
 # OxPHP — Example Dockerfile
 
-This is a **starting template** for building your own application image on top of the published OxPHP image. Copy `Dockerfile` into the root of your project and adapt it.
+This is a **starting template** for building your own application image on top of the published OxPHP image. Copy both `Dockerfile` and `.dockerignore` into the root of your project and adapt them. The `.dockerignore` keeps your VCS history, `.env` secrets, and local artifacts out of the image, which the `COPY . /var/www/html` steps would otherwise pull in.
 
 It is **not** the Dockerfile that builds the official `ghcr.io/oxphp/oxphp` image — that one lives in `docker/release/alpine/Dockerfile` and is for repository maintainers only.
 

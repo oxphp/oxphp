@@ -10,23 +10,27 @@
 # Prod:     Minimal runtime on bare alpine — no PHP CLI, no toolchain,
 #           no package manager clutter. Only the oxphp binary,
 #           libphp.so, required shared libraries, and your app code.
-#           Runs as www-data.
+#           Starts as root to bind :80/:443, then drops to www-data.
 # Prod-CLI: Short-lived image for migrations/artisan/maintenance.
 #           Run as `docker run --rm myapp:prod-cli php artisan migrate`.
 #           Keep out of the long-running serving path.
 # ══════════════════════════════════════════════════════════════
 
-# Alpine version MUST match the one baked into the OxPHP image
-# (ghcr.io/oxphp/oxphp:0.3.0 is built on php:8.4-zts-alpine3.23).
-# A version mismatch changes the musl version behind the precompiled
-# libphp.so and the Rust-compiled oxphp binary, and can cause musl
-# TLS corruption or undefined-symbol errors at startup.
+# Pinned versions — single source of truth. The OxPHP image tag below is
+# derived from all three (canonical scheme: {ver}-php{minor}-alpine{alpine}),
+# so the PHP/Alpine versions of the OxPHP base image, the php-base stage, and
+# the prod runtime can never drift apart. That match matters: a mismatched
+# musl/PHP version behind the precompiled libphp.so and the Rust-compiled
+# oxphp binary can cause musl TLS corruption or undefined-symbol errors at
+# startup. Override any of them with --build-arg at build time.
+ARG OXPHP_VERSION=0.8.0
+ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
 # ══════════════════════════════════════════════════════════════
 # Stage: php-base — shared PHP extensions (pdo, intl)
 # ══════════════════════════════════════════════════════════════
-FROM php:8.4-zts-alpine${ALPINE_VERSION} AS php-base
+FROM php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION} AS php-base
 
 RUN apk add --no-cache \
         icu-dev \
@@ -58,17 +62,18 @@ FROM composer:2 AS composer
 # ══════════════════════════════════════════════════════════════
 # Stage: oxphp — pull OxPHP artifacts
 #
-# For production hardening, pin by digest instead of tag:
-#   FROM ghcr.io/oxphp/oxphp:0.3.0@sha256:<digest> AS oxphp
-# Same applies to php:8.4-zts-alpine3.23 and composer:2 above —
-# tags are mutable, digests are not.
+# The tag is derived from the ARGs above, so its Alpine/PHP versions match the
+# php-base stage by construction. For production hardening, pin by digest
+# instead of tag (tags are mutable, digests are not):
+#   FROM ghcr.io/oxphp/oxphp:0.8.0-php8.4-alpine3.23@sha256:<digest> AS oxphp
+# The same applies to php:*-zts-alpine* and composer:2 above.
 # ══════════════════════════════════════════════════════════════
-FROM ghcr.io/oxphp/oxphp:0.3.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:${OXPHP_VERSION}-php${PHP_VERSION}-alpine${ALPINE_VERSION} AS oxphp
 
 # ══════════════════════════════════════════════════════════════
 # Target: dev
 #
-# Base: php:8.4-zts-alpine (PHP CLI available)
+# Base: php:${PHP_VERSION}-zts-alpine (PHP CLI available)
 # Extensions: pdo, intl, xdebug
 # OxPHP copied INTO this image
 # ══════════════════════════════════════════════════════════════
@@ -141,7 +146,7 @@ CMD ["oxphp"]
 # ad-hoc composer invocations. Run as `docker run --rm` or as a
 # Kubernetes Job — keep this image out of the serving path.
 #
-# Base:       php:8.4-zts-alpine + prod extensions (no OxPHP server)
+# Base:       php:${PHP_VERSION}-zts-alpine + prod extensions (no OxPHP server)
 # Extras:     Composer
 # User:       www-data
 # Entrypoint: inherited docker-php-entrypoint — pass the command at
@@ -206,7 +211,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 # Base: alpine:${ALPINE_VERSION} — must match the alpine version
 #       baked into the OxPHP base image, otherwise musl/libc version
 #       skew can cause TLS corruption at startup.
-# User: www-data
+# User: starts as root, drops to www-data via `oxphp --user` after binding
 #
 # Size budget (smoke-tested on linux/arm64, without your app code):
 #   alpine rootfs         ~9 MB
@@ -217,9 +222,9 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 #   ---------------------------
 #   base total          ~76 MB
 #
-# For reference, the ghcr.io/oxphp/oxphp:0.3.0 base image is ~188 MB,
-# so this approach cuts ~60 % of the image size at the cost of an
-# explicit apk-deps list that must track PHP/Alpine version bumps.
+# For reference, the full ghcr.io/oxphp/oxphp base image is ~190 MB, so this
+# approach roughly halves the image size at the cost of an explicit apk-deps
+# list that must track PHP/Alpine version bumps.
 # ══════════════════════════════════════════════════════════════
 FROM alpine:${ALPINE_VERSION} AS prod
 
@@ -232,7 +237,7 @@ FROM alpine:${ALPINE_VERSION} AS prod
 #   ldd /usr/local/lib/libphp.so
 #   ldd /usr/local/lib/php/extensions/no-debug-zts-*/intl.so
 #   ldd /usr/local/lib/php/extensions/no-debug-zts-*/pdo_pgsql.so
-# inside the ghcr.io/oxphp/oxphp:0.3.0 image. Rerun after any PHP
+# inside the ghcr.io/oxphp/oxphp image you pull. Rerun after any PHP
 # or Alpine version bump and reconcile.
 #
 # Transitive curl/xml deps (xz-libs, c-ares, nghttp2, nghttp3, idn2,
@@ -290,6 +295,20 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
+# Production opcache. OPcache is statically compiled into the PHP ZTS base
+# (no zend_extension line needed), so this only tunes it. The image is
+# immutable, so timestamp validation is disabled — no per-request stat(2) of
+# every script. Bump the buffers for a typical framework codebase. JIT is
+# left off (workload-dependent); enable it deliberately if you benchmark a win.
+RUN { \
+        echo "[opcache]"; \
+        echo "opcache.enable=1"; \
+        echo "opcache.validate_timestamps=0"; \
+        echo "opcache.interned_strings_buffer=16"; \
+        echo "opcache.max_accelerated_files=20000"; \
+        echo "opcache.memory_consumption=192"; \
+    } > /usr/local/etc/php/conf.d/opcache-prod.ini
+
 # Web root
 RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
@@ -298,11 +317,12 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 # Your app code
 COPY --chown=www-data:www-data . /var/www/html
 
-USER www-data
-
 EXPOSE 80 443
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
 
-CMD ["oxphp"]
+# No `USER` directive: oxphp starts as root so it can bind the privileged
+# ports 80/443, then permanently drops to www-data via `--user` before any
+# traffic is served. A `USER www-data` here would block that bind instead.
+CMD ["oxphp", "serve", "--user=www-data"]
