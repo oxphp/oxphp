@@ -295,6 +295,20 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
+# Production opcache. OPcache is statically compiled into the PHP ZTS base
+# (no zend_extension line needed), so this only tunes it. The image is
+# immutable, so timestamp validation is disabled — no per-request stat(2) of
+# every script. Bump the buffers for a typical framework codebase. JIT is
+# left off (workload-dependent); enable it deliberately if you benchmark a win.
+RUN { \
+        echo "[opcache]"; \
+        echo "opcache.enable=1"; \
+        echo "opcache.validate_timestamps=0"; \
+        echo "opcache.interned_strings_buffer=16"; \
+        echo "opcache.max_accelerated_files=20000"; \
+        echo "opcache.memory_consumption=192"; \
+    } > /usr/local/etc/php/conf.d/opcache-prod.ini
+
 # Web root
 RUN mkdir -p /var/www/html/public && chown -R www-data:www-data /var/www/html
 
