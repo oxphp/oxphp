@@ -91,6 +91,26 @@ fn main() -> Result<(), types::BoxError> {
         None => None,
     };
 
+    // Warn when the internal server is reachable off-host without an allow-list.
+    // The warning is private-aware and suppressed once INTERNAL_ALLOW_IPS is set,
+    // so it signals real exposure instead of firing for every deployment.
+    if let Some(listener) = &internal_listener {
+        if config.internal_allow_ips.is_none() {
+            let bound = listener.local_addr()?;
+            match config::classify_bind_exposure(bound.ip()) {
+                config::BindExposure::Loopback => {}
+                config::BindExposure::Private => tracing::info!(
+                    addr = %bound,
+                    "Internal server bound to a private address; set INTERNAL_ALLOW_IPS to restrict which hosts may reach /metrics and /config"
+                ),
+                config::BindExposure::Exposed => tracing::warn!(
+                    addr = %bound,
+                    "Internal server is reachable off-host with no INTERNAL_ALLOW_IPS set — /metrics and /config are exposed; set INTERNAL_ALLOW_IPS or bind a loopback address"
+                ),
+            }
+        }
+    }
+
     if let Some(target) = &serve_opts.drop_to {
         privdrop::drop_to(target)?;
     }

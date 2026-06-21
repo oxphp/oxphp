@@ -4,6 +4,16 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `INTERNAL_ALLOW_IPS`: a CIDR allow-list for the internal server. A peer outside the list receives `403` on `/metrics`, `/config`, and other internal paths — before any handler runs, so it cannot probe which paths exist. Health endpoints (`/health`, `/healthz`, `/readyz`, `/startupz` and their long forms) are always reachable so orchestrator and load-balancer health checks never break. Unset/empty allows all peers (the prior behavior). Loopback is not implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup. There is deliberately no bearer-token option: a token invites exposing the port "because it's protected"; the controls are network isolation plus this allow-list.
+
+### Changed
+
+- A port-only `INTERNAL_ADDR` (e.g. `:9090`) now binds `127.0.0.1` instead of failing to resolve; bind an explicit `0.0.0.0:9090` to expose the internal server off-host.
+- `/config` no longer reports `internal_addr` or `error_pages_dir` — deployment topology and filesystem paths that aided an attacker and were not needed by metrics scrapers.
+- The server warns at startup when the internal listener is reachable off-host (`0.0.0.0`, `::`, or a public address) and no `INTERNAL_ALLOW_IPS` is set; a private-interface bind logs an informational note instead, and the warning is suppressed once an allow-list is configured.
+
 ## [0.8.0] - 2026-06-13
 
 ### Migration from 0.7.0
