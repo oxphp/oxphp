@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -10,12 +11,46 @@ use hyper_util::rt::TokioIo;
 use hyper_util::server::conn::auto::Builder;
 use tokio::net::TcpListener;
 
-use crate::config::Config;
+use crate::config::{Config, IpAllowList};
 use crate::executor::ScriptExecutor;
 use crate::metrics::Metrics;
 use crate::plugin::handler::PluginInternalRequest;
 use crate::plugin::PluginManager;
 use crate::types::{full_body, ResponseBody};
+
+/// Health-probe paths that stay reachable regardless of `INTERNAL_ALLOW_IPS`:
+/// the probe source is the orchestrator/node, not the metrics scraper, so
+/// gating them would make a pod kill itself.
+const PROBE_PATHS: &[&str] = &[
+    "/health",
+    "/healthz",
+    "/health/liveness",
+    "/readyz",
+    "/health/readiness",
+    "/startupz",
+    "/health/startup",
+];
+
+/// Decide whether `peer_ip` may reach `path`. Probe paths are always allowed.
+/// Every other path is gated by `allow` when set; an unset/empty allow-list
+/// permits all peers (the prior behavior). Loopback is not special-cased — to
+/// keep localhost access, list `127.0.0.1/32` in `INTERNAL_ALLOW_IPS`.
+fn gate_allows(path: &str, peer_ip: IpAddr, allow: Option<&IpAllowList>) -> bool {
+    if PROBE_PATHS.contains(&path) {
+        return true;
+    }
+    match allow {
+        Some(list) => list.contains(peer_ip),
+        None => true,
+    }
+}
+
+fn forbidden_response() -> Response<ResponseBody> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .body(full_body(Bytes::from_static(b"403 Forbidden")))
+        .unwrap()
+}
 
 /// Run the internal HTTP server for health, metrics, and config endpoints.
 /// This server listens on a separate port and is only started when
@@ -34,13 +69,14 @@ pub async fn run_internal_server(
     tracing::info!(addr = %local_addr, "Internal server listening");
 
     loop {
-        let (stream, _remote) = match listener.accept().await {
+        let (stream, remote) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 tracing::error!(error = %e, "Internal server accept error");
                 continue;
             }
         };
+        let peer_ip = remote.ip();
 
         let metrics = Arc::clone(&metrics);
         let config = Arc::clone(&config);
@@ -56,7 +92,9 @@ pub async fn run_internal_server(
                 let pm = Arc::clone(&pm);
                 let shutdown = Arc::clone(&shutdown);
                 async move {
-                    handle_internal_request(req, &metrics, &config, &*executor, &pm, &shutdown)
+                    handle_internal_request(
+                        req, peer_ip, &metrics, &config, &*executor, &pm, &shutdown,
+                    )
                 }
             });
 
@@ -71,12 +109,20 @@ pub async fn run_internal_server(
 
 fn handle_internal_request(
     req: Request<Incoming>,
+    peer_ip: IpAddr,
     metrics: &Metrics,
     config: &Config,
     executor: &dyn ScriptExecutor,
     plugin_manager: &PluginManager,
     shutdown: &AtomicBool,
 ) -> Result<Response<ResponseBody>, Infallible> {
+    if !gate_allows(
+        req.uri().path(),
+        peer_ip,
+        config.internal_allow_ips.as_ref(),
+    ) {
+        return Ok(forbidden_response());
+    }
     let response = match req.uri().path() {
         "/health/liveness" | "/healthz" => liveness_response(),
         "/health/readiness" | "/readyz" => readiness_response(executor, plugin_manager, shutdown),
@@ -216,12 +262,21 @@ fn metrics_response(metrics: &Metrics, plugin_manager: &PluginManager) -> Respon
         .unwrap()
 }
 
-fn config_response(config: &Config, plugin_manager: &PluginManager) -> Response<ResponseBody> {
+/// Build the `/config` JSON, merging the plugin config blob and scrubbing
+/// topology/path details (`internal_addr`, `error_pages_dir`) that aid an
+/// attacker and are not needed by metrics scrapers.
+fn build_config_json(config: &Config, plugin_manager: &PluginManager) -> serde_json::Value {
     let mut body = config.to_json();
     if let Some(obj) = body.as_object_mut() {
         obj.insert("plugins".to_string(), plugin_manager.config_json());
+        obj.remove("internal_addr");
+        obj.remove("error_pages_dir");
     }
+    body
+}
 
+fn config_response(config: &Config, plugin_manager: &PluginManager) -> Response<ResponseBody> {
+    let body = build_config_json(config, plugin_manager);
     Response::builder()
         .status(StatusCode::OK)
         .header(http::header::CONTENT_TYPE, "application/json")
@@ -232,12 +287,62 @@ fn config_response(config: &Config, plugin_manager: &PluginManager) -> Response<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::IpAllowList;
     use crate::events::EventDispatcher;
     use crate::executor::stub::StubExecutor;
     use crate::executor::ScriptExecutor;
     use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth, PluginManager};
     use crate::types::ScriptRequest;
+    use std::net::IpAddr;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn test_gate_probe_paths_always_allowed() {
+        let allow = IpAllowList::from_spec("10.0.0.0/8");
+        let outsider: IpAddr = "203.0.113.5".parse().unwrap();
+        for p in [
+            "/health",
+            "/healthz",
+            "/health/liveness",
+            "/readyz",
+            "/health/readiness",
+            "/startupz",
+            "/health/startup",
+        ] {
+            assert!(gate_allows(p, outsider, Some(&allow)), "{p} must stay open");
+        }
+    }
+
+    #[test]
+    fn test_gate_allowed_peer_reaches_gated_path() {
+        let allow = IpAllowList::from_spec("10.0.0.0/8");
+        let peer: IpAddr = "10.1.2.3".parse().unwrap();
+        assert!(gate_allows("/metrics", peer, Some(&allow)));
+        assert!(gate_allows("/config", peer, Some(&allow)));
+    }
+
+    #[test]
+    fn test_gate_non_allowed_peer_blocked_on_gated_path() {
+        let allow = IpAllowList::from_spec("10.0.0.0/8");
+        let peer: IpAddr = "203.0.113.5".parse().unwrap();
+        assert!(!gate_allows("/metrics", peer, Some(&allow)));
+        assert!(!gate_allows("/config", peer, Some(&allow)));
+        assert!(!gate_allows("/__profiler", peer, Some(&allow)));
+    }
+
+    #[test]
+    fn test_gate_no_allowlist_allows_all() {
+        let peer: IpAddr = "203.0.113.5".parse().unwrap();
+        assert!(gate_allows("/metrics", peer, None));
+        assert!(gate_allows("/config", peer, None));
+    }
+
+    #[test]
+    fn test_gate_loopback_not_auto_allowed() {
+        let allow = IpAllowList::from_spec("10.0.0.0/8");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(!gate_allows("/metrics", peer, Some(&allow)));
+    }
 
     /// Executor that always reports unhealthy.
     struct UnhealthyExecutor;
@@ -266,6 +371,31 @@ mod tests {
         fn health(&self) -> PluginHealth {
             PluginHealth::Failed
         }
+    }
+
+    #[test]
+    fn test_config_json_scrubs_sensitive_keys() {
+        let mut config = Config::test_minimal();
+        config.internal_addr = Some("0.0.0.0:9090".to_string());
+        config.error_pages_dir = Some("/etc/oxphp/errors".to_string());
+        let pm = PluginManager::new();
+
+        let body = build_config_json(&config, &pm);
+        let obj = body.as_object().expect("config json is an object");
+
+        assert!(
+            !obj.contains_key("internal_addr"),
+            "internal_addr must be scrubbed"
+        );
+        assert!(
+            !obj.contains_key("error_pages_dir"),
+            "error_pages_dir must be scrubbed"
+        );
+        assert!(obj.contains_key("plugins"), "plugins block still present");
+        assert!(
+            obj.contains_key("listen_addr"),
+            "non-sensitive keys still present"
+        );
     }
 
     #[test]

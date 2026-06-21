@@ -246,7 +246,9 @@ flowchart TD
 |----------|-------------|
 | `GET /health` | JSON 格式健康状态（运行时长、请求数、连接数） |
 | `GET /metrics` | Prometheus 文本格式指标 |
-| `GET /config` | JSON 格式运行时配置（TLS 路径已脱敏） |
+| `GET /config` | JSON 格式运行时配置（TLS 路径已脱敏；不输出 `internal_addr` 和 `error_pages_dir`） |
+
+仅含端口的 `INTERNAL_ADDR`（例如 `:9090`）会绑定到 `127.0.0.1`；只有在需要对外暴露时才使用 `0.0.0.0:9090`。当监听器在未设置 `INTERNAL_ALLOW_IPS` 的情况下可从主机外访问时，服务器会在启动时发出警告。访问控制依靠网络隔离加上 `INTERNAL_ALLOW_IPS` CIDR 白名单——刻意不使用 bearer 令牌，因为令牌会诱使人们“因为有保护”而公开端口。健康探针始终可达，因此编排器的存活/就绪检查不会中断。
 
 ### 追踪管道（`plugin-otel` + `plugin-apm`）
 
@@ -312,7 +314,8 @@ flowchart LR
 | `DOCUMENT_ROOT` | `/var/www/html/public` | 静态文件服务的根目录路径 |
 | `ENTRY_FILE` | *(未设置)* | 唯一规范的入口脚本。未设置 = Traditional，`*.php` = Framework，非 `.php` = SPA。相对路径基于 `DOCUMENT_ROOT` 解析 |
 | `WORKER_MODE_ENABLED` | `false` | 启用持久化工作进程模式。要求 `ENTRY_FILE` 指向 `.php` 脚本 |
-| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置（例如 `0.0.0.0:9090`） |
+| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址，用于健康检查/指标/配置。仅含端口的值（如 `:9090`）绑定 `127.0.0.1`；使用 `0.0.0.0:9090` 才会对外暴露 |
+| `INTERNAL_ALLOW_IPS` | *(未设置)* | 允许访问 `/metrics`、`/config` 及其他内部路径的 CIDR 列表（逗号分隔）。健康端点（`/health`、`/healthz`、`/readyz`、`/startupz` 等）始终允许。为空 = 允许所有。loopback 不是隐式允许的——列出 `127.0.0.1/32` 以保留本机访问 |
 | `TLS_CERT` | *(未设置)* | TLS 证书 PEM 文件路径 |
 | `TLS_KEY` | *(未设置)* | TLS 私钥 PEM 文件路径 |
 | `SUPERGLOBALS_ENABLED` | `true` | 填充 `$_GET`、`$_POST`、`$_COOKIE`、`$_FILES`、`$_SERVER`；设为 `false` 时仅使用 `oxphp_http_request()` |

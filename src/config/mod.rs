@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
 pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny, RoutingModeKind};
-pub use proxy::TrustedProxyConfig;
+pub use proxy::{
+    classify_bind_exposure, parse_cidr_list, BindExposure, IpAllowList, TrustedProxyConfig,
+};
 pub use server::{H2Config, ServerConfig};
 pub use symlink_allow::SymlinkAllowList;
 pub use workers::{parse_php_workers, WorkerMode};
@@ -48,6 +50,7 @@ pub struct Config {
     pub max_connections: usize,
     pub drain_timeout_seconds: u64,
     pub internal_addr: Option<String>,
+    pub internal_allow_ips: Option<IpAllowList>,
     pub rate_limit: u32,
     pub rate_window_seconds: u64,
     pub tls_cert: Option<String>,
@@ -144,6 +147,19 @@ pub fn parse_duration(s: &str) -> Result<Option<u64>, String> {
     Ok(Some(num.saturating_mul(multiplier)))
 }
 
+/// Normalize `INTERNAL_ADDR`. A port-only form (`:9090`) binds loopback by
+/// default so the internal endpoints are not exposed off-host unless the
+/// operator opts in with an explicit address such as `0.0.0.0:9090`.
+fn normalize_internal_addr(addr: &str) -> String {
+    let trimmed = addr.trim();
+    if let Some(port) = trimmed.strip_prefix(':') {
+        if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+            return format!("127.0.0.1:{port}");
+        }
+    }
+    trimmed.to_string()
+}
+
 /// Resolve `static_max_age` from new and legacy env values.
 /// `new` is `STATIC_MAX_AGE`, `legacy` is the deprecated `STATIC_CACHE_TTL`.
 /// Both are expected to be non-empty (callers strip empty/unset upstream).
@@ -199,7 +215,9 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(30);
-        let internal_addr = std::env::var("INTERNAL_ADDR").ok();
+        let internal_addr = std::env::var("INTERNAL_ADDR")
+            .ok()
+            .map(|a| normalize_internal_addr(&a));
         let rate_limit = std::env::var("RATE_LIMIT")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -336,6 +354,9 @@ impl Config {
         let trusted_proxies = TrustedProxyConfig::from_env()
             .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
 
+        let internal_allow_ips = IpAllowList::from_env()
+            .map_err(|e| -> crate::types::BoxError { format!("INTERNAL_ALLOW_IPS: {e}").into() })?;
+
         let h2 = H2Config::from_env(worker_mode.max_worker_count());
 
         Ok(Self {
@@ -345,6 +366,7 @@ impl Config {
             max_connections,
             drain_timeout_seconds,
             internal_addr,
+            internal_allow_ips,
             rate_limit,
             rate_window_seconds,
             tls_cert,
@@ -390,6 +412,7 @@ impl Config {
             max_connections: 10_000,
             drain_timeout_seconds: 30,
             internal_addr: None,
+            internal_allow_ips: None,
             rate_limit: 0,
             rate_window_seconds: 60,
             tls_cert: None,
@@ -597,6 +620,24 @@ fn check_file(label: &str, path: &Path, errors: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_internal_addr_port_only_binds_loopback() {
+        assert_eq!(normalize_internal_addr(":9090"), "127.0.0.1:9090");
+        assert_eq!(normalize_internal_addr(" :9090 "), "127.0.0.1:9090");
+    }
+
+    #[test]
+    fn test_normalize_internal_addr_explicit_unchanged() {
+        assert_eq!(normalize_internal_addr("0.0.0.0:9090"), "0.0.0.0:9090");
+        assert_eq!(normalize_internal_addr("127.0.0.1:9090"), "127.0.0.1:9090");
+        assert_eq!(normalize_internal_addr("10.0.0.5:9090"), "10.0.0.5:9090");
+    }
+
+    #[test]
+    fn test_normalize_internal_addr_non_numeric_port_unchanged() {
+        assert_eq!(normalize_internal_addr(":abc"), ":abc");
+    }
 
     #[test]
     fn test_parse_duration_seconds() {

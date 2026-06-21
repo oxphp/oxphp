@@ -246,7 +246,9 @@ When `INTERNAL_ADDR` is set, a lightweight HTTP server starts on a separate port
 |----------|-------------|
 | `GET /health` | JSON health status (uptime, requests, connections) |
 | `GET /metrics` | Prometheus text format metrics |
-| `GET /config` | JSON runtime configuration (TLS paths redacted) |
+| `GET /config` | JSON runtime configuration (TLS paths redacted; `internal_addr` and `error_pages_dir` omitted) |
+
+A port-only `INTERNAL_ADDR` (e.g. `:9090`) binds loopback; bind `0.0.0.0:9090` only to expose it. When the listener is reachable off-host without `INTERNAL_ALLOW_IPS`, the server warns at startup. Access control is by network isolation plus the `INTERNAL_ALLOW_IPS` CIDR allow-list — there is no bearer token by design, since a token invites exposing the port "because it's protected." Health probes are always reachable so orchestrator liveness/readiness checks never break.
 
 ### Tracing pipeline (`plugin-otel` + `plugin-apm`)
 
@@ -312,7 +314,8 @@ The essentials — what most deployments need to get a service up:
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional, `*.php` = Framework, non-`.php` = SPA. Resolved against `DOCUMENT_ROOT` |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
-| `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config (e.g. `0.0.0.0:9090`) |
+| `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config. A port-only value like `:9090` binds `127.0.0.1`; use `0.0.0.0:9090` to expose it off-host |
+| `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDRs allowed to reach `/metrics`, `/config` and other internal paths. Health endpoints (`/health`, `/healthz`, `/readyz`, `/startupz`, …) are always allowed. Empty = allow all. Loopback is not implicit — list `127.0.0.1/32` to keep localhost access |
 | `TLS_CERT` | *(unset)* | Path to TLS certificate PEM file |
 | `TLS_KEY` | *(unset)* | Path to TLS private key PEM file |
 | `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
