@@ -12,7 +12,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cargo fmt -- --check
 
   clippy:
@@ -32,13 +32,13 @@ jobs:
             flags: "--all-targets"
             php_id: "80500"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Rust version
         id: rust
         run: echo "hash=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -59,13 +59,13 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Rust version
         id: rust
         run: echo "hash=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -82,11 +82,11 @@ jobs:
     name: Licenses
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Detect license-relevant changes
         id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             cargo:
@@ -116,7 +116,7 @@ jobs:
       - name: Cache cargo-about install
         if: steps.filter.outputs.cargo == 'true'
         id: cache-about
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin/cargo-about
           key: cargo-about-0.6-${{ steps.rust.outputs.hash }}
@@ -128,7 +128,7 @@ jobs:
       # Registry cache so `cargo fetch` is a no-op on cache hit. Keyed by
       # Cargo.lock — same convention as the clippy/test jobs.
       - if: steps.filter.outputs.cargo == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
