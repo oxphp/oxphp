@@ -181,6 +181,30 @@ against real traffic. A good starting range is `0.0005..0.002`; higher
 values produce noticeable overhead, especially with
 `PROFILER_INTERNAL=true`.
 
+### 5.5. Excluding paths from sampling
+
+`PROFILER_SAMPLE_RATE` samples a random fraction of **all** requests — including
+framework self-traffic that pollutes the data. Symfony's web debug toolbar polls
+`/_wdt/{token}` and links to `/_profiler/{token}`; Laravel Debugbar and Telescope
+behave similarly. Keep these out of sampling with `PROFILER_EXCLUDE_PATHS`:
+
+```bash
+PROFILER_EXCLUDE_PATHS=/_profiler,/_profiler/**,/_wdt/**
+```
+
+Comma-separated glob patterns, same syntax as `PHP_DENY_PATHS`: `*` does not
+cross `/`, `**` does, and a leading `/` is optional. A pattern matches a bare
+path **or** its subtree only if you list both — `/_profiler/**` covers
+`/_profiler/x` but not the bare `/_profiler`, hence the two-pattern recipe above.
+Patterns match the request path as received — no percent-decoding or `..`
+normalization — so list the literal path your framework uses.
+
+> **Exclusion affects automatic sampling only.** A request carrying an explicit
+> trigger — the `x-oxphp-profile` header, the `OXPROF` cookie, or the `__oxprof`
+> query parameter — is **always** profiled, even on an excluded path. This lets
+> you deliberately profile `/_profiler` itself while keeping it out of background
+> sampling.
+
 ---
 
 ## 6. Configuration — full reference
@@ -190,6 +214,7 @@ values produce noticeable overhead, especially with
 | `PROFILER_ENABLED` | `false` | Master switch. `true` → plugin is loaded. |
 | `PROFILER_AUTH_TOKEN` | *(unset)* | Secret for triggers and bearer token for `/__profiler/*` routes. Empty string = "no token required" (any non-empty trigger value passes). **Never commit the token to the repo.** |
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`. Random sampling rate. |
+| `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. Explicit triggers still profile them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
 | `PROFILER_INTERNAL` | `false` | Observe **internal** C functions (`strlen`, `json_encode`, …). Full coverage, but **2–5× overhead**. Use surgically. |
 | `PROFILER_MAX_SPANS` | `50000` | Hard cap on tree size per request. When exceeded, further spans are marked `truncated` and not written. |
 | `PROFILER_MAX_DEPTH` | `256` | Hard cap on stack depth. |

@@ -53,8 +53,12 @@ pub fn should_profile<R: Rng + ?Sized>(
         });
     }
 
-    // Random sampling: no token required.
-    if cfg.sample_rate > 0.0 && rng.random::<f64>() < cfg.sample_rate {
+    // Random sampling: no token required. Excluded paths are never sampled
+    // (short-circuits before the rng draw); explicit triggers above bypass this.
+    if cfg.sample_rate > 0.0
+        && !path_excluded(req.uri, cfg)
+        && rng.random::<f64>() < cfg.sample_rate
+    {
         return Some(ActivationDecision {
             source: ActivationSource::SampleRate,
             mode: ProfilingMode::ProfileAll,
@@ -110,6 +114,29 @@ fn extract_query_param(uri: &http::Uri, key: &str) -> Option<String> {
             }
         })
     })
+}
+
+/// True when the request path matches `PROFILER_EXCLUDE_PATHS`. The leading
+/// `/` is stripped to match the normalized patterns. `None` set → never
+/// excluded. Consulted by `sample_rate` activation only — explicit triggers
+/// (header/cookie/query) bypass this and run first.
+///
+/// Matches the **raw** request path (`uri.path()`): unlike `PHP_DENY_PATHS`,
+/// which runs against the routing layer's sanitized path, this runs at
+/// RequestReceived — before routing — so no percent-decoding or `..`
+/// normalization has happened yet. Only the glob *syntax* is shared with
+/// `PHP_DENY_PATHS`, not the matched input. This is deliberate: exclusion only
+/// suppresses sampling overhead (not a security boundary), and framework
+/// toolbar paths (`/_wdt/...`, `/_profiler/...`) are literal ASCII that never
+/// arrive percent-encoded or with dot-segments.
+fn path_excluded(uri: &http::Uri, cfg: &ProfilerConfig) -> bool {
+    match &cfg.exclude_paths {
+        None => false,
+        Some(set) => {
+            let path = uri.path().strip_prefix('/').unwrap_or(uri.path());
+            set.is_match(path)
+        }
+    }
 }
 
 fn generate_run_id<R: Rng + ?Sized>(req: &PluginRequestView, rng: &mut R) -> String {
@@ -299,6 +326,78 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let fx = ViewFixture::new("/", HeaderMap::new(), vec![]);
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
+    }
+
+    fn config_excluding(patterns: &str) -> ProfilerConfig {
+        use globset::{GlobBuilder, GlobSetBuilder};
+        let mut b = GlobSetBuilder::new();
+        for p in patterns.split(',') {
+            let p = p.trim().strip_prefix('/').unwrap_or(p.trim());
+            b.add(GlobBuilder::new(p).literal_separator(true).build().unwrap());
+        }
+        ProfilerConfig {
+            enabled: true,
+            sample_rate: 1.0, // always fires unless excluded
+            exclude_paths: Some(std::sync::Arc::new(b.build().unwrap())),
+            ..ProfilerConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_excluded_path_not_sampled() {
+        let cfg = config_excluding("/_profiler/**");
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/_profiler/abc", HeaderMap::new(), vec![]);
+        assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
+    }
+
+    #[test]
+    fn test_non_excluded_path_is_sampled() {
+        let cfg = config_excluding("/_profiler/**");
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/app/dashboard", HeaderMap::new(), vec![]);
+        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("sampled");
+        assert_eq!(d.source, ActivationSource::SampleRate);
+    }
+
+    #[test]
+    fn test_explicit_header_bypasses_exclusion() {
+        let cfg = config_excluding("/_profiler/**");
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut h = HeaderMap::new();
+        h.insert("x-oxphp-profile", "anything".parse().unwrap());
+        let fx = ViewFixture::new("/_profiler/abc", h, vec![]);
+        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("explicit wins");
+        assert_eq!(d.source, ActivationSource::Header);
+    }
+
+    #[test]
+    fn test_exclusion_matches_raw_path_not_decoded() {
+        // Documented behavior: matching runs against the raw request path at
+        // RequestReceived (before routing), so no percent-decoding happens.
+        // An exact pattern keyed on the decoded form does not match the
+        // encoded request, so it is still sampled. Pins the intentional
+        // divergence from PHP_DENY_PATHS (which matches the sanitized path).
+        // (A `**` subtree pattern would still match the encoded segment as a
+        // literal — the gap only shows on exact patterns and on dot-segments.)
+        let cfg = config_excluding("/_profiler/abc");
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/_profiler/%61bc", HeaderMap::new(), vec![]);
+        assert!(should_profile(&fx.view(), &cfg, &mut rng).is_some());
+    }
+
+    #[test]
+    fn test_bare_excluded_path_needs_its_own_pattern() {
+        // "/_profiler/**" does NOT cover bare "/_profiler"; the recipe adds it.
+        let only_subtree = config_excluding("/_profiler/**");
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/_profiler", HeaderMap::new(), vec![]);
+        assert!(should_profile(&fx.view(), &only_subtree, &mut rng).is_some());
+
+        let with_bare = config_excluding("/_profiler,/_profiler/**");
+        let mut rng2 = StdRng::seed_from_u64(0);
+        let fx2 = ViewFixture::new("/_profiler", HeaderMap::new(), vec![]);
+        assert!(should_profile(&fx2.view(), &with_bare, &mut rng2).is_none());
     }
 
     #[test]

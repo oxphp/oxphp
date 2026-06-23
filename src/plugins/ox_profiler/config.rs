@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use globset::GlobSet;
+
 use crate::config::{parse_bool_opt, parse_bool_strict};
 use crate::plugin::{PluginContext, PluginError};
 
@@ -28,6 +30,13 @@ pub struct ProfilerConfig {
     pub export_format: String,
     pub export_auth_token: Option<Arc<str>>,
     pub export_xhgui: bool,
+    /// Compiled glob set from `PROFILER_EXCLUDE_PATHS`. `None` = no exclusions.
+    /// Matched paths are skipped by `sample_rate` activation only; explicit
+    /// triggers still profile them.
+    pub exclude_paths: Option<Arc<GlobSet>>,
+    /// Source patterns behind `exclude_paths`, surfaced in `/config` so an
+    /// operator can verify the exclusion compiled. Empty when none configured.
+    pub exclude_patterns: Vec<String>,
 }
 
 impl Default for ProfilerConfig {
@@ -47,6 +56,8 @@ impl Default for ProfilerConfig {
             export_format: "xhprof".into(),
             export_auth_token: None,
             export_xhgui: false,
+            exclude_paths: None,
+            exclude_patterns: Vec::new(),
         }
     }
 }
@@ -126,6 +137,12 @@ impl ProfilerConfig {
                 .map_err(|e| PluginError::Config(format!("PROFILER_EXPORT_XHGUI: {e}")))?,
         };
 
+        let (exclude_paths, exclude_patterns) =
+            match parse_exclude_paths(ctx.config("EXCLUDE_PATHS").as_deref())? {
+                Some((set, patterns)) => (Some(set), patterns),
+                None => (None, Vec::new()),
+            };
+
         Ok(Self {
             enabled,
             auth_token,
@@ -141,7 +158,29 @@ impl ProfilerConfig {
             export_format,
             export_auth_token,
             export_xhgui,
+            exclude_paths,
+            exclude_patterns,
         })
+    }
+}
+
+/// Parse `PROFILER_EXCLUDE_PATHS` into a compiled `GlobSet` plus its source
+/// patterns. Returns `Ok(None)` when unset or empty after trimming. Glob
+/// compilation is shared with `PHP_DENY_PATHS` via [`crate::config::compile_glob_csv`]
+/// so the two cannot drift apart in syntax.
+#[allow(clippy::type_complexity)]
+fn parse_exclude_paths(
+    raw: Option<&str>,
+) -> Result<Option<(Arc<GlobSet>, Vec<String>)>, PluginError> {
+    let raw = match raw {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    match crate::config::compile_glob_csv(raw, "PROFILER_EXCLUDE_PATHS")
+        .map_err(PluginError::Config)?
+    {
+        Some((set, patterns)) => Ok(Some((Arc::new(set), patterns))),
+        None => Ok(None),
     }
 }
 
@@ -182,5 +221,39 @@ mod tests {
         assert_eq!(parse_f64(Some("0.5"), 0.0), 0.5);
         assert_eq!(parse_f64(Some("2.0"), 0.0), 2.0);
         assert_eq!(parse_f64(None, 0.1), 0.1);
+    }
+
+    #[test]
+    fn test_exclude_paths_unset_is_none() {
+        assert!(parse_exclude_paths(None).unwrap().is_none());
+        assert!(parse_exclude_paths(Some("")).unwrap().is_none());
+        assert!(parse_exclude_paths(Some("  ,  ")).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_exclude_paths_glob_semantics() {
+        // Patterns match against the URI path with leading '/' stripped.
+        let (set, patterns) = parse_exclude_paths(Some("/_profiler,/_profiler/**,/_wdt/**"))
+            .unwrap()
+            .expect("some");
+        assert!(set.is_match("_profiler")); // bare path, covered by "/_profiler"
+        assert!(set.is_match("_profiler/abc123")); // subtree, covered by "/_profiler/**"
+        assert!(set.is_match("_wdt/token")); // "/_wdt/**"
+        assert!(!set.is_match("_profilerx")); // not a prefix match
+        assert!(!set.is_match("api/users"));
+        // Patterns are returned normalized (leading '/' stripped) for /config.
+        assert_eq!(patterns, vec!["_profiler", "_profiler/**", "_wdt/**"]);
+    }
+
+    #[test]
+    fn test_exclude_paths_single_star_does_not_cross_slash() {
+        let (set, _) = parse_exclude_paths(Some("/_wdt/*")).unwrap().expect("some");
+        assert!(set.is_match("_wdt/token"));
+        assert!(!set.is_match("_wdt/a/b"));
+    }
+
+    #[test]
+    fn test_exclude_paths_invalid_glob_errors() {
+        assert!(parse_exclude_paths(Some("/_wdt/[abc")).is_err());
     }
 }
