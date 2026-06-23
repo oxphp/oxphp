@@ -147,6 +147,42 @@ pub fn parse_duration(s: &str) -> Result<Option<u64>, String> {
     Ok(Some(num.saturating_mul(multiplier)))
 }
 
+/// Compile a comma-separated glob list into a `GlobSet` plus the normalized
+/// source patterns.
+///
+/// Each pattern is trimmed, empties are dropped, and a leading `/` is stripped
+/// so patterns match sanitized URI paths (whose leading `/` is also removed).
+/// Globs are built with `literal_separator(true)`: `*` does not cross `/`,
+/// `**` does. Returns `Ok(None)` when the list is empty after trimming.
+/// `label` names the source (e.g. an env var) for error messages.
+///
+/// Shared by `PHP_DENY_PATHS` and `PROFILER_EXCLUDE_PATHS` so their glob
+/// semantics cannot drift apart.
+pub(crate) fn compile_glob_csv(
+    raw: &str,
+    label: &str,
+) -> Result<Option<(globset::GlobSet, Vec<String>)>, String> {
+    let patterns: Vec<String> = raw
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.strip_prefix('/').unwrap_or(p).to_string())
+        .collect();
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    for p in &patterns {
+        let glob = globset::GlobBuilder::new(p)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| format!("{label} pattern {p:?}: {e}"))?;
+        builder.add(glob);
+    }
+    let set = builder.build().map_err(|e| format!("{label} build: {e}"))?;
+    Ok(Some((set, patterns)))
+}
+
 /// Normalize `INTERNAL_ADDR`. A port-only form (`:9090`) binds loopback by
 /// default so the internal endpoints are not exposed off-host unless the
 /// operator opts in with an explicit address such as `0.0.0.0:9090`.

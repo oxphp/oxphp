@@ -24,7 +24,7 @@ pub enum RoutingModeKind {
     Worker,
 }
 
-use globset::{GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 
 use crate::types::BoxError;
 
@@ -113,28 +113,11 @@ impl PhpDeny {
             RoutingModeKind::Traditional | RoutingModeKind::Spa => {}
         }
 
-        let patterns: Vec<String> = raw
-            .split(',')
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .map(normalize_pattern)
-            .collect();
-
-        if patterns.is_empty() {
-            return Ok(None);
-        }
-
-        let mut builder = GlobSetBuilder::new();
-        for p in &patterns {
-            let glob = globset::GlobBuilder::new(p)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| -> BoxError { format!("{source} pattern {p:?}: {e}").into() })?;
-            builder.add(glob);
-        }
-        let matcher = builder
-            .build()
-            .map_err(|e| -> BoxError { format!("{source} build: {e}").into() })?;
+        let (matcher, patterns) =
+            match super::compile_glob_csv(&raw, source).map_err(|e| -> BoxError { e.into() })? {
+                Some(v) => v,
+                None => return Ok(None),
+            };
 
         let fallback_raw = std::env::var("PHP_DENY_FALLBACK").unwrap_or_else(|_| "404".to_string());
         let fallback = parse_fallback(&fallback_raw, document_root, &matcher, &patterns)?;
@@ -199,11 +182,6 @@ impl PhpDeny {
             }
         }
     }
-}
-
-/// Strip the leading `/` so patterns match sanitized URIs (which have it stripped).
-fn normalize_pattern(p: &str) -> String {
-    p.strip_prefix('/').unwrap_or(p).to_string()
 }
 
 fn parse_fallback(
@@ -292,22 +270,11 @@ mod tests {
     use super::*;
 
     fn deny_with(patterns: &str) -> PhpDeny {
-        let patterns: Vec<String> = patterns
-            .split(',')
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .map(normalize_pattern)
-            .collect();
-        let mut builder = GlobSetBuilder::new();
-        for p in &patterns {
-            let glob = globset::GlobBuilder::new(p)
-                .literal_separator(true)
-                .build()
-                .unwrap();
-            builder.add(glob);
-        }
+        let (matcher, patterns) = super::super::compile_glob_csv(patterns, "PHP_DENY_PATHS")
+            .unwrap()
+            .unwrap();
         PhpDeny {
-            matcher: builder.build().unwrap(),
+            matcher,
             patterns,
             fallback: DenyFallback::Status(404),
         }

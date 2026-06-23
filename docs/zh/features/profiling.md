@@ -169,6 +169,25 @@ PROFILER_SAMPLE_RATE=0.001   # ≈ 1000 个请求中采 1 个
 推荐起始值 `0.0005..0.002`；再高会带来可察觉的开销，尤其是当
 `PROFILER_INTERNAL=true` 时。
 
+### 5.5. 从采样中排除路径
+
+`PROFILER_SAMPLE_RATE` 会随机采样**所有**请求——包括污染数据的框架自身流量。
+Symfony 的 Web Debug Toolbar 轮询 `/_wdt/{token}` 并链接到 `/_profiler/{token}`；
+Laravel Debugbar 和 Telescope 也类似。用 `PROFILER_EXCLUDE_PATHS` 把它们排除在采样之外：
+
+```bash
+PROFILER_EXCLUDE_PATHS=/_profiler,/_profiler/**,/_wdt/**
+```
+
+逗号分隔的 glob 模式，语法与 `PHP_DENY_PATHS` 相同：`*` 不跨越 `/`，`**` 跨越，
+开头的 `/` 可选。只有同时列出两者，才能既覆盖裸路径**又**覆盖其子树——
+`/_profiler/**` 匹配 `/_profiler/x` 但不匹配裸 `/_profiler`，因此有上面的双模式写法。
+模式按原样匹配请求路径——不做 percent 解码或 `..` 规范化——因此请填写框架实际使用的字面路径。
+
+> **排除仅影响自动采样。** 携带显式触发器（`x-oxphp-profile` 请求头、`OXPROF`
+> Cookie 或 `__oxprof` 查询参数）的请求**始终**会被分析，即使在被排除的路径上。
+> 这样你可以有意分析 `/_profiler` 本身，同时把它排除在后台采样之外。
+
 ---
 
 ## 6. 配置——完整参考
@@ -178,6 +197,7 @@ PROFILER_SAMPLE_RATE=0.001   # ≈ 1000 个请求中采 1 个
 | `PROFILER_ENABLED` | `false` | 主开关。`true` → 插件加载。 |
 | `PROFILER_AUTH_TOKEN` | *(未设)* | 触发器密钥及 `/__profiler/*` 路由的 Bearer 令牌。空字符串 = 「无需令牌」（任意非空触发值都通过）。**不要把令牌提交到仓库。** |
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`。随机采样率。 |
+| `PROFILER_EXCLUDE_PATHS` | *(未设)* | 逗号分隔的 glob 模式（`PHP_DENY_PATHS` 语法），从 `PROFILER_SAMPLE_RATE` 中排除。显式触发器仍会分析它们。示例：`/_profiler,/_profiler/**,/_wdt/**`。 |
 | `PROFILER_INTERNAL` | `false` | 观测**内部** C 函数（`strlen`、`json_encode` 等）。覆盖全面，但**额外开销 2–5 倍**。仅在需要时定点开启。 |
 | `PROFILER_MAX_SPANS` | `50000` | 单请求 Span 树大小硬上限。超出后后续 Span 被标记为 `truncated`，不再写入。 |
 | `PROFILER_MAX_DEPTH` | `256` | 栈深度硬上限。 |

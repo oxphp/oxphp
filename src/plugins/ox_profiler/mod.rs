@@ -352,6 +352,7 @@ impl Plugin for ProfilerPlugin {
         ctx.expose_config("enabled", true);
         ctx.expose_config("sample_rate", self.config.sample_rate);
         ctx.expose_config("auth_token_configured", self.config.auth_token.is_some());
+        ctx.expose_config("exclude_paths", self.config.exclude_patterns.clone());
 
         // Apply the per-request span cap to the C observer. Runs
         // only when the profiler is enabled — otherwise no spans are
