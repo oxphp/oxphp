@@ -17,7 +17,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 Если `INTERNAL_ADDR` не задан, внутренний сервер не запускается и конечные точки работоспособности недоступны.
 
-> **Примечание:** В продакшене привязывайтесь к `127.0.0.1`, если только внутренний сервер не защищён брандмауэром. Конечная точка `/config` раскрывает операционные детали, которые не должны быть публичными.
+> **Примечание:** Значение `INTERNAL_ADDR` только с портом (`:9090` или `9090`) привязывается к `127.0.0.1`; задайте явный `0.0.0.0:9090`, чтобы открыть внутренний сервер за пределами хоста. Когда он доступен извне хоста, ограничьте доступ через `INTERNAL_ALLOW_IPS` (allow-лист CIDR/IP — `/metrics`, `/config` и пути плагинов возвращают `403` узлам вне списка, при этом health-пробы остаются доступными); loopback не подразумевается неявно, поэтому укажите `127.0.0.1/32`, чтобы сохранить доступ с localhost. Сервер выводит предупреждение на старте, если слушатель открыт без заданного allow-листа.
 
 ## Пробы Kubernetes
 
@@ -100,7 +100,7 @@ curl http://localhost:9090/metrics
 
 ## GET /config
 
-Возвращает активную конфигурацию сервера в формате JSON. Пути к TLS-сертификату и ключу опускаются из соображений безопасности.
+Возвращает активную конфигурацию сервера в формате JSON. Пути к TLS-сертификату и ключу, `internal_addr` и `error_pages_dir` вычищаются из ответа из соображений безопасности.
 
 ```bash
 curl -s http://localhost:9090/config | jq .
@@ -118,12 +118,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -133,6 +131,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -140,7 +140,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Примечание:** Пути к TLS-сертификату и ключу опускаются. Булево поле `tls_enabled` указывает, активен ли TLS.
+> **Примечание:** Пути к TLS-сертификату и ключу никогда не выводятся (`tls_enabled` указывает, активен ли TLS), а `internal_addr` и `error_pages_dir` вычищаются из отдаваемого ответа.
 
 ## Интеграция с Kubernetes
 

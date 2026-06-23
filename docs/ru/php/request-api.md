@@ -452,7 +452,7 @@ interface UploadedFileInterface
     public function tmpPath(): string;
     public function error(): int;
     public function isValid(): bool;
-    public function moveTo(string $path): bool;
+    public function moveTo(string $destination): bool;
 }
 ```
 

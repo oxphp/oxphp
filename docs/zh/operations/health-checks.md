@@ -17,7 +17,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 当 `INTERNAL_ADDR` 未设置时，内部服务器不会启动，健康端点也不可用。
 
-> **注意：** 在生产环境中请绑定到 `127.0.0.1`，除非内部服务器部署在防火墙之后。`/config` 端点会暴露不应公开的运维详情。
+> **注意：** 仅含端口的 `INTERNAL_ADDR`（`:9090` 或 `9090`）绑定 `127.0.0.1`；要将内部服务器暴露到主机之外，需显式使用 `0.0.0.0:9090`。当其可在主机之外访问时，请用 `INTERNAL_ALLOW_IPS` 限制访问（这是一个 CIDR/IP 允许名单——名单之外的对端访问 `/metrics`、`/config` 和插件路径时收到 `403`，而健康探针始终可达）；回环地址不会隐式放行，需列出 `127.0.0.1/32` 以保留本机访问。若监听器被暴露而未设置允许名单，服务器会在启动时发出警告。
 
 ## Kubernetes 探针
 
@@ -100,7 +100,7 @@ curl http://localhost:9090/metrics
 
 ## GET /config
 
-以 JSON 格式返回服务器当前配置。出于安全考虑，TLS 证书和私钥路径会被省略。
+以 JSON 格式返回服务器当前配置。出于安全考虑，TLS 证书和私钥路径、`internal_addr` 和 `error_pages_dir` 会从响应中剔除。
 
 ```bash
 curl -s http://localhost:9090/config | jq .
@@ -118,12 +118,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -133,6 +131,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -140,7 +140,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **注意：** TLS 证书和私钥路径已省略。`tls_enabled` 布尔值表示 TLS 是否已启用。
+> **注意：** TLS 证书和私钥路径从不输出（`tls_enabled` 表示 TLS 是否处于启用状态），同时 `internal_addr` 和 `error_pages_dir` 也会从所提供的响应中剔除。
 
 ## Kubernetes 集成
 

@@ -259,11 +259,11 @@ Semantics worth noting:
 
 The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in the generic shared-registry endpoints:
 
-- **`GET /__ox_shared/summary`** includes a `Channel` bucket with count, bytes, ops, and `pending_total`.
-- **`GET /__ox_shared/entries?type=Channel`** lists channel entries with their registry IDs.
-- **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
+- **`GET /__ox_shared/summary`** includes a `Channel` bucket with `count`, `bytes`, and `ops`.
+- **`GET /__ox_shared/entries`** lists registry entries with their IDs (accepts a `limit` query parameter).
+- **`GET /__ox_shared/entry?id=<id>`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
-The `ops` counter (and the registry-wide `oxphp_shared_ops_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
+The `ops` counter (and the registry-wide `oxphp_shared_operations_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
 
 Prometheus exposition on `/metrics`:
 

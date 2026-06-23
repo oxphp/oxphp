@@ -249,7 +249,7 @@ fiber.stack_size = 512K
 - **Cooperative only** — CPU-bound code (tight loops, heavy computation) starves other fibers. There is no preemption
 - **Blocking I/O blocks the thread** — all blocking calls must be wrapped in `oxphp_async()` for true concurrency
 - **PHP's native `sleep()`/`usleep()` are not fiber-aware** — use `oxphp_sleep()`/`oxphp_usleep()`
-- **`oxphp_async_await_all()`, `oxphp_async_await_race()`, and `oxphp_async_await_any()` do not yield** — they currently block even inside a fiber. Use sequential `oxphp_async_await()` calls for fiber-friendly behavior
+- **`oxphp_async_await_race()` and `oxphp_async_await_any()` do not yield** — they currently block even inside a fiber. `oxphp_async_await_all()` *does* suspend the fiber while waiting, so it is fiber-friendly; for `race`/`any`, use sequential `oxphp_async_await()` calls if you need the thread to stay cooperative
 
 ## See Also
 

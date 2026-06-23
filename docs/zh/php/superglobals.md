@@ -18,12 +18,12 @@ OxPHP 遵循 CGI/1.1 规范，根据传入的 HTTP 请求构建 `$_SERVER`。进
 | `SCRIPT_FILENAME` | 正在执行的 PHP 脚本的绝对文件系统路径 | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | 通过 `DOCUMENT_ROOT` 环境变量配置的 Web 根目录 | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | 服务器标识符（包含运行中的 OxPHP 版本） | `OxPHP/0.8.0` |
-| `SERVER_PROTOCOL` | 始终为 `HTTP/1.1` | `HTTP/1.1` |
+| `SERVER_PROTOCOL` | 协商得到的 HTTP 协议版本 | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP 方法 | `GET` |
 | `REQUEST_URI` | 包含查询字符串的完整 URI | `/app?page=2` |
-| `SCRIPT_NAME` | 不含查询字符串的 URI 路径 | `/app` |
-| `DOCUMENT_URI` | `SCRIPT_NAME` 的别名，用于 nginx/PHP-FPM 兼容性 | `/app` |
-| `PHP_SELF` | 与 `SCRIPT_NAME` 相同 | `/app` |
+| `SCRIPT_NAME` | 相对于 `DOCUMENT_ROOT` 的已执行脚本路径——在 Framework 模式下即前端控制器，**而非**请求 URI | `/index.php` |
+| `DOCUMENT_URI` | `SCRIPT_NAME` 的别名，用于 nginx/PHP-FPM 兼容性 | `/index.php` |
+| `PHP_SELF` | `SCRIPT_NAME` 加上存在时的 `PATH_INFO`，否则等于 `SCRIPT_NAME` | `/index.php/user/42` |
 | `QUERY_STRING` | URI 的查询部分（不存在时为空字符串） | `page=2` |
 | `SERVER_NAME` | 来自 `Host` 请求头的主机名 | `example.com` |
 | `SERVER_PORT` | 来自 `Host` 请求头的端口 | `8080` |

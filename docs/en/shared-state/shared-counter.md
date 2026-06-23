@@ -119,7 +119,7 @@ See [Shared Observability](shared-observability.md) for the full tour. Quick ref
 
 - `GET /__ox_shared/entry?id=N` exposes `{ value, type: "Counter" }`.
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` gauge tracks the current value.
-- Registry-wide counters (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) cover Counter via the `type="Counter"` label.
+- Registry-wide counters (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) cover Counter via the `type="Counter"` label.
 
 ## When not to use
 

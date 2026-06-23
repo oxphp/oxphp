@@ -201,7 +201,7 @@ a future release. Wire new dashboards against `_count`.
 the deprecation window and will diverge when the alias is removed in
 a future release. Wire new dashboards against `_count`.
 
-`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | manual | shutdown | dead_owner`. The `dead_owner` label counts reclaim-on-panic events.
+`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | evict | shutdown`. `idle_timeout` is an automatic eviction of an idle slot, `evict` is an explicit `Pool::evict()` call, and `shutdown` is teardown at process exit.
 
 ### Counter / Flag / Once / Mutex
 
@@ -292,7 +292,7 @@ Artifacts land in `tests/soak/out/<timestamp>/`:
 - `metrics.csv` — one row per minute (unix ts, RSS, per-type entry counts, per-pool eviction counters, deadlock count, ops).
 - `server.log` — container stdout/stderr including any stale-handle or panic trails.
 - `wrk.out` / `wrk.err` — raw load-generator output.
-- `metrics.final` — the last `/metrics` scrape taken just before container teardown. Used to read `oxphp_shared_leaked_entries_at_shutdown_total`.
+- `metrics.final` — the last `/metrics` scrape taken just before container teardown. Used to confirm entry and byte counts have returned to baseline (no leaked Shared entries) after the load stops.
 - `verify.txt` — pass/fail report for the five exit criteria.
 
 Do **not** wire this into CI. A 24h run is not cheap and its purpose is pre-release confidence, not continuous validation.

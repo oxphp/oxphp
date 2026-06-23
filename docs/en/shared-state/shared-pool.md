@@ -49,7 +49,7 @@ final class Pool implements Shareable
 
 namespace OxPHP\Shared\Pool;
 
-final class Handle
+class Handle
 {
     public function get(): mixed;     // the underlying resource (throws after release)
     public function release(): void;  // return the slot now; idempotent; also runs on destruct
@@ -230,7 +230,7 @@ Exceptions thrown inside the factory propagate to the acquire caller unchanged a
 See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
-- `GET /__ox_shared/summary` counts Pool instances and aggregate `waiting_total`, `evicted_total`.
+- `GET /__ox_shared/summary` includes a `Pool` bucket with `count`, `bytes`, and `ops`. Per-pool gauges like `waiting` and the `evicted_total` counter are exposed on `/metrics` (below), not aggregated in the summary.
 - Prometheus metrics per pool:
   - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, total slots (in-use + idle).
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.

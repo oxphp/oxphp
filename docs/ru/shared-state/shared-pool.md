@@ -49,7 +49,7 @@ final class Pool implements Shareable
 
 namespace OxPHP\Shared\Pool;
 
-final class Handle
+class Handle
 {
     public function get(): mixed;     // нижележащий ресурс (бросает после release)
     public function release(): void;  // вернуть слот сейчас; идемпотентно; также выполняется на destruct
@@ -230,7 +230,7 @@ Idle-слоты вытесняются фоновым планировщиком
 Полную экскурсию см. в [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
-- `GET /__ox_shared/summary` считает экземпляры Pool и агрегированные `waiting_total`, `evicted_total`.
+- `GET /__ox_shared/summary` включает бакет `Pool` с `count`, `bytes` и `ops`. Per-pool gauge вроде `waiting` и counter `evicted_total` публикуются на `/metrics` (ниже), а не агрегируются в summary.
 - Prometheus-метрики per pool:
   - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, всего слотов (in-use + idle).
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.

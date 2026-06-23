@@ -170,7 +170,7 @@ oxphp_server_info(): array
 
 | 键 | 类型 | 描述 |
 |----|------|------|
-| `version` | `string` | 服务器版本（例如 `"0.1.0"`） |
+| `version` | `string` | 服务器版本（例如 `"0.8.0"`） |
 | `worker_id` | `int` | 与 `oxphp_worker_id()` 返回值相同 |
 | `request_time` | `float` | 请求开始时的 Unix 时间戳，精确到微秒 |
 | `worker_mode` | `bool` | 当前进程是否以 Worker 模式运行 |
@@ -181,7 +181,7 @@ oxphp_server_info(): array
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.1.0",
+//     "version"      => "0.8.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,
@@ -405,7 +405,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **参数：**
 - `$closure` — 要在异步 Worker 线程上运行的用户定义 `Closure`
-- `...$args` — 传递给闭包的参数。仅接受标量值（`null`、`bool`、`int`、`float`、`string`）及标量数组。对象和资源不能跨线程传递。
+- `...$args` — 传递给闭包的参数。接受标量值（`null`、`bool`、`int`、`float`、`string`）、标量数组，以及 `OxPHP\Shared\*` 实例（唯一允许跨线程边界传递的对象）。资源和任何非 `Shared` 对象都会被拒绝。
 
 **返回值：** 整数类型的 Promise ID。将其传递给 `oxphp_async_await()`、`oxphp_async_await_all()`、`oxphp_async_await_race()` 或 `oxphp_async_await_any()`。
 
@@ -992,7 +992,7 @@ OxPHP\Profile\resume();
 ## OxPHP\Profile\mark()
 
 ```php
-OxPHP\Profile\mark(string $label, array $attrs = []): void
+OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 ```
 
 为最顶部已打开的 span 附加一个 `Mark` 事件，可选附带属性表。当没有打开的 span 时是空操作（例如剖析未激活，或在任何已埋点帧之外的请求顶层调用 `mark()`）。
@@ -1129,12 +1129,12 @@ print_r($functions);
 //     [9]  => oxphp_sleep
 //     [10] => oxphp_usleep
 //     [11] => oxphp_worker
-//     [12] => oxphp_async
-//     [13] => oxphp_async_await
-//     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_race
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
+//     [12] => oxphp_register_decorator
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_race
+//     [17] => oxphp_async_await_any
 //     [18] => oxphp_apm_trace
 //     [19] => oxphp_apm_start
 //     [20] => oxphp_apm_end
@@ -1147,6 +1147,8 @@ print_r($functions);
 //     [27] => oxphp_apm_header
 // )
 ```
+
+> **注意：** 核心 SAPI 函数（直到 `oxphp_register_decorator`）排在最前；`oxphp_async_*` 与 `oxphp_apm_*` 系列——以及构建中编入剖析器时的 `OxPHP\Profile\*` SDK——由各自的插件在模块初始化期间追加。请将此列表视为示意：确切的函数集合与排序取决于哪些插件被编译进了该构建。
 
 ## 与 PHP-FPM 的兼容性
 

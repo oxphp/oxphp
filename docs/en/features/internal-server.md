@@ -26,7 +26,8 @@ OxPHP runs a separate HTTP server on a dedicated port for health checks, Prometh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *(unset)* | Address for the internal server. Not started when unset. Example: `127.0.0.1:9090` |
+| `INTERNAL_ADDR` | *(unset)* | Address for the internal server. Not started when unset. A port-only value (`:9090` or `9090`) binds `127.0.0.1`; use an explicit `0.0.0.0:9090` to expose it off-host. Example: `127.0.0.1:9090` |
+| `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDR/IP allow-list. Peers outside the list receive `403` on `/metrics`, `/config`, and `/__<plugin>/` paths; health probes always stay reachable. Unset/empty = allow all. Loopback is **not** implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup |
 
 ## Endpoints
 
@@ -106,12 +107,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -121,6 +120,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -128,7 +129,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-TLS certificate and key file paths are deliberately omitted from the output for security. Only the `tls_enabled` boolean is exposed.
+TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 
 ### Plugin Endpoints
 
@@ -183,13 +184,14 @@ startupProbe:
 
 ## Security
 
-The internal server has no built-in authentication or access control. To protect it:
+The internal server has no bearer-token authentication; access is controlled by where it binds and by `INTERNAL_ALLOW_IPS`. To protect it:
 
-- **Bind to localhost** — set `INTERNAL_ADDR=127.0.0.1:9090` so the port is only reachable from within the container or host
+- **Bind to localhost** — a port-only `INTERNAL_ADDR` (`:9090`) already binds `127.0.0.1`; an explicit `127.0.0.1:9090` keeps the port reachable only from within the container or host
+- **Set `INTERNAL_ALLOW_IPS`** when the listener must be reachable off-host — a CIDR/IP allow-list that returns `403` on `/metrics`, `/config`, and plugin paths to peers outside it, while health probes stay reachable. Loopback is not implicit, so include `127.0.0.1/32` if you still need localhost access. The server warns at startup if the listener is exposed off-host with no allow-list set
 - **Do not expose as a Kubernetes Service** — declare the port as a `containerPort` but do not create a Service for it. Kubernetes probes access container ports directly
 - **Use network policies** — restrict access at the network layer if the port must be exposed
 
-The `/config` endpoint reveals operational details (document root, rate limits, worker counts, timeout values). While TLS paths are redacted, consider whether this information should be accessible from outside the pod.
+The `/config` endpoint reveals operational details (document root, rate limits, worker counts, timeout values). TLS paths, `internal_addr`, and `error_pages_dir` are scrubbed, but consider whether the rest should be accessible from outside the pod.
 
 ## Docker Example
 

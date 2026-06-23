@@ -153,7 +153,7 @@ final class RedisCounterBackend implements CounterBackend
 
 语义差异：
 
-- `Map::compareAndSet` 重试循环（Shared\* 的原子 RMW 习惯用法）在 Redis 中必须变成服务端 Lua 脚本，或在 SQL 中使用 `SELECT ... FOR UPDATE`。普通 `HGET` + 计算 + `HSET` 失去原子性。`Map::setIfAbsent` 覆盖更简单的"仅插入一次"场景；注意它返回 `bool`，因此要读回值时，调用方需要在 `setIfAbsent` 之后再调用 `get`。
+- `Map::compareAndSet` 重试循环（Shared\* 的原子 RMW 习惯用法）在 Redis 中必须变成服务端 Lua 脚本，或在 SQL 中使用 `SELECT ... FOR UPDATE`。普通 `HGET` + 计算 + `HSET` 失去原子性。`Map::setIfAbsent` 覆盖更简单的"仅插入一次"场景；它返回**先前的**值（当键缺失且值被插入时返回 `null`），因此返回 `null` 表示插入已发生。
 - Map 的**循环安全**在外部不存在。你不会闭合循环，因为没有可闭合的 Shareable 图。
 - **嵌套 Shareable** 变成「单独键、值中编码指针」。簿记由你负责。
 
@@ -247,7 +247,7 @@ final class RedisRateLimiterBackend implements RateLimiterBackend
 
 ```php
 <?php
-// 未命中时插入，命中时读取。setIfAbsent 仅在键缺失时提交，并返回 bool ——
+// 未命中时插入，命中时读取。setIfAbsent 仅在键缺失时插入，并返回先前的值 ——
 // 之后用 get() 回读已缓存的值。
 $cfg = $cache->get($tenantId);
 if ($cfg === null) {
@@ -267,7 +267,7 @@ if ($cfg === null) {
 $writes = new OxPHP\Shared\Channel(capacity: 10_000);
 
 oxphp_async(function () use ($writes) {
-    while (($batch = $writes->recvMany(max: 100, timeout: 0.5))) {
+    while (($batch = $writes->recvMany(100, 500))) { // 最多 100 项，等待 500ms
         writeBatchToRedis($batch);
     }
 });

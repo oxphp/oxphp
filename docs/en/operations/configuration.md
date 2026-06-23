@@ -149,7 +149,8 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *(unset)* | Address for the internal server (`/health`, `/metrics`, `/config`). Internal server is not started when unset |
+| `INTERNAL_ADDR` | *(unset)* | Address for the internal server (`/health`, `/metrics`, `/config`). Internal server is not started when unset. A port-only value (`:9090` or `9090`) binds `127.0.0.1`; bind an explicit `0.0.0.0:9090` to expose it off-host |
+| `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDR/IP allow-list for the internal server. A peer outside the list receives `403` on `/metrics`, `/config`, and plugin paths; health probes (`/health`, `/healthz`, `/readyz`, `/startupz` and their long forms) stay reachable. Unset/empty = allow all. Loopback is **not** implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory containing custom error pages named `{status}.html` (e.g., `404.html`, `503.html`) |
 | `MAX_QUERY_BODY` | `524288` | Maximum request body size in bytes for internal query endpoints (512 KiB) |
 | `TRACE_CONTEXT` | `false` | Boolean — see [Boolean values](#boolean-values). When truthy, enables W3C Trace Context propagation: reads `traceparent`/`tracestate` headers and forwards them to PHP via `$_SERVER` |
@@ -314,12 +315,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -329,6 +328,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -348,7 +349,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Note:** TLS certificate and key paths are omitted from the output. The `tls_enabled` field indicates whether TLS is active.
+> **Note:** The served `/config` response scrubs a few keys that the internal `Config` representation carries: TLS certificate and key paths are never emitted (`tls_enabled` indicates whether TLS is active), and `internal_addr` and `error_pages_dir` are removed — deployment topology and filesystem paths that aid an attacker and are not needed by metrics scrapers.
 
 ## See Also
 

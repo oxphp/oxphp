@@ -6,13 +6,24 @@ All notable changes to OxPHP are documented in this file.
 
 ### Added
 
+- **Async task composition (nested `oxphp_async`).** An async task may now itself call `oxphp_async()` and suspend on `await_all` / `await_any` / `await_race`, so a task can fan out child tasks and await them without blocking its worker thread — the previous "no nested async" restriction is removed. The async executor runs each task on a cooperative fiber (a C scheduler driven from Rust) instead of blocking a worker for the task's whole duration; JIT trace state (`jit_trace_num`, `vm_stack_page_size`) is saved and restored across fiber switches so JIT-compiled tasks resume correctly.
+- `ASYNC_MAX_FIBERS` (default `256`): bounds concurrent async tasks. The process-global in-flight cap is `ASYNC_MAX_FIBERS × ASYNC_WORKERS` and limits queued + running tasks via a CAS-bounded counter; a dispatch past the cap is rejected immediately with `AsyncException` rather than blocking, so fan-out composition cannot deadlock waiting on a slot it will never get. Exposed in `/config` as `async_max_fibers` and `async_in_flight_cap`.
+- Async task observability: the `oxphp_async_tasks_in_flight` and `oxphp_async_tasks_in_flight_limit` gauges, and the `oxphp_async_output_discarded_bytes_total` counter (output written by an async task — which has no client to receive it — is discarded at worker idle). The gauges render only when the async pool has wired its in-flight counter.
 - `INTERNAL_ALLOW_IPS`: a CIDR allow-list for the internal server. A peer outside the list receives `403` on `/metrics`, `/config`, and other internal paths — before any handler runs, so it cannot probe which paths exist. Health endpoints (`/health`, `/healthz`, `/readyz`, `/startupz` and their long forms) are always reachable so orchestrator and load-balancer health checks never break. Unset/empty allows all peers (the prior behavior). Loopback is not implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup. There is deliberately no bearer-token option: a token invites exposing the port "because it's protected"; the controls are network isolation plus this allow-list.
 
 ### Changed
 
+- A timed-out `await` now cancels the abandoned async task instead of letting it run to request end. A task parked in cooperative sleep or suspended awaiting a child is force-resumed into cancellation, and a CPU-bound task is interrupted at an opcode boundary (best-effort, bounded by opcode-boundary latency); any tasks still in flight when the request ends are drained. The previous behavior — the abandoned task kept running until request end — is replaced.
 - A port-only `INTERNAL_ADDR` (e.g. `:9090`) now binds `127.0.0.1` instead of failing to resolve; bind an explicit `0.0.0.0:9090` to expose the internal server off-host.
 - `/config` no longer reports `internal_addr` or `error_pages_dir` — deployment topology and filesystem paths that aided an attacker and were not needed by metrics scrapers.
 - The server warns at startup when the internal listener is reachable off-host (`0.0.0.0`, `::`, or a public address) and no `INTERNAL_ALLOW_IPS` is set; a private-interface bind logs an informational note instead, and the warning is suppressed once an allow-list is configured.
+
+### Fixed
+
+- A fiber send-waiter parked on a full `Shared\Channel` is now woken when `recv_blocking` frees a buffer slot. The slow path freed the slot but only signaled the non-fiber send notifier, which a parked fiber waiter does not observe — so a blocked sender stranded until some consumer happened to take the `tryRecv` fast path, making `sendTimeout` trip spuriously under saturation. Both open-channel branches now drain a send-waiter on slot free, mirroring `tryRecv` (the send-side counterpart of the already-fixed receive-side handoff gap).
+- Fixed a graceful-shutdown crash by tearing down PHP on the main thread.
+- A fiber `await` on a closed async promise now rejects instead of stalling.
+- `await_all` cancels and strands the remaining promises when it bails out early, rather than leaving them running.
 
 ## [0.8.0] - 2026-06-13
 

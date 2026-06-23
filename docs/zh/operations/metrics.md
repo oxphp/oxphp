@@ -36,6 +36,7 @@ curl http://localhost:9090/metrics
 | `oxphp_responses_by_status_total` | counter | 按状态类别统计的响应数。标签：`status`（`1xx`、`2xx`、`3xx`、`4xx`、`5xx`） |
 | `oxphp_request_bytes_total` | counter | 接收的请求体总字节数 |
 | `oxphp_response_bytes_total` | counter | 发送的响应体总字节数 |
+| `oxphp_request_cancelled_total` | counter | 按原因统计的被取消请求数。标签：`reason`（`client_abort`、`timeout`、`shutdown`）。始终输出 |
 
 > **注意：** 仅输出至少有一次记录的方法和状态类别。零计数标签不会输出。
 
@@ -68,6 +69,16 @@ curl http://localhost:9090/metrics
 | `oxphp_busy_workers` | gauge | 当前正在处理请求的工作进程数 |
 | `oxphp_workers_spawned_total` | counter | 启动以来创建的工作进程总数（含初始工作进程） |
 | `oxphp_workers_retired_total` | counter | 因空闲超时退出的工作进程总数（仅动态模式） |
+
+## 工作进程监督器指标
+
+由工作进程监督器输出的单工作进程可观测性指标。每条序列携带 `worker_id` 标签（槽位索引）。这些指标在监督器开始跟踪单工作进程状态后出现。
+
+| 指标 | 类型 | 描述 |
+|--------|------|-------------|
+| `oxphp_worker_request_age_seconds` | gauge | 每个工作进程上在途请求的存活时长（秒）。标签：`worker_id` |
+| `oxphp_worker_long_running_total` | counter | 监督器扫描中发现请求超过卡死阈值的次数。标签：`worker_id` |
+| `oxphp_worker_stuck_total` | counter | 每个工作进程的卡死分类计数器。标签：`worker_id`、`kind`（`io`、`c_call`、`cpu`） |
 
 ## 队列等待直方图
 
@@ -134,7 +145,7 @@ curl http://localhost:9090/metrics
 
 ## 异步进程池指标
 
-这些指标仅在 `ASYNC_WORKERS` 设置为非零值时才会输出。
+这些指标要求 `ASYNC_WORKERS` 设置为非零值，并且每项都有各自的输出门控：计数器仅在至少有一个任务被分发或拒绝后出现，`_in_flight` / `_in_flight_limit` 仪表盘在池接入其在途计数器后出现，而 `oxphp_async_output_discarded_bytes_total` 仅在有输出被丢弃后才出现。
 
 | 指标 | 类型 | 描述 |
 |--------|------|-------------|

@@ -177,7 +177,7 @@ if ($snapshot & FLAG_FAILED) {
 See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ value, type: "Atomic" }`.
-- Registry-wide counters (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) cover Atomic via the `type="Atomic"` label.
+- Registry-wide counters (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) cover Atomic via the `type="Atomic"` label.
 
 ## When not to use
 

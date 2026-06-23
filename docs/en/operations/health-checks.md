@@ -17,7 +17,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 When `INTERNAL_ADDR` is not set, the internal server does not start and no health endpoints are available.
 
-> **Note:** Bind to `127.0.0.1` in production unless the internal server is behind a firewall. The `/config` endpoint exposes operational details that should not be public.
+> **Note:** A port-only `INTERNAL_ADDR` (`:9090` or `9090`) binds `127.0.0.1`; use an explicit `0.0.0.0:9090` to expose the internal server off-host. When it is reachable off-host, restrict access with `INTERNAL_ALLOW_IPS` (a CIDR/IP allow-list — `/metrics`, `/config`, and plugin paths return `403` to peers outside it, while health probes stay reachable); loopback is not implicit, so list `127.0.0.1/32` to keep localhost access. The server warns at startup if the listener is exposed with no allow-list set.
 
 ## Kubernetes Probes
 
@@ -100,7 +100,7 @@ curl http://localhost:9090/metrics
 
 ## GET /config
 
-Returns the active server configuration as JSON. TLS certificate and key paths are omitted for security.
+Returns the active server configuration as JSON. TLS certificate and key paths, `internal_addr`, and `error_pages_dir` are scrubbed from the response for security.
 
 ```bash
 curl -s http://localhost:9090/config | jq .
@@ -118,12 +118,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -133,6 +131,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -140,7 +140,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Note:** TLS certificate and key paths are omitted. The `tls_enabled` boolean indicates whether TLS is active.
+> **Note:** TLS certificate and key paths are never emitted (`tls_enabled` indicates whether TLS is active), and `internal_addr` and `error_pages_dir` are scrubbed from the served response.
 
 ## Kubernetes Integration
 

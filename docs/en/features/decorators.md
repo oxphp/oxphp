@@ -224,11 +224,11 @@ class RequireRole implements AttributeInterface
 
 ## Worker Mode Behavior
 
-In worker mode, decorator instances persist across requests within the same worker — they are created once and reused. This means:
+In worker mode the PHP process persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
 
-- Constructor logic runs once per worker per decorated function (not per request)
-- Instance state in properties carries over between requests
-- Instances are recreated when the worker is recycled
+- Constructor logic runs once per request per decorated function — at that function's first call within the request — not once for the worker's lifetime
+- Instance state in properties is shared by every call to a decorated function within a single request, but does **not** carry over to the next request
+- Each request starts with a fresh instance (and a fresh constructor run, re-evaluating the attribute arguments)
 
 Design decorators to be stateless between requests. If you need per-request state, set it in `before()` and read it in `after()`:
 
@@ -320,9 +320,9 @@ oxphp_register_decorator(Timer::class);
 
 ### Constructor arguments not updating between requests
 
-Decorator instances are cached per worker. The constructor runs once, not per request.
+Attribute arguments are source-level literals, evaluated when the decorator instance is constructed (the first call in each request). They are not runtime values, so mutating application data cannot change them — they only change when you edit the attribute in code.
 
-**Fix:** Use `before()` for per-request initialization, not the constructor. The constructor should only accept static configuration from the attribute.
+**Fix:** Use `before()` for per-request initialization, not the constructor. The constructor should only accept the static configuration declared in the attribute.
 
 ## PHP Examples
 

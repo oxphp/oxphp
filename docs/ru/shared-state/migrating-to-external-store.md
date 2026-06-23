@@ -153,7 +153,7 @@ final class RedisCounterBackend implements CounterBackend
 
 Семантические разрывы:
 
-- Цикл повторов `Map::compareAndSet` (идиома атомарного RMW в Shared\*) должен стать server-side Lua-скриптом в Redis или `SELECT ... FOR UPDATE` в SQL. Простой `HGET` + compute + `HSET` теряет атомарность. Простой случай «вставить, если отсутствует» покрывает `Map::setIfAbsent`; помните, что он возвращает `bool`, поэтому для чтения значения после вставки делайте `setIfAbsent`, а затем `get`.
+- Цикл повторов `Map::compareAndSet` (идиома атомарного RMW в Shared\*) должен стать server-side Lua-скриптом в Redis или `SELECT ... FOR UPDATE` в SQL. Простой `HGET` + compute + `HSET` теряет атомарность. Простой случай «вставить один раз» покрывает `Map::setIfAbsent`; он возвращает **предыдущее** значение (`null`, когда ключ отсутствовал и значение было вставлено), поэтому возврат `null` означает, что вставка произошла.
 - **Cycle safety** Map'а не существует снаружи. Вы никогда не замкнёте цикл, потому что нет графа Shareable, который можно замкнуть.
 - **Вложенные Shareable** становятся «отдельным ключом с указателем, закодированным в значении». Бухгалтерию ведёте вы.
 
@@ -247,9 +247,9 @@ Read-heavy нагрузки часто используют `Shared\Map` как 
 
 ```php
 <?php
-// Вставка на промахе, чтение при попадании. setIfAbsent фиксирует значение
-// только если ключ отсутствует и возвращает bool — читайте закэшированное
-// значение обратно через get().
+// Вставка на промахе, чтение при попадании. setIfAbsent вставляет
+// только если ключ отсутствует, и возвращает предыдущее значение —
+// читайте закэшированное значение обратно через get().
 $cfg = $cache->get($tenantId);
 if ($cfg === null) {
     $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
@@ -268,7 +268,7 @@ Write-heavy нагрузки буферизуются в `Shared\Channel`, а ф
 $writes = new OxPHP\Shared\Channel(capacity: 10_000);
 
 oxphp_async(function () use ($writes) {
-    while (($batch = $writes->recvMany(max: 100, timeout: 0.5))) {
+    while (($batch = $writes->recvMany(100, 500))) { // до 100 элементов, ожидание 500 мс
         writeBatchToRedis($batch);
     }
 });

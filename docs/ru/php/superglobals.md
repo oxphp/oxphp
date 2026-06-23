@@ -18,12 +18,12 @@ OxPHP формирует `$_SERVER` из входящего HTTP-запроса 
 | `SCRIPT_FILENAME` | Абсолютный путь в файловой системе к выполняемому PHP-скрипту | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Корневая директория веб-сервера, настроенная через переменную окружения `DOCUMENT_ROOT` | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Идентификатор сервера (содержит текущую версию OxPHP) | `OxPHP/0.8.0` |
-| `SERVER_PROTOCOL` | Всегда `HTTP/1.1` | `HTTP/1.1` |
+| `SERVER_PROTOCOL` | Согласованная версия протокола HTTP | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP-метод | `GET` |
 | `REQUEST_URI` | Полный URI со строкой запроса | `/app?page=2` |
-| `SCRIPT_NAME` | Путь URI без строки запроса | `/app` |
-| `DOCUMENT_URI` | Псевдоним `SCRIPT_NAME` для совместимости с nginx/PHP-FPM | `/app` |
-| `PHP_SELF` | То же, что и `SCRIPT_NAME` | `/app` |
+| `SCRIPT_NAME` | Путь исполняемого скрипта относительно `DOCUMENT_ROOT` — фронт-контроллер в режиме Framework, а **не** URI запроса | `/index.php` |
+| `DOCUMENT_URI` | Псевдоним `SCRIPT_NAME` для совместимости с nginx/PHP-FPM | `/index.php` |
+| `PHP_SELF` | `SCRIPT_NAME` плюс `PATH_INFO` при наличии, иначе равно `SCRIPT_NAME` | `/index.php/user/42` |
 | `QUERY_STRING` | Часть URI со строкой запроса (пустая строка при отсутствии) | `page=2` |
 | `SERVER_NAME` | Имя хоста из заголовка `Host` | `example.com` |
 | `SERVER_PORT` | Порт из заголовка `Host` | `8080` |

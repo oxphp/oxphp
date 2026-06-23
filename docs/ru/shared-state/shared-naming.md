@@ -144,7 +144,7 @@ Conditional-success операции живут на `Map` под именем `
 ### 10. Идентификация в реестре — `id(): int`
 
 Каждый инстанс `Shared\*` предоставляет `id(): int` для логов и
-observability-эндпоинта `/__ox_shared/entries/:id`.
+observability-эндпоинта `/__ox_shared/entry?id=<id>`.
 
 ## Шпаргалка
 
@@ -192,7 +192,7 @@ observability-эндпоинта `/__ox_shared/entries/:id`.
 ## Observability-имена отстают от PHP-API
 
 Operator-facing поверхность — имена Prometheus-метрик и JSON в
-`/__ox_shared/entries/:id` — это отдельный контракт от PHP-API. Его
+`/__ox_shared/entry?id=<id>` — это отдельный контракт от PHP-API. Его
 переименование ломает дашборды и алерты. Чтобы не оставлять тихую
 несогласованность, затронутые имена эмитятся **дважды** в течение
 одного релизного цикла:

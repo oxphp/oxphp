@@ -177,7 +177,7 @@ if ($snapshot & FLAG_FAILED) {
 Полный тур — в [Shared Observability](shared-observability.md). Краткие отсылки:
 
 - `GET /__ox_shared/entry?id=N` показывает `{ value, type: "Atomic" }`.
-- Общереестровые счётчики (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) покрывают Atomic через метку `type="Atomic"`.
+- Общереестровые счётчики (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) покрывают Atomic через метку `type="Atomic"`.
 
 ## Когда не использовать
 

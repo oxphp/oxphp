@@ -170,7 +170,7 @@ Returns an associative array with server and request metadata.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `version` | `string` | Server version (e.g. `"0.1.0"`) |
+| `version` | `string` | Server version (e.g. `"0.8.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
@@ -181,7 +181,7 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.1.0",
+//     "version"      => "0.8.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,
@@ -405,7 +405,7 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 
 **Parameters:**
 - `$closure` — A user-defined `Closure` to run on an async worker thread
-- `...$args` — Arguments to pass to the closure. Only scalar values (`null`, `bool`, `int`, `float`, `string`) and arrays of scalars are accepted. Objects and resources cannot be passed across threads.
+- `...$args` — Arguments to pass to the closure. Scalar values (`null`, `bool`, `int`, `float`, `string`), arrays of those, and `OxPHP\Shared\*` instances (the only objects that may cross the thread boundary) are accepted. Resources and any non-`Shared` object are rejected.
 
 **Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`.
 
@@ -992,7 +992,7 @@ OxPHP\Profile\resume();
 ## OxPHP\Profile\mark()
 
 ```php
-OxPHP\Profile\mark(string $label, array $attrs = []): void
+OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 ```
 
 Attaches a `Mark` event to the topmost open span, with an optional attribute bag. No-op when no span is open (e.g. profiling not active, or `mark()` called at request top-level outside any instrumented frame).
@@ -1129,12 +1129,12 @@ print_r($functions);
 //     [9]  => oxphp_sleep
 //     [10] => oxphp_usleep
 //     [11] => oxphp_worker
-//     [12] => oxphp_async
-//     [13] => oxphp_async_await
-//     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_race
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
+//     [12] => oxphp_register_decorator
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_race
+//     [17] => oxphp_async_await_any
 //     [18] => oxphp_apm_trace
 //     [19] => oxphp_apm_start
 //     [20] => oxphp_apm_end
@@ -1147,6 +1147,8 @@ print_r($functions);
 //     [27] => oxphp_apm_header
 // )
 ```
+
+> **Note:** The core SAPI functions (through `oxphp_register_decorator`) come first; the `oxphp_async_*` and `oxphp_apm_*` families — and the `OxPHP\Profile\*` SDK when the profiler is built in — are appended by their plugins during module init. Treat this list as illustrative: the exact set and ordering depend on which plugins are compiled into the build.
 
 ## Compatibility with PHP-FPM
 
