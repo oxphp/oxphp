@@ -170,7 +170,7 @@ oxphp_server_info(): array
 
 | Ключ | Тип | Описание |
 |------|-----|----------|
-| `version` | `string` | Версия сервера (например, `"0.1.0"`) |
+| `version` | `string` | Версия сервера (например, `"0.8.0"`) |
 | `worker_id` | `int` | То же значение, что и `oxphp_worker_id()` |
 | `request_time` | `float` | Unix-timestamp с точностью до микросекунды в момент начала запроса |
 | `worker_mode` | `bool` | Выполняется ли текущий процесс в режиме worker |
@@ -181,7 +181,7 @@ oxphp_server_info(): array
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.1.0",
+//     "version"      => "0.8.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,
@@ -405,7 +405,7 @@ oxphp_async(Closure $closure, mixed ...$args): int
 
 **Параметры:**
 - `$closure` — Пользовательское `Closure` для выполнения в асинхронном воркер-потоке
-- `...$args` — Аргументы для передачи в замыкание. Принимаются только скалярные значения (`null`, `bool`, `int`, `float`, `string`) и массивы из скаляров. Объекты и ресурсы не могут передаваться между потоками.
+- `...$args` — Аргументы для передачи в замыкание. Принимаются скалярные значения (`null`, `bool`, `int`, `float`, `string`), массивы из них и экземпляры `OxPHP\Shared\*` (единственные объекты, которым разрешено пересекать границу потока). Ресурсы и любые объекты, не являющиеся `Shared`, отвергаются.
 
 **Возвращает:** Целочисленный идентификатор промиса. Передайте его в `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` или `oxphp_async_await_any()`.
 
@@ -994,7 +994,7 @@ OxPHP\Profile\resume();
 ## OxPHP\Profile\mark()
 
 ```php
-OxPHP\Profile\mark(string $label, array $attrs = []): void
+OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 ```
 
 Прикрепляет событие `Mark` к самому верхнему открытому спану с опциональным мешком атрибутов. No-op, если открытых спанов нет (например, профилирование не активно или `mark()` вызван на верхнем уровне запроса вне любого инструментированного фрейма).
@@ -1131,12 +1131,12 @@ print_r($functions);
 //     [9]  => oxphp_sleep
 //     [10] => oxphp_usleep
 //     [11] => oxphp_worker
-//     [12] => oxphp_async
-//     [13] => oxphp_async_await
-//     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_race
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
+//     [12] => oxphp_register_decorator
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_race
+//     [17] => oxphp_async_await_any
 //     [18] => oxphp_apm_trace
 //     [19] => oxphp_apm_start
 //     [20] => oxphp_apm_end
@@ -1149,6 +1149,8 @@ print_r($functions);
 //     [27] => oxphp_apm_header
 // )
 ```
+
+> **Примечание:** Список иллюстративен — функции семейств `oxphp_async_*`, `oxphp_apm_*` и SDK `OxPHP\Profile\*` дописываются их плагинами при инициализации модуля, поэтому точный набор и порядок зависят от того, какие плагины включены в сборку.
 
 ## Совместимость с PHP-FPM
 

@@ -49,7 +49,7 @@ final class Pool implements Shareable
 
 namespace OxPHP\Shared\Pool;
 
-final class Handle
+class Handle
 {
     public function get(): mixed;     // 底层资源（release 之后调用会抛异常）
     public function release(): void;  // 立即归还槽；幂等；析构时也会运行
@@ -230,7 +230,7 @@ v1 的池是严格按线程的：在工作线程 A 上铸造的槽不能在工�
 完整内容请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`。
-- `GET /__ox_shared/summary` 统计 Pool 实例和聚合的 `waiting_total`、`evicted_total`。
+- `GET /__ox_shared/summary` 包含一个带有 `count`、`bytes` 和 `ops` 的 `Pool` 桶。像 `waiting` 这样的每池仪表以及 `evicted_total` 计数器暴露在 `/metrics` 上（见下文），不在 summary 中聚合。
 - 每池 Prometheus 指标：
   - `oxphp_shared_pool_size{pool_id="…"}`            —— 仪表，槽总数（在用 + 空闲）。
   - `oxphp_shared_pool_in_use{pool_id="…"}`          —— 仪表。

@@ -199,7 +199,7 @@ JSON 端点和 `/metrics` 都会在该地址可达。无需额外配置。
 deprecation 周期内两条序列携带相同的值，并在未来某个发布移除别名
 时分离。新仪表盘请配置 `_count`。
 
-`oxphp_shared_pool_evicted_total` 标签：`reason=idle_timeout | manual | shutdown | dead_owner`。`dead_owner` 标签计数混沌回收时的事件。
+`oxphp_shared_pool_evicted_total` 标签：`reason=idle_timeout | evict | shutdown`。`idle_timeout` 是对空闲槽位的自动驱逐，`evict` 是显式的 `Pool::evict()` 调用，`shutdown` 是进程退出时的拆除。
 
 ### Counter / Flag / Once / Mutex
 
@@ -290,7 +290,7 @@ SOAK_CONCURRENCY=400 SOAK_THREADS=8 tests/soak/pool_soak.sh
 - `metrics.csv` —— 每分钟一行（unix ts、RSS、按类型条目数、按池驱逐计数、死锁数、ops）。
 - `server.log` —— 容器 stdout/stderr，含任何 stale-handle 或 panic 痕迹。
 - `wrk.out` / `wrk.err` —— 原始压测器输出。
-- `metrics.final` —— 容器拆除前最后一次 `/metrics` 抓取。用于读取 `oxphp_shared_leaked_entries_at_shutdown_total`。
+- `metrics.final` —— 容器拆除前最后一次 `/metrics` 抓取。用于在负载停止后确认条目数和字节数已回到基线（无泄漏条目）。
 - `verify.txt` —— 五项退出准则的通过/失败报告。
 
 请**不要**把它接入 CI。24 小时跑成本不便宜，且其目的是发布前信心，而非持续验证。

@@ -177,7 +177,7 @@ if ($snapshot & FLAG_FAILED) {
 完整内容请见 [Shared 可观测性](shared-observability.md)。速查：
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ value, type: "Atomic" }`。
-- 注册表级计数器（`oxphp_shared_ops_total`、`oxphp_shared_objects_total`）通过 `type="Atomic"` 标签覆盖 Atomic。
+- 注册表级计数器（`oxphp_shared_operations_total`、`oxphp_shared_objects_total`）通过 `type="Atomic"` 标签覆盖 Atomic。
 
 ## 何时不宜使用
 

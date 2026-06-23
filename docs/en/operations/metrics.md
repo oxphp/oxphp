@@ -36,6 +36,7 @@ curl http://localhost:9090/metrics
 | `oxphp_responses_by_status_total` | counter | Responses by status class. Label: `status` (`1xx`, `2xx`, `3xx`, `4xx`, `5xx`) |
 | `oxphp_request_bytes_total` | counter | Total request body bytes received |
 | `oxphp_response_bytes_total` | counter | Total response body bytes sent |
+| `oxphp_request_cancelled_total` | counter | Cancelled requests by reason. Label: `reason` (`client_abort`, `timeout`, `shutdown`). Always emitted |
 
 > **Note:** Only methods and status classes with at least one recorded event are emitted. Zero-count labels are omitted.
 
@@ -68,6 +69,16 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_busy_workers` | gauge | Workers currently processing a request |
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired due to idle timeout (dynamic mode only) |
+
+## Worker Supervisor Metrics
+
+Per-worker observability emitted by the worker supervisor. Each series carries a `worker_id` label (slot index). These appear once the supervisor is tracking per-worker state.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_worker_request_age_seconds` | gauge | Age of the in-flight request on each worker, in seconds. Label: `worker_id` |
+| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold. Label: `worker_id` |
+| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`) |
 
 ## Queue Wait Histogram
 
@@ -134,7 +145,7 @@ This histogram measures time spent inside the PHP handler callback, excluding qu
 
 ## Async Pool Metrics
 
-These metrics are only emitted when `ASYNC_WORKERS` is set to a non-zero value.
+These metrics require `ASYNC_WORKERS` set to a non-zero value, and each has its own emission gate: the counters appear only after at least one task has been dispatched or rejected, the `_in_flight` / `_in_flight_limit` gauges appear once the pool has wired its in-flight counter, and `oxphp_async_output_discarded_bytes_total` appears only after some output has been discarded.
 
 | Metric | Type | Description |
 |--------|------|-------------|

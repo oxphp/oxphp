@@ -127,9 +127,9 @@ grep "PRIVATE KEY" key.pem
 
 如果密钥缺失，请重新生成证书和密钥对。
 
-### 启动时出现 `no certificates found in PEM file` 错误
+### 启动时证书加载失败
 
-证书文件为空或损坏。请验证证书文件是否包含至少一个 `-----BEGIN CERTIFICATE-----` 块：
+证书文件为空或损坏，启动会中止并抛出来自 TLS 层的错误。请验证证书文件是否包含至少一个 `-----BEGIN CERTIFICATE-----` 块：
 
 ```bash
 grep "BEGIN CERTIFICATE" cert.pem

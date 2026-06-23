@@ -26,7 +26,8 @@ OxPHP 在专用端口上运行独立的 HTTP 服务器，用于健康检查、Pr
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *（未设置）* | 内部服务器地址。未设置时不启动。示例：`127.0.0.1:9090` |
+| `INTERNAL_ADDR` | *（未设置）* | 内部服务器地址。未设置时不启动。仅含端口的取值（`:9090` 或 `9090`）绑定 `127.0.0.1`；要将其暴露到主机之外，需显式使用 `0.0.0.0:9090`。示例：`127.0.0.1:9090` |
+| `INTERNAL_ALLOW_IPS` | *（未设置）* | 逗号分隔的 CIDR/IP 允许名单。名单之外的对端访问 `/metrics`、`/config` 和 `/__<plugin>/` 路径时收到 `403`；健康探针始终保持可达。未设置/为空 = 全部允许。回环地址**不会**隐式放行——需列出 `127.0.0.1/32` 以保留本机访问。格式错误的名单会导致启动失败 |
 
 ## 端点
 
@@ -106,12 +107,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -121,6 +120,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -128,7 +129,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-出于安全考虑，TLS 证书和密钥文件路径被故意从输出中省略。只暴露 `tls_enabled` 布尔值。
+TLS 证书和密钥文件路径从不输出（只暴露 `tls_enabled` 布尔值），同时 `internal_addr` 和 `error_pages_dir` 也会从所提供的响应中剔除——这些部署拓扑和文件系统路径会帮助攻击者，且指标抓取器并不需要它们。
 
 ### 插件端点
 
@@ -183,13 +184,14 @@ startupProbe:
 
 ## 安全性
 
-内部服务器没有内置认证或访问控制。保护措施：
+内部服务器没有 bearer-token 认证；访问由其绑定位置和 `INTERNAL_ALLOW_IPS` 控制。保护措施：
 
-- **绑定到 localhost** — 设置 `INTERNAL_ADDR=127.0.0.1:9090`，使端口只能从容器或主机内部访问
+- **绑定到 localhost** — 仅含端口的 `INTERNAL_ADDR`（`:9090`）已经绑定 `127.0.0.1`；显式的 `127.0.0.1:9090` 使端口只能从容器或主机内部访问
+- **设置 `INTERNAL_ALLOW_IPS`** — 当监听器必须可在主机之外访问时使用，这是一个 CIDR/IP 允许名单，对名单之外的对端在 `/metrics`、`/config` 和插件路径上返回 `403`，而健康探针始终保持可达。回环地址不会隐式放行，因此若仍需本机访问，请包含 `127.0.0.1/32`。若监听器被暴露到主机之外而未设置允许名单，服务器会在启动时发出警告
 - **不作为 Kubernetes Service 暴露** — 将端口声明为 `containerPort`，但不为其创建 Service。Kubernetes 探针直接访问容器端口
 - **使用网络策略** — 如果端口必须暴露，请在网络层限制访问
 
-`/config` 端点会暴露运营细节（文档根目录、速率限制、Worker 数量、超时值）。虽然 TLS 路径已被隐藏，但请考虑这些信息是否应该可从 Pod 外部访问。
+`/config` 端点会暴露运营细节（文档根目录、速率限制、Worker 数量、超时值）。TLS 路径、`internal_addr` 和 `error_pages_dir` 已被剔除，但请考虑其余信息是否应该可从 Pod 外部访问。
 
 ## Docker 示例
 

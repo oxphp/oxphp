@@ -34,7 +34,7 @@ APM 插件在 OTel 基础之上增加了三层追踪能力：
 
 ### OpenTelemetry 插件
 
-OTel 插件是编译时特性（`plugin-otel`）。启用时会自动设置 `TRACE_CONTEXT=true`。
+OTel 插件是编译时特性（`plugin-otel`）。启用时它会自动开启 trace-context 传播（与设置 `TRACE_CONTEXT=true` 效果相同）。
 
 | 变量 | 默认值 | 说明 |
 |----------|---------|-------------|
@@ -171,9 +171,12 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 | `oxphp.event.kind` | 来源 | 事件属性 |
 |--------------------|------|----------|
 | `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数 | `exception.type` |
-| `mark` | `oxphp_apm_event()` / 性能分析器 `#[Mark]` | 用户提供 |
+| `custom` | `oxphp_apm_event()` | 用户提供 |
+| `mark` | 性能分析器 `#[Mark]` 注解 | 用户提供 |
 | `slow` | 性能分析器 `#[SlowThreshold]` 超阈值 | `threshold_ms`、`elapsed_ms` |
 | `memory_spike` | 性能分析器 `#[MemoryThreshold]` 超阈值 | `threshold_kb`、`delta_bytes` |
+
+`oxphp.event.kind` 属性在 APM 插桩生成的事件上还可能携带 `sql`、`http` 或 `alloc`。
 
 ### OTel 与请求 ID
 

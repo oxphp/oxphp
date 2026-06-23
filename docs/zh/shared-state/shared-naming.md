@@ -124,7 +124,7 @@ $pool->count();   // 全部活跃槽（in-use + idle）
 ### 10. 注册表标识 — `id(): int`
 
 每个 `Shared\*` 实例都暴露 `id(): int`，便于日志记录与
-`/__ox_shared/entries/:id` 可观测性端点关联。
+`/__ox_shared/entry?id=<id>` 可观测性端点关联。
 
 ## 速查表
 
@@ -168,7 +168,7 @@ $pool->count();   // 全部活跃槽（in-use + idle）
 
 ## 可观测性命名滞后于 PHP API
 
-面向运维的接口 — Prometheus 指标名与 `/__ox_shared/entries/:id` 的
+面向运维的接口 — Prometheus 指标名与 `/__ox_shared/entry?id=<id>` 的
 JSON — 与 PHP API 是相互独立的契约。重命名会破坏仪表盘和告警规则。
 为避免悄无声息的不一致，受影响的名字会在一个发布周期内**同时**
 发出：

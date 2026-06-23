@@ -88,7 +88,7 @@ RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
 COPY --chown=www-data:www-data . /var/www/html/public
 
-EXPOSE 80 443 9090
+EXPOSE 80 443
 
 CMD ["oxphp"]
 ```

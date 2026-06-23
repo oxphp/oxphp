@@ -153,7 +153,7 @@ Semantic gaps:
 
 Semantic gaps:
 
-- The `Map::compareAndSet` retry loop (Shared\*'s atomic RMW idiom) must become a server-side Lua script in Redis or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity. `Map::setIfAbsent` covers the simpler insert-once case; note it returns `bool`, so to read the value back the caller does `setIfAbsent` followed by `get`.
+- The `Map::compareAndSet` retry loop (Shared\*'s atomic RMW idiom) must become a server-side Lua script in Redis or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity. `Map::setIfAbsent` covers the simpler insert-once case; it returns the **previous** value (`null` when the key was absent and the value was inserted), so a `null` return means the insert happened.
 - Map's **cycle safety** does not exist externally. You will never close a cycle because there is no Shareable graph to close.
 - **Nested Shareables** become "separate key with a pointer encoded in the value". You own the bookkeeping.
 
@@ -247,8 +247,8 @@ Read-heavy workloads often use `Shared\Map` as a TTL cache in front of an extern
 
 ```php
 <?php
-// Insert on miss, read on hit. setIfAbsent commits only when the key
-// is absent and returns bool — read the cached value back with get().
+// Insert on miss, read on hit. setIfAbsent inserts only when the key is
+// absent and returns the previous value — read the cached value back with get().
 $cfg = $cache->get($tenantId);
 if ($cfg === null) {
     $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
@@ -267,7 +267,7 @@ Write-heavy workloads buffer in a `Shared\Channel` and a background consumer flu
 $writes = new OxPHP\Shared\Channel(capacity: 10_000);
 
 oxphp_async(function () use ($writes) {
-    while (($batch = $writes->recvMany(max: 100, timeout: 0.5))) {
+    while (($batch = $writes->recvMany(100, 500))) { // up to 100 items, 500ms wait
         writeBatchToRedis($batch);
     }
 });

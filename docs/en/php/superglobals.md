@@ -18,12 +18,12 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.8.0` |
-| `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
+| `SERVER_PROTOCOL` | Negotiated HTTP protocol version | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
-| `SCRIPT_NAME` | URI path without query string | `/app` |
-| `DOCUMENT_URI` | Alias for `SCRIPT_NAME`, for nginx/PHP-FPM compatibility | `/app` |
-| `PHP_SELF` | Same as `SCRIPT_NAME` | `/app` |
+| `SCRIPT_NAME` | Path of the executed script relative to `DOCUMENT_ROOT` — the front controller in Framework mode, **not** the request URI | `/index.php` |
+| `DOCUMENT_URI` | Alias for `SCRIPT_NAME`, for nginx/PHP-FPM compatibility | `/index.php` |
+| `PHP_SELF` | `SCRIPT_NAME` plus `PATH_INFO` when present, otherwise equal to `SCRIPT_NAME` | `/index.php/user/42` |
 | `QUERY_STRING` | Query portion of the URI (empty string when absent) | `page=2` |
 | `SERVER_NAME` | Hostname from the `Host` header | `example.com` |
 | `SERVER_PORT` | Port from the `Host` header | `8080` |

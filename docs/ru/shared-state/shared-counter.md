@@ -119,7 +119,7 @@ Counter'ы никогда не бросают на переполнение ил
 
 - `GET /__ox_shared/entry?id=N` показывает `{ value, type: "Counter" }`.
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` gauge отслеживает текущее значение.
-- Общереестровые счётчики (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) покрывают Counter через метку `type="Counter"`.
+- Общереестровые счётчики (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) покрывают Counter через метку `type="Counter"`.
 
 ## Когда не использовать
 

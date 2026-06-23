@@ -168,8 +168,9 @@ try {
 
 ```text
 \Exception
-  └── OxPHP\Async\AsyncException              # 所有异步错误
-        └── OxPHP\Async\TimeoutException  # 超时专用
+  └── OxPHP\Async\AsyncException                   # 所有异步错误
+        ├── OxPHP\Async\TimeoutException           # 超时专用
+        └── OxPHP\Async\AggregateAsyncException    # 多个失败（await_all / await_any）
 ```
 
 ## Fiber 集成

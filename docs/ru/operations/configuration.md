@@ -149,7 +149,8 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
-| `INTERNAL_ADDR` | *(не задано)* | Адрес внутреннего сервера (`/health`, `/metrics`, `/config`). Внутренний сервер не запускается, если не задано |
+| `INTERNAL_ADDR` | *(не задано)* | Адрес внутреннего сервера (`/health`, `/metrics`, `/config`). Внутренний сервер не запускается, если не задано. Значение только с портом (`:9090` или `9090`) привязывается к `127.0.0.1`; задайте явный `0.0.0.0:9090`, чтобы открыть его за пределами хоста |
+| `INTERNAL_ALLOW_IPS` | *(не задано)* | Список CIDR/IP через запятую — allow-лист для внутреннего сервера. Узел вне списка получает `403` на `/metrics`, `/config` и путях плагинов; health-пробы (`/health`, `/healthz`, `/readyz`, `/startupz` и их длинные формы) остаются доступными. Не задано/пусто = разрешить всем. Loopback **не** подразумевается неявно — укажите `127.0.0.1/32`, чтобы сохранить доступ с localhost. Некорректный список приводит к остановке запуска |
 | `ERROR_PAGES_DIR` | *(не задано)* | Директория с пользовательскими страницами ошибок вида `{status}.html` (например, `404.html`, `503.html`) |
 | `MAX_QUERY_BODY` | `524288` | Максимальный размер тела запроса в байтах для внутренних конечных точек (512 КиБ) |
 | `TRACE_CONTEXT` | `false` | Булева — см. [Булевы значения](#булевы-значения). При truthy включает распространение W3C Trace Context: читает заголовки `traceparent`/`tracestate` и передаёт их в PHP через `$_SERVER` |
@@ -314,12 +315,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -329,6 +328,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -348,7 +349,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Примечание:** Пути к TLS-сертификату и ключу не включаются в вывод. Поле `tls_enabled` указывает, активен ли TLS.
+> **Примечание:** Отдаваемый ответ `/config` вычищает несколько ключей, которые внутреннее представление `Config` несёт: пути к TLS-сертификату и ключу никогда не выводятся (`tls_enabled` указывает, активен ли TLS), а `internal_addr` и `error_pages_dir` удаляются — топология развёртывания и пути в файловой системе помогают атакующему и не нужны сборщикам метрик.
 
 ## См. также
 

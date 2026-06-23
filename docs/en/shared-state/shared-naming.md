@@ -138,7 +138,7 @@ idiom. (`Atomic` spells the same operation `swap()`; Counter keeps
 ### 10. Registry identity — `id(): int`
 
 Every `Shared\*` instance exposes `id(): int` for logs and the
-`/__ox_shared/entries/:id` observability endpoint.
+`/__ox_shared/entry?id=<id>` observability endpoint.
 
 ## Cheat sheet
 
@@ -185,7 +185,7 @@ When proposing a new primitive, fill out this checklist before merging:
 ## Observability names lag the PHP API
 
 The operator-facing surface — Prometheus metric names and the JSON at
-`/__ox_shared/entries/:id` — is a separate contract from the PHP API.
+`/__ox_shared/entry?id=<id>` — is a separate contract from the PHP API.
 Renaming it breaks dashboards and alert rules. To avoid silent
 inconsistency, the affected names are emitted **twice** for one
 release cycle:

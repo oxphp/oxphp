@@ -169,8 +169,9 @@ try {
 
 ```text
 \Exception
-  └── OxPHP\Async\AsyncException              # Все асинхронные ошибки
-        └── OxPHP\Async\TimeoutException  # Специфично для тайм-аутов
+  └── OxPHP\Async\AsyncException                   # Все асинхронные ошибки
+        ├── OxPHP\Async\TimeoutException           # Специфично для тайм-аутов
+        └── OxPHP\Async\AggregateAsyncException    # Несколько ошибок (await_all / await_any)
 ```
 
 ## Интеграция с Fiber

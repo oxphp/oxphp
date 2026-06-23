@@ -149,7 +149,8 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址（`/health`、`/metrics`、`/config`）。未设置时不启动内部服务器 |
+| `INTERNAL_ADDR` | *(未设置)* | 内部服务器地址（`/health`、`/metrics`、`/config`）。未设置时不启动内部服务器。仅含端口的取值（`:9090` 或 `9090`）绑定 `127.0.0.1`；要将其暴露到主机之外，需显式绑定 `0.0.0.0:9090` |
+| `INTERNAL_ALLOW_IPS` | *(未设置)* | 内部服务器的逗号分隔 CIDR/IP 允许名单。名单之外的对端访问 `/metrics`、`/config` 和插件路径时收到 `403`；健康探针（`/health`、`/healthz`、`/readyz`、`/startupz` 及其长格式）始终可达。未设置/为空 = 全部允许。回环地址**不会**隐式放行——需列出 `127.0.0.1/32` 以保留本机访问。格式错误的名单会导致启动失败 |
 | `ERROR_PAGES_DIR` | *(未设置)* | 包含自定义错误页面的目录，文件名格式为 `{status}.html`（如 `404.html`、`503.html`） |
 | `MAX_QUERY_BODY` | `524288` | 内部查询端点的最大请求体大小（字节，512 KiB） |
 | `TRACE_CONTEXT` | `false` | 布尔——参见[布尔值](#布尔值)。当为真值时启用 W3C Trace Context 传播：读取 `traceparent`/`tracestate` 头部并通过 `$_SERVER` 转发给 PHP |
@@ -314,12 +315,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -329,6 +328,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -348,7 +349,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **注意：** TLS 证书和私钥路径不包含在输出中。`tls_enabled` 字段表示 TLS 是否已启用。
+> **注意：** 所提供的 `/config` 响应会剔除内部 `Config` 表示中携带的若干键：TLS 证书和私钥路径从不输出（`tls_enabled` 字段表示 TLS 是否已启用），同时 `internal_addr` 和 `error_pages_dir` 也被移除——这些部署拓扑和文件系统路径会帮助攻击者，且指标抓取器并不需要它们。
 
 ## 参见
 

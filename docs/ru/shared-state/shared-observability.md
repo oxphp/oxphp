@@ -201,7 +201,7 @@ BFS-обход исходящих ссылок `Shareable`, начинающий
 течение цикла deprecation и разойдутся, когда alias будет удалён в
 одном из будущих релизов. Новые дашборды настраивайте на `_count`.
 
-Метки `oxphp_shared_pool_evicted_total`: `reason=idle_timeout | manual | shutdown | dead_owner`. Метка `dead_owner` считает события chaos-reclaim.
+Метки `oxphp_shared_pool_evicted_total`: `reason=idle_timeout | evict | shutdown`. `idle_timeout` — автоматическое вытеснение простаивающего слота, `evict` — явный вызов `Pool::evict()`, а `shutdown` — teardown при завершении процесса.
 
 ### Counter / Flag / Once / Mutex
 
@@ -292,7 +292,7 @@ SOAK_CONCURRENCY=400 SOAK_THREADS=8 tests/soak/pool_soak.sh
 - `metrics.csv` — одна строка в минуту (unix ts, RSS, per-type счётчики записей, per-pool счётчики вытеснения, deadlock count, ops).
 - `server.log` — stdout/stderr контейнера, включая любые stale-handle или panic трейсы.
 - `wrk.out` / `wrk.err` — сырой вывод нагрузочного генератора.
-- `metrics.final` — последний скрейп `/metrics`, взятый прямо перед teardown контейнера. Используется для чтения `oxphp_shared_leaked_entries_at_shutdown_total`.
+- `metrics.final` — последний скрейп `/metrics`, взятый прямо перед teardown контейнера. Используется, чтобы подтвердить, что число записей и байт вернулось к базовому уровню (нет утёкших Shared-записей) после остановки нагрузки.
 - `verify.txt` — pass/fail отчёт по пяти exit-критериям.
 
 **Не** подключайте это в CI. 24ч прогон не дёшев, и его цель — pre-release уверенность, а не непрерывная валидация.

@@ -119,7 +119,7 @@ Counter 在溢出或极值时永远不会抛出——它会回绕。
 
 - `GET /__ox_shared/entry?id=N` 暴露 `{ value, type: "Counter" }`。
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` 仪表跟踪当前值。
-- 注册表级计数器(`oxphp_shared_ops_total`、`oxphp_shared_objects_total`)通过 `type="Counter"` 标签覆盖 Counter。
+- 注册表级计数器(`oxphp_shared_operations_total`、`oxphp_shared_objects_total`)通过 `type="Counter"` 标签覆盖 Counter。
 
 ## 何时不宜使用
 

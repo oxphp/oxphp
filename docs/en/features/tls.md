@@ -139,9 +139,9 @@ grep "PRIVATE KEY" key.pem
 
 If the key is missing, regenerate the certificate and key pair.
 
-### `no certificates found in PEM file` error at startup
+### Certificate fails to load at startup
 
-The certificate file is empty or corrupt. Verify that the cert file contains at least one `-----BEGIN CERTIFICATE-----` block:
+The certificate file is empty or corrupt, and startup aborts with an error from the TLS layer. Verify that the cert file contains at least one `-----BEGIN CERTIFICATE-----` block:
 
 ```bash
 grep "BEGIN CERTIFICATE" cert.pem
