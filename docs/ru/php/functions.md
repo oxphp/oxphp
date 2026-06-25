@@ -170,7 +170,7 @@ oxphp_server_info(): array
 
 | Ключ | Тип | Описание |
 |------|-----|----------|
-| `version` | `string` | Версия сервера (например, `"0.8.0"`) |
+| `version` | `string` | Версия сервера (например, `"0.9.0"`) |
 | `worker_id` | `int` | То же значение, что и `oxphp_worker_id()` |
 | `request_time` | `float` | Unix-timestamp с точностью до микросекунды в момент начала запроса |
 | `worker_mode` | `bool` | Выполняется ли текущий процесс в режиме worker |
@@ -181,7 +181,7 @@ oxphp_server_info(): array
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.8.0",
+//     "version"      => "0.9.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,

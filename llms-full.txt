@@ -173,7 +173,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -214,7 +214,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.8.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.9.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -329,7 +329,7 @@ Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`p
 The shortest useful example:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -344,7 +344,7 @@ The container starts as root. In production, drop privileges at the orchestrator
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.8.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.9.0 AS prod` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
@@ -360,13 +360,13 @@ The same prod image can run `php` CLI commands for migrations, Composer, or ad-h
 # root-owned mounted volumes.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.8.0 \
+    ghcr.io/oxphp/oxphp:0.9.0 \
     php artisan migrate
 
 # If the mounted volume is owned by www-data, pass Docker's --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.8.0 \
+    ghcr.io/oxphp/oxphp:0.9.0 \
     php artisan migrate
 ```
 
@@ -376,12 +376,12 @@ docker run --rm --user www-data \
 
 The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.8.0
+      image: ghcr.io/oxphp/oxphp:0.9.0
       user: www-data
   ```
 - **Kubernetes:**
@@ -406,7 +406,7 @@ Start the container **as root** — do not also set `user:`, because the bind ne
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     command: ["oxphp", "serve", "--user=www-data"]
     ports:
       - "80:80"
@@ -572,14 +572,14 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.8.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.8.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.9.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.9.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
 
 ## Docker (Recommended)
 
 Pull the official image from the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.8.0
+docker pull ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 The image includes:
@@ -590,7 +590,7 @@ The image includes:
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
 - **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -647,15 +647,15 @@ The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already co
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
 COPY --chown=www-data:www-data . /var/www/html/public
 
-EXPOSE 80 443 9090
+EXPOSE 80 443
 
 CMD ["oxphp"]
 ```
@@ -674,7 +674,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 # Runtime dependencies for extensions
 USER root
@@ -699,7 +699,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 If your application does not need additional extensions, this is sufficient:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -797,7 +797,7 @@ A healthy server returns `200` with JSON status. A degraded server returns `503`
 If you already have a PHP project with a `public/` directory:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.8.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 Open `http://localhost/` — your application is running.
@@ -805,7 +805,7 @@ Open `http://localhost/` — your application is running.
 To enable the internal server (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.8.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 ---
@@ -823,12 +823,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Create a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.8.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
+The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.9.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
 > **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
@@ -894,7 +894,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.8.0</p>
+<p>Version: 0.9.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
@@ -1057,7 +1057,7 @@ And ensure your upstream client or load balancer sends a `traceparent` header on
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -1110,6 +1110,7 @@ OxPHP provides an async execution system that runs PHP closures on a dedicated t
 |----------|---------|-------------|
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. Set to `0` to disable the async pool entirely |
 | `ASYNC_QUEUE_CAPACITY` | `0` (auto) | Maximum pending async tasks. When `0`, defaults to `ASYNC_WORKERS × 64` |
+| `ASYNC_MAX_FIBERS` | `256` | Per-worker cap on concurrent async task fibers. The process-global in-flight limit (queued + running tasks) is `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch past it is rejected immediately (non-blocking) with `OxPHP\Async\AsyncException`, so fan-out composition cannot deadlock waiting on capacity it holds |
 
 > **Note:** The async pool is disabled by default (`ASYNC_WORKERS=0`). With the pool disabled, all four async functions exist but throw `OxPHP\Async\AsyncException` when called. Set `ASYNC_WORKERS` to a value greater than `0` to enable background execution.
 
@@ -1258,8 +1259,9 @@ try {
 
 ```text
 \Exception
-  └── OxPHP\Async\AsyncException              # All async errors
-        └── OxPHP\Async\TimeoutException  # Timeout-specific
+  └── OxPHP\Async\AsyncException                   # All async errors
+        ├── OxPHP\Async\TimeoutException           # Timeout-specific
+        └── OxPHP\Async\AggregateAsyncException    # Multiple failures (await_all / await_any)
 ```
 
 ## Fiber Integration
@@ -1286,6 +1288,23 @@ oxphp_worker(function () {
 });
 ```
 
+## Composition (Nested Async)
+
+An async task may itself call `oxphp_async()` and await the result. Because each task runs inside a scheduler fiber, awaiting a nested promise suspends the *task's* fiber and frees its worker to run the nested task — so a task can fan out to children without holding a worker while it waits.
+
+```php
+<?php
+$p = oxphp_async(function (): int {
+    // Dispatched and awaited from inside an async task
+    $inner = oxphp_async(fn () => 21);
+    return oxphp_async_await($inner) * 2;
+});
+
+$result = oxphp_async_await($p); // 42
+```
+
+`oxphp_async_await_all()`, `oxphp_async_await_race()`, and `oxphp_async_await_any()` may likewise be called from inside a task fiber. The number of concurrent task fibers (queued + running) is bounded by `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch that would exceed the cap is rejected immediately with `OxPHP\Async\AsyncException` instead of blocking, so a fan-out cannot deadlock by waiting on capacity it is itself holding.
+
 ## Limitations
 
 Async closures run on separate threads. This imposes restrictions on what data can cross the thread boundary:
@@ -1299,7 +1318,6 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 Additional constraints:
 
-- **No nested async** — calling `oxphp_async()` from inside an async closure throws `OxPHP\Async\AsyncException`
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
@@ -1309,7 +1327,7 @@ Additional constraints:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -1334,7 +1352,7 @@ ASYNC_WORKERS=4
 
 ### "Failed to dispatch async task (pool full)"
 
-The async pool is running but all queue slots are occupied.
+The async pool is running but all queue slots are occupied, or the process-global in-flight cap (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`, covering queued + running tasks) has been reached. Both raise `OxPHP\Async\AsyncException` on dispatch and increment `oxphp_async_tasks_rejected_total`.
 
 **Check:** Verify the pool is accepting tasks:
 
@@ -1367,9 +1385,9 @@ In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP 
 
 **Fix:** Enable worker mode (`WORKER_MODE_ENABLED=true`) so that `oxphp_async_await()` suspends the fiber instead of blocking the thread.
 
-### Async timeout does not kill the running task
+### Timeouts cancel the abandoned task
 
-`OxPHP\Async\TimeoutException` is thrown at the await side — the closure continues running on the async pool until it finishes or the request ends. Tasks are cancelled at the end of the request during cleanup.
+`OxPHP\Async\TimeoutException` is raised on the await side the moment the deadline passes. The background task is no longer left running unobserved: a task parked in `oxphp_sleep()` or suspended awaiting a child promise is resumed and unwinds (its `finally` blocks run), and a CPU-bound task that never yields is interrupted at an opcode boundary — so cancellation is best-effort with a short latency bound, not instantaneous. The same cancellation applies to the promises `oxphp_async_await_all()` abandons and to the losers of `oxphp_async_await_race()` / `oxphp_async_await_any()`. A task that still cannot be interrupted in time is *stranded* — cancelled but drained at request end, which can extend `RSHUTDOWN` by up to a few seconds; watch `oxphp_async_tasks_stranded_total`.
 
 ## Best Practices
 
@@ -1498,7 +1516,7 @@ If your build pipeline generates `.br` files and sets the `Content-Encoding: br`
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     volumes:
@@ -1600,7 +1618,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.8.0
+  ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 ### A 429 response still shows the default body
@@ -1612,7 +1630,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:8080"
     volumes:
@@ -1878,11 +1896,11 @@ class RequireRole implements AttributeInterface
 
 ## Worker Mode Behavior
 
-In worker mode, decorator instances persist across requests within the same worker — they are created once and reused. This means:
+In worker mode the PHP process persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
 
-- Constructor logic runs once per worker per decorated function (not per request)
-- Instance state in properties carries over between requests
-- Instances are recreated when the worker is recycled
+- Constructor logic runs once per request per decorated function — at that function's first call within the request — not once for the worker's lifetime
+- Instance state in properties is shared by every call to a decorated function within a single request, but does **not** carry over to the next request
+- Each request starts with a fresh instance (and a fresh constructor run, re-evaluating the attribute arguments)
 
 Design decorators to be stateless between requests. If you need per-request state, set it in `before()` and read it in `after()`:
 
@@ -1974,9 +1992,9 @@ oxphp_register_decorator(Timer::class);
 
 ### Constructor arguments not updating between requests
 
-Decorator instances are cached per worker. The constructor runs once, not per request.
+Attribute arguments are source-level literals, evaluated when the decorator instance is constructed (the first call in each request). They are not runtime values, so mutating application data cannot change them — they only change when you edit the attribute in code.
 
-**Fix:** Use `before()` for per-request initialization, not the constructor. The constructor should only accept static configuration from the attribute.
+**Fix:** Use `before()` for per-request initialization, not the constructor. The constructor should only accept the static configuration declared in the attribute.
 
 ## PHP Examples
 
@@ -2087,7 +2105,7 @@ If no `traceparent` header is present, OxPHP generates a new trace ID and span I
 
 ### OpenTelemetry Plugin
 
-The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it automatically sets `TRACE_CONTEXT=true`.
+The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it automatically turns on trace-context propagation (the same effect as setting `TRACE_CONTEXT=true`).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -2224,9 +2242,12 @@ OTLP backends. A `oxphp.event.kind` attribute on each event identifies its type:
 | `oxphp.event.kind` | Source | Event attributes |
 |--------------------|--------|------------------|
 | `exception` | A `#[OxPHP\Apm\Trace]` function that threw | `exception.type` |
-| `mark` | `oxphp_apm_event()` / profiler `#[Mark]` | user-supplied |
+| `custom` | `oxphp_apm_event()` | user-supplied |
+| `mark` | profiler `#[Mark]` annotation | user-supplied |
 | `slow` | profiler `#[SlowThreshold]` breach | `threshold_ms`, `elapsed_ms` |
 | `memory_spike` | profiler `#[MemoryThreshold]` breach | `threshold_kb`, `delta_bytes` |
+
+The `oxphp.event.kind` attribute may additionally carry `sql`, `http`, or `alloc` on events generated by APM instrumentation.
 
 ### Request ID with OTel
 
@@ -2390,7 +2411,7 @@ Enable W3C trace propagation without an external backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -2405,7 +2426,7 @@ Full observability stack with Jaeger as the tracing backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -2428,7 +2449,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -2454,7 +2475,7 @@ Full observability with automatic instrumentation of database queries, HTTP call
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -2873,7 +2894,7 @@ PHP VM stacks (used for function call frames) are allocated fresh per request an
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -2944,7 +2965,7 @@ fiber.stack_size = 512K
 - **Cooperative only** — CPU-bound code (tight loops, heavy computation) starves other fibers. There is no preemption
 - **Blocking I/O blocks the thread** — all blocking calls must be wrapped in `oxphp_async()` for true concurrency
 - **PHP's native `sleep()`/`usleep()` are not fiber-aware** — use `oxphp_sleep()`/`oxphp_usleep()`
-- **`oxphp_async_await_all()`, `oxphp_async_await_race()`, and `oxphp_async_await_any()` do not yield** — they currently block even inside a fiber. Use sequential `oxphp_async_await()` calls for fiber-friendly behavior
+- **`oxphp_async_await_race()` and `oxphp_async_await_any()` do not yield** — they currently block even inside a fiber. `oxphp_async_await_all()` *does* suspend the fiber while waiting, so it is fiber-friendly; for `race`/`any`, use sequential `oxphp_async_await()` calls if you need the thread to stay cooperative
 
 ## See Also
 
@@ -2980,7 +3001,8 @@ OxPHP runs a separate HTTP server on a dedicated port for health checks, Prometh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *(unset)* | Address for the internal server. Not started when unset. Example: `127.0.0.1:9090` |
+| `INTERNAL_ADDR` | *(unset)* | Address for the internal server. Not started when unset. A port-only value (`:9090` or `9090`) binds `127.0.0.1`; use an explicit `0.0.0.0:9090` to expose it off-host. Example: `127.0.0.1:9090` |
+| `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDR/IP allow-list. Peers outside the list receive `403` on `/metrics`, `/config`, and `/__<plugin>/` paths; health probes always stay reachable. Unset/empty = allow all. Loopback is **not** implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup |
 
 ## Endpoints
 
@@ -3060,12 +3082,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -3075,6 +3095,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -3082,7 +3104,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-TLS certificate and key file paths are deliberately omitted from the output for security. Only the `tls_enabled` boolean is exposed.
+TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 
 ### Plugin Endpoints
 
@@ -3137,20 +3159,21 @@ startupProbe:
 
 ## Security
 
-The internal server has no built-in authentication or access control. To protect it:
+The internal server has no bearer-token authentication; access is controlled by where it binds and by `INTERNAL_ALLOW_IPS`. To protect it:
 
-- **Bind to localhost** — set `INTERNAL_ADDR=127.0.0.1:9090` so the port is only reachable from within the container or host
+- **Bind to localhost** — a port-only `INTERNAL_ADDR` (`:9090`) already binds `127.0.0.1`; an explicit `127.0.0.1:9090` keeps the port reachable only from within the container or host
+- **Set `INTERNAL_ALLOW_IPS`** when the listener must be reachable off-host — a CIDR/IP allow-list that returns `403` on `/metrics`, `/config`, and plugin paths to peers outside it, while health probes stay reachable. Loopback is not implicit, so include `127.0.0.1/32` if you still need localhost access. The server warns at startup if the listener is exposed off-host with no allow-list set
 - **Do not expose as a Kubernetes Service** — declare the port as a `containerPort` but do not create a Service for it. Kubernetes probes access container ports directly
 - **Use network policies** — restrict access at the network layer if the port must be exposed
 
-The `/config` endpoint reveals operational details (document root, rate limits, worker counts, timeout values). While TLS paths are redacted, consider whether this information should be accessible from outside the pod.
+The `/config` endpoint reveals operational details (document root, rate limits, worker counts, timeout values). TLS paths, `internal_addr`, and `error_pages_dir` are scrubbed, but consider whether the rest should be accessible from outside the pod.
 
 ## Docker Example
 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -3164,7 +3187,7 @@ For production, bind the internal server to localhost and use Kubernetes probes:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     environment:
@@ -3231,7 +3254,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -3390,6 +3413,30 @@ against real traffic. A good starting range is `0.0005..0.002`; higher
 values produce noticeable overhead, especially with
 `PROFILER_INTERNAL=true`.
 
+### 5.5. Excluding paths from sampling
+
+`PROFILER_SAMPLE_RATE` samples a random fraction of **all** requests — including
+framework self-traffic that pollutes the data. Symfony's web debug toolbar polls
+`/_wdt/{token}` and links to `/_profiler/{token}`; Laravel Debugbar and Telescope
+behave similarly. Keep these out of sampling with `PROFILER_EXCLUDE_PATHS`:
+
+```bash
+PROFILER_EXCLUDE_PATHS=/_profiler,/_profiler/**,/_wdt/**
+```
+
+Comma-separated glob patterns, same syntax as `PHP_DENY_PATHS`: `*` does not
+cross `/`, `**` does, and a leading `/` is optional. A pattern matches a bare
+path **or** its subtree only if you list both — `/_profiler/**` covers
+`/_profiler/x` but not the bare `/_profiler`, hence the two-pattern recipe above.
+Patterns match the request path as received — no percent-decoding or `..`
+normalization — so list the literal path your framework uses.
+
+> **Exclusion affects automatic sampling only.** A request carrying an explicit
+> trigger — the `x-oxphp-profile` header, the `OXPROF` cookie, or the `__oxprof`
+> query parameter — is **always** profiled, even on an excluded path. This lets
+> you deliberately profile `/_profiler` itself while keeping it out of background
+> sampling.
+
 ---
 
 ## 6. Configuration — full reference
@@ -3399,6 +3446,7 @@ values produce noticeable overhead, especially with
 | `PROFILER_ENABLED` | `false` | Master switch. `true` → plugin is loaded. |
 | `PROFILER_AUTH_TOKEN` | *(unset)* | Secret for triggers and bearer token for `/__profiler/*` routes. Empty string = "no token required" (any non-empty trigger value passes). **Never commit the token to the repo.** |
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`. Random sampling rate. |
+| `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. Explicit triggers still profile them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
 | `PROFILER_INTERNAL` | `false` | Observe **internal** C functions (`strlen`, `json_encode`, …). Full coverage, but **2–5× overhead**. Use surgically. |
 | `PROFILER_MAX_SPANS` | `50000` | Hard cap on tree size per request. When exceeded, further spans are marked `truncated` and not written. |
 | `PROFILER_MAX_DEPTH` | `256` | Hard cap on stack depth. |
@@ -3727,7 +3775,7 @@ curl -H "Authorization: Bearer dev-secret" \
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.8.0",
+  "oxphp_version": "0.9.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
@@ -4514,7 +4562,7 @@ OxPHP tracks up to 100,000 unique IP addresses. When this limit is reached, expi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     environment:
@@ -4886,7 +4934,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     volumes:
@@ -5086,7 +5134,7 @@ SSE endpoints require PHP's execution timer to be disabled or set high. Each act
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:8080"
     volumes:
@@ -5270,7 +5318,7 @@ A 304 means the client already has the current version. This is correct behavior
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     volumes:
@@ -5415,7 +5463,7 @@ OPcache recompilation adds latency on the first request after a file change. Thi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:8080"
     environment:
@@ -5582,9 +5630,9 @@ grep "PRIVATE KEY" key.pem
 
 If the key is missing, regenerate the certificate and key pair.
 
-### `no certificates found in PEM file` error at startup
+### Certificate fails to load at startup
 
-The certificate file is empty or corrupt. Verify that the cert file contains at least one `-----BEGIN CERTIFICATE-----` block:
+The certificate file is empty or corrupt, and startup aborts with an error from the TLS layer. Verify that the cert file contains at least one `-----BEGIN CERTIFICATE-----` block:
 
 ```bash
 grep "BEGIN CERTIFICATE" cert.pem
@@ -5615,7 +5663,7 @@ OxPHP listens on a single port. To support both protocols simultaneously, use a 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "443:443"
     environment:
@@ -5770,7 +5818,7 @@ If your database server closes idle connections, reconnect attempts in the next 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     volumes:
@@ -6023,7 +6071,7 @@ Semantic gaps:
 
 Semantic gaps:
 
-- The `Map::compareAndSet` retry loop (Shared\*'s atomic RMW idiom) must become a server-side Lua script in Redis or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity. `Map::setIfAbsent` covers the simpler insert-once case; note it returns `bool`, so to read the value back the caller does `setIfAbsent` followed by `get`.
+- The `Map::compareAndSet` retry loop (Shared\*'s atomic RMW idiom) must become a server-side Lua script in Redis or a `SELECT ... FOR UPDATE` in SQL. Plain `HGET` + compute + `HSET` loses atomicity. `Map::setIfAbsent` covers the simpler insert-once case; it returns the **previous** value (`null` when the key was absent and the value was inserted), so a `null` return means the insert happened.
 - Map's **cycle safety** does not exist externally. You will never close a cycle because there is no Shareable graph to close.
 - **Nested Shareables** become "separate key with a pointer encoded in the value". You own the bookkeeping.
 
@@ -6117,8 +6165,8 @@ Read-heavy workloads often use `Shared\Map` as a TTL cache in front of an extern
 
 ```php
 <?php
-// Insert on miss, read on hit. setIfAbsent commits only when the key
-// is absent and returns bool — read the cached value back with get().
+// Insert on miss, read on hit. setIfAbsent inserts only when the key is
+// absent and returns the previous value — read the cached value back with get().
 $cfg = $cache->get($tenantId);
 if ($cfg === null) {
     $cache->setIfAbsent($tenantId, loadFromRedis($tenantId));
@@ -6137,7 +6185,7 @@ Write-heavy workloads buffer in a `Shared\Channel` and a background consumer flu
 $writes = new OxPHP\Shared\Channel(capacity: 10_000);
 
 oxphp_async(function () use ($writes) {
-    while (($batch = $writes->recvMany(max: 100, timeout: 0.5))) {
+    while (($batch = $writes->recvMany(100, 500))) { // up to 100 items, 500ms wait
         writeBatchToRedis($batch);
     }
 });
@@ -6678,7 +6726,7 @@ idiom. (`Atomic` spells the same operation `swap()`; Counter keeps
 ### 10. Registry identity — `id(): int`
 
 Every `Shared\*` instance exposes `id(): int` for logs and the
-`/__ox_shared/entries/:id` observability endpoint.
+`/__ox_shared/entry?id=<id>` observability endpoint.
 
 ## Cheat sheet
 
@@ -6725,7 +6773,7 @@ When proposing a new primitive, fill out this checklist before merging:
 ## Observability names lag the PHP API
 
 The operator-facing surface — Prometheus metric names and the JSON at
-`/__ox_shared/entries/:id` — is a separate contract from the PHP API.
+`/__ox_shared/entry?id=<id>` — is a separate contract from the PHP API.
 Renaming it breaks dashboards and alert rules. To avoid silent
 inconsistency, the affected names are emitted **twice** for one
 release cycle:
@@ -6954,7 +7002,7 @@ a future release. Wire new dashboards against `_count`.
 the deprecation window and will diverge when the alias is removed in
 a future release. Wire new dashboards against `_count`.
 
-`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | manual | shutdown | dead_owner`. The `dead_owner` label counts reclaim-on-panic events.
+`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | evict | shutdown`. `idle_timeout` is an automatic eviction of an idle slot, `evict` is an explicit `Pool::evict()` call, and `shutdown` is teardown at process exit.
 
 ### Counter / Flag / Once / Mutex
 
@@ -7045,7 +7093,7 @@ Artifacts land in `tests/soak/out/<timestamp>/`:
 - `metrics.csv` — one row per minute (unix ts, RSS, per-type entry counts, per-pool eviction counters, deadlock count, ops).
 - `server.log` — container stdout/stderr including any stale-handle or panic trails.
 - `wrk.out` / `wrk.err` — raw load-generator output.
-- `metrics.final` — the last `/metrics` scrape taken just before container teardown. Used to read `oxphp_shared_leaked_entries_at_shutdown_total`.
+- `metrics.final` — the last `/metrics` scrape taken just before container teardown. Used to confirm entry and byte counts have returned to baseline (no leaked Shared entries) after the load stops.
 - `verify.txt` — pass/fail report for the five exit criteria.
 
 Do **not** wire this into CI. A 24h run is not cheap and its purpose is pre-release confidence, not continuous validation.
@@ -7243,7 +7291,7 @@ if ($snapshot & FLAG_FAILED) {
 See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ value, type: "Atomic" }`.
-- Registry-wide counters (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) cover Atomic via the `type="Atomic"` label.
+- Registry-wide counters (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) cover Atomic via the `type="Atomic"` label.
 
 ## When not to use
 
@@ -7519,11 +7567,11 @@ Semantics worth noting:
 
 The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in the generic shared-registry endpoints:
 
-- **`GET /__ox_shared/summary`** includes a `Channel` bucket with count, bytes, ops, and `pending_total`.
-- **`GET /__ox_shared/entries?type=Channel`** lists channel entries with their registry IDs.
-- **`GET /__ox_shared/entries/:id`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
+- **`GET /__ox_shared/summary`** includes a `Channel` bucket with `count`, `bytes`, and `ops`.
+- **`GET /__ox_shared/entries`** lists registry entries with their IDs (accepts a `limit` query parameter).
+- **`GET /__ox_shared/entry?id=<id>`** returns per-channel state: `capacity`, `count`, `pending` *(deprecated alias of `count`)*, `closed`, `senders_blocked`, `receivers_blocked`.
 
-The `ops` counter (and the registry-wide `oxphp_shared_ops_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
+The `ops` counter (and the registry-wide `oxphp_shared_operations_total{type="Channel"}`) counts every recv attempt regardless of outcome — a hit, an empty/closed channel, and a timed-out `recvTimeout` all increment it. The metric tracks channel accesses, not just successfully transferred values.
 
 Prometheus exposition on `/metrics`:
 
@@ -7736,7 +7784,7 @@ See [Shared Observability](shared-observability.md) for the full tour. Quick ref
 
 - `GET /__ox_shared/entry?id=N` exposes `{ value, type: "Counter" }`.
 - Prometheus `oxphp_shared_counter_value{counter_id="…"}` gauge tracks the current value.
-- Registry-wide counters (`oxphp_shared_ops_total`, `oxphp_shared_objects_total`) cover Counter via the `type="Counter"` label.
+- Registry-wide counters (`oxphp_shared_operations_total`, `oxphp_shared_objects_total`) cover Counter via the `type="Counter"` label.
 
 ## When not to use
 
@@ -8684,7 +8732,7 @@ final class Pool implements Shareable
 
 namespace OxPHP\Shared\Pool;
 
-final class Handle
+class Handle
 {
     public function get(): mixed;     // the underlying resource (throws after release)
     public function release(): void;  // return the slot now; idempotent; also runs on destruct
@@ -8865,7 +8913,7 @@ Exceptions thrown inside the factory propagate to the acquire caller unchanged a
 See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
 - `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
-- `GET /__ox_shared/summary` counts Pool instances and aggregate `waiting_total`, `evicted_total`.
+- `GET /__ox_shared/summary` includes a `Pool` bucket with `count`, `bytes`, and `ops`. Per-pool gauges like `waiting` and the `evicted_total` counter are exposed on `/metrics` (below), not aggregated in the summary.
 - Prometheus metrics per pool:
   - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, total slots (in-use + idle).
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.
@@ -9905,7 +9953,7 @@ interface UploadedFileInterface
     public function tmpPath(): string;
     public function error(): int;
     public function isValid(): bool;
-    public function moveTo(string $path): bool;
+    public function moveTo(string $destination): bool;
 }
 ```
 
@@ -10374,13 +10422,13 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 ```bash
 docker run -p 80:80 \
   -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
-  ghcr.io/oxphp/oxphp:0.8.0
+  ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -10391,7 +10439,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     volumes:
@@ -10591,7 +10639,7 @@ Returns an associative array with server and request metadata.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `version` | `string` | Server version (e.g. `"0.1.0"`) |
+| `version` | `string` | Server version (e.g. `"0.9.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
@@ -10602,7 +10650,7 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.1.0",
+//     "version"      => "0.9.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,
@@ -10826,7 +10874,7 @@ Dispatches a closure for execution on a dedicated async worker thread and return
 
 **Parameters:**
 - `$closure` — A user-defined `Closure` to run on an async worker thread
-- `...$args` — Arguments to pass to the closure. Only scalar values (`null`, `bool`, `int`, `float`, `string`) and arrays of scalars are accepted. Objects and resources cannot be passed across threads.
+- `...$args` — Arguments to pass to the closure. Scalar values (`null`, `bool`, `int`, `float`, `string`), arrays of those, and `OxPHP\Shared\*` instances (the only objects that may cross the thread boundary) are accepted. Resources and any non-`Shared` object are rejected.
 
 **Returns:** An integer promise ID. Pass this to `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`.
 
@@ -11413,7 +11461,7 @@ OxPHP\Profile\resume();
 ## OxPHP\Profile\mark()
 
 ```php
-OxPHP\Profile\mark(string $label, array $attrs = []): void
+OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 ```
 
 Attaches a `Mark` event to the topmost open span, with an optional attribute bag. No-op when no span is open (e.g. profiling not active, or `mark()` called at request top-level outside any instrumented frame).
@@ -11550,12 +11598,12 @@ print_r($functions);
 //     [9]  => oxphp_sleep
 //     [10] => oxphp_usleep
 //     [11] => oxphp_worker
-//     [12] => oxphp_async
-//     [13] => oxphp_async_await
-//     [14] => oxphp_async_await_all
-//     [15] => oxphp_async_await_race
-//     [16] => oxphp_async_await_any
-//     [17] => oxphp_register_decorator
+//     [12] => oxphp_register_decorator
+//     [13] => oxphp_async
+//     [14] => oxphp_async_await
+//     [15] => oxphp_async_await_all
+//     [16] => oxphp_async_await_race
+//     [17] => oxphp_async_await_any
 //     [18] => oxphp_apm_trace
 //     [19] => oxphp_apm_start
 //     [20] => oxphp_apm_end
@@ -11568,6 +11616,8 @@ print_r($functions);
 //     [27] => oxphp_apm_header
 // )
 ```
+
+> **Note:** The core SAPI functions (through `oxphp_register_decorator`) come first; the `oxphp_async_*` and `oxphp_apm_*` families — and the `OxPHP\Profile\*` SDK when the profiler is built in — are appended by their plugins during module init. Treat this list as illustrative: the exact set and ordering depend on which plugins are compiled into the build.
 
 ## Compatibility with PHP-FPM
 
@@ -11623,13 +11673,13 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.8.0` |
-| `SERVER_PROTOCOL` | Always `HTTP/1.1` | `HTTP/1.1` |
+| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.9.0` |
+| `SERVER_PROTOCOL` | Negotiated HTTP protocol version | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
-| `SCRIPT_NAME` | URI path without query string | `/app` |
-| `DOCUMENT_URI` | Alias for `SCRIPT_NAME`, for nginx/PHP-FPM compatibility | `/app` |
-| `PHP_SELF` | Same as `SCRIPT_NAME` | `/app` |
+| `SCRIPT_NAME` | Path of the executed script relative to `DOCUMENT_ROOT` — the front controller in Framework mode, **not** the request URI | `/index.php` |
+| `DOCUMENT_URI` | Alias for `SCRIPT_NAME`, for nginx/PHP-FPM compatibility | `/index.php` |
+| `PHP_SELF` | `SCRIPT_NAME` plus `PATH_INFO` when present, otherwise equal to `SCRIPT_NAME` | `/index.php/user/42` |
 | `QUERY_STRING` | Query portion of the URI (empty string when absent) | `page=2` |
 | `SERVER_NAME` | Hostname from the `Host` header | `example.com` |
 | `SERVER_PORT` | Port from the `Host` header | `8080` |
@@ -12217,7 +12267,8 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `INTERNAL_ADDR` | *(unset)* | Address for the internal server (`/health`, `/metrics`, `/config`). Internal server is not started when unset |
+| `INTERNAL_ADDR` | *(unset)* | Address for the internal server (`/health`, `/metrics`, `/config`). Internal server is not started when unset. A port-only value (`:9090` or `9090`) binds `127.0.0.1`; bind an explicit `0.0.0.0:9090` to expose it off-host |
+| `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDR/IP allow-list for the internal server. A peer outside the list receives `403` on `/metrics`, `/config`, and plugin paths; health probes (`/health`, `/healthz`, `/readyz`, `/startupz` and their long forms) stay reachable. Unset/empty = allow all. Loopback is **not** implicit — list `127.0.0.1/32` to keep localhost access. A malformed list aborts startup |
 | `ERROR_PAGES_DIR` | *(unset)* | Directory containing custom error pages named `{status}.html` (e.g., `404.html`, `503.html`) |
 | `MAX_QUERY_BODY` | `524288` | Maximum request body size in bytes for internal query endpoints (512 KiB) |
 | `TRACE_CONTEXT` | `false` | Boolean — see [Boolean values](#boolean-values). When truthy, enables W3C Trace Context propagation: reads `traceparent`/`tracestate` headers and forwards them to PHP via `$_SERVER` |
@@ -12255,6 +12306,7 @@ When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, m
 |----------|---------|-------------|
 | `ASYNC_WORKERS` | `0` (disabled) | Number of dedicated async worker threads. When `0`, the async functions (`oxphp_async`, etc.) are registered but throw `OxPHP\Async\AsyncException` on call. Set to a positive value to enable background task execution |
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | Maximum pending tasks in the async queue. `0` = auto (workers × 64) |
+| `ASYNC_MAX_FIBERS` | `256` | Per-worker cap on concurrent async task fibers. The process-global in-flight limit (queued + running) is `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch past it is rejected immediately with `OxPHP\Async\AsyncException` so fan-out composition cannot deadlock |
 
 The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.
 
@@ -12381,12 +12433,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -12396,6 +12446,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -12415,7 +12467,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Note:** TLS certificate and key paths are omitted from the output. The `tls_enabled` field indicates whether TLS is active.
+> **Note:** The served `/config` response scrubs a few keys that the internal `Config` representation carries: TLS certificate and key paths are never emitted (`tls_enabled` indicates whether TLS is active), and `internal_addr` and `error_pages_dir` are removed — deployment topology and filesystem paths that aid an attacker and are not needed by metrics scrapers.
 
 ## See Also
 
@@ -12493,7 +12545,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.8.0
+          image: ghcr.io/oxphp/oxphp:0.9.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -12527,7 +12579,7 @@ Or set it in your Compose file:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"
@@ -12579,7 +12631,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 
 When `INTERNAL_ADDR` is not set, the internal server does not start and no health endpoints are available.
 
-> **Note:** Bind to `127.0.0.1` in production unless the internal server is behind a firewall. The `/config` endpoint exposes operational details that should not be public.
+> **Note:** A port-only `INTERNAL_ADDR` (`:9090` or `9090`) binds `127.0.0.1`; use an explicit `0.0.0.0:9090` to expose the internal server off-host. When it is reachable off-host, restrict access with `INTERNAL_ALLOW_IPS` (a CIDR/IP allow-list — `/metrics`, `/config`, and plugin paths return `403` to peers outside it, while health probes stay reachable); loopback is not implicit, so list `127.0.0.1/32` to keep localhost access. The server warns at startup if the listener is exposed with no allow-list set.
 
 ## Kubernetes Probes
 
@@ -12662,7 +12714,7 @@ curl http://localhost:9090/metrics
 
 ## GET /config
 
-Returns the active server configuration as JSON. TLS certificate and key paths are omitted for security.
+Returns the active server configuration as JSON. TLS certificate and key paths, `internal_addr`, and `error_pages_dir` are scrubbed from the response for security.
 
 ```bash
 curl -s http://localhost:9090/config | jq .
@@ -12680,12 +12732,10 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
-  "internal_addr": "127.0.0.1:9090",
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "error_pages_dir": null,
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,
@@ -12695,6 +12745,8 @@ curl -s http://localhost:9090/config | jq .
   "static_revalidate": false,
   "async_workers": 0,
   "async_queue_capacity": 0,
+  "async_max_fibers": 256,
+  "async_in_flight_cap": 0,
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
@@ -12702,7 +12754,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-> **Note:** TLS certificate and key paths are omitted. The `tls_enabled` boolean indicates whether TLS is active.
+> **Note:** TLS certificate and key paths are never emitted (`tls_enabled` indicates whether TLS is active), and `internal_addr` and `error_pages_dir` are scrubbed from the served response.
 
 ## Kubernetes Integration
 
@@ -12814,6 +12866,7 @@ curl http://localhost:9090/metrics
 | `oxphp_responses_by_status_total` | counter | Responses by status class. Label: `status` (`1xx`, `2xx`, `3xx`, `4xx`, `5xx`) |
 | `oxphp_request_bytes_total` | counter | Total request body bytes received |
 | `oxphp_response_bytes_total` | counter | Total response body bytes sent |
+| `oxphp_request_cancelled_total` | counter | Cancelled requests by reason. Label: `reason` (`client_abort`, `timeout`, `shutdown`). Always emitted |
 
 > **Note:** Only methods and status classes with at least one recorded event are emitted. Zero-count labels are omitted.
 
@@ -12846,6 +12899,16 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_busy_workers` | gauge | Workers currently processing a request |
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired due to idle timeout (dynamic mode only) |
+
+## Worker Supervisor Metrics
+
+Per-worker observability emitted by the worker supervisor. Each series carries a `worker_id` label (slot index). These appear once the supervisor is tracking per-worker state.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_worker_request_age_seconds` | gauge | Age of the in-flight request on each worker, in seconds. Label: `worker_id` |
+| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold. Label: `worker_id` |
+| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`) |
 
 ## Queue Wait Histogram
 
@@ -12912,7 +12975,7 @@ This histogram measures time spent inside the PHP handler callback, excluding qu
 
 ## Async Pool Metrics
 
-These metrics are only emitted when `ASYNC_WORKERS` is set to a non-zero value.
+These metrics require `ASYNC_WORKERS` set to a non-zero value, and each has its own emission gate: the counters appear only after at least one task has been dispatched or rejected, the `_in_flight` / `_in_flight_limit` gauges appear once the pool has wired its in-flight counter, and `oxphp_async_output_discarded_bytes_total` appears only after some output has been discarded.
 
 | Metric | Type | Description |
 |--------|------|-------------|
@@ -12920,8 +12983,11 @@ These metrics are only emitted when `ASYNC_WORKERS` is set to a non-zero value.
 | `oxphp_async_tasks_completed_total` | counter | Async tasks that completed successfully |
 | `oxphp_async_tasks_failed_total` | counter | Async tasks that threw an exception |
 | `oxphp_async_tasks_cancelled_total` | counter | Async tasks that were cancelled |
-| `oxphp_async_tasks_rejected_total` | counter | Async tasks rejected because the pool queue was full |
+| `oxphp_async_tasks_rejected_total` | counter | Async tasks rejected at dispatch — because the pool queue was full or the in-flight cap (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) was reached |
 | `oxphp_async_tasks_stranded_total` | counter | Workers left running past an `await_race` / `await_any` timeout. Each stranded task can extend RSHUTDOWN by up to 5 seconds. |
+| `oxphp_async_tasks_in_flight` | gauge | Async tasks currently queued or running (emitted once the pool wires its in-flight counter) |
+| `oxphp_async_tasks_in_flight_limit` | gauge | Maximum concurrent async tasks (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) |
+| `oxphp_async_output_discarded_bytes_total` | counter | Bytes of async-task output discarded at worker idle (an `echo` in an async task has no client to receive it) |
 
 ## Grafana Dashboard Tips
 
