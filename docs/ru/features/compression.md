@@ -112,7 +112,7 @@ curl -H "Accept-Encoding: br" -I http://localhost/
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "8080:80"
     volumes:

@@ -4,6 +4,16 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-25
+
+### Migration from 0.8.0
+
+**A timed-out `await` now cancels the abandoned async task instead of letting it finish.** Previously a task whose `await` (or `await_all` / `await_any` / `await_race`) timed out kept running to the end of the request; its side effects — database writes, cache fills, outbound calls — would still complete in the background. The task is now force-cancelled at the timeout: one parked in cooperative sleep or suspended awaiting a child is resumed into cancellation, and a CPU-bound task is interrupted at the next opcode boundary. Code that relied on a timed-out task quietly running to completion must instead treat the timeout as a hard abort — move work that must always finish out of the awaited task, or give it a budget under the `await` timeout. Tasks still in flight when the request ends are likewise drained.
+
+**`/config` no longer reports `internal_addr` or `error_pages_dir`.** These two keys were removed from the internal `/config` JSON because they leak deployment topology and a filesystem path without serving any metrics-scraping need. Tooling that read `internal_addr` or `error_pages_dir` from `/config` must source them another way (the process environment / your deployment manifest); the remaining keys are unchanged.
+
+**A port-only `INTERNAL_ADDR` now binds loopback, not all interfaces.** `INTERNAL_ADDR=:9090` previously failed to resolve; it now binds `127.0.0.1:9090`. To expose the internal server off-host, set an explicit `INTERNAL_ADDR=0.0.0.0:9090` — and pair it with `INTERNAL_ALLOW_IPS` (new in this release), since the server now warns at startup when the internal listener is reachable off-host without an allow-list.
+
 ### Added
 
 - **Async task composition (nested `oxphp_async`).** An async task may now itself call `oxphp_async()` and suspend on `await_all` / `await_any` / `await_race`, so a task can fan out child tasks and await them without blocking its worker thread — the previous "no nested async" restriction is removed. The async executor runs each task on a cooperative fiber (a C scheduler driven from Rust) instead of blocking a worker for the task's whole duration; JIT trace state (`jit_trace_num`, `vm_stack_page_size`) is saved and restored across fiber switches so JIT-compiled tasks resume correctly.
@@ -715,6 +725,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.9.0]: https://github.com/oxphp/oxphp/releases/tag/v0.9.0
 [0.8.0]: https://github.com/oxphp/oxphp/releases/tag/v0.8.0
 [0.7.0]: https://github.com/oxphp/oxphp/releases/tag/v0.7.0
 [0.6.0]: https://github.com/oxphp/oxphp/releases/tag/v0.6.0

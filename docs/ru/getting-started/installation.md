@@ -5,14 +5,14 @@ description: Установка OxPHP через Docker-образ или сбо
 
 # Установка
 
-OxPHP распространяется в виде Docker-образа — это самый быстрый и рекомендуемый способ начать обслуживать PHP-приложения. Образ содержит серверный бинарный файл, PHP 8.4 или 8.5 ZTS, расширение OxPHP и все зависимости времени выполнения на базе Alpine Linux. По умолчанию теги `:0.8.0` и `:latest` поставляются с PHP 8.5; для PHP 8.4 используйте теги `:0.8.0-php8.4`, `:php8.4` или любой вариант `*-php8.4*`.
+OxPHP распространяется в виде Docker-образа — это самый быстрый и рекомендуемый способ начать обслуживать PHP-приложения. Образ содержит серверный бинарный файл, PHP 8.4 или 8.5 ZTS, расширение OxPHP и все зависимости времени выполнения на базе Alpine Linux. По умолчанию теги `:0.9.0` и `:latest` поставляются с PHP 8.5; для PHP 8.4 используйте теги `:0.9.0-php8.4`, `:php8.4` или любой вариант `*-php8.4*`.
 
 ## Docker (рекомендуется)
 
 Загрузите официальный образ из GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.8.0
+docker pull ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 В образ входит:
@@ -23,7 +23,7 @@ docker pull ghcr.io/oxphp/oxphp:0.8.0
 - **Библиотека-мост** (`liboxphp_bridge.so`) — связывает Rust-сервер со средой выполнения PHP
 - **Alpine Linux** — минимальный базовый образ
 - **Без директивы `USER`** — образ по умолчанию запускается от **root**, что соответствует поведению `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. Пользователь `www-data` (UID 82, GID 82) предварительно создан, а директория `/var/www/html` принадлежит ему уже на этапе сборки; снижайте привилегии на уровне оркестратора при развёртывании:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.8.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -80,9 +80,9 @@ oxphp ──► libphp.so ──► libxml2, libcurl, libsqlite3, libonig, ...
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.8.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.9.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -107,7 +107,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Продакшен
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 # Runtime-зависимости расширений
 USER root
@@ -132,7 +132,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 Если приложению не нужны дополнительные расширения, достаточно:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```

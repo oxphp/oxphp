@@ -17,7 +17,7 @@ OxPHP формирует `$_SERVER` из входящего HTTP-запроса 
 |-----------|---------|--------|
 | `SCRIPT_FILENAME` | Абсолютный путь в файловой системе к выполняемому PHP-скрипту | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Корневая директория веб-сервера, настроенная через переменную окружения `DOCUMENT_ROOT` | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Идентификатор сервера (содержит текущую версию OxPHP) | `OxPHP/0.8.0` |
+| `SERVER_SOFTWARE` | Идентификатор сервера (содержит текущую версию OxPHP) | `OxPHP/0.9.0` |
 | `SERVER_PROTOCOL` | Согласованная версия протокола HTTP | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP-метод | `GET` |
 | `REQUEST_URI` | Полный URI со строкой запроса | `/app?page=2` |

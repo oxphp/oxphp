@@ -140,13 +140,13 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 ```bash
 docker run -p 80:80 \
   -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
-  ghcr.io/oxphp/oxphp:0.8.0
+  ghcr.io/oxphp/oxphp:0.9.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.8.0
+FROM ghcr.io/oxphp/oxphp:0.9.0
 
 COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -157,7 +157,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.8.0
+    image: ghcr.io/oxphp/oxphp:0.9.0
     ports:
       - "80:80"
     volumes:
