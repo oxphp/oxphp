@@ -179,7 +179,7 @@ CMD ["oxphp"]
 
 `--chown=www-data:www-data` on the `COPY` is important: files are owned by `www-data` (uid 82) inside the image, so an orchestrator-level `--user www-data` drop lands on a webroot the unprivileged process can read and (where needed) write to.
 
-The container starts as root. In production, drop privileges at the orchestrator level (see the security note below).
+The container starts as root, and `oxphp serve` then drops to `www-data` by default before serving any traffic (see the security note below). Pin the identity explicitly at the orchestrator level if you want a specific uid or a non-`www-data` user.
 
 ### Best practice pattern (two stages, smaller image)
 
@@ -213,7 +213,9 @@ docker run --rm --user www-data \
 
 ### Security note
 
-The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
+The prod image has no `USER` directive, so the container **starts** as root (matching `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions). Starting as root lets OxPHP bind privileged ports — but it no longer means traffic is *served* as root: **`oxphp serve` and `oxphp run` drop to `www-data` by default**, binding as root and then permanently dropping before any request is handled or any PHP worker runs. On the official image (which ships the `www-data` account) this happens out of the box, with no orchestrator configuration.
+
+You can still pin the runtime identity explicitly at the orchestrator level — recommended when you want a specific uid, extra defense-in-depth, or a non-`www-data` user:
 
 - **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
 - **Compose:**
@@ -232,15 +234,19 @@ The prod image has no `USER` directive, so the container runs as root by default
   ```
   `runAsNonRoot: true` is defense-in-depth: if `runAsUser` is ever removed or overridden to `0`, the kubelet rejects the pod instead of silently running as root.
 
-The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths lands on a readable webroot.
+When you start the container as non-root this way, OxPHP is already unprivileged and the default self-drop is a no-op — but the process then cannot bind ports below 1024 (see [Run as non-root on port 80](#run-as-non-root-on-port-80-serve---user) to keep a privileged bind *and* non-root serving). To deliberately keep serving as root, pass `oxphp serve --user=root`.
+
+The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths — including the default self-drop — lands on a readable webroot.
+
+> CLI invocations like `docker run … php artisan migrate` run the `php` binary directly, not `oxphp serve`/`run`, so they do **not** self-drop — they run as the container's start user (root by default). Use Docker's `--user` for those, as shown above.
 
 ### Run as non-root on port 80 (`serve --user`)
 
 Dropping privileges at the orchestrator level (above) has one limitation: a process that starts as `www-data` cannot bind a privileged port (below 1024). To serve on `:80`/`:443` you would otherwise need `CAP_NET_BIND_SERVICE`, a `su-exec`-style entrypoint, or a high port (such as `:8080`) behind a port mapping.
 
-`oxphp serve --user=<spec>` collapses this into a single process: OxPHP binds the listeners **as root**, then permanently drops to the target user **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities.
+OxPHP collapses this into a single process: it binds the listeners **as root**, then permanently drops **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities. **By default the dropped user is `www-data`**, so on the official image simply starting the container as root already gives you a privileged bind served by `www-data` — no flag required. Use `--user=<spec>` only to drop to a *different* user; use `--user=root` to keep root.
 
-Start the container **as root** — do not also set `user:`, because the bind needs root — and pass the flag via `command`:
+Start the container **as root** — do not also set `user:`, because the bind needs root. The example below passes `--user=www-data` explicitly to be self-documenting, but it matches the default:
 
 ```yaml
 services:
@@ -254,7 +260,7 @@ services:
       - LISTEN_ADDR=0.0.0.0:80
 ```
 
-`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. If the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root.
+`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. An **explicit** `--user` is fail-fast: if the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root. (The *default* drop is best-effort instead — started non-root it simply skips, since there is nothing to drop.)
 
 > Choose **one** model, not both. Use the orchestrator drop (`user:` / `runAsUser`) when a high port or an external load balancer terminates `:80`. Use `serve --user` when you want OxPHP itself to own the privileged bind. Setting `user:` **and** `serve --user` makes the bind fail — the container is no longer root.
 

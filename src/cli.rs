@@ -17,10 +17,11 @@ use crate::types::BoxError;
 /// Options for the `serve` role.
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct ServeOptions {
-    /// Drop OS privileges to this user/group after binding the listeners.
-    /// `Some` only when `--user` was given. The bind happens as the starting
-    /// user (root, for privileged ports); the drop is irreversible.
-    pub drop_to: Option<DropTarget>,
+    /// Privilege-drop intent applied after binding the listeners, while still
+    /// single-threaded. Defaults to a best-effort drop to `www-data`; an
+    /// explicit `--user` is fail-fast. The bind happens as the starting user
+    /// (root, for privileged ports); the drop is irreversible.
+    pub drop_to: DropIntent,
 }
 
 /// Resolved target of `serve --user=<name|name:group|uid|uid:gid>`.
@@ -98,6 +99,20 @@ impl std::str::FromStr for DropTarget {
     fn from_str(_s: &str) -> Result<Self, Self::Err> {
         Err("--user is not supported on this platform".into())
     }
+}
+
+/// Privilege-drop intent for a runnable role (`serve` / `run`).
+///
+/// `Explicit` carries a target resolved at parse time from `--user`; it is
+/// fail-fast (must start as root, drops or aborts). `DefaultWwwData` is the
+/// no-flag default: a best-effort drop to `www-data` resolved at drop time —
+/// it never aborts startup (see `privdrop::apply_drop`). Pass `--user=root`
+/// to opt out and keep running as root.
+#[derive(Debug, PartialEq, Eq, Default)]
+pub enum DropIntent {
+    Explicit(DropTarget),
+    #[default]
+    DefaultWwwData,
 }
 
 #[cfg(unix)]
@@ -204,11 +219,12 @@ pub struct RunOptions {
     /// `-d key=value` ini overrides, applied before the script runs (php-CLI
     /// parity). These are oxphp's own flags, consumed before the script path.
     pub ini: Vec<(String, String)>,
-    /// Drop OS privileges to this user/group before MINIT and script execution
-    /// when `--user` was given (k8s `Job` as non-root). Mirrors
-    /// `ServeOptions::drop_to`; the drop itself is performed by `main` before
-    /// calling `run_cli`, because `privdrop` lives in the binary crate.
-    pub user: Option<DropTarget>,
+    /// Privilege-drop intent applied before MINIT and script execution.
+    /// Defaults to a best-effort drop to `www-data`; an explicit `--user` is
+    /// fail-fast (k8s `Job` as non-root). Mirrors `ServeOptions::drop_to`; the
+    /// drop itself is performed by `main` before calling `run_cli`, because
+    /// `privdrop` lives in the binary crate.
+    pub user: DropIntent,
 }
 
 /// The runtime role selected by [`dispatch`]. Exactly one role runs per
@@ -350,15 +366,19 @@ fn parse_ini_define(raw: OsString) -> (String, String) {
     }
 }
 
-/// Resolve a raw `--user` spec (collected during parsing) into a `DropTarget`.
-/// Deferred from collection time so terminal flags (`--help`/`--version`) and
-/// out-of-role rejection (`config`) act without forcing a passwd lookup on a
-/// spec that will never be used. Still runs inside `parse_from`, so an unknown
-/// user for a real `serve`/`run` role fails fast, before any startup work.
-fn resolve_user(raw: Option<OsString>) -> Result<Option<DropTarget>, BoxError> {
+/// Resolve a raw `--user` spec (collected during parsing) into a [`DropIntent`].
+/// A present spec becomes `Explicit` (resolved now); an absent spec becomes the
+/// best-effort `DefaultWwwData` default, resolved later at drop time. Deferred
+/// from collection time so terminal flags (`--help`/`--version`) and out-of-role
+/// rejection (`config`) act without forcing a passwd lookup on a spec that will
+/// never be used. Still runs inside `parse_from`, so an unknown user for a real
+/// `serve`/`run` role fails fast, before any startup work.
+fn resolve_user(raw: Option<OsString>) -> Result<DropIntent, BoxError> {
     match raw {
-        Some(spec) => Ok(Some(spec.to_string_lossy().parse::<DropTarget>()?)),
-        None => Ok(None),
+        Some(spec) => Ok(DropIntent::Explicit(
+            spec.to_string_lossy().parse::<DropTarget>()?,
+        )),
+        None => Ok(DropIntent::DefaultWwwData),
     }
 }
 
@@ -714,7 +734,7 @@ mod tests {
         assert_eq!(opts.script, PathBuf::from("hello.php"));
         assert!(opts.args.is_empty());
         assert!(opts.ini.is_empty());
-        assert!(opts.user.is_none());
+        assert_eq!(opts.user, DropIntent::DefaultWwwData);
     }
 
     #[test]
@@ -840,7 +860,7 @@ mod tests {
         assert_eq!(opts.script, PathBuf::from("start"));
         assert!(opts.args.is_empty());
         assert!(opts.ini.is_empty());
-        assert!(opts.user.is_none());
+        assert_eq!(opts.user, DropIntent::DefaultWwwData);
     }
 
     #[test]
@@ -1028,10 +1048,45 @@ mod privilege_drop_tests {
             .is_err());
     }
 
+    /// Unwrap an explicit `--user` target, failing loudly on the default.
+    fn explicit_target(intent: DropIntent) -> DropTarget {
+        match intent {
+            DropIntent::Explicit(t) => t,
+            DropIntent::DefaultWwwData => {
+                panic!("expected DropIntent::Explicit, got DefaultWwwData")
+            }
+        }
+    }
+
+    #[test]
+    fn serve_without_user_defaults_to_www_data() {
+        let opts = serve_opts(parse_from(args(&["serve"])).unwrap());
+        assert_eq!(opts.drop_to, DropIntent::DefaultWwwData);
+    }
+
+    #[test]
+    fn run_without_user_defaults_to_www_data() {
+        let opts = run_opts(parse_from(args(&["run", "app.php"])).unwrap());
+        assert_eq!(opts.user, DropIntent::DefaultWwwData);
+    }
+
+    #[test]
+    fn implicit_run_without_user_defaults_to_www_data() {
+        let opts = run_opts(parse_from(args(&["app.php"])).unwrap());
+        assert_eq!(opts.user, DropIntent::DefaultWwwData);
+    }
+
+    #[test]
+    fn serve_user_root_is_explicit_optout() {
+        // `root` resolves on every system → uid 0. This is the "stay root" opt-out.
+        let opts = serve_opts(parse_from(args(&["serve", "--user=root"])).unwrap());
+        assert_eq!(explicit_target(opts.drop_to).uid, 0);
+    }
+
     #[test]
     fn serve_user_flag_attached() {
         let opts = serve_opts(parse_from(args(&["serve", "--user=1000001:1000002"])).unwrap());
-        let t = opts.drop_to.expect("drop_to should be set");
+        let t = explicit_target(opts.drop_to);
         assert_eq!(t.uid, 1000001);
         assert_eq!(t.gid, 1000002);
     }
@@ -1039,13 +1094,7 @@ mod privilege_drop_tests {
     #[test]
     fn serve_user_flag_separate_value() {
         let opts = serve_opts(parse_from(args(&["serve", "--user", "1000001:1000002"])).unwrap());
-        assert_eq!(opts.drop_to.expect("drop_to should be set").uid, 1000001);
-    }
-
-    #[test]
-    fn serve_without_user_has_no_drop() {
-        let opts = serve_opts(parse_from(args(&["serve"])).unwrap());
-        assert!(opts.drop_to.is_none());
+        assert_eq!(explicit_target(opts.drop_to).uid, 1000001);
     }
 
     #[test]
@@ -1057,7 +1106,7 @@ mod privilege_drop_tests {
     #[test]
     fn implicit_run_user_before_script() {
         let opts = run_opts(parse_from(args(&["--user=1000001:1000002", "app.php"])).unwrap());
-        let t = opts.user.expect("user should be set");
+        let t = explicit_target(opts.user);
         assert_eq!(t.uid, 1000001);
         assert_eq!(t.gid, 1000002);
         assert_eq!(opts.script, PathBuf::from("app.php"));
@@ -1067,7 +1116,7 @@ mod privilege_drop_tests {
     fn run_keyword_user_before_script() {
         let opts =
             run_opts(parse_from(args(&["run", "--user=1000001:1000002", "app.php"])).unwrap());
-        assert_eq!(opts.user.expect("user should be set").uid, 1000001);
+        assert_eq!(explicit_target(opts.user).uid, 1000001);
     }
 
     #[test]
@@ -1087,7 +1136,7 @@ mod privilege_drop_tests {
             ]))
             .unwrap(),
         );
-        let t = opts.user.expect("user should be set");
+        let t = explicit_target(opts.user);
         assert_eq!(t.uid, 1000003);
         assert_eq!(t.gid, 1000004);
     }

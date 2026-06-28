@@ -22,7 +22,7 @@ The image includes:
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
-- **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
+- **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`

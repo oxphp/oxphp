@@ -32,12 +32,15 @@ COMMANDS:
 启动 HTTP 应用服务器 —— 默认角色。`oxphp` 与 `oxphp serve` 等价。配置通过[环境变量](../operations/configuration.md)完成；`serve` 本身只接受 `--user`。
 
 ```bash
-oxphp                 # implicit serve
-oxphp serve           # explicit
-oxphp serve --user=www-data
+oxphp                 # 隐式 serve —— best-effort 降权到 www-data
+oxphp serve           # 显式 —— 同样的默认行为
+oxphp serve --user=appuser   # 降权到指定用户（fail-fast）
+oxphp serve --user=root      # 退出方式：保持以 root 运行
 ```
 
-`--user` 会以启动用户（root，因此能绑定 1024 以下的端口）绑定监听器，然后在处理任何流量之前永久降权到目标用户。完整模式、`<spec>` 语法以及文件权限清单，请参阅[在 80 端口以非 root 运行](docker.md#在-80-端口以非-root-运行serve---user)。
+**默认情况下 —— 不带 `--user` —— `serve` 会执行一次 best-effort 的降权到 `www-data`。** 当以 root 启动且存在 `www-data` 账户（如官方镜像）时，它以 root 绑定监听器，然后在处理任何流量之前永久降权到 `www-data`。以非 root 启动时保持当前用户；以 root 启动但主机上没有 `www-data` 账户时，记录一条警告并继续以 root 运行。该默认降权永远不会中断启动。
+
+`--user=<spec>` 覆盖目标用户，并且是 **fail-fast** 的：以 root 绑定，然后永久降权到该用户；若进程不是以 root 启动则报错退出。传入 `--user=root` 可有意保持以 root 运行。完整模式、`<spec>` 语法以及文件权限清单，请参阅[在 80 端口以非 root 运行](docker.md#在-80-端口以非-root-运行serve---user)。
 
 ## `oxphp run`
 
@@ -133,7 +136,7 @@ oxphp run -d memory_limit=1G -d display_errors=1 report.php
 
 ### run 路径上的 `--user`
 
-`oxphp run --user=<spec> <script.php>` 会在脚本执行之前降权操作系统权限，因此以 root 启动的一次性任务可以以非特权用户运行。`<spec>` 语法和降权机制与 [`serve --user`](docker.md#在-80-端口以非-root-运行serve---user) 完全相同；以非 root 启动却使用 `--user` 是硬性错误。
+`run` 遵循与 `serve` 相同的默认行为：不带 `--user` 时，它会在脚本执行之前执行一次 best-effort 的降权到 `www-data`（若已是非 root 则静默跳过）。`oxphp run --user=<spec> <script.php>` 覆盖目标用户，因此以 root 启动的一次性任务可以以指定的非特权用户运行；`--user=root` 保持 root。`<spec>` 语法和降权机制与 [`serve --user`](docker.md#在-80-端口以非-root-运行serve---user) 完全相同；显式 `--user` 在以非 root 启动时是硬性错误。
 
 ## `oxphp config`
 

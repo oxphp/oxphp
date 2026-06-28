@@ -179,7 +179,7 @@ CMD ["oxphp"]
 
 `COPY` 上的 `--chown=www-data:www-data` 很重要：文件在镜像中归 `www-data`（uid 82）所有，这样编排层通过 `--user www-data` 降权后，非特权进程能读（以及在需要时写）到 webroot。
 
-容器默认以 root 启动。在生产环境中，请在编排层降权（见下方安全说明）。
+容器以 root 启动，随后 `oxphp serve` 会在服务任何流量之前默认降权到 `www-data`（见下方安全说明）。若你需要特定 uid 或非 `www-data` 用户，可在编排层显式固定运行身份。
 
 ### 最佳实践（双阶段，更小的镜像）
 
@@ -212,7 +212,9 @@ docker run --rm --user www-data \
 
 ### 安全说明
 
-生产镜像没有 `USER` 指令，因此容器默认以 root 运行。这是有意为之，与 `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` 的约定一致。生产环境中**必须**在编排层降权：
+生产镜像没有 `USER` 指令，因此容器**以 root 启动**（与 `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` 的约定一致）。以 root 启动让 OxPHP 能绑定特权端口 —— 但这不再意味着流量*以 root 被服务*：**`oxphp serve` 和 `oxphp run` 默认会降权到 `www-data`**，先以 root 绑定，然后在处理任何请求或启动任何 PHP worker 之前永久降权。在官方镜像（自带 `www-data` 账户）上，这是开箱即用的，无需任何编排层配置。
+
+你仍然可以在编排层显式固定运行身份 —— 当你需要特定 uid、额外的纵深防御，或非 `www-data` 用户时，推荐这样做：
 
 - **Docker：** `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
 - **Compose：**
@@ -231,15 +233,19 @@ docker run --rm --user www-data \
   ```
   `runAsNonRoot: true` 是纵深防御：若 `runAsUser` 被删除或覆盖为 `0`，kubelet 会直接拒绝该 Pod，而不是默默以 root 运行。
 
-`www-data` 用户（uid 82，gid 82）由基础镜像预先创建，且 `/var/www/html` 在构建时已 `chown` 给它，所以上述任意降权路径都指向可读的 webroot。
+当你以这种方式以非 root 启动容器时，OxPHP 已经是非特权的，默认的自降权变为 no-op —— 但此时进程无法绑定 1024 以下的端口（见[在 80 端口以非 root 运行](#在-80-端口以非-root-运行serve---user)，以同时保留特权绑定*和*非 root 服务）。若要有意继续以 root 服务，请传入 `oxphp serve --user=root`。
+
+`www-data` 用户（uid 82，gid 82）由基础镜像预先创建，且 `/var/www/html` 在构建时已 `chown` 给它，所以上述任意降权路径 —— 包括默认自降权 —— 都指向可读的 webroot。
+
+> 像 `docker run … php artisan migrate` 这样的 CLI 调用直接运行 `php` 二进制文件，而非 `oxphp serve`/`run`，因此它们**不会**自降权 —— 它们以容器的启动用户（默认 root）运行。对于这些命令，请使用上面所示的 Docker `--user`。
 
 ### 在 80 端口以非 root 运行（`serve --user`）
 
 在编排层降权（见上）有一个限制：以 `www-data` 启动的进程无法绑定特权端口（低于 1024）。否则要监听 `:80`/`:443`，你需要 `CAP_NET_BIND_SERVICE`、类似 `su-exec` 的 entrypoint，或在端口映射后使用高端口（如 `:8080`）。
 
-`oxphp serve --user=<spec>` 把这些收拢到单个进程里：OxPHP **以 root** 绑定监听套接字，然后在接受任何连接或启动任何 PHP worker **之前**，永久降权到目标用户。你既得到特权端口，又让请求处理以非 root 运行，且无需额外 capabilities。
+OxPHP 把这些收拢到单个进程里：它 **以 root** 绑定监听套接字，然后在接受任何连接或启动任何 PHP worker **之前**永久降权。你既得到特权端口，又让请求处理以非 root 运行，且无需额外 capabilities。**默认降权到的用户就是 `www-data`**，所以在官方镜像上，仅仅以 root 启动容器就已经能得到由 `www-data` 服务的特权绑定 —— 无需任何标志。仅当要降权到*其他*用户时才使用 `--user=<spec>`；用 `--user=root` 保持 root。
 
-**以 root 启动容器** —— 同时不要设置 `user:`，因为绑定需要 root —— 并通过 `command` 传入该标志：
+**以 root 启动容器** —— 同时不要设置 `user:`，因为绑定需要 root。下面的示例显式传入 `--user=www-data` 以便自文档化，但它与默认行为一致：
 
 ```yaml
 services:
@@ -253,7 +259,7 @@ services:
       - LISTEN_ADDR=0.0.0.0:80
 ```
 
-`<spec>` 接受用户名、`name:group`、数字 `uid` 或 `uid:gid`。降权按 `initgroups → setgid → setuid` 执行，并校验无法重新获得 root，且不可逆；在 Linux 上还会设置 `no_new_privs`。如果进程**不是**以 root 启动，`serve --user` 会报错退出，而不是悄悄以 root 继续运行。
+`<spec>` 接受用户名、`name:group`、数字 `uid` 或 `uid:gid`。降权按 `initgroups → setgid → setuid` 执行，并校验无法重新获得 root，且不可逆；在 Linux 上还会设置 `no_new_privs`。**显式**的 `--user` 是 fail-fast 的：如果进程**不是**以 root 启动，`serve --user` 会报错退出，而不是悄悄以 root 继续运行。（而*默认*降权是 best-effort 的 —— 以非 root 启动时它会直接跳过，因为没有可降的权限。）
 
 > 只选**一种**模型，不要两者并用。当 `:80` 由高端口或外部负载均衡器终结时，用编排层降权（`user:` / `runAsUser`）；当你希望由 OxPHP 自己掌管特权绑定时，用 `serve --user`。同时设置 `user:` **和** `serve --user` 会导致绑定失败——此时容器已不是 root。
 

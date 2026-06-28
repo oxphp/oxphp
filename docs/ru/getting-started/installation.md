@@ -22,7 +22,7 @@ docker pull ghcr.io/oxphp/oxphp:0.9.0
 - **PHP-расширение OxPHP** (`oxphp_sapi.so`) — предоставляет `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()` и другие встроенные функции
 - **Библиотека-мост** (`liboxphp_bridge.so`) — связывает Rust-сервер со средой выполнения PHP
 - **Alpine Linux** — минимальный базовый образ
-- **Без директивы `USER`** — образ по умолчанию запускается от **root**, что соответствует поведению `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. Пользователь `www-data` (UID 82, GID 82) предварительно создан, а директория `/var/www/html` принадлежит ему уже на этапе сборки; снижайте привилегии на уровне оркестратора при развёртывании:
+- **Без директивы `USER`** — образ **стартует** от **root** (как `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`), чтобы мочь занять привилегированные порты, но `oxphp serve`/`run` затем по умолчанию сбрасывают привилегии до **`www-data`** ещё до обслуживания, поэтому трафик не обрабатывается от root «из коробки». Пользователь `www-data` (UID 82, GID 82) предварительно создан, а директория `/var/www/html` принадлежит ему уже на этапе сборки. Явно фиксируйте идентичность на уровне оркестратора, если нужен конкретный uid или дополнительная defense-in-depth:
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`

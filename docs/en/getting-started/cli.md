@@ -32,12 +32,15 @@ The role is chosen by keyword. The exact tokens `serve`, `run`, and `config` sel
 Starts the HTTP application server — the default role. `oxphp` and `oxphp serve` are equivalent. Configuration is via [environment variables](../operations/configuration.md); `serve` itself takes only `--user`.
 
 ```bash
-oxphp                 # implicit serve
-oxphp serve           # explicit
-oxphp serve --user=www-data
+oxphp                 # implicit serve — best-effort drop to www-data
+oxphp serve           # explicit — same default
+oxphp serve --user=appuser   # drop to a specific user (fail-fast)
+oxphp serve --user=root      # opt out: keep running as root
 ```
 
-`--user` binds the listeners as the starting user (root, so it can bind ports below 1024) and then permanently drops to the target user before any traffic is served. See [Run as non-root on port 80](docker.md#run-as-non-root-on-port-80-serve---user) for the full pattern, the `<spec>` grammar, and the file-permission checklist.
+**By default — with no `--user` — `serve` performs a best-effort drop to `www-data`.** Started as root with a `www-data` account present (as in the official image), it binds the listeners as root and then permanently drops to `www-data` before any traffic is served. Started as non-root it keeps the current user; started as root on a host without a `www-data` account it logs a warning and continues as root. The default never aborts startup.
+
+`--user=<spec>` overrides the target and is **fail-fast**: it binds as root, then permanently drops to that user, and exits with an error if not started as root. Pass `--user=root` to deliberately keep root. See [Run as non-root on port 80](docker.md#run-as-non-root-on-port-80-serve---user) for the full pattern, the `<spec>` grammar, and the file-permission checklist.
 
 ## `oxphp run`
 
@@ -133,7 +136,7 @@ The unopenable-file case is checked before engine startup, so a missing or unrea
 
 ### `--user` on the run path
 
-`oxphp run --user=<spec> <script.php>` drops OS privileges before the script executes, so a one-shot job started as root can run as an unprivileged user. The `<spec>` grammar and drop mechanics are identical to [`serve --user`](docker.md#run-as-non-root-on-port-80-serve---user); starting as non-root with `--user` is a hard error.
+`run` follows the same default as `serve`: with no `--user` it performs a best-effort drop to `www-data` before the script executes (skipped silently when already non-root). `oxphp run --user=<spec> <script.php>` overrides the target so a one-shot job started as root can run as a specific unprivileged user; `--user=root` keeps root. The `<spec>` grammar and drop mechanics are identical to [`serve --user`](docker.md#run-as-non-root-on-port-80-serve---user); an explicit `--user` started as non-root is a hard error.
 
 ## `oxphp config`
 

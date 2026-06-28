@@ -7,7 +7,7 @@
 //! run while single-threaded (only the logging writer thread may be alive), so
 //! the only thing that ever needs root is binding the listener at startup.
 
-use oxphp::cli::DropTarget;
+use oxphp::cli::{DropIntent, DropTarget};
 use oxphp::types::BoxError;
 
 /// Permanently drop to the target user/group. Call this while the process is
@@ -108,6 +108,79 @@ pub fn drop_to(_t: &DropTarget) -> Result<(), BoxError> {
     Err("privilege drop is not supported on this platform".into())
 }
 
+/// Default user for the no-`--user` best-effort drop.
+#[cfg(unix)]
+const DEFAULT_DROP_USER: &str = "www-data";
+
+/// Outcome of evaluating the best-effort default drop.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum DropPlan {
+    /// Not root — already running unprivileged; skip.
+    Skip,
+    /// Root but the default user does not resolve — stay root, warn.
+    StayRoot,
+    /// Root and the default user resolved — drop to it.
+    Drop(DropTarget),
+}
+
+/// Pure decision for the default (`www-data`) drop, split out so the branch
+/// logic is unit-testable without performing a real `setuid`.
+#[cfg(unix)]
+fn plan_default_drop(is_root: bool, resolved: Option<DropTarget>) -> DropPlan {
+    match (is_root, resolved) {
+        (false, _) => DropPlan::Skip,
+        (true, None) => DropPlan::StayRoot,
+        (true, Some(t)) => DropPlan::Drop(t),
+    }
+}
+
+/// Apply a [`DropIntent`]. `Explicit` is fail-fast (delegates to `drop_to`).
+/// `DefaultWwwData` is best-effort: it resolves `www-data` at call time and
+/// never aborts startup — it drops if root and the user exists, stays root with
+/// a warning if root but the user is missing, and skips silently when already
+/// non-root.
+#[cfg(unix)]
+pub fn apply_drop(intent: &DropIntent) -> Result<(), BoxError> {
+    match intent {
+        DropIntent::Explicit(t) => drop_to(t),
+        DropIntent::DefaultWwwData => {
+            // SAFETY: geteuid is async-signal-safe and never fails.
+            let is_root = unsafe { libc::geteuid() } == 0;
+            let resolved = DEFAULT_DROP_USER.parse::<DropTarget>().ok();
+            match plan_default_drop(is_root, resolved) {
+                DropPlan::Skip => {
+                    tracing::debug!(
+                        event = "privilege_drop_skipped",
+                        "not started as root; running as the current user"
+                    );
+                    Ok(())
+                }
+                DropPlan::StayRoot => {
+                    tracing::warn!(
+                        event = "privilege_drop_unavailable",
+                        user = DEFAULT_DROP_USER,
+                        "running as root: user '{DEFAULT_DROP_USER}' not found; not dropping \
+                         privileges. Pass --user=<name|uid> or run as a non-root user.",
+                    );
+                    Ok(())
+                }
+                DropPlan::Drop(t) => drop_to(&t),
+            }
+        }
+    }
+}
+
+/// Non-unix stub. Explicit `--user` is rejected at parse time on these
+/// platforms; the default intent is a no-op.
+#[cfg(not(unix))]
+pub fn apply_drop(intent: &DropIntent) -> Result<(), BoxError> {
+    match intent {
+        DropIntent::Explicit(t) => drop_to(t),
+        DropIntent::DefaultWwwData => Ok(()),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -129,5 +202,35 @@ mod tests {
         };
         let err = drop_to(&target).expect_err("non-root drop must fail, never silently no-op");
         assert!(err.to_string().contains("root"));
+    }
+
+    fn sample_target() -> DropTarget {
+        DropTarget {
+            uid: 82,
+            gid: 82,
+            user: None,
+        }
+    }
+
+    #[test]
+    fn plan_nonroot_always_skips() {
+        assert_eq!(plan_default_drop(false, None), DropPlan::Skip);
+        assert_eq!(
+            plan_default_drop(false, Some(sample_target())),
+            DropPlan::Skip
+        );
+    }
+
+    #[test]
+    fn plan_root_without_user_stays_root() {
+        assert_eq!(plan_default_drop(true, None), DropPlan::StayRoot);
+    }
+
+    #[test]
+    fn plan_root_with_user_drops() {
+        assert_eq!(
+            plan_default_drop(true, Some(sample_target())),
+            DropPlan::Drop(sample_target())
+        );
     }
 }
