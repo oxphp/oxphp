@@ -44,11 +44,9 @@ fn main() -> Result<(), types::BoxError> {
             // and binds no socket, so the drop is simpler than serve's. Logging
             // is not initialised yet, so the drop's tracing line is silent — the
             // run role uses plain stderr UX, not JSON logs.
-            if let Some(target) = &opts.user {
-                if let Err(e) = privdrop::drop_to(target) {
-                    eprintln!("oxphp: {e}");
-                    std::process::exit(1);
-                }
+            if let Err(e) = privdrop::apply_drop(&opts.user) {
+                eprintln!("oxphp: {e}");
+                std::process::exit(1);
             }
             std::process::exit(oxphp::frontend::run_cli(opts))
         }
@@ -111,9 +109,7 @@ fn main() -> Result<(), types::BoxError> {
         }
     }
 
-    if let Some(target) = &serve_opts.drop_to {
-        privdrop::drop_to(target)?;
-    }
+    privdrop::apply_drop(&serve_opts.drop_to)?;
 
     // Report effective uid/gid + supplementary groups AFTER any privilege drop,
     // so the log reflects the post-drop identity and the "running as root"

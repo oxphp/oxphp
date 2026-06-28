@@ -34,12 +34,15 @@ The role is chosen by keyword. The exact tokens `serve`, `run`, and `config` sel
 Starts the HTTP application server — the default role. `oxphp` and `oxphp serve` are equivalent. Configuration is via [environment variables](../operations/configuration.md); `serve` itself takes only `--user`.
 
 ```bash
-oxphp                 # implicit serve
-oxphp serve           # explicit
-oxphp serve --user=www-data
+oxphp                 # implicit serve — best-effort drop to www-data
+oxphp serve           # explicit — same default
+oxphp serve --user=appuser   # drop to a specific user (fail-fast)
+oxphp serve --user=root      # opt out: keep running as root
 ```
 
-`--user` binds the listeners as the starting user (root, so it can bind ports below 1024) and then permanently drops to the target user before any traffic is served. See [Run as non-root on port 80](docker.md#run-as-non-root-on-port-80-serve---user) for the full pattern, the `<spec>` grammar, and the file-permission checklist.
+**By default — with no `--user` — `serve` performs a best-effort drop to `www-data`.** Started as root with a `www-data` account present (as in the official image), it binds the listeners as root and then permanently drops to `www-data` before any traffic is served. Started as non-root it keeps the current user; started as root on a host without a `www-data` account it logs a warning and continues as root. The default never aborts startup.
+
+`--user=<spec>` overrides the target and is **fail-fast**: it binds as root, then permanently drops to that user, and exits with an error if not started as root. Pass `--user=root` to deliberately keep root. See [Run as non-root on port 80](docker.md#run-as-non-root-on-port-80-serve---user) for the full pattern, the `<spec>` grammar, and the file-permission checklist.
 
 ## `oxphp run`
 
@@ -135,7 +138,7 @@ The unopenable-file case is checked before engine startup, so a missing or unrea
 
 ### `--user` on the run path
 
-`oxphp run --user=<spec> <script.php>` drops OS privileges before the script executes, so a one-shot job started as root can run as an unprivileged user. The `<spec>` grammar and drop mechanics are identical to [`serve --user`](docker.md#run-as-non-root-on-port-80-serve---user); starting as non-root with `--user` is a hard error.
+`run` follows the same default as `serve`: with no `--user` it performs a best-effort drop to `www-data` before the script executes (skipped silently when already non-root). `oxphp run --user=<spec> <script.php>` overrides the target so a one-shot job started as root can run as a specific unprivileged user; `--user=root` keeps root. The `<spec>` grammar and drop mechanics are identical to [`serve --user`](docker.md#run-as-non-root-on-port-80-serve---user); an explicit `--user` started as non-root is a hard error.
 
 ## `oxphp config`
 
@@ -340,7 +343,7 @@ CMD ["oxphp"]
 
 `--chown=www-data:www-data` on the `COPY` is important: files are owned by `www-data` (uid 82) inside the image, so an orchestrator-level `--user www-data` drop lands on a webroot the unprivileged process can read and (where needed) write to.
 
-The container starts as root. In production, drop privileges at the orchestrator level (see the security note below).
+The container starts as root, and `oxphp serve` then drops to `www-data` by default before serving any traffic (see the security note below). Pin the identity explicitly at the orchestrator level if you want a specific uid or a non-`www-data` user.
 
 ### Best practice pattern (two stages, smaller image)
 
@@ -374,7 +377,9 @@ docker run --rm --user www-data \
 
 ### Security note
 
-The prod image has no `USER` directive, so the container runs as root by default. This is intentional and matches `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions. In production **you must** drop privileges at the orchestrator level:
+The prod image has no `USER` directive, so the container **starts** as root (matching `nginx:alpine` / `php:*-fpm-alpine` / `frankenphp:alpine` conventions). Starting as root lets OxPHP bind privileged ports — but it no longer means traffic is *served* as root: **`oxphp serve` and `oxphp run` drop to `www-data` by default**, binding as root and then permanently dropping before any request is handled or any PHP worker runs. On the official image (which ships the `www-data` account) this happens out of the box, with no orchestrator configuration.
+
+You can still pin the runtime identity explicitly at the orchestrator level — recommended when you want a specific uid, extra defense-in-depth, or a non-`www-data` user:
 
 - **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
 - **Compose:**
@@ -393,15 +398,19 @@ The prod image has no `USER` directive, so the container runs as root by default
   ```
   `runAsNonRoot: true` is defense-in-depth: if `runAsUser` is ever removed or overridden to `0`, the kubelet rejects the pod instead of silently running as root.
 
-The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths lands on a readable webroot.
+When you start the container as non-root this way, OxPHP is already unprivileged and the default self-drop is a no-op — but the process then cannot bind ports below 1024 (see [Run as non-root on port 80](#run-as-non-root-on-port-80-serve---user) to keep a privileged bind *and* non-root serving). To deliberately keep serving as root, pass `oxphp serve --user=root`.
+
+The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths — including the default self-drop — lands on a readable webroot.
+
+> CLI invocations like `docker run … php artisan migrate` run the `php` binary directly, not `oxphp serve`/`run`, so they do **not** self-drop — they run as the container's start user (root by default). Use Docker's `--user` for those, as shown above.
 
 ### Run as non-root on port 80 (`serve --user`)
 
 Dropping privileges at the orchestrator level (above) has one limitation: a process that starts as `www-data` cannot bind a privileged port (below 1024). To serve on `:80`/`:443` you would otherwise need `CAP_NET_BIND_SERVICE`, a `su-exec`-style entrypoint, or a high port (such as `:8080`) behind a port mapping.
 
-`oxphp serve --user=<spec>` collapses this into a single process: OxPHP binds the listeners **as root**, then permanently drops to the target user **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities.
+OxPHP collapses this into a single process: it binds the listeners **as root**, then permanently drops **before** any connection is accepted or any PHP worker runs. You get a privileged port *and* non-root request handling without extra capabilities. **By default the dropped user is `www-data`**, so on the official image simply starting the container as root already gives you a privileged bind served by `www-data` — no flag required. Use `--user=<spec>` only to drop to a *different* user; use `--user=root` to keep root.
 
-Start the container **as root** — do not also set `user:`, because the bind needs root — and pass the flag via `command`:
+Start the container **as root** — do not also set `user:`, because the bind needs root. The example below passes `--user=www-data` explicitly to be self-documenting, but it matches the default:
 
 ```yaml
 services:
@@ -415,7 +424,7 @@ services:
       - LISTEN_ADDR=0.0.0.0:80
 ```
 
-`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. If the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root.
+`<spec>` accepts a user name, `name:group`, a numeric `uid`, or `uid:gid`. The drop runs `initgroups → setgid → setuid`, verifies that root cannot be regained, and is irreversible; on Linux it also sets `no_new_privs`. An **explicit** `--user` is fail-fast: if the process is **not** started as root, `serve --user` exits with an error rather than silently continuing as root. (The *default* drop is best-effort instead — started non-root it simply skips, since there is nothing to drop.)
 
 > Choose **one** model, not both. Use the orchestrator drop (`user:` / `runAsUser`) when a high port or an external load balancer terminates `:80`. Use `serve --user` when you want OxPHP itself to own the privileged bind. Setting `user:` **and** `serve --user` makes the bind fail — the container is no longer root.
 
@@ -589,7 +598,7 @@ The image includes:
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
-- **No `USER` directive** — the image runs as **root** by default, matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time; drop privileges at the orchestrator level when you deploy:
+- **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
@@ -6769,7 +6778,7 @@ When a request matches a static file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache (re-checks each file at most once per 3 seconds; changes become visible within that window). Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 
 ## MIME Detection
 
@@ -6796,7 +6805,7 @@ The file cache is populated on the first request to each file and retained acros
 
 ### Content Revalidation
 
-Set `STATIC_REVALIDATE=on` to enable mtime-based revalidation. In this mode, each cache hit performs a `stat()` syscall to check the file's modification time. If the file has changed on disk, the stale entry is evicted and the file is re-read automatically. **Enable this in development** — you see file changes immediately without restarting the server. Leave it off in production.
+Set `STATIC_REVALIDATE=on` to enable mtime-based revalidation. In this mode the server re-checks a cached file's modification time with a `stat()` syscall **at most once every 3 seconds per file**, not on every request. If the file has changed on disk, the stale entry is evicted and the file is re-read automatically. Within the 3-second window a cached entry is served straight from memory with no syscall, so the cost is amortized rather than paid per request. Changes on disk become visible within 3 seconds. **Enable this in development** — you see file changes without restarting the server. Leave it off in production.
 
 In production, leave `STATIC_REVALIDATE` unset (the default `off`) for maximum throughput with zero per-request syscall overhead.
 
@@ -6865,7 +6874,7 @@ There are two independent cache layers and a variable for each:
 | Variable | Controls | Effect of `off` |
 |----------|----------|-----------------|
 | `STATIC_MAX_AGE=off` | **Browser cache** (HTTP headers) | No `Cache-Control`, `ETag`, or `Last-Modified` headers sent |
-| `STATIC_REVALIDATE=on` | **Server in-memory cache** | Each hit validates file mtime; stale entries evicted automatically |
+| `STATIC_REVALIDATE=on` | **Server in-memory cache** | Re-checks file mtime at most once per 3s per file; stale entries evicted automatically |
 
 For development, set `STATIC_REVALIDATE=on` so the server always serves fresh content. Optionally also set `STATIC_MAX_AGE=off` to prevent browser caching entirely.
 
@@ -6873,7 +6882,7 @@ For development, set `STATIC_REVALIDATE=on` so the server always serves fresh co
 
 ### Server keeps serving stale files
 
-By default, the in-memory content cache does not check whether files have changed on disk. Set `STATIC_REVALIDATE=on` during development to enable mtime revalidation — the server will detect file changes automatically.
+By default, the in-memory content cache does not check whether files have changed on disk. Set `STATIC_REVALIDATE=on` during development to enable mtime revalidation — the server detects file changes automatically (within 3 seconds).
 
 ### Browser keeps serving stale files
 
@@ -13829,7 +13838,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: each cache hit checks the file's modification time and evicts stale entries automatically. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
 
 ## Logging

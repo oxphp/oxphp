@@ -22,7 +22,7 @@ docker pull ghcr.io/oxphp/oxphp:0.9.0
 - **OxPHP PHP 扩展**（`oxphp_sapi.so`）—— 提供 `oxphp_request_id()`、`oxphp_server_info()`、`oxphp_worker()` 等内置函数
 - **Bridge 库**（`liboxphp_bridge.so`）—— 连接 Rust 服务器与 PHP 运行时
 - **Alpine Linux** 基础镜像 —— 最小化运行时占用
-- **不设置 `USER` 指令** —— 镜像默认以 **root** 运行，与 `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine` 保持一致。`www-data` 用户（UID 82，GID 82）已预先创建，并在构建时将 `/var/www/html` 的所有权切换给它；部署时请在编排层下放权限：
+- **不设置 `USER` 指令** —— 镜像**以 root 启动**（与 `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine` 一致）以便绑定特权端口，但 `oxphp serve`/`run` 随后会在服务之前默认降权到 **`www-data`**，因此流量不会开箱即用地以 root 处理。`www-data` 用户（UID 82，GID 82）已预先创建，并在构建时将 `/var/www/html` 的所有权切换给它。若你需要特定 uid 或额外的纵深防御，可在编排层显式固定运行身份：
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.9.0`
   - Compose：`services.app.user: www-data`
   - Kubernetes：`securityContext.runAsUser: 82`
