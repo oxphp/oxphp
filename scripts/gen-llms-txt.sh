@@ -80,8 +80,9 @@ section_title() {
 # gather DIR -> "title<TAB>description<TAB>relpath" per doc file, sorted by title.
 gather() {
   local dir="$1" f base meta t d rel
-  for f in "$dir"/*.md; do
-    [ -e "$f" ] || continue
+  # Recurse so nested sections (e.g. examples/{framework,cms,ecommerce}/*.md) are
+  # included; flat sections are unaffected.
+  find "$dir" -type f -name '*.md' | while IFS= read -r f; do
     base="$(basename "$f")"
     case "$base" in CLAUDE.md|index.md) continue ;; esac
     meta="$(read_meta "$f")"
@@ -98,7 +99,7 @@ gather() {
 }
 
 # --- section order (mirrors the docs nav) ------------------------------------
-ordered="getting-started features shared-state security php operations architecture"
+ordered="getting-started examples features shared-state security php operations architecture"
 sections=""
 for s in $ordered; do
   [ -d "$DOCS_DIR/$s" ] && sections="$sections $s"

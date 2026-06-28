@@ -5,7 +5,7 @@ description: OxPHP 文档 —— 高性能异步 PHP 应用服务器，内置 TL
 
 [English](../en/index.md) · [Русский](../ru/index.md) · **中文**
 
-[入门](#入门) · [功能特性](#功能特性) · [共享状态](#共享状态) · [安全](#安全) · [PHP](#php) · [运维](#运维) · [架构](#架构)
+[入门](#入门) · [示例](#示例) · [功能特性](#功能特性) · [共享状态](#共享状态) · [安全](#安全) · [PHP](#php) · [运维](#运维) · [架构](#架构)
 
 # OxPHP 文档
 
@@ -43,6 +43,15 @@ OxPHP 是一个高性能 PHP 应用服务器，用单一二进制文件取代 ng
 - [快速开始](getting-started/quick-start.md) —— 5 分钟内构建并运行第一个 OxPHP 应用
 - [Docker 指南](getting-started/docker.md) —— Dockerfile、Compose 配置、数据卷和部署模式
 - [命令行接口](getting-started/cli.md) —— `oxphp` 命令语法：`serve`、`run` 运行单个 PHP 脚本、`config` 以及 `--user` 降权
+
+## 示例
+
+在 OxPHP 上运行流行 PHP 应用的端到端实战教程 —— 每个都是完整的 Docker Compose 项目，包含 `Dockerfile`、`docker-compose.yml`、安装步骤，以及标准（nginx + PHP-FPM）文档未涵盖的 OxPHP 特有说明。
+
+- [示例部署](examples/index.md) —— 概览、九应用矩阵，以及每个教程共通的模式
+- 框架模式：[Laravel](examples/framework/laravel.md) · [Symfony](examples/framework/symfony.md) · [Yii3](examples/framework/yii3.md)
+- CMS：[WordPress](examples/cms/wordpress.md) · [Drupal](examples/cms/drupal.md) · [Craft CMS](examples/cms/craft.md) · [October CMS](examples/cms/october.md)
+- 电商：[Magento](examples/ecommerce/magento.md) · [OpenCart](examples/ecommerce/opencart.md)
 
 ## 功能特性
 
