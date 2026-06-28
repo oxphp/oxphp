@@ -9,6 +9,18 @@
 - [Installation](docs/en/getting-started/installation.md): Install OxPHP via Docker image or build from source. Covers prerequisites, verification, and platform notes.
 - [Quick Start](docs/en/getting-started/quick-start.md): Get OxPHP running in under 5 minutes. Create a project, write a PHP app, start the server, and make your first request.
 
+## Examples
+
+- [Craft CMS on OxPHP](docs/en/examples/cms/craft.md): Run Craft CMS 5 on OxPHP in framework routing mode with MySQL — Dockerfile, Compose file, console-driven install, and OxPHP-specific notes.
+- [Drupal on OxPHP](docs/en/examples/cms/drupal.md): Run Drupal 11 on OxPHP in framework routing mode with MySQL and drush — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [Laravel on OxPHP](docs/en/examples/framework/laravel.md): Run a Laravel application on OxPHP in framework routing mode with a MySQL database — Dockerfile, Compose file, install steps, and the OxPHP-specific configuration.
+- [Magento on OxPHP](docs/en/examples/ecommerce/magento.md): Run Magento Open Source 2.4 on OxPHP in framework routing mode with MySQL and OpenSearch — Dockerfile, Compose file, install steps, the static-asset version symlink, and OxPHP-specific notes.
+- [October CMS on OxPHP](docs/en/examples/cms/october.md): Run October CMS 4 on OxPHP in framework routing mode with a public/ mirror and SYMLINK_ALLOW_PATHS — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [OpenCart on OxPHP](docs/en/examples/ecommerce/opencart.md): Run OpenCart 4 on OxPHP in traditional routing mode with MySQL and PHP_DENY_PATHS — Dockerfile, Compose file, CLI install, and OxPHP-specific notes.
+- [Symfony on OxPHP](docs/en/examples/framework/symfony.md): Run a Symfony application on OxPHP in framework routing mode with no database — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [WordPress on OxPHP](docs/en/examples/cms/wordpress.md): Run WordPress on OxPHP in traditional routing mode with MySQL and a WP-CLI sidecar — Dockerfile that extends the OxPHP runtime, Compose file, and OxPHP-specific notes.
+- [Yii3 on OxPHP](docs/en/examples/framework/yii3.md): Run a Yii3 (yiisoft/app) application on OxPHP in framework routing mode with no database — the leanest example. Dockerfile, Compose file, and OxPHP-specific notes.
+
 ## Features
 
 - [Access Logging](docs/en/features/access-logging.md): Structured JSON access logs for every HTTP request in OxPHP, with configurable modes for all requests or errors only.

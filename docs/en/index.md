@@ -5,7 +5,7 @@ description: Documentation for OxPHP, a high-performance async PHP application s
 
 **English** · [Русский](../ru/index.md) · [中文](../zh/index.md)
 
-[Getting Started](#getting-started) · [Features](#features) · [Shared State](#shared-state) · [Security](#security) · [PHP](#php) · [Operations](#operations) · [Architecture](#architecture)
+[Getting Started](#getting-started) · [Examples](#examples) · [Features](#features) · [Shared State](#shared-state) · [Security](#security) · [PHP](#php) · [Operations](#operations) · [Architecture](#architecture)
 
 # OxPHP Documentation
 
@@ -43,6 +43,15 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Quick Start](getting-started/quick-start.md) — build and run your first OxPHP application in under 5 minutes
 - [Docker Guide](getting-started/docker.md) — Dockerfiles, Compose configuration, volumes, and deployment patterns
 - [Command-Line Interface](getting-started/cli.md) — the `oxphp` command grammar: `serve`, `run` a single PHP script, `config`, and `--user` privilege drop
+
+## Examples
+
+End-to-end recipes for running popular PHP applications on OxPHP — each a complete Docker Compose project with a `Dockerfile`, a `docker-compose.yml`, install steps, and the OxPHP-specific notes that stock (nginx + PHP-FPM) docs do not cover.
+
+- [Example Deployments](examples/index.md) — overview, the nine-application matrix, and the patterns common to every recipe
+- Framework mode: [Laravel](examples/framework/laravel.md) · [Symfony](examples/framework/symfony.md) · [Yii3](examples/framework/yii3.md)
+- CMS: [WordPress](examples/cms/wordpress.md) · [Drupal](examples/cms/drupal.md) · [Craft CMS](examples/cms/craft.md) · [October CMS](examples/cms/october.md)
+- E-commerce: [Magento](examples/ecommerce/magento.md) · [OpenCart](examples/ecommerce/opencart.md)
 
 ## Features
 

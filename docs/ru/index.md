@@ -5,7 +5,7 @@ description: Документация по OxPHP — высокопроизво�
 
 [English](../en/index.md) · **Русский** · [中文](../zh/index.md)
 
-[Начало работы](#начало-работы) · [Возможности](#возможности) · [Разделяемое состояние](#разделяемое-состояние) · [Безопасность](#безопасность) · [PHP](#php) · [Эксплуатация](#эксплуатация) · [Архитектура](#архитектура)
+[Начало работы](#начало-работы) · [Примеры](#примеры) · [Возможности](#возможности) · [Разделяемое состояние](#разделяемое-состояние) · [Безопасность](#безопасность) · [PHP](#php) · [Эксплуатация](#эксплуатация) · [Архитектура](#архитектура)
 
 # Документация OxPHP
 
@@ -43,6 +43,15 @@ OxPHP — высокопроизводительный сервер PHP-прил
 - [Быстрый старт](getting-started/quick-start.md) — сборка и запуск первого приложения OxPHP менее чем за 5 минут
 - [Руководство по Docker](getting-started/docker.md) — Dockerfiles, конфигурация Compose, тома и паттерны развёртывания
 - [Интерфейс командной строки](getting-started/cli.md) — грамматика команд `oxphp`: `serve`, `run` для одного PHP-скрипта, `config` и сброс привилегий через `--user`
+
+## Примеры
+
+Готовые рецепты запуска популярных PHP-приложений на OxPHP — каждый представляет собой полноценный проект Docker Compose с `Dockerfile`, `docker-compose.yml`, шагами установки и специфичными для OxPHP замечаниями, которых нет в стандартной документации (nginx + PHP-FPM).
+
+- [Примеры развёртывания](examples/index.md) — обзор, матрица из девяти приложений и общие для всех рецептов паттерны
+- Режим фреймворка: [Laravel](examples/framework/laravel.md) · [Symfony](examples/framework/symfony.md) · [Yii3](examples/framework/yii3.md)
+- CMS: [WordPress](examples/cms/wordpress.md) · [Drupal](examples/cms/drupal.md) · [Craft CMS](examples/cms/craft.md) · [October CMS](examples/cms/october.md)
+- Электронная коммерция: [Magento](examples/ecommerce/magento.md) · [OpenCart](examples/ecommerce/opencart.md)
 
 ## Возможности
 
