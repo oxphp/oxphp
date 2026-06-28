@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `STATIC_REVALIDATE=on` now amortizes its filesystem check: a cached file's modification time is re-checked via `stat()` at most once every 3 seconds per file, instead of on every request. Within that window cached content is served straight from memory under a shared read lock with no syscall; the single combined cache lookup also resolves conditional (304) requests, so a served static hit performs at most one `stat()` (previously up to two). On-disk changes become visible within 3 seconds rather than immediately, in exchange for making the mode cheap enough to run without measurable per-request overhead. The default remains `off`.
+
 ## [0.9.0] - 2026-06-25
 
 ### Migration from 0.8.0
