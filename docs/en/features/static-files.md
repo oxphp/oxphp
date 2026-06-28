@@ -23,7 +23,7 @@ When a request matches a static file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache (re-checks each file at most once per 3 seconds; changes become visible within that window). Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 
 ## MIME Detection
 
@@ -50,7 +50,7 @@ The file cache is populated on the first request to each file and retained acros
 
 ### Content Revalidation
 
-Set `STATIC_REVALIDATE=on` to enable mtime-based revalidation. In this mode, each cache hit performs a `stat()` syscall to check the file's modification time. If the file has changed on disk, the stale entry is evicted and the file is re-read automatically. **Enable this in development** — you see file changes immediately without restarting the server. Leave it off in production.
+Set `STATIC_REVALIDATE=on` to enable mtime-based revalidation. In this mode the server re-checks a cached file's modification time with a `stat()` syscall **at most once every 3 seconds per file**, not on every request. If the file has changed on disk, the stale entry is evicted and the file is re-read automatically. Within the 3-second window a cached entry is served straight from memory with no syscall, so the cost is amortized rather than paid per request. Changes on disk become visible within 3 seconds. **Enable this in development** — you see file changes without restarting the server. Leave it off in production.
 
 In production, leave `STATIC_REVALIDATE` unset (the default `off`) for maximum throughput with zero per-request syscall overhead.
 
@@ -119,7 +119,7 @@ There are two independent cache layers and a variable for each:
 | Variable | Controls | Effect of `off` |
 |----------|----------|-----------------|
 | `STATIC_MAX_AGE=off` | **Browser cache** (HTTP headers) | No `Cache-Control`, `ETag`, or `Last-Modified` headers sent |
-| `STATIC_REVALIDATE=on` | **Server in-memory cache** | Each hit validates file mtime; stale entries evicted automatically |
+| `STATIC_REVALIDATE=on` | **Server in-memory cache** | Re-checks file mtime at most once per 3s per file; stale entries evicted automatically |
 
 For development, set `STATIC_REVALIDATE=on` so the server always serves fresh content. Optionally also set `STATIC_MAX_AGE=off` to prevent browser caching entirely.
 
@@ -127,7 +127,7 @@ For development, set `STATIC_REVALIDATE=on` so the server always serves fresh co
 
 ### Server keeps serving stale files
 
-By default, the in-memory content cache does not check whether files have changed on disk. Set `STATIC_REVALIDATE=on` during development to enable mtime revalidation — the server will detect file changes automatically.
+By default, the in-memory content cache does not check whether files have changed on disk. Set `STATIC_REVALIDATE=on` during development to enable mtime revalidation — the server detects file changes automatically (within 3 seconds).
 
 ### Browser keeps serving stale files
 

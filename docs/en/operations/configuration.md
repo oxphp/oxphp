@@ -133,7 +133,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: each cache hit checks the file's modification time and evicts stale entries automatically. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 | `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
 
 ## Logging

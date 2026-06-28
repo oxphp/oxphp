@@ -2,7 +2,7 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -21,6 +21,12 @@ const MAX_CACHE_FILE_SIZE: usize = 1_048_576;
 /// Maximum total bytes held in the content cache (64 MiB).
 const MAX_CACHE_TOTAL_BYTES: usize = 67_108_864;
 
+/// Revalidation window when `STATIC_REVALIDATE=on`. A cached entry's mtime is
+/// re-checked via `stat()` at most once per window, not on every hit — so the
+/// syscall cost is amortized to ~1 stat / file / window instead of one (or two)
+/// stats per request. Changes on disk become visible within this bound.
+const STATIC_REVALIDATE_TTL: Duration = Duration::from_secs(3);
+
 /// Cached filesystem entry type.
 #[derive(Debug, Clone, Copy)]
 pub enum FileType {
@@ -36,6 +42,27 @@ struct ContentEntry {
     etag: Arc<str>,
     /// Pre-formatted HTTP date for Last-Modified header (avoids per-request formatting).
     last_modified_str: Arc<str>,
+    /// When this entry's mtime was last verified against disk. Used by TTL-based
+    /// revalidation to skip the `stat()` while the window is still open.
+    last_checked: Instant,
+}
+
+/// Outcome of a content-cache lookup that already factored in conditional
+/// (304) headers and TTL revalidation, computed under a single cache access.
+pub enum Lookup {
+    /// Cached and the request's conditional headers indicate 304 Not Modified.
+    NotModified {
+        etag: Arc<str>,
+        last_modified_str: Arc<str>,
+    },
+    /// Cached content to serve as a 200 (or range) response.
+    Content {
+        bytes: Bytes,
+        mime_type: Arc<str>,
+        modified: SystemTime,
+        etag: Arc<str>,
+        last_modified_str: Arc<str>,
+    },
 }
 
 /// Content cache with its own byte budget. Kept as a single struct so the
@@ -63,9 +90,10 @@ pub struct FileCache {
     meta: Mutex<LruCache<String, Option<FileType>>>,
     content: RwLock<ContentCache>,
     canonical: Mutex<LruCache<String, Option<PathBuf>>>,
-    /// When true, `get_content()` checks file mtime via `stat()` before returning.
-    /// Stale entries are evicted and `None` is returned.
-    validate_content: bool,
+    /// When `Some(ttl)`, content lookups re-check the file mtime via `stat()` at
+    /// most once per `ttl` window; entries whose mtime changed are evicted.
+    /// `None` disables revalidation (cached bytes served until LRU eviction).
+    revalidate_ttl: Option<Duration>,
 }
 
 impl FileCache {
@@ -74,10 +102,17 @@ impl FileCache {
         Self::with_revalidation(capacity, false)
     }
 
-    /// Create a file cache with explicit content revalidation setting.
-    /// When `validate` is true, `get_content()` performs a `stat()` check
-    /// on every hit and evicts entries whose mtime has changed.
+    /// Create a file cache with content revalidation toggled by `validate`.
+    /// When `validate` is true, content lookups re-check the file mtime against
+    /// disk at most once per [`STATIC_REVALIDATE_TTL`] window and evict entries
+    /// whose mtime has changed.
     pub fn with_revalidation(capacity: usize, validate: bool) -> Self {
+        Self::with_revalidation_ttl(capacity, validate.then_some(STATIC_REVALIDATE_TTL))
+    }
+
+    /// Create a file cache with an explicit revalidation window. `None` disables
+    /// revalidation; `Some(Duration::ZERO)` revalidates on every hit.
+    pub fn with_revalidation_ttl(capacity: usize, revalidate_ttl: Option<Duration>) -> Self {
         let cap = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1).unwrap());
         Self {
             meta: Mutex::new(LruCache::new(cap)),
@@ -86,7 +121,100 @@ impl FileCache {
                 total_bytes: 0,
             }),
             canonical: Mutex::new(LruCache::new(cap)),
-            validate_content: validate,
+            revalidate_ttl,
+        }
+    }
+
+    /// Build a [`Lookup`] from a live cache entry, applying the conditional
+    /// (304) check when `try_304` is set.
+    fn build_lookup(entry: &ContentEntry, headers: &HeaderMap, try_304: bool) -> Lookup {
+        if try_304 && check_not_modified(headers, &entry.etag, &entry.modified) {
+            Lookup::NotModified {
+                etag: entry.etag.clone(),
+                last_modified_str: entry.last_modified_str.clone(),
+            }
+        } else {
+            Lookup::Content {
+                bytes: entry.bytes.clone(),
+                mime_type: entry.mime_type.clone(),
+                modified: entry.modified,
+                etag: entry.etag.clone(),
+                last_modified_str: entry.last_modified_str.clone(),
+            }
+        }
+    }
+
+    /// Combined 304 + content lookup in a single cache access. Resolves the
+    /// conditional check and content fetch together so a served request stats
+    /// the file at most once (and only when the revalidation window elapsed).
+    /// `try_304` should be set only when a 304 is actually serviceable
+    /// (conditional method + a Cache-Control to echo).
+    pub fn lookup(&self, key: &str, headers: &HeaderMap, try_304: bool) -> Option<Lookup> {
+        // Fast path: read lock. The entry is served directly when revalidation
+        // is off, or the window has not elapsed — no syscall, full reader
+        // parallelism. LRU order is not promoted here (would need a write lock);
+        // promotion happens on the slow path below, once per window.
+        {
+            let guard = self.content.read();
+            let entry = guard.entries.peek(key)?;
+            let stale =
+                matches!(self.revalidate_ttl, Some(ttl) if entry.last_checked.elapsed() >= ttl);
+            if !stale {
+                return Some(Self::build_lookup(entry, headers, try_304));
+            }
+        }
+        // Slow path: window elapsed. Claim the revalidation under the write
+        // lock, then stat() outside it. A single `get_mut` re-checks the window,
+        // promotes the entry to MRU (restoring LRU ordering for hot files), and
+        // — if we win the claim — bumps `last_checked` before the lock is
+        // released. Concurrent callers that arrive while we stat then see a
+        // fresh window and skip their own syscall, so a thundering herd on one
+        // file collapses to a single stat() per window.
+        //
+        // The stat runs with no lock held, so it never blocks readers on the
+        // content lock. It is a synchronous `std::fs` call on the Tokio worker
+        // (not `spawn_blocking`): on a local FS a stat is far cheaper than
+        // blocking-pool dispatch, and it now runs at most once per window per
+        // file. On a slow/network static root (NFS, sshfs) it briefly occupies
+        // the worker thread — such deployments should keep revalidation off.
+        let modified = {
+            let mut guard = self.content.write();
+            let entry = guard.entries.get_mut(key)?;
+            match self.revalidate_ttl {
+                Some(ttl) if entry.last_checked.elapsed() >= ttl => {
+                    entry.last_checked = Instant::now(); // claim before releasing
+                    entry.modified
+                }
+                // Another caller already revalidated this window — serve fresh
+                // without a stat. (Reached for `None` only on a TOCTOU race
+                // where revalidation was disabled meanwhile; serving is safe.)
+                _ => return Some(Self::build_lookup(entry, headers, try_304)),
+            }
+        };
+        // stat() with no lock held — only the claiming caller reaches here.
+        let disk_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
+        if disk_mtime == Some(modified) {
+            // Unchanged: the entry is already promoted and its window reset.
+            let guard = self.content.read();
+            guard
+                .entries
+                .peek(key)
+                .map(|entry| Self::build_lookup(entry, headers, try_304))
+        } else {
+            // Changed on disk: evict so the caller re-reads. Guard the pop on
+            // the mtime we stat'd against so a concurrently-reinserted fresh
+            // entry is not thrown away.
+            let mut guard = self.content.write();
+            if guard
+                .entries
+                .peek(key)
+                .is_some_and(|e| e.modified == modified)
+            {
+                if let Some(evicted) = guard.entries.pop(key) {
+                    guard.total_bytes -= evicted.bytes.len();
+                }
+            }
+            None
         }
     }
 
@@ -130,122 +258,39 @@ impl FileCache {
         self.content.read().entries.peek(key).is_some()
     }
 
-    /// Check if cached content matches the request's conditional headers (304 fast path).
-    /// Returns `Some(true)` if cached and not modified, `Some(false)` if cached but modified,
-    /// `None` on cache miss. When content revalidation is enabled, uses a write lock and
-    /// may evict a stale entry; otherwise uses a read lock.
-    pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
-        if self.validate_content {
-            // Need write lock for potential eviction
-            let mut guard = self.content.write();
-            let entry = guard.entries.peek(key)?;
-            let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
-            match current_mtime {
-                Some(mtime) if mtime == entry.modified => {
-                    Some(check_not_modified(headers, &entry.etag, &entry.modified))
-                }
-                _ => {
-                    if let Some(evicted) = guard.entries.pop(key) {
-                        guard.total_bytes -= evicted.bytes.len();
-                    }
-                    None
-                }
-            }
-        } else {
-            let guard = self.content.read();
-            let entry = guard.entries.peek(key)?;
-            Some(check_not_modified(headers, &entry.etag, &entry.modified))
-        }
-    }
-
-    /// Combined 304 check + header retrieval in a single cache access.
-    /// Returns `Some((etag, last_modified_str))` when the content is cached AND
-    /// the request's conditional headers indicate 304 Not Modified.
-    /// Eliminates the double-lock pattern of `check_not_modified()` + `get_content()`.
-    pub fn check_304_headers(
-        &self,
-        key: &str,
-        headers: &HeaderMap,
-    ) -> Option<(Arc<str>, Arc<str>)> {
-        if self.validate_content {
-            let mut guard = self.content.write();
-            let entry = guard.entries.peek(key)?;
-            let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
-            match current_mtime {
-                Some(mtime) if mtime == entry.modified => {
-                    if check_not_modified(headers, &entry.etag, &entry.modified) {
-                        Some((entry.etag.clone(), entry.last_modified_str.clone()))
-                    } else {
-                        None
-                    }
-                }
-                _ => {
-                    if let Some(evicted) = guard.entries.pop(key) {
-                        guard.total_bytes -= evicted.bytes.len();
-                    }
-                    None
-                }
-            }
-        } else {
-            let guard = self.content.read();
-            let entry = guard.entries.peek(key)?;
-            if check_not_modified(headers, &entry.etag, &entry.modified) {
-                Some((entry.etag.clone(), entry.last_modified_str.clone()))
-            } else {
-                None
-            }
-        }
-    }
-
-    /// Get cached file content and MIME type. Returns `None` on cache miss.
-    /// O(1) clone via `Bytes` Arc increment + `Arc<str>` bump.
+    /// Test-only thin wrapper over [`lookup`] for standalone conditional checks.
+    /// Returns `Some(true)` if cached and not modified, `Some(false)` if cached
+    /// but modified, `None` on cache miss. Production code uses [`lookup`].
     ///
-    /// When content revalidation is disabled (default), uses a read lock with
-    /// `peek()` to avoid write-lock contention. LRU ordering is not updated on
-    /// read hits in this mode — weight-based eviction still works correctly since
-    /// popular files are frequently re-inserted after cache misses.
+    /// [`lookup`]: Self::lookup
+    #[cfg(test)]
+    pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
+        match self.lookup(key, headers, true)? {
+            Lookup::NotModified { .. } => Some(true),
+            Lookup::Content { .. } => Some(false),
+        }
+    }
+
+    /// Test-only thin wrapper over [`lookup`] returning just cached content and
+    /// headers (no conditional check). Production code uses [`lookup`].
+    ///
+    /// [`lookup`]: Self::lookup
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub fn get_content(
         &self,
         key: &str,
     ) -> Option<(Bytes, Arc<str>, SystemTime, Arc<str>, Arc<str>)> {
-        if self.validate_content {
-            // Revalidation needs write lock for potential eviction
-            let mut guard = self.content.write();
-            if let Some(entry) = guard.entries.get(key) {
-                let current_mtime = std::fs::metadata(key).ok().and_then(|m| m.modified().ok());
-                match current_mtime {
-                    Some(mtime) if mtime == entry.modified => {}
-                    _ => {
-                        if let Some(evicted) = guard.entries.pop(key) {
-                            guard.total_bytes -= evicted.bytes.len();
-                        }
-                        return None;
-                    }
-                }
-                let entry = guard.entries.peek(key)?;
-                Some((
-                    entry.bytes.clone(),
-                    entry.mime_type.clone(),
-                    entry.modified,
-                    entry.etag.clone(),
-                    entry.last_modified_str.clone(),
-                ))
-            } else {
-                None
-            }
-        } else {
-            // No revalidation — read lock + peek (no LRU promotion, no contention)
-            let guard = self.content.read();
-            guard.entries.peek(key).map(|entry| {
-                (
-                    entry.bytes.clone(),
-                    entry.mime_type.clone(),
-                    entry.modified,
-                    entry.etag.clone(),
-                    entry.last_modified_str.clone(),
-                )
-            })
+        match self.lookup(key, &HeaderMap::new(), false)? {
+            Lookup::Content {
+                bytes,
+                mime_type,
+                modified,
+                etag,
+                last_modified_str,
+            } => Some((bytes, mime_type, modified, etag, last_modified_str)),
+            // try_304 = false never produces a NotModified result.
+            Lookup::NotModified { .. } => None,
         }
     }
 
@@ -289,6 +334,7 @@ impl FileCache {
                 modified,
                 etag,
                 last_modified_str,
+                last_checked: Instant::now(),
             },
         );
     }
@@ -685,37 +731,44 @@ pub async fn serve(
     // likewise skips not-modified handling for them.
     let conditional = method == http::Method::GET || method == http::Method::HEAD;
 
-    // 1. Fast 304 check — single cache access returns etag + last_modified_str
-    if conditional {
-        if let Some(cc) = cache_control {
-            if let Some((etag, last_modified_str)) =
-                cache.check_304_headers(&cache_key, request_headers)
-            {
-                return Ok(build_304(
-                    &etag_for_304(request_headers, &etag),
-                    &last_modified_str,
-                    cc,
-                ));
-            }
+    // Combined 304 + content lookup: a single cache access (and at most one
+    // stat, only when the revalidation window has elapsed) resolves both the
+    // conditional check and the content fetch. 304 is only serviceable for a
+    // conditional method with a Cache-Control to echo.
+    let try_304 = conditional && cache_control.is_some();
+    match cache.lookup(&cache_key, request_headers, try_304) {
+        Some(Lookup::NotModified {
+            etag,
+            last_modified_str,
+        }) => {
+            let cc = cache_control.expect("try_304 implies cache_control is Some");
+            return Ok(build_304(
+                &etag_for_304(request_headers, &etag),
+                &last_modified_str,
+                cc,
+            ));
         }
-    }
-
-    // 2. Check content cache (already validated at insertion time)
-    if let Some((cached_bytes, cached_mime, modified, etag, last_modified_str)) =
-        cache.get_content(&cache_key)
-    {
-        let allow_ranges = ranges_allowed(supports_brotli, &cached_mime, cached_bytes.len() as u64);
-        return Ok(respond_bytes(
-            cached_bytes,
-            &cached_mime,
-            &etag,
-            &last_modified_str,
-            &modified,
-            cache_control,
-            method,
-            request_headers,
-            allow_ranges,
-        )?);
+        Some(Lookup::Content {
+            bytes,
+            mime_type,
+            modified,
+            etag,
+            last_modified_str,
+        }) => {
+            let allow_ranges = ranges_allowed(supports_brotli, &mime_type, bytes.len() as u64);
+            return Ok(respond_bytes(
+                bytes,
+                &mime_type,
+                &etag,
+                &last_modified_str,
+                &modified,
+                cache_control,
+                method,
+                request_headers,
+                allow_ranges,
+            )?);
+        }
+        None => {}
     }
 
     // Cache miss — compute MIME type
@@ -1192,6 +1245,63 @@ mod tests {
     }
 
     #[test]
+    fn test_revalidation_promotes_hot_entry_on_access() {
+        // In revalidation mode a cache hit must promote the entry to MRU,
+        // otherwise a constantly-accessed hot file is evicted ahead of colder,
+        // later-inserted ones once the byte budget fills.
+        let dir = TempDir::new().unwrap();
+        // Zero-TTL → every lookup takes the revalidating slow path that promotes.
+        let cache = FileCache::with_revalidation_ttl(10, Some(std::time::Duration::ZERO));
+
+        // `Bytes::clone` is Arc-shared, so all entries share one physical 1 MiB
+        // buffer; the byte budget is accounted by len(), filling it cheaply.
+        let data = Bytes::from(vec![0u8; MAX_CACHE_FILE_SIZE]);
+        let mime: Arc<str> = "application/octet-stream".into();
+        let entries = MAX_CACHE_TOTAL_BYTES / MAX_CACHE_FILE_SIZE;
+
+        let insert = |key: &str, modified: SystemTime| {
+            cache.insert_content(
+                key.to_string(),
+                data.clone(),
+                mime.clone(),
+                modified,
+                generate_etag(1, &modified).as_str().into(),
+                httpdate::fmt_http_date(modified).as_str().into(),
+            );
+        };
+
+        let mut keys = Vec::new();
+        for i in 0..entries {
+            // Tiny on-disk file — only its mtime is read during revalidation.
+            let path = dir.path().join(format!("hot_{i}.bin"));
+            fs::write(&path, b"x").unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            let key = path.to_string_lossy().to_string();
+            insert(&key, modified);
+            keys.push(key);
+        }
+
+        // Access the oldest (LRU) entry — this must promote it to MRU.
+        assert!(cache.get_content(&keys[0]).is_some());
+
+        // One more insert pushes over budget, evicting the true LRU entry.
+        let overflow = dir.path().join("overflow.bin");
+        fs::write(&overflow, b"x").unwrap();
+        let ov_modified = fs::metadata(&overflow).unwrap().modified().unwrap();
+        insert(&overflow.to_string_lossy(), ov_modified);
+
+        // keys[0] was promoted, so keys[1] (now LRU) is evicted in its place.
+        assert!(
+            cache.get_content(&keys[0]).is_some(),
+            "accessed (promoted) entry must survive eviction"
+        );
+        assert!(
+            cache.get_content(&keys[1]).is_none(),
+            "the now-LRU entry should be evicted instead of the hot one"
+        );
+    }
+
+    #[test]
     fn test_canonical_cache_hit_miss() {
         let cache = FileCache::new(10);
 
@@ -1567,7 +1677,9 @@ mod tests {
         let file_path = dir.path().join("revalidate.txt");
         fs::write(&file_path, "original").unwrap();
 
-        let cache = FileCache::with_revalidation(10, true);
+        // Zero-TTL revalidation stats on every hit, so the change is detected
+        // immediately without waiting out a window.
+        let cache = FileCache::with_revalidation_ttl(10, Some(std::time::Duration::ZERO));
         let key = file_path.to_string_lossy().to_string();
         let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
 
@@ -1591,6 +1703,37 @@ mod tests {
         assert!(
             cache.get_content(&key).is_none(),
             "Revalidation should detect mtime change and evict stale entry"
+        );
+    }
+
+    #[test]
+    fn test_content_cache_revalidation_window_keeps_entry() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("windowed.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        // Default `on` TTL (3s) — a change within the window stays masked until
+        // the window elapses, trading bounded staleness for far fewer stats.
+        let cache = FileCache::with_revalidation(10, true);
+        let key = file_path.to_string_lossy().to_string();
+        let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
+
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"original"),
+            "text/plain".into(),
+            modified,
+            generate_etag(8, &modified).as_str().into(),
+            httpdate::fmt_http_date(modified).as_str().into(),
+        );
+
+        // Modify on disk, then read back immediately — still within the window.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        fs::write(&file_path, "updated").unwrap();
+
+        assert!(
+            cache.get_content(&key).is_some(),
+            "Within the revalidation window the entry should be served without a stat-driven eviction"
         );
     }
 
@@ -1632,7 +1775,7 @@ mod tests {
         let file_path = dir.path().join("check_304.txt");
         fs::write(&file_path, "hello").unwrap();
 
-        let cache = FileCache::with_revalidation(10, true);
+        let cache = FileCache::with_revalidation_ttl(10, Some(std::time::Duration::ZERO));
         let key = file_path.to_string_lossy().to_string();
         let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
         let etag: Arc<str> = generate_etag(5, &modified).as_str().into();
