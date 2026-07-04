@@ -69,8 +69,17 @@ pub fn run(opts: RunOptions) -> i32 {
         return 1;
     }
 
-    let config = crate::config::Config::from_env().ok();
-
+    // ── `run` is a one-shot script executor: it parses only the env vars it
+    //    actually consumes (`SUPERGLOBALS_ENABLED` and the `ASYNC_*` pool
+    //    settings) instead of the full server config. A job container that
+    //    inherits a web deployment's env template must not fail on
+    //    server-only variables it never uses (an `ENTRY_FILE` pointing into
+    //    an unmounted docroot, a bad `TLS_MIN_VERSION`, …) — but garbage in a
+    //    variable this path DOES honor still fails loudly instead of
+    //    silently re-enabling superglobals an operator disabled (folding the
+    //    whole process env, secrets included, into $_SERVER) or turning off
+    //    the async pool. ──
+    //
     // ── Honor SUPERGLOBALS_ENABLED on the CLI path too (defaults to `true`).
     //    When an operator sets it `false`, the process-environment fold into
     //    $_SERVER is skipped, matching the HTTP worker. The $_SERVER script
@@ -78,10 +87,13 @@ pub fn run(opts: RunOptions) -> i32 {
     //    unconditional, so a one-shot script stays a usable CLI either way.
     //    `set_cli_request_data` reads the same flag back from the bridge, so
     //    both sides always agree. ──
-    let superglobals_enabled = config
-        .as_ref()
-        .map(|c| c.superglobals_enabled)
-        .unwrap_or(true);
+    let superglobals_enabled = match crate::config::parse_env_bool("SUPERGLOBALS_ENABLED", true) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("oxphp: invalid configuration: {e}");
+            return 1;
+        }
+    };
 
     // ── Register plugin functions / classes / decorators BEFORE MINIT so the
     //    PHP module startup can expose them to the compiler (OPcache needs them
@@ -131,9 +143,14 @@ pub fn run(opts: RunOptions) -> i32 {
     //    thread independent of which pool thread is currently inside `block_on`.
     //    With `ASYNC_WORKERS=0` (the `oxphp run` default) no pool is created, so
     //    no runtime — and no extra OS thread — is spawned. ──
-    let async_workers = config.as_ref().map(|c| c.async_workers).unwrap_or(0);
-    let async_queue = config.as_ref().map(|c| c.async_queue_capacity).unwrap_or(0);
-    let async_max_fibers = config.as_ref().map(|c| c.async_max_fibers).unwrap_or(256);
+    let (async_workers, async_queue, async_max_fibers) =
+        match crate::config::resolve_async_pool_env() {
+            Ok(triple) => triple,
+            Err(e) => {
+                eprintln!("oxphp: invalid configuration: {e}");
+                return 1;
+            }
+        };
     let mut async_pool =
         crate::executor::async_pool::AsyncWorkerPool::new(async_workers, async_queue, None);
 

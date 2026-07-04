@@ -3,6 +3,9 @@ mod php_deny;
 mod proxy;
 mod server;
 pub(crate) mod symlink_allow;
+#[cfg(test)]
+pub(crate) mod test_env;
+mod tls;
 mod workers;
 
 use std::fmt;
@@ -17,6 +20,7 @@ pub use proxy::{
 };
 pub use server::{H2Config, ServerConfig};
 pub use symlink_allow::SymlinkAllowList;
+pub use tls::TlsMinVersion;
 pub use workers::{parse_php_workers, WorkerMode};
 
 /// Access log verbosity level.
@@ -55,6 +59,10 @@ pub struct Config {
     pub rate_window_seconds: u64,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// Minimum accepted TLS protocol version. Parsed and validated at startup
+    /// even when TLS is not enabled, so a typo'd floor fails loudly everywhere
+    /// (including `oxphp config --check`), not just once TLS is turned on.
+    pub tls_min_version: TlsMinVersion,
     pub error_pages_dir: Option<String>,
     pub compression_level: i32,
     pub access_log: AccessLogLevel,
@@ -236,6 +244,60 @@ fn resolve_static_revalidate(
     }
 }
 
+/// Parse the async-pool env triple — `ASYNC_WORKERS`, `ASYNC_QUEUE_CAPACITY`,
+/// `ASYNC_MAX_FIBERS`. Shared by `Config::from_env` and the one-shot CLI
+/// path, which reads only the variables it actually consumes.
+///
+/// Unset or exactly-empty values fall back to the defaults `(0, 0, 256)`;
+/// anything else must parse as a non-negative integer. A malformed value is
+/// a hard error, not a silent fallback — `ASYNC_WORKERS=8x` collapsing to
+/// `0` would quietly disable the async pool. `ASYNC_MAX_FIBERS=0` keeps its
+/// historical meaning of "use the default cap" (256).
+pub(crate) fn resolve_async_pool_env() -> Result<(usize, usize, usize), crate::types::BoxError> {
+    fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxError> {
+        match std::env::var(name) {
+            Err(std::env::VarError::NotPresent) => Ok(default),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(format!("{name} is not valid UTF-8").into())
+            }
+            Ok(v) if v.is_empty() => Ok(default),
+            Ok(v) => v
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| format!("{name} must be a non-negative integer (got {v:?})").into()),
+        }
+    }
+
+    let async_workers = parse_knob("ASYNC_WORKERS", 0)?;
+    let async_queue_capacity = parse_knob("ASYNC_QUEUE_CAPACITY", 0)?;
+    let async_max_fibers = match parse_knob("ASYNC_MAX_FIBERS", 256)? {
+        0 => 256,
+        n => n,
+    };
+    Ok((async_workers, async_queue_capacity, async_max_fibers))
+}
+
+/// Optional env var that must be UTF-8 when present: unset — or *exactly*
+/// empty, per the codebase convention for `${VAR:-}`-style compose/Helm
+/// substitutions — → `None`, non-UTF-8 → hard error. A plain `var(..).ok()`
+/// would turn a corrupted value into "TLS silently disabled" — a worse
+/// downgrade than the invalid-value class `TLS_MIN_VERSION` already rejects —
+/// and an empty pair into an `fs::read("")` crash at startup.
+///
+/// Whitespace-only values deliberately stay `Some`: `" "` is never a valid
+/// TLS path, and collapsing it to "unset" would fail open (plain HTTP on an
+/// intended-HTTPS port when a secret mount emits a stray space/newline).
+/// Left as-is it fails closed downstream — unreadable path or half-pair
+/// abort.
+pub(crate) fn optional_utf8_env(name: &str) -> Result<Option<String>, crate::types::BoxError> {
+    match std::env::var(name) {
+        Ok(v) if v.is_empty() => Ok(None),
+        Ok(v) => Ok(Some(v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8").into()),
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, crate::types::BoxError> {
         let server = ServerConfig::from_env()?;
@@ -262,8 +324,26 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(60);
-        let tls_cert = std::env::var("TLS_CERT").ok();
-        let tls_key = std::env::var("TLS_KEY").ok();
+        let tls_cert = optional_utf8_env("TLS_CERT")?;
+        let tls_key = optional_utf8_env("TLS_KEY")?;
+        // A `${VAR:-}` substitution that rendered empty (broken secret
+        // mount?) leaves a breadcrumb: the environment *mentions* TLS, yet
+        // the server is about to serve plaintext. Genuinely absent vars stay
+        // silent — plain HTTP is the normal default. A half-pair is handled
+        // separately (startup abort).
+        if tls_cert.is_none() && tls_key.is_none() {
+            let empty_present: Vec<&str> = ["TLS_CERT", "TLS_KEY"]
+                .into_iter()
+                .filter(|k| std::env::var_os(k).is_some())
+                .collect();
+            if !empty_present.is_empty() {
+                tracing::warn!(
+                    vars = empty_present.join(", "),
+                    "TLS variable(s) set but empty — TLS disabled, serving plain HTTP"
+                );
+            }
+        }
+        let tls_min_version = TlsMinVersion::from_env()?;
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
         let compression_level: i32 = match std::env::var("COMPRESSION_LEVEL") {
             Ok(val) => match val.parse::<i32>() {
@@ -341,19 +421,7 @@ impl Config {
         let static_revalidate =
             resolve_static_revalidate(new_revalidate.as_deref(), legacy_cache.as_deref())?;
 
-        let async_workers: usize = std::env::var("ASYNC_WORKERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let async_queue_capacity: usize = std::env::var("ASYNC_QUEUE_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let async_max_fibers: usize = std::env::var("ASYNC_MAX_FIBERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(256);
+        let (async_workers, async_queue_capacity, async_max_fibers) = resolve_async_pool_env()?;
 
         let trace_context = parse_env_bool("TRACE_CONTEXT", false)?;
         let superglobals_enabled = parse_env_bool("SUPERGLOBALS_ENABLED", true)?;
@@ -407,6 +475,7 @@ impl Config {
             rate_window_seconds,
             tls_cert,
             tls_key,
+            tls_min_version,
             error_pages_dir,
             compression_level,
             access_log,
@@ -453,6 +522,7 @@ impl Config {
             rate_window_seconds: 60,
             tls_cert: None,
             tls_key: None,
+            tls_min_version: TlsMinVersion::V12,
             error_pages_dir: None,
             compression_level: 4,
             access_log: AccessLogLevel::Off,
@@ -475,6 +545,22 @@ impl Config {
             trusted_proxies: None,
             h2: H2Config::default(),
         }
+    }
+
+    /// Canonical error for a half-configured TLS pair — exactly one of
+    /// `TLS_CERT`/`TLS_KEY` set, which is almost always a typo'd variable
+    /// name and must never silently serve plain HTTP. One string shared by
+    /// `validate()` (`config --check`) and the serve-startup abort, so the
+    /// two reports cannot drift.
+    pub fn half_configured_tls_error(&self) -> Option<String> {
+        let (set, missing) = match (self.tls_cert.is_some(), self.tls_key.is_some()) {
+            (true, false) => ("TLS_CERT", "TLS_KEY"),
+            (false, true) => ("TLS_KEY", "TLS_CERT"),
+            _ => return None,
+        };
+        Some(format!(
+            "{set} is set but {missing} is missing — both are required to enable TLS (unset {set} to serve plain HTTP)"
+        ))
     }
 
     /// Human-readable description of the worker pool (e.g. "4", "2:8", "4 (auto)").
@@ -505,6 +591,7 @@ impl Config {
             "rate_limit": self.rate_limit,
             "rate_window_seconds": self.rate_window_seconds,
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
+            "tls_min_version": self.tls_min_version.to_string(),
             "error_pages_dir": self.error_pages_dir,
             "compression_level": self.compression_level,
             "access_log": self.access_log.to_string(),
@@ -533,10 +620,15 @@ impl Config {
     /// Returns a list of problems (empty = OK). Path checks cover
     /// `DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`.
     /// Worker-mode invariants: an entry file is required, and it must be `.php`.
+    /// `TLS_CERT`/`TLS_KEY` must be set as a pair — a typo'd variable name is
+    /// caught here pre-deploy, and `serve` aborts on the same half-pair.
     /// All problems are collected — the function never short-circuits.
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         check_dir("DOCUMENT_ROOT", &self.server.document_root, &mut errors);
+        if let Some(err) = self.half_configured_tls_error() {
+            errors.push(err);
+        }
         if let Some(entry) = &self.entry_file {
             check_file("ENTRY_FILE", entry, &mut errors);
         }
@@ -656,6 +748,95 @@ fn check_file(label: &str, path: &Path, errors: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_flags_half_configured_tls() {
+        let mut config = Config::test_minimal();
+        config.tls_cert = Some("/etc/ssl/cert.pem".to_string());
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("TLS_KEY is missing") && e.contains("TLS_CERT")),
+            "errors: {errors:?}"
+        );
+    }
+
+    // Both tests exercise `optional_utf8_env` directly rather than the full
+    // `Config::from_env`, which reads the whole ambient environment — an
+    // unrelated invalid var in a CI shell would turn these into false reds.
+
+    #[test]
+    fn empty_tls_cert_and_key_are_treated_as_unset() {
+        // `${TLS_CERT:-}`-style substitution: no false "TLS_CERT is set but
+        // TLS_KEY is missing" error, no `fs::read("")` crash.
+        test_env::with_env(&[("TLS_CERT", Some("")), ("TLS_KEY", Some(""))], || {
+            assert_eq!(optional_utf8_env("TLS_CERT").unwrap(), None);
+            assert_eq!(optional_utf8_env("TLS_KEY").unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn async_pool_env_strictness() {
+        const ASYNC_VARS: [&str; 3] = ["ASYNC_WORKERS", "ASYNC_QUEUE_CAPACITY", "ASYNC_MAX_FIBERS"];
+        let cleared: Vec<(&str, Option<&str>)> = ASYNC_VARS.iter().map(|k| (*k, None)).collect();
+
+        // Unset → defaults.
+        test_env::with_env(&cleared, || {
+            assert_eq!(resolve_async_pool_env().unwrap(), (0, 0, 256));
+        });
+        // Exactly-empty = unset (`${VAR:-}` substitution); 0 fiber cap keeps
+        // its historical meaning of "default".
+        test_env::with_env(
+            &[
+                ("ASYNC_WORKERS", Some("")),
+                ("ASYNC_QUEUE_CAPACITY", Some("")),
+                ("ASYNC_MAX_FIBERS", Some("0")),
+            ],
+            || {
+                assert_eq!(resolve_async_pool_env().unwrap(), (0, 0, 256));
+            },
+        );
+        // Garbage is a hard error naming the variable — not a silently
+        // disabled pool.
+        test_env::with_env(
+            &[
+                ("ASYNC_WORKERS", Some("8x")),
+                ("ASYNC_QUEUE_CAPACITY", None),
+                ("ASYNC_MAX_FIBERS", None),
+            ],
+            || {
+                let err = resolve_async_pool_env().unwrap_err();
+                assert!(err.to_string().contains("ASYNC_WORKERS"), "err: {err}");
+            },
+        );
+    }
+
+    #[test]
+    fn whitespace_only_tls_cert_stays_set() {
+        // `" "` is never a valid certificate path. Collapsing it to unset
+        // would silently downgrade an intended-HTTPS port to plain HTTP;
+        // kept as `Some` it fails closed downstream (unreadable path or
+        // half-configured-pair abort).
+        test_env::with_env(&[("TLS_CERT", Some(" "))], || {
+            assert_eq!(
+                optional_utf8_env("TLS_CERT").unwrap(),
+                Some(" ".to_string())
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_cert_non_utf8_is_a_hard_error() {
+        use std::os::unix::ffi::OsStrExt;
+        // A corrupted TLS_CERT must not silently start the server without TLS.
+        let bad = std::ffi::OsStr::from_bytes(b"/etc/ssl/\xFF.pem");
+        test_env::with_env_os(&[("TLS_CERT", Some(bad))], || {
+            let err = optional_utf8_env("TLS_CERT").unwrap_err();
+            assert!(err.to_string().contains("TLS_CERT"), "err: {err}");
+        });
+    }
 
     #[test]
     fn test_normalize_internal_addr_port_only_binds_loopback() {
@@ -838,34 +1019,10 @@ mod tests {
 #[cfg(test)]
 mod entry_file_tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    // Process-global env vars are touched here — serialise.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-            .collect();
-        for (k, v) in vars {
-            match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
-            }
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        for (k, prev_val) in prev {
-            match prev_val {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
-        }
+        crate::config::test_env::with_env(vars, f);
     }
 
     fn make_root_with(files: &[&str]) -> TempDir {

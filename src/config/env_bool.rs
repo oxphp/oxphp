@@ -138,24 +138,8 @@ mod tests {
         assert!(msg.contains("garbage"), "msg: {msg}");
     }
 
-    // `parse_env_bool` touches the process env — serialise.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_env<F: FnOnce()>(name: &str, value: Option<&str>, f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(name).ok();
-        match value {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        match prev {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
-        }
+        crate::config::test_env::with_env(&[(name, value)], f);
     }
 
     #[test]

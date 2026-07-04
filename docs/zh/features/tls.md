@@ -1,6 +1,6 @@
 ---
 title: TLS
-description: 在 OxPHP 中配置原生 TLS 终止，支持 TLS 1.2、TLS 1.3、HTTP/2 ALPN 协商和 PEM 证书。
+description: 在 OxPHP 中配置原生 TLS 终止，支持 TLS 1.2、TLS 1.3、可配置的最低协议版本、HTTP/2 ALPN 协商和 PEM 证书。
 ---
 
 # TLS
@@ -26,17 +26,32 @@ TLS 握手发生在任何 HTTP 处理之前：
 |------|--------|------|
 | `TLS_CERT` | *(未设置)* | PEM 编码证书文件的路径。必须同时设置 `TLS_CERT` 和 `TLS_KEY` 才能启用 TLS |
 | `TLS_KEY` | *(未设置)* | PEM 编码私钥文件的路径 |
+| `TLS_MIN_VERSION` | `1.2` | 接受的最低 TLS 协议版本：`1.2` 或 `1.3`。任何其他值都会导致启动错误 |
 | `LISTEN_ADDR` | `0.0.0.0:80` | 监听的地址和端口。使用 TLS 时请更改为 `0.0.0.0:443` |
 
-如果只提供了 `TLS_CERT` 或 `TLS_KEY` 中的一个，TLS 不会启用，服务器以纯 HTTP 模式启动。
+如果只设置了 `TLS_CERT` 或 `TLS_KEY` 中的一个，服务器会拒绝启动：只配置一半的证书对几乎总是变量名拼写错误，而在本应提供 HTTPS 的端口上静默提供纯 HTTP 属于 fail-open。空值（`TLS_CERT=`，即 `${TLS_CERT:-}` 风格替换的产物）视为未设置；当两者都未设置时，服务器以纯 HTTP 模式启动。
 
 ## 支持的协议
 
 | 能力 | 详情 |
 |------|------|
-| TLS 版本 | TLS 1.2 和 TLS 1.3 |
+| TLS 版本 | TLS 1.2 和 TLS 1.3（最低版本可通过 `TLS_MIN_VERSION` 配置） |
 | ALPN 协议 | `h2`（HTTP/2）和 `http/1.1`，按此顺序协商 |
 | 客户端证书 | 不支持（无双向 TLS） |
+
+### 最低协议版本
+
+默认情况下，服务器同时接受 TLS 1.2 和 TLS 1.3。必须拒绝 TLS 1.2 的部署环境——例如 PCI-DSS 合规范围或要求仅使用 1.3 的内部策略——可以提高最低版本：
+
+```bash
+TLS_MIN_VERSION=1.3
+```
+
+将最低版本设为 `1.3` 后，TLS 1.2 的 ClientHello 会在握手阶段被拒绝并返回 `protocol_version` 警报；TLS 1.3 客户端不受影响。
+
+无效值（`1.1`、`1.0` 或拼写错误）会导致**硬性启动错误**，而不是静默回退——安全下限的拼写错误必须显式暴露，而不能悄悄以更弱的配置运行。即使未启用 TLS，该值也会在启动时校验，`oxphp config --check` 会在重启之前报告同样的错误。空值（`TLS_MIN_VERSION=`，即 `${TLS_MIN_VERSION:-}` 风格替换的产物）视为未设置。TLS 1.0 和 1.1 完全不受支持，也无法启用。
+
+> **密码套件不可配置——这是有意设计。** 内置 TLS 实现只提供现代 AEAD 密码套件（使用 ECDHE 密钥交换的 AES-GCM 和 ChaCha20-Poly1305）。这里没有 RC4、没有 CBC 模式套件、没有出口级密码可供禁用，因此传统的"限制弱密码"配置项没有任何可移除的对象。`TLS_MIN_VERSION` 仅是协议版本下限；它不会更改加密提供程序，也不是 FIPS 合规开关。
 
 ## HTTP/2
 
@@ -111,13 +126,13 @@ LISTEN_ADDR=0.0.0.0:443
 
 ### 服务器启动但 TLS 未激活
 
-OxPHP 要求**同时**设置 `TLS_CERT` 和 `TLS_KEY`。如果其中任一缺失，服务器将以纯 HTTP 模式启动，不发出任何警告。请确认两个变量都已设置：
+OxPHP 要求**同时**设置 `TLS_CERT` 和 `TLS_KEY`。如果只设置了其中一个，服务器会拒绝启动（`TLS_CERT is set but TLS_KEY is missing — both are required to enable TLS (unset TLS_CERT to serve plain HTTP)`），`oxphp config --check` 也会在部署之前报告同样的错误。如果两者都未设置，纯 HTTP 是正常的默认行为，不会产生警告；但如果变量*存在且为空*（`${VAR:-}` 风格替换渲染为空，例如 secret 挂载失效），启动时会记录警告（`TLS variable(s) set but empty — TLS disabled, serving plain HTTP`），留下痕迹。当设置了 `TLS_MIN_VERSION=1.3` 但未启用 TLS 时，同样会记录警告。请确认两个变量都已设置：
 
 ```bash
 docker exec <container> env | grep TLS
 ```
 
-### 启动时出现 `no private key found in PEM file` 错误
+### 启动时出现 `TLS_KEY: no private key found in ...` 错误
 
 密钥文件为空、损坏或只包含证书。请验证密钥文件是否包含 `-----BEGIN ... PRIVATE KEY-----` 块：
 

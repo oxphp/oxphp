@@ -117,6 +117,7 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 |----------|---------|-------------|
 | `TLS_CERT` | *(unset)* | Path to PEM-encoded TLS certificate. Both `TLS_CERT` and `TLS_KEY` must be set to enable TLS |
 | `TLS_KEY` | *(unset)* | Path to PEM-encoded TLS private key |
+| `TLS_MIN_VERSION` | `1.2` | Minimum accepted TLS protocol version: `1.2` or `1.3`. Validated at startup (and by `oxphp config --check`) even when TLS is not enabled — any other value, including non-UTF-8 bytes, is a hard startup error. An empty value is treated as unset |
 
 ## HTTP/2
 
@@ -191,6 +192,8 @@ When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, m
 | `ASYNC_MAX_FIBERS` | `256` | Per-worker cap on concurrent async task fibers. The process-global in-flight limit (queued + running) is `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch past it is rejected immediately with `OxPHP\Async\AsyncException` so fan-out composition cannot deadlock |
 
 The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.
+
+A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a startup error — falling back to a default would silently disable or misconfigure the pool. An exactly-empty value is treated as unset.
 
 ## Shared State
 

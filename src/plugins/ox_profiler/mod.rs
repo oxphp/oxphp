@@ -627,13 +627,6 @@ mod tests {
         try_init_profiler_plugin(plugin).unwrap()
     }
 
-    /// Serialises every test that reads or writes `PROFILER_*` env vars.
-    /// `cargo test` runs tests in parallel, and the strict bool parser now
-    /// rejects garbage values (e.g. `PROFILER_INTERNAL=ture`) — without this
-    /// lock a test that *sets* a bad value would make every other concurrent
-    /// `init_profiler_plugin` panic on `unwrap()`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Bool env vars the profiler config reads. These are the only ones
     /// that can reject and abort `init`, so we clear them on entry and
     /// restore them on exit to keep tests hermetic.
@@ -643,36 +636,23 @@ mod tests {
         "PROFILER_EXPORT_XHGUI",
     ];
 
-    /// Run `f` with the given env-var overrides applied, holding `ENV_LOCK`
-    /// for the entire duration. All [`BOOL_VARS`] that aren't explicitly
-    /// listed in `overrides` are cleared, so a leaked value from another
-    /// test or the host environment cannot bleed in.
+    /// Run `f` with the given env-var overrides applied, serialized by the
+    /// crate-wide env-test harness (`cargo test` runs tests in parallel, and
+    /// the strict bool parser rejects garbage values — without the lock a
+    /// test that *sets* a bad value would make every other concurrent
+    /// `init_profiler_plugin` panic on `unwrap()`). All [`BOOL_VARS`] that
+    /// aren't explicitly listed in `overrides` are cleared, so a leaked value
+    /// from another test or the host environment cannot bleed in.
     fn with_env<F, R>(overrides: &[(&str, &str)], f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev: Vec<(String, Option<String>)> = BOOL_VARS
+        let vars: Vec<(&str, Option<&str>)> = BOOL_VARS
             .iter()
-            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .map(|k| (*k, None))
+            .chain(overrides.iter().map(|(k, v)| (*k, Some(*v))))
             .collect();
-        for k in BOOL_VARS {
-            std::env::remove_var(k);
-        }
-        for (k, v) in overrides {
-            std::env::set_var(k, v);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        for (k, prev_val) in prev {
-            match prev_val {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
-        match result {
-            Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e),
-        }
+        crate::config::test_env::with_env(&vars, f)
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 title: TLS
-description: Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, HTTP/2 ALPN negotiation, and PEM certificates.
+description: Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
 ---
 
 # TLS
@@ -26,17 +26,47 @@ The TLS handshake happens before any HTTP processing:
 |----------|---------|-------------|
 | `TLS_CERT` | *(unset)* | Path to PEM-encoded certificate file. Both `TLS_CERT` and `TLS_KEY` must be set to enable TLS |
 | `TLS_KEY` | *(unset)* | Path to PEM-encoded private key file |
+| `TLS_MIN_VERSION` | `1.2` | Minimum accepted TLS protocol version: `1.2` or `1.3`. Any other value is a startup error |
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port to listen on. Change to `0.0.0.0:443` when using TLS |
 
-If only one of `TLS_CERT` or `TLS_KEY` is provided, TLS is not enabled and the server starts in plain HTTP mode.
+If only one of `TLS_CERT` or `TLS_KEY` is set, the server refuses to start: a half-configured pair is almost always a typo'd variable name, and silently serving plain HTTP on a port meant for HTTPS would fail open. An empty value (`TLS_CERT=`, as produced by `${TLS_CERT:-}`-style substitutions) is treated as unset; when neither is set, the server starts in plain HTTP mode.
 
 ## Supported Protocols
 
 | Capability | Detail |
 |------------|--------|
-| TLS versions | TLS 1.2 and TLS 1.3 |
+| TLS versions | TLS 1.2 and TLS 1.3 (floor configurable via `TLS_MIN_VERSION`) |
 | ALPN protocols | `h2` (HTTP/2) and `http/1.1`, negotiated in that order |
 | Client certificates | Not supported (no mutual TLS) |
+
+### Minimum Protocol Version
+
+By default the server accepts TLS 1.2 and TLS 1.3. Deployments that must
+refuse TLS 1.2 — PCI-DSS scopes, internal policies mandating 1.3-only — can
+raise the floor:
+
+```bash
+TLS_MIN_VERSION=1.3
+```
+
+With the floor at `1.3`, a TLS 1.2 ClientHello is rejected during the
+handshake with a `protocol_version` alert; TLS 1.3 clients are unaffected.
+
+An invalid value (`1.1`, `1.0`, or a typo) is a **hard startup error**, not a
+silent fallback — a mistyped security floor must fail loudly rather than
+quietly run with a weaker configuration. The value is validated at startup
+even when TLS itself is not enabled, and `oxphp config --check` reports the
+same error before any restart. An empty value (`TLS_MIN_VERSION=`, as
+produced by `${TLS_MIN_VERSION:-}`-style substitutions) is treated as unset.
+TLS 1.0 and 1.1 are not supported at all and cannot be enabled.
+
+> **Cipher suites are not configurable — by design.** The built-in TLS
+> implementation ships only modern AEAD cipher suites (AES-GCM and
+> ChaCha20-Poly1305 with ECDHE key exchange). There is no RC4, no CBC-mode
+> suite, no export cipher to disable, so the classic "restrict weak ciphers"
+> knob has nothing to remove. `TLS_MIN_VERSION` is a protocol floor only; it
+> does not change the cryptography provider and is not a FIPS compliance
+> switch.
 
 ## HTTP/2
 
@@ -123,13 +153,13 @@ LISTEN_ADDR=0.0.0.0:443
 
 ### Server starts but TLS is not active
 
-OxPHP requires **both** `TLS_CERT` and `TLS_KEY` to be set. If either is missing, the server starts in plain HTTP mode without any warning. Confirm both variables are set:
+OxPHP requires **both** `TLS_CERT` and `TLS_KEY` to be set. If only one of them is set, the server refuses to start (`TLS_CERT is set but TLS_KEY is missing — both are required to enable TLS (unset TLS_CERT to serve plain HTTP)`), and `oxphp config --check` reports the same misconfiguration before deployment. If neither is set, plain HTTP is the normal, silent default — but if the variables are *present and empty* (a `${VAR:-}` substitution that rendered empty, e.g. a broken secret mount), a startup warning (`TLS variable(s) set but empty — TLS disabled, serving plain HTTP`) leaves a trace. A warning is also logged when `TLS_MIN_VERSION=1.3` is set while TLS is not enabled. Confirm both variables are set:
 
 ```bash
 docker exec <container> env | grep TLS
 ```
 
-### `no private key found in PEM file` error at startup
+### `TLS_KEY: no private key found in ...` error at startup
 
 The key file is empty, corrupt, or contains only a certificate. Verify that the key file contains a `-----BEGIN ... PRIVATE KEY-----` block:
 

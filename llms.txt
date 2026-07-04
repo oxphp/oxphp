@@ -39,7 +39,7 @@
 - [Server-Sent Events (SSE)](docs/en/features/sse.md): Stream real-time data to browser clients using Server-Sent Events in OxPHP with built-in backpressure and connection management.
 - [Static Files](docs/en/features/static-files.md): OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
 - [Timeouts](docs/en/features/timeouts.md): Configure header read timeouts and PHP execution timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
-- [TLS](docs/en/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, HTTP/2 ALPN negotiation, and PEM certificates.
+- [TLS](docs/en/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
 - [Worker Mode](docs/en/features/worker-mode.md): Persistent PHP processes that bootstrap once and handle multiple requests, eliminating per-request startup overhead in OxPHP.
 
 ## Shared State

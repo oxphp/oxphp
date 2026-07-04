@@ -117,6 +117,7 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 |----------|---------|-------------|
 | `TLS_CERT` | *(未设置)* | PEM 编码 TLS 证书的路径。`TLS_CERT` 和 `TLS_KEY` 均设置后才会启用 TLS |
 | `TLS_KEY` | *(未设置)* | PEM 编码 TLS 私钥的路径 |
+| `TLS_MIN_VERSION` | `1.2` | 接受的最低 TLS 协议版本：`1.2` 或 `1.3`。即使未启用 TLS，也会在启动时（以及 `oxphp config --check` 中）校验——任何其他值（包括非 UTF-8 字节）都会导致硬性启动错误。空值视为未设置 |
 
 ## HTTP/2
 
@@ -191,6 +192,8 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | `ASYNC_MAX_FIBERS` | `256` | 每个 Worker 的并发异步任务 fiber 上限。进程级在途上限（排队 + 运行中）为 `ASYNC_MAX_FIBERS × ASYNC_WORKERS`；超出上限的分发会立即以 `OxPHP\Async\AsyncException` 拒绝，因此 fan-out 组合不会死锁 |
 
 异步工作进程池处理从 PHP 分发的即发即忘后台任务。它独立于 PHP 工作进程池，标准请求处理不需要它。
+
+这三个变量中任何一个的格式错误值（例如 `ASYNC_WORKERS=8x`）都会导致启动错误——回退到默认值会静默禁用或错误配置该池。完全为空的值视为未设置。
 
 ## 共享状态
 

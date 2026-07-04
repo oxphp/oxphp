@@ -42,18 +42,10 @@ fn build_config_clean_env(
     entry_path: Option<std::path::PathBuf>,
     worker_mode: bool,
 ) -> RouteConfig {
-    let _lock = crate::config::symlink_allow::tests::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
-    std::env::remove_var("SYMLINK_ALLOW_PATHS");
-    let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.to_path_buf());
-    let rc = RouteConfig::new(&config, entry_path.as_deref(), worker_mode);
-    match prev {
-        Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
-        None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
-    }
-    rc
+    crate::config::test_env::with_env(&[("SYMLINK_ALLOW_PATHS", None)], || {
+        let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.to_path_buf());
+        RouteConfig::new(&config, entry_path.as_deref(), worker_mode)
+    })
 }
 
 /// Test helper that mirrors the dot-path screen inside `resolve_request`:
@@ -1350,12 +1342,9 @@ mod php_deny_integration {
     use super::*;
     use crate::config::ServerConfig;
     use crate::server::response::static_file::FileCache;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
-
-    // Shared lock — the env-var-driven PhpDeny loader is process-global.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn setup(
         dir_layout: &[(&str, &[u8])],
@@ -1371,28 +1360,11 @@ mod php_deny_integration {
         entry_file: Option<&str>,
         worker_mode: bool,
     ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
-        // Hold the lock for the full setup so env mutations don't race other tests.
-        // Guard is dropped on function exit — by then RouteConfig has captured
-        // whatever PhpDeny it needed, so the env can be safely restored.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
         let dir = TempDir::new().unwrap();
         for (rel, body) in dir_layout {
             let p = dir.path().join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, body).unwrap();
-        }
-
-        // Save previous env, apply overrides.
-        let prev: Vec<(String, Option<String>)> = env
-            .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-            .collect();
-        for (k, v) in env {
-            match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
-            }
         }
 
         let cfg = ServerConfig {
@@ -1402,18 +1374,16 @@ mod php_deny_integration {
         };
         let entry_path = entry_file.map(|name| dir.path().join(name));
         let cache = Arc::new(FileCache::new(1024));
-        let mut rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), worker_mode);
-        if worker_mode {
-            rc.set_worker_route(entry_path.clone().expect("worker mode requires entry"));
-        }
-
-        // Restore env so other tests aren't polluted.
-        for (k, prev_val) in prev {
-            match prev_val {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
+        // Env mutations are scoped (and panic-safe) via the shared harness,
+        // held only across RouteConfig construction — it captures whatever
+        // PhpDeny it needs, so the env is restored as soon as it returns.
+        let rc = crate::config::test_env::with_env(env, || {
+            let mut rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), worker_mode);
+            if worker_mode {
+                rc.set_worker_route(entry_path.clone().expect("worker mode requires entry"));
             }
-        }
+            rc
+        });
 
         (dir, cache, rc)
     }

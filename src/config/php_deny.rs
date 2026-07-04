@@ -337,53 +337,16 @@ mod tests {
         assert_eq!(d.matches(""), None);
     }
 
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    // Mutex serializes tests that touch process-global env vars.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Defense-in-depth: snapshot+clear PHP_DENY_PATHS and PHP_DENY_DIRS
-        // unconditionally so an inherited shell value can't poison a test
-        // that omits them from `vars`. Tests opt in by re-setting them.
-        let deny_keys = ["PHP_DENY_PATHS", "PHP_DENY_DIRS"];
-        let deny_prev: Vec<(String, Option<String>)> = deny_keys
-            .iter()
-            .map(|k| (k.to_string(), std::env::var(k).ok()))
-            .collect();
-        for k in &deny_keys {
-            std::env::remove_var(k);
-        }
-
-        let prev: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-            .collect();
-        for (k, v) in vars {
-            match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
-            }
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        for (k, prev_val) in prev {
-            match prev_val {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
-        for (k, prev_val) in deny_prev {
-            match prev_val {
-                Some(v) => std::env::set_var(&k, v),
-                None => std::env::remove_var(&k),
-            }
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
-        }
+        // Defense-in-depth: clear PHP_DENY_PATHS and PHP_DENY_DIRS first so
+        // an inherited shell value can't poison a test that omits them from
+        // `vars`. Tests opt in by re-setting them (later entries win).
+        let mut all: Vec<(&str, Option<&str>)> =
+            vec![("PHP_DENY_PATHS", None), ("PHP_DENY_DIRS", None)];
+        all.extend_from_slice(vars);
+        crate::config::test_env::with_env(&all, f);
     }
 
     fn make_tempdir_with_file(subpath: &str) -> TempDir {
