@@ -186,8 +186,8 @@ mod tests {
         assert_eq!(parse_usize(Some("not-a-number".into()), 42), 42);
     }
 
-    /// Locks env-mutating tests so they don't race with each other.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Crate-wide lock for env-mutating tests — see `config::test_env`.
+    use crate::config::test_env::ENV_LOCK;
 
     // Mirrors PluginContext::new — keeping the wide arg list keeps the test
     // scaffolding obvious instead of hiding bookkeeping behind a builder.

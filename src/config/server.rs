@@ -129,10 +129,6 @@ impl H2Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env vars are process-global; this lock serializes all env-touching tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const H2_VARS: &[&str] = &[
         "H2_MAX_CONCURRENT_STREAMS",
@@ -142,44 +138,17 @@ mod tests {
         "H2_KEEPALIVE_TIMEOUT_SECS",
     ];
 
-    /// Lock + set vars + run + restore. Also snapshots any pre-existing values
-    /// so a CI environment with H2_* already set does not pollute other tests.
+    /// Set vars + run + restore, via the crate-wide env-test harness.
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<String>)> = vars
-            .iter()
-            .map(|(k, _)| (*k, std::env::var(k).ok()))
-            .collect();
-        for (k, v) in vars {
-            std::env::set_var(k, v);
-        }
-        f();
-        for (k, orig) in &saved {
-            match orig {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
+        let opt: Vec<(&str, Option<&str>)> = vars.iter().map(|(k, v)| (*k, Some(*v))).collect();
+        crate::config::test_env::with_env(&opt, f);
     }
 
-    /// Lock + clear all H2_* vars + run + restore. Guarantees defaults even when
+    /// Clear all H2_* vars + run + restore. Guarantees defaults even when
     /// CI sets H2_* in the environment.
     fn without_h2_env<F: FnOnce()>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved: Vec<(&str, Option<String>)> = H2_VARS
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
-        for k in H2_VARS {
-            std::env::remove_var(k);
-        }
-        f();
-        for (k, orig) in &saved {
-            match orig {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
+        let cleared: Vec<(&str, Option<&str>)> = H2_VARS.iter().map(|k| (*k, None)).collect();
+        crate::config::test_env::with_env(&cleared, f);
     }
 
     #[test]

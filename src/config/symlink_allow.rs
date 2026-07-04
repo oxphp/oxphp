@@ -111,24 +111,25 @@ impl SymlinkAllowList {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Crate-wide lock — see `config::test_env`. Re-exported because
+    // `server::routing::tests` locks it around RAII `EnvGuard` scopes.
+    pub(crate) use crate::config::test_env::ENV_LOCK;
 
     /// RAII helper for tests that mutate a single env var. Restores the
-    /// previous value (set / unset) on Drop, including during a panic
-    /// unwind — so an `assert!` after construction stays free of
+    /// previous value (set / unset, non-UTF-8 safe) on Drop, including during
+    /// a panic unwind — so an `assert!` after construction stays free of
     /// manual save/restore dancing. Tests that need this for
     /// `SYMLINK_ALLOW_PATHS` should hold `ENV_LOCK` for the same scope.
     pub(crate) struct EnvGuard {
         key: &'static str,
-        prev: Option<String>,
+        prev: Option<std::ffi::OsString>,
     }
 
     impl EnvGuard {
         pub(crate) fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
+            let prev = std::env::var_os(key);
             std::env::set_var(key, value);
             Self { key, prev }
         }
@@ -160,20 +161,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn with_env<F: FnOnce()>(value: Option<&str>, f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
-        match value {
-            Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
-            None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        match prev {
-            Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
-            None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
-        }
-        if let Err(e) = result {
-            std::panic::resume_unwind(e);
-        }
+        crate::config::test_env::with_env(&[("SYMLINK_ALLOW_PATHS", value)], f);
     }
 
     #[test]

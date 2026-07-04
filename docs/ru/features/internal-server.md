@@ -111,6 +111,7 @@ curl -s http://localhost:9090/config | jq .
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
+  "tls_min_version": "1.2",
   "compression_level": 4,
   "access_log": "all",
   "max_query_body": 524288,

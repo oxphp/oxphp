@@ -350,11 +350,31 @@ async fn async_main(
     // Initialize optional TLS
     let tls_acceptor = match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => {
-            let acceptor = server::tls::load_tls_config(Path::new(cert), Path::new(key))?;
-            tracing::info!("TLS enabled");
+            let acceptor = server::tls::load_tls_config(
+                Path::new(cert),
+                Path::new(key),
+                config.tls_min_version,
+            )?;
+            tracing::info!(min_version = %config.tls_min_version, "TLS enabled");
             Some(acceptor)
         }
-        _ => None,
+        _ => {
+            // A half-configured pair is almost always a typo'd variable name.
+            // Refuse to start rather than silently serve plain HTTP on a port
+            // meant for HTTPS — fail-closed. Empty values count as unset, so
+            // `${VAR:-}`-style substitutions of the whole pair still mean
+            // "no TLS" rather than an error.
+            if let Some(err) = config.half_configured_tls_error() {
+                return Err(err.into());
+            }
+            if config.tls_min_version != oxphp::config::TlsMinVersion::V12 {
+                tracing::warn!(
+                    min_version = %config.tls_min_version,
+                    "TLS_MIN_VERSION is set but TLS is not enabled — the floor has no effect"
+                );
+            }
+            None
+        }
     };
 
     // Initialize optional error pages
