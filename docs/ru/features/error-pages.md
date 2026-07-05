@@ -22,14 +22,18 @@ OxPHP обслуживает брендированные HTML-страницы 
 
 ## Примеры страниц
 
-Минимальная страница 404:
+Каждая страница ошибки — самодостаточный HTML-файл с именем `{status}.html`. Держите их со встроенными стилями и без внешних ресурсов: вторичный запрос, который сам завершится ошибкой, иначе сломает саму страницу ошибки.
+
+### Переиспользуемый шаблон
+
+Скопируйте это в каждый `{status}.html` и меняйте `<title>`, `<h1>` и `<p>`:
 
 ```html
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
-  <title>404 - Page Not Found</title>
+  <title>500 — Внутренняя ошибка сервера</title>
   <style>
     body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem 1rem; color: #333; }
     h1 { font-size: 2rem; margin-bottom: 0.5rem; }
@@ -37,8 +41,47 @@ OxPHP обслуживает брендированные HTML-страницы 
   </style>
 </head>
 <body>
-  <h1>Page Not Found</h1>
-  <p>The page you requested does not exist.</p>
+  <h1>Что-то пошло не так</h1>
+  <p>Попробуйте ещё раз через минуту.</p>
+</body>
+</html>
+```
+
+### Какие коды статуса имеет смысл добавить
+
+OxPHP заменяет тело любого ответа 4xx или 5xx, который доходит до конвейера ответов. Эти коды сервер отдаёт сам, поэтому добавьте файл под каждый:
+
+| Файл | Статус | Когда OxPHP его возвращает |
+|------|--------|----------------------------|
+| `404.html` | Not Found | Нет подходящего файла или маршрута; заблокированный dotfile (`.env`, `.git/`); прямой запрос `.php` в режиме Framework; ответ по умолчанию для `PHP_DENY_PATHS` |
+| `413.html` | Payload Too Large | Тело запроса превышает максимальный размер |
+| `416.html` | Range Not Satisfiable | Невыполнимый заголовок `Range` для статического файла (`Content-Range` сохраняется) |
+| `500.html` | Internal Server Error | Необработанная или фатальная ошибка PHP |
+| `503.html` | Service Unavailable | Плавное завершение (drain) при остановке |
+| `504.html` | Gateway Timeout | Запрос превысил `REQUEST_TIMEOUT_SECONDS` |
+| `529.html` | Site is overloaded | Очередь запросов заполнена при `QUEUE_CAPACITY` (`Retry-After` сохраняется) |
+
+Любой другой код 4xx или 5xx работает так же — добавьте `403.html`, `451.html` и т. д. для кодов, которые возвращает ваше PHP-приложение, или для кастомного статуса `PHP_DENY_FALLBACK`. Единственное исключение — `429` от ограничителя частоты: он формируется до запуска этого обработчика и всегда использует стандартное тело (см. раздел «Примечания» ниже).
+
+### Готовые примеры
+
+Минимальная страница 404:
+
+```html
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>404 — Страница не найдена</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem 1rem; color: #333; }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    p { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Страница не найдена</h1>
+  <p>Запрошенная страница не существует.</p>
 </body>
 </html>
 ```
@@ -47,11 +90,11 @@ OxPHP обслуживает брендированные HTML-страницы 
 
 ```html
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta http-equiv="refresh" content="30">
-  <title>503 - Service Unavailable</title>
+  <title>503 — Сервис недоступен</title>
   <style>
     body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem 1rem; color: #333; }
     h1 { font-size: 2rem; margin-bottom: 0.5rem; }
@@ -59,8 +102,8 @@ OxPHP обслуживает брендированные HTML-страницы 
   </style>
 </head>
 <body>
-  <h1>Service Unavailable</h1>
-  <p>We are performing maintenance. This page will refresh automatically.</p>
+  <h1>Сервис недоступен</h1>
+  <p>Идут технические работы. Страница обновится автоматически.</p>
 </body>
 </html>
 ```
@@ -120,8 +163,9 @@ project/
     403.html
     404.html
     500.html
-    502.html
     503.html
+    504.html
+    529.html
 ```
 
 ## Лучшие практики

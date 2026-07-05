@@ -3141,6 +3141,49 @@ OxPHP serves branded HTML error pages for 4xx and 5xx responses. Error pages are
 
 ## Example Pages
 
+Every error page is a self-contained HTML file named `{status}.html`. Keep them inline-styled with no external assets — a secondary request that fails would otherwise break the error page itself.
+
+### Reusable template
+
+Copy this to each `{status}.html` and change the `<title>`, `<h1>`, and `<p>`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>500 — Internal Server Error</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem 1rem; color: #333; }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    p { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Something went wrong</h1>
+  <p>Please try again in a moment.</p>
+</body>
+</html>
+```
+
+### Status codes worth providing
+
+OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. These are the codes it returns on its own, so provide a file for each:
+
+| File | Status | When OxPHP returns it |
+|------|--------|-----------------------|
+| `404.html` | Not Found | No matching file or route; a blocked dotfile (`.env`, `.git/`); a direct `.php` request in Framework mode; the default `PHP_DENY_PATHS` fallback |
+| `413.html` | Payload Too Large | The request body exceeds the maximum size |
+| `416.html` | Range Not Satisfiable | An unsatisfiable `Range` header on a static file (`Content-Range` is preserved) |
+| `500.html` | Internal Server Error | An uncaught or fatal PHP error |
+| `503.html` | Service Unavailable | Graceful draining during shutdown |
+| `504.html` | Gateway Timeout | The request exceeded `REQUEST_TIMEOUT_SECONDS` |
+| `529.html` | Site is overloaded | The request queue is full at `QUEUE_CAPACITY` (`Retry-After` is preserved) |
+
+Any other 4xx or 5xx works the same way — add a `403.html`, `451.html`, and so on for codes your PHP application returns, or for a custom `PHP_DENY_FALLBACK` status. The one exception is the rate limiter's `429`, which is produced before this handler runs and always uses its default body (see **Notes** below).
+
+### Ready-made examples
+
 A minimal 404 page:
 
 ```html
@@ -3239,8 +3282,9 @@ project/
     403.html
     404.html
     500.html
-    502.html
     503.html
+    504.html
+    529.html
 ```
 
 ## Best Practices
