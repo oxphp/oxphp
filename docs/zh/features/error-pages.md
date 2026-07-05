@@ -22,6 +22,49 @@ OxPHP 为 4xx 和 5xx 响应提供品牌化 HTML 错误页面。错误页面在�
 
 ## 示例页面
 
+每个错误页面都是一个名为 `{status}.html` 的自包含 HTML 文件。请使用内联样式且不引用外部资源——否则一个自身也失败的次级请求会破坏错误页面本身。
+
+### 可复用模板
+
+将以下内容复制到每个 `{status}.html`，并修改 `<title>`、`<h1>` 和 `<p>`：
+
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>500 - 服务器内部错误</title>
+  <style>
+    body { font-family: system-ui, sans-serif; text-align: center; padding: 4rem 1rem; color: #333; }
+    h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+    p { color: #666; }
+  </style>
+</head>
+<body>
+  <h1>出错了</h1>
+  <p>请稍后重试。</p>
+</body>
+</html>
+```
+
+### 值得提供的状态码
+
+OxPHP 会替换每个到达响应流水线的 4xx 或 5xx 响应的正文。以下是服务器自身返回的状态码，请为每个都提供一个文件：
+
+| 文件 | 状态 | OxPHP 何时返回它 |
+|------|--------|-----------------------|
+| `404.html` | Not Found | 无匹配的文件或路由；被阻止的 dotfile（`.env`、`.git/`）；Framework 模式下的直接 `.php` 请求；`PHP_DENY_PATHS` 的默认回退 |
+| `413.html` | Payload Too Large | 请求正文超过最大大小 |
+| `416.html` | Range Not Satisfiable | 静态文件上无法满足的 `Range` 头（保留 `Content-Range`） |
+| `500.html` | Internal Server Error | 未捕获的或致命的 PHP 错误 |
+| `503.html` | Service Unavailable | 关闭期间的平滑排空（drain） |
+| `504.html` | Gateway Timeout | 请求超过 `REQUEST_TIMEOUT_SECONDS` |
+| `529.html` | Site is overloaded | 请求队列在 `QUEUE_CAPACITY` 处已满（保留 `Retry-After`） |
+
+任何其他 4xx 或 5xx 也以相同方式工作——为你的 PHP 应用返回的状态码或自定义的 `PHP_DENY_FALLBACK` 状态添加 `403.html`、`451.html` 等。唯一的例外是速率限制器的 `429`，它在此处理器运行之前生成，始终使用其默认正文（见下方「注意事项」）。
+
+### 现成示例
+
 最简 404 页面：
 
 ```html
@@ -120,8 +163,9 @@ project/
     403.html
     404.html
     500.html
-    502.html
     503.html
+    504.html
+    529.html
 ```
 
 ## 最佳实践
