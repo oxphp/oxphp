@@ -237,7 +237,10 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | `PROFILER_EXPORT_URL` | *（未设置）* | 用于 POST profile 的远程端点。设置后仍会写盘，除非 `PROFILER_OUTPUT_FORMATS` 为空 |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | `PROFILER_EXPORT_URL` 上传时使用的线格式 |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *（未设置）* | 每次导出请求附带的可选 Bearer Token |
-| `PROFILER_EXPORT_XHGUI` | *（自动检测）* | 布尔。强制导出负载使用 XHGui 兼容的包装。未设置 = 根据 `PROFILER_EXPORT_URL` 自动检测（匹配 `xhgui` 或 `/run/import`） |
+| `PROFILER_EXPORT_XHGUI` | *（自动检测）* | 布尔。强制导出负载使用 XHGui 兼容的包装。未设置 = 当 `PROFILER_EXPORT_URL` 路径以 `/run/import` 结尾时自动检测（host/query 中的字符串不匹配） |
+| `PROFILER_EXPORT_BUGGREGATOR` | *（自动检测）* | 布尔。强制使用 Buggregator 包装。未设置 = 当 `PROFILER_EXPORT_URL` 路径以 `/api/profiler/store` 结尾时自动检测。此信封始终发送 xhprof，因此 `PROFILER_EXPORT_FORMAT` 对它无效（非 xhprof 取值仅告警，不致命）。与 `PROFILER_EXPORT_XHGUI` 互斥——同时启用会在启动时报错 |
+| `PROFILER_EXPORT_APP_NAME` | *（未设置）* | Buggregator 的 `app_name`，用于按项目分组 |
+| `PROFILER_EXPORT_TAGS` | *（未设置）* | Buggregator 的 `tags`，格式为 `key=value,key2=value2`；非法项、空键或重复键会在启动时报错 |
 
 ## 配置示例
 

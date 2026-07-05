@@ -237,7 +237,10 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 | `PROFILER_EXPORT_URL` | *(не задано)* | Удалённый эндпоинт для POST-отправки профилей. При задании запись на диск также происходит, если `PROFILER_OUTPUT_FORMATS` не пуст |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire-формат для отправок `PROFILER_EXPORT_URL` |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(не задано)* | Опциональный bearer-токен, отправляемый с каждым экспортом |
-| `PROFILER_EXPORT_XHGUI` | *(автоопределение)* | Булева. Принудительно включает XHGui-совместимую обёртку экспорта. Не задано = автоопределение по `PROFILER_EXPORT_URL` (срабатывает на `xhgui` или `/run/import`) |
+| `PROFILER_EXPORT_XHGUI` | *(автоопределение)* | Булева. Принудительно включает XHGui-совместимую обёртку экспорта. Не задано = автоопределение, когда путь `PROFILER_EXPORT_URL` оканчивается на `/run/import` (подстроки в host/query не матчатся) |
+| `PROFILER_EXPORT_BUGGREGATOR` | *(автоопределение)* | Булева. Принудительно включает обёртку Buggregator. Не задано = автоопределение, когда путь `PROFILER_EXPORT_URL` оканчивается на `/api/profiler/store`. Конверт всегда шлёт xhprof, поэтому `PROFILER_EXPORT_FORMAT` для него игнорируется (не-xhprof значение — предупреждение, не фатально). Взаимоисключима с `PROFILER_EXPORT_XHGUI` — включение обеих является ошибкой при старте |
+| `PROFILER_EXPORT_APP_NAME` | *(не задано)* | `app_name` для Buggregator — проект, под которым группируется профиль |
+| `PROFILER_EXPORT_TAGS` | *(не задано)* | `tags` для Buggregator в виде `key=value,key2=value2`; некорректный токен, пустой ключ или дубликат ключа — ошибка при старте |
 
 ## Примеры конфигураций
 

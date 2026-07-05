@@ -5045,7 +5045,10 @@ normalization — so list the literal path your framework uses.
 | `PROFILER_EXPORT_URL` | *(unset)* | POST URL for each captured run (xhgui, custom collector). |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | One of the four formats for HTTP push. |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Bearer token for the push target. |
-| `PROFILER_EXPORT_XHGUI` | `auto` | Force xhgui envelope mode. Auto: URL contains `xhgui` or ends with `/run/import`. |
+| `PROFILER_EXPORT_XHGUI` | `auto` | Force xhgui envelope mode. Auto: URL path ends with `/run/import` (the canonical xhgui endpoint; host/query hints are not matched — set this to `true` for a non-standard path). |
+| `PROFILER_EXPORT_BUGGREGATOR` | `auto` | Force the Buggregator envelope. Auto: URL path ends with `/api/profiler/store`. The envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT` is ignored for it (a non-xhprof value is warned, not fatal). Mutually exclusive with `PROFILER_EXPORT_XHGUI` (enabling both is a startup error). |
+| `PROFILER_EXPORT_APP_NAME` | *(unset)* | Buggregator `app_name` — the project a profile is grouped under. |
+| `PROFILER_EXPORT_TAGS` | *(unset)* | Buggregator `tags`, a `key=value,key2=value2` list for filtering. A malformed token (not `key=value`), an empty key, or a duplicate key is a startup error. |
 
 ### Example production config
 
@@ -5331,6 +5334,40 @@ curl -H "Authorization: Bearer dev-secret" \
   | flamegraph.pl --title "Checkout $run_id" > flame.svg
 ```
 
+### 10.5. Buggregator (local debug server)
+
+[Buggregator](https://buggregator.dev) is a single-binary debug server that,
+among other things, renders xhprof profiles as flame graphs grouped by project.
+The `xhprof` push targets its `POST /api/profiler/store` endpoint directly — no
+xhprof PHP extension or client library needed, OxPHP's native profiler produces
+the data.
+
+```yaml
+services:
+  buggregator:
+    image: ghcr.io/buggregator/server:latest
+    ports: ["8000:8000"]
+
+  app:
+    image: ghcr.io/oxphp/oxphp:latest
+    environment:
+      PROFILER_ENABLED: "true"
+      PROFILER_SAMPLE_RATE: "0.01"
+      PROFILER_EXPORT_URL: "http://buggregator:8000/api/profiler/store"
+      PROFILER_EXPORT_FORMAT: "xhprof"
+      PROFILER_EXPORT_APP_NAME: "checkout"          # groups profiles by project
+      PROFILER_EXPORT_TAGS: "env=staging,region=eu" # filterable in the UI
+```
+
+A URL whose path ends in `/api/profiler/store` auto-selects the Buggregator
+envelope (`PROFILER_EXPORT_BUGGREGATOR: "true"` forces it for a custom URL;
+`"false"` opts out). This envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT`
+is ignored for it (a non-xhprof value is warned at startup, not fatal — the
+profiler never crashes the server over an export knob). `app_name` and `tags`
+drive Buggregator's project grouping and filtering; without them the profile
+still renders but lands ungrouped. `hostname` comes from `$HOSTNAME`, falling
+back to the `gethostname(2)` syscall when that variable is not set.
+
 ---
 
 ## 11. Storage and cleanup
@@ -5436,8 +5473,9 @@ environment:
   PROFILER_EXPORT_AUTH_TOKEN: "shared-secret"   # optional
 ```
 
-- xhgui envelope auto-detection: URL contains `xhgui` **or** ends with
-  `/run/import`. Force via `PROFILER_EXPORT_XHGUI=true|false`.
+- xhgui envelope auto-detection: URL **path ends with `/run/import`** (the
+  canonical xhgui endpoint). A fuzzy `xhgui` substring in the host or query is
+  not matched — force via `PROFILER_EXPORT_XHGUI=true|false` for such URLs.
 - Retry plan: 3 attempts with exponential backoff `100/200/400 ms`, total
   budget 5 s wall-clock. The request body is shared across attempts as
   `bytes::Bytes` (zero retry allocations).
@@ -13973,7 +14011,10 @@ Sampling profiler that emits xhprof / speedscope traces. See [Profiling](../feat
 | `PROFILER_EXPORT_URL` | *(unset)* | Remote endpoint to POST profiles to. When set, disk writes still happen unless `PROFILER_OUTPUT_FORMATS` is empty |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Optional bearer token sent with each export request |
-| `PROFILER_EXPORT_XHGUI` | *(auto-detect)* | Boolean. Forces XHGui-compatible wrapping of the export payload. Unset = auto-detect from `PROFILER_EXPORT_URL` (matches `xhgui` or `/run/import`) |
+| `PROFILER_EXPORT_XHGUI` | *(auto-detect)* | Boolean. Forces XHGui-compatible wrapping of the export payload. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/run/import` (host/query hints are not matched) |
+| `PROFILER_EXPORT_BUGGREGATOR` | *(auto-detect)* | Boolean. Forces the Buggregator envelope. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/api/profiler/store`. The envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT` is ignored for it (a non-xhprof value warns, non-fatal). Mutually exclusive with `PROFILER_EXPORT_XHGUI` — enabling both is a startup error |
+| `PROFILER_EXPORT_APP_NAME` | *(unset)* | Buggregator `app_name` for project grouping |
+| `PROFILER_EXPORT_TAGS` | *(unset)* | Buggregator `tags` as `key=value,key2=value2`; a malformed token, empty key, or duplicate key is a startup error |
 
 ## Example Configurations
 

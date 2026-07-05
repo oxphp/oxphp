@@ -12,7 +12,9 @@ pub mod xhprof;
 pub use collapsed::{export_collapsed, CollapsedMetric};
 pub use pprof::export_pprof;
 pub use speedscope::export_speedscope;
-pub use xhprof::{export_xhprof, XhguiMeta, XhprofMode};
+pub use xhprof::{
+    export_xhprof, export_xhprof_buggregator, BuggregatorMeta, XhguiMeta, XhprofMode,
+};
 
 use crate::profiling::{FinishedSpan, SpanTree};
 use std::collections::HashMap;

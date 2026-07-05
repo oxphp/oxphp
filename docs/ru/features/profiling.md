@@ -221,7 +221,10 @@ Glob-паттерны через запятую, синтаксис тот же,
 | `PROFILER_EXPORT_URL` | *(нет)* | POST-URL для отправки каждого запуска (xhgui, свой коллектор). |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | Один из 4 форматов для HTTP push. |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(нет)* | Bearer-токен для целевого URL. |
-| `PROFILER_EXPORT_XHGUI` | `auto` | Принудительный режим xhgui-конверта. Auto: URL содержит `xhgui` или `/run/import`. |
+| `PROFILER_EXPORT_XHGUI` | `auto` | Принудительный режим xhgui-конверта. Auto: путь URL оканчивается на `/run/import` (канонический эндпоинт xhgui; подстроки в host/query не матчатся — для нестандартного пути ставьте `true`). |
+| `PROFILER_EXPORT_BUGGREGATOR` | `auto` | Принудительный режим конверта Buggregator. Auto: путь URL оканчивается на `/api/profiler/store`. Конверт всегда шлёт xhprof, поэтому `PROFILER_EXPORT_FORMAT` для него игнорируется (не-xhprof значение — предупреждение, не фатально). Взаимоисключим с `PROFILER_EXPORT_XHGUI` (включение обоих — ошибка при старте). |
+| `PROFILER_EXPORT_APP_NAME` | *(не задано)* | `app_name` для Buggregator — проект, под которым группируется профиль. |
+| `PROFILER_EXPORT_TAGS` | *(не задано)* | `tags` для Buggregator в виде `key=value,key2=value2` для фильтрации. Некорректный токен (не `key=value`), пустой ключ или дубликат ключа — ошибка при старте. |
 
 ### Пример продовой конфигурации
 
@@ -503,6 +506,29 @@ curl -H "Authorization: Bearer dev-secret" \
   | flamegraph.pl --title "Checkout $run_id" > flame.svg
 ```
 
+### 10.5. Buggregator (локальный debug-сервер)
+
+[Buggregator](https://buggregator.dev) — однобинарный debug-сервер, который, среди прочего, рисует xhprof-профили как flame graph с группировкой по проектам. Push формата `xhprof` шлётся прямо на его эндпоинт `POST /api/profiler/store` — расширение xhprof и клиентская библиотека не нужны, данные производит нативный профайлер OxPHP.
+
+```yaml
+services:
+  buggregator:
+    image: ghcr.io/buggregator/server:latest
+    ports: ["8000:8000"]
+
+  app:
+    image: ghcr.io/oxphp/oxphp:latest
+    environment:
+      PROFILER_ENABLED: "true"
+      PROFILER_SAMPLE_RATE: "0.01"
+      PROFILER_EXPORT_URL: "http://buggregator:8000/api/profiler/store"
+      PROFILER_EXPORT_FORMAT: "xhprof"
+      PROFILER_EXPORT_APP_NAME: "checkout"          # группировка по проекту
+      PROFILER_EXPORT_TAGS: "env=staging,region=eu" # фильтры в UI
+```
+
+URL, чей путь оканчивается на `/api/profiler/store`, автоматически выбирает конверт Buggregator (`PROFILER_EXPORT_BUGGREGATOR: "true"` форсирует его для произвольного URL; `"false"` — отключает). Этот конверт всегда шлёт xhprof, поэтому `PROFILER_EXPORT_FORMAT` для него игнорируется (не-xhprof значение вызывает предупреждение при старте, но не фатально — профайлер никогда не роняет сервер из-за настройки экспорта). `app_name` и `tags` управляют группировкой и фильтрацией в Buggregator; без них профиль всё равно отобразится, но без группировки. `hostname` берётся из `$HOSTNAME`, а если переменная не задана — из системного вызова `gethostname(2)`.
+
 ---
 
 ## 11. Хранение и очистка
@@ -608,8 +634,9 @@ environment:
   PROFILER_EXPORT_AUTH_TOKEN: "shared-secret"   # опционально
 ```
 
-- Автоопределение xhgui-конверта: URL содержит `xhgui` **или** заканчивается
-  на `/run/import`. Принудительно — `PROFILER_EXPORT_XHGUI=true|false`.
+- Автоопределение xhgui-конверта: **путь URL оканчивается на `/run/import`**
+  (канонический эндпоинт xhgui). Подстрока `xhgui` в host/query не матчится —
+  для таких URL включайте `PROFILER_EXPORT_XHGUI=true|false`.
 - Retry-план: 3 попытки с экспонентой `100/200/400 мс`, общий бюджет — 5 с
   wall-clock. Тело запроса разделяется между попытками как `bytes::Bytes`
   (ноль аллокаций на retry).
