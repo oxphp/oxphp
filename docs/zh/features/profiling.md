@@ -208,7 +208,10 @@ PROFILER_EXCLUDE_PATHS=/_profiler,/_profiler/**,/_wdt/**
 | `PROFILER_EXPORT_URL` | *(未设)* | 将每个运行 POST 推送到的 URL（xhgui、自建收集器）。 |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | HTTP 推送使用的四种格式之一。 |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(未设)* | 推送目标的 Bearer 令牌。 |
-| `PROFILER_EXPORT_XHGUI` | `auto` | 强制 xhgui 信封模式。Auto：URL 含 `xhgui` 或以 `/run/import` 结尾。 |
+| `PROFILER_EXPORT_XHGUI` | `auto` | 强制 xhgui 信封模式。Auto：URL 路径以 `/run/import` 结尾（xhgui 的规范端点；host/query 中的字符串不匹配——非标准路径请设为 `true`）。 |
+| `PROFILER_EXPORT_BUGGREGATOR` | `auto` | 强制使用 Buggregator 信封。Auto：URL 路径以 `/api/profiler/store` 结尾。此信封始终发送 xhprof，因此 `PROFILER_EXPORT_FORMAT` 对它无效（非 xhprof 取值仅告警，不致命）。与 `PROFILER_EXPORT_XHGUI` 互斥（同时启用会在启动时报错）。 |
+| `PROFILER_EXPORT_APP_NAME` | *（未设置）* | Buggregator 的 `app_name`——profile 归属的项目。 |
+| `PROFILER_EXPORT_TAGS` | *（未设置）* | Buggregator 的 `tags`，格式 `key=value,key2=value2`，用于过滤。非法项（非 `key=value`）、空键或重复键会在启动时报错。 |
 
 ### 生产环境示例配置
 
@@ -489,6 +492,29 @@ curl -H "Authorization: Bearer dev-secret" \
   | flamegraph.pl --title "Checkout $run_id" > flame.svg
 ```
 
+### 10.5. Buggregator（本地调试服务器）
+
+[Buggregator](https://buggregator.dev) 是一个单文件调试服务器，功能之一是将 xhprof profile 渲染为按项目分组的火焰图。`xhprof` 推送直接发往它的 `POST /api/profiler/store` 端点——无需 xhprof PHP 扩展或客户端库，数据由 OxPHP 的原生 profiler 生成。
+
+```yaml
+services:
+  buggregator:
+    image: ghcr.io/buggregator/server:latest
+    ports: ["8000:8000"]
+
+  app:
+    image: ghcr.io/oxphp/oxphp:latest
+    environment:
+      PROFILER_ENABLED: "true"
+      PROFILER_SAMPLE_RATE: "0.01"
+      PROFILER_EXPORT_URL: "http://buggregator:8000/api/profiler/store"
+      PROFILER_EXPORT_FORMAT: "xhprof"
+      PROFILER_EXPORT_APP_NAME: "checkout"          # 按项目分组
+      PROFILER_EXPORT_TAGS: "env=staging,region=eu" # UI 中可过滤
+```
+
+路径以 `/api/profiler/store` 结尾的 URL 会自动选择 Buggregator 信封（`PROFILER_EXPORT_BUGGREGATOR: "true"` 可为自定义 URL 强制启用；`"false"` 可关闭）。此信封始终发送 xhprof，因此 `PROFILER_EXPORT_FORMAT` 对它无效（非 xhprof 取值在启动时仅告警，不致命——profiler 绝不会因导出配置而使服务器崩溃）。`app_name` 和 `tags` 驱动 Buggregator 的项目分组与过滤；不设置时 profile 仍会渲染，但不分组。`hostname` 取自 `$HOSTNAME`，该变量未设置时回退到 `gethostname(2)` 系统调用。
+
 ---
 
 ## 11. 存储与清理
@@ -592,8 +618,9 @@ environment:
   PROFILER_EXPORT_AUTH_TOKEN: "shared-secret"   # 可选
 ```
 
-- xhgui 信封自动识别：URL 含 `xhgui` **或**以 `/run/import` 结尾。
-  通过 `PROFILER_EXPORT_XHGUI=true|false` 强制设定。
+- xhgui 信封自动识别：**URL 路径以 `/run/import` 结尾**（xhgui 的规范端点）。
+  host/query 中的 `xhgui` 字符串不匹配——此类 URL 请用
+  `PROFILER_EXPORT_XHGUI=true|false` 强制设定。
 - 重试策略：3 次指数退避 `100/200/400 毫秒`，总预算 5 秒墙钟时间。
   请求体跨重试以 `bytes::Bytes` 共享（零重试分配）。
 - 失败递增 `oxphp_profiler_http_push_failures_total`。

@@ -222,6 +222,47 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Best-effort host identity for the Buggregator envelope's `hostname`
+/// field. `$HOSTNAME` is a shell variable that is *not* reliably exported to a
+/// process's environment (systemd units, bare-metal, minimal init) even though
+/// container runtimes set it — so prefer it when present but fall back to the
+/// `gethostname(2)` syscall. Empty string only if both fail; Buggregator
+/// treats the field as informational.
+fn resolve_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    gethostname().unwrap_or_default()
+}
+
+/// The kernel hostname via `gethostname(2)`. `None` on syscall error, an empty
+/// name, or non-UTF-8 bytes. Unix-only — OxPHP ships Linux-only (ZTS
+/// `libphp.so`), so the `#[cfg(unix)]` split is hygiene rather than a supported
+/// non-unix path, which simply falls back to `$HOSTNAME` alone.
+#[cfg(unix)]
+fn gethostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is a valid writable buffer of `buf.len()` bytes; the kernel
+    // writes at most that many and NUL-terminates when the name fits.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    if end == 0 {
+        return None;
+    }
+    String::from_utf8(buf[..end].to_vec()).ok()
+}
+
+#[cfg(not(unix))]
+fn gethostname() -> Option<String> {
+    None
+}
+
 fn build_run_meta(
     view: &PluginCompleteView,
     tree: &std::sync::Arc<crate::profiling::SpanTree>,
@@ -405,11 +446,25 @@ impl Plugin for ProfilerPlugin {
                 .export_auth_token
                 .as_ref()
                 .map(|t| t.to_string());
+            let buggregator =
+                self.config
+                    .export_buggregator
+                    .then(|| crate::profiling::export::BuggregatorMeta {
+                        app_name: self
+                            .config
+                            .export_app_name
+                            .as_deref()
+                            .unwrap_or("")
+                            .to_string(),
+                        tags: self.config.export_tags.clone(),
+                        hostname: resolve_hostname(),
+                    });
             match storage::HttpPusher::new(
                 url.to_string(),
                 format,
                 token,
                 self.config.export_xhgui,
+                buggregator,
                 std::sync::Arc::clone(&metrics),
             ) {
                 Ok(p) => Some(p),
@@ -455,6 +510,9 @@ impl Plugin for ProfilerPlugin {
             "export_url_configured": self.config.export_url.is_some(),
             "export_format": self.config.export_format.clone(),
             "export_xhgui": self.config.export_xhgui,
+            "export_buggregator": self.config.export_buggregator,
+            "export_app_name": self.config.export_app_name.as_deref(),
+            "export_tags_count": self.config.export_tags.len(),
         });
 
         routes::register(
@@ -554,6 +612,7 @@ impl Plugin for ProfilerPlugin {
             auth_token_configured = self.config.auth_token.is_some(),
             export_url_configured = self.config.export_url.is_some(),
             export_xhgui = self.config.export_xhgui,
+            export_buggregator = self.config.export_buggregator,
             output_formats = ?self.config.output_formats,
             "Profiler plugin initialized"
         );
@@ -627,13 +686,22 @@ mod tests {
         try_init_profiler_plugin(plugin).unwrap()
     }
 
-    /// Bool env vars the profiler config reads. These are the only ones
-    /// that can reject and abort `init`, so we clear them on entry and
-    /// restore them on exit to keep tests hermetic.
+    /// Env vars whose stray presence could perturb a hermetic `init`. The first
+    /// five can make `ProfilerConfig::from_ctx` *reject* on a bad value (strict
+    /// bool parsers for the flags, the tag parser, the envelope resolver's
+    /// both-set error). `PROFILER_EXPORT_URL` / `PROFILER_EXPORT_FORMAT` do
+    /// **not** abort — a non-xhprof format only warns — but they steer envelope
+    /// resolution and its warnings, so they are cleared too. All are restored on
+    /// exit so a value leaked from another test or the host environment can't
+    /// affect an unrelated `init`.
     const BOOL_VARS: &[&str] = &[
         "PROFILER_ENABLED",
         "PROFILER_INTERNAL",
         "PROFILER_EXPORT_XHGUI",
+        "PROFILER_EXPORT_BUGGREGATOR",
+        "PROFILER_EXPORT_TAGS",
+        "PROFILER_EXPORT_URL",
+        "PROFILER_EXPORT_FORMAT",
     ];
 
     /// Run `f` with the given env-var overrides applied, serialized by the
@@ -665,6 +733,17 @@ mod tests {
             assert!(!plugin.enabled);
             assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
             assert_eq!(plugin.health(), PluginHealth::Ok);
+        });
+    }
+
+    #[test]
+    fn test_buggregator_without_url_does_not_abort_init() {
+        // PROFILER_EXPORT_BUGGREGATOR=true with no PROFILER_EXPORT_URL is a
+        // warned no-op (nothing to push), NOT a startup error — init must
+        // succeed (init_profiler_plugin unwraps `from_ctx`, so a reject panics).
+        with_env(&[("PROFILER_EXPORT_BUGGREGATOR", "true")], || {
+            let mut plugin = ProfilerPlugin::new();
+            let _config = init_profiler_plugin(&mut plugin);
         });
     }
 
