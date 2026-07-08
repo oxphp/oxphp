@@ -521,7 +521,7 @@ impl SharedRegistry {
     /// waiters via `Notify`/condvar; Map/Mutex/Counter/Flag/Atomic/Once
     /// are no-ops because they never block). There is no per-Shared
     /// timeout; the overall graceful-shutdown deadline lives at server
-    /// level (`DRAIN_TIMEOUT_SECONDS`, default 30s), which already waits
+    /// level (`DRAIN_TIMEOUT_SECONDS`, default 25s), which already waits
     /// on the connection-drain loop in `main.rs` long enough for woken
     /// PHP requests to unwind their exception and flush their response.
     pub fn drain(&self) {

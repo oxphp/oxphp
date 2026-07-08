@@ -461,7 +461,7 @@ services:
       - LOG_LEVEL=info
       - ACCESS_LOG=error
       - PHP_WORKERS=4
-      - DRAIN_TIMEOUT_SECONDS=30
+      - DRAIN_TIMEOUT_SECONDS=25
       - COMPRESSION_LEVEL=4
     restart: unless-stopped
 ```
@@ -6830,6 +6830,20 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 - Brotli compression is automatically skipped for streaming responses. Compression only applies to fully buffered responses.
 - `oxphp_stream_flush()` returns `false` if `oxphp_finish_request()` was already called on the same request.
 - In worker mode, the worker remains occupied for the full duration of the stream and handles the next request only after the PHP script exits.
+
+## Behaviour on shutdown
+
+When the server receives SIGTERM (a rolling deploy, a `docker stop`, a Kubernetes pod eviction), it drains gracefully:
+
+- Each open SSE stream is ended cleanly on its next `flush` — its handler bails as if the connection closed, so `register_shutdown_function()` callbacks still run and `error_get_last()['message']` reads `Request cancelled (shutdown)`.
+- HTTP/2 clients receive a `GOAWAY` frame; HTTP/1.1 keep-alive connections are closed. The browser's `EventSource` reconnects automatically — to a healthy instance when a load balancer fronts the fleet.
+- The stream does **not** receive a 503: its `200` headers were already sent, so the status cannot be rewritten. Design clients to resume from the last event id (send `id:` with each event; on reconnect the browser sends it back as the `Last-Event-ID` request header, available in PHP as `$_SERVER['HTTP_LAST_EVENT_ID']`).
+
+Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they get the whole drain window to finish normally, and only requests still running when `DRAIN_TIMEOUT_SECONDS` (default 25) expires are cancelled, with ~2 more seconds to unwind. Set the orchestrator's termination grace period above `DRAIN_TIMEOUT_SECONDS` + 2.
+
+"Streaming" here means any response that has already flushed chunked output — the server cannot tell a finite streaming download from an infinite event stream, so a large flushed download in flight at SIGTERM is ended early too, not just SSE. A request that called `oxphp_finish_request()` before SIGTERM counts as ordinary: its response is complete, and its remaining background work gets the drain window.
+
+A handler blocked inside a single long-running **native** call (a native `sleep()`, a heavy `preg_match`, a blocking database query) cannot be interrupted until that call returns. In worker mode prefer the cooperative `oxphp_sleep()` in streaming loops — it yields to the fiber scheduler and is woken immediately on shutdown. Outside worker mode `oxphp_sleep()` falls back to a regular blocking sleep, so the stream reacts to shutdown at its next `flush` after the sleep returns.
 
 ## See Also
 
@@ -13906,7 +13920,7 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive HTTP headers after connection (Slowloris protection) |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds to wait for in-flight connections during graceful shutdown |
 
 PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and `set_time_limit()` at runtime), not an OxPHP env var.
 
@@ -14089,7 +14103,7 @@ RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
-DRAIN_TIMEOUT_SECONDS=30
+DRAIN_TIMEOUT_SECONDS=25
 COMPRESSION_LEVEL=4
 STATIC_MAX_AGE=30d
 ```
@@ -14210,12 +14224,14 @@ Both signals trigger the same shutdown sequence. Only the first signal is needed
 
 When a shutdown signal is received, OxPHP follows this sequence:
 
-1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port and shuts down plugins. PHP workers continue running to process in-flight requests.
-2. **Drain in-flight requests** — active connections are allowed to finish processing. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
-3. **Enforce drain timeout** — if connections remain active after `DRAIN_TIMEOUT_SECONDS`, the server logs a warning and proceeds. Remaining connections are dropped.
-4. **Shut down async pool** — the background async task pool is stopped.
-5. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
-6. **Exit** — the process exits with status code 0.
+1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port. PHP workers continue running to process in-flight requests.
+2. **Wind down live connections** — HTTP/2 clients receive a `GOAWAY` frame and idle HTTP/1.1 keep-alive connections are closed, so clients move to a healthy instance instead of multiplexing new requests into the dying one. Open streams are ended promptly and cleanly — any response that has started flushing chunked output counts, finite downloads as well as SSE — see [Server-Sent Events](../features/sse.md#behaviour-on-shutdown).
+3. **Drain in-flight requests** — ordinary active requests are left alone to finish with their full responses. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
+4. **Enforce the drain deadline** — requests still running after `DRAIN_TIMEOUT_SECONDS` are cancelled (their `register_shutdown_function()` callbacks still run) and given ~2 seconds to unwind before the server proceeds.
+5. **Flush plugins** — access-log entries and APM spans buffered during the drain window are flushed.
+6. **Shut down async pool** — the background async task pool is stopped.
+7. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
+8. **Exit** — the process exits with status code 0.
 
 > **Note:** PHP workers are stopped explicitly during step 1 — the executor's `shutdown()` is called as part of stopping the main server, which signals worker threads to exit after finishing any in-progress request.
 
@@ -14223,7 +14239,7 @@ When a shutdown signal is received, OxPHP follows this sequence:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections to complete before forcing shutdown |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds in-flight requests get to complete before being cancelled; the process exits within ~2 seconds after the deadline. The default leaves headroom for the post-deadline unwind and telemetry flush inside Kubernetes' default 30-second termination grace period |
 
 Set `DRAIN_TIMEOUT_SECONDS` to accommodate your slowest expected request:
 
@@ -14237,10 +14253,10 @@ In Kubernetes, the shutdown flow during a rolling update is:
 
 1. Kubernetes sends `SIGTERM` to the pod.
 2. The pod is removed from the Service endpoint list.
-3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`.
+3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`, then cancels stragglers and exits within ~2 more seconds.
 4. If the pod is still running after `terminationGracePeriodSeconds`, Kubernetes sends `SIGKILL`.
 
-Set `DRAIN_TIMEOUT_SECONDS` lower than `terminationGracePeriodSeconds` to ensure the drain completes before the forced kill:
+Set `terminationGracePeriodSeconds` above `DRAIN_TIMEOUT_SECONDS` + 2 so the drain — including the post-deadline unwind and telemetry flush — completes before the forced kill:
 
 ```yaml
 apiVersion: apps/v1
@@ -14304,11 +14320,12 @@ During a graceful shutdown, OxPHP emits structured log messages you can monitor:
 {"level":"INFO","message":"Server stopped"}
 ```
 
-**Drain timeout reached:**
+**Drain deadline reached:**
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
+{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1}
+{"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
 

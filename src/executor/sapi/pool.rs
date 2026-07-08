@@ -51,6 +51,7 @@ fn clear_worker_slot(id: usize) {
             }
             slot.interrupt_flag_ptr
                 .store(std::ptr::null_mut(), Ordering::Release);
+            slot.active_requests.store(0, Ordering::Release);
             slot.heartbeat.request_start_us.store(0, Ordering::Relaxed);
             slot.heartbeat.tid.store(0, Ordering::Relaxed);
         }

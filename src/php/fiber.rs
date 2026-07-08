@@ -155,6 +155,13 @@ struct FiberTlsSlot {
     )>,
     #[cfg(feature = "php")]
     request_start: Option<Instant>,
+    /// Strong ref to this request's CancellationState. The C side keeps a raw
+    /// pointer to the cell inside it (`fiber->request_cancel_ptr`); parking the
+    /// Arc here keeps that pointer valid for the whole suspension. Without it
+    /// the cell dies as soon as the client's dispatch future is dropped and a
+    /// later request overwrites the single per-thread WORKER_CANCEL_STATE slot.
+    #[cfg(feature = "php")]
+    cancel_state: Option<std::sync::Arc<crate::bridge::cancel::CancellationState>>,
 }
 
 thread_local! {
@@ -171,6 +178,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let response = RESPONSE.with(|r| std::mem::take(&mut *r.borrow_mut()));
         let early_tx = super::sapi::take_early_tx();
         let request_start = super::sapi::take_request_start();
+        let cancel_state = super::sapi::take_worker_cancel_state();
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(
                 fiber_id,
@@ -178,6 +186,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     response,
                     early_tx,
                     request_start,
+                    cancel_state,
                 },
             );
         });
@@ -202,6 +211,7 @@ pub fn restore_fiber_tls(fiber_id: u64) {
                 });
                 super::sapi::restore_early_tx(slot.early_tx);
                 super::sapi::restore_request_start(slot.request_start);
+                super::sapi::restore_worker_cancel_state(slot.cancel_state);
             }
         });
     }
@@ -341,6 +351,8 @@ mod tests {
             early_tx: None,
             #[cfg(feature = "php")]
             request_start: None,
+            #[cfg(feature = "php")]
+            cancel_state: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -357,6 +369,8 @@ mod tests {
             early_tx: None,
             #[cfg(feature = "php")]
             request_start: None,
+            #[cfg(feature = "php")]
+            cancel_state: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -405,6 +419,8 @@ mod tests {
             early_tx: None,
             #[cfg(feature = "php")]
             request_start: None,
+            #[cfg(feature = "php")]
+            cancel_state: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);

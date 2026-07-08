@@ -211,6 +211,20 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 - `oxphp_stream_flush()` returns `false` if `oxphp_finish_request()` was already called on the same request.
 - In worker mode, the worker remains occupied for the full duration of the stream and handles the next request only after the PHP script exits.
 
+## Behaviour on shutdown
+
+When the server receives SIGTERM (a rolling deploy, a `docker stop`, a Kubernetes pod eviction), it drains gracefully:
+
+- Each open SSE stream is ended cleanly on its next `flush` — its handler bails as if the connection closed, so `register_shutdown_function()` callbacks still run and `error_get_last()['message']` reads `Request cancelled (shutdown)`.
+- HTTP/2 clients receive a `GOAWAY` frame; HTTP/1.1 keep-alive connections are closed. The browser's `EventSource` reconnects automatically — to a healthy instance when a load balancer fronts the fleet.
+- The stream does **not** receive a 503: its `200` headers were already sent, so the status cannot be rewritten. Design clients to resume from the last event id (send `id:` with each event; on reconnect the browser sends it back as the `Last-Event-ID` request header, available in PHP as `$_SERVER['HTTP_LAST_EVENT_ID']`).
+
+Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they get the whole drain window to finish normally, and only requests still running when `DRAIN_TIMEOUT_SECONDS` (default 25) expires are cancelled, with ~2 more seconds to unwind. Set the orchestrator's termination grace period above `DRAIN_TIMEOUT_SECONDS` + 2.
+
+"Streaming" here means any response that has already flushed chunked output — the server cannot tell a finite streaming download from an infinite event stream, so a large flushed download in flight at SIGTERM is ended early too, not just SSE. A request that called `oxphp_finish_request()` before SIGTERM counts as ordinary: its response is complete, and its remaining background work gets the drain window.
+
+A handler blocked inside a single long-running **native** call (a native `sleep()`, a heavy `preg_match`, a blocking database query) cannot be interrupted until that call returns. In worker mode prefer the cooperative `oxphp_sleep()` in streaming loops — it yields to the fiber scheduler and is woken immediately on shutdown. Outside worker mode `oxphp_sleep()` falls back to a regular blocking sleep, so the stream reacts to shutdown at its next `flush` after the sleep returns.
+
 ## See Also
 
 - [Worker Mode](worker-mode.md) -- persistent PHP processes for reduced bootstrap overhead

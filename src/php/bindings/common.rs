@@ -193,6 +193,9 @@ extern "C" {
     pub fn oxphp_bridge_set_cancel_ptr(ptr: *const std::sync::atomic::AtomicU8);
     pub fn oxphp_bridge_get_cancel_reason() -> u8;
     pub fn oxphp_bridge_set_cancel_reason(reason: u8) -> bool;
+    // Process-global graceful-shutdown drain latch, read by the stream-flush
+    // path to self-cancel a stream when the server is draining.
+    pub fn oxphp_bridge_is_draining() -> bool;
     pub fn oxphp_bridge_vm_interrupt_addr() -> *mut u8;
     pub fn oxphp_bridge_set_vm_interrupt_addr(addr: *mut std::os::raw::c_void);
     pub fn oxphp_bridge_request_interrupt();

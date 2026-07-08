@@ -536,12 +536,17 @@ async fn async_main(
     // Spawn graceful shutdown handler
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let server_ref = Arc::clone(&server);
-    let pm_shutdown = Arc::clone(&plugin_manager);
     let shutdown_ref = Arc::clone(&shutdown_notify);
     tokio::spawn(async move {
         shutdown_signal().await;
         tracing::info!("Received shutdown signal, draining connections");
-        pm_shutdown.shutdown_all();
+        // Stop accepting, latch the drain flag, and wake every connection so
+        // it winds down (GOAWAY on h2, Connection: close on idle h1
+        // keep-alives). Long-lived streams are cancelled promptly by the
+        // drain latch itself — the stream-flush path and the worker-mode
+        // fiber sweep observe it; ordinary in-flight requests keep running
+        // and get the whole drain window to finish. Requests still running
+        // at the deadline are hard-cancelled by the drain loop below.
         server_ref.shutdown();
         shutdown_ref.notify_one();
     });
@@ -592,7 +597,11 @@ async fn async_main(
         });
     }
 
-    // Graceful drain: wait for in-flight connections to finish
+    // Graceful drain: wait for in-flight connections to finish. Two phases:
+    // until the deadline, in-flight requests run undisturbed (streams were
+    // already cancelled by the drain latch); at the deadline, everything
+    // still running is hard-cancelled and given a short beat to unwind its
+    // bailout (shutdown handlers, final bytes) before the process exits.
     let active = server.active_connections();
     if active > 0 {
         tracing::info!(
@@ -601,22 +610,38 @@ async fn async_main(
         );
         let drain_deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(config.drain_timeout_seconds);
+        let hard_exit = drain_deadline + std::time::Duration::from_secs(2);
+        let mut hard_cancelled = false;
         loop {
             let remaining = server.active_connections();
             if remaining == 0 {
                 tracing::info!("All connections drained");
                 break;
             }
-            if tokio::time::Instant::now() >= drain_deadline {
+            let now = tokio::time::Instant::now();
+            if now >= drain_deadline && !hard_cancelled {
+                hard_cancelled = true;
                 tracing::warn!(
                     remaining_connections = remaining,
-                    "Drain timeout reached, forcing shutdown"
+                    "Drain timeout reached, cancelling in-flight requests"
                 );
+                oxphp::php::worker_registry::hard_cancel_all(
+                    oxphp::php::worker_registry::CancelReason::Shutdown,
+                );
+            }
+            if now >= hard_exit {
+                tracing::warn!(remaining_connections = remaining, "Forcing shutdown");
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+
+    // Flush plugins after the (bounded) drain so RequestComplete / access-log
+    // / APM events from requests finishing inside the drain window still
+    // reach live plugins. Worst case this runs DRAIN_TIMEOUT_SECONDS + 2s
+    // after SIGTERM — the orchestrator's grace period must exceed that.
+    plugin_manager.shutdown_all();
 
     // Shutdown async worker pool
     if let Some(ref mut pool) = async_pool {

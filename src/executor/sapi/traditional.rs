@@ -252,18 +252,12 @@ impl Drop for RequestDataGuard {
         // RSHUTDOWN handlers still see a real timestamp.
         unsafe {
             bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
-            // Clear our request's Weak ref from WORKERS so a stale
-            // cancel_request() walking the registry can't accidentally
-            // match a finished request.
-            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-                let id = bindings::oxphp_bridge_get_worker_id() as usize;
-                if let Some(slot) = workers.get(id) {
-                    *slot.cancel_state.lock().unwrap() = None;
-                    slot.heartbeat
-                        .request_start_us
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+            // Clear our request's registry entry so a stale cancel_request()
+            // walking the registry can't accidentally match a finished
+            // request, and the drain kick's in-flight count stays balanced.
+            crate::php::worker_registry::end_request(
+                bindings::oxphp_bridge_get_worker_id() as usize
+            );
             bindings::oxphp_bridge_set_request_time(0.0);
         }
     }
@@ -304,9 +298,7 @@ fn execute_request(
 
     // One-shot capture per traditional worker thread: publish
     // EG(vm_interrupt)'s address into WORKERS[id] so cross-thread
-    // cancellation can interrupt this thread's PHP execution. Then
-    // register a Weak back-ref to this request's CancellationState so
-    // cancel_request() can find this worker by Arc::ptr_eq.
+    // cancellation can interrupt this thread's PHP execution.
     let worker_id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
     VM_INTERRUPT_CAPTURED.with(|c| {
         if !c.get() {
@@ -327,29 +319,6 @@ fn execute_request(
             c.set(true);
         }
     });
-    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-        if let Some(slot) = workers.get(worker_id) {
-            *slot.cancel_state.lock().unwrap() =
-                Some(std::sync::Arc::downgrade(&request.cancel_state));
-            slot.heartbeat.request_start_us.store(
-                crate::php::heartbeat::monotonic_us(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            if slot
-                .heartbeat
-                .tid
-                .load(std::sync::atomic::Ordering::Relaxed)
-                == 0
-            {
-                let tid = crate::php::heartbeat::current_tid();
-                if tid != 0 {
-                    slot.heartbeat
-                        .tid
-                        .store(tid, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
-    }
 
     // Publish the cancel-state's atomic byte to the bridge so the
     // SAPI's interrupt handler can record CancelReason via
@@ -400,6 +369,12 @@ fn execute_request(
     // Streaming channel is created lazily in send_streaming_headers() — no alloc
     // for the vast majority of non-streaming requests.
 
+    // Register the request in the worker registry (Weak back-ref for targeted
+    // cancel_request(), in-flight count for the drain kick, busy heartbeat)
+    // immediately before the cleanup guard exists: end_request runs in the
+    // guard's Drop, and any gap between the two is a window where a panic
+    // leaks the count.
+    crate::php::worker_registry::begin_request(worker_id, &request.cancel_state);
     let _guard = RequestDataGuard;
 
     // Set request_time BEFORE php_request_startup() — OPcache reads it during RINIT.

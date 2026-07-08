@@ -741,6 +741,14 @@ extern "C" {
     pub fn oxphp_bridge_set_cancel_ptr(ptr: *const std::sync::atomic::AtomicU8);
     pub fn oxphp_bridge_get_cancel_reason() -> u8;
     pub fn oxphp_bridge_set_cancel_reason(reason: u8) -> bool;
+    // Process-global graceful-shutdown drain latches (NOT the per-request
+    // cancel reason above). Both one-way. `set_draining` latches at SIGTERM
+    // (read by the fiber scheduler and stream-flush path); `set_drain_hard`
+    // latches when the drain deadline passes (read by the interrupt handler
+    // to self-cancel the request running when the broadcast kick lands).
+    pub fn oxphp_bridge_set_draining();
+    pub fn oxphp_bridge_is_draining() -> bool;
+    pub fn oxphp_bridge_set_drain_hard();
     pub fn oxphp_bridge_vm_interrupt_addr() -> *mut u8;
     pub fn oxphp_bridge_set_vm_interrupt_addr(addr: *mut std::os::raw::c_void);
     pub fn oxphp_bridge_request_interrupt();

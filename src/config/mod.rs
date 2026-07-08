@@ -309,10 +309,15 @@ impl Config {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(10_000);
+        // Default 25s, not 30s: shutdown takes up to drain + ~2s of forced
+        // unwind + the plugin flush, and the whole sequence must fit inside
+        // the orchestrator's kill window — Kubernetes defaults
+        // terminationGracePeriodSeconds to 30. 25 + 2 + flush leaves headroom;
+        // a 30s default would be SIGKILLed mid-flush on stock deployments.
         let drain_timeout_seconds = std::env::var("DRAIN_TIMEOUT_SECONDS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(30);
+            .unwrap_or(25);
         let internal_addr = std::env::var("INTERNAL_ADDR")
             .ok()
             .map(|a| normalize_internal_addr(&a));
@@ -515,7 +520,7 @@ impl Config {
             log_level: "info".to_string(),
             executor_type: "stub".to_string(),
             max_connections: 10_000,
-            drain_timeout_seconds: 30,
+            drain_timeout_seconds: 25,
             internal_addr: None,
             internal_allow_ips: None,
             rate_limit: 0,

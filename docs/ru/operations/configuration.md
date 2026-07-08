@@ -88,7 +88,7 @@ PHP_WORKERS=0:16   # авто-определение минимума (CPU / 4, 
 | Переменная | По умолчанию | Описание |
 |-----------|-------------|---------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Максимальное время в секундах для получения HTTP-заголовков после соединения (защита от Slowloris) |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Максимальное время в секундах ожидания выполнения активных соединений при штатном завершении работы |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Максимальное время в секундах ожидания выполнения активных соединений при штатном завершении работы |
 
 Время выполнения PHP ограничивается собственной ini-директивой `max_execution_time` (и функцией `set_time_limit()` во время выполнения), а не переменной окружения OxPHP.
 
@@ -270,7 +270,7 @@ INTERNAL_ADDR=127.0.0.1:9090
 RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 HEADER_TIMEOUT_SECONDS=5
-DRAIN_TIMEOUT_SECONDS=30
+DRAIN_TIMEOUT_SECONDS=25
 COMPRESSION_LEVEL=4
 STATIC_MAX_AGE=30d
 TRUSTED_PROXIES=private

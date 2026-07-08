@@ -51,6 +51,13 @@ pub struct Server {
     /// Pre-configured HTTP builder reused across all connections.
     http_builder: Builder<hyper_util::rt::TokioExecutor>,
     shutdown: Arc<AtomicBool>,
+    /// Broadcast latch that flips to `true` when draining begins. Each
+    /// connection subscribes and, on flip, calls hyper's `graceful_shutdown()`.
+    /// Flipped via `send_replace` (stores even with zero receivers) and
+    /// observed via `wait_for` (checks the current value before waiting), so
+    /// a SIGTERM on an idle server and the accept→subscribe race are both
+    /// covered without retaining an extra receiver.
+    drain_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl Server {
@@ -119,6 +126,8 @@ impl Server {
             }
         }
 
+        let (drain_tx, _) = tokio::sync::watch::channel(false);
+
         Self {
             route_config: Arc::new(route_config),
             file_cache,
@@ -131,6 +140,7 @@ impl Server {
             static_cache_control,
             http_builder,
             shutdown,
+            drain_tx,
         }
     }
 
@@ -147,6 +157,14 @@ impl Server {
     pub fn shutdown(&self) {
         self.executor.shutdown();
         self.shutdown.store(true, Ordering::SeqCst);
+        // Wake every live connection so it can send GOAWAY / Connection: close.
+        // send_replace, not send: it stores the value even when no receiver is
+        // currently subscribed (SIGTERM on an idle server).
+        self.drain_tx.send_replace(true);
+        // Latch the bridge drain flag so the worker-thread stream-flush path
+        // and the C fiber scheduler observe the shutdown. On host builds
+        // (no `php` feature) `bridge::ffi` is the mock and this is a no-op.
+        unsafe { crate::bridge::ffi::oxphp_bridge_set_draining() };
     }
 
     /// Returns true if shutdown has been initiated.
@@ -192,13 +210,33 @@ impl Server {
             }
         });
 
+        // `wait_for` checks the current value before waiting, so a flip that
+        // landed between accept and this subscribe is still observed — no
+        // accept→subscribe race.
+        let mut drain_rx = self.drain_tx.subscribe();
         let result = if let Some(ref acceptor) = self.tls_acceptor {
-            let tls_stream = acceptor.accept(stream).await?;
+            // The handshake itself must also observe the drain latch: rustls
+            // has no handshake timeout, and a client that connects and then
+            // stalls mid-handshake would otherwise pin active_connections()
+            // for the whole drain window.
+            // The extra async block discards `wait_for`'s `Ref` return value —
+            // it holds a read guard that is not `Send`, and `select!` would
+            // otherwise store it in its output enum, making the whole
+            // connection future non-spawnable.
+            let tls_stream = tokio::select! {
+                accepted = acceptor.accept(stream) => accepted?,
+                _ = async { drain_rx.wait_for(|&draining| draining).await.ok(); } => {
+                    // Deliberate wind-down, not a failure: an Err here would
+                    // surface as a Connection-error log line on every deploy.
+                    tracing::debug!("TLS handshake abandoned: server draining");
+                    return Ok(());
+                }
+            };
             let io = TokioIo::new(tls_stream);
-            self.http_builder.serve_connection(io, service).await
+            self.serve_with_drain(io, service, &mut drain_rx).await
         } else {
             let io = TokioIo::new(stream);
-            self.http_builder.serve_connection(io, service).await
+            self.serve_with_drain(io, service, &mut drain_rx).await
         };
 
         // Notify any in-flight handler that the connection is done. This lets
@@ -211,5 +249,40 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Serve one connection, winding it down gracefully when the drain latch
+    /// flips. Shared by the TLS and cleartext arms of `handle_connection` so the
+    /// drain/`graceful_shutdown` logic lives in exactly one place.
+    async fn serve_with_drain<I, S, B>(
+        &self,
+        io: I,
+        service: S,
+        drain_rx: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+        S: hyper::service::Service<
+                hyper::Request<hyper::body::Incoming>,
+                Response = hyper::Response<B>,
+            > + Send
+            + 'static,
+        S::Future: Send + 'static,
+        S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+        B: hyper::body::Body + Send + 'static,
+        B::Data: Send,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let conn = self.http_builder.serve_connection(io, service);
+        tokio::pin!(conn);
+        tokio::select! {
+            res = conn.as_mut() => res,
+            // async block: drop wait_for's non-Send `Ref` before yielding.
+            _ = async { drain_rx.wait_for(|&draining| draining).await.ok(); } => {
+                // GOAWAY (h2) / Connection: close (h1), then finish in-flight work.
+                conn.as_mut().graceful_shutdown();
+                conn.as_mut().await
+            }
+        }
     }
 }

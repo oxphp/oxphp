@@ -22,12 +22,14 @@ Both signals trigger the same shutdown sequence. Only the first signal is needed
 
 When a shutdown signal is received, OxPHP follows this sequence:
 
-1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port and shuts down plugins. PHP workers continue running to process in-flight requests.
-2. **Drain in-flight requests** — active connections are allowed to finish processing. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
-3. **Enforce drain timeout** — if connections remain active after `DRAIN_TIMEOUT_SECONDS`, the server logs a warning and proceeds. Remaining connections are dropped.
-4. **Shut down async pool** — the background async task pool is stopped.
-5. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
-6. **Exit** — the process exits with status code 0.
+1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port. PHP workers continue running to process in-flight requests.
+2. **Wind down live connections** — HTTP/2 clients receive a `GOAWAY` frame and idle HTTP/1.1 keep-alive connections are closed, so clients move to a healthy instance instead of multiplexing new requests into the dying one. Open streams are ended promptly and cleanly — any response that has started flushing chunked output counts, finite downloads as well as SSE — see [Server-Sent Events](../features/sse.md#behaviour-on-shutdown).
+3. **Drain in-flight requests** — ordinary active requests are left alone to finish with their full responses. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
+4. **Enforce the drain deadline** — requests still running after `DRAIN_TIMEOUT_SECONDS` are cancelled (their `register_shutdown_function()` callbacks still run) and given ~2 seconds to unwind before the server proceeds.
+5. **Flush plugins** — access-log entries and APM spans buffered during the drain window are flushed.
+6. **Shut down async pool** — the background async task pool is stopped.
+7. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
+8. **Exit** — the process exits with status code 0.
 
 > **Note:** PHP workers are stopped explicitly during step 1 — the executor's `shutdown()` is called as part of stopping the main server, which signals worker threads to exit after finishing any in-progress request.
 
@@ -35,7 +37,7 @@ When a shutdown signal is received, OxPHP follows this sequence:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections to complete before forcing shutdown |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds in-flight requests get to complete before being cancelled; the process exits within ~2 seconds after the deadline. The default leaves headroom for the post-deadline unwind and telemetry flush inside Kubernetes' default 30-second termination grace period |
 
 Set `DRAIN_TIMEOUT_SECONDS` to accommodate your slowest expected request:
 
@@ -49,10 +51,10 @@ In Kubernetes, the shutdown flow during a rolling update is:
 
 1. Kubernetes sends `SIGTERM` to the pod.
 2. The pod is removed from the Service endpoint list.
-3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`.
+3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`, then cancels stragglers and exits within ~2 more seconds.
 4. If the pod is still running after `terminationGracePeriodSeconds`, Kubernetes sends `SIGKILL`.
 
-Set `DRAIN_TIMEOUT_SECONDS` lower than `terminationGracePeriodSeconds` to ensure the drain completes before the forced kill:
+Set `terminationGracePeriodSeconds` above `DRAIN_TIMEOUT_SECONDS` + 2 so the drain — including the post-deadline unwind and telemetry flush — completes before the forced kill:
 
 ```yaml
 apiVersion: apps/v1
@@ -116,11 +118,12 @@ During a graceful shutdown, OxPHP emits structured log messages you can monitor:
 {"level":"INFO","message":"Server stopped"}
 ```
 
-**Drain timeout reached:**
+**Drain deadline reached:**
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
+{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1}
+{"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
 

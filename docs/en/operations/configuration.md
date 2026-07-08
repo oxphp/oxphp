@@ -88,7 +88,7 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive HTTP headers after connection (Slowloris protection) |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | Maximum seconds to wait for in-flight connections during graceful shutdown |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds to wait for in-flight connections during graceful shutdown |
 
 PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and `set_time_limit()` at runtime), not an OxPHP env var.
 
@@ -271,7 +271,7 @@ RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
-DRAIN_TIMEOUT_SECONDS=30
+DRAIN_TIMEOUT_SECONDS=25
 COMPRESSION_LEVEL=4
 STATIC_MAX_AGE=30d
 ```

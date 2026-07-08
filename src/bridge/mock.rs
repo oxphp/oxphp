@@ -1064,7 +1064,7 @@ pub unsafe extern "C" fn oxphp_bridge_get_max_memory_bytes() -> u64 {
 
 // Cancellation reason API (mock).
 
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 
 static MOCK_CANCEL_PTR: AtomicPtr<AtomicU8> = AtomicPtr::new(std::ptr::null_mut());
 static MOCK_VM_INTERRUPT: AtomicU8 = AtomicU8::new(0);
@@ -1111,6 +1111,24 @@ pub unsafe extern "C" fn oxphp_bridge_request_interrupt() {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn oxphp_bridge_request_interrupt_at(_addr: *mut std::os::raw::c_void) {
     MOCK_VM_INTERRUPT.store(1, Ordering::Relaxed);
+}
+
+static MOCK_DRAINING: AtomicBool = AtomicBool::new(false);
+static MOCK_DRAIN_HARD: AtomicBool = AtomicBool::new(false);
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_draining() {
+    MOCK_DRAINING.store(true, Ordering::Relaxed);
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_is_draining() -> bool {
+    MOCK_DRAINING.load(Ordering::Relaxed)
+}
+
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn oxphp_bridge_set_drain_hard() {
+    MOCK_DRAIN_HARD.store(true, Ordering::Relaxed);
 }
 
 #[allow(clippy::missing_safety_doc)]

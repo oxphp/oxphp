@@ -337,6 +337,24 @@ pub(crate) fn restore_request_start(val: Option<Instant>) {
     WORKER_REQUEST_START.with(|cell| cell.set(val));
 }
 
+/// Take the worker's strong ref to the current request's CancellationState
+/// (for per-fiber save). Parking the Arc in the fiber's TLS slot keeps the
+/// cell the C side points at (`fiber->request_cancel_ptr`) alive across the
+/// suspension: the per-thread slot below only ever protects the most recently
+/// prepared request.
+pub(crate) fn take_worker_cancel_state(
+) -> Option<std::sync::Arc<crate::bridge::cancel::CancellationState>> {
+    WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take())
+}
+
+/// Restore the request's CancellationState strong ref into TLS (for per-fiber
+/// restore).
+pub(crate) fn restore_worker_cancel_state(
+    val: Option<std::sync::Arc<crate::bridge::cancel::CancellationState>>,
+) {
+    WORKER_CANCEL_STATE.with(|slot| *slot.borrow_mut() = val);
+}
+
 /// Parse raw header strings into typed `HeaderName`/`HeaderValue` pairs.
 /// Shared between early send and normal response paths.
 pub fn parse_raw_headers(raw: Vec<(String, String)>) -> Vec<(HeaderName, HeaderValue)> {
@@ -449,18 +467,37 @@ fn flush_stream_chunk() {
                 }
                 Some(Bytes::from(std::mem::take(&mut resp.output)))
             });
-            if let Some(chunk) = data {
-                // blocking_send: blocks if channel full (backpressure).
-                // Err means the receiver was dropped — client gone.
-                if tx.blocking_send(chunk).is_err() {
-                    unsafe {
-                        if bindings::oxphp_bridge_get_cancel_reason() == 0 {
-                            tracing::warn!("Stream client disconnected during flush");
-                            let _ =
-                                bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
-                            bindings::oxphp_bridge_request_interrupt();
-                        }
+            // blocking_send: blocks if channel full (backpressure).
+            // Err means the receiver was dropped — client gone. A None chunk
+            // (empty flush) is not an error but must still see the drain check.
+            let send_failed = match data {
+                Some(chunk) => tx.blocking_send(chunk).is_err(),
+                None => false,
+            };
+            unsafe {
+                if send_failed {
+                    if bindings::oxphp_bridge_get_cancel_reason() == 0 {
+                        tracing::warn!("Stream client disconnected during flush");
+                        let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+                        bindings::oxphp_bridge_request_interrupt();
                     }
+                } else if bindings::oxphp_bridge_is_draining()
+                    && bindings::oxphp_bridge_get_cancel_reason() == 0
+                    && !bindings::oxphp_bridge_is_finished()
+                {
+                    // Server is draining: end the stream on the next opcode even
+                    // if this flush carried no output (heartbeat comment, or the
+                    // buffer was already drained). Catches tight flush loops that
+                    // never suspend, so the fiber scheduler's drain sweep — which
+                    // only reaches suspended fibers — cannot see them.
+                    //
+                    // The `is_finished` guard excludes the closing flush that
+                    // oxphp_finish_request() performs on a streaming request:
+                    // the response is complete at that point, and the script's
+                    // post-response work is an ordinary request for drain
+                    // purposes — it gets the window, not an immediate cancel.
+                    let _ = bindings::oxphp_bridge_set_cancel_reason(3 /* SHUTDOWN */);
+                    bindings::oxphp_bridge_request_interrupt();
                 }
             }
         }
@@ -2487,20 +2524,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         if was_early_sent() {
             #[cfg(feature = "plugin-profiler")]
             reset_profiler_bridge_if_dirty();
-            record_worker_request_metrics();
-            clear_buffers();
-            bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
-            WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
-            if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-                let id = bindings::oxphp_bridge_get_worker_id() as usize;
-                if let Some(slot) = workers.get(id) {
-                    *slot.cancel_state.lock().unwrap() = None;
-                    slot.heartbeat
-                        .request_start_us
-                        .store(0, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            bindings::oxphp_bridge_set_request_time(0.0);
+            worker_request_teardown();
             return 0;
         }
     }
@@ -2509,20 +2533,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     if was_early_sent() {
         #[cfg(feature = "plugin-profiler")]
         reset_profiler_bridge_if_dirty();
-        record_worker_request_metrics();
-        clear_buffers();
-        bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
-        WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
-        if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-            let id = bindings::oxphp_bridge_get_worker_id() as usize;
-            if let Some(slot) = workers.get(id) {
-                *slot.cancel_state.lock().unwrap() = None;
-                slot.heartbeat
-                    .request_start_us
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        bindings::oxphp_bridge_set_request_time(0.0);
+        worker_request_teardown();
         return 0;
     }
 
@@ -2588,28 +2599,28 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         }
     });
 
-    // Record worker mode metrics after response sent
-    record_worker_request_metrics();
-
-    // Clean up for next request
-    clear_buffers();
-
-    // Drop the worker's Arc to CancellationState and clear the bridge
-    // pointer; the next request installs fresh state in setup_request_tls.
-    bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
-    WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
-    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-        let id = bindings::oxphp_bridge_get_worker_id() as usize;
-        if let Some(slot) = workers.get(id) {
-            *slot.cancel_state.lock().unwrap() = None;
-            slot.heartbeat
-                .request_start_us
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-    bindings::oxphp_bridge_set_request_time(0.0);
+    worker_request_teardown();
 
     0
+}
+
+/// Shared terminal cleanup for one worker-mode request: record metrics, clear
+/// the response buffers, drop the worker's Arc to CancellationState, clear
+/// the bridge cancel pointer (the next request installs fresh state in
+/// `setup_request_tls`), unregister from the worker registry, and zero the
+/// SAPI request time. Every exit path of `worker_send_callback` must run
+/// exactly one of these — `end_request` inside balances the `begin_request`
+/// from `setup_request_tls`.
+///
+/// # Safety
+/// Must run on the worker thread that owns the current request's TLS.
+unsafe fn worker_request_teardown() {
+    record_worker_request_metrics();
+    clear_buffers();
+    bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
+    WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
+    crate::php::worker_registry::end_request(bindings::oxphp_bridge_get_worker_id() as usize);
+    bindings::oxphp_bridge_set_request_time(0.0);
 }
 
 /// Record per-request worker mode metrics (memory, requests_done, duration histogram).
@@ -2777,34 +2788,23 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
         *slot.borrow_mut() = Some(req.script.cancel_state.clone());
     });
 
-    // Per-request: register a Weak back-ref so cancel_request() can
-    // find this worker by Arc::ptr_eq, and stamp request_start_us so
-    // the supervisor sees this worker as busy. tid is captured once
-    // per worker (zero-once) the first time we enter this path.
-    if let Some(workers) = crate::php::worker_registry::WORKERS.get() {
-        let id = unsafe { bindings::oxphp_bridge_get_worker_id() } as usize;
-        if let Some(slot) = workers.get(id) {
-            *slot.cancel_state.lock().unwrap() =
-                Some(std::sync::Arc::downgrade(&req.script.cancel_state));
-            slot.heartbeat.request_start_us.store(
-                crate::php::heartbeat::monotonic_us(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            if slot
-                .heartbeat
-                .tid
-                .load(std::sync::atomic::Ordering::Relaxed)
-                == 0
-            {
-                let tid = crate::php::heartbeat::current_tid();
-                if tid != 0 {
-                    slot.heartbeat
-                        .tid
-                        .store(tid, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
+    // Install the cancel cell into the bridge ctx BEFORE the fast-path check
+    // below: the C serve loop creates a fiber for this request either way, and
+    // oxphp_scheduler_create_fiber captures ctx.cancel_ptr at that moment. An
+    // early return that skipped this install would hand the fiber a NULL
+    // pointer (reset_request_ctx above zeroed it), making it invisible to the
+    // drain sweep's cell write and the hard-drain self-cancel.
+    unsafe {
+        bindings::oxphp_bridge_set_cancel_ptr(cancel_ptr);
     }
+
+    // Per-request: register a Weak back-ref so cancel_request() can find this
+    // worker by Arc::ptr_eq, count the request for the drain broadcast kick,
+    // and stamp request_start_us so the supervisor sees this worker as busy.
+    crate::php::worker_registry::begin_request(
+        unsafe { bindings::oxphp_bridge_get_worker_id() } as usize,
+        &req.script.cancel_state,
+    );
 
     // Fast-path: client disconnected while we were in the queue.
     // Ship 499 directly via the still-owned response_tx and bail
@@ -2818,10 +2818,6 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
 
     // Store request start time for duration histogram
     WORKER_REQUEST_START.with(|slot| slot.set(Some(start)));
-
-    unsafe {
-        bindings::oxphp_bridge_set_cancel_ptr(cancel_ptr);
-    }
 
     // One-shot capture of &EG(vm_interrupt) on the worker thread +
     // publish into WORKERS[id].interrupt_flag_ptr so other threads
