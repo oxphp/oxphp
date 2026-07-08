@@ -211,6 +211,20 @@ services:
 - 如果同一请求中已调用 `oxphp_finish_request()`，`oxphp_stream_flush()` 将返回 `false`。
 - 在 Worker 模式下，Worker 在整个流传输期间保持占用，只有在 PHP 脚本退出后才处理下一个请求。
 
+## 关闭时的行为
+
+当服务器收到 SIGTERM（滚动部署、`docker stop`、Kubernetes pod 驱逐）时，会优雅地排空连接：
+
+- 每个打开的 SSE 流会在下一次 `flush` 时干净地结束——其处理器如同连接关闭一样退出，因此 `register_shutdown_function()` 回调仍会运行，`error_get_last()['message']` 为 `Request cancelled (shutdown)`。
+- HTTP/2 客户端会收到 `GOAWAY` 帧；HTTP/1.1 keep-alive 连接被关闭。浏览器的 `EventSource` 会自动重连——在集群前有负载均衡器时会连到健康的实例。
+- 该流**不会**收到 503：其 `200` 响应头已经发送，状态码无法重写。请将客户端设计为从最后一个事件 id 恢复（每个事件都发送 `id:`；重连时浏览器会通过 `Last-Event-ID` 请求头回传，在 PHP 中可用 `$_SERVER['HTTP_LAST_EVENT_ID']` 读取）。
+
+SIGTERM 时正在执行的普通（非流式）请求不会被中断：它们可以利用整个排空窗口正常完成，只有在 `DRAIN_TIMEOUT_SECONDS`（默认 25）到期时仍在运行的请求才会被取消，并有约 2 秒时间收尾。请将编排器的终止宽限期设置为高于 `DRAIN_TIMEOUT_SECONDS` + 2。
+
+这里的"流式"指任何已经开始通过 flush 输出 chunked 内容的响应——服务器无法区分有限的流式下载和无限的事件流，因此 SIGTERM 时正在进行的大文件分块下载同样会被提前结束，而不仅仅是 SSE。在 SIGTERM 之前已调用 `oxphp_finish_request()` 的请求算作普通请求：其响应已经完成，剩余的后台工作可以利用整个排空窗口。
+
+阻塞在单个耗时**原生**调用（原生 `sleep()`、耗时的 `preg_match`、阻塞式数据库查询）中的处理器，在该调用返回前无法被中断。在 worker 模式下，请在流式循环中优先使用协作式的 `oxphp_sleep()`——它会让出给 fiber 调度器并在关闭时立即被唤醒。在 worker 模式之外，`oxphp_sleep()` 退化为普通的阻塞式睡眠，因此流会在睡眠结束后的下一次 `flush` 时才响应关闭。
+
 ## 参见
 
 - [Worker 模式](worker-mode.md) -- 减少启动开销的持久化 PHP 进程

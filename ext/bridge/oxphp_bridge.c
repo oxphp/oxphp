@@ -1911,6 +1911,10 @@ void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr) {
     ctx.cancel_ptr = ptr;
 }
 
+_Atomic(uint8_t)* oxphp_bridge_get_cancel_ptr(void) {
+    return ctx.cancel_ptr;
+}
+
 oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void) {
     if (!ctx.cancel_ptr) return OXPHP_CANCEL_NONE;
     uint8_t v = atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
@@ -1918,14 +1922,44 @@ oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void) {
 }
 
 bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason) {
-    if (!ctx.cancel_ptr || reason == OXPHP_CANCEL_NONE) return false;
+    return oxphp_bridge_set_cancel_reason_at(ctx.cancel_ptr, reason);
+}
+
+/* CAS a specific request's cancel cell to `reason` (first-writer-wins, so an
+ * in-flight ClientAbort/Timeout is not clobbered). Used by the fiber
+ * scheduler's drain sweep to mark each suspended fiber's OWN cell, rather than
+ * the single per-thread ctx pointer. */
+bool oxphp_bridge_set_cancel_reason_at(_Atomic(uint8_t)* ptr, oxphp_cancel_reason_t reason) {
+    if (!ptr || reason == OXPHP_CANCEL_NONE) return false;
     uint8_t expected = OXPHP_CANCEL_NONE;
     return atomic_compare_exchange_strong_explicit(
-        ctx.cancel_ptr,
-        &expected,
-        (uint8_t)reason,
-        memory_order_relaxed,
-        memory_order_relaxed);
+        ptr, &expected, (uint8_t)reason,
+        memory_order_relaxed, memory_order_relaxed);
+}
+
+/* Process-global graceful-shutdown drain latch (NOT __thread — every worker
+ * and the scheduler must observe it). One-way: set true once, never reset. */
+static atomic_bool g_draining = false;
+
+void oxphp_bridge_set_draining(void) {
+    atomic_store_explicit(&g_draining, true, memory_order_relaxed);
+}
+
+bool oxphp_bridge_is_draining(void) {
+    return atomic_load_explicit(&g_draining, memory_order_relaxed);
+}
+
+/* Second drain phase, latched when the drain deadline passes. Read by the
+ * interrupt handler to self-cancel whatever request is running when the
+ * broadcast vm_interrupt kick lands. One-way, like g_draining. */
+static atomic_bool g_drain_hard = false;
+
+void oxphp_bridge_set_drain_hard(void) {
+    atomic_store_explicit(&g_drain_hard, true, memory_order_release);
+}
+
+bool oxphp_bridge_is_drain_hard(void) {
+    return atomic_load_explicit(&g_drain_hard, memory_order_acquire);
 }
 
 void* oxphp_bridge_vm_interrupt_addr(void) {

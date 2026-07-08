@@ -1211,6 +1211,17 @@ PHP_FUNCTION(oxphp_stream_flush)
 
 /* ─── Cooperative Sleep ───────────────────────────────────── */
 
+/* Uncatchable drain bail for a fiber force-resumed by the scheduler's drain
+ * sweep: mark the connection aborted (so shutdown handlers calling
+ * connection_aborted()/connection_status() observe it), then unwind via
+ * zend_error_noreturn — registered shutdown functions still run, a userland
+ * try/catch cannot swallow it. Shared by every suspend point's resume path. */
+static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
+{
+    PG(connection_status) |= PHP_CONNECTION_ABORTED;
+    zend_error_noreturn(E_ERROR, "Request cancelled (shutdown)");
+}
+
 /* Internal: register timer and suspend current fiber.
  * duration_us is the sleep duration in microseconds.
  * Returns 1 if fiber-suspended (timer expired), 0 if no fiber (use blocking
@@ -1237,8 +1248,10 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
     /* --- RESUMED on timer expiry, OR force-resumed by the scheduler when the
-     * task was cancelled (awaiter gave up). On cancellation, signal the caller
-     * to throw instead of returning normally. */
+     * task was cancelled (awaiter gave up) or the server is draining. */
+    if (self->drain_kill) {
+        oxphp_fiber_drain_bail();
+    }
     if (self->cancel_requested) {
         self->cancel_requested = false;
         return -1; /* cancelled */
@@ -2388,6 +2401,10 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
      * the deadline first; then unwind on cancel/timeout by signalling the caller
      * to throw instead of consuming a result. */
     self->await_deadline_ns = 0;
+    /* Drain: bail uncatchably before touching the (unsettled) promise result. */
+    if (self->drain_kill) {
+        oxphp_fiber_drain_bail();
+    }
     if (self->cancel_requested) {
         self->cancel_requested = false;
         return -3; /* cancelled */
@@ -2426,6 +2443,9 @@ int oxphp_fiber_suspend_for_yield(void) {
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
     /* --- RESUMED on the next scheduler tick once the timer expires --- */
+    if (self->drain_kill) {
+        oxphp_fiber_drain_bail();
+    }
     if (self->cancel_requested) {
         self->cancel_requested = false;
         return -3; /* cancelled */
@@ -3196,6 +3216,17 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 
     oxphp_cancel_reason_t reason = oxphp_bridge_get_cancel_reason();
 
+    /* Hard-drain broadcast kick: the drain deadline passed and Rust raised
+     * vm_interrupt on every worker with requests in flight. Under fiber
+     * multiplexing the registry slot names only the most recently prepared
+     * request, so no per-request reason may have reached the cell of the
+     * request actually running here — self-cancel it (CAS, first writer
+     * wins; if the cell already holds a reason, that reason is used). */
+    if (reason == OXPHP_CANCEL_NONE && oxphp_bridge_is_drain_hard()) {
+        oxphp_bridge_set_cancel_reason(OXPHP_CANCEL_SHUTDOWN);
+        reason = oxphp_bridge_get_cancel_reason();
+    }
+
     if (reason == OXPHP_CANCEL_NONE) {
         if (orig_zend_interrupt_function) {
             orig_zend_interrupt_function(execute_data);
@@ -3205,7 +3236,11 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 
     if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
         PG(connection_status) |= PHP_CONNECTION_ABORTED;
-        if (PG(ignore_user_abort)) {
+        /* ignore_user_abort() lets a script outlive its client — but not the
+         * server. Once the drain deadline has passed, the hard kick must be
+         * able to unwind a request whose cell already holds CLIENT_ABORT
+         * (first-writer-wins), or it survives until the forced process exit. */
+        if (PG(ignore_user_abort) && !oxphp_bridge_is_drain_hard()) {
             return;
         }
     } else if (reason == OXPHP_CANCEL_TIMEOUT) {
@@ -3217,6 +3252,19 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
          * shutdown handlers calling connection_aborted() / connection_status()
          * observe a non-zero state instead of PHP_CONNECTION_NORMAL. */
         PG(connection_status) |= PHP_CONNECTION_ABORTED;
+
+        /* A drain unwind is administrative, not a handler defect — mark it so
+         * oxphp_scheduler_finalize_fiber keeps the consecutive-error breaker
+         * neutral. The scheduler's sweep sets this itself for the fibers it
+         * force-resumes; the two paths that reach a RUNNING request cannot:
+         * the streaming flush path's self-cancel (tight flush loops the sweep
+         * never sees) and the deadline kick (broadcast vm_interrupt). Three
+         * such kills in a row would otherwise trip WORKER_MAX_CONSECUTIVE_ERRORS
+         * and error-exit the worker mid-drain, destroying the ordinary in-flight
+         * requests the drain exists to protect. */
+        if (reason == OXPHP_CANCEL_SHUTDOWN && oxphp_current_fiber != NULL) {
+            oxphp_current_fiber->drain_kill = true;
+        }
     }
 
     zend_error_noreturn(E_ERROR,

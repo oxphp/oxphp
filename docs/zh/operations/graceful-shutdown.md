@@ -22,12 +22,14 @@ OxPHP 响应两种关闭信号：
 
 收到关闭信号后，OxPHP 按以下序列执行：
 
-1. **停止接受新连接** — 服务器停止在主端口接受新的 TCP 连接并关闭插件。PHP 工作进程继续运行以处理进行中的请求。
-2. **排空进行中的请求** — 允许活跃连接完成处理。服务器每 100ms 检查一次完成状态。内部健康/指标服务器在整个排空期间保持可用，就绪探针可继续正常工作。
-3. **执行排空超时** — 如果在 `DRAIN_TIMEOUT_SECONDS` 后连接仍处于活跃状态，服务器会记录警告并继续执行。剩余连接将被强制断开。
-4. **关闭异步进程池** — 后台异步任务进程池被停止。
-5. **终止内部服务器** — 排空完成后停止健康/指标服务器。
-6. **退出** — 进程以状态码 0 退出。
+1. **停止接受新连接** — 服务器停止在主端口接受新的 TCP 连接。PHP 工作进程继续运行以处理进行中的请求。
+2. **收拢存活连接** — HTTP/2 客户端收到 `GOAWAY` 帧，空闲的 HTTP/1.1 keep-alive 连接被关闭，客户端会转向健康实例，而不是继续向正在关闭的实例复用新请求。打开的流会被立即干净地结束——任何已经开始 flush 输出 chunked 内容的响应都算在内，有限下载与 SSE 同样处理——参见 [Server-Sent Events](../features/sse.md#关闭时的行为)。
+3. **排空进行中的请求** — 普通活跃请求不受打扰，正常完成并返回完整响应。服务器每 100ms 检查一次完成状态。内部健康/指标服务器在整个排空期间保持可用，就绪探针可继续正常工作。
+4. **执行排空截止时间** — 在 `DRAIN_TIMEOUT_SECONDS` 到期时仍在运行的请求会被取消（其 `register_shutdown_function()` 回调仍会执行），并获得约 2 秒时间收尾，之后服务器继续关闭流程。
+5. **刷新插件** — 排空窗口期间累积的访问日志条目和 APM span 被刷出。
+6. **关闭异步进程池** — 后台异步任务进程池被停止。
+7. **终止内部服务器** — 排空完成后停止健康/指标服务器。
+8. **退出** — 进程以状态码 0 退出。
 
 > **注意：** PHP 工作进程在步骤 1 中被显式停止——停止主服务器时会调用执行器的 `shutdown()`，向工作线程发出信号，使其在完成进行中的请求后退出。
 
@@ -35,7 +37,7 @@ OxPHP 响应两种关闭信号：
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECONDS` | `30` | 强制关闭前等待进行中连接完成的最大秒数 |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | 进行中请求在被取消前可用于完成的最大秒数；截止时间过后进程在约 2 秒内退出。该默认值在 Kubernetes 默认的 30 秒终止宽限期内为截止后的收尾和遥测刷新留出了余量 |
 
 根据预期的最慢请求设置 `DRAIN_TIMEOUT_SECONDS`：
 
@@ -49,10 +51,10 @@ OxPHP 响应两种关闭信号：
 
 1. Kubernetes 向 Pod 发送 `SIGTERM`。
 2. Pod 从 Service 端点列表中移除。
-3. OxPHP 在 `DRAIN_TIMEOUT_SECONDS` 内排空进行中的连接。
+3. OxPHP 在 `DRAIN_TIMEOUT_SECONDS` 内排空进行中的连接，随后取消掉队的请求，并在约 2 秒内退出。
 4. 如果 Pod 在 `terminationGracePeriodSeconds` 后仍在运行，Kubernetes 发送 `SIGKILL`。
 
-将 `DRAIN_TIMEOUT_SECONDS` 设置为低于 `terminationGracePeriodSeconds` 的值，确保排空在强制终止前完成：
+将 `terminationGracePeriodSeconds` 设置为高于 `DRAIN_TIMEOUT_SECONDS` + 2 的值，确保排空——包括截止时间后的收尾与遥测刷新——在强制终止前完成：
 
 ```yaml
 apiVersion: apps/v1
@@ -120,7 +122,8 @@ services:
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, forcing shutdown","remaining_connections":1}
+{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1}
+{"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
 

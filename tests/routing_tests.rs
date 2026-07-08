@@ -1,7 +1,8 @@
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
 use tokio::time::Duration;
 
 use oxphp::events::EventDispatcher;
@@ -17,13 +18,6 @@ async fn start_server_with_options(
     entry_file: Option<&str>,
     rate_limiter: Option<Arc<oxphp::server::rate_limit::RateLimiter>>,
 ) -> SocketAddr {
-    let config =
-        oxphp::config::ServerConfig::new("127.0.0.1:0".to_string(), document_root.to_path_buf());
-    let entry_path = entry_file.map(|name| document_root.join(name));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
-        Arc::new(oxphp::executor::stub::StubExecutor::new());
     let metrics = Arc::new(oxphp::metrics::Metrics::new());
 
     // Build dispatcher with standard handlers
@@ -46,37 +40,15 @@ async fn start_server_with_options(
             Arc::clone(&metrics),
         ));
     }
-    dispatcher.freeze();
 
-    let server = Arc::new(oxphp::server::Server::new(
-        &config,
+    let (addr, _server) = common::start_test_server(
+        document_root,
         &oxphp::config::H2Config::default(),
-        executor,
+        entry_file,
         metrics,
-        Arc::new(dispatcher),
-        None,
-        0,                                                   // compression disabled in tests
-        512 * 1024,                                          // max_query_body: 512 KB
-        entry_path,                                          // entry_file
-        false,                                               // worker_mode_enabled
-        Some("public, max-age=86400".to_string()),           // static_cache_control
-        false,                                               // static_revalidate
-        Arc::new(std::sync::atomic::AtomicBool::new(false)), // shutdown flag
-    ));
-
-    tokio::spawn(async move {
-        loop {
-            let (stream, remote_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => break,
-            };
-            let server_clone = Arc::clone(&server);
-            tokio::spawn(async move {
-                let _ = server_clone.handle_connection(stream, remote_addr).await;
-            });
-        }
-    });
-
+        dispatcher,
+    )
+    .await;
     addr
 }
 

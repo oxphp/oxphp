@@ -88,7 +88,7 @@ PHP_WORKERS=0:16   # 自动检测最小值（CPU / 4，最少 1），最多 16 �
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
 | `HEADER_TIMEOUT_SECONDS` | `5` | 连接建立后接收 HTTP 头部的最大秒数（Slowloris 防护） |
-| `DRAIN_TIMEOUT_SECONDS` | `30` | 优雅关闭期间等待进行中连接完成的最大秒数 |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | 优雅关闭期间等待进行中连接完成的最大秒数 |
 
 PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行时的 `set_time_limit()`）限制，而非 OxPHP 的环境变量。
 
@@ -271,7 +271,7 @@ RATE_LIMIT=100
 RATE_WINDOW_SECONDS=60
 TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
-DRAIN_TIMEOUT_SECONDS=30
+DRAIN_TIMEOUT_SECONDS=25
 COMPRESSION_LEVEL=4
 STATIC_MAX_AGE=30d
 ```

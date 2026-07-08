@@ -55,6 +55,23 @@ typedef struct {
     int http_response_code;
     bool headers_sent;
 
+    /* PG(connection_status) is thread-global; without per-fiber save/restore
+     * one fiber's PHP_CONNECTION_ABORTED (drain bail, client abort) would leak
+     * into every other multiplexed fiber on the same worker thread. */
+    int connection_status;
+
+    /* The bridge's per-request ctx flags live in its __thread ctx and are
+     * wiped by every new request's prep (oxphp_bridge_reset_request_ctx), so
+     * under multiplexing a suspended fiber's response state is gone by the
+     * time it resumes. All three are monotonic within a request (they only
+     * ever go false→true), so capturing at suspend and re-installing at resume
+     * is a faithful restore. Both C (oxphp_stream_flush, oxphp_finish_request)
+     * and Rust (oxphp_flush, ub_write, try_early_send, the drain flush guard)
+     * read them, so the whole trio has to travel with the fiber. */
+    bool bridge_stream_mode;    /* ctx.stream_mode: chunked output has begun */
+    bool bridge_headers_sent;   /* ctx.headers_sent: stream headers on the wire */
+    bool bridge_finished;       /* ctx.finished: oxphp_finish_request() was called */
+
     /* Zend VM state (vm_stack, execute_data, bailout, etc.) */
     oxphp_fiber_vm_state vm_state;
 
@@ -126,6 +143,27 @@ typedef struct _oxphp_request_fiber {
                                      * The awaiter sets it cross-thread and kicks vm_interrupt; the
                                      * interrupt handler reads it to unwind a CPU-bound task fiber.
                                      * NULL for HTTP request fibers. */
+    _Atomic(uint8_t) *request_cancel_ptr; /* borrowed: this HTTP request's CancelReason cell
+                                     * (Rust CancellationState). Captured in
+                                     * oxphp_scheduler_create_fiber (both request paths run the
+                                     * Rust prep, which installs the cell, immediately before) and
+                                     * re-installed into the bridge ctx on every resume, so the
+                                     * interrupt handler and suspend points read THIS fiber's reason
+                                     * rather than whichever request last set the per-thread ptr —
+                                     * the fix for cancellation under fiber multiplexing. NULL for
+                                     * task-mode fibers. */
+    bool drain_kill;                /* set by the scheduler's drain sweep when it force-resumes
+                                     * this suspended fiber; the suspend point unwinds uncatchably
+                                     * on it. Deliberately independent of request_cancel_ptr: the
+                                     * cell may already hold ClientAbort/Timeout, and the resume
+                                     * must still bail instead of falling through to a blocking
+                                     * await on an unsettled promise. */
+    /* The drain sweep's soft phase kills only fibers with an OPEN stream —
+     * php_state.bridge_stream_mode && !php_state.bridge_finished, captured at
+     * the last suspend. An ordinary request suspended in a short await/sleep,
+     * and a streaming request that already completed its response via
+     * oxphp_finish_request(), both get the whole drain window; the deadline
+     * (hard) phase kills every suspended fiber regardless. */
     zval task_closure;              /* owned: dtor at finalize */
     zend_fcall_info task_fci;
     zend_fcall_info_cache task_fcc;

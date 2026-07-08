@@ -255,6 +255,28 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->handler_failed = false;
     fiber->completed = false;
     fiber->consecutive_errors = 0;
+    fiber->drain_kill = false;
+    /* A free-list fiber's saved php_state still holds the previous request's
+     * final connection_status and bridge ctx flags (plain ints and bools —
+     * unlike the zval fields they are not consumed by restore). Reset them, or
+     * the first resume for THIS request would re-install the previous
+     * request's ABORTED status over the fresh PHP_CONNECTION_NORMAL that
+     * oxphp_fiber_init_request_state() just set, and re-install its streaming
+     * / finished flags over the ones oxphp_bridge_reset_request_ctx() just
+     * cleared — a fresh request would start out believing its response had
+     * already been sent. */
+    fiber->php_state.connection_status = PHP_CONNECTION_NORMAL;
+    fiber->php_state.bridge_stream_mode = false;
+    fiber->php_state.bridge_headers_sent = false;
+    fiber->php_state.bridge_finished = false;
+    /* Capture this request's cancel cell here, in the one place both request
+     * paths share: the Rust prep (setup_request_tls) installed it into the
+     * bridge ctx immediately before this call — via worker_wait on the fast
+     * path, via prepare_request on the event-loop path. Doing it at creation
+     * also clears a free-list fiber's stale pointer from its previous request
+     * (dangling once that request's CancellationState is dropped). Re-installed
+     * into the bridge ctx on every resume — see oxphp_fiber_restore_php_state. */
+    fiber->request_cancel_ptr = oxphp_bridge_get_cancel_ptr();
 
     if (!reused) {
         /* First-time init: allocate C stack via mmap */
@@ -314,6 +336,14 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
                     (void(*)(void*))sapi_free_header, 0);
     fiber->php_state.http_response_code = SG(sapi_headers).http_response_code;
     fiber->php_state.headers_sent = SG(headers_sent);
+    fiber->php_state.connection_status = PG(connection_status);
+
+    /* The thread-local bridge ctx is still THIS fiber's request here (the
+     * fiber just suspended; nothing else ran yet) — capture its per-request
+     * flags before the next multiplexed request's prep wipes them. */
+    fiber->php_state.bridge_stream_mode = oxphp_bridge_is_streaming();
+    fiber->php_state.bridge_headers_sent = oxphp_bridge_get_headers_sent();
+    fiber->php_state.bridge_finished = oxphp_bridge_is_finished();
 
     /* Step 5: Save VM state (vm_stack, execute_data, bailout) */
     oxphp_save_vm_state(&fiber->php_state.vm_state);
@@ -338,6 +368,23 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
                     (void(*)(void*))sapi_free_header, 0);
     SG(sapi_headers).http_response_code = fiber->php_state.http_response_code;
     SG(headers_sent) = fiber->php_state.headers_sent;
+    PG(connection_status) = fiber->php_state.connection_status;
+
+    /* The bridge's per-request ctx flags are thread-global, reset by every new
+     * multiplexed request's prep (oxphp_bridge_reset_request_ctx) and not part
+     * of the Rust-side fiber ctx save. Re-install this fiber's values so the
+     * streaming flush path, oxphp_finish_request(), ub_write and the next
+     * suspend's capture all see THIS request's state, not whichever request
+     * touched the thread ctx last. */
+    oxphp_bridge_set_stream_mode(fiber->php_state.bridge_stream_mode);
+    oxphp_bridge_set_headers_sent(fiber->php_state.bridge_headers_sent);
+    oxphp_bridge_set_finished(fiber->php_state.bridge_finished);
+
+    /* Re-install this fiber's request cancel cell so the interrupt handler and
+     * suspend points read THIS fiber's reason, not whichever request set the
+     * per-thread pointer last. Without this, cancellation under fiber
+     * multiplexing targets the wrong request. */
+    oxphp_bridge_set_cancel_ptr(fiber->request_cancel_ptr);
 }
 
 /* ─── Targeted per-fiber request init ──────────────────── */
@@ -463,8 +510,15 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
 }
 
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
-    /* Track per-fiber handler failure in scheduler-level counter */
-    if (fiber->handler_failed) {
+    /* Track per-fiber handler failure in scheduler-level counter. A drain
+     * kill is an administrative unwind, not a handler defect: it must neither
+     * trip the consecutive-error breaker (3+ drain kills would error-exit the
+     * worker mid-drain, destroying still-live ordinary requests) nor reset it
+     * (it says nothing about handler health). Set by the sweep below for
+     * suspended fibers and by the interrupt handler for running ones. */
+    if (fiber->drain_kill) {
+        /* neutral */
+    } else if (fiber->handler_failed) {
         sched->consecutive_errors++;
     } else {
         sched->consecutive_errors = 0;
@@ -525,7 +579,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * bridge state, used by exit-condition checks downstream. */
         sched->total_requests_done = oxphp_bridge_increment_requests_done();
 
-        /* Create or reuse fiber */
+        /* Create or reuse fiber (captures the request's cancel cell) */
         oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(
             sched, sched->shared_fci, sched->shared_fcc);
         if (!fiber) break;
@@ -582,6 +636,49 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
             }
             /* TODO: AWAIT_ALL, AWAIT_ANY — similar pattern */
 
+            fiber = next;
+        }
+    }
+
+    /* 2b. Drain sweep, two phases. Soft phase (is_draining): unwind only
+     * fibers whose request holds an OPEN stream — their response never
+     * finishes on its own, and the client is built to reconnect. A streaming
+     * request that already called oxphp_finish_request() is not open: its
+     * response is complete and its remaining background work is ordinary. An
+     * ordinary request
+     * suspended in a short await/sleep is left alone; it resumes normally and
+     * gets the whole drain window to finish with a real response. Hard phase
+     * (is_drain_hard, latched at the drain deadline): unwind EVERY suspended
+     * fiber — the broadcast vm_interrupt kick only reaches running code, so
+     * this sweep is the only thing that can end a suspended straggler.
+     * For each victim: mark drain_kill and resume; the suspend point sees the
+     * mark and bails uncatchably via zend_error_noreturn — a user try/catch
+     * cannot swallow it, and registered shutdown functions still run. Covers
+     * SLEEP and every AWAIT variant, and every fiber on the worker — not just
+     * the one a single per-thread vm_interrupt would reach. The CAS on the
+     * cell is observability only (response cancel_reason, metrics); the kill
+     * must not depend on it — the cell can already hold ClientAbort/Timeout,
+     * and a resume that fell through would block forever in await_dispatch on
+     * an unsettled promise. */
+    if (oxphp_bridge_is_draining()) {
+        bool drain_hard = oxphp_bridge_is_drain_hard();
+        oxphp_request_fiber *fiber = sched->fibers_head;
+        while (fiber) {
+            oxphp_request_fiber *next = fiber->next;
+            bool open_stream = fiber->php_state.bridge_stream_mode
+                            && !fiber->php_state.bridge_finished;
+            if (!fiber->completed && fiber->suspend_reason != OXPHP_SUSPEND_NONE
+                && (drain_hard || open_stream)) {
+                oxphp_bridge_set_cancel_reason_at(fiber->request_cancel_ptr,
+                                                  OXPHP_CANCEL_SHUTDOWN);
+                fiber->drain_kill = true;
+                fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                oxphp_scheduler_resume_fiber(sched, fiber, NULL);
+                if (fiber->completed) {
+                    oxphp_scheduler_finalize_fiber(sched, fiber);
+                }
+                work_done = 1;
+            }
             fiber = next;
         }
     }
@@ -866,6 +963,11 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->timed_out = false;
     fiber->await_deadline_ns = 0;
     fiber->cancel_cell = (_Atomic(uint8_t) *)cancel_cell;
+    fiber->request_cancel_ptr = NULL; /* task fibers carry no HTTP request cell */
+    fiber->drain_kill = false;
+    fiber->php_state.bridge_stream_mode = false;
+    fiber->php_state.bridge_headers_sent = false;
+    fiber->php_state.bridge_finished = false;
     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
     fiber->completed = false;
     fiber->handler_failed = false;

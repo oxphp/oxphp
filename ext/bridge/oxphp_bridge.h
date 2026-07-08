@@ -1035,8 +1035,30 @@ typedef enum {
 } oxphp_cancel_reason_t;
 
 void oxphp_bridge_set_cancel_ptr(_Atomic(uint8_t)* ptr);
+/* Current thread's request cancel cell, as last set by set_cancel_ptr. The
+ * fiber scheduler captures this per fiber and re-installs it on resume. */
+_Atomic(uint8_t)* oxphp_bridge_get_cancel_ptr(void);
 oxphp_cancel_reason_t oxphp_bridge_get_cancel_reason(void);
 bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason);
+
+/* CAS a specific request's cancel cell to `reason` (first-writer-wins). Used by
+ * the fiber scheduler's drain sweep to mark each suspended fiber's own cell. */
+bool oxphp_bridge_set_cancel_reason_at(_Atomic(uint8_t)* ptr, oxphp_cancel_reason_t reason);
+
+/* Process-global graceful-shutdown drain latch (NOT the per-request cancel
+ * reason above). Set by the Rust drain path at SIGTERM; read by the fiber
+ * scheduler to wake suspended request fibers and by the stream-flush path.
+ * One-way: set once, never reset. */
+void oxphp_bridge_set_draining(void);
+bool oxphp_bridge_is_draining(void);
+
+/* Second drain phase, latched when the drain deadline passes: ordinary
+ * in-flight requests were given the whole drain window to finish, now
+ * everything still running is cancelled. Read by the interrupt handler to
+ * self-cancel the request actually executing when the broadcast vm_interrupt
+ * kick lands (the registry can't name it under fiber multiplexing). One-way. */
+void oxphp_bridge_set_drain_hard(void);
+bool oxphp_bridge_is_drain_hard(void);
 
 /* Returns &EG(vm_interrupt) for this worker; captured after the
  * first php_request_startup. */
