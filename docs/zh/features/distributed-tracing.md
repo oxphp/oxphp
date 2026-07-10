@@ -40,7 +40,7 @@ OTel 插件是编译时特性（`plugin-otel`）。启用时它会自动开启 t
 |----------|---------|-------------|
 | `OTEL_ENABLED` | `false` | 启用 OpenTelemetry 插件。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | 导出协议：`grpc` 或 `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317`（gRPC）或 `http://localhost:4318`（HTTP） | OTLP 收集器端点。`https://` URL 会在两种传输上通过 TLS 导出，并根据系统信任根存储校验（运行镜像需自带 CA 包，如 `ca-certificates`——官方镜像已包含）；暂不支持自定义 CA 包和 mTLS |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317`（gRPC）或 `http://localhost:4318`（HTTP） | OTLP 收集器端点。`https://` URL 会在两种传输上通过 TLS 导出，并根据系统信任根存储校验（运行镜像需自带 CA 包，如 `ca-certificates`——官方镜像已安装）；暂不支持自定义 CA 包和 mTLS |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | 导出超时（毫秒） |
 | `OTEL_EXPORTER_OTLP_HEADERS` | *（未设置）* | 认证请求头：`key=value,key2=value2` |
 | `OTEL_SERVICE_NAME` | `oxphp` | 导出 span 中的服务名称 |

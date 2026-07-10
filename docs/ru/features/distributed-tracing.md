@@ -40,7 +40,7 @@ OxPHP поддерживает распространение W3C Trace Context,
 |------------|--------------|----------|
 | `OTEL_ENABLED` | `false` | Включить плагин OpenTelemetry. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Протокол экспорта: `grpc` или `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) или `http://localhost:4318` (HTTP) | Конечная точка OTLP-коллектора. URL вида `https://` экспортируется по TLS на обоих транспортах, проверка по системному хранилищу доверенных корней (образ должен содержать CA-бандл, например `ca-certificates` — официальный образ содержит); пользовательский CA-бандл и mTLS пока не поддерживаются |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) или `http://localhost:4318` (HTTP) | Конечная точка OTLP-коллектора. URL вида `https://` экспортируется по TLS на обоих транспортах, проверка по системному хранилищу доверенных корней (образ должен содержать CA-бандл, например `ca-certificates` — официальный образ его устанавливает); пользовательский CA-бандл и mTLS пока не поддерживаются |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Тайм-аут экспорта в миллисекундах |
 | `OTEL_EXPORTER_OTLP_HEADERS` | *(не задано)* | Заголовки аутентификации: `key=value,key2=value2` |
 | `OTEL_SERVICE_NAME` | `oxphp` | Имя сервиса в экспортируемых спанах |
