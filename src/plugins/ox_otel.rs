@@ -11,6 +11,7 @@ use opentelemetry_otlp::{WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use opentelemetry_semantic_conventions::trace as semconv;
+use tonic::transport::ClientTlsConfig;
 
 use crate::events::Priority;
 use crate::plugin::handler::{
@@ -162,6 +163,16 @@ impl OtelPlugin {
         headers
     }
 
+    /// Whether an OTLP endpoint URL uses TLS (an `https://` scheme, matched
+    /// case-insensitively). Gates attaching a tonic `ClientTlsConfig`: the
+    /// connector — and its eager system-trust-store load — is only wanted for
+    /// TLS endpoints, never for plaintext `http://` or scheme-less ones.
+    fn endpoint_uses_tls(endpoint: &str) -> bool {
+        endpoint
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
+    }
+
     /// Initialize the SdkTracerProvider with OTLP exporter.
     fn init_provider(&self) -> Result<SdkTracerProvider, PluginError> {
         let protocol =
@@ -180,7 +191,10 @@ impl OtelPlugin {
 
         let exporter = match protocol.as_str() {
             "http/protobuf" => {
+                // trim(): strips a stray newline/space from templated env values
+                // (e.g. Helm), matching how headers are parsed above.
                 let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    .map(|s| s.trim().to_string())
                     .unwrap_or_else(|_| "http://localhost:4318".into());
 
                 let mut builder = opentelemetry_otlp::SpanExporter::builder()
@@ -198,13 +212,29 @@ impl OtelPlugin {
             }
             _ => {
                 // Default: gRPC via tonic
+                // trim(): strips a stray newline/space from templated env values
+                // (e.g. Helm) so the scheme check and the URI both see a clean value.
                 let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    .map(|s| s.trim().to_string())
                     .unwrap_or_else(|_| "http://localhost:4317".into());
+                let use_tls = Self::endpoint_uses_tls(&endpoint);
 
                 let mut builder = opentelemetry_otlp::SpanExporter::builder()
                     .with_tonic()
                     .with_endpoint(endpoint)
                     .with_timeout(timeout);
+
+                // Attach TLS only for https endpoints. tonic builds the TLS
+                // connector eagerly inside build(), and with_native_roots() loads
+                // the system trust store there — so attaching it to a plaintext
+                // http:// endpoint would make build() fail with NativeCertsNotFound
+                // on a host without a CA store (e.g. a minimal image lacking
+                // ca-certificates), silently disabling all trace export. Gating on
+                // the scheme keeps plaintext working everywhere. Native roots =
+                // the system trust store (rustls-native-certs).
+                if use_tls {
+                    builder = builder.with_tls_config(ClientTlsConfig::new().with_native_roots());
+                }
 
                 if !headers.is_empty() {
                     let mut metadata = tonic::metadata::MetadataMap::new();
@@ -989,5 +1019,59 @@ mod tests {
             server_address: "0.0.0.0:8080".to_string(),
         };
         assert_eq!(handler.server_address, "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn test_endpoint_uses_tls_scheme_gate() {
+        // Regression guard for the scheme gate: only https endpoints may pull in
+        // the tonic TLS connector (whose native-roots load is eager and fails on
+        // a CA-less host). http:// and scheme-less endpoints must stay plaintext.
+        assert!(OtelPlugin::endpoint_uses_tls("https://collector:4317"));
+        assert!(OtelPlugin::endpoint_uses_tls("HTTPS://collector:4317")); // scheme is case-insensitive
+        assert!(!OtelPlugin::endpoint_uses_tls("http://localhost:4317"));
+        assert!(!OtelPlugin::endpoint_uses_tls("grpc://collector:4317"));
+        assert!(!OtelPlugin::endpoint_uses_tls("localhost:4317")); // no scheme
+    }
+
+    #[test]
+    fn test_grpc_plaintext_exporter_builds() {
+        // Regression guard for the scheme gate: a plaintext http:// gRPC endpoint
+        // must build WITHOUT a ClientTlsConfig, so it succeeds even on a host with
+        // no CA store. (The pre-fix code attached TLS unconditionally, which made
+        // build() fail with NativeCertsNotFound on a CA-less host.) This path is
+        // environment-independent — unlike an https:// build, whose eager
+        // with_native_roots() load depends on the host trust store, so that path is
+        // left to the live smoke and is not asserted here. The scheme *decision* is
+        // covered by test_endpoint_uses_tls_scheme_gate above. build() is lazy
+        // (connect_lazy), so no collector is contacted.
+
+        // A Tokio runtime context is required: SdkTracerProvider::build() starts
+        // a BatchSpanProcessor that spawns a background task.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+
+        let plugin = OtelPlugin::new();
+
+        // Capture the result and clean up env inside the locked scope, then release
+        // ENV_MUTEX BEFORE asserting: a failing assert must not poison the mutex
+        // (which would cascade panics through every other test that locks it).
+        let http = {
+            let _lock = ENV_MUTEX.lock().unwrap();
+            std::env::set_var("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc");
+            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
+            let http = plugin.init_provider();
+            std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL");
+            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+            http
+        };
+
+        assert!(
+            http.is_ok(),
+            "gRPC plaintext exporter should build without a CA store: {:?}",
+            http.err()
+        );
     }
 }
