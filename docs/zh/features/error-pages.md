@@ -53,6 +53,7 @@ OxPHP 会替换每个到达响应流水线的 4xx 或 5xx 响应的正文。以�
 
 | 文件 | 状态 | OxPHP 何时返回它 |
 |------|--------|-----------------------|
+| `400.html` | Bad Request | 未携带 `Content-Type` 头的 `QUERY` 请求（RFC 10008） |
 | `404.html` | Not Found | 无匹配的文件或路由；被阻止的 dotfile（`.env`、`.git/`）；Framework 模式下的直接 `.php` 请求；`PHP_DENY_PATHS` 的默认回退 |
 | `413.html` | Payload Too Large | 请求正文超过最大大小 |
 | `416.html` | Range Not Satisfiable | 静态文件上无法满足的 `Range` 头（保留 `Content-Range`） |
@@ -160,6 +161,7 @@ project/
     public/
       index.php
   errors/
+    400.html
     403.html
     404.html
     500.html

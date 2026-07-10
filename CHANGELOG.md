@@ -21,6 +21,7 @@ All notable changes to OxPHP are documented in this file.
 - TLS startup errors now name the variable and the file: a typo'd `TLS_CERT` path fails with `TLS_CERT: cannot read /etc/ssl/cert.pem: No such file or directory` instead of a bare `No such file or directory (os error 2)`; PEM-parse and certificate/key-mismatch errors are prefixed the same way.
 - **Breaking: `oxphp serve` and `oxphp run` now drop OS privileges to `www-data` by default.** When started as root on a host where the `www-data` account exists (as in the official image), the process binds its listeners as root and then permanently drops to `www-data` before serving any traffic or running any PHP — so the official image no longer serves as root out of the box. The default is best-effort and never aborts startup: started as non-root it keeps the current user, and started as root without a `www-data` account it logs a warning and continues as root. Previously the process kept running as whoever started it (root in the official image) unless `--user` was passed. To restore the old behavior pass `--user=root`; to drop to a different account pass `--user=<name|uid[:gid]>`. An explicit `--user` remains fail-fast (it must start as root). Orchestrator-level drops (`docker run --user`, Compose `user:`, Kubernetes `securityContext`) are unaffected and take precedence — when the container already starts non-root, the default self-drop is a no-op.
 - `STATIC_REVALIDATE=on` now amortizes its filesystem check: a cached file's modification time is re-checked via `stat()` at most once every 3 seconds per file, instead of on every request. Within that window cached content is served straight from memory under a shared read lock with no syscall; the single combined cache lookup also resolves conditional (304) requests, so a served static hit performs at most one `stat()` (previously up to two). On-disk changes become visible within 3 seconds rather than immediately, in exchange for making the mode cheap enough to run without measurable per-request overhead. The default remains `off`.
+- A `QUERY` request that arrives without a `Content-Type` header now returns `400 Bad Request` instead of `415 Unsupported Media Type`, matching RFC 10008 (the HTTP QUERY method): a request carrying no media-type information is malformed, and `415` is reserved for a `Content-Type` that is present but unsupported. This was the only server-generated `415`, so a custom error page keyed on `415` (`ERROR_PAGES_DIR/415.html`) for this case must be renamed to `400.html`; a `415.html` now fires only for a `415` your PHP application returns.
 
 ## [0.9.0] - 2026-06-25
 
@@ -700,7 +701,7 @@ and built-in observability.
 - Multi-platform Docker images (amd64/arm64) published to GHCR
 - CI workflows: nightly build, PR checks (fmt, clippy, tests), release tagging
 - Best-practice Dockerfile example with separate dev/prod targets
-- HTTP QUERY method support (RFC 9110)
+- HTTP QUERY method support (RFC 10008)
 - Documentation in English, Russian, Belarusian, and Chinese
 
 ### PHP Functions
