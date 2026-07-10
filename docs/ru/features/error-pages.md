@@ -53,6 +53,7 @@ OxPHP заменяет тело любого ответа 4xx или 5xx, кот
 
 | Файл | Статус | Когда OxPHP его возвращает |
 |------|--------|----------------------------|
+| `400.html` | Bad Request | Запрос `QUERY` (RFC 10008), отправленный без заголовка `Content-Type` |
 | `404.html` | Not Found | Нет подходящего файла или маршрута; заблокированный dotfile (`.env`, `.git/`); прямой запрос `.php` в режиме Framework; ответ по умолчанию для `PHP_DENY_PATHS` |
 | `413.html` | Payload Too Large | Тело запроса превышает максимальный размер |
 | `416.html` | Range Not Satisfiable | Невыполнимый заголовок `Range` для статического файла (`Content-Range` сохраняется) |
@@ -160,6 +161,7 @@ project/
     public/
       index.php
   errors/
+    400.html
     403.html
     404.html
     500.html

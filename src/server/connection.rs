@@ -31,9 +31,18 @@ fn method_expects_body(method: &Method) -> bool {
     ) || is_query_method(method)
 }
 
-/// Returns true if the method is QUERY (draft-ietf-httpbis-safe-method-w-body).
+/// Returns true if the method is QUERY (RFC 10008).
 fn is_query_method(method: &Method) -> bool {
     method.as_str() == "QUERY"
+}
+
+/// True when `method` is QUERY but the request carries no `Content-Type`.
+/// Per RFC 10008 §4 such a request lacks media-type information and is
+/// malformed, so it is rejected with a 4xx (we use 400 Bad Request). 415
+/// (Unsupported Media Type) is reserved for a Content-Type that is present
+/// but unsupported, not for a missing one.
+fn query_lacks_content_type(method: &Method, headers: &http::HeaderMap) -> bool {
+    is_query_method(method) && !headers.contains_key(http::header::CONTENT_TYPE)
 }
 
 /// Look up a key in the metadata vector, returning empty string if not found.
@@ -363,14 +372,16 @@ async fn dispatch_request(
             }
             let is_query = is_query_method(&parts.method);
 
-            // QUERY requires Content-Type per draft-ietf-httpbis-safe-method-w-body §4.2
-            if is_query && !parts.headers.contains_key(http::header::CONTENT_TYPE) {
+            // RFC 10008 §4: a QUERY request without media-type information is
+            // malformed. Reject with 400 (Bad Request) — 415 (Unsupported Media
+            // Type) is reserved for a Content-Type that is present but unsupported.
+            if query_lacks_content_type(&parts.method, &parts.headers) {
                 return Ok((
                     Response::builder()
-                        .status(StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                        .status(StatusCode::BAD_REQUEST)
                         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                         .body(full_body(Bytes::from_static(
-                            b"415 Unsupported Media Type: QUERY requires Content-Type",
+                            b"400 Bad Request: QUERY requires a Content-Type",
                         )))?,
                     0,
                     PhpExecData::default(),
@@ -630,6 +641,27 @@ mod tests {
         assert!(!method_expects_body(&Method::HEAD));
         assert!(!method_expects_body(&Method::OPTIONS));
         assert!(!method_expects_body(&Method::TRACE));
+    }
+
+    #[test]
+    fn test_query_lacks_content_type() {
+        let query = Method::from_bytes(b"QUERY").unwrap();
+
+        // QUERY without Content-Type → malformed (dispatch returns 400).
+        let empty = http::HeaderMap::new();
+        assert!(query_lacks_content_type(&query, &empty));
+
+        // QUERY with Content-Type → accepted.
+        let mut with_ct = http::HeaderMap::new();
+        with_ct.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/sql"),
+        );
+        assert!(!query_lacks_content_type(&query, &with_ct));
+
+        // Non-QUERY methods are never rejected by this check, even without a type.
+        assert!(!query_lacks_content_type(&Method::POST, &empty));
+        assert!(!query_lacks_content_type(&Method::GET, &empty));
     }
 
     #[test]
