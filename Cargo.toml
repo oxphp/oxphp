@@ -117,7 +117,15 @@ rustls-pemfile = "2"
 # OpenTelemetry (optional — used by otel plugin)
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client"], optional = true }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "grpc-tonic",       # gRPC transport
+    "http-proto",       # HTTP/protobuf transport
+    "trace",            # SpanExporter — the only signal this plugin emits
+    "internal-logs",    # otel self-diagnostics (channel/handshake debug lines)
+    "reqwest-client",   # selects the async reqwest client build path
+    "reqwest-rustls",   # → reqwest/rustls-tls-native-roots
+    "tls-roots",        # → tls (tonic/tls-ring) + tonic/tls-native-roots
+], optional = true }
 opentelemetry-semantic-conventions = { version = "0.31", optional = true }
 tonic = { version = "0.14", optional = true }
 
