@@ -114,10 +114,14 @@ RUN cargo build --release --features plugin-apm,plugin-async,plugin-profiler,plu
 # libgcc must be added explicitly: the Rust-compiled oxphp binary
 # dynamically links libgcc_s.so.1, which the PHP base image does not
 # ship (it's a gcc runtime dep, not a PHP dep).
+# ca-certificates: OxPHP's OTLP exporter verifies the collector's TLS
+# certificate against the system trust store, so an https:// endpoint needs a
+# CA bundle. The php:*-alpine base already ships it, but pinning it here keeps
+# the dependency explicit and survives other bases (e.g. distroless).
 # ══════════════════════════════════════════════════════════════
 FROM ${BASE_IMAGE}
 
-RUN apk add --no-cache libgcc
+RUN apk add --no-cache libgcc ca-certificates
 
 # Copy bridge library from bridge-builder
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/

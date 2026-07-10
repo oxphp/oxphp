@@ -40,7 +40,7 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 |----------|---------|-------------|
 | `OTEL_ENABLED` | `false` | Enable the OpenTelemetry plugin. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint. An `https://` URL is exported over TLS on both transports, verified against the system trust store (the runtime image must ship a CA bundle such as `ca-certificates` — the official image does); custom CA bundles and mTLS are not yet supported |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint. An `https://` URL is exported over TLS on both transports, verified against the system trust store (the runtime image must ship a CA bundle such as `ca-certificates` — the official image installs it); custom CA bundles and mTLS are not yet supported |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
 | `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Authentication headers: `key=value,key2=value2` |
 | `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported spans |
