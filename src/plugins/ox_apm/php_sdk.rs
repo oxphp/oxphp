@@ -234,6 +234,44 @@ pub fn register_functions(
                 None
             };
 
+            // Capture the exception data BEFORE touching the span stack. The
+            // capture re-enters the VM (getTraceAsString()); doing it with no
+            // PROFILING_CONTEXT borrow held mirrors the decorator path, which
+            // finishes capture in C before any Rust borrow. getTraceAsString is
+            // final so the re-entry cannot call back into oxphp_apm_* today, but
+            // capturing first keeps borrow-safety from resting on that invariant.
+            //
+            // A Throwable yields type/message/stacktrace; a bare string reason
+            // (oxphp_apm_error('gateway timeout')) is recorded as the message
+            // under a generic "Error" type so the event still renders in backends
+            // that key exception events on exception.type (e.g. New Relic Errors
+            // Inbox) rather than being silently dropped.
+            let mut captured: Option<(String, Option<String>, Option<String>)> = None;
+            if call.argc() > 0 {
+                call.capture_exception_arg(0, |cls, msg, trace| {
+                    captured = Some((
+                        cls.to_string(),
+                        msg.map(String::from),
+                        trace.map(String::from),
+                    ));
+                });
+                if captured.is_none() {
+                    if let Ok(crate::bridge::types::ValType::String) = call.arg_type(0) {
+                        if let Ok(bytes) = call.arg_bytes(0) {
+                            if !bytes.is_empty() {
+                                captured = Some((
+                                    "Error".to_string(),
+                                    Some(String::from_utf8_lossy(bytes).into_owned()),
+                                    None,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Resolve the target span once, mark it errored, and record the
+            // captured exception (if any) on that same span.
             PROFILING_CONTEXT.with(|stack| {
                 let mut stack = stack.borrow_mut();
                 let span = if let Some(id) = explicit_id {
@@ -241,8 +279,20 @@ pub fn register_functions(
                 } else {
                     stack.current_mut()
                 };
-                if let Some(span) = span {
-                    span.status_code = 2; // Error
+                let span = match span {
+                    Some(span) => span,
+                    None => return,
+                };
+                span.status_code = 2; // Error
+                if let Some((cls, msg, trace)) = &captured {
+                    super::push_exception_event(
+                        span,
+                        cls,
+                        msg.as_deref(),
+                        trace.as_deref(),
+                        super::MESSAGE_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+                        super::STACKTRACE_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+                    );
                 }
             });
             Ok(())

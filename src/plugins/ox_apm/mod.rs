@@ -3,7 +3,9 @@ pub mod hooks;
 pub mod php_sdk;
 pub mod sql;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
@@ -75,16 +77,15 @@ impl crate::decorator::Decorator for TraceDecorator {
                 if !result.success {
                     if let Some(span) = stack.get_mut(local_id) {
                         span.status_code = 2; // Error
-                        if let Some(exc_class) = result.exception_class.clone() {
-                            span.events.push(SpanEvent {
-                                name: "exception".into(),
-                                attributes: vec![(
-                                    std::sync::Arc::from("exception.type"),
-                                    std::sync::Arc::from(exc_class),
-                                )],
-                                timestamp_ns: now_ns(),
-                                kind: SpanEventKind::Exception,
-                            });
+                        if let Some(exc_class) = result.exception_class.as_deref() {
+                            push_exception_event(
+                                span,
+                                exc_class,
+                                result.exception_message.as_deref(),
+                                result.exception_stacktrace.as_deref(),
+                                MESSAGE_MAX_BYTES.load(Ordering::Relaxed),
+                                STACKTRACE_MAX_BYTES.load(Ordering::Relaxed),
+                            );
                         }
                     }
                 }
@@ -154,6 +155,148 @@ impl PluginRequestHandler for ApmRequestHandler {
     fn priority(&self) -> Priority {
         -70
     }
+}
+
+/// Default cap for the `exception.stacktrace` attribute (bytes).
+const DEFAULT_STACKTRACE_MAX_BYTES: usize = 8192;
+
+/// Default cap for the `exception.message` attribute (bytes). 4096 matches the
+/// per-attribute value limit New Relic applies on ingest, so a larger value
+/// would be truncated downstream anyway; a real message rarely exceeds a few
+/// hundred bytes.
+const DEFAULT_MESSAGE_MAX_BYTES: usize = 4096;
+
+/// Runtime cap (bytes) for `exception.stacktrace`, set from
+/// `OTEL_APM_STACKTRACE_MAX_BYTES` in `ApmPlugin::init`. `0` disables
+/// truncation. Read on the exception path by both the `#[Trace]` decorator and
+/// `oxphp_apm_error`.
+static STACKTRACE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_STACKTRACE_MAX_BYTES);
+
+/// Runtime cap (bytes) for `exception.message`, set from
+/// `OTEL_APM_MESSAGE_MAX_BYTES` in `ApmPlugin::init`. `0` disables truncation.
+static MESSAGE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MESSAGE_MAX_BYTES);
+
+/// Truncate an exception attribute string to at most `max_bytes`, appending a
+/// marker when it was cut. `max_bytes == 0` disables truncation. Cuts on a
+/// UTF-8 char boundary. For a stacktrace (`getTraceAsString()` is top-down),
+/// the root frame (`#0`, the throw site) is preserved and only the tail
+/// (`{main}`-ward) is dropped. The result is always `<= max_bytes`: when even
+/// the marker would not fit (`max_bytes <= MARKER.len()`), the content is
+/// hard-cut with no marker.
+fn truncate_attr(s: &str, max_bytes: usize) -> Cow<'_, str> {
+    if max_bytes == 0 || s.len() <= max_bytes {
+        return Cow::Borrowed(s);
+    }
+    const MARKER: &str = "…(truncated)";
+    let with_marker = max_bytes > MARKER.len();
+    let budget = if with_marker {
+        max_bytes - MARKER.len()
+    } else {
+        max_bytes
+    };
+    let mut end = budget.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + MARKER.len());
+    out.push_str(&s[..end]);
+    if with_marker {
+        out.push_str(MARKER);
+    }
+    Cow::Owned(out)
+}
+
+/// Push an OTel-semconv `exception` span event. Each attribute is omitted when
+/// empty (`exception.type` too, so a bare string reason can be recorded as
+/// message-only). The message is truncated to `message_max` and the stacktrace
+/// to `stacktrace_max` — the caps are passed in (not read from the globals)
+/// so callers stay in control and tests need not mutate process-wide state.
+///
+/// Called once per decorated frame the exception unwinds through (each span in
+/// the error chain records its own exception event, per OTel). The per-attribute
+/// caps bound each event, but there is deliberately no *aggregate* per-trace cap:
+/// a pathologically deep recursive `#[Trace]` chain (hundreds of frames) can thus
+/// produce a large trace payload. Kept stateless on purpose — a per-trace dedup
+/// or byte budget would add per-worker state that fibers multiplexed onto one
+/// worker would corrupt, for a case that is rare in practice.
+fn push_exception_event(
+    span: &mut crate::profiling::PendingSpan,
+    exc_type: &str,
+    message: Option<&str>,
+    stacktrace: Option<&str>,
+    message_max: usize,
+    stacktrace_max: usize,
+) {
+    let mut attributes: Vec<(Arc<str>, Arc<str>)> = Vec::with_capacity(3);
+    if !exc_type.is_empty() {
+        // An anonymous class name is "<parent>@anonymous\0<file>:<line>$<hash>"
+        // with an embedded NUL. It arrives length-delimited (so it is not
+        // truncated at the NUL on the way in), but a NUL is valid UTF-8 and
+        // would otherwise ride into the attribute and truncate the type again in
+        // any NUL-terminating downstream — strip it here so the type stays clean
+        // and distinct. No-op for ordinary class names, which never hold a NUL.
+        let ty: Cow<str> = if exc_type.contains('\0') {
+            Cow::Owned(exc_type.replace('\0', ""))
+        } else {
+            Cow::Borrowed(exc_type)
+        };
+        attributes.push((Arc::from("exception.type"), Arc::from(ty.as_ref())));
+    }
+    if let Some(m) = message.filter(|s| !s.is_empty()) {
+        attributes.push((
+            Arc::from("exception.message"),
+            Arc::from(truncate_attr(m, message_max).as_ref()),
+        ));
+    }
+    if let Some(t) = stacktrace.filter(|s| !s.is_empty()) {
+        attributes.push((
+            Arc::from("exception.stacktrace"),
+            Arc::from(truncate_attr(t, stacktrace_max).as_ref()),
+        ));
+    }
+    span.events.push(SpanEvent {
+        name: "exception".into(),
+        attributes,
+        timestamp_ns: now_ns(),
+        kind: SpanEventKind::Exception,
+    });
+}
+
+/// Parse a byte-cap env var (falling back to `default`), publish it to `cell`
+/// (the single source of truth read by the decorator and SDK on the exception
+/// path), and expose it on the internal config endpoint. Shared by the two
+/// exception-attribute caps so their parsing cannot drift apart.
+fn read_cap(
+    ctx: &mut PluginContext,
+    env: &str,
+    expose_key: &str,
+    cell: &AtomicUsize,
+    default: usize,
+) {
+    let value = match ctx.config(env).as_deref().map(str::trim) {
+        // Unset, or set-but-blank (e.g. `OTEL_APM_MESSAGE_MAX_BYTES=` in a
+        // compose file): treat as "use the default", silently — matching the
+        // sibling caps (SLOW_QUERY_MS, TLS_MIN_VERSION).
+        None | Some("") => default,
+        Some(trimmed) => match trimmed.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                // A typo'd cap (e.g. "8k", "0x2000") would otherwise silently
+                // apply the default, leaving the operator to wonder why their
+                // exception.message is truncated. Surface it.
+                tracing::warn!(
+                    plugin = "apm",
+                    env,
+                    value = %trimmed,
+                    default,
+                    "invalid byte cap; expected a non-negative integer, using default"
+                );
+                default
+            }
+        },
+    };
+    cell.store(value, Ordering::Relaxed);
+    ctx.expose_config(expose_key, value as u64);
 }
 
 /// Stable string tag for a span event's semantic kind. Emitted as the
@@ -389,6 +532,21 @@ impl Plugin for ApmPlugin {
             .unwrap_or(100);
 
         self.config.db_capture_params = db_capture_params;
+
+        read_cap(
+            ctx,
+            "OTEL_APM_STACKTRACE_MAX_BYTES",
+            "stacktrace_max_bytes",
+            &STACKTRACE_MAX_BYTES,
+            DEFAULT_STACKTRACE_MAX_BYTES,
+        );
+        read_cap(
+            ctx,
+            "OTEL_APM_MESSAGE_MAX_BYTES",
+            "message_max_bytes",
+            &MESSAGE_MAX_BYTES,
+            DEFAULT_MESSAGE_MAX_BYTES,
+        );
 
         // Expose config
         ctx.expose_config("enabled", true);
@@ -850,6 +1008,8 @@ mod tests {
             success: true,
             elapsed_ns: 5_000_000,
             exception_class: None,
+            exception_message: None,
+            exception_stacktrace: None,
         };
         decorator.on_end(&ctx, &result);
 
@@ -900,6 +1060,8 @@ mod tests {
             success: false,
             elapsed_ns: 1_000,
             exception_class: Some("RuntimeException".into()),
+            exception_message: Some("connection refused".into()),
+            exception_stacktrace: Some("#0 /app/Db.php(9): connect()\n#1 {main}".into()),
         };
         decorator.on_end(&ctx, &result);
 
@@ -911,18 +1073,165 @@ mod tests {
             assert_eq!(finished[0].name.as_ref(), "App\\PaymentService::charge");
             assert_eq!(finished[0].status_code, 2); // Error
 
-            // Should have an exception event
+            // Should have an exception event with full OTel data
             assert_eq!(finished[0].events.len(), 1);
-            assert_eq!(finished[0].events[0].name, "exception");
-            assert_eq!(finished[0].events[0].attributes.len(), 1);
-            assert_eq!(
-                finished[0].events[0].attributes[0].0.as_ref(),
-                "exception.type"
+            let ev = &finished[0].events[0];
+            assert_eq!(ev.name, "exception");
+            assert_eq!(ev.attributes.len(), 3);
+            assert_eq!(ev.attributes[0].0.as_ref(), "exception.type");
+            assert_eq!(ev.attributes[0].1.as_ref(), "RuntimeException");
+            assert_eq!(ev.attributes[1].0.as_ref(), "exception.message");
+            assert_eq!(ev.attributes[1].1.as_ref(), "connection refused");
+            assert_eq!(ev.attributes[2].0.as_ref(), "exception.stacktrace");
+            assert!(ev.attributes[2].1.as_ref().contains("#0 /app/Db.php(9)"));
+        });
+    }
+
+    #[test]
+    fn truncate_short_is_borrowed() {
+        let s = "#0 /app/x.php(1): f()\n#1 {main}";
+        match truncate_attr(s, 8192) {
+            Cow::Borrowed(b) => assert_eq!(b, s),
+            Cow::Owned(_) => panic!("short trace must not be copied"),
+        }
+    }
+
+    #[test]
+    fn truncate_zero_disables() {
+        let s = "a".repeat(100_000);
+        assert!(matches!(truncate_attr(&s, 0), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn truncate_long_marks_and_bounds() {
+        let s = "x".repeat(20_000);
+        let out = truncate_attr(&s, 8192);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 8192, "len was {}", out.len());
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        // "é" is 2 bytes; a naive byte cut would split it and be invalid UTF-8.
+        let s = "é".repeat(100); // 200 bytes
+        let out = truncate_attr(&s, 50);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 50);
+    }
+
+    #[test]
+    fn truncate_tiny_cap_never_exceeds() {
+        // Cap smaller than the marker ("…(truncated)" = 14 bytes): the result
+        // must still be <= max_bytes, so the marker is dropped rather than
+        // overflowing the cap.
+        let s = "x".repeat(1000);
+        for cap in [1usize, 5, 13, 14, 15] {
+            let out = truncate_attr(&s, cap);
+            assert!(out.len() <= cap, "cap={cap} produced {} bytes", out.len());
+        }
+    }
+
+    #[test]
+    fn push_exception_event_full_set() {
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-x".into(),
+                "root-x".into(),
+            )
+        });
+        let id = PROFILING_CONTEXT.with(|s| s.borrow_mut().push(Arc::from("f"), vec![]));
+
+        PROFILING_CONTEXT.with(|s| {
+            let mut stack = s.borrow_mut();
+            let span = stack.get_mut(id).unwrap();
+            push_exception_event(
+                span,
+                "RuntimeException",
+                Some("Payment declined"),
+                Some("#0 /app/Pay.php(42): charge()\n#1 {main}"),
+                4096,
+                8192,
             );
+            let ev = &span.events[0];
+            assert_eq!(ev.name, "exception");
+            assert_eq!(ev.attributes.len(), 3);
             assert_eq!(
-                finished[0].events[0].attributes[0].1.as_ref(),
-                "RuntimeException"
+                ev.attributes[0],
+                (Arc::from("exception.type"), Arc::from("RuntimeException"))
             );
+            assert_eq!(ev.attributes[1].0.as_ref(), "exception.message");
+            assert_eq!(ev.attributes[1].1.as_ref(), "Payment declined");
+            assert_eq!(ev.attributes[2].0.as_ref(), "exception.stacktrace");
+        });
+    }
+
+    #[test]
+    fn push_exception_event_skips_empty_optionals() {
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-y".into(),
+                "root-y".into(),
+            )
+        });
+        let id = PROFILING_CONTEXT.with(|s| s.borrow_mut().push(Arc::from("g"), vec![]));
+        PROFILING_CONTEXT.with(|s| {
+            let mut stack = s.borrow_mut();
+            let span = stack.get_mut(id).unwrap();
+            push_exception_event(span, "LogicException", None, Some(""), 4096, 8192);
+            assert_eq!(span.events[0].attributes.len(), 1); // only exception.type
+        });
+    }
+
+    #[test]
+    fn push_exception_event_message_only_when_type_empty() {
+        // A bare string reason (oxphp_apm_error('...')) has no class: the event
+        // carries exception.message with no exception.type.
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-w".into(),
+                "root-w".into(),
+            )
+        });
+        let id = PROFILING_CONTEXT.with(|s| s.borrow_mut().push(Arc::from("i"), vec![]));
+        PROFILING_CONTEXT.with(|s| {
+            let mut stack = s.borrow_mut();
+            let span = stack.get_mut(id).unwrap();
+            push_exception_event(span, "", Some("gateway timeout"), None, 4096, 8192);
+            let ev = &span.events[0];
+            assert_eq!(ev.attributes.len(), 1);
+            assert_eq!(ev.attributes[0].0.as_ref(), "exception.message");
+            assert_eq!(ev.attributes[0].1.as_ref(), "gateway timeout");
+        });
+    }
+
+    #[test]
+    fn push_exception_event_truncates_message() {
+        // Caps are passed in, so the test never mutates the process-wide globals
+        // (which parallel tests read).
+        PROFILING_CONTEXT.with(|s| {
+            s.borrow_mut().reset(
+                crate::profiling::ProfilingMode::ApmOnly,
+                "trace-z".into(),
+                "root-z".into(),
+            )
+        });
+        let id = PROFILING_CONTEXT.with(|s| s.borrow_mut().push(Arc::from("h"), vec![]));
+        let big_message = "SQL error: ".to_string() + &"A".repeat(10_000);
+        PROFILING_CONTEXT.with(|s| {
+            let mut stack = s.borrow_mut();
+            let span = stack.get_mut(id).unwrap();
+            push_exception_event(span, "PDOException", Some(&big_message), None, 128, 8192);
+            let msg = &span.events[0].attributes[1];
+            assert_eq!(msg.0.as_ref(), "exception.message");
+            assert!(
+                msg.1.as_ref().len() <= 128,
+                "len was {}",
+                msg.1.as_ref().len()
+            );
+            assert!(msg.1.as_ref().ends_with("…(truncated)"));
         });
     }
 }
