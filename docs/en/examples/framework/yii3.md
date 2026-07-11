@@ -9,7 +9,7 @@ Yii3 is the leanest recipe here. The `yiisoft/app` template has a `public/index.
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `mbstring` (native, for speed — the runtime otherwise polyfills it)
 - **Services:** OxPHP only
@@ -31,7 +31,7 @@ cp yii3-oxphp/src/.env.example yii3-oxphp/src/.env
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

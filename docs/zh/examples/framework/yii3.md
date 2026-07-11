@@ -9,7 +9,7 @@ Yii3 是这里最精简的方案。`yiisoft/app` 模板带有一个 `public/inde
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0`（PHP 8.5）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0`（PHP 8.5）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT` 保持默认值 `/var/www/html/public`）
 - **新增扩展：** `mbstring`（原生扩展，为了性能——否则运行时会用 polyfill 替代）
 - **服务：** 仅 OxPHP
@@ -31,7 +31,7 @@ cp yii3-oxphp/src/.env.example yii3-oxphp/src/.env
 `src/Dockerfile`：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

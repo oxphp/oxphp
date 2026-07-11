@@ -11,7 +11,7 @@ October CMS (на базе Laravel) поставляется с `index.php` в �
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23` (PHP 8.4)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` оставлен по умолчанию `/var/www/html/public`)
 - **Добавленные расширения:** `gd`, `pdo_mysql`, `mbstring`, `zip`
 - **Сервисы:** OxPHP + MySQL
@@ -35,7 +35,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile.oxphp` (назван так, чтобы не конфликтовать с собственными ассетами October):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

@@ -9,7 +9,7 @@ Magento 是本系列中最重的方案：它强制要求一个搜索引擎（Ope
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23`（PHP 8.4）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23`（PHP 8.4）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT=/var/www/html/pub` 覆盖默认的 `…/public`）
 - **新增扩展：** `bcmath`、`gd`、`intl`、`pdo_mysql`、`soap`、`xsl`、`zip`、`mbstring`、`ftp`、`pcntl`、`sockets`
 - **服务：** OxPHP + MySQL 8.0 + OpenSearch 2.x
@@ -35,7 +35,7 @@ docker compose run --rm --no-deps -e COMPOSER_MEMORY_LIMIT=-1 app \
 `src/Dockerfile.oxphp`（这样命名是为了避免与 Magento 自带的 docker 资源冲突）：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

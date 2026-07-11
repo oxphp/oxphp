@@ -11,7 +11,7 @@ This is the recipe that exercises OxPHP's [`SYMLINK_ALLOW_PATHS`](../../security
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `gd`, `pdo_mysql`, `mbstring`, `zip`
 - **Services:** OxPHP + MySQL
@@ -35,7 +35,7 @@ Then point `src/.env` at the database service (`DB_HOST=db`, `DB_DATABASE=octobe
 `src/Dockerfile.oxphp` (named to avoid colliding with October's own assets):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

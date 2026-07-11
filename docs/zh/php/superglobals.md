@@ -17,7 +17,7 @@ OxPHP 遵循 CGI/1.1 规范，根据传入的 HTTP 请求构建 `$_SERVER`。进
 |------|------|------|
 | `SCRIPT_FILENAME` | 正在执行的 PHP 脚本的绝对文件系统路径 | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | 通过 `DOCUMENT_ROOT` 环境变量配置的 Web 根目录 | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | 服务器标识符（包含运行中的 OxPHP 版本） | `OxPHP/0.9.0` |
+| `SERVER_SOFTWARE` | 服务器标识符（包含运行中的 OxPHP 版本） | `OxPHP/0.10.0` |
 | `SERVER_PROTOCOL` | 协商得到的 HTTP 协议版本 | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP 方法 | `GET` |
 | `REQUEST_URI` | 包含查询字符串的完整 URI | `/app?page=2` |

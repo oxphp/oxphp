@@ -9,7 +9,7 @@ Front controller Symfony `public/index.php` напрямую укладывае�
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` оставлен по умолчанию `/var/www/html/public`)
 - **Добавленные расширения:** `intl`, `mbstring` (рекомендуемый базовый набор Symfony; во время выполнения строго необходимы только core-расширения)
 - **Сервисы:** только OxPHP
@@ -35,7 +35,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

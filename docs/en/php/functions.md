@@ -170,7 +170,7 @@ Returns an associative array with server and request metadata.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `version` | `string` | Server version (e.g. `"0.9.0"`) |
+| `version` | `string` | Server version (e.g. `"0.10.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
@@ -181,7 +181,7 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.9.0",
+//     "version"      => "0.10.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,

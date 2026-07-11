@@ -9,7 +9,7 @@ Magento — самый тяжёлый рецепт здесь: он требуе
 
 ## Стек в двух словах
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23` (PHP 8.4)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/pub` переопределяет умолчание `…/public`)
 - **Добавленные расширения:** `bcmath`, `gd`, `intl`, `pdo_mysql`, `soap`, `xsl`, `zip`, `mbstring`, `ftp`, `pcntl`, `sockets`
 - **Сервисы:** OxPHP + MySQL 8.0 + OpenSearch 2.x
@@ -35,7 +35,7 @@ docker compose run --rm --no-deps -e COMPOSER_MEMORY_LIMIT=-1 app \
 `src/Dockerfile.oxphp` (назван так, чтобы не конфликтовать с собственными docker-ресурсами Magento):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

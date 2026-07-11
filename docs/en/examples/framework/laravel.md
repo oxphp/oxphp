@@ -9,7 +9,7 @@ Laravel is the canonical framework-mode application: a single front controller a
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `pdo_mysql`, `intl`
 - **Services:** OxPHP + MySQL
@@ -50,7 +50,7 @@ DB_PASSWORD=laravel
 `src/Dockerfile` — copies OxPHP into a `php:8.5-zts-alpine` base that carries Laravel's runtime extensions:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

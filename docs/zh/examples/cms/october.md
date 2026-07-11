@@ -11,7 +11,7 @@ October CMS（基于 Laravel）在项目根目录提供 `index.php`，与 `confi
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23`（PHP 8.4）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23`（PHP 8.4）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT` 保持默认 `/var/www/html/public`）
 - **新增扩展：** `gd`、`pdo_mysql`、`mbstring`、`zip`
 - **服务：** OxPHP + MySQL
@@ -35,7 +35,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile.oxphp`（如此命名以避免与 October 自带的资源冲突）：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

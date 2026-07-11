@@ -178,7 +178,7 @@ PHP 虚拟机栈（用于函数调用帧）在每次请求时全新分配，并�
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "80:80"
     environment:

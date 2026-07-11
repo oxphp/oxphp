@@ -130,7 +130,7 @@ docker logs my-app 2>&1 | grep "error page"
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.9.0
+  ghcr.io/oxphp/oxphp:0.10.0
 ```
 
 ### 429 响应仍显示默认正文
@@ -142,7 +142,7 @@ docker run --rm -v ./errors:/var/www/errors:ro \
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "8080:8080"
     volumes:

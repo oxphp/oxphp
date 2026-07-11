@@ -178,7 +178,7 @@ PHP VM stacks (used for function call frames) are allocated fresh per request an
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "80:80"
     environment:

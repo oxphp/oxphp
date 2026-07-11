@@ -89,7 +89,7 @@ OxPHP 最多跟踪 100,000 个唯一 IP 地址。达到此限制时，在添加�
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "8080:80"
     environment:

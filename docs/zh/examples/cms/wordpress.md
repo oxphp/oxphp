@@ -11,7 +11,7 @@ WordPress 是一个 **traditional 模式** 应用：它有许多物理入口（`
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0`（PHP 8.5）—— 就地扩展
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0`（PHP 8.5）—— 就地扩展
 - **路由模式：** Traditional（无 `ENTRY_FILE`）
 - **新增扩展：** `mysqli`、`pdo_mysql`、`gd`、`zip`、`intl`、`exif`、`bcmath`
 - **服务：** OxPHP + MySQL + 一个 WP-CLI sidecar（`cli` profile）
@@ -58,7 +58,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && mkdir -p /ext-out \
           "$EXT_DIR"/bcmath.so   /ext-out/
 
 # ── 阶段 2：带有 WordPress 扩展的 OxPHP 运行时 ─────────────
-FROM ghcr.io/oxphp/oxphp:0.9.0 AS runtime
+FROM ghcr.io/oxphp/oxphp:0.10.0 AS runtime
 USER root
 RUN apk add --no-cache icu-libs libzip libpng libjpeg-turbo freetype oniguruma
 # 把编译好的扩展放进 OxPHP 的 PHP 8.5 扩展目录

@@ -9,7 +9,7 @@ Yii3 — самый лёгкий рецепт из всех здесь пред�
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` оставлен на значении по умолчанию `/var/www/html/public`)
 - **Добавленные расширения:** `mbstring` (нативное, ради скорости — иначе среда выполнения использует полифил)
 - **Сервисы:** только OxPHP
@@ -31,7 +31,7 @@ cp yii3-oxphp/src/.env.example yii3-oxphp/src/.env
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
