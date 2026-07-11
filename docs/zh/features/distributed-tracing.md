@@ -60,6 +60,8 @@ APM 插件是编译时特性（`plugin-apm`），依赖于 OTel 插件。它增�
 | `OTEL_APM_ENABLED` | `false` | 启用 APM：自动插桩、错误捕获、PHP SDK。需要 `OTEL_ENABLED=true`。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此阈值的查询会在其 span 上标记 `oxphp.db.slow=true` |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 在 `db.params` span 属性中记录绑定参数。布尔——参见[布尔值](../operations/configuration.md#布尔值) |
+| `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | `exception.stacktrace` 属性的最大字节数。超出时从尾部截断（保留根帧）并标记 `…(truncated)`。`0` 表示禁用截断 |
+| `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | `exception.message` 属性的最大字节数（默认值与 New Relic 的单属性值上限一致）。超出时从尾部截断并标记 `…(truncated)`。`0` 表示禁用截断 |
 
 ## PHP 中的 Trace Context
 
@@ -170,7 +172,7 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 | `oxphp.event.kind` | 来源 | 事件属性 |
 |--------------------|------|----------|
-| `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数 | `exception.type` |
+| `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数，或 `oxphp_apm_error()` | `exception.type`、`exception.message`、`exception.stacktrace` |
 | `custom` | `oxphp_apm_event()` | 用户提供 |
 | `mark` | 性能分析器 `#[Mark]` 注解 | 用户提供 |
 | `slow` | 性能分析器 `#[SlowThreshold]` 超阈值 | `threshold_ms`、`elapsed_ms` |
@@ -220,8 +222,9 @@ use OxPHP\Apm\Trace;
 function processOrder(int $orderId): void
 {
     // A span named "processOrder" is created on entry and closed on exit.
-    // If an exception is thrown, the span is marked as error with the
-    // exception class recorded as a span event.
+    // If an exception is thrown, the span is marked as error and an
+    // "exception" span event records exception.type, exception.message
+    // and exception.stacktrace.
 }
 
 class PaymentService
@@ -237,7 +240,7 @@ class PaymentService
 
 `#[Trace]` 属性可用于函数和方法。无需注册调用 — APM 插件在初始化时自动注册该装饰器。
 
-如果被装饰的函数抛出异常，span 的状态会被设为错误，并记录一个包含异常类名的 `exception` 事件。
+如果被装饰的函数抛出异常，span 的状态会被设为错误，并按 OpenTelemetry 语义约定记录一个 `exception` 事件，包含完整信息：`exception.type`（类名）、`exception.message`（消息）和 `exception.stacktrace`（来自 `getTraceAsString()` 的调用栈）。消息被截断至 `OTEL_APM_MESSAGE_MAX_BYTES` 字节（默认 4096），堆栈跟踪被截断至 `OTEL_APM_STACKTRACE_MAX_BYTES` 字节（默认 8192）；`0` 禁用相应截断。堆栈中的参数捕获遵循 PHP 的 `zend.exception_ignore_args` 设置。
 
 ## APM：PHP 追踪 SDK
 
@@ -323,7 +326,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 | `oxphp_apm_end(span_id)` | `void` | 关闭指定本地 ID 的 span |
 | `oxphp_apm_attribute(key, value, ?span_id)` | `void` | 在当前或指定的 span 上设置属性 |
 | `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | 在当前或指定的 span 上记录带时间戳的事件 |
-| `oxphp_apm_error(exception, ?span_id)` | `void` | 将当前或指定的 span 标记为错误 |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | 将当前或指定的 span 标记为错误，并记录 `exception` 事件。Throwable 对象提供 `exception.type`、`exception.message`、`exception.stacktrace`；字符串参数记录为 `exception.message`，并带有通用的 `exception.type` = `Error`（以便事件在按类型分组的后端中仍可见） |
 | `oxphp_apm_status(code, ?description, ?span_id)` | `void` | 设置 span 状态：`0` = 未设置，`1` = 正常，`2` = 错误 |
 | `oxphp_apm_trace_id()` | `string` | 当前 trace ID（32 个十六进制字符）。APM 禁用时为空 |
 | `oxphp_apm_span_id()` | `string` | 当前 span ID（16 个十六进制字符）。无活跃 span 时为空 |

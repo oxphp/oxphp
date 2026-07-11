@@ -3762,6 +3762,8 @@ The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel
 | `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true`. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Queries above this get `oxphp.db.slow=true` on their spans |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
+| `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Maximum size in bytes of the `exception.stacktrace` attribute. Over the cap the stacktrace is truncated from the tail (the root frame is kept) with a `…(truncated)` marker. `0` disables truncation |
+| `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Maximum size in bytes of the `exception.message` attribute (default matches New Relic's per-attribute value limit). Over the cap the message is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 
 ## Trace Context in PHP
 
@@ -3872,7 +3874,7 @@ OTLP backends. A `oxphp.event.kind` attribute on each event identifies its type:
 
 | `oxphp.event.kind` | Source | Event attributes |
 |--------------------|--------|------------------|
-| `exception` | A `#[OxPHP\Apm\Trace]` function that threw | `exception.type` |
+| `exception` | A `#[OxPHP\Apm\Trace]` function that threw, or `oxphp_apm_error()` | `exception.type`, `exception.message`, `exception.stacktrace` |
 | `custom` | `oxphp_apm_event()` | user-supplied |
 | `mark` | profiler `#[Mark]` annotation | user-supplied |
 | `slow` | profiler `#[SlowThreshold]` breach | `threshold_ms`, `elapsed_ms` |
@@ -3922,8 +3924,9 @@ use OxPHP\Apm\Trace;
 function processOrder(int $orderId): void
 {
     // A span named "processOrder" is created on entry and closed on exit.
-    // If an exception is thrown, the span is marked as error with the
-    // exception class recorded as a span event.
+    // If an exception is thrown, the span is marked as error and an
+    // "exception" span event records exception.type, exception.message
+    // and exception.stacktrace.
 }
 
 class PaymentService
@@ -3939,7 +3942,7 @@ class PaymentService
 
 The `#[Trace]` attribute targets both functions and methods. No registration call is needed — the APM plugin registers the decorator automatically during initialization.
 
-If the decorated function throws an exception, the span's status is set to error and an `exception` event is recorded with the exception class name.
+If the decorated function throws an exception, the span's status is set to error and an `exception` event is recorded with the full OpenTelemetry semantic-convention data: `exception.type` (the class), `exception.message` (the message), and `exception.stacktrace` (the call stack from `getTraceAsString()`). The message is truncated to `OTEL_APM_MESSAGE_MAX_BYTES` bytes (default 4096) and the stacktrace to `OTEL_APM_STACKTRACE_MAX_BYTES` bytes (default 8192); `0` disables either cap. Argument capture inside frames follows PHP's own `zend.exception_ignore_args` setting.
 
 ## APM: PHP Tracing SDK
 
@@ -4025,7 +4028,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 | `oxphp_apm_end(span_id)` | `void` | Close the span with the given local ID |
 | `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
 | `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
-| `oxphp_apm_error(exception, ?span_id)` | `void` | Mark the current or specified span as error |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | Mark the current or specified span as error and record an `exception` event. A Throwable object contributes `exception.type`, `exception.message`, and `exception.stacktrace`; a bare string argument is recorded as `exception.message` under a generic `exception.type` of `Error` (so the event stays visible in backends that group by type) |
 | `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
 | `oxphp_apm_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
 | `oxphp_apm_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
@@ -14012,6 +14015,8 @@ The special value `private` expands to all RFC-1918 private networks, loopback, 
 | `OTEL_APM_ENABLED` | `false` | Enable APM: automatic instrumentation, error capture, and the PHP tracing SDK. Requires `OTEL_ENABLED=true`. Boolean — see [Boolean values](#boolean-values) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Database queries exceeding this get an `oxphp.db.slow=true` span attribute |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Disable in production if parameters may contain sensitive data. Boolean — see [Boolean values](#boolean-values) |
+| `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Maximum size in bytes of the `exception.stacktrace` attribute. Over the cap the stacktrace is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
+| `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Maximum size in bytes of the `exception.message` attribute (default matches New Relic's per-attribute value limit). Over the cap the message is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 
 When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_apm_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, they are safe no-ops.
 

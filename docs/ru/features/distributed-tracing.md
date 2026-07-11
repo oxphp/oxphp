@@ -60,6 +60,8 @@ OxPHP поддерживает распространение W3C Trace Context,
 | `OTEL_APM_ENABLED` | `false` | Включить APM: автоинструментацию, захват ошибок, PHP SDK. Требует `OTEL_ENABLED=true`. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Порог медленного запроса в миллисекундах. Запросы свыше этого значения получают атрибут `oxphp.db.slow=true` на своих спанах |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Записывать параметры привязки в атрибут спана `db.params`. Булева — см. [Булевы значения](../operations/configuration.md#булевы-значения) |
+| `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Максимальный размер атрибута `exception.stacktrace` в байтах. При превышении стектрейс усекается с хвоста (корневой фрейм сохраняется) с пометкой `…(truncated)`. `0` отключает усечение |
+| `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Максимальный размер атрибута `exception.message` в байтах (дефолт совпадает с лимитом значения атрибута в New Relic). При превышении сообщение усекается с хвоста с пометкой `…(truncated)`. `0` отключает усечение |
 
 ## Контекст трассировки в PHP
 
@@ -171,7 +173,7 @@ Grafana Tempo и других OTLP-бэкендах. Атрибут `oxphp.event
 
 | `oxphp.event.kind` | Источник | Атрибуты события |
 |--------------------|----------|------------------|
-| `exception` | Функция с `#[OxPHP\Apm\Trace]`, выбросившая исключение | `exception.type` |
+| `exception` | Функция с `#[OxPHP\Apm\Trace]`, выбросившая исключение, либо `oxphp_apm_error()` | `exception.type`, `exception.message`, `exception.stacktrace` |
 | `custom` | `oxphp_apm_event()` | пользовательские |
 | `mark` | аннотация `#[Mark]` профайлера | пользовательские |
 | `slow` | Превышение порога `#[SlowThreshold]` профайлера | `threshold_ms`, `elapsed_ms` |
@@ -221,8 +223,9 @@ use OxPHP\Apm\Trace;
 function processOrder(int $orderId): void
 {
     // A span named "processOrder" is created on entry and closed on exit.
-    // If an exception is thrown, the span is marked as error with the
-    // exception class recorded as a span event.
+    // If an exception is thrown, the span is marked as error and an
+    // "exception" span event records exception.type, exception.message
+    // and exception.stacktrace.
 }
 
 class PaymentService
@@ -238,7 +241,7 @@ class PaymentService
 
 Атрибут `#[Trace]` применяется как к функциям, так и к методам. Вызов регистрации не требуется — плагин APM автоматически регистрирует декоратор во время инициализации.
 
-Если декорированная функция выбрасывает исключение, статус спана устанавливается как ошибочный, и записывается событие `exception` с именем класса исключения.
+Если декорированная функция выбрасывает исключение, статус спана устанавливается как ошибочный, и записывается событие `exception` с полными данными по семантическим конвенциям OpenTelemetry: `exception.type` (класс), `exception.message` (сообщение) и `exception.stacktrace` (стек вызовов из `getTraceAsString()`). Сообщение усекается до `OTEL_APM_MESSAGE_MAX_BYTES` байт (по умолчанию 4096), а стектрейс — до `OTEL_APM_STACKTRACE_MAX_BYTES` байт (по умолчанию 8192); `0` отключает соответствующее усечение. Захват аргументов в стеке подчиняется настройке PHP `zend.exception_ignore_args`.
 
 ## APM: PHP SDK трассировки
 
@@ -324,7 +327,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 | `oxphp_apm_end(span_id)` | `void` | Закрыть спан с указанным локальным ID |
 | `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Установить атрибут на текущем или указанном спане |
 | `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Записать событие с меткой времени на текущем или указанном спане |
-| `oxphp_apm_error(exception, ?span_id)` | `void` | Отметить текущий или указанный спан как ошибочный |
+| `oxphp_apm_error(exception, ?span_id)` | `void` | Отметить текущий или указанный спан как ошибочный и записать событие `exception`. Объект-Throwable даёт `exception.type`, `exception.message` и `exception.stacktrace`; строковый аргумент записывается как `exception.message` с обобщённым `exception.type` = `Error` (чтобы событие оставалось видимым в бэкендах, группирующих по типу) |
 | `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Установить статус спана: `0` = Не задан, `1` = Ok, `2` = Ошибка |
 | `oxphp_apm_trace_id()` | `string` | Текущий идентификатор трассы (32 шестнадцатеричных символа). Пустой, когда APM отключён |
 | `oxphp_apm_span_id()` | `string` | Текущий идентификатор спана (16 шестнадцатеричных символов). Пустой, когда нет активного спана |
