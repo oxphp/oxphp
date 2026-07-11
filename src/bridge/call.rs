@@ -2,7 +2,7 @@ use super::ffi;
 use super::types::ValType;
 use crate::plugin::PhpError;
 use std::marker::PhantomData;
-use std::os::raw::c_void;
+use std::os::raw::{c_char, c_void};
 
 /// Zval-sized slot with correct alignment (8 bytes for the pointer/long/double union).
 /// PHP zval is always 16 bytes on 64-bit: 8-byte value + 4-byte type_info + 4-byte u2.
@@ -267,6 +267,52 @@ impl<'a> NativeCall<'a> {
             ffi::oxphp_array_foreach(arr, trampoline::<F>, &mut f as *mut F as *mut c_void);
         }
         Ok(())
+    }
+
+    /// If arg `idx` is a Throwable, invoke `f` with `(class, message,
+    /// stacktrace)` valid for the callback's duration. Message / stacktrace are
+    /// `None` when absent, and are length-delimited and decoded lossily (a PHP
+    /// string may hold non-UTF-8 or embedded-NUL bytes). No-op if the arg is not
+    /// a Throwable (then `f` is never called).
+    pub fn capture_exception_arg<F>(&self, idx: u32, mut f: F)
+    where
+        F: FnMut(&str, Option<&str>, Option<&str>),
+    {
+        // Guard the C-side raw index `((zval*)args)+idx` — unlike the fallible
+        // arg_* accessors this is infallible, so an out-of-range index no-ops
+        // rather than reading past the argument array.
+        if idx >= self.argc() {
+            return;
+        }
+
+        unsafe extern "C" fn trampoline<F: FnMut(&str, Option<&str>, Option<&str>)>(
+            cls: *const c_char,
+            cls_len: usize,
+            msg: *const c_char,
+            msg_len: usize,
+            trace: *const c_char,
+            trace_len: usize,
+            user_data: *mut c_void,
+        ) {
+            let f = unsafe { &mut *(user_data as *mut F) };
+            let class = unsafe { crate::bridge::decode::bytes_lossy(cls, cls_len) };
+            let msg = unsafe { crate::bridge::decode::bytes_lossy(msg, msg_len) };
+            let trace = unsafe { crate::bridge::decode::bytes_lossy(trace, trace_len) };
+            f(
+                class.as_deref().unwrap_or(""),
+                msg.as_deref(),
+                trace.as_deref(),
+            );
+        }
+
+        unsafe {
+            ffi::oxphp_arg_exception_capture(
+                self.args,
+                idx,
+                trampoline::<F>,
+                &mut f as *mut F as *mut c_void,
+            );
+        }
     }
 
     /// Iterate over an array argument yielding RAW string-key bytes.

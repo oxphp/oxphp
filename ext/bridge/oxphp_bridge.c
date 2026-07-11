@@ -1191,6 +1191,8 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_attributes.h"
+#include "Zend/zend_execute.h"
+#include "Zend/zend_interfaces.h"
 #include "Zend/zend_enum.h"
 
 /* Custom object struct — defined here because it depends on zend_object from php.h.
@@ -1309,6 +1311,108 @@ void *oxphp_arg_array(void *args, uint32_t idx) {
     zval *z = ((zval*)args) + idx;
     if (Z_TYPE_P(z) != IS_ARRAY) return NULL;
     return z;
+}
+
+/* ── Exception extraction ── */
+
+void oxphp_exception_capture(void *ex_v,
+    const char **out_class, size_t *out_class_len,
+    char **out_message, size_t *out_message_len,
+    char **out_trace, size_t *out_trace_len)
+{
+    zend_object *ex = (zend_object *)ex_v;
+    /* Class name is length-delimited too: an anonymous class name is
+     * "<parent>@anonymous\0<file>:<line>$<hash>" with an embedded NUL, so a
+     * NUL-terminated read would collapse every anonymous class to the same
+     * "<parent>@anonymous". Borrowed interned identifier, stable for the call. */
+    *out_class = ZSTR_VAL(ex->ce->name);
+    *out_class_len = ZSTR_LEN(ex->ce->name);
+    *out_message = NULL;
+    *out_message_len = 0;
+    *out_trace = NULL;
+    *out_trace_len = 0;
+
+    /* message property: a plain read, safe with an exception pending (mirrors
+     * the fiber-side capture). Copied into a malloc'd buffer (like the trace
+     * below), so both out-strings are caller-owned and stable — the API hands
+     * out no borrows into `ex` whose validity would depend on the object
+     * outliving the call or $this->message not being reassigned. Length-
+     * delimited: a message may hold binary/latin1 bytes or NULs. */
+    zval rv;
+    zval *msg = zend_read_property(ex->ce, ex, "message", sizeof("message") - 1, 1, &rv);
+    if (msg && Z_TYPE_P(msg) == IS_STRING && Z_STRLEN_P(msg) > 0) {
+        size_t mlen = Z_STRLEN_P(msg);
+        char *mbuf = malloc(mlen);
+        if (mbuf) {
+            memcpy(mbuf, Z_STRVAL_P(msg), mlen);
+            *out_message = mbuf;
+            *out_message_len = mlen;
+        }
+    }
+
+    /* getTraceAsString() dispatches a method; Zend refuses to call with an
+     * exception in flight, so always save/clear/restore EG(exception) around it
+     * (unconditionally — symmetric across paths, so a live exception is never
+     * released instead of restored). The call re-enters the VM and allocates,
+     * so it can zend_bailout (longjmp) if it exhausts memory_limit or trips
+     * max_execution_time. The zend_try exists only to run our own cleanup on
+     * that path — restore EG(exception), free the message copy — and then
+     * re-raise the bailout: swallowing it would let the request keep executing
+     * past a resource limit the engine meant to be fatal. zend_catch runs with
+     * EG(bailout) already restored to the outer target, so zend_bailout() there
+     * propagates to request shutdown.
+     * NOTE: on a stack of N decorated frames the exception fires this end hook
+     * per frame, so the trace is formatted O(N) times on the (cold) error path. */
+    zend_object *saved = EG(exception);
+    EG(exception) = NULL;
+
+    zval trace_ret;
+    ZVAL_UNDEF(&trace_ret);
+    zend_try {
+        zend_call_method_with_0_params(ex, ex->ce, NULL, "gettraceasstring", &trace_ret);
+    } zend_catch {
+        free(*out_message);
+        *out_message = NULL;
+        *out_message_len = 0;
+        EG(exception) = saved;
+        zend_bailout();
+    } zend_end_try();
+
+    if (Z_TYPE(trace_ret) == IS_STRING && Z_STRLEN(trace_ret) > 0) {
+        size_t len = Z_STRLEN(trace_ret);
+        char *buf = malloc(len);
+        if (buf) {
+            memcpy(buf, Z_STRVAL(trace_ret), len);
+            *out_trace = buf;
+            *out_trace_len = len;
+        }
+    }
+    zval_ptr_dtor(&trace_ret); /* safe on UNDEF (bailout path) */
+
+    /* getTraceAsString() must not leave an exception; clear defensively before
+     * restoring the caller's original exception (NULL on the non-decorator
+     * paths, the in-flight exception on the decorator path). */
+    if (EG(exception)) { OBJ_RELEASE(EG(exception)); EG(exception) = NULL; }
+    EG(exception) = saved;
+}
+
+void oxphp_arg_exception_capture(
+    void *args, uint32_t idx, oxphp_exc_capture_cb cb, void *user_data)
+{
+    zval *z = ((zval*)args) + idx;
+    if (Z_TYPE_P(z) != IS_OBJECT) return;
+    zend_object *ex = Z_OBJ_P(z);
+    if (!instanceof_function(ex->ce, zend_ce_throwable)) return;
+
+    const char *cls = NULL;
+    char *msg = NULL, *trace = NULL;
+    size_t cls_len = 0, msg_len = 0, trace_len = 0;
+    /* The exception was caught in PHP and passed as an argument, so EG(exception)
+     * is not in flight here; the capture saves/restores it regardless. */
+    oxphp_exception_capture(ex, &cls, &cls_len, &msg, &msg_len, &trace, &trace_len);
+    cb(cls, cls_len, msg, msg_len, trace, trace_len, user_data);
+    free(msg);   /* free(NULL) is safe */
+    free(trace);
 }
 
 /* ── Array iteration ── */

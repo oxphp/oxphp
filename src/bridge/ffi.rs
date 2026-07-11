@@ -24,6 +24,21 @@ extern "C" {
         user_data: *mut c_void,
     );
 
+    pub fn oxphp_arg_exception_capture(
+        args: *mut c_void,
+        idx: u32,
+        cb: unsafe extern "C" fn(
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            *mut c_void,
+        ),
+        user_data: *mut c_void,
+    );
+
     pub fn oxphp_val_long(zv: *mut c_void) -> i64;
     pub fn oxphp_val_double(zv: *mut c_void) -> f64;
     pub fn oxphp_val_bool(zv: *mut c_void) -> c_int;
@@ -103,6 +118,11 @@ extern "C" {
                 elapsed_ns: u64,
                 success: c_int,
                 exception_class: *const c_char,
+                exception_class_len: usize,
+                exception_message: *const c_char,
+                exception_message_len: usize,
+                exception_stacktrace: *const c_char,
+                exception_stacktrace_len: usize,
             ),
         >,
     );

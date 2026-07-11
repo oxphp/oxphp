@@ -162,6 +162,11 @@ unsafe extern "C" fn end_callback(
     elapsed_ns: u64,
     success: c_int,
     exception_class: *const c_char,
+    exception_class_len: usize,
+    exception_message: *const c_char,
+    exception_message_len: usize,
+    exception_stacktrace: *const c_char,
+    exception_stacktrace_len: usize,
 ) {
     let registry = get_registry();
     let resolved = match registry.get_resolved(fn_id) {
@@ -169,19 +174,15 @@ unsafe extern "C" fn end_callback(
         None => return,
     };
 
-    let exc = if exception_class.is_null() {
-        None
-    } else {
-        CStr::from_ptr(exception_class)
-            .to_str()
-            .ok()
-            .map(String::from)
-    };
-
+    use crate::bridge::decode::bytes_lossy;
     let result = DecoratorCallResult {
         success: success != 0,
         elapsed_ns,
-        exception_class: exc,
+        exception_class: bytes_lossy(exception_class, exception_class_len).map(|c| c.into_owned()),
+        exception_message: bytes_lossy(exception_message, exception_message_len)
+            .map(|c| c.into_owned()),
+        exception_stacktrace: bytes_lossy(exception_stacktrace, exception_stacktrace_len)
+            .map(|c| c.into_owned()),
     };
 
     let ctx = DecoratorCallContext {
@@ -314,6 +315,8 @@ mod tests {
             success: true,
             elapsed_ns: 100,
             exception_class: None,
+            exception_message: None,
+            exception_stacktrace: None,
         };
         for d in resolved.iter().rev() {
             if let ResolvedDecorator::Rust(ref decorator) = d {

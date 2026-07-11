@@ -53,6 +53,8 @@ pub struct DecoratorCallResult {
     pub success: bool,
     pub elapsed_ns: u64,
     pub exception_class: Option<String>,
+    pub exception_message: Option<String>,
+    pub exception_stacktrace: Option<String>,
 }
 
 /// One decoded PHP attribute constructor argument.
@@ -279,6 +281,8 @@ mod tests {
             success: true,
             elapsed_ns: 5_000_000,
             exception_class: None,
+            exception_message: None,
+            exception_stacktrace: None,
         };
         assert!(result.success);
         assert_eq!(result.elapsed_ns, 5_000_000);
@@ -288,9 +292,12 @@ mod tests {
             success: false,
             elapsed_ns: 1_000,
             exception_class: Some("RuntimeException".into()),
+            exception_message: Some("boom".into()),
+            exception_stacktrace: Some("#0 {main}".into()),
         };
         assert!(!result.success);
         assert_eq!(result.exception_class.as_deref(), Some("RuntimeException"));
+        assert_eq!(result.exception_message.as_deref(), Some("boom"));
     }
 
     #[test]

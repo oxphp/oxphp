@@ -50,6 +50,22 @@ pub unsafe fn oxphp_array_foreach(
 ) {
 }
 
+pub unsafe fn oxphp_arg_exception_capture(
+    _args: *mut c_void,
+    _idx: u32,
+    _cb: unsafe extern "C" fn(
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *mut c_void,
+    ),
+    _user_data: *mut c_void,
+) {
+}
+
 pub unsafe fn oxphp_val_long(_zv: *mut c_void) -> i64 {
     0
 }
@@ -163,6 +179,11 @@ pub unsafe fn oxphp_bridge_set_decorator_end(
             elapsed_ns: u64,
             success: c_int,
             exception_class: *const c_char,
+            exception_class_len: usize,
+            exception_message: *const c_char,
+            exception_message_len: usize,
+            exception_stacktrace: *const c_char,
+            exception_stacktrace_len: usize,
         ),
     >,
 ) {

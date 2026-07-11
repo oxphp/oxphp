@@ -2300,10 +2300,16 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
     oxphp_decorator_end_fn_t end_fn = oxphp_bridge_get_decorator_end();
     if (end_fn) {
         const char *exc_class = NULL;
+        char *exc_msg = NULL, *exc_trace = NULL;
+        size_t exc_class_len = 0, exc_msg_len = 0, exc_trace_len = 0;
         if (!success && EG(exception)) {
-            exc_class = ZSTR_VAL(EG(exception)->ce->name);
+            oxphp_exception_capture(EG(exception), &exc_class, &exc_class_len,
+                                    &exc_msg, &exc_msg_len, &exc_trace, &exc_trace_len);
         }
-        end_fn(dctx->fn_id, elapsed_ns, success, exc_class);
+        end_fn(dctx->fn_id, elapsed_ns, success, exc_class, exc_class_len,
+               exc_msg, exc_msg_len, exc_trace, exc_trace_len);
+        free(exc_msg);   /* free(NULL) is safe */
+        free(exc_trace);
     }
 
     /* Dispatch to PHP decorators in reverse order: call after() */
