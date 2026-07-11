@@ -180,6 +180,8 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | `OTEL_APM_ENABLED` | `false` | 启用 APM：自动埋点、错误捕获和 PHP 追踪 SDK。需要 `OTEL_ENABLED=true`。布尔——参见[布尔值](#布尔值) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | 慢查询阈值（毫秒）。超过此值的数据库查询将添加 `oxphp.db.slow=true` Span 属性 |
 | `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | 将绑定参数记录到 `db.params` Span 属性中。如果参数可能包含敏感数据，请在生产环境中禁用。布尔——参见[布尔值](#布尔值) |
+| `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | `exception.stacktrace` 属性的最大字节数。超出时从尾部截断并标记 `…(truncated)`。`0` 表示禁用截断 |
+| `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | `exception.message` 属性的最大字节数（默认值与 New Relic 的单属性值上限一致）。超出时从尾部截断并标记 `…(truncated)`。`0` 表示禁用截断 |
 
 当 APM 启用时，OxPHP 自动 hook 33 个 PHP 内部函数（PDO、mysqli、cURL、Redis、Memcached、文件 I/O）来创建子 Span。无论 APM 是否启用，`oxphp_apm_*()` PHP 函数都会注册——禁用时它们是安全的空操作。
 
