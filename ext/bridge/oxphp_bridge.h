@@ -670,6 +670,19 @@ typedef void (*oxphp_array_iter_fn)(
 );
 void oxphp_array_foreach(void *zv_array, oxphp_array_iter_fn cb, void *user_data);
 
+/* ── Exception argument capture ── */
+typedef void (*oxphp_exc_capture_cb)(
+    const char *exc_class, size_t exc_class_len,
+    const char *exc_message, size_t exc_message_len,
+    const char *exc_stacktrace, size_t exc_stacktrace_len,
+    void *user_data
+);
+/* If arg `idx` is a Throwable object, extract (class, message, stacktrace) and
+ * invoke `cb` once with pointers valid for the callback's duration. No-op if
+ * the arg is not a Throwable. */
+void oxphp_arg_exception_capture(
+    void *args, uint32_t idx, oxphp_exc_capture_cb cb, void *user_data);
+
 /* ── Direct value reading (from zval*, not from args array) ── */
 int64_t oxphp_val_long(void *zv);
 double  oxphp_val_double(void *zv);
@@ -729,12 +742,36 @@ typedef int (*oxphp_decorator_begin_fn_t)(
     uint64_t timestamp_ns
 );
 
+/* `exception_class`, `exception_message` and `exception_stacktrace` are all
+ * length-delimited (ptr + byte length) because a PHP string is a byte string
+ * that may contain embedded NULs or non-UTF-8 bytes — latin1 from a DB, binary
+ * payloads, or an anonymous class name's "<parent>@anonymous\0<file>" form; the
+ * Rust side decodes them lossily. */
 typedef void (*oxphp_decorator_end_fn_t)(
     uintptr_t fn_id,
     uint64_t elapsed_ns,
     int success,
-    const char *exception_class
+    const char *exception_class, size_t exception_class_len,
+    const char *exception_message, size_t exception_message_len,
+    const char *exception_stacktrace, size_t exception_stacktrace_len
 );
+
+/* Extract exception data from a PHP Throwable `ex` (a zend_object*, passed as
+ * void* to keep this header Zend-free). `*out_class` / `*out_class_len` is a
+ * borrowed interned identifier (valid while `ex` lives), length-delimited
+ * because an anonymous class name embeds a NUL. `*out_message` and `*out_trace`
+ * are both malloc'd copies (of `*out_message_len` / `*out_trace_len` bytes, or
+ * NULL/0) that the caller MUST free() — they are length-delimited so embedded
+ * NULs are preserved and they carry no borrow into `ex`.
+ * EG(exception) is always saved, cleared around the getTraceAsString() method
+ * call (which Zend refuses with an exception pending, and which is wrapped in a
+ * bailout guard), and restored — so a live in-flight exception (the decorator
+ * path) is never dropped or turned into a fatal, and a live exception on any
+ * other path is preserved rather than released. */
+void oxphp_exception_capture(void *ex,
+    const char **out_class, size_t *out_class_len,
+    char **out_message, size_t *out_message_len,
+    char **out_trace, size_t *out_trace_len);
 
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,

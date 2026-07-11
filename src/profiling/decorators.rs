@@ -304,6 +304,8 @@ mod tests {
             success: true,
             elapsed_ns: 0,
             exception_class: None,
+            exception_message: None,
+            exception_stacktrace: None,
         }
     }
 
