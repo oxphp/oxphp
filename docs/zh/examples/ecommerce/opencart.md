@@ -9,7 +9,7 @@ OpenCart 是一个 **traditional 模式**应用，拥有两个物理 front contr
 
 ## 技术栈速览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23`（PHP 8.4）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23`（PHP 8.4）
 - **路由模式：** Traditional（无 `ENTRY_FILE`；`DOCUMENT_ROOT` = 项目根目录，覆盖默认的 `…/public`）
 - **新增扩展：** `gd`、`mysqli`、`zip`、`mbstring`
 - **服务：** OxPHP + MySQL
@@ -36,7 +36,7 @@ cp -a /tmp/oc/upload/. opencart-oxphp/src/
 `src/Dockerfile.oxphp`（如此命名是为了避免与 OpenCart 自带的 Dockerfile 冲突）：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

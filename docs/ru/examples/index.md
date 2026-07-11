@@ -34,7 +34,7 @@ OxPHP поставляет готовый PHP-рантайм как `ghcr.io/oxp
    ```dockerfile
    FROM php:8.4-zts-alpine3.23 AS php-base       # PHP-расширения вашего приложения
    FROM composer:2            AS composer        # бинарник Composer
-   FROM ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23 AS oxphp   # артефакты OxPHP
+   FROM ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23 AS oxphp   # артефакты OxPHP
    FROM php-base AS dev                          # итоговый образ
    # ... копируем бинарник oxphp, библиотеку bridge и SAPI-расширение:
    COPY --from=oxphp /usr/local/bin/oxphp              /usr/local/bin/oxphp

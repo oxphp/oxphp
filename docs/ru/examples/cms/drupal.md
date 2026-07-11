@@ -9,7 +9,7 @@ Drupal 11 использует `web/index.php` в качестве front control
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23` (PHP 8.4)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/web` переопределяет значение по умолчанию `…/public`)
 - **Добавленные расширения:** `gd`, `pdo_mysql`, `zip`, `mbstring`
 - **Сервисы:** OxPHP + MySQL
@@ -37,7 +37,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

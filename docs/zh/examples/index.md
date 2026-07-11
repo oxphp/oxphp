@@ -34,7 +34,7 @@ OxPHP 以 `ghcr.io/oxphp/oxphp` 形式发布了一个开箱即用的 PHP 运行�
    ```dockerfile
    FROM php:8.4-zts-alpine3.23 AS php-base       # 你的应用的 PHP 扩展
    FROM composer:2            AS composer        # Composer 二进制文件
-   FROM ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23 AS oxphp   # OxPHP 产物
+   FROM ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23 AS oxphp   # OxPHP 产物
    FROM php-base AS dev                          # 最终镜像
    # ... 复制 oxphp 二进制文件、bridge 库和 SAPI 扩展：
    COPY --from=oxphp /usr/local/bin/oxphp              /usr/local/bin/oxphp

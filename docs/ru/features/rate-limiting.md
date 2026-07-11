@@ -89,7 +89,7 @@ OxPHP отслеживает до 100 000 уникальных IP-адресов
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "8080:80"
     environment:

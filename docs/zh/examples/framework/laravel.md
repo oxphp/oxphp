@@ -9,7 +9,7 @@ Laravel 是 framework 模式应用的典型代表：位于 `public/index.php` �
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0`（PHP 8.5）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0`（PHP 8.5）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT` 保留默认值 `/var/www/html/public`）
 - **新增扩展：** `pdo_mysql`、`intl`
 - **服务：** OxPHP + MySQL
@@ -50,7 +50,7 @@ DB_PASSWORD=laravel
 `src/Dockerfile` —— 将 OxPHP 拷贝进一个携带 Laravel 运行时扩展的 `php:8.5-zts-alpine` 基础镜像：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

@@ -11,7 +11,7 @@ This recipe also demonstrates the second build shape: instead of copying OxPHP i
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5) — extended in place
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5) — extended in place
 - **Routing mode:** Traditional (no `ENTRY_FILE`)
 - **Extensions added:** `mysqli`, `pdo_mysql`, `gd`, `zip`, `intl`, `exif`, `bcmath`
 - **Services:** OxPHP + MySQL + a WP-CLI sidecar (`cli` profile)
@@ -58,7 +58,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && mkdir -p /ext-out \
           "$EXT_DIR"/bcmath.so   /ext-out/
 
 # ── Stage 2: OxPHP runtime with WordPress extensions ─────────────
-FROM ghcr.io/oxphp/oxphp:0.9.0 AS runtime
+FROM ghcr.io/oxphp/oxphp:0.10.0 AS runtime
 USER root
 RUN apk add --no-cache icu-libs libzip libpng libjpeg-turbo freetype oniguruma
 # Drop the compiled extensions into OxPHP's PHP 8.5 extension dir

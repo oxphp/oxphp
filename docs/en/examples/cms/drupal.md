@@ -9,7 +9,7 @@ Drupal 11 uses `web/index.php` as a front controller with clean URLs (every non-
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/web` overrides the default `…/public`)
 - **Extensions added:** `gd`, `pdo_mysql`, `zip`, `mbstring`
 - **Services:** OxPHP + MySQL
@@ -37,7 +37,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

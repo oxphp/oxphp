@@ -130,7 +130,7 @@ OxPHP записывает предупреждение в лог и продо�
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.9.0
+  ghcr.io/oxphp/oxphp:0.10.0
 ```
 
 ### Ответ 429 всё равно показывает стандартное тело
@@ -142,7 +142,7 @@ docker run --rm -v ./errors:/var/www/errors:ro \
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.9.0
+    image: ghcr.io/oxphp/oxphp:0.10.0
     ports:
       - "8080:8080"
     volumes:

@@ -11,7 +11,7 @@ WordPress — это приложение **traditional-режима**: у не�
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5) — расширяется на месте
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5) — расширяется на месте
 - **Режим маршрутизации:** Traditional (без `ENTRY_FILE`)
 - **Добавленные расширения:** `mysqli`, `pdo_mysql`, `gd`, `zip`, `intl`, `exif`, `bcmath`
 - **Сервисы:** OxPHP + MySQL + сайдкар WP-CLI (профиль `cli`)
@@ -58,7 +58,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && mkdir -p /ext-out \
           "$EXT_DIR"/bcmath.so   /ext-out/
 
 # ── Стадия 2: runtime OxPHP с расширениями WordPress ─────────────
-FROM ghcr.io/oxphp/oxphp:0.9.0 AS runtime
+FROM ghcr.io/oxphp/oxphp:0.10.0 AS runtime
 USER root
 RUN apk add --no-cache icu-libs libzip libpng libjpeg-turbo freetype oniguruma
 # Подкладываем скомпилированные расширения в каталог расширений PHP 8.5 OxPHP

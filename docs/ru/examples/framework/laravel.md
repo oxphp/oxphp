@@ -9,7 +9,7 @@ Laravel — это каноническое приложение для framewor
 
 ## Стек вкратце
 
-- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.9.0` (PHP 8.5)
+- **Образ OxPHP:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
 - **Режим маршрутизации:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` оставлен по умолчанию `/var/www/html/public`)
 - **Добавленные расширения:** `pdo_mysql`, `intl`
 - **Сервисы:** OxPHP + MySQL
@@ -50,7 +50,7 @@ DB_PASSWORD=laravel
 `src/Dockerfile` — копирует OxPHP в базовый образ `php:8.5-zts-alpine`, который несёт runtime-расширения Laravel:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

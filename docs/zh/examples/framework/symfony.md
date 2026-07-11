@@ -9,7 +9,7 @@ Symfony 的 `public/index.php` front controller 可直接套用 OxPHP 的 [frame
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0`（PHP 8.5）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0`（PHP 8.5）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT` 保持默认的 `/var/www/html/public`）
 - **新增扩展：** `intl`、`mbstring`（Symfony 推荐的基线；运行时严格来说只需要核心扩展）
 - **服务：** 仅 OxPHP
@@ -35,7 +35,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

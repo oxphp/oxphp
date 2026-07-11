@@ -9,7 +9,7 @@ Drupal 11 使用 `web/index.php` 作为 front controller，并启用 clean URL�
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0-php8.4-alpine3.23`（PHP 8.4）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23`（PHP 8.4）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT=/var/www/html/web` 覆盖默认的 `…/public`）
 - **新增扩展：** `gd`、`pdo_mysql`、`zip`、`mbstring`
 - **服务：** OxPHP + MySQL
@@ -37,7 +37,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

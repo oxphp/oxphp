@@ -9,7 +9,7 @@ Craft CMS 使用 `web/index.php` 作为前端控制器（front controller），�
 
 ## 技术栈一览
 
-- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.9.0`（PHP 8.5）
+- **OxPHP 镜像：** `ghcr.io/oxphp/oxphp:0.10.0`（PHP 8.5）
 - **路由模式：** Framework（`ENTRY_FILE=index.php`；`DOCUMENT_ROOT=/var/www/html/web` 覆盖默认的 `…/public`）
 - **新增扩展：** `bcmath`、`gd`、`intl`、`pdo_mysql`、`mbstring`、`zip`
 - **服务：** OxPHP + MySQL（8.4 LTS）
@@ -33,7 +33,7 @@ Craft 从环境变量读取数据库连接，因此除了控制台写入的那�
 `src/Dockerfile`：
 
 ```dockerfile
-ARG OXPHP_VERSION=0.9.0
+ARG OXPHP_VERSION=0.10.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
