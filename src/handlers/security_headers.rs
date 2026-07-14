@@ -5,7 +5,7 @@ use crate::events::{EventHandler, Priority, Propagation};
 
 /// Adds security headers to every response: `X-Content-Type-Options`, `X-Frame-Options`,
 /// and `Content-Security-Policy: frame-ancestors`. Frame protection is controlled by the
-/// `FRAME_OPTIONS` environment variable (default: `DENY`).
+/// `FRAME_OPTIONS` environment variable (default: `SAMEORIGIN`).
 pub struct SecurityHeadersHandler {
     frame_options: Option<HeaderValue>,
     frame_ancestors: Option<HeaderValue>,
@@ -26,11 +26,11 @@ impl SecurityHeadersHandler {
             _ => {
                 tracing::warn!(
                     value = %raw,
-                    "Invalid FRAME_OPTIONS value, defaulting to DENY"
+                    "Invalid FRAME_OPTIONS value, defaulting to SAMEORIGIN"
                 );
                 (
-                    Some(HeaderValue::from_static("DENY")),
-                    Some(HeaderValue::from_static("frame-ancestors 'none'")),
+                    Some(HeaderValue::from_static("SAMEORIGIN")),
+                    Some(HeaderValue::from_static("frame-ancestors 'self'")),
                 )
             }
         };
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_frame_deny() {
+    fn test_frame_deny() {
         let handler = SecurityHeadersHandler::new("DENY");
         let mut event = make_event();
 
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_value_defaults_deny() {
+    fn test_invalid_value_defaults_sameorigin() {
         let handler = SecurityHeadersHandler::new("GARBAGE");
         let mut event = make_event();
 
@@ -238,7 +238,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "DENY"
+            "SAMEORIGIN"
         );
         assert_eq!(
             event
@@ -248,7 +248,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "frame-ancestors 'none'"
+            "frame-ancestors 'self'"
         );
     }
 

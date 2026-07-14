@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The default `FRAME_OPTIONS` is now `SAMEORIGIN` instead of `DENY`.** Out of the box OxPHP now allows a page to be framed by other pages on the same origin, while still blocking the cross-origin framing that clickjacking relies on — matching the common default of nginx, Rails, and other servers, and unbreaking legitimate same-origin embedding (admin previews, dashboard widgets, same-origin payment components) that `DENY` blocked. This is a slight relaxation of the default policy: a deployment that relied on the built-in `DENY` to forbid *all* framing, including same-origin, must now set `FRAME_OPTIONS=DENY` explicitly to keep that behavior. The emitted headers are unchanged per value (`SAMEORIGIN` → `X-Frame-Options: SAMEORIGIN` + `Content-Security-Policy: frame-ancestors 'self'`), and an application that sets its own `X-Frame-Options` or a CSP `frame-ancestors` directive still overrides the server default entirely. An invalid `FRAME_OPTIONS` value now falls back to `SAMEORIGIN` (the new default) rather than `DENY`.
+
 ## [0.10.0] - 2026-07-12
 
 ### Migration from 0.9.0

@@ -17,3 +17,6 @@ headers/test_server_header_present | GET | | 200 | server:OxPHP
 headers/test_date_header_present | GET | | 200 | date:exists
 headers/test_request_id_header | GET | | 200 | x-request-id:exists
 headers/test_request_id_passthrough | GET | -H "X-Request-ID: abc123" | 200 | x-request-id:abc123
+headers/test_frame_options_default | GET | | 200 | x-frame-options:SAMEORIGIN, content-security-policy:~ancestors, x-content-type-options:nosniff
+headers/test_frame_options_app_xfo_wins | GET | | 200 | x-frame-options:DENY, content-security-policy:missing
+headers/test_frame_options_app_csp_wins | GET | | 200 | content-security-policy:~partner.example.com, x-frame-options:missing

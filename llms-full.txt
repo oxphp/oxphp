@@ -13940,13 +13940,36 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FRAME_OPTIONS` | `DENY` | Clickjacking protection. `DENY` blocks all framing, `SAMEORIGIN` allows same-origin framing, `off` disables (use when managing framing via your own CSP). Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors`. Server security headers are fallbacks: values set by the application (e.g. PHP `header()`) take precedence and are never overwritten. The framing pair is linked both ways — an application-set `X-Frame-Options` suppresses the server `Content-Security-Policy: frame-ancestors` (CSP overrides `X-Frame-Options` in modern browsers), and an application CSP containing a `frame-ancestors` directive suppresses the server `X-Frame-Options`. Note this precedence also applies to `X-Content-Type-Options`: an application-set value is kept as-is even though `nosniff` is its only valid value — an invalid value disables the protection |
+| `FRAME_OPTIONS` | `SAMEORIGIN` | Clickjacking protection. `SAMEORIGIN` allows framing only by pages on the same origin, `DENY` blocks all framing, `off` disables (use when managing framing via your own CSP). Any other value falls back to the `SAMEORIGIN` default with a startup warning. Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` on every response. See [Clickjacking protection](#clickjacking-protection) below for the emitted header values, how server headers defer to application-set ones, and guidance on choosing a value |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
 | `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention) |
 | `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
+
+### Clickjacking protection
+
+Clickjacking is an attack where a hostile page embeds your site in an invisible `<iframe>` and tricks the user into clicking something they can't see — a "yes, delete my account" button, a one-click purchase, an OAuth "authorize" prompt. The defense is to tell the browser who, if anyone, is allowed to frame your pages. `FRAME_OPTIONS` controls this.
+
+Because two headers govern framing — the legacy `X-Frame-Options` (understood by all browsers) and the modern `Content-Security-Policy: frame-ancestors` (which supersedes it where both are present) — OxPHP emits **both** so the policy holds on old and new browsers alike. A single `FRAME_OPTIONS` value maps to a matching pair:
+
+| `FRAME_OPTIONS` | `X-Frame-Options` | `Content-Security-Policy` | Who may frame your pages |
+|-----------------|-------------------|---------------------------|--------------------------|
+| `SAMEORIGIN` (default) | `SAMEORIGIN` | `frame-ancestors 'self'` | Only pages on the same origin |
+| `DENY` | `DENY` | `frame-ancestors 'none'` | No one, not even your own pages |
+| `off` | *(not sent)* | *(not sent)* | Anyone — no framing restriction from the server |
+
+**Choosing a value.** `SAMEORIGIN` is the default: it blocks the cross-origin framing that clickjacking actually relies on, while still letting your own pages embed each other — which many apps legitimately do (admin previews, dashboard widgets, payment components hosted on the same origin). Choose `DENY` when nothing on your site is ever meant to be framed, not even by itself, for the strictest posture. Choose `off` only when you manage framing yourself through a full `Content-Security-Policy` your application sets — see below.
+
+**Framing external origins.** Neither `X-Frame-Options` value can name a specific allowed origin (`ALLOW-FROM` was removed from the standard). To permit a named third party to frame your pages, set `FRAME_OPTIONS=off` and have your application emit its own `Content-Security-Policy` with an explicit `frame-ancestors` list, e.g. `header("Content-Security-Policy: frame-ancestors 'self' https://partner.example.com");`.
+
+**Application headers win.** The server headers are fallbacks, applied only when the response carries no such header — an application that sets its own `X-Frame-Options` or `Content-Security-Policy` via PHP `header()` keeps it untouched. The two framing headers are treated as one policy, so the server never contradicts the application:
+
+- If your app sets `X-Frame-Options`, OxPHP skips its `frame-ancestors` fallback (a server CSP would override your app's choice in modern browsers).
+- If your app sets a `Content-Security-Policy` that contains a `frame-ancestors` directive, OxPHP skips its `X-Frame-Options` fallback (a stricter server `X-Frame-Options` would over-block in legacy browsers that ignore CSP).
+
+The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `nosniff` on every response: an application-set value is kept verbatim. Note that `nosniff` is the only value that does anything — an application overriding it with anything else silently disables MIME-sniffing protection.
 
 ## TLS
 
