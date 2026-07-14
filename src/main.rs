@@ -404,7 +404,7 @@ async fn async_main(
     )));
     dispatcher.on(handlers::server_header::ServerHeaderHandler);
     dispatcher.on(handlers::security_headers::SecurityHeadersHandler::new(
-        &std::env::var("FRAME_OPTIONS").unwrap_or_else(|_| "DENY".to_string()),
+        &std::env::var("FRAME_OPTIONS").unwrap_or_else(|_| "SAMEORIGIN".to_string()),
     ));
     if config.access_log != oxphp::config::AccessLogLevel::Off {
         dispatcher.on(handlers::access_log::AccessLogHandler::new(

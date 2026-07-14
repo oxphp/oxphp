@@ -103,13 +103,36 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 | 变量 | 默认值 | 描述 |
 |------|--------|------|
-| `FRAME_OPTIONS` | `DENY` | 点击劫持防护。`DENY` 禁止所有框架嵌入，`SAMEORIGIN` 允许同源嵌入，`off` 关闭（适用于通过自定义 CSP 管理框架策略的场景）。同时设置 `X-Frame-Options` 和 `Content-Security-Policy: frame-ancestors`。服务器安全头仅作为兜底：应用程序设置的值（例如 PHP 中的 `header()`）优先，永远不会被覆盖。框架嵌入这对头部双向联动：应用程序设置的 `X-Frame-Options` 会抑制服务器的 `Content-Security-Policy: frame-ancestors`（现代浏览器中 CSP 优先于 `X-Frame-Options`），而应用程序 CSP 中包含 `frame-ancestors` 指令时也会抑制服务器的 `X-Frame-Options`。此优先级同样适用于 `X-Content-Type-Options`：应用程序设置的值会原样保留，尽管其唯一有效值是 `nosniff` —— 无效值会使该防护失效 |
+| `FRAME_OPTIONS` | `SAMEORIGIN` | 点击劫持防护。`SAMEORIGIN` 仅允许同源页面嵌入框架，`DENY` 禁止所有框架嵌入，`off` 关闭（适用于通过自定义 CSP 管理框架策略的场景）。任何其他值都会回退到默认值 `SAMEORIGIN` 并在启动时发出警告。为每个响应同时设置 `X-Frame-Options` 和 `Content-Security-Policy: frame-ancestors`。有关具体发出的头部值、服务器头部如何让位于应用程序设置的头部，以及如何选择取值，参见下方的 [点击劫持防护](#点击劫持防护) |
 | `TRUSTED_PROXIES` | *（未设置）* | 受信任的反向代理网络（逗号分隔 CIDR 或 `private`）。设置后，OxPHP 使用 rightmost-non-trusted 算法从 `Forwarded`（[RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)）或 `X-Forwarded-For` 中提取真实客户端 IP。同时处理 `X-Forwarded-Proto` 和 `X-Forwarded-Host` 以设置 `$_SERVER['HTTPS']`、`REQUEST_SCHEME`、`SERVER_NAME` 和 `SERVER_PORT`。未设置 = 功能禁用 |
 | `PHP_DENY_PATHS` | *（未设置）* | 逗号分隔的 glob 模式列表，禁止其中的 `.php` 文件通过直接 URI 执行（例如 `/uploads/**,/cache/**,/admin/legacy.php`）。模式可以指向整个目录，也可以指向单个文件。在直接文件映射模式（Traditional 与 SPA）下生效；在 Framework 与 Worker 模式下会在启动时发出警告并忽略，因为这两种模式从不直接执行任意 `.php` 文件。同时覆盖经目录索引解析到达的脚本（`/uploads/` → `uploads/index.php`）。对直接 `.php` URI 的匹配发生在任何磁盘 I/O 之前，因此被拒路径无论文件是否存在都返回相同响应（无 existence oracle）。旧名称 `PHP_DENY_DIRS` 作为已弃用别名仍被接受，启动时输出 `WARN`。参见 [PHP 执行拒绝名单](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | 命中 `PHP_DENY_PATHS` 时返回什么。可以是 HTTP 状态码 `400`–`599`（与 `ERROR_PAGES_DIR` 配合可自定义 HTML），也可以是以 `/` 开头、指向 `DOCUMENT_ROOT` 内 PHP 回退脚本的 URI 路径。脚本在 `$_SERVER` 中接收 `OXPHP_DENIED_PATH` 与 `OXPHP_DENIED_PATTERN`。启动时严格校验：文件必须存在、规范化路径必须位于 `DOCUMENT_ROOT` 内，且脚本自身不得命中 `PHP_DENY_PATHS`（防止循环） |
 | `SYMLINK_ALLOW_PATHS` | *（未设置）* | 逗号分隔的绝对路径列表，列出允许其下符号链接指向 `DOCUMENT_ROOT` 之外的路径。每个条目必须在磁盘上已存在；相对路径与不存在的路径会导致启动失败。未设置 = 不允许任何符号链接逃逸。参见 [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 特殊值 `private` 展开为所有 RFC-1918 私有网络、回环和链路本地地址（IPv4 和 IPv6）：`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、`127.0.0.0/8`、`169.254.0.0/16`、`::1/128`、`fc00::/7`、`fe80::/10`。
+
+### 点击劫持防护
+
+点击劫持是一种攻击：恶意页面把你的网站嵌入一个不可见的 `<iframe>`，诱骗用户点击他们看不见的东西——「是的，删除我的账户」按钮、一键购买、OAuth 的「授权」提示。防御手段就是告诉浏览器：谁（如果有的话）被允许把你的页面嵌入框架。这由 `FRAME_OPTIONS` 控制。
+
+由于有两个头部管理框架嵌入——旧的 `X-Frame-Options`（所有浏览器都识别）和新的 `Content-Security-Policy: frame-ancestors`（两者并存时它优先）——OxPHP 会**同时**发出两者，使策略在新旧浏览器上都生效。单个 `FRAME_OPTIONS` 值会映射为匹配的一对：
+
+| `FRAME_OPTIONS` | `X-Frame-Options` | `Content-Security-Policy` | 谁可以嵌入你的页面 |
+|-----------------|-------------------|---------------------------|---------------------|
+| `SAMEORIGIN`（默认） | `SAMEORIGIN` | `frame-ancestors 'self'` | 仅同源页面 |
+| `DENY` | `DENY` | `frame-ancestors 'none'` | 任何人都不行，连你自己的页面也不行 |
+| `off` | *（不发送）* | *（不发送）* | 任何人——服务器不施加任何框架嵌入限制 |
+
+**如何选择取值。** `SAMEORIGIN` 是默认值：它阻止点击劫持真正依赖的跨源框架嵌入，同时仍允许你自己的页面互相嵌入——许多应用都合法需要这一点（后台预览、仪表盘小组件、同源托管的支付组件）。当你网站上的任何内容都绝不应被嵌入框架（连它自己也不行）时，选择 `DENY`，这是最严格的策略。仅当你通过应用程序自行设置的完整 `Content-Security-Policy` 来管理框架嵌入时，才选择 `off`（见下文）。
+
+**允许外部源嵌入。** 任何一个 `X-Frame-Options` 取值都无法指定某个具体的被允许源（`ALLOW-FROM` 已从标准中移除）。要允许某个指定的第三方嵌入你的页面，请设置 `FRAME_OPTIONS=off`，并由应用程序发出自己的 `Content-Security-Policy`，其中带有显式的 `frame-ancestors` 列表，例如 `header("Content-Security-Policy: frame-ancestors 'self' https://partner.example.com");`。
+
+**应用程序头部优先。** 服务器头部仅作为兜底，只在响应中尚无该头部时才应用——通过 PHP `header()` 设置了自己的 `X-Frame-Options` 或 `Content-Security-Policy` 的应用程序会保持其原样不动。两个框架嵌入头部被视为同一策略，因此服务器绝不会与应用程序相矛盾：
+
+- 如果应用程序设置了 `X-Frame-Options`，OxPHP 会跳过它的 `frame-ancestors` 兜底（服务器 CSP 在现代浏览器中会覆盖应用程序的选择）。
+- 如果应用程序设置了包含 `frame-ancestors` 指令的 `Content-Security-Policy`，OxPHP 会跳过它的 `X-Frame-Options` 兜底（更严格的服务器 `X-Frame-Options` 会在忽略 CSP 的旧浏览器中过度阻止）。
+
+同样的优先级也适用于 `X-Content-Type-Options`，OxPHP 会在每个响应上把它设为 `nosniff`：应用程序设置的值会被逐字保留。请注意，`nosniff` 是唯一有实际作用的值——应用程序用其他任何值覆盖它都会悄然关闭 MIME 嗅探防护。
 
 ## TLS
 
