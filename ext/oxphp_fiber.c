@@ -151,6 +151,31 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
  *
  * If the handler suspends mid-request (oxphp_sleep/oxphp_async_await), the
  * scheduler creates additional fibers for concurrent requests. */
+
+/* Capture the in-flight exception into bridge TLS for the worker send path, so
+ * the root SERVER span can carry it without any PHP-side integration.
+ * EG(exception) must be live (called before OBJ_RELEASE). Reads file/line from
+ * the Throwable's own properties (throw origin); oxphp_exception_capture handles
+ * class (borrowed, length-delimited), message + getTraceAsString (malloc'd). */
+static void oxphp_capture_unhandled(zend_object *ex) {
+    const char *cls = NULL;
+    char *msg = NULL, *trace = NULL;
+    size_t cls_len = 0, msg_len = 0, trace_len = 0;
+    oxphp_exception_capture(ex, &cls, &cls_len, &msg, &msg_len, &trace, &trace_len);
+
+    zval rv_f, rv_l;
+    zval *fz = zend_read_property(ex->ce, ex, "file", sizeof("file") - 1, 1, &rv_f);
+    zval *lz = zend_read_property(ex->ce, ex, "line", sizeof("line") - 1, 1, &rv_l);
+    const char *file = (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRVAL_P(fz) : NULL;
+    size_t file_len = (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRLEN_P(fz) : 0;
+    uint32_t line = (lz && Z_TYPE_P(lz) == IS_LONG) ? (uint32_t)Z_LVAL_P(lz) : 0;
+
+    oxphp_bridge_set_unhandled_exc(cls, cls_len, msg, msg_len, trace, trace_len,
+                                   file, file_len, line);
+    free(msg);
+    free(trace);
+}
+
 static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
     /* Retrieve fiber pointer via kind — set during zend_fiber_init_context() */
     oxphp_request_fiber *fiber = (oxphp_request_fiber *)EG(current_fiber_context)->kind;
@@ -190,6 +215,15 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
             if (EG(exception)) {
                 if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
                     fiber->handler_failed = true;
+                    /* Normal (non-bailout) unwind of an uncaught handler
+                     * exception — the worker's only path to observe it, since
+                     * the fiber swallows it before zend_exception_error runs.
+                     * Capture the live object for the root span before release.
+                     * (The zend_catch arm below is the zend_bailout/fatal path:
+                     * fatals are already recorded by oxphp_error_cb, and calling
+                     * getTraceAsString there could re-bailout — so no capture
+                     * there.) */
+                    oxphp_capture_unhandled(EG(exception));
                 }
                 OBJ_RELEASE(EG(exception));
                 EG(exception) = NULL;
