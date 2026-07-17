@@ -17,11 +17,14 @@
 #
 # Root-span auto-capture scenarios: UNCAUGHT (raw uncaught exception), FATAL
 # (classless E_USER_ERROR), CHAINED (outer wraps a cause — must bucket on the
-# thrown class, not the root cause), HANDLED (set_exception_handler swallows —
-# no event, with a positive control), WORKER (fiber-catch C capture — class /
-# trace / file / line), and WORKER-B (a request parked in a suspending shutdown
-# function keeps its capture while another request runs on the same worker
-# thread — the per-fiber save/restore guard).
+# thrown class, not the root cause), FORGE (a message forging a "\n\nNext
+# FakeClass: …" segment — the structural throw-hook class must win over the text
+# parse), STREAM (a 5xx that starts streaming then throws a late fatal — the
+# event must still reach the span via the deferred RequestComplete), HANDLED
+# (set_exception_handler swallows — no event, with a positive control), WORKER
+# (fiber-catch C capture — class / trace / file / line), and WORKER-B (a request
+# parked in a suspending shutdown function keeps its capture while another
+# request runs on the same worker thread — the per-fiber save/restore guard).
 #
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
@@ -70,6 +73,8 @@ docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/uncaught.php":/var/www/html/public/uncaught.php:ro \
 	-v "$FIX/fatal.php":/var/www/html/public/fatal.php:ro \
 	-v "$FIX/chained.php":/var/www/html/public/chained.php:ro \
+	-v "$FIX/forge.php":/var/www/html/public/forge.php:ro \
+	-v "$FIX/stream_fatal.php":/var/www/html/public/stream_fatal.php:ro \
 	-v "$FIX/handled.php":/var/www/html/public/handled.php:ro \
 	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
 	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
@@ -132,6 +137,10 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "fatal HTTP %{http_code}\n" "http://$SRV:80/fatal.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "chained HTTP %{http_code}\n" "http://$SRV:80/chained.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "forge HTTP %{http_code}\n" "http://$SRV:80/forge.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "stream_fatal HTTP %{http_code}\n" "http://$SRV:80/stream_fatal.php"
 # Capture handled's body as a positive control — proves handled.php actually ran
 # (its set_exception_handler fired) so the "no event" assertion is meaningful and
 # not a false pass from a 404 / parse error.
@@ -140,17 +149,17 @@ HANDLED_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest \
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "worker HTTP %{http_code}\n" "http://$WRK:80/boom"
 
-# Scenario B: /a-fail throws then parks its capture in a suspending shutdown
-# function; drive /b-ok on the same single-thread worker while /a-fail is parked.
-# The parked capture must survive so /a-fail's message still reaches its span.
+# Scenario B: /a-fail throws, then parks its capture in a suspending shutdown
+# function (signalled by a marker file). /b-ok deterministically spin-waits for
+# that marker before returning, so it provably overlaps /a-fail's parked phase on
+# the single worker thread — the parked capture must survive that overlap. No
+# fixed sleep: /b-ok's cooperative wait removes the timing race entirely. The
+# --max-time bounds the run if the marker never appears (a real regression).
 docker run --rm --network "$NET" curlimages/curl:latest \
-	-s -o /dev/null "http://$WRK:80/a-fail" &
-# /a-fail parks for ~800ms in its shutdown sleep; fire /b-ok well inside that
-# window so the two overlap on the single worker thread.
-sleep 0.2
-BOK_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
-	-s -o /dev/null -w "%{http_code}" "http://$WRK:80/b-ok")"
-echo "a-fail(bg)/b-ok HTTP $BOK_CODE"
+	-s -o /dev/null --max-time 30 "http://$WRK:80/a-fail" &
+BOK_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s --max-time 30 "http://$WRK:80/b-ok")"
+echo "a-fail(bg)/b-ok body: $BOK_BODY"
 wait
 
 # Let the batch span processor flush to the collector.
@@ -233,6 +242,22 @@ echo "$LOGS" | grep -qF 'Next DomainException: chained outer: api failed' \
 echo "$LOGS" | grep -qF 'exception.file: Str(/var/www/html/public/chained.php)' \
 	&& ok "chained: file is thrown site" || bad "chained: file is thrown site"
 
+# Scenario FORGE: the exception's message forges a "\n\nNext FakeClass: …"
+# segment. The structural throw-hook class (ForgeReal) must win — a text parse
+# would have taken FakeClass. Proves the traditional-path class is captured from
+# the engine, not the (partly user-controlled) fatal text.
+echo "$LOGS" | grep -qF 'exception.type: Str(ForgeReal)' \
+	&& ok "forge: structural class wins" || bad "forge: structural class wins"
+echo "$LOGS" | grep -qF 'exception.type: Str(FakeClass)' \
+	&& bad "forge: forged class must NOT appear" || ok "forge: forged class rejected"
+
+# Scenario STREAM: a 5xx response commits its headers and starts streaming, THEN
+# a fatal is thrown. The status is already on the wire, but the exception event
+# must still reach the root span — its final errors are delivered when the stream
+# closes and RequestComplete is deferred until then.
+echo "$LOGS" | grep -qF 'exception.message: Str(stream fatal after headers)' \
+	&& ok "stream: late fatal reaches span" || bad "stream: late fatal reaches span"
+
 # Scenario HANDLED (negative + positive control): set_exception_handler consumed
 # the exception and rendered its own 500. The positive control proves the handler
 # actually ran (so a 404 / parse error can't turn the negative into a false pass),
@@ -254,11 +279,13 @@ echo "$LOGS" | grep -qF 'workerBoom()' \
 	&& ok "worker: stacktrace frame" || bad "worker: stacktrace frame"
 
 # Scenario WORKER-B: /a-fail threw and parked its capture in a suspending
-# shutdown function while /b-ok ran on the same single-thread worker. Per-fiber
-# save/restore must keep /b-ok's reset from wiping the parked capture, so
-# /a-fail's message still reaches its span.
-[ "$BOK_CODE" = 200 ] \
-	&& ok "worker-b: overlapping /b-ok returned 200" || bad "worker-b: overlapping /b-ok returned 200 (got $BOK_CODE)"
+# shutdown function while /b-ok ran on the same single-thread worker. /b-ok only
+# returns "b-ok:overlapped" once it observed /a-fail's parked marker, so this
+# proves a genuine overlap (not a serialized false-green). Per-fiber save/restore
+# must keep /b-ok's reset from wiping the parked capture, so /a-fail's message
+# still reaches its span.
+[ "$BOK_BODY" = "b-ok:overlapped" ] \
+	&& ok "worker-b: /b-ok provably overlapped /a-fail's parked phase" || bad "worker-b: overlap not proven (got '$BOK_BODY')"
 echo "$LOGS" | grep -qF 'exception.message: Str(scenario-b: parked capture survived)' \
 	&& ok "worker-b: parked capture survived the overlap" || bad "worker-b: parked capture survived the overlap"
 

@@ -1,26 +1,36 @@
 //! Normalize the terminal PHP error of a failed request into a `CapturedException`.
 //!
-//! Two shapes feed in:
+//! Every failing request now carries the uncaught exception's class
+//! *structurally* in `exception_class` — the worker fiber-catch site sets it
+//! from `EG(exception)->ce`, and the traditional path sets it from a
+//! `zend_throw_exception_hook` snapshot taken at throw time. So the class (the
+//! error-inbox bucketing key) is never derived from the formatted, partly
+//! user-controlled fatal text.
+//!
+//! Two message shapes still feed in:
+//! * Worker — a clean `message` (the exception's own message) plus a structural
+//!   `stacktrace` (`getTraceAsString`). Used verbatim.
 //! * Traditional/Framework/SPA — `oxphp_error_cb` records the engine's uncaught
 //!   fatal as `E_ERROR` with message `Uncaught <Class>: <msg> in <file>:<line>\n
-//!   Stack trace:\n<trace>\n  thrown`. Parsed here.
-//! * Worker — the fiber catch site pre-fills `exception_class`/`stacktrace`
-//!   structurally; used directly, no parsing.
+//!   Stack trace:\n<trace>\n  thrown`. The `message`/`stacktrace` are parsed out
+//!   of that text, but the structural `exception_class` overrides whatever class
+//!   the text would yield — so a message that forges a `\n\nNext <FakeClass>: …`
+//!   segment cannot poison `exception.type`.
 
 use crate::types::{CapturedException, PhpScriptError};
 
 /// Scan a request's error stream for the terminal failure and normalize it.
 /// `None` if there is none.
 ///
-/// Prefers the actual uncaught exception (worker: `exception_class` set;
-/// traditional: an `Uncaught …` fatal) over a plain error raised later by a
-/// shutdown function — those run *after* the terminating error is recorded and
-/// would otherwise shadow the exception that really failed the request. Falls
-/// back to the last `error`-level entry when no uncaught exception is present.
+/// Prefers the *earliest* uncaught exception (structural `exception_class`, or a
+/// traditional `Uncaught …` fatal) over one raised *later* by a shutdown
+/// function — shutdown callbacks run after the terminating error is recorded, so
+/// the earliest uncaught is the one that actually failed the request (matching
+/// the worker path, which records the escaping exception once). Falls back to the
+/// last `error`-level entry when no uncaught exception is present.
 pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<CapturedException> {
     let err = errors
         .iter()
-        .rev()
         .find(|e| {
             e.level == "error"
                 && (e.exception_class.is_some() || e.message.starts_with("Uncaught "))
@@ -33,8 +43,28 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
     let file = (!err.file.is_empty() && err.file != "unknown").then(|| err.file.clone());
     let line = (err.line != 0).then_some(err.line);
 
-    // Worker path pre-fills the class structurally — use it verbatim.
+    // Structural class present (worker fiber-catch, or the traditional throw-hook
+    // snapshot). Use it verbatim — never the parsed text — so the bucketing key
+    // is robust.
     if let Some(class) = &err.exception_class {
+        // Traditional path: the engine's "Uncaught …" text still lives in
+        // `message` and there is no structural stacktrace. Parse the
+        // message/stacktrace out of the text (best-effort), but keep the
+        // structural class.
+        if err.stacktrace.is_none() && err.message.starts_with("Uncaught ") {
+            if let Some((_parsed_class, message, stacktrace)) =
+                parse_uncaught(&err.message, err.file.as_str(), err.line)
+            {
+                return Some(CapturedException {
+                    exception_type: class.clone(),
+                    message,
+                    stacktrace,
+                    file,
+                    line,
+                });
+            }
+        }
+        // Worker path: clean `message` + structural `stacktrace`. Use verbatim.
         return Some(CapturedException {
             exception_type: class.clone(),
             message: (!err.message.is_empty()).then(|| err.message.clone()),
@@ -44,7 +74,9 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
         });
     }
 
-    // Traditional path: parse the engine's "Uncaught …" fatal message.
+    // No structural class (the throw-hook missed, or a classless fatal). Fall
+    // back to parsing the engine's "Uncaught …" text — the class it yields is
+    // best-effort (a chained message can shift the parse; see `parse_uncaught`).
     if let Some((class, message, stacktrace)) =
         parse_uncaught(&err.message, err.file.as_str(), err.line)
     {
@@ -57,7 +89,7 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
         });
     }
 
-    // Plain fatal (undefined function, E_PARSE, …): no Throwable, no trace.
+    // Plain fatal (E_USER_ERROR, OOM, timeout, …): no Throwable, no trace.
     Some(CapturedException {
         exception_type: err.error_type.to_string(),
         message: (!err.message.is_empty()).then(|| err.message.clone()),
@@ -71,6 +103,11 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
 /// message. `file`/`line` are the structurally-known origin, used to strip the
 /// ` in <file>:<line>` header tail robustly. Returns `None` if not an uncaught
 /// message (caller falls back to plain-fatal handling).
+///
+/// The returned class is used only when no structural `exception_class` is
+/// available; the caller prefers the structural class. The `message`/`stacktrace`
+/// are always taken from here on the traditional path — they describe the
+/// outermost (thrown) exception, the last chain segment.
 fn parse_uncaught(
     msg: &str,
     file: &str,
@@ -90,10 +127,11 @@ fn parse_uncaught(
     // `Exception::__toString` (Zend/zend_exceptions.c) renders a chain
     // root-cause-first and appends the thrown exception after the final
     // "\n\nNext "; the `Uncaught` fatal's file:line is the thrown exception's
-    // origin (`file`/`line` here). Take that last chain segment's header so
-    // type/message describe the thrown exception — not the root cause — since
-    // both must agree for error-inbox bucketing, and the traditional path must
-    // match the worker path (which reads the class from `EG(exception)->ce`).
+    // origin (`file`/`line` here). Take that last chain segment's header so the
+    // parsed message describes the thrown exception, not the root cause. (This
+    // fallback class can be shifted by a message containing a literal "\n\nNext "
+    // — which is exactly why the caller overrides it with the structural class
+    // whenever one is present.)
     let outer = body.rsplit("\n\nNext ").next().unwrap_or(body);
     let outer_header = outer
         .split_once("\nStack trace:\n")
@@ -237,6 +275,56 @@ mod tests {
         let c = extract_unhandled_exception(&errs).unwrap();
         assert_eq!(c.exception_type, "RuntimeException");
         assert_eq!(c.message.as_deref(), Some("real killer"));
+    }
+
+    #[test]
+    fn earliest_uncaught_wins_over_shutdown_uncaught() {
+        // Handler throws (recorded first), then a shutdown function throws its
+        // own *uncaught* exception (recorded later, structural class too). The
+        // span must report the request-killer, not the shutdown-time throw —
+        // matching the worker path, which records the escaping exception once.
+        let mut killer = err(
+            "error",
+            "E_ERROR",
+            "Uncaught RuntimeException: real killer in /app.php:9\nStack trace:\n#0 {main}\n  thrown",
+            "/app.php",
+            9,
+        );
+        killer.exception_class = Some("RuntimeException".into());
+        let mut shutdown = err(
+            "error",
+            "E_ERROR",
+            "Uncaught JsonException: shutdown blew up in /sd.php:3\nStack trace:\n#0 {main}\n  thrown",
+            "/sd.php",
+            3,
+        );
+        shutdown.exception_class = Some("JsonException".into());
+        let c = extract_unhandled_exception(&[killer, shutdown]).unwrap();
+        assert_eq!(c.exception_type, "RuntimeException");
+        assert_eq!(c.message.as_deref(), Some("real killer"));
+    }
+
+    #[test]
+    fn traditional_structural_class_overrides_forged_message() {
+        // Traditional path: the throw-hook captured the real class structurally,
+        // while the engine's fatal text carries a user message that forges a
+        // "\n\nNext FakeClass: …" segment. exception.type must be the structural
+        // class, never the forged one; message/stacktrace still come from the text.
+        let mut e = err(
+            "error",
+            "E_ERROR",
+            "Uncaught RealException: oops\n\nNext FakeClass: pwned in /app.php:5\nStack trace:\n#0 {main}\n  thrown",
+            "/app.php",
+            5,
+        );
+        e.exception_class = Some("RealException".into());
+        let c = extract_unhandled_exception(&[e]).unwrap();
+        assert_eq!(c.exception_type, "RealException");
+        assert_ne!(c.exception_type, "FakeClass");
+        assert_eq!(c.file.as_deref(), Some("/app.php"));
+        assert_eq!(c.line, Some(5));
+        // A traditional structural entry still gets its trace from the text.
+        assert!(c.stacktrace.as_deref().unwrap().contains("{main}"));
     }
 
     #[test]

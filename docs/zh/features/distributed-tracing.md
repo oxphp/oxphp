@@ -192,6 +192,8 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 **worker 模式不经过 `set_exception_handler()`。** worker 运行时直接捕获从 `oxphp_worker()` 闭包中逃逸的异常——它不会调用引擎的用户异常处理器。因此对于 worker 处理器，只要异常离开闭包就会触发自动捕获，即使代码注册了自己的 `set_exception_handler()`（该处理器仅适用于闭包自身捕获的异常，而非从中逃逸的异常）。
 
+**流式响应。** 对于流式响应（SSE 或任何 `oxphp_stream_flush()` 循环），一旦响应头发出，HTTP 状态就已固定。在响应已提交 **5xx** 状态*之后*抛出的致命错误仍会被捕获——请求的完成会推迟到流关闭，使这个迟到的错误到达根 span。但已经发送 **2xx** 的流无法事后改判为 5xx：进行中的 2xx 流上的致命错误会被记录，但不会为根 span 添加 `exception` 事件（trace 中仍显示该 span，只是没有 `exception` 事件）。
+
 ### OTel 与请求 ID
 
 OTel 插件激活时，请求 ID 从 trace context 派生：trace ID 的前 16 个字符和 span ID 的前 8 个字符，以连字符分隔。这会出现在日志、`X-Request-ID` 响应头以及 PHP 中的 `oxphp_request_id()` 中。

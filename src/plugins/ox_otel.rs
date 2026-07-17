@@ -334,8 +334,8 @@ impl Plugin for OtelPlugin {
         // same bare `OTEL_APM_*_MAX_BYTES` knobs as the APM child-span path so a
         // single operator setting drives both, with the same warn-on-typo and
         // blank-is-default behavior. `0` = no truncation.
-        let message_max = read_byte_cap("OTEL_APM_MESSAGE_MAX_BYTES", 4096);
-        let stacktrace_max = read_byte_cap("OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
+        let message_max = read_byte_cap(ctx, "OTEL_APM_MESSAGE_MAX_BYTES", 4096);
+        let stacktrace_max = read_byte_cap(ctx, "OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
 
         // Register handlers
         ctx.on_request(OtelRequestHandler);
@@ -433,13 +433,15 @@ impl PluginRequestHandler for OtelRequestHandler {
 
 // ─── Unhandled-exception event ──────────────────────────────
 
-/// Parse a byte-cap env var, warning (rather than silently defaulting) on a
+/// Parse a byte-cap env var through `PluginContext::config` (so the plugin reads
+/// its own configuration the same way every other plugin does, honoring a
+/// plugin-prefixed override), warning — rather than silently defaulting — on a
 /// malformed value so an operator's typo surfaces. Unset or blank uses
 /// `default`. Mirrors the APM plugin's `read_cap`, so the shared
 /// `OTEL_APM_*_MAX_BYTES` knobs behave the same on the root-span path (here) and
 /// the child-span path.
-fn read_byte_cap(env: &str, default: usize) -> usize {
-    match std::env::var(env).ok().as_deref().map(str::trim) {
+fn read_byte_cap(ctx: &PluginContext, env: &str, default: usize) -> usize {
+    match ctx.config(env).as_deref().map(str::trim) {
         None | Some("") => default,
         Some(v) => match v.parse() {
             Ok(n) => n,
@@ -503,7 +505,12 @@ fn exception_event(
     } else {
         exc.exception_type.clone()
     };
-    let mut attrs = vec![KeyValue::new("exception.type", ty)];
+    // Omit `exception.type` when empty (a degenerate parse), matching the APM
+    // child-span path — some backends drop an event whose type is a blank string.
+    let mut attrs = Vec::with_capacity(6);
+    if !ty.is_empty() {
+        attrs.push(KeyValue::new("exception.type", ty));
+    }
     if let Some(m) = &exc.message {
         attrs.push(KeyValue::new(
             "exception.message",
@@ -582,13 +589,24 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 
         // Auto-capture the unhandled exception / fatal that failed a 5xx request,
         // so the root SERVER span carries it without any PHP-side integration.
-        let unhandled = if status_code >= 500 {
-            crate::php::unhandled_exception::extract_unhandled_exception(view.php_errors)
+        // Build the (already byte-capped) event here, BEFORE the spawn, so a
+        // multi-megabyte message/stacktrace is truncated on the hot path and only
+        // the bounded event — not the full-size `CapturedException` — is moved
+        // into the background task.
+        let unhandled_event = if status_code >= 500 {
+            crate::php::unhandled_exception::extract_unhandled_exception(view.php_errors).map(
+                |exc| {
+                    exception_event(
+                        &exc,
+                        std::time::SystemTime::now(),
+                        self.message_max,
+                        self.stacktrace_max,
+                    )
+                },
+            )
         } else {
             None
         };
-        let message_max = self.message_max;
-        let stacktrace_max = self.stacktrace_max;
 
         // Span building + OTel export happens off the hot path
         tokio::spawn(async move {
@@ -653,13 +671,8 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 .with_attributes(attributes)
                 .with_status(status);
 
-            if let Some(exc) = &unhandled {
-                builder = builder.with_events(vec![exception_event(
-                    exc,
-                    end_time,
-                    message_max,
-                    stacktrace_max,
-                )]);
+            if let Some(event) = unhandled_event {
+                builder = builder.with_events(vec![event]);
             }
 
             if let Some(parent_sid) = parent_span_id {
@@ -694,6 +707,53 @@ mod tests {
     use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
+    use std::borrow::Cow;
+
+    // `truncate_attr` is owned by this plugin (the APM plugin re-uses it), so its
+    // unit tests live here — an otel-only build still exercises the helper.
+    #[test]
+    fn truncate_short_is_borrowed() {
+        let s = "#0 /app/x.php(1): f()\n#1 {main}";
+        match truncate_attr(s, 8192) {
+            Cow::Borrowed(b) => assert_eq!(b, s),
+            Cow::Owned(_) => panic!("short trace must not be copied"),
+        }
+    }
+
+    #[test]
+    fn truncate_zero_disables() {
+        let s = "a".repeat(100_000);
+        assert!(matches!(truncate_attr(&s, 0), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn truncate_long_marks_and_bounds() {
+        let s = "x".repeat(20_000);
+        let out = truncate_attr(&s, 8192);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 8192, "len was {}", out.len());
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        // "é" is 2 bytes; a naive byte cut would split it and be invalid UTF-8.
+        let s = "é".repeat(100); // 200 bytes
+        let out = truncate_attr(&s, 50);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 50);
+    }
+
+    #[test]
+    fn truncate_tiny_cap_never_exceeds() {
+        // Cap smaller than the marker ("…(truncated)" = 14 bytes): the result
+        // must still be <= max_bytes, so the marker is dropped rather than
+        // overflowing the cap.
+        let s = "x".repeat(1000);
+        for cap in [1usize, 5, 13, 14, 15] {
+            let out = truncate_attr(&s, cap);
+            assert!(out.len() <= cap, "cap={cap} produced {} bytes", out.len());
+        }
+    }
 
     #[test]
     fn exception_event_carries_all_attrs() {

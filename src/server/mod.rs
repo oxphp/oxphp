@@ -206,7 +206,7 @@ impl Server {
             move |req| {
                 let server = Arc::clone(&server); // 1 Arc clone per request (was 10)
                 let closed_rx = closed_rx.clone();
-                async move { connection::handle_request(req, &server, remote_addr, closed_rx).await }
+                async move { connection::handle_request(req, server, remote_addr, closed_rx).await }
             }
         });
 

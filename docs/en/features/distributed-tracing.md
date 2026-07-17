@@ -192,6 +192,8 @@ This works for raw PHP, applications without a custom exception handler, and wor
 
 **Worker mode does not route through `set_exception_handler()`.** The worker runtime catches an exception that escapes your `oxphp_worker()` closure directly — it does not invoke the engine's user exception handler. So for worker handlers, automatic capture fires whenever an exception leaves the closure, even if the code registered its own `set_exception_handler()` (which then applies only to exceptions the closure itself catches, not to ones that escape it).
 
+**Streaming responses.** For a streamed response (SSE, or any `oxphp_stream_flush()` loop), the HTTP status is fixed once the headers are on the wire. A fatal thrown *after* a response has already committed a **5xx** status is still captured — the request's completion is deferred until the stream closes, so the late error reaches the root span. But a stream that already sent a **2xx** cannot be retroactively re-flagged as 5xx: a fatal on an in-progress 2xx stream is logged, yet adds no root-span exception event (the trace still shows the span, without the `exception` event).
+
 ### Request ID with OTel
 
 When the OTel plugin is active, request IDs are derived from the trace context: the first 16 characters of the trace ID and first 8 characters of the span ID, separated by a dash. This appears in logs, the `X-Request-ID` response header, and `oxphp_request_id()` in PHP.

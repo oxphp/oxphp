@@ -802,6 +802,15 @@ void *oxphp_bridge_take_unhandled(void);
 void oxphp_bridge_restore_unhandled(void *slot);
 void oxphp_bridge_free_unhandled(void *slot);
 
+/* Traditional-path structural class snapshot. A zend_throw_exception_hook records
+ * the class of every thrown exception; the Rust error callback reads the latest
+ * snapshot when it logs the "Uncaught …" fatal, so exception.type comes from the
+ * engine (EG(exception)->ce), never from parsing the fatal text. Install once
+ * after php_module_startup(). peek() borrows a length-delimited class name (NULL
+ * if none), valid until the next throw — copy it synchronously. */
+void oxphp_bridge_install_throw_hook(void);
+const char *oxphp_bridge_peek_thrown_class(size_t *out_len);
+
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,
     uint32_t targets

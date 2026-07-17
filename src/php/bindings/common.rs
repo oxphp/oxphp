@@ -388,6 +388,16 @@ extern "C" {
     /// leave its capture for the next request on the thread to pick up.
     pub fn oxphp_bridge_clear_unhandled();
 
+    // ─── Traditional-path structural class snapshot ─────
+    /// Install the `zend_throw_exception_hook` that records each thrown
+    /// exception's class. Call once after `php_module_startup()`.
+    pub fn oxphp_bridge_install_throw_hook();
+    /// Borrow the most-recently thrown exception's class (length-delimited via
+    /// `out_len`, NUL-inclusive for anonymous classes). Returns null if nothing
+    /// has been thrown. The pointer is valid only until the next throw — copy it
+    /// synchronously.
+    pub fn oxphp_bridge_peek_thrown_class(out_len: *mut usize) -> *const c_char;
+
     // ─── SAPI response code ─────────────────────────────
     pub fn oxphp_bridge_get_response_code() -> c_int;
 

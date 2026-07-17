@@ -3866,6 +3866,60 @@ void oxphp_bridge_free_unhandled(void *vp) {
     free(p);
 }
 
+/* ── Traditional-path structural class snapshot ────────────────
+ * The worker path reads an escaping exception's class straight from
+ * EG(exception) at the fiber-catch site. The traditional path never gets that
+ * chance: PHP nulls EG(exception) inside zend_exception_error *before* our
+ * zend_error_cb sees the "Uncaught …" text, so the class would otherwise have to
+ * be parsed out of the formatted, partly user-controlled message (where a
+ * message forging a "\n\nNext <FakeClass>: …" segment could poison the type).
+ *
+ * Instead, snapshot the class of every thrown exception here via
+ * zend_throw_exception_hook; the Rust error callback reads the most-recent
+ * snapshot when it records the Uncaught fatal and uses it as the authoritative
+ * exception.type. Any "Uncaught" fatal is, by construction, preceded by a
+ * same-request throw that overwrote this slot, so the read is never stale and no
+ * per-request reset is needed (a caught exception's leftover class is always
+ * overwritten by the next request's first throw before that request can fault).
+ * The class is length-delimited (an anonymous class name carries an embedded
+ * NUL), matching the worker capture. */
+static __thread char *thrown_class = NULL;
+static __thread size_t thrown_class_len = 0;
+
+/* Chained so another extension's hook (if any) still runs. Set once at install. */
+static void (*prev_throw_exception_hook)(zend_object *ex) = NULL;
+
+static void oxphp_throw_exception_hook(zend_object *ex) {
+    if (ex && ex->ce && ex->ce->name) {
+        /* free-old + dup-new; on OOM leave the slot empty so the Rust side
+         * falls back to text parsing rather than reporting a stale class. */
+        char *dup = unhandled_dup_n(ZSTR_VAL(ex->ce->name), ZSTR_LEN(ex->ce->name));
+        free(thrown_class);
+        thrown_class = dup;
+        thrown_class_len = dup ? ZSTR_LEN(ex->ce->name) : 0;
+    }
+    if (prev_throw_exception_hook) {
+        prev_throw_exception_hook(ex);
+    }
+}
+
+/* Install the throw hook once, after php_module_startup(). Idempotent. */
+void oxphp_bridge_install_throw_hook(void) {
+    if (zend_throw_exception_hook == oxphp_throw_exception_hook) {
+        return;
+    }
+    prev_throw_exception_hook = zend_throw_exception_hook;
+    zend_throw_exception_hook = oxphp_throw_exception_hook;
+}
+
+/* Borrow the most-recent thrown class (length-delimited, NUL-inclusive). NULL
+ * when none has been thrown. Valid until the next throw overwrites it — the Rust
+ * error callback copies it synchronously while recording the Uncaught fatal. */
+const char *oxphp_bridge_peek_thrown_class(size_t *out_len) {
+    if (out_len) *out_len = thrown_class_len;
+    return thrown_class_len ? thrown_class : NULL;
+}
+
 /* === Async Promise: Async Reset === */
 
 #include "main/php_output.h"

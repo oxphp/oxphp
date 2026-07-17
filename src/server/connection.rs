@@ -109,7 +109,7 @@ impl Drop for ClientAbortGuard {
 /// while a service handler is running.
 pub async fn handle_request(
     req: Request<Incoming>,
-    server: &Server,
+    server: std::sync::Arc<Server>,
     remote_addr: SocketAddr,
     mut closed_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Response<ResponseBody>, Infallible> {
@@ -197,7 +197,7 @@ pub async fn handle_request(
         let dispatch = dispatch_request(
             parts,
             body,
-            server,
+            &server,
             remote_addr,
             &request_id,
             &metadata,
@@ -285,6 +285,41 @@ pub async fn handle_request(
     // Handlers: MetricsResponseHandler (0), AccessLogHandler (100)
     let status = response.status().as_u16();
     let response_size = response.body().size_hint().exact().unwrap_or(0);
+
+    // A streaming response finalizes its PHP errors only when the stream closes
+    // (the script — and any late fatal — has finished). Defer RequestComplete
+    // until the worker delivers them so the observers (metrics, access log, and
+    // the OTel root-span exception event) see a fatal thrown *after* the
+    // already-sent 5xx headers. Non-streaming responses have their final errors
+    // in hand, so they dispatch inline below.
+    if let Some(late_errors_rx) = php_exec.late_errors_rx.take() {
+        let profile_tree = php_exec.profile_tree.take();
+        let queue_wait_us = php_exec.queue_wait_us;
+        let php_exec_us = php_exec.php_exec_us;
+        tokio::spawn(async move {
+            // Err = the sender was dropped (client vanished before the stream
+            // closed); fall back to no late errors.
+            let php_errors = late_errors_rx.await.unwrap_or_default();
+            let mut complete_event = RequestComplete {
+                request_id,
+                method,
+                path: path_str,
+                status,
+                duration: start.elapsed(),
+                remote_addr,
+                request_body_size: request_body_size as u64,
+                response_size,
+                metadata,
+                php_errors,
+                profile_tree,
+                queue_wait_us,
+                php_exec_us,
+            };
+            server.dispatcher.dispatch(&mut complete_event);
+        });
+        return Ok(response);
+    }
+
     let elapsed = start.elapsed();
     let mut complete_event = RequestComplete {
         request_id, // move — no clone
@@ -311,6 +346,10 @@ pub async fn handle_request(
 #[derive(Default)]
 struct PhpExecData {
     php_errors: Vec<crate::types::PhpScriptError>,
+    /// Streaming only: delivers the final `php_errors` when the stream closes.
+    /// When present, `RequestComplete` is deferred until it resolves so a fatal
+    /// thrown after the 5xx headers still reaches the root span.
+    late_errors_rx: Option<tokio::sync::oneshot::Receiver<Vec<crate::types::PhpScriptError>>>,
     profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     queue_wait_us: Option<u64>,
     php_exec_us: Option<u64>,
@@ -572,6 +611,7 @@ async fn dispatch_request(
             // Move PHP errors and profile tree into typed exec data.
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),
+                late_errors_rx: script_response.late_errors_rx.take(),
                 profile_tree: script_response.profile_tree.take(),
                 ..exec_data
             };

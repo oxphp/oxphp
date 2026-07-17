@@ -1062,49 +1062,9 @@ mod tests {
         });
     }
 
-    #[test]
-    fn truncate_short_is_borrowed() {
-        let s = "#0 /app/x.php(1): f()\n#1 {main}";
-        match truncate_attr(s, 8192) {
-            Cow::Borrowed(b) => assert_eq!(b, s),
-            Cow::Owned(_) => panic!("short trace must not be copied"),
-        }
-    }
-
-    #[test]
-    fn truncate_zero_disables() {
-        let s = "a".repeat(100_000);
-        assert!(matches!(truncate_attr(&s, 0), Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn truncate_long_marks_and_bounds() {
-        let s = "x".repeat(20_000);
-        let out = truncate_attr(&s, 8192);
-        assert!(out.ends_with("…(truncated)"));
-        assert!(out.len() <= 8192, "len was {}", out.len());
-    }
-
-    #[test]
-    fn truncate_respects_utf8_boundary() {
-        // "é" is 2 bytes; a naive byte cut would split it and be invalid UTF-8.
-        let s = "é".repeat(100); // 200 bytes
-        let out = truncate_attr(&s, 50);
-        assert!(out.ends_with("…(truncated)"));
-        assert!(out.len() <= 50);
-    }
-
-    #[test]
-    fn truncate_tiny_cap_never_exceeds() {
-        // Cap smaller than the marker ("…(truncated)" = 14 bytes): the result
-        // must still be <= max_bytes, so the marker is dropped rather than
-        // overflowing the cap.
-        let s = "x".repeat(1000);
-        for cap in [1usize, 5, 13, 14, 15] {
-            let out = truncate_attr(&s, cap);
-            assert!(out.len() <= cap, "cap={cap} produced {} bytes", out.len());
-        }
-    }
+    // `truncate_attr` unit tests live next to the implementation in `ox_otel`
+    // (this plugin only re-exports it); its APM-specific use is covered by
+    // `push_exception_event_truncates_message` below.
 
     #[test]
     fn push_exception_event_full_set() {

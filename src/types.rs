@@ -145,7 +145,18 @@ pub struct ScriptResponse {
     /// subsequent chunks arrive via this channel. Channel close = stream end.
     pub stream_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
     /// PHP errors captured during script execution.
+    ///
+    /// For a streaming response this is the snapshot at *header* time (usually
+    /// empty — the script has barely started). The errors accumulated for the
+    /// rest of the stream, including a late fatal, arrive on `late_errors_rx`
+    /// when the stream closes.
     pub errors: Vec<PhpScriptError>,
+    /// Streaming only: the final `errors` snapshot, delivered when the worker
+    /// closes the stream (the script — and any late fatal — has finished). The
+    /// dispatch side defers `RequestComplete` until this resolves so the root
+    /// span sees a fatal thrown *after* the 5xx headers were already on the wire.
+    /// `None` for non-streaming responses (their `errors` is already final).
+    pub late_errors_rx: Option<tokio::sync::oneshot::Receiver<Vec<PhpScriptError>>>,
     /// Finalized span tree for the request. Produced by `ProfilingContext::finalize()` on the
     /// PHP worker thread. `None` when APM is disabled or no spans were created.
     pub profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
@@ -179,6 +190,7 @@ impl Default for ScriptResponse {
             execution_time_us: 0,
             stream_rx: None,
             errors: Vec::new(),
+            late_errors_rx: None,
             profile_tree: None,
             cancel_reason: 0,
         }
