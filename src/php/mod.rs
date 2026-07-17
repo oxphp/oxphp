@@ -8,4 +8,5 @@ pub mod heartbeat;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod supervisor;
+pub mod unhandled_exception;
 pub mod worker_registry;
