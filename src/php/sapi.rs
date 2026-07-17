@@ -1625,6 +1625,7 @@ unsafe extern "C" fn oxphp_error_cb(
             file: file.to_string(),
             line: error_lineno,
             stacktrace: None, // Stack trace capture will be added later
+            exception_class: None,
         });
     });
 

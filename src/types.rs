@@ -116,6 +116,23 @@ pub struct PhpScriptError {
     pub line: u32,
     /// Stack trace for exceptions and fatal errors.
     pub stacktrace: Option<String>,
+    /// Real Throwable class when this entry is a captured unhandled exception
+    /// (worker mode pre-fills it; the traditional path leaves it `None` and the
+    /// class is parsed from `message`). `None` for ordinary warnings/notices.
+    pub exception_class: Option<String>,
+}
+
+/// The single unhandled exception (or fatal error) that failed a request,
+/// normalized for export as an OTel `exception` event on the root span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedException {
+    /// `exception.type` — real Throwable class, or a synthetic name for a
+    /// classless fatal (e.g. "E_ERROR").
+    pub exception_type: String,
+    pub message: Option<String>,
+    pub stacktrace: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.
