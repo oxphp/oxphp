@@ -330,11 +330,25 @@ impl Plugin for OtelPlugin {
         // Share SdkTracerProvider with other plugins (e.g. APM)
         ctx.register_service("otel.provider", Box::new(self.provider.clone()));
 
+        // Byte caps for the auto-captured root-span exception event. Mirror the
+        // APM plugin's env knobs so one operator setting drives both. `0` = no
+        // truncation.
+        let message_max = std::env::var("OTEL_APM_MESSAGE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(4096);
+        let stacktrace_max = std::env::var("OTEL_APM_STACKTRACE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(8192);
+
         // Register handlers
         ctx.on_request(OtelRequestHandler);
         ctx.on_complete(OtelCompleteHandler {
             provider: self.provider.clone(),
             server_address: self.server_address.clone(),
+            message_max,
+            stacktrace_max,
         });
 
         Ok(())
@@ -422,11 +436,61 @@ impl PluginRequestHandler for OtelRequestHandler {
     }
 }
 
+// ─── Unhandled-exception event ──────────────────────────────
+
+/// Truncate to at most `max_bytes` on a UTF-8 boundary. `0` disables truncation.
+fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 || s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Build the OTel `exception` event for an unhandled exception / fatal error.
+/// `exception.file`/`exception.line` are an OxPHP extension (OTel standardizes
+/// only `exception.{type,message,stacktrace,escaped}`).
+fn exception_event(
+    exc: &crate::types::CapturedException,
+    timestamp: std::time::SystemTime,
+    message_max: usize,
+    stacktrace_max: usize,
+) -> opentelemetry::trace::Event {
+    let mut attrs = vec![KeyValue::new("exception.type", exc.exception_type.clone())];
+    if let Some(m) = &exc.message {
+        attrs.push(KeyValue::new(
+            "exception.message",
+            truncate_utf8(m, message_max),
+        ));
+    }
+    if let Some(t) = &exc.stacktrace {
+        attrs.push(KeyValue::new(
+            "exception.stacktrace",
+            truncate_utf8(t, stacktrace_max),
+        ));
+    }
+    if let Some(f) = &exc.file {
+        attrs.push(KeyValue::new("exception.file", f.clone()));
+    }
+    if let Some(l) = exc.line {
+        attrs.push(KeyValue::new("exception.line", l as i64));
+    }
+    attrs.push(KeyValue::new("oxphp.event.kind", "exception"));
+    opentelemetry::trace::Event::new("exception", timestamp, attrs, 0)
+}
+
 // ─── Complete handler ───────────────────────────────────────
 
 struct OtelCompleteHandler {
     provider: Arc<OnceLock<SdkTracerProvider>>,
     server_address: String,
+    /// Byte caps for the auto-captured `exception` event's message/stacktrace.
+    /// `0` disables truncation. Shared knob names with the APM plugin.
+    message_max: usize,
+    stacktrace_max: usize,
 }
 
 impl PluginCompleteHandler for OtelCompleteHandler {
@@ -471,6 +535,16 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         let response_size = view.response_size;
         let queue_wait_us = view.queue_wait_us.map(|v| v as i64);
         let php_exec_us = view.php_exec_us.map(|v| v as i64);
+
+        // Auto-capture the unhandled exception / fatal that failed a 5xx request,
+        // so the root SERVER span carries it without any PHP-side integration.
+        let unhandled = if status_code >= 500 {
+            crate::php::unhandled_exception::extract_unhandled_exception(view.php_errors)
+        } else {
+            None
+        };
+        let message_max = self.message_max;
+        let stacktrace_max = self.stacktrace_max;
 
         // Span building + OTel export happens off the hot path
         tokio::spawn(async move {
@@ -535,6 +609,15 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 .with_attributes(attributes)
                 .with_status(status);
 
+            if let Some(exc) = &unhandled {
+                builder = builder.with_events(vec![exception_event(
+                    exc,
+                    end_time,
+                    message_max,
+                    stacktrace_max,
+                )]);
+            }
+
             if let Some(parent_sid) = parent_span_id {
                 use opentelemetry::trace::{SpanContext, TraceContextExt};
                 let parent_ctx =
@@ -564,6 +647,55 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 mod tests {
     use super::*;
     use crate::events::EventDispatcher;
+
+    #[test]
+    fn exception_event_carries_all_attrs() {
+        use crate::types::CapturedException;
+        let exc = CapturedException {
+            exception_type: "RuntimeException".into(),
+            message: Some("boom".into()),
+            stacktrace: Some("#0 {main}".into()),
+            file: Some("/app/x.php".into()),
+            line: Some(9),
+        };
+        let ev = super::exception_event(&exc, std::time::UNIX_EPOCH, 4096, 8192);
+        assert_eq!(ev.name, "exception");
+        let get = |k: &str| {
+            ev.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(get("exception.type").as_deref(), Some("RuntimeException"));
+        assert_eq!(get("exception.message").as_deref(), Some("boom"));
+        assert_eq!(get("exception.stacktrace").as_deref(), Some("#0 {main}"));
+        assert_eq!(get("exception.file").as_deref(), Some("/app/x.php"));
+        assert_eq!(get("exception.line").as_deref(), Some("9"));
+        assert_eq!(get("oxphp.event.kind").as_deref(), Some("exception"));
+    }
+
+    #[test]
+    fn exception_event_truncates_and_skips_missing() {
+        use crate::types::CapturedException;
+        let exc = CapturedException {
+            exception_type: "E_ERROR".into(),
+            message: Some("abcdef".into()),
+            stacktrace: None,
+            file: None,
+            line: None,
+        };
+        let ev = super::exception_event(&exc, std::time::UNIX_EPOCH, 3, 8192);
+        let get = |k: &str| {
+            ev.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(get("exception.message").as_deref(), Some("abc")); // truncated to 3 bytes
+        assert!(get("exception.stacktrace").is_none()); // skipped
+        assert!(get("exception.file").is_none());
+        assert!(get("exception.line").is_none());
+    }
     use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
@@ -693,6 +825,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         assert_eq!(handler.priority(), -80);
     }
@@ -702,6 +836,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         let view = PluginCompleteView::new(
             "req1",
@@ -726,6 +862,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         let metadata = vec![
             (
@@ -1017,6 +1155,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: "0.0.0.0:8080".to_string(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         assert_eq!(handler.server_address, "0.0.0.0:8080");
     }
