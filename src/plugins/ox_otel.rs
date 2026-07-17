@@ -438,16 +438,32 @@ impl PluginRequestHandler for OtelRequestHandler {
 
 // ─── Unhandled-exception event ──────────────────────────────
 
-/// Truncate to at most `max_bytes` on a UTF-8 boundary. `0` disables truncation.
-fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+/// Truncate a string to at most `max_bytes` on a UTF-8 boundary, keeping the head
+/// (so a stacktrace's root frame `#0` survives) and appending a `…(truncated)`
+/// marker when the cap leaves room for it. `0` disables truncation. Mirrors the
+/// APM plugin's per-attribute cap so root-span and child-span exception events
+/// truncate identically.
+fn truncate_attr(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
     if max_bytes == 0 || s.len() <= max_bytes {
-        return s.to_string();
+        return std::borrow::Cow::Borrowed(s);
     }
-    let mut end = max_bytes;
+    const MARKER: &str = "…(truncated)";
+    let with_marker = max_bytes > MARKER.len();
+    let budget = if with_marker {
+        max_bytes - MARKER.len()
+    } else {
+        max_bytes
+    };
+    let mut end = budget.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    s[..end].to_string()
+    let mut out = String::with_capacity(end + MARKER.len());
+    out.push_str(&s[..end]);
+    if with_marker {
+        out.push_str(MARKER);
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Build the OTel `exception` event for an unhandled exception / fatal error.
@@ -459,17 +475,25 @@ fn exception_event(
     message_max: usize,
     stacktrace_max: usize,
 ) -> opentelemetry::trace::Event {
-    let mut attrs = vec![KeyValue::new("exception.type", exc.exception_type.clone())];
+    // Strip any embedded NUL from the class name — an anonymous class arrives as
+    // "<parent>@anonymous\0<file>:<line>$<hash>" (worker capture is length-
+    // delimited), and a NUL would truncate the type again downstream.
+    let ty = if exc.exception_type.contains('\0') {
+        exc.exception_type.replace('\0', "")
+    } else {
+        exc.exception_type.clone()
+    };
+    let mut attrs = vec![KeyValue::new("exception.type", ty)];
     if let Some(m) = &exc.message {
         attrs.push(KeyValue::new(
             "exception.message",
-            truncate_utf8(m, message_max),
+            truncate_attr(m, message_max).into_owned(),
         ));
     }
     if let Some(t) = &exc.stacktrace {
         attrs.push(KeyValue::new(
             "exception.stacktrace",
-            truncate_utf8(t, stacktrace_max),
+            truncate_attr(t, stacktrace_max).into_owned(),
         ));
     }
     if let Some(f) = &exc.file {
