@@ -129,6 +129,59 @@ pub fn take_request_errors() -> Vec<crate::types::PhpScriptError> {
     REQUEST_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
 }
 
+/// Pop a worker-mode unhandled-exception capture (set by the fiber catch site in
+/// `oxphp_fiber.c`) into a synthetic terminal `PhpScriptError`. `None` when no
+/// capture is pending. The `exception_class` field lets the downstream parser use
+/// the real class without re-parsing a formatted message.
+unsafe fn pop_worker_unhandled_exception() -> Option<crate::types::PhpScriptError> {
+    let mut cls_len: usize = 0;
+    let cls_ptr = bindings::oxphp_bridge_pop_unhandled_class(&mut cls_len);
+    if cls_ptr.is_null() {
+        return None;
+    }
+
+    // Copy a length-delimited C buffer into an owned String (lossy for non-UTF-8)
+    // and free the C allocation. NULL/empty → None.
+    let take = |ptr: *mut std::os::raw::c_char, len: usize| -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let s = if len == 0 {
+            None
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        };
+        unsafe { libc::free(ptr as *mut std::os::raw::c_void) };
+        s
+    };
+
+    let class = take(cls_ptr, cls_len).unwrap_or_default();
+    let mut m_len: usize = 0;
+    let message = take(
+        bindings::oxphp_bridge_pop_unhandled_message(&mut m_len),
+        m_len,
+    );
+    let mut t_len: usize = 0;
+    let stacktrace = take(
+        bindings::oxphp_bridge_pop_unhandled_trace(&mut t_len),
+        t_len,
+    );
+    let mut f_len: usize = 0;
+    let file = take(bindings::oxphp_bridge_pop_unhandled_file(&mut f_len), f_len);
+    let line = bindings::oxphp_bridge_get_unhandled_line();
+
+    Some(crate::types::PhpScriptError {
+        level: "error",
+        error_type: "E_ERROR",
+        message: message.unwrap_or_default(),
+        file: file.unwrap_or_default(),
+        line,
+        stacktrace,
+        exception_class: Some(class),
+    })
+}
+
 /// Per-request data stored in thread-local for SAPI callbacks to access.
 /// Reused across requests — `server_vars` Vec capacity is retained.
 struct RequestData {
@@ -2587,13 +2640,21 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     let cancel_reason = bindings::oxphp_bridge_get_cancel_reason();
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
+            // The fiber swallows an uncaught handler exception before
+            // zend_exception_error runs, so it never reaches oxphp_error_cb /
+            // REQUEST_ERRORS. Pull the fiber-side capture into the error stream
+            // so the root SERVER span carries it just like the traditional path.
+            let mut errors = take_request_errors();
+            if let Some(exc) = pop_worker_unhandled_exception() {
+                errors.push(exc);
+            }
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
-                errors: take_request_errors(),
+                errors,
                 profile_tree,
                 cancel_reason,
             });
