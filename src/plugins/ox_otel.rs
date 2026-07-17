@@ -330,17 +330,12 @@ impl Plugin for OtelPlugin {
         // Share SdkTracerProvider with other plugins (e.g. APM)
         ctx.register_service("otel.provider", Box::new(self.provider.clone()));
 
-        // Byte caps for the auto-captured root-span exception event. Mirror the
-        // APM plugin's env knobs so one operator setting drives both. `0` = no
-        // truncation.
-        let message_max = std::env::var("OTEL_APM_MESSAGE_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(4096);
-        let stacktrace_max = std::env::var("OTEL_APM_STACKTRACE_MAX_BYTES")
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(8192);
+        // Byte caps for the auto-captured root-span exception event. Read the
+        // same bare `OTEL_APM_*_MAX_BYTES` knobs as the APM child-span path so a
+        // single operator setting drives both, with the same warn-on-typo and
+        // blank-is-default behavior. `0` = no truncation.
+        let message_max = read_byte_cap("OTEL_APM_MESSAGE_MAX_BYTES", 4096);
+        let stacktrace_max = read_byte_cap("OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
 
         // Register handlers
         ctx.on_request(OtelRequestHandler);
@@ -438,12 +433,37 @@ impl PluginRequestHandler for OtelRequestHandler {
 
 // ─── Unhandled-exception event ──────────────────────────────
 
+/// Parse a byte-cap env var, warning (rather than silently defaulting) on a
+/// malformed value so an operator's typo surfaces. Unset or blank uses
+/// `default`. Mirrors the APM plugin's `read_cap`, so the shared
+/// `OTEL_APM_*_MAX_BYTES` knobs behave the same on the root-span path (here) and
+/// the child-span path.
+fn read_byte_cap(env: &str, default: usize) -> usize {
+    match std::env::var(env).ok().as_deref().map(str::trim) {
+        None | Some("") => default,
+        Some(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    plugin = "otel",
+                    env,
+                    value = %v,
+                    default,
+                    "invalid byte cap; expected a non-negative integer, using default"
+                );
+                default
+            }
+        },
+    }
+}
+
 /// Truncate a string to at most `max_bytes` on a UTF-8 boundary, keeping the head
 /// (so a stacktrace's root frame `#0` survives) and appending a `…(truncated)`
-/// marker when the cap leaves room for it. `0` disables truncation. Mirrors the
-/// APM plugin's per-attribute cap so root-span and child-span exception events
-/// truncate identically.
-fn truncate_attr(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+/// marker when the cap leaves room for it. `0` disables truncation. This is the
+/// single copy shared by both exception-event paths: the APM plugin (which
+/// depends on this one) reuses it for child-span events so root-span and
+/// child-span exception attributes truncate identically.
+pub(crate) fn truncate_attr(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
     if max_bytes == 0 || s.len() <= max_bytes {
         return std::borrow::Cow::Borrowed(s);
     }
@@ -671,6 +691,9 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 mod tests {
     use super::*;
     use crate::events::EventDispatcher;
+    use crate::plugin::context::PluginDecoratorDef;
+    use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
+    use crate::plugin::php::PluginNativeFunctionDef;
 
     #[test]
     fn exception_event_carries_all_attrs() {
@@ -720,9 +743,6 @@ mod tests {
         assert!(get("exception.file").is_none());
         assert!(get("exception.line").is_none());
     }
-    use crate::plugin::context::PluginDecoratorDef;
-    use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
-    use crate::plugin::php::PluginNativeFunctionDef;
 
     // Mutex to serialize tests that manipulate env vars
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());

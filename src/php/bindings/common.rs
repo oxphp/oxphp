@@ -382,6 +382,11 @@ extern "C" {
     pub fn oxphp_bridge_pop_unhandled_trace(out_len: *mut usize) -> *mut c_char;
     pub fn oxphp_bridge_pop_unhandled_file(out_len: *mut usize) -> *mut c_char;
     pub fn oxphp_bridge_get_unhandled_line() -> u32;
+    /// Clear the thread-active unhandled-exception slot (freeing any un-popped
+    /// fields). Called at worker request teardown so a request that never popped
+    /// (e.g. an early-sent `finish_request()` request that later threw) cannot
+    /// leave its capture for the next request on the thread to pick up.
+    pub fn oxphp_bridge_clear_unhandled();
 
     // ─── SAPI response code ─────────────────────────────
     pub fn oxphp_bridge_get_response_code() -> c_int;

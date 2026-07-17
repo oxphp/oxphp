@@ -124,7 +124,7 @@ pub struct PhpScriptError {
 
 /// The single unhandled exception (or fatal error) that failed a request,
 /// normalized for export as an OTel `exception` event on the root span.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct CapturedException {
     /// `exception.type` — real Throwable class, or a synthetic name for a
     /// classless fatal (e.g. "E_ERROR").

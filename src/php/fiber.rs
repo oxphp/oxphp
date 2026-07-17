@@ -162,6 +162,13 @@ struct FiberTlsSlot {
     /// later request overwrites the single per-thread WORKER_CANCEL_STATE slot.
     #[cfg(feature = "php")]
     cancel_state: Option<std::sync::Arc<crate::bridge::cancel::CancellationState>>,
+    /// Captured PHP errors (`REQUEST_ERRORS`) for this request. Thread-global
+    /// like the buffers above: without per-fiber save/restore a suspended
+    /// request's recorded errors (including the terminal fatal that drives the
+    /// root-span exception event) would be drained by, or blended into, another
+    /// request that runs on the same worker thread while this one is parked.
+    #[cfg(feature = "php")]
+    request_errors: Vec<crate::types::PhpScriptError>,
 }
 
 thread_local! {
@@ -179,6 +186,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let early_tx = super::sapi::take_early_tx();
         let request_start = super::sapi::take_request_start();
         let cancel_state = super::sapi::take_worker_cancel_state();
+        let request_errors = super::sapi::take_request_errors();
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(
                 fiber_id,
@@ -187,6 +195,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     early_tx,
                     request_start,
                     cancel_state,
+                    request_errors,
                 },
             );
         });
@@ -212,6 +221,7 @@ pub fn restore_fiber_tls(fiber_id: u64) {
                 super::sapi::restore_early_tx(slot.early_tx);
                 super::sapi::restore_request_start(slot.request_start);
                 super::sapi::restore_worker_cancel_state(slot.cancel_state);
+                super::sapi::restore_request_errors(slot.request_errors);
             }
         });
     }
@@ -353,6 +363,8 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -371,6 +383,8 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -421,6 +435,8 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);

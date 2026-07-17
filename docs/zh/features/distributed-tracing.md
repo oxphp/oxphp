@@ -184,11 +184,13 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 当请求因**未处理异常**或**致命错误**失败并返回 5xx 时，OxPHP 会自动在请求的**根 span** 上附加一个 `exception` 事件——无需 `#[OxPHP\Apm\Trace]` 属性，也无需调用 `oxphp_apm_error()`。这使得 500 响应在 trace 中可自我描述，并填充按异常事件对错误分组的后端（例如 New Relic Errors Inbox）。
 
-该事件携带标准的 `exception.type`、`exception.message` 和 `exception.stacktrace`，外加两个 OxPHP 扩展 `exception.file` 和 `exception.line`，指向抛出位置（或致命错误的位置）。对于无类的致命错误（例如调用未定义函数），`exception.type` 为合成名称且不含堆栈。message 和 stacktrace 遵循与其他异常事件相同的 `OTEL_APM_MESSAGE_MAX_BYTES` / `OTEL_APM_STACKTRACE_MAX_BYTES` 上限。
+该事件携带标准的 `exception.type`、`exception.message` 和 `exception.stacktrace`，外加两个 OxPHP 扩展 `exception.file` 和 `exception.line`，指向抛出位置（或致命错误的位置）。对于**无类的致命错误**——`trigger_error(…, E_USER_ERROR)`、内存耗尽或执行超时中止——`exception.type` 为合成名称（PHP 错误常量，例如 `E_USER_ERROR`），且不含堆栈。（在 PHP 8 中，调用未定义函数*不是*无类致命错误：它会抛出普通的 `Error`，与其他异常一样携带完整堆栈。）message 和 stacktrace 遵循与其他异常事件相同的 `OTEL_APM_MESSAGE_MAX_BYTES` / `OTEL_APM_STACKTRACE_MAX_BYTES` 上限。
 
 这适用于原生 PHP、没有自定义异常处理器的应用，以及 worker 模式的处理器。
 
-**边界——吞掉异常的框架。** 如果应用安装了 `set_exception_handler()` 并渲染自己的错误页面（Laravel、Symfony、WordPress 等），从引擎角度看该异常已被*处理*——它不会以未捕获状态向上传播，OxPHP 只能看到 500 状态而无法取回 Throwable。对这类请求不会触发自动捕获；请在框架的错误上报处通过 `oxphp_apm_error($e)` 显式记录异常。
+**边界——吞掉异常的框架（传统请求路径）。** 在 Traditional / Framework / SPA 模式下，如果应用安装了 `set_exception_handler()` 并渲染自己的错误页面（Laravel、Symfony、WordPress 等），从引擎角度看该异常已被*处理*——它不会以未捕获状态向上传播，OxPHP 只能看到 500 状态而无法取回 Throwable。对这类请求不会触发自动捕获；请在框架的错误上报处通过 `oxphp_apm_error($e)` 显式记录异常。
+
+**worker 模式不经过 `set_exception_handler()`。** worker 运行时直接捕获从 `oxphp_worker()` 闭包中逃逸的异常——它不会调用引擎的用户异常处理器。因此对于 worker 处理器，只要异常离开闭包就会触发自动捕获，即使代码注册了自己的 `set_exception_handler()`（该处理器仅适用于闭包自身捕获的异常，而非从中逃逸的异常）。
 
 ### OTel 与请求 ID
 

@@ -28,6 +28,11 @@ use crate::plugin::{Plugin, PluginContext, PluginDeps, PluginError, PluginHealth
 
 use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 
+// The per-attribute truncation helper is owned by the OTel plugin (which this
+// plugin depends on) so both the root-span and child-span exception-event paths
+// share one implementation and cannot drift apart.
+use crate::plugins::ox_otel::truncate_attr;
+
 // ---------------------------------------------------------------------------
 // Thread-local to pass span local IDs between on_begin and on_end.
 // The Decorator trait does not allow passing state directly, so we use a
@@ -175,36 +180,6 @@ static STACKTRACE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_STACKTRACE_M
 /// Runtime cap (bytes) for `exception.message`, set from
 /// `OTEL_APM_MESSAGE_MAX_BYTES` in `ApmPlugin::init`. `0` disables truncation.
 static MESSAGE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MESSAGE_MAX_BYTES);
-
-/// Truncate an exception attribute string to at most `max_bytes`, appending a
-/// marker when it was cut. `max_bytes == 0` disables truncation. Cuts on a
-/// UTF-8 char boundary. For a stacktrace (`getTraceAsString()` is top-down),
-/// the root frame (`#0`, the throw site) is preserved and only the tail
-/// (`{main}`-ward) is dropped. The result is always `<= max_bytes`: when even
-/// the marker would not fit (`max_bytes <= MARKER.len()`), the content is
-/// hard-cut with no marker.
-fn truncate_attr(s: &str, max_bytes: usize) -> Cow<'_, str> {
-    if max_bytes == 0 || s.len() <= max_bytes {
-        return Cow::Borrowed(s);
-    }
-    const MARKER: &str = "…(truncated)";
-    let with_marker = max_bytes > MARKER.len();
-    let budget = if with_marker {
-        max_bytes - MARKER.len()
-    } else {
-        max_bytes
-    };
-    let mut end = budget.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = String::with_capacity(end + MARKER.len());
-    out.push_str(&s[..end]);
-    if with_marker {
-        out.push_str(MARKER);
-    }
-    Cow::Owned(out)
-}
 
 /// Push an OTel-semconv `exception` span event. Each attribute is omitted when
 /// empty (`exception.type` too, so a bare string reason can be recorded as

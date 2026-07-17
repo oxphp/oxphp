@@ -129,6 +129,14 @@ pub fn take_request_errors() -> Vec<crate::types::PhpScriptError> {
     REQUEST_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
 }
 
+/// Restore a request's captured PHP errors (the counterpart of
+/// `take_request_errors`, used by the per-fiber TLS save/restore so a suspended
+/// worker request's errors are not lost to — or mixed with — the errors of
+/// another request that runs on the same worker thread while it is parked).
+pub fn restore_request_errors(errors: Vec<crate::types::PhpScriptError>) {
+    REQUEST_ERRORS.with(|slot| *slot.borrow_mut() = errors);
+}
+
 /// Pop a worker-mode unhandled-exception capture (set by the fiber catch site in
 /// `oxphp_fiber.c`) into a synthetic terminal `PhpScriptError`. `None` when no
 /// capture is pending. The `exception_class` field lets the downstream parser use
@@ -2646,6 +2654,18 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             // so the root SERVER span carries it just like the traditional path.
             let mut errors = take_request_errors();
             if let Some(exc) = pop_worker_unhandled_exception() {
+                // This capture bypasses oxphp_error_cb (the fiber swallows the
+                // exception before zend_exception_error), so emit the same
+                // error-level log the traditional fatal path produces —
+                // otherwise a worker-mode 500 is silent in the logs.
+                tracing::error!(
+                    php_error_type = "E_ERROR",
+                    php_class = exc.exception_class.as_deref().unwrap_or(""),
+                    php_file = %exc.file,
+                    php_line = exc.line,
+                    "PHP: {}",
+                    exc.message
+                );
                 errors.push(exc);
             }
             let _ = tx.send(ScriptResponse {
@@ -2679,6 +2699,12 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 unsafe fn worker_request_teardown() {
     record_worker_request_metrics();
     clear_buffers();
+    // Free any unhandled-exception capture this request left un-popped — an
+    // early-sent (finish_request) request that then threw skips the pop path
+    // above, and without this its capture would linger in the thread-active slot
+    // for whichever request runs next on this thread. Normal requests already
+    // popped it, so this is a no-op for them.
+    bindings::oxphp_bridge_clear_unhandled();
     bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
     WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
     crate::php::worker_registry::end_request(bindings::oxphp_bridge_get_worker_id() as usize);

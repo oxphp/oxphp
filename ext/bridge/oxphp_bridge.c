@@ -3723,20 +3723,28 @@ char *oxphp_bridge_pop_fatal(void) {
 }
 
 /* ─── Worker-mode unhandled-exception capture ──────────────────
- * The fiber catch site stores the failing request's exception here (thread-
- * local, one slot; the catch→finalize→send sequence is synchronous on the
- * worker thread, so no concurrent fiber overwrites it). The Rust worker send
- * callback pops the fields and pushes a synthetic PhpScriptError. Length-
- * delimited: class names may embed a NUL (anonymous classes); messages may be
- * binary/latin1. */
-static __thread struct {
-    bool present;
+ * The fiber catch site stores the failing request's exception here; the Rust
+ * worker send callback pops the fields and pushes a synthetic PhpScriptError.
+ * Length-delimited: class names may embed a NUL (anonymous classes); messages
+ * may be binary/latin1.
+ *
+ * There is one "active" slot per worker thread. Under fiber multiplexing the
+ * capture happens after the handler returns but before shutdown functions run;
+ * a shutdown function that suspends (oxphp_sleep/await) would otherwise let the
+ * next request's oxphp_bridge_reset_request_ctx wipe this request's capture. The
+ * fiber scheduler therefore moves the slot in and out of the running fiber via
+ * oxphp_bridge_take_unhandled / oxphp_bridge_restore_unhandled around every
+ * suspend/resume, so the capture travels with its request. Presence is
+ * "cls != NULL" — set() requires a class and pop detaches all fields together. */
+typedef struct {
     char *cls;   size_t cls_len;
     char *msg;   size_t msg_len;
     char *trace; size_t trace_len;
     char *file;  size_t file_len;
     uint32_t line;
-} unhandled_exc = {0};
+} oxphp_unhandled_slot;
+
+static __thread oxphp_unhandled_slot unhandled_exc = {0};
 
 static char *unhandled_dup_n(const char *p, size_t len) {
     if (!p || len == 0) return NULL;
@@ -3753,8 +3761,13 @@ void oxphp_bridge_set_unhandled_exc(
     uint32_t line)
 {
     oxphp_bridge_clear_unhandled();
-    unhandled_exc.cls = unhandled_dup_n(cls, cls_len);
-    unhandled_exc.cls_len = unhandled_exc.cls ? cls_len : 0;
+    /* Class first: if it can't be duplicated there is no capture, so bail before
+     * allocating the other fields (avoids a headerless orphan the pop path,
+     * keyed on cls, could never reach). */
+    char *c = unhandled_dup_n(cls, cls_len);
+    if (!c) return;
+    unhandled_exc.cls = c;
+    unhandled_exc.cls_len = cls_len;
     unhandled_exc.msg = unhandled_dup_n(msg, msg_len);
     unhandled_exc.msg_len = unhandled_exc.msg ? msg_len : 0;
     unhandled_exc.trace = unhandled_dup_n(trace, trace_len);
@@ -3762,7 +3775,6 @@ void oxphp_bridge_set_unhandled_exc(
     unhandled_exc.file = unhandled_dup_n(file, file_len);
     unhandled_exc.file_len = unhandled_exc.file ? file_len : 0;
     unhandled_exc.line = line;
-    unhandled_exc.present = (unhandled_exc.cls != NULL);
 }
 
 static char *unhandled_pop_field(char **slot, size_t *slot_len, size_t *out_len) {
@@ -3774,7 +3786,7 @@ static char *unhandled_pop_field(char **slot, size_t *slot_len, size_t *out_len)
 }
 
 char *oxphp_bridge_pop_unhandled_class(size_t *out_len) {
-    if (!unhandled_exc.present) {
+    if (!unhandled_exc.cls) {
         if (out_len) *out_len = 0;
         return NULL;
     }
@@ -3803,7 +3815,55 @@ void oxphp_bridge_clear_unhandled(void) {
     free(unhandled_exc.trace); unhandled_exc.trace = NULL; unhandled_exc.trace_len = 0;
     free(unhandled_exc.file);  unhandled_exc.file = NULL;  unhandled_exc.file_len = 0;
     unhandled_exc.line = 0;
-    unhandled_exc.present = false;
+}
+
+/* ── Per-fiber save/restore of the active capture ──────────────
+ * The fiber scheduler parks a suspended request's capture off the thread-active
+ * slot and restores it on resume, so a suspending shutdown function cannot let
+ * another request's reset wipe it (and so two requests never cross-attribute). */
+
+/* Move the active slot into a heap container (ownership of the inner strings
+ * transfers with it) and clear the active slot. Returns NULL when empty. */
+void *oxphp_bridge_take_unhandled(void) {
+    if (!unhandled_exc.cls) {
+        return NULL;
+    }
+    oxphp_unhandled_slot *p = malloc(sizeof(*p));
+    if (!p) {
+        /* OOM: drop the capture rather than leak or misattribute it. */
+        oxphp_bridge_clear_unhandled();
+        return NULL;
+    }
+    *p = unhandled_exc;
+    memset(&unhandled_exc, 0, sizeof(unhandled_exc));
+    return p;
+}
+
+/* Move a previously-taken container back into the active slot and free the
+ * container. Any capture currently in the active slot is released first (it
+ * should already be empty at a resume). NULL is a no-op. */
+void oxphp_bridge_restore_unhandled(void *vp) {
+    oxphp_bridge_clear_unhandled();
+    if (!vp) {
+        return;
+    }
+    oxphp_unhandled_slot *p = (oxphp_unhandled_slot *)vp;
+    unhandled_exc = *p;
+    free(p);
+}
+
+/* Free a taken container that will never be restored (fiber destroyed while
+ * suspended with a capture parked). NULL is a no-op. */
+void oxphp_bridge_free_unhandled(void *vp) {
+    if (!vp) {
+        return;
+    }
+    oxphp_unhandled_slot *p = (oxphp_unhandled_slot *)vp;
+    free(p->cls);
+    free(p->msg);
+    free(p->trace);
+    free(p->file);
+    free(p);
 }
 
 /* === Async Promise: Async Reset === */

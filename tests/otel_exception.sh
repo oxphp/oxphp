@@ -15,11 +15,20 @@
 # Scenario MANUAL: oxphp_apm_error($e) on an explicit span → the same three
 # attributes on that span's exception event.
 #
+# Root-span auto-capture scenarios: UNCAUGHT (raw uncaught exception), FATAL
+# (classless E_USER_ERROR), CHAINED (outer wraps a cause — must bucket on the
+# thrown class, not the root cause), HANDLED (set_exception_handler swallows —
+# no event, with a positive control), WORKER (fiber-catch C capture — class /
+# trace / file / line), and WORKER-B (a request parked in a suspending shutdown
+# function keeps its capture while another request runs on the same worker
+# thread — the per-fiber save/restore guard).
+#
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
 # NOT wired into run_all.sh or CI (like tests/graceful_drain.sh and
 # tests/cli_run.sh) — run manually after touching the exception-capture path
-# (ext/bridge/oxphp_bridge.c, ext/oxphp_sapi.c, src/plugins/ox_apm).
+# (ext/bridge/oxphp_bridge.c, ext/oxphp_fiber.c, ext/oxphp_sapi.c,
+# src/php/unhandled_exception.rs, src/plugins/ox_apm, src/plugins/ox_otel).
 #
 # Usage: tests/otel_exception.sh [IMAGE_REF]   (default: oxphp-oxphp:latest)
 set -u
@@ -60,6 +69,7 @@ docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/ref.php":/var/www/html/public/ref.php:ro \
 	-v "$FIX/uncaught.php":/var/www/html/public/uncaught.php:ro \
 	-v "$FIX/fatal.php":/var/www/html/public/fatal.php:ro \
+	-v "$FIX/chained.php":/var/www/html/public/chained.php:ro \
 	-v "$FIX/handled.php":/var/www/html/public/handled.php:ro \
 	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
 	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
@@ -68,11 +78,15 @@ docker run -d --name "$SRV" --network "$NET" \
 	"$IMAGE" >/dev/null
 
 # Worker-mode server (same collector) — exercises the fiber-catch capture path.
+# PHP_WORKERS=1 pins all requests to one worker thread so the scenario-B overlap
+# (/a-fail parked in a suspending shutdown function while /b-ok runs) shares the
+# single thread's capture slot — the case per-fiber save/restore must protect.
 docker run -d --name "$WRK" --network "$NET" \
 	-v "$FIX/worker.php":/var/www/html/worker.php:ro \
 	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
 	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
 	-e WORKER_MODE_ENABLED=true -e ENTRY_FILE=/var/www/html/worker.php \
+	-e PHP_WORKERS=1 \
 	-e INTERNAL_ADDR=0.0.0.0:9090 \
 	-e LOG_LEVEL=error \
 	"$IMAGE" >/dev/null
@@ -117,9 +131,27 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "fatal HTTP %{http_code}\n" "http://$SRV:80/fatal.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
-	-s -o /dev/null -w "handled HTTP %{http_code}\n" "http://$SRV:80/handled.php"
+	-s -o /dev/null -w "chained HTTP %{http_code}\n" "http://$SRV:80/chained.php"
+# Capture handled's body as a positive control — proves handled.php actually ran
+# (its set_exception_handler fired) so the "no event" assertion is meaningful and
+# not a false pass from a 404 / parse error.
+HANDLED_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s "http://$SRV:80/handled.php")"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "worker HTTP %{http_code}\n" "http://$WRK:80/boom"
+
+# Scenario B: /a-fail throws then parks its capture in a suspending shutdown
+# function; drive /b-ok on the same single-thread worker while /a-fail is parked.
+# The parked capture must survive so /a-fail's message still reaches its span.
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null "http://$WRK:80/a-fail" &
+# /a-fail parks for ~800ms in its shutdown sleep; fire /b-ok well inside that
+# window so the two overlap on the single worker thread.
+sleep 0.2
+BOK_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "%{http_code}" "http://$WRK:80/b-ok")"
+echo "a-fail(bg)/b-ok HTTP $BOK_CODE"
+wait
 
 # Let the batch span processor flush to the collector.
 sleep 8
@@ -188,16 +220,47 @@ echo "$LOGS" | grep -qF 'exception.message: Str(fatal path: kaboom)' \
 echo "$LOGS" | grep -qF 'exception.type: Str(E_USER_ERROR)' \
 	&& ok "fatal: synthetic type" || bad "fatal: synthetic type"
 
-# Scenario HANDLED (negative): set_exception_handler consumed the exception and
-# rendered its own 500, so no Throwable is observable — no event must appear.
+# Scenario CHAINED: an outer DomainException wrapping a PDOException cause. PHP
+# renders the chain root-cause-first, so the span must bucket on the THROWN
+# DomainException (type + message), not the root cause, with the location NOT
+# glued into the message and the full chain kept in the stacktrace.
+echo "$LOGS" | grep -qF 'exception.type: Str(DomainException)' \
+	&& ok "chained: type is thrown class (not root cause)" || bad "chained: type is thrown class (not root cause)"
+echo "$LOGS" | grep -qF 'exception.message: Str(chained outer: api failed)' \
+	&& ok "chained: message is thrown, no glued location" || bad "chained: message is thrown, no glued location"
+echo "$LOGS" | grep -qF 'Next DomainException: chained outer: api failed' \
+	&& ok "chained: full chain in stacktrace" || bad "chained: full chain in stacktrace"
+echo "$LOGS" | grep -qF 'exception.file: Str(/var/www/html/public/chained.php)' \
+	&& ok "chained: file is thrown site" || bad "chained: file is thrown site"
+
+# Scenario HANDLED (negative + positive control): set_exception_handler consumed
+# the exception and rendered its own 500. The positive control proves the handler
+# actually ran (so a 404 / parse error can't turn the negative into a false pass),
+# then the negative proves no Throwable leaked onto a span.
+echo "$HANDLED_BODY" | grep -qF 'handled by app' \
+	&& ok "handled: handler ran (positive control)" || bad "handled: handler ran (positive control)"
 echo "$LOGS" | grep -qF 'handled path: should not appear on span' \
 	&& bad "handled: exception must NOT be on span" || ok "handled: no span exception (correct)"
 
 # Scenario WORKER: a worker-mode handler that throws is caught by the fiber
 # harness before zend_exception_error, yet the root span still carries the
-# exception via the C-side capture at the catch site.
+# exception via the C-side capture at the catch site — with the message, the
+# worker file, and the throwing frame (proving class/trace/file, not just msg).
 echo "$LOGS" | grep -qF 'exception.message: Str(worker path: handler exploded)' \
 	&& ok "worker: exception on root span" || bad "worker: exception on root span"
+echo "$LOGS" | grep -qF 'exception.file: Str(/var/www/html/worker.php)' \
+	&& ok "worker: exception.file" || bad "worker: exception.file"
+echo "$LOGS" | grep -qF 'workerBoom()' \
+	&& ok "worker: stacktrace frame" || bad "worker: stacktrace frame"
+
+# Scenario WORKER-B: /a-fail threw and parked its capture in a suspending
+# shutdown function while /b-ok ran on the same single-thread worker. Per-fiber
+# save/restore must keep /b-ok's reset from wiping the parked capture, so
+# /a-fail's message still reaches its span.
+[ "$BOK_CODE" = 200 ] \
+	&& ok "worker-b: overlapping /b-ok returned 200" || bad "worker-b: overlapping /b-ok returned 200 (got $BOK_CODE)"
+echo "$LOGS" | grep -qF 'exception.message: Str(scenario-b: parked capture survived)' \
+	&& ok "worker-b: parked capture survived the overlap" || bad "worker-b: parked capture survived the overlap"
 
 echo
 echo "  otel_exception: $PASS passed, $FAIL failed"

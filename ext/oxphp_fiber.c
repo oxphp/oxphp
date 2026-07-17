@@ -89,11 +89,15 @@ void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     sched->next_fiber_id = 1;
 }
 
-/* Free task-mode payload owned by a fiber: the reconstructed closure, the
- * captured return value, and the captured-exception strings. The borrowed
- * task_args belong to the Rust driver and are NOT touched here. A no-op for
- * HTTP request fibers, whose task_* fields stay zeroed/UNDEF. Single source of
- * truth shared by oxphp_async_sched_release and oxphp_scheduler_destroy so both
+/* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
+ * closure, captured return value, captured-exception strings) and any parked
+ * unhandled-exception capture. The borrowed task_args belong to the Rust driver
+ * and are NOT touched here. The task_* fields are a no-op for HTTP request
+ * fibers (they stay zeroed/UNDEF); php_state.unhandled_exc is a no-op for
+ * task-mode fibers (only HTTP request fibers ever park one) and is normally NULL
+ * even for request fibers — non-NULL only when a request fiber is destroyed
+ * while suspended in a shutdown function with a capture parked. Single source of
+ * truth shared by oxphp_async_sched_release and oxphp_scheduler_destroy so all
  * paths free the same set of fields. */
 static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     if (!Z_ISUNDEF(fiber->task_closure)) {
@@ -111,6 +115,10 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     if (fiber->task_exc_message) {
         free(fiber->task_exc_message);
         fiber->task_exc_message = NULL;
+    }
+    if (fiber->php_state.unhandled_exc) {
+        oxphp_bridge_free_unhandled(fiber->php_state.unhandled_exc);
+        fiber->php_state.unhandled_exc = NULL;
     }
 }
 
@@ -379,6 +387,13 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.bridge_headers_sent = oxphp_bridge_get_headers_sent();
     fiber->php_state.bridge_finished = oxphp_bridge_is_finished();
 
+    /* Park any unhandled-exception capture with this fiber. A capture only
+     * exists here when the handler already threw and a shutdown function is
+     * suspending; taking it off the thread-active slot keeps the next request's
+     * oxphp_bridge_reset_request_ctx from wiping it. NULL (the common case)
+     * leaves php_state.unhandled_exc NULL. */
+    fiber->php_state.unhandled_exc = oxphp_bridge_take_unhandled();
+
     /* Step 5: Save VM state (vm_stack, execute_data, bailout) */
     oxphp_save_vm_state(&fiber->php_state.vm_state);
 }
@@ -413,6 +428,11 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     oxphp_bridge_set_stream_mode(fiber->php_state.bridge_stream_mode);
     oxphp_bridge_set_headers_sent(fiber->php_state.bridge_headers_sent);
     oxphp_bridge_set_finished(fiber->php_state.bridge_finished);
+
+    /* Re-install this fiber's parked exception capture into the thread-active
+     * slot (consumes the container). NULL is a no-op. */
+    oxphp_bridge_restore_unhandled(fiber->php_state.unhandled_exc);
+    fiber->php_state.unhandled_exc = NULL;
 
     /* Re-install this fiber's request cancel cell so the interrupt handler and
      * suspend points read THIS fiber's reason, not whichever request set the

@@ -9,12 +9,28 @@
 
 use crate::types::{CapturedException, PhpScriptError};
 
-/// Scan a request's error stream for the terminal failure (the last
-/// `level == "error"` entry) and normalize it. `None` if there is none.
+/// Scan a request's error stream for the terminal failure and normalize it.
+/// `None` if there is none.
+///
+/// Prefers the actual uncaught exception (worker: `exception_class` set;
+/// traditional: an `Uncaught …` fatal) over a plain error raised later by a
+/// shutdown function — those run *after* the terminating error is recorded and
+/// would otherwise shadow the exception that really failed the request. Falls
+/// back to the last `error`-level entry when no uncaught exception is present.
 pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<CapturedException> {
-    let err = errors.iter().rev().find(|e| e.level == "error")?;
+    let err = errors
+        .iter()
+        .rev()
+        .find(|e| {
+            e.level == "error"
+                && (e.exception_class.is_some() || e.message.starts_with("Uncaught "))
+        })
+        .or_else(|| errors.iter().rev().find(|e| e.level == "error"))?;
 
-    let file = (!err.file.is_empty()).then(|| err.file.clone());
+    // `oxphp_error_cb` substitutes the literal "unknown" for a NULL zend
+    // filename; treat it as absent so `exception.file` is omitted (like
+    // `line == 0`) rather than exported with a placeholder value.
+    let file = (!err.file.is_empty() && err.file != "unknown").then(|| err.file.clone());
     let line = (err.line != 0).then_some(err.line);
 
     // Worker path pre-fills the class structurally — use it verbatim.
@@ -63,20 +79,34 @@ fn parse_uncaught(
     let body = msg.strip_prefix("Uncaught ")?;
     let body = body.strip_suffix("\n  thrown").unwrap_or(body);
 
-    // Split the header from the stack-trace section at the FIRST occurrence, so
-    // chained exceptions keep the outermost header and the whole chain in trace.
-    let (header, stacktrace) = match body.split_once("\nStack trace:\n") {
-        Some((h, t)) => (h, Some(t.trim_end().to_string())),
-        None => (body, None),
-    };
+    // Stack trace = everything after the FIRST header line. For a chained
+    // exception this keeps the whole "…\n\nNext <thrown> …" chain — useful for
+    // debugging.
+    let stacktrace = body
+        .split_once("\nStack trace:\n")
+        .map(|(_, t)| t.trim_end().to_string());
+
+    // The exception that actually escaped is the OUTERMOST. PHP's
+    // `Exception::__toString` (Zend/zend_exceptions.c) renders a chain
+    // root-cause-first and appends the thrown exception after the final
+    // "\n\nNext "; the `Uncaught` fatal's file:line is the thrown exception's
+    // origin (`file`/`line` here). Take that last chain segment's header so
+    // type/message describe the thrown exception — not the root cause — since
+    // both must agree for error-inbox bucketing, and the traditional path must
+    // match the worker path (which reads the class from `EG(exception)->ce`).
+    let outer = body.rsplit("\n\nNext ").next().unwrap_or(body);
+    let outer_header = outer
+        .split_once("\nStack trace:\n")
+        .map(|(h, _)| h)
+        .unwrap_or(outer);
 
     // Strip the " in <file>:<line>" tail using the known origin, isolating
     // "<Class>[: <message>]". Robust even if the message itself contains " in ".
     let header = if !file.is_empty() && line != 0 {
         let tail = format!(" in {file}:{line}");
-        header.strip_suffix(&tail).unwrap_or(header)
+        outer_header.strip_suffix(&tail).unwrap_or(outer_header)
     } else {
-        header
+        outer_header
     };
 
     // Class is up to the first ": " (class names never contain ": ").
@@ -137,16 +167,25 @@ mod tests {
     }
 
     #[test]
-    fn chained_takes_outermost_class_full_trace() {
-        let msg = "Uncaught DomainException: outer in /a.php:5\nStack trace:\n#0 {main}\n\nNext RuntimeException: inner in /b.php:9\nStack trace:\n#0 {main}\n  thrown";
-        let c = extract_unhandled_exception(&[err("error", "E_ERROR", msg, "/a.php", 5)]).unwrap();
-        assert_eq!(c.exception_type, "DomainException");
-        assert_eq!(c.message.as_deref(), Some("outer"));
-        assert!(c
-            .stacktrace
-            .as_deref()
-            .unwrap()
-            .contains("Next RuntimeException: inner"));
+    fn chained_takes_thrown_not_root_cause() {
+        // Real PHP shape for `throw new ApiException('api failed', previous:
+        // new PDOException('db down'))`: __toString renders the root cause
+        // (PDOException) first and appends the thrown ApiException after the
+        // final "\n\nNext "; the Uncaught fatal's file:line is the thrown one's.
+        let msg = "Uncaught PDOException: db down in /db.php:10\nStack trace:\n#0 /db.php(5): connect()\n#1 {main}\n\nNext ApiException: api failed in /api.php:20\nStack trace:\n#0 /api.php(15): handle()\n#1 {main}\n  thrown";
+        let c =
+            extract_unhandled_exception(&[err("error", "E_ERROR", msg, "/api.php", 20)]).unwrap();
+        // Bucket on the exception that actually escaped, not its root cause.
+        assert_eq!(c.exception_type, "ApiException");
+        assert_eq!(c.message.as_deref(), Some("api failed"));
+        // No " in <file>:<line>" glued into the message.
+        assert!(!c.message.as_deref().unwrap().contains(" in "));
+        assert_eq!(c.file.as_deref(), Some("/api.php"));
+        assert_eq!(c.line, Some(20));
+        // The full chain (root cause first) survives in the stacktrace.
+        let trace = c.stacktrace.as_deref().unwrap();
+        assert!(trace.starts_with("#0 /db.php(5): connect()"));
+        assert!(trace.contains("Next ApiException: api failed"));
     }
 
     #[test]
@@ -160,22 +199,54 @@ mod tests {
 
     #[test]
     fn plain_fatal_no_class_no_trace() {
+        // A genuine classless fatal (no Throwable): E_USER_ERROR from
+        // trigger_error, OOM, or a timeout. The message has no "Uncaught "
+        // prefix and there is no stack trace, so the synthetic type is the
+        // error constant. (An undefined-function call is NOT this shape on
+        // PHP 8 — it throws a Throwable `Error` with a full trace.)
         let c = extract_unhandled_exception(&[err(
             "error",
-            "E_ERROR",
-            "Call to undefined function foo()",
+            "E_USER_ERROR",
+            "fatal path: kaboom",
             "/x.php",
             7,
         )])
         .unwrap();
-        assert_eq!(c.exception_type, "E_ERROR");
-        assert_eq!(
-            c.message.as_deref(),
-            Some("Call to undefined function foo()")
-        );
+        assert_eq!(c.exception_type, "E_USER_ERROR");
+        assert_eq!(c.message.as_deref(), Some("fatal path: kaboom"));
         assert_eq!(c.stacktrace, None);
         assert_eq!(c.file.as_deref(), Some("/x.php"));
         assert_eq!(c.line, Some(7));
+    }
+
+    #[test]
+    fn shutdown_error_does_not_shadow_uncaught() {
+        // The uncaught exception is recorded first; a shutdown function then
+        // raises its own fatal. The span must report the exception that killed
+        // the request, not the later shutdown-time error.
+        let errs = vec![
+            err(
+                "error",
+                "E_ERROR",
+                "Uncaught RuntimeException: real killer in /app.php:9\nStack trace:\n#0 {main}\n  thrown",
+                "/app.php",
+                9,
+            ),
+            err("error", "E_USER_ERROR", "shutdown logger blew up", "/shutdown.php", 3),
+        ];
+        let c = extract_unhandled_exception(&errs).unwrap();
+        assert_eq!(c.exception_type, "RuntimeException");
+        assert_eq!(c.message.as_deref(), Some("real killer"));
+    }
+
+    #[test]
+    fn unknown_file_is_omitted() {
+        // NULL zend filename arrives as the literal "unknown"; omit the
+        // attribute rather than exporting the placeholder.
+        let c =
+            extract_unhandled_exception(&[err("error", "E_ERROR", "boom", "unknown", 0)]).unwrap();
+        assert_eq!(c.file, None);
+        assert_eq!(c.line, None);
     }
 
     #[test]

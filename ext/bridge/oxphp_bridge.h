@@ -791,6 +791,17 @@ char *oxphp_bridge_pop_unhandled_file(size_t *out_len);
 uint32_t oxphp_bridge_get_unhandled_line(void);
 void oxphp_bridge_clear_unhandled(void);
 
+/* Per-fiber save/restore of the active capture. The scheduler parks a suspended
+ * request's capture (take) off the thread-active slot and re-installs it on
+ * resume (restore), so a suspending shutdown function cannot let another
+ * request's reset wipe it and two requests never cross-attribute. take() returns
+ * an opaque heap container (NULL if empty); restore() consumes it back into the
+ * active slot; free() releases a container that will never be restored (fiber
+ * destroyed while suspended). */
+void *oxphp_bridge_take_unhandled(void);
+void oxphp_bridge_restore_unhandled(void *slot);
+void oxphp_bridge_free_unhandled(void *slot);
+
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,
     uint32_t targets

@@ -72,6 +72,14 @@ typedef struct {
     bool bridge_headers_sent;   /* ctx.headers_sent: stream headers on the wire */
     bool bridge_finished;       /* ctx.finished: oxphp_finish_request() was called */
 
+    /* Parked unhandled-exception capture (opaque oxphp_unhandled_slot*, owned).
+     * The capture is taken at line ~226 after the handler returns, before
+     * shutdown functions run; if a shutdown function suspends, the bridge's
+     * thread-active capture slot is moved here (take) so the next request's
+     * reset can't wipe it, and moved back (restore) when this fiber resumes.
+     * NULL whenever the fiber holds no parked capture (the common case). */
+    void *unhandled_exc;
+
     /* Zend VM state (vm_stack, execute_data, bailout, etc.) */
     oxphp_fiber_vm_state vm_state;
 
