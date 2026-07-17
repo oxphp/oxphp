@@ -773,6 +773,24 @@ void oxphp_exception_capture(void *ex,
     char **out_message, size_t *out_message_len,
     char **out_trace, size_t *out_trace_len);
 
+/* Worker-mode unhandled-exception capture. The fiber catch site stores the
+ * failing request's exception (thread-local, one slot); the Rust worker send
+ * callback pops the fields to build a synthetic PhpScriptError. Popped buffers
+ * are caller-owned (free with free()). oxphp_bridge_clear_unhandled() frees any
+ * un-popped fields and is also called from oxphp_bridge_reset_request_ctx(). */
+void oxphp_bridge_set_unhandled_exc(
+    const char *cls, size_t cls_len,
+    const char *msg, size_t msg_len,
+    const char *trace, size_t trace_len,
+    const char *file, size_t file_len,
+    uint32_t line);
+char *oxphp_bridge_pop_unhandled_class(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_message(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_trace(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_file(size_t *out_len);
+uint32_t oxphp_bridge_get_unhandled_line(void);
+void oxphp_bridge_clear_unhandled(void);
+
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,
     uint32_t targets

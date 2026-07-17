@@ -1966,6 +1966,10 @@ void oxphp_bridge_reset_request_ctx(void) {
      * touched here — they are thread-persistent and only mutated by
      * oxphp_bridge_increment_requests_done() / set_worker_start_time(),
      * called from Rust at request start / thread boot respectively. */
+
+    /* Free any unhandled-exception capture not popped by the send path (e.g. a
+     * request whose status was forced below 500). */
+    oxphp_bridge_clear_unhandled();
 }
 
 int oxphp_bridge_worker_wait(void) {
@@ -3716,6 +3720,90 @@ char *oxphp_bridge_pop_fatal(void) {
     char *msg = captured_fatal_msg;
     captured_fatal_msg = NULL;
     return msg; /* caller owns — free with free() */
+}
+
+/* ─── Worker-mode unhandled-exception capture ──────────────────
+ * The fiber catch site stores the failing request's exception here (thread-
+ * local, one slot; the catch→finalize→send sequence is synchronous on the
+ * worker thread, so no concurrent fiber overwrites it). The Rust worker send
+ * callback pops the fields and pushes a synthetic PhpScriptError. Length-
+ * delimited: class names may embed a NUL (anonymous classes); messages may be
+ * binary/latin1. */
+static __thread struct {
+    bool present;
+    char *cls;   size_t cls_len;
+    char *msg;   size_t msg_len;
+    char *trace; size_t trace_len;
+    char *file;  size_t file_len;
+    uint32_t line;
+} unhandled_exc = {0};
+
+static char *unhandled_dup_n(const char *p, size_t len) {
+    if (!p || len == 0) return NULL;
+    char *b = malloc(len);
+    if (b) memcpy(b, p, len);
+    return b;
+}
+
+void oxphp_bridge_set_unhandled_exc(
+    const char *cls, size_t cls_len,
+    const char *msg, size_t msg_len,
+    const char *trace, size_t trace_len,
+    const char *file, size_t file_len,
+    uint32_t line)
+{
+    oxphp_bridge_clear_unhandled();
+    unhandled_exc.cls = unhandled_dup_n(cls, cls_len);
+    unhandled_exc.cls_len = unhandled_exc.cls ? cls_len : 0;
+    unhandled_exc.msg = unhandled_dup_n(msg, msg_len);
+    unhandled_exc.msg_len = unhandled_exc.msg ? msg_len : 0;
+    unhandled_exc.trace = unhandled_dup_n(trace, trace_len);
+    unhandled_exc.trace_len = unhandled_exc.trace ? trace_len : 0;
+    unhandled_exc.file = unhandled_dup_n(file, file_len);
+    unhandled_exc.file_len = unhandled_exc.file ? file_len : 0;
+    unhandled_exc.line = line;
+    unhandled_exc.present = (unhandled_exc.cls != NULL);
+}
+
+static char *unhandled_pop_field(char **slot, size_t *slot_len, size_t *out_len) {
+    char *p = *slot;
+    *slot = NULL;
+    if (out_len) *out_len = *slot_len;
+    *slot_len = 0;
+    return p; /* caller frees with free() */
+}
+
+char *oxphp_bridge_pop_unhandled_class(size_t *out_len) {
+    if (!unhandled_exc.present) {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+    return unhandled_pop_field(&unhandled_exc.cls, &unhandled_exc.cls_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_message(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.msg, &unhandled_exc.msg_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_trace(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.trace, &unhandled_exc.trace_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_file(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.file, &unhandled_exc.file_len, out_len);
+}
+
+uint32_t oxphp_bridge_get_unhandled_line(void) {
+    return unhandled_exc.line;
+}
+
+void oxphp_bridge_clear_unhandled(void) {
+    free(unhandled_exc.cls);   unhandled_exc.cls = NULL;   unhandled_exc.cls_len = 0;
+    free(unhandled_exc.msg);   unhandled_exc.msg = NULL;   unhandled_exc.msg_len = 0;
+    free(unhandled_exc.trace); unhandled_exc.trace = NULL; unhandled_exc.trace_len = 0;
+    free(unhandled_exc.file);  unhandled_exc.file = NULL;  unhandled_exc.file_len = 0;
+    unhandled_exc.line = 0;
+    unhandled_exc.present = false;
 }
 
 /* === Async Promise: Async Reset === */

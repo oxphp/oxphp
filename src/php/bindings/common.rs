@@ -376,6 +376,13 @@ extern "C" {
     pub fn oxphp_bridge_get_max_memory_bytes() -> u64;
     pub fn oxphp_bridge_get_handler_failed() -> bool;
 
+    // ─── Worker unhandled-exception capture ─────────────
+    pub fn oxphp_bridge_pop_unhandled_class(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_message(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_trace(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_file(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_get_unhandled_line() -> u32;
+
     // ─── SAPI response code ─────────────────────────────
     pub fn oxphp_bridge_get_response_code() -> c_int;
 
