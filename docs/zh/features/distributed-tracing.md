@@ -172,13 +172,23 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
 
 | `oxphp.event.kind` | 来源 | 事件属性 |
 |--------------------|------|----------|
-| `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数，或 `oxphp_apm_error()` | `exception.type`、`exception.message`、`exception.stacktrace` |
+| `exception` | 抛出异常的 `#[OxPHP\Apm\Trace]` 函数、`oxphp_apm_error()`，或请求根 span 上的未处理异常 / 致命错误（见[根 span 异常自动捕获](#根-span-异常自动捕获)） | `exception.type`、`exception.message`、`exception.stacktrace` |
 | `custom` | `oxphp_apm_event()` | 用户提供 |
 | `mark` | 性能分析器 `#[Mark]` 注解 | 用户提供 |
 | `slow` | 性能分析器 `#[SlowThreshold]` 超阈值 | `threshold_ms`、`elapsed_ms` |
 | `memory_spike` | 性能分析器 `#[MemoryThreshold]` 超阈值 | `threshold_kb`、`delta_bytes` |
 
 `oxphp.event.kind` 属性在 APM 插桩生成的事件上还可能携带 `sql`、`http` 或 `alloc`。
+
+### 根 span 异常自动捕获
+
+当请求因**未处理异常**或**致命错误**失败并返回 5xx 时，OxPHP 会自动在请求的**根 span** 上附加一个 `exception` 事件——无需 `#[OxPHP\Apm\Trace]` 属性，也无需调用 `oxphp_apm_error()`。这使得 500 响应在 trace 中可自我描述，并填充按异常事件对错误分组的后端（例如 New Relic Errors Inbox）。
+
+该事件携带标准的 `exception.type`、`exception.message` 和 `exception.stacktrace`，外加两个 OxPHP 扩展 `exception.file` 和 `exception.line`，指向抛出位置（或致命错误的位置）。对于无类的致命错误（例如调用未定义函数），`exception.type` 为合成名称且不含堆栈。message 和 stacktrace 遵循与其他异常事件相同的 `OTEL_APM_MESSAGE_MAX_BYTES` / `OTEL_APM_STACKTRACE_MAX_BYTES` 上限。
+
+这适用于原生 PHP、没有自定义异常处理器的应用，以及 worker 模式的处理器。
+
+**边界——吞掉异常的框架。** 如果应用安装了 `set_exception_handler()` 并渲染自己的错误页面（Laravel、Symfony、WordPress 等），从引擎角度看该异常已被*处理*——它不会以未捕获状态向上传播，OxPHP 只能看到 500 状态而无法取回 Throwable。对这类请求不会触发自动捕获；请在框架的错误上报处通过 `oxphp_apm_error($e)` 显式记录异常。
 
 ### OTel 与请求 ID
 
