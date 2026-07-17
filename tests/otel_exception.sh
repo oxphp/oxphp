@@ -30,6 +30,7 @@ FIX="$ROOT/tests/fixtures/otel_exception"
 NET="oxexc-net"
 COL="oxexc-col"
 SRV="oxexc-srv"
+WRK="oxexc-wrk"
 PASS=0
 FAIL=0
 
@@ -37,12 +38,12 @@ ok()  { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$COL" "$SRV" >/dev/null 2>&1
+	docker rm -f "$COL" "$SRV" "$WRK" >/dev/null 2>&1
 	docker network rm "$NET" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
-docker rm -f "$COL" "$SRV" >/dev/null 2>&1
+docker rm -f "$COL" "$SRV" "$WRK" >/dev/null 2>&1
 docker network rm "$NET" >/dev/null 2>&1
 docker network create "$NET" >/dev/null
 
@@ -57,8 +58,21 @@ docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/reason.php":/var/www/html/public/reason.php:ro \
 	-v "$FIX/anon.php":/var/www/html/public/anon.php:ro \
 	-v "$FIX/ref.php":/var/www/html/public/ref.php:ro \
+	-v "$FIX/uncaught.php":/var/www/html/public/uncaught.php:ro \
+	-v "$FIX/fatal.php":/var/www/html/public/fatal.php:ro \
+	-v "$FIX/handled.php":/var/www/html/public/handled.php:ro \
 	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
 	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
+	-e INTERNAL_ADDR=0.0.0.0:9090 \
+	-e LOG_LEVEL=error \
+	"$IMAGE" >/dev/null
+
+# Worker-mode server (same collector) — exercises the fiber-catch capture path.
+docker run -d --name "$WRK" --network "$NET" \
+	-v "$FIX/worker.php":/var/www/html/worker.php:ro \
+	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
+	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
+	-e WORKER_MODE_ENABLED=true -e ENTRY_FILE=/var/www/html/worker.php \
 	-e INTERNAL_ADDR=0.0.0.0:9090 \
 	-e LOG_LEVEL=error \
 	"$IMAGE" >/dev/null
@@ -74,6 +88,17 @@ for _ in $(seq 1 30); do
 done
 [ "$ready" = 1 ] || { echo "server did not become healthy"; docker logs "$SRV" | tail -20; exit 1; }
 
+# Wait for the worker-mode server too.
+wready=0
+for _ in $(seq 1 30); do
+	if docker exec "$WRK" wget -q --spider http://127.0.0.1:9090/health 2>/dev/null; then
+		wready=1
+		break
+	fi
+	sleep 1
+done
+[ "$wready" = 1 ] || { echo "worker server did not become healthy"; docker logs "$WRK" | tail -20; exit 1; }
+
 # Drive both endpoints.
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "auto  HTTP %{http_code}\n" "http://$SRV:80/auto.php"
@@ -87,6 +112,14 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "anon  HTTP %{http_code}\n" "http://$SRV:80/anon.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "ref   HTTP %{http_code}\n" "http://$SRV:80/ref.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "uncaught HTTP %{http_code}\n" "http://$SRV:80/uncaught.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "fatal HTTP %{http_code}\n" "http://$SRV:80/fatal.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "handled HTTP %{http_code}\n" "http://$SRV:80/handled.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "worker HTTP %{http_code}\n" "http://$WRK:80/boom"
 
 # Let the batch span processor flush to the collector.
 sleep 8
@@ -135,6 +168,36 @@ echo "$LOGS" | grep -qF 'exception.type: Str(RuntimeException@anonymous/var/www/
 # the capture sees the slot, so it reads IS_OBJECT. Regression guard.
 echo "$LOGS" | grep -qF 'exception.message: Str(ref path: boom)' \
 	&& ok "ref: reference Throwable captured" || bad "ref: reference Throwable captured"
+
+# Scenario UNCAUGHT: a raw uncaught exception (no #[Trace], no oxphp_apm_error)
+# surfaces automatically on the request's root SERVER span, with type, message,
+# the file/line extension, and a stacktrace.
+echo "$LOGS" | grep -qF 'exception.message: Str(uncaught path: gateway down)' \
+	&& ok "uncaught: message on root span" || bad "uncaught: message on root span"
+echo "$LOGS" | grep -qF 'exception.file: Str(/var/www/html/public/uncaught.php)' \
+	&& ok "uncaught: exception.file" || bad "uncaught: exception.file"
+echo "$LOGS" | grep -qE 'exception\.line: (Int|Str)\(3\)' \
+	&& ok "uncaught: exception.line" || bad "uncaught: exception.line"
+echo "$LOGS" | grep -qF 'processPayment()' \
+	&& ok "uncaught: stacktrace frame" || bad "uncaught: stacktrace frame"
+
+# Scenario FATAL: a classless fatal (E_USER_ERROR, not a Throwable) still yields
+# a located event — synthetic type + message + file/line, no stacktrace.
+echo "$LOGS" | grep -qF 'exception.message: Str(fatal path: kaboom)' \
+	&& ok "fatal: message captured" || bad "fatal: message captured"
+echo "$LOGS" | grep -qF 'exception.type: Str(E_USER_ERROR)' \
+	&& ok "fatal: synthetic type" || bad "fatal: synthetic type"
+
+# Scenario HANDLED (negative): set_exception_handler consumed the exception and
+# rendered its own 500, so no Throwable is observable — no event must appear.
+echo "$LOGS" | grep -qF 'handled path: should not appear on span' \
+	&& bad "handled: exception must NOT be on span" || ok "handled: no span exception (correct)"
+
+# Scenario WORKER: a worker-mode handler that throws is caught by the fiber
+# harness before zend_exception_error, yet the root span still carries the
+# exception via the C-side capture at the catch site.
+echo "$LOGS" | grep -qF 'exception.message: Str(worker path: handler exploded)' \
+	&& ok "worker: exception on root span" || bad "worker: exception on root span"
 
 echo
 echo "  otel_exception: $PASS passed, $FAIL failed"
