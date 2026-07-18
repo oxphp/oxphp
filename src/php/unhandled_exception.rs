@@ -48,12 +48,9 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
         // message/stacktrace out of the text (best-effort), but keep the
         // structural class.
         if err.stacktrace.is_none() && err.message.starts_with("Uncaught ") {
-            if let Some((_parsed_class, message, stacktrace)) = parse_uncaught(
-                &err.message,
-                err.file.as_str(),
-                err.line,
-                Some(class.as_str()),
-            ) {
+            if let Some((_parsed_class, message, stacktrace)) =
+                parse_uncaught(&err.message, err.file.as_str(), err.line)
+            {
                 return Some(CapturedException {
                     exception_type: class.clone(),
                     message,
@@ -83,7 +80,7 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
     // below where `exception.type` becomes the honest error constant.
     if err.error_type == "E_ERROR" {
         if let Some((class, message, stacktrace)) =
-            parse_uncaught(&err.message, err.file.as_str(), err.line, None)
+            parse_uncaught(&err.message, err.file.as_str(), err.line)
         {
             return Some(CapturedException {
                 exception_type: class,
@@ -114,19 +111,10 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
 /// available; the caller prefers the structural class. The `message`/`stacktrace`
 /// are always taken from here on the traditional path — they describe the
 /// outermost (thrown) exception.
-///
-/// `known_class` is the structural class the throw-hook captured (the exception
-/// that actually escaped), when available. It disambiguates the one text shape a
-/// purely positional parse gets wrong: a SINGLE exception whose own message
-/// contains the literal `"\n\nNext "` looks, textually, exactly like a two-link
-/// chain. Without the class we take the last `"\n\nNext "` segment (correct for a
-/// real chain); with the class we can tell the cases apart (see below) and
-/// recover the full message instead of a truncated tail.
 fn parse_uncaught(
     msg: &str,
     file: &str,
     line: u32,
-    known_class: Option<&str>,
 ) -> Option<(String, Option<String>, Option<String>)> {
     let body = msg.strip_prefix("Uncaught ")?;
     let body = body.strip_suffix("\n  thrown").unwrap_or(body);
@@ -138,34 +126,36 @@ fn parse_uncaught(
         .split_once("\nStack trace:\n")
         .map(|(_, t)| t.trim_end().to_string());
 
-    // The exception that actually escaped is the OUTERMOST. PHP's
-    // `Exception::__toString` (Zend/zend_exceptions.c) renders a chain
-    // root-cause-first and appends the thrown exception after the final
-    // "\n\nNext "; the `Uncaught` fatal's file:line is the thrown exception's
-    // origin. So for a real chain the escaped header is the last segment.
-    let outer_segment = body.rsplit("\n\nNext ").next().unwrap_or(body);
-    let outer_header = strip_origin_tail(header_line(outer_segment), file, line);
-
-    // But the last-segment rule is positional, and a single exception whose own
-    // message embeds "\n\nNext " is split spuriously. The structural class
-    // resolves it: the FULL first header (before any "\nStack trace:\n") starts
-    // with "<known_class>: " exactly when the outermost thrown exception is also
-    // the first-rendered one — i.e. a single exception (or a chain whose root ==
-    // thrown). Take the message from that full header so an embedded "\n\nNext …"
-    // survives intact. Otherwise the first header names a different (root-cause)
-    // class, so it is a genuine chain and the last segment is right. With no
-    // structural class we cannot tell, and keep the positional last-segment
-    // behavior (best-effort, unchanged).
-    let header = match known_class {
-        Some(class) => {
-            let full_header = strip_origin_tail(header_line(body), file, line);
-            if header_matches_class(full_header, class) {
-                full_header
-            } else {
-                outer_header
-            }
-        }
-        None => outer_header,
+    // Pick the header describing the exception that actually ESCAPED — the
+    // OUTERMOST. PHP's `Exception::__toString` (Zend/zend_exceptions.c) renders a
+    // chain root-cause-first and appends each outer link after a "\n\nNext "
+    // delimiter, so the thrown exception is the LAST segment and the `Uncaught`
+    // fatal's file:line is its origin. Crucially, every non-last link is
+    // terminated by its own "\nStack trace:\n" BEFORE that delimiter.
+    //
+    // A single exception whose own *message* merely embeds the literal
+    // "\n\nNext " has no such trace before the first delimiter — its one trace is
+    // appended once, after the whole message. That structural difference tells a
+    // genuine chain boundary from a spurious in-message one without trusting the
+    // partly user-controlled class text (a class-name check mislabels the common
+    // same-class re-wrap `catch (X) { throw new X(..., previous: $e) }` as a
+    // single exception and reports the root cause's message):
+    //   * segment before the first "\n\nNext " contains "\nStack trace:\n"
+    //     → real chain → take the last segment (the thrown exception).
+    //   * otherwise (embedded delimiter, or no delimiter at all)
+    //     → one exception → take the whole first header, so the message survives.
+    //
+    // (A message that also embeds "\nStack trace:\n" can still force the chain
+    // branch and truncate itself — a documented best-effort limit; the bucketing
+    // `exception.type` is structural and unaffected either way.)
+    let is_real_chain = body
+        .split_once("\n\nNext ")
+        .is_some_and(|(first, _)| first.contains("\nStack trace:\n"));
+    let header = if is_real_chain {
+        let outer_segment = body.rsplit("\n\nNext ").next().unwrap_or(body);
+        strip_origin_tail(header_line(outer_segment), file, line)
+    } else {
+        strip_origin_tail(header_line(body), file, line)
     };
 
     // Class is up to the first ": " (class names never contain ": ").
@@ -194,14 +184,6 @@ fn strip_origin_tail<'a>(header: &'a str, file: &str, line: u32) -> &'a str {
     } else {
         header
     }
-}
-
-/// Whether `header` opens the `"<class>[: …]"` of `class` — either exactly the
-/// class (empty-message form) or `"<class>: "` followed by a message.
-fn header_matches_class(header: &str, class: &str) -> bool {
-    header
-        .strip_prefix(class)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(": "))
 }
 
 #[cfg(test)]
@@ -495,6 +477,33 @@ mod tests {
         assert_eq!(c.exception_type, "ApiException");
         assert_eq!(c.message.as_deref(), Some("api failed"));
         assert!(!c.message.as_deref().unwrap().contains(" in "));
+    }
+
+    #[test]
+    fn structural_class_same_class_chain_takes_thrown_message() {
+        // Regression guard for a genuine chain whose root cause and thrown
+        // exception SHARE a class — `catch (RuntimeException $e) { throw new
+        // RuntimeException(..., previous: $e); }`, an extremely common re-wrap.
+        // __toString renders the root cause ("inner cause") first and the thrown
+        // wrapper ("outer wrap") last; the fatal's file:line is the wrapper's.
+        // The message must be the thrown "outer wrap", never the root cause, and
+        // never with an " in <file>:<line>" tail glued on. A class-name
+        // disambiguation matched the root header (same class) and reported
+        // "inner cause in /x.php:3"; the structural "is there a \nStack trace:\n
+        // before the first \n\nNext " signal keeps this on the chain branch.
+        let mut e = err(
+            "error",
+            "E_ERROR",
+            "Uncaught RuntimeException: inner cause in /x.php:3\nStack trace:\n#0 /x.php(3): a()\n#1 {main}\n\nNext RuntimeException: outer wrap in /x.php:5\nStack trace:\n#0 /x.php(5): b()\n#1 {main}\n  thrown",
+            "/x.php",
+            5,
+        );
+        e.exception_class = Some("RuntimeException".into());
+        let c = extract_unhandled_exception(&[e]).unwrap();
+        assert_eq!(c.exception_type, "RuntimeException");
+        assert_eq!(c.message.as_deref(), Some("outer wrap"));
+        assert!(!c.message.as_deref().unwrap().contains(" in "));
+        assert_eq!(c.line, Some(5));
     }
 
     #[test]
