@@ -5062,9 +5062,9 @@ mod tests {
     #[test]
     fn collect_status_adopts_explicit_sg_when_not_cancelled() {
         // No cancellation: SG is the script's authoritative choice. An explicit
-        // non-200 wins even over a fatal-500 already on RESPONSE (the round-6 case:
+        // non-200 wins even over a fatal-500 already on RESPONSE:
         // http_response_code(503) before an uncaught throw ships 503, and a worker
-        // http_response_code(201) ships 201).
+        // http_response_code(201) ships 201.
         assert_eq!(resolve_collected_status(503, 0), Some(503));
         assert_eq!(resolve_collected_status(201, 0), Some(201));
         // A 200 or an unset 0 leaves RESPONSE untouched so the fatal / cancel
