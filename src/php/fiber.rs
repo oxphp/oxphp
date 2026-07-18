@@ -162,6 +162,19 @@ struct FiberTlsSlot {
     /// later request overwrites the single per-thread WORKER_CANCEL_STATE slot.
     #[cfg(feature = "php")]
     cancel_state: Option<std::sync::Arc<crate::bridge::cancel::CancellationState>>,
+    /// Captured PHP errors (`REQUEST_ERRORS`) for this request. Thread-global
+    /// like the buffers above: without per-fiber save/restore a suspended
+    /// request's recorded errors (including the terminal fatal that drives the
+    /// root-span exception event) would be drained by, or blended into, another
+    /// request that runs on the same worker thread while this one is parked.
+    #[cfg(feature = "php")]
+    request_errors: Vec<crate::types::PhpScriptError>,
+    /// Streaming chunk sender (`STREAM_TX`) for a suspended streaming request.
+    /// Thread-global like the buffers above; without per-fiber save/restore
+    /// another streaming request on this worker thread would overwrite it and
+    /// this request's later chunks would flow to the other client's body channel.
+    #[cfg(feature = "php")]
+    stream_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
 }
 
 thread_local! {
@@ -179,6 +192,8 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let early_tx = super::sapi::take_early_tx();
         let request_start = super::sapi::take_request_start();
         let cancel_state = super::sapi::take_worker_cancel_state();
+        let request_errors = super::sapi::take_request_errors();
+        let stream_tx = super::sapi::take_stream_tx();
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(
                 fiber_id,
@@ -187,6 +202,8 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     early_tx,
                     request_start,
                     cancel_state,
+                    request_errors,
+                    stream_tx,
                 },
             );
         });
@@ -212,6 +229,8 @@ pub fn restore_fiber_tls(fiber_id: u64) {
                 super::sapi::restore_early_tx(slot.early_tx);
                 super::sapi::restore_request_start(slot.request_start);
                 super::sapi::restore_worker_cancel_state(slot.cancel_state);
+                super::sapi::restore_request_errors(slot.request_errors);
+                super::sapi::restore_stream_tx(slot.stream_tx);
             }
         });
     }
@@ -353,6 +372,10 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
+            #[cfg(feature = "php")]
+            stream_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -371,6 +394,10 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
+            #[cfg(feature = "php")]
+            stream_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -421,6 +448,10 @@ mod tests {
             request_start: None,
             #[cfg(feature = "php")]
             cancel_state: None,
+            #[cfg(feature = "php")]
+            request_errors: Vec::new(),
+            #[cfg(feature = "php")]
+            stream_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);

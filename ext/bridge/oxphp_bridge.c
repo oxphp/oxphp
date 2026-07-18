@@ -1966,6 +1966,20 @@ void oxphp_bridge_reset_request_ctx(void) {
      * touched here — they are thread-persistent and only mutated by
      * oxphp_bridge_increment_requests_done() / set_worker_start_time(),
      * called from Rust at request start / thread boot respectively. */
+
+    /* Free any unhandled-exception capture not popped by the send path (e.g. a
+     * request whose status was forced below 500). */
+    oxphp_bridge_clear_unhandled();
+
+    /* Drop any thrown-class snapshot left by this request's throws. The Rust
+     * error callback consumes it on a genuine Uncaught E_ERROR, but a request
+     * that only threw-and-caught (or threw a chained/hookless exception) leaves a
+     * live snapshot behind. Clearing it at this per-request choke point bounds
+     * the slot to a single request, so a later request whose Uncaught fatal did
+     * NOT fire the throw hook — e.g. an exception thrown without a stack frame,
+     * which the engine sends straight to zend_exception_error — cannot borrow a
+     * stale class from an earlier request on this thread. */
+    oxphp_bridge_clear_thrown_class();
 }
 
 int oxphp_bridge_worker_wait(void) {
@@ -3716,6 +3730,218 @@ char *oxphp_bridge_pop_fatal(void) {
     char *msg = captured_fatal_msg;
     captured_fatal_msg = NULL;
     return msg; /* caller owns — free with free() */
+}
+
+/* ─── Worker-mode unhandled-exception capture ──────────────────
+ * The fiber catch site stores the failing request's exception here; the Rust
+ * worker send callback pops the fields and pushes a synthetic PhpScriptError.
+ * Length-delimited: class names may embed a NUL (anonymous classes); messages
+ * may be binary/latin1.
+ *
+ * There is one "active" slot per worker thread. Under fiber multiplexing the
+ * capture happens after the handler returns but before shutdown functions run;
+ * a shutdown function that suspends (oxphp_sleep/await) would otherwise let the
+ * next request's oxphp_bridge_reset_request_ctx wipe this request's capture. The
+ * fiber scheduler therefore moves the slot in and out of the running fiber via
+ * oxphp_bridge_take_unhandled / oxphp_bridge_restore_unhandled around every
+ * suspend/resume, so the capture travels with its request. Presence is
+ * "cls != NULL" — set() requires a class and pop detaches all fields together. */
+typedef struct {
+    char *cls;   size_t cls_len;
+    char *msg;   size_t msg_len;
+    char *trace; size_t trace_len;
+    char *file;  size_t file_len;
+    uint32_t line;
+} oxphp_unhandled_slot;
+
+static __thread oxphp_unhandled_slot unhandled_exc = {0};
+
+static char *unhandled_dup_n(const char *p, size_t len) {
+    if (!p || len == 0) return NULL;
+    char *b = malloc(len);
+    if (b) memcpy(b, p, len);
+    return b;
+}
+
+void oxphp_bridge_set_unhandled_exc(
+    const char *cls, size_t cls_len,
+    const char *msg, size_t msg_len,
+    const char *trace, size_t trace_len,
+    const char *file, size_t file_len,
+    uint32_t line)
+{
+    oxphp_bridge_clear_unhandled();
+    /* Class first: if it can't be duplicated there is no capture, so bail before
+     * allocating the other fields (avoids a headerless orphan the pop path,
+     * keyed on cls, could never reach). */
+    char *c = unhandled_dup_n(cls, cls_len);
+    if (!c) return;
+    unhandled_exc.cls = c;
+    unhandled_exc.cls_len = cls_len;
+    unhandled_exc.msg = unhandled_dup_n(msg, msg_len);
+    unhandled_exc.msg_len = unhandled_exc.msg ? msg_len : 0;
+    unhandled_exc.trace = unhandled_dup_n(trace, trace_len);
+    unhandled_exc.trace_len = unhandled_exc.trace ? trace_len : 0;
+    unhandled_exc.file = unhandled_dup_n(file, file_len);
+    unhandled_exc.file_len = unhandled_exc.file ? file_len : 0;
+    unhandled_exc.line = line;
+}
+
+static char *unhandled_pop_field(char **slot, size_t *slot_len, size_t *out_len) {
+    char *p = *slot;
+    *slot = NULL;
+    if (out_len) *out_len = *slot_len;
+    *slot_len = 0;
+    return p; /* caller frees with free() */
+}
+
+char *oxphp_bridge_pop_unhandled_class(size_t *out_len) {
+    if (!unhandled_exc.cls) {
+        if (out_len) *out_len = 0;
+        return NULL;
+    }
+    return unhandled_pop_field(&unhandled_exc.cls, &unhandled_exc.cls_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_message(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.msg, &unhandled_exc.msg_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_trace(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.trace, &unhandled_exc.trace_len, out_len);
+}
+
+char *oxphp_bridge_pop_unhandled_file(size_t *out_len) {
+    return unhandled_pop_field(&unhandled_exc.file, &unhandled_exc.file_len, out_len);
+}
+
+uint32_t oxphp_bridge_get_unhandled_line(void) {
+    return unhandled_exc.line;
+}
+
+void oxphp_bridge_clear_unhandled(void) {
+    free(unhandled_exc.cls);   unhandled_exc.cls = NULL;   unhandled_exc.cls_len = 0;
+    free(unhandled_exc.msg);   unhandled_exc.msg = NULL;   unhandled_exc.msg_len = 0;
+    free(unhandled_exc.trace); unhandled_exc.trace = NULL; unhandled_exc.trace_len = 0;
+    free(unhandled_exc.file);  unhandled_exc.file = NULL;  unhandled_exc.file_len = 0;
+    unhandled_exc.line = 0;
+}
+
+/* ── Per-fiber save/restore of the active capture ──────────────
+ * The fiber scheduler parks a suspended request's capture off the thread-active
+ * slot and restores it on resume, so a suspending shutdown function cannot let
+ * another request's reset wipe it (and so two requests never cross-attribute). */
+
+/* Move the active slot into a heap container (ownership of the inner strings
+ * transfers with it) and clear the active slot. Returns NULL when empty. */
+void *oxphp_bridge_take_unhandled(void) {
+    if (!unhandled_exc.cls) {
+        return NULL;
+    }
+    oxphp_unhandled_slot *p = malloc(sizeof(*p));
+    if (!p) {
+        /* OOM: drop the capture rather than leak or misattribute it. */
+        oxphp_bridge_clear_unhandled();
+        return NULL;
+    }
+    *p = unhandled_exc;
+    memset(&unhandled_exc, 0, sizeof(unhandled_exc));
+    return p;
+}
+
+/* Move a previously-taken container back into the active slot and free the
+ * container. Any capture currently in the active slot is released first (it
+ * should already be empty at a resume). NULL is a no-op. */
+void oxphp_bridge_restore_unhandled(void *vp) {
+    oxphp_bridge_clear_unhandled();
+    if (!vp) {
+        return;
+    }
+    oxphp_unhandled_slot *p = (oxphp_unhandled_slot *)vp;
+    unhandled_exc = *p;
+    free(p);
+}
+
+/* Free a taken container that will never be restored (fiber destroyed while
+ * suspended with a capture parked). NULL is a no-op. */
+void oxphp_bridge_free_unhandled(void *vp) {
+    if (!vp) {
+        return;
+    }
+    oxphp_unhandled_slot *p = (oxphp_unhandled_slot *)vp;
+    free(p->cls);
+    free(p->msg);
+    free(p->trace);
+    free(p->file);
+    free(p);
+}
+
+/* ── Traditional-path structural class snapshot ────────────────
+ * The worker path reads an escaping exception's class straight from
+ * EG(exception) at the fiber-catch site. The traditional path never gets that
+ * chance: PHP nulls EG(exception) inside zend_exception_error *before* our
+ * zend_error_cb sees the "Uncaught …" text, so the class would otherwise have to
+ * be parsed out of the formatted, partly user-controlled message (where a
+ * message forging a "\n\nNext <FakeClass>: …" segment could poison the type).
+ *
+ * Instead, snapshot the class of every thrown exception here via
+ * zend_throw_exception_hook; the Rust error callback reads the most-recent
+ * snapshot when it records the Uncaught fatal and uses it as the authoritative
+ * exception.type. The Rust callback reads it only for a genuine engine
+ * `E_ERROR` "Uncaught" fatal and clears it immediately after copying
+ * (oxphp_bridge_clear_thrown_class). That consume-on-read is not sufficient on
+ * its own: an Uncaught fatal is NOT always preceded by a hook-firing throw in
+ * the same request — an exception thrown without a stack frame goes straight to
+ * zend_exception_error without the hook running (Zend/zend_exceptions.c), so a
+ * snapshot left by an EARLIER request (which threw-and-caught, never clearing)
+ * would be read as this request's class. oxphp_bridge_reset_request_ctx() clears
+ * the slot per request to close that cross-request window. The class is
+ * length-delimited (an anonymous class name carries an embedded NUL), matching
+ * the worker capture. */
+static __thread char *thrown_class = NULL;
+static __thread size_t thrown_class_len = 0;
+
+/* Chained so another extension's hook (if any) still runs. Set once at install. */
+static void (*prev_throw_exception_hook)(zend_object *ex) = NULL;
+
+static void oxphp_throw_exception_hook(zend_object *ex) {
+    if (ex && ex->ce && ex->ce->name) {
+        /* free-old + dup-new; on OOM leave the slot empty so the Rust side
+         * falls back to text parsing rather than reporting a stale class. */
+        char *dup = unhandled_dup_n(ZSTR_VAL(ex->ce->name), ZSTR_LEN(ex->ce->name));
+        free(thrown_class);
+        thrown_class = dup;
+        thrown_class_len = dup ? ZSTR_LEN(ex->ce->name) : 0;
+    }
+    if (prev_throw_exception_hook) {
+        prev_throw_exception_hook(ex);
+    }
+}
+
+/* Install the throw hook once, after php_module_startup(). Idempotent. */
+void oxphp_bridge_install_throw_hook(void) {
+    if (zend_throw_exception_hook == oxphp_throw_exception_hook) {
+        return;
+    }
+    prev_throw_exception_hook = zend_throw_exception_hook;
+    zend_throw_exception_hook = oxphp_throw_exception_hook;
+}
+
+/* Borrow the most-recent thrown class (length-delimited, NUL-inclusive). NULL
+ * when none has been thrown. Valid until the next throw overwrites it — the Rust
+ * error callback copies it synchronously while recording the Uncaught fatal. */
+const char *oxphp_bridge_peek_thrown_class(size_t *out_len) {
+    if (out_len) *out_len = thrown_class_len;
+    return thrown_class_len ? thrown_class : NULL;
+}
+
+/* Drop the thrown-class snapshot (consume-once). The Rust error callback calls
+ * this right after copying the class while recording an Uncaught E_ERROR fatal,
+ * so a stale class can never be borrowed by a later request on this thread. */
+void oxphp_bridge_clear_thrown_class(void) {
+    free(thrown_class);
+    thrown_class = NULL;
+    thrown_class_len = 0;
 }
 
 /* === Async Promise: Async Reset === */

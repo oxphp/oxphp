@@ -374,7 +374,31 @@ extern "C" {
     pub fn oxphp_bridge_get_rss_bytes() -> u64;
     pub fn oxphp_bridge_get_memory_usage() -> u64;
     pub fn oxphp_bridge_get_max_memory_bytes() -> u64;
-    pub fn oxphp_bridge_get_handler_failed() -> bool;
+
+    // ─── Worker unhandled-exception capture ─────────────
+    pub fn oxphp_bridge_pop_unhandled_class(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_message(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_trace(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_pop_unhandled_file(out_len: *mut usize) -> *mut c_char;
+    pub fn oxphp_bridge_get_unhandled_line() -> u32;
+    /// Clear the thread-active unhandled-exception slot (freeing any un-popped
+    /// fields). Called at worker request teardown so a request that never popped
+    /// (e.g. an early-sent `finish_request()` request that later threw) cannot
+    /// leave its capture for the next request on the thread to pick up.
+    pub fn oxphp_bridge_clear_unhandled();
+
+    // ─── Traditional-path structural class snapshot ─────
+    /// Install the `zend_throw_exception_hook` that records each thrown
+    /// exception's class. Call once after `php_module_startup()`.
+    pub fn oxphp_bridge_install_throw_hook();
+    /// Borrow the most-recently thrown exception's class (length-delimited via
+    /// `out_len`, NUL-inclusive for anonymous classes). Returns null if nothing
+    /// has been thrown. The pointer is valid only until the next throw — copy it
+    /// synchronously.
+    pub fn oxphp_bridge_peek_thrown_class(out_len: *mut usize) -> *const c_char;
+    /// Drop the thrown-class snapshot (consume-once). Called by the error callback
+    /// right after copying the class of an Uncaught `E_ERROR` fatal.
+    pub fn oxphp_bridge_clear_thrown_class();
 
     // ─── SAPI response code ─────────────────────────────
     pub fn oxphp_bridge_get_response_code() -> c_int;

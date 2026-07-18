@@ -389,6 +389,10 @@ fn execute_request(
         return Some(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"php_request_startup() failed"),
+            // A failing RINIT (e.g. an extension) can record a fatal in
+            // REQUEST_ERRORS; carry it so the root span still gets the exception
+            // event instead of a bare 500.
+            errors: sapi::take_request_errors(),
             ..Default::default()
         });
     }

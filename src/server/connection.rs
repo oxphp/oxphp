@@ -285,6 +285,17 @@ pub async fn handle_request(
     // Handlers: MetricsResponseHandler (0), AccessLogHandler (100)
     let status = response.status().as_u16();
     let response_size = response.body().size_hint().exact().unwrap_or(0);
+
+    // RequestComplete dispatches synchronously for every response — access log and
+    // metrics are never withheld for the lifetime of a long-lived stream. For a
+    // streaming or `finish_request()` response, `php_errors` is the snapshot taken
+    // when the headers went out (empty at header time for a stream; the rest
+    // accumulate on the worker thread and are dropped at teardown). A fatal thrown
+    // *after* such a response has already committed its status is therefore not
+    // attached to the root span — a documented streaming boundary, symmetric with
+    // a sub-500 stream that a late error cannot re-flag. The common non-streaming
+    // 5xx (a plain PHP fatal) carries its exception here: its errors are final by
+    // send time.
     let elapsed = start.elapsed();
     let mut complete_event = RequestComplete {
         request_id, // move — no clone

@@ -330,11 +330,20 @@ impl Plugin for OtelPlugin {
         // Share SdkTracerProvider with other plugins (e.g. APM)
         ctx.register_service("otel.provider", Box::new(self.provider.clone()));
 
+        // Byte caps for the auto-captured root-span exception event. Read the
+        // same bare `OTEL_APM_*_MAX_BYTES` knobs as the APM child-span path so a
+        // single operator setting drives both, with the same warn-on-typo and
+        // blank-is-default behavior. `0` = no truncation.
+        let message_max = read_byte_cap("OTEL_APM_MESSAGE_MAX_BYTES", 4096);
+        let stacktrace_max = read_byte_cap("OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
+
         // Register handlers
         ctx.on_request(OtelRequestHandler);
         ctx.on_complete(OtelCompleteHandler {
             provider: self.provider.clone(),
             server_address: self.server_address.clone(),
+            message_max,
+            stacktrace_max,
         });
 
         Ok(())
@@ -422,11 +431,135 @@ impl PluginRequestHandler for OtelRequestHandler {
     }
 }
 
+// ─── Unhandled-exception event ──────────────────────────────
+
+/// Parse a byte-cap env var, warning — rather than silently defaulting — on a
+/// malformed value so an operator's typo surfaces. Unset or blank uses `default`.
+///
+/// Read as a *bare* env var, NOT through `PluginContext::config`: the
+/// `OTEL_APM_*_MAX_BYTES` knobs are a single cap shared by the root-span path
+/// (here) and the APM child-span path, and `config` would prepend the plugin name
+/// to the already-namespaced key (`OTEL_OTEL_APM_…` here, `APM_OTEL_APM_…` there),
+/// so a plugin-prefixed override could silently split the two spans' caps apart.
+/// The APM plugin's `read_cap` reads the same key the same way, so they never
+/// drift.
+fn read_byte_cap(env: &str, default: usize) -> usize {
+    match std::env::var(env).ok().as_deref().map(str::trim) {
+        None | Some("") => default,
+        Some(v) => match v.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    plugin = "otel",
+                    env,
+                    value = %v,
+                    default,
+                    "invalid byte cap; expected a non-negative integer, using default"
+                );
+                default
+            }
+        },
+    }
+}
+
+/// Truncate a string to at most `max_bytes` on a UTF-8 boundary, keeping the head
+/// (so a stacktrace's root frame `#0` survives) and appending a `…(truncated)`
+/// marker when the cap leaves room for it. `0` disables truncation. This is the
+/// single copy shared by both exception-event paths: the APM plugin (which
+/// depends on this one) reuses it for child-span events so root-span and
+/// child-span exception attributes truncate identically.
+pub(crate) fn truncate_attr(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if max_bytes == 0 || s.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    const MARKER: &str = "…(truncated)";
+    let with_marker = max_bytes > MARKER.len();
+    let budget = if with_marker {
+        max_bytes - MARKER.len()
+    } else {
+        max_bytes
+    };
+    let mut end = budget.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + MARKER.len());
+    out.push_str(&s[..end]);
+    if with_marker {
+        out.push_str(MARKER);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Strip embedded NUL bytes from an attribute value. A worker-captured exception
+/// type/message/stacktrace is length-delimited and fully script-controlled, so an
+/// interior NUL (valid UTF-8) would otherwise ride into the OTLP attribute and be
+/// silently truncated by any NUL-terminating downstream consumer — e.g. a message
+/// `timeout\0admin-token` seen as `timeout`. An anonymous class name
+/// (`<parent>@anonymous\0<file>:<line>$<hash>`) carries one by construction.
+/// No-op (borrowed) when there is no NUL. Shared by the root-span path
+/// (`exception_event`) and the APM child-span path (`push_exception_event`) so
+/// every exported exception attribute is sanitized identically.
+pub(crate) fn strip_nul(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\0') {
+        std::borrow::Cow::Owned(s.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Build the OTel `exception` event for an unhandled exception / fatal error.
+/// `exception.file`/`exception.line` are an OxPHP extension (OTel standardizes
+/// only `exception.{type,message,stacktrace,escaped}`).
+fn exception_event(
+    exc: &crate::types::CapturedException,
+    timestamp: std::time::SystemTime,
+    message_max: usize,
+    stacktrace_max: usize,
+) -> opentelemetry::trace::Event {
+    // Sanitize every script-controlled field for embedded NUL (see `strip_nul`),
+    // then byte-cap message/stacktrace. Type is stripped too — an anonymous class
+    // name carries a NUL by construction — and so is `file`: on the worker path it
+    // is a length-delimited, fully script-controlled string, so an interior NUL
+    // would otherwise truncate the path in any NUL-terminating downstream.
+    let ty = strip_nul(&exc.exception_type);
+    // Omit `exception.type` when empty (a degenerate parse), matching the APM
+    // child-span path — some backends drop an event whose type is a blank string.
+    let mut attrs = Vec::with_capacity(6);
+    if !ty.is_empty() {
+        attrs.push(KeyValue::new("exception.type", ty.into_owned()));
+    }
+    if let Some(m) = &exc.message {
+        attrs.push(KeyValue::new(
+            "exception.message",
+            truncate_attr(strip_nul(m).as_ref(), message_max).into_owned(),
+        ));
+    }
+    if let Some(t) = &exc.stacktrace {
+        attrs.push(KeyValue::new(
+            "exception.stacktrace",
+            truncate_attr(strip_nul(t).as_ref(), stacktrace_max).into_owned(),
+        ));
+    }
+    if let Some(f) = &exc.file {
+        attrs.push(KeyValue::new("exception.file", strip_nul(f).into_owned()));
+    }
+    if let Some(l) = exc.line {
+        attrs.push(KeyValue::new("exception.line", l as i64));
+    }
+    attrs.push(KeyValue::new("oxphp.event.kind", "exception"));
+    opentelemetry::trace::Event::new("exception", timestamp, attrs, 0)
+}
+
 // ─── Complete handler ───────────────────────────────────────
 
 struct OtelCompleteHandler {
     provider: Arc<OnceLock<SdkTracerProvider>>,
     server_address: String,
+    /// Byte caps for the auto-captured `exception` event's message/stacktrace.
+    /// `0` disables truncation. Shared knob names with the APM plugin.
+    message_max: usize,
+    stacktrace_max: usize,
 }
 
 impl PluginCompleteHandler for OtelCompleteHandler {
@@ -448,7 +581,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             return;
         }
 
-        // Collect owned data for background export — nothing below blocks the response
+        // Collect owned scalars up front for the span build below.
         let provider = self.provider.clone();
         let trace_id_owned = trace_id_str.to_string();
         let span_id_owned = span_id_str.to_string();
@@ -472,8 +605,35 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         let queue_wait_us = view.queue_wait_us.map(|v| v as i64);
         let php_exec_us = view.php_exec_us.map(|v| v as i64);
 
-        // Span building + OTel export happens off the hot path
-        tokio::spawn(async move {
+        // Auto-capture the unhandled exception / fatal that failed a 5xx request,
+        // so the root SERVER span carries it without any PHP-side integration.
+        // Build the (already byte-capped) event here, so a multi-megabyte
+        // message/stacktrace is truncated up front and only the bounded event —
+        // not the full-size `CapturedException` — is carried into the span build.
+        let unhandled_event = if status_code >= 500 {
+            crate::php::unhandled_exception::extract_unhandled_exception(view.php_errors).map(
+                |exc| {
+                    exception_event(
+                        &exc,
+                        std::time::SystemTime::now(),
+                        self.message_max,
+                        self.stacktrace_max,
+                    )
+                },
+            )
+        } else {
+            None
+        };
+
+        // Build the span synchronously. The BatchSpanProcessor still exports on
+        // its own thread — only the cheap build (an attribute Vec) and the
+        // non-blocking enqueue run here. Doing it inline rather than in a detached
+        // task guarantees the span is enqueued before `RequestComplete` returns,
+        // which runs before this request's connection is counted as drained. So at
+        // graceful shutdown `plugin_manager.shutdown_all()` — which runs only after
+        // `active_connections()` hits 0 — force-flushes an already-enqueued span,
+        // with no drain guard needed and no detached task racing provider.shutdown().
+        {
             let provider = provider.get().unwrap(); // safe: checked above
             let tracer = provider.tracer("oxphp");
 
@@ -518,6 +678,13 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             if let Some(us) = php_exec_us {
                 attributes.push(KeyValue::new("oxphp.php_exec_us", us));
             }
+            // OTel HTTP semantic conventions: a server span for a failed (5xx)
+            // response carries `error.type`. Backends read it straight off the
+            // span for HTTP error grouping and metrics, independently of the
+            // exception event's own `exception.type`. Use the status code string.
+            if status_code >= 500 {
+                attributes.push(KeyValue::new("error.type", status_code.to_string()));
+            }
 
             let status = if status_code >= 500 {
                 Status::error(format!("HTTP {status_code}"))
@@ -534,6 +701,10 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 .with_end_time(end_time)
                 .with_attributes(attributes)
                 .with_status(status);
+
+            if let Some(event) = unhandled_event {
+                builder = builder.with_events(vec![event]);
+            }
 
             if let Some(parent_sid) = parent_span_id {
                 use opentelemetry::trace::{SpanContext, TraceContextExt};
@@ -552,7 +723,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 }
                 drop(builder.start(&tracer));
             }
-        });
+        }
     }
 
     fn priority(&self) -> Priority {
@@ -567,6 +738,153 @@ mod tests {
     use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
+    use std::borrow::Cow;
+
+    // `truncate_attr` is owned by this plugin (the APM plugin re-uses it), so its
+    // unit tests live here — an otel-only build still exercises the helper.
+    #[test]
+    fn truncate_short_is_borrowed() {
+        let s = "#0 /app/x.php(1): f()\n#1 {main}";
+        match truncate_attr(s, 8192) {
+            Cow::Borrowed(b) => assert_eq!(b, s),
+            Cow::Owned(_) => panic!("short trace must not be copied"),
+        }
+    }
+
+    #[test]
+    fn truncate_zero_disables() {
+        let s = "a".repeat(100_000);
+        assert!(matches!(truncate_attr(&s, 0), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strip_nul_removes_embedded_nul_from_message() {
+        // A worker exception message is length-delimited and user-controlled, so
+        // an interior NUL survives to here; strip it so a NUL-terminating
+        // downstream cannot truncate "timeout\0admin-token" to "timeout".
+        match strip_nul("timeout\0admin-token") {
+            Cow::Owned(s) => assert_eq!(s, "timeoutadmin-token"),
+            Cow::Borrowed(_) => panic!("NUL-bearing value must be rewritten"),
+        }
+    }
+
+    #[test]
+    fn strip_nul_borrows_clean_value() {
+        // Ordinary values (no NUL) must not be copied.
+        assert!(matches!(
+            strip_nul("RuntimeException"),
+            Cow::Borrowed("RuntimeException")
+        ));
+    }
+
+    #[test]
+    fn exception_event_sanitizes_every_script_controlled_nul() {
+        // End-to-end: a NUL in type/message/stacktrace/file must not reach the
+        // attribute. `file` is length-delimited and script-controlled on the
+        // worker path, so an interior NUL would truncate the path downstream.
+        let exc = crate::types::CapturedException {
+            exception_type: "Anon\0Class".into(),
+            message: Some("boom\0hidden".into()),
+            stacktrace: Some("#0 main\0trailer".into()),
+            file: Some("app.php\0/secret/tail".into()),
+            line: Some(7),
+        };
+        let ev = exception_event(&exc, std::time::UNIX_EPOCH, 0, 0);
+        let mut saw_file = false;
+        for kv in &ev.attributes {
+            if let opentelemetry::Value::String(s) = &kv.value {
+                assert!(
+                    !s.as_str().contains('\0'),
+                    "attribute {} still holds a NUL",
+                    kv.key.as_str()
+                );
+                if kv.key.as_str() == "exception.file" {
+                    saw_file = true;
+                    // The whole path survives (the NUL is stripped, not truncated at it).
+                    assert_eq!(s.as_str(), "app.php/secret/tail");
+                }
+            }
+        }
+        assert!(saw_file, "exception.file attribute missing");
+    }
+
+    #[test]
+    fn truncate_long_marks_and_bounds() {
+        let s = "x".repeat(20_000);
+        let out = truncate_attr(&s, 8192);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 8192, "len was {}", out.len());
+    }
+
+    #[test]
+    fn truncate_respects_utf8_boundary() {
+        // "é" is 2 bytes; a naive byte cut would split it and be invalid UTF-8.
+        let s = "é".repeat(100); // 200 bytes
+        let out = truncate_attr(&s, 50);
+        assert!(out.ends_with("…(truncated)"));
+        assert!(out.len() <= 50);
+    }
+
+    #[test]
+    fn truncate_tiny_cap_never_exceeds() {
+        // Cap smaller than the marker ("…(truncated)" = 14 bytes): the result
+        // must still be <= max_bytes, so the marker is dropped rather than
+        // overflowing the cap.
+        let s = "x".repeat(1000);
+        for cap in [1usize, 5, 13, 14, 15] {
+            let out = truncate_attr(&s, cap);
+            assert!(out.len() <= cap, "cap={cap} produced {} bytes", out.len());
+        }
+    }
+
+    #[test]
+    fn exception_event_carries_all_attrs() {
+        use crate::types::CapturedException;
+        let exc = CapturedException {
+            exception_type: "RuntimeException".into(),
+            message: Some("boom".into()),
+            stacktrace: Some("#0 {main}".into()),
+            file: Some("/app/x.php".into()),
+            line: Some(9),
+        };
+        let ev = super::exception_event(&exc, std::time::UNIX_EPOCH, 4096, 8192);
+        assert_eq!(ev.name, "exception");
+        let get = |k: &str| {
+            ev.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(get("exception.type").as_deref(), Some("RuntimeException"));
+        assert_eq!(get("exception.message").as_deref(), Some("boom"));
+        assert_eq!(get("exception.stacktrace").as_deref(), Some("#0 {main}"));
+        assert_eq!(get("exception.file").as_deref(), Some("/app/x.php"));
+        assert_eq!(get("exception.line").as_deref(), Some("9"));
+        assert_eq!(get("oxphp.event.kind").as_deref(), Some("exception"));
+    }
+
+    #[test]
+    fn exception_event_truncates_and_skips_missing() {
+        use crate::types::CapturedException;
+        let exc = CapturedException {
+            exception_type: "E_ERROR".into(),
+            message: Some("abcdef".into()),
+            stacktrace: None,
+            file: None,
+            line: None,
+        };
+        let ev = super::exception_event(&exc, std::time::UNIX_EPOCH, 3, 8192);
+        let get = |k: &str| {
+            ev.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == k)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(get("exception.message").as_deref(), Some("abc")); // truncated to 3 bytes
+        assert!(get("exception.stacktrace").is_none()); // skipped
+        assert!(get("exception.file").is_none());
+        assert!(get("exception.line").is_none());
+    }
 
     // Mutex to serialize tests that manipulate env vars
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -693,6 +1011,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         assert_eq!(handler.priority(), -80);
     }
@@ -702,6 +1022,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         let view = PluginCompleteView::new(
             "req1",
@@ -726,6 +1048,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         let metadata = vec![
             (
@@ -1017,6 +1341,8 @@ mod tests {
         let handler = OtelCompleteHandler {
             provider: Arc::new(OnceLock::new()),
             server_address: "0.0.0.0:8080".to_string(),
+            message_max: 4096,
+            stacktrace_max: 8192,
         };
         assert_eq!(handler.server_address, "0.0.0.0:8080");
     }

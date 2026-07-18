@@ -116,6 +116,26 @@ pub struct PhpScriptError {
     pub line: u32,
     /// Stack trace for exceptions and fatal errors.
     pub stacktrace: Option<String>,
+    /// Real Throwable class when this entry is a captured unhandled exception.
+    /// Worker mode pre-fills it from `EG(exception)->ce`; the traditional path
+    /// fills it from a `zend_throw_exception_hook` snapshot taken at throw time.
+    /// `None` only when the hook missed (e.g. an exception thrown without a stack
+    /// frame) — then the class is parsed from `message` as a fallback — or for
+    /// ordinary warnings/notices.
+    pub exception_class: Option<String>,
+}
+
+/// The single unhandled exception (or fatal error) that failed a request,
+/// normalized for export as an OTel `exception` event on the root span.
+#[derive(Debug)]
+pub struct CapturedException {
+    /// `exception.type` — real Throwable class, or a synthetic name for a
+    /// classless fatal (e.g. "E_ERROR").
+    pub exception_type: String,
+    pub message: Option<String>,
+    pub stacktrace: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
 }
 
 /// Response sent from PHP worker thread back to Tokio task.
@@ -128,6 +148,12 @@ pub struct ScriptResponse {
     /// subsequent chunks arrive via this channel. Channel close = stream end.
     pub stream_rx: Option<tokio::sync::mpsc::Receiver<Bytes>>,
     /// PHP errors captured during script execution.
+    ///
+    /// For a streaming (or `finish_request()` early-sent) response this is the
+    /// snapshot taken when the headers went out — empty at header time for a
+    /// stream, since the script has barely started. Errors accumulated for the
+    /// rest of the stream are not delivered to the dispatch side (a documented
+    /// streaming boundary); the common non-streaming response's `errors` is final.
     pub errors: Vec<PhpScriptError>,
     /// Finalized span tree for the request. Produced by `ProfilingContext::finalize()` on the
     /// PHP worker thread. `None` when APM is disabled or no spans were created.

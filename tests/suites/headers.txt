@@ -20,3 +20,8 @@ headers/test_request_id_passthrough | GET | -H "X-Request-ID: abc123" | 200 | x-
 headers/test_frame_options_default | GET | | 200 | x-frame-options:SAMEORIGIN, content-security-policy:~ancestors, x-content-type-options:nosniff
 headers/test_frame_options_app_xfo_wins | GET | | 200 | x-frame-options:DENY, content-security-policy:missing
 headers/test_frame_options_app_csp_wins | GET | | 200 | content-security-policy:~partner.example.com, x-frame-options:missing
+
+# An explicit http_response_code() set before an uncaught throw must survive onto
+# the wire: PHP substitutes a fatal 500 only when the code is still 200, so the
+# script's 503 wins over the generic error fallback.
+headers/test_status_explicit_then_throw | GET | | 503

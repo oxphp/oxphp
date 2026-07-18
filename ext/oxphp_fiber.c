@@ -89,11 +89,15 @@ void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     sched->next_fiber_id = 1;
 }
 
-/* Free task-mode payload owned by a fiber: the reconstructed closure, the
- * captured return value, and the captured-exception strings. The borrowed
- * task_args belong to the Rust driver and are NOT touched here. A no-op for
- * HTTP request fibers, whose task_* fields stay zeroed/UNDEF. Single source of
- * truth shared by oxphp_async_sched_release and oxphp_scheduler_destroy so both
+/* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
+ * closure, captured return value, captured-exception strings) and any parked
+ * unhandled-exception capture. The borrowed task_args belong to the Rust driver
+ * and are NOT touched here. The task_* fields are a no-op for HTTP request
+ * fibers (they stay zeroed/UNDEF); php_state.unhandled_exc is a no-op for
+ * task-mode fibers (only HTTP request fibers ever park one) and is normally NULL
+ * even for request fibers — non-NULL only when a request fiber is destroyed
+ * while suspended in a shutdown function with a capture parked. Single source of
+ * truth shared by oxphp_async_sched_release and oxphp_scheduler_destroy so all
  * paths free the same set of fields. */
 static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     if (!Z_ISUNDEF(fiber->task_closure)) {
@@ -111,6 +115,10 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     if (fiber->task_exc_message) {
         free(fiber->task_exc_message);
         fiber->task_exc_message = NULL;
+    }
+    if (fiber->php_state.unhandled_exc) {
+        oxphp_bridge_free_unhandled(fiber->php_state.unhandled_exc);
+        fiber->php_state.unhandled_exc = NULL;
     }
 }
 
@@ -151,6 +159,31 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
  *
  * If the handler suspends mid-request (oxphp_sleep/oxphp_async_await), the
  * scheduler creates additional fibers for concurrent requests. */
+
+/* Capture the in-flight exception into bridge TLS for the worker send path, so
+ * the root SERVER span can carry it without any PHP-side integration.
+ * EG(exception) must be live (called before OBJ_RELEASE). Reads file/line from
+ * the Throwable's own properties (throw origin); oxphp_exception_capture handles
+ * class (borrowed, length-delimited), message + getTraceAsString (malloc'd). */
+static void oxphp_capture_unhandled(zend_object *ex) {
+    const char *cls = NULL;
+    char *msg = NULL, *trace = NULL;
+    size_t cls_len = 0, msg_len = 0, trace_len = 0;
+    oxphp_exception_capture(ex, &cls, &cls_len, &msg, &msg_len, &trace, &trace_len);
+
+    zval rv_f, rv_l;
+    zval *fz = zend_read_property(ex->ce, ex, "file", sizeof("file") - 1, 1, &rv_f);
+    zval *lz = zend_read_property(ex->ce, ex, "line", sizeof("line") - 1, 1, &rv_l);
+    const char *file = (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRVAL_P(fz) : NULL;
+    size_t file_len = (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRLEN_P(fz) : 0;
+    uint32_t line = (lz && Z_TYPE_P(lz) == IS_LONG) ? (uint32_t)Z_LVAL_P(lz) : 0;
+
+    oxphp_bridge_set_unhandled_exc(cls, cls_len, msg, msg_len, trace, trace_len,
+                                   file, file_len, line);
+    free(msg);
+    free(trace);
+}
+
 static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
     /* Retrieve fiber pointer via kind — set during zend_fiber_init_context() */
     oxphp_request_fiber *fiber = (oxphp_request_fiber *)EG(current_fiber_context)->kind;
@@ -190,6 +223,15 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
             if (EG(exception)) {
                 if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
                     fiber->handler_failed = true;
+                    /* Normal (non-bailout) unwind of an uncaught handler
+                     * exception — the worker's only path to observe it, since
+                     * the fiber swallows it before zend_exception_error runs.
+                     * Capture the live object for the root span before release.
+                     * (The zend_catch arm below is the zend_bailout/fatal path:
+                     * fatals are already recorded by oxphp_error_cb, and calling
+                     * getTraceAsString there could re-bailout — so no capture
+                     * there.) */
+                    oxphp_capture_unhandled(EG(exception));
                 }
                 OBJ_RELEASE(EG(exception));
                 EG(exception) = NULL;
@@ -345,6 +387,13 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.bridge_headers_sent = oxphp_bridge_get_headers_sent();
     fiber->php_state.bridge_finished = oxphp_bridge_is_finished();
 
+    /* Park any unhandled-exception capture with this fiber. A capture only
+     * exists here when the handler already threw and a shutdown function is
+     * suspending; taking it off the thread-active slot keeps the next request's
+     * oxphp_bridge_reset_request_ctx from wiping it. NULL (the common case)
+     * leaves php_state.unhandled_exc NULL. */
+    fiber->php_state.unhandled_exc = oxphp_bridge_take_unhandled();
+
     /* Step 5: Save VM state (vm_stack, execute_data, bailout) */
     oxphp_save_vm_state(&fiber->php_state.vm_state);
 }
@@ -379,6 +428,11 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     oxphp_bridge_set_stream_mode(fiber->php_state.bridge_stream_mode);
     oxphp_bridge_set_headers_sent(fiber->php_state.bridge_headers_sent);
     oxphp_bridge_set_finished(fiber->php_state.bridge_finished);
+
+    /* Re-install this fiber's parked exception capture into the thread-active
+     * slot (consumes the container). NULL is a no-op. */
+    oxphp_bridge_restore_unhandled(fiber->php_state.unhandled_exc);
+    fiber->php_state.unhandled_exc = NULL;
 
     /* Re-install this fiber's request cancel cell so the interrupt handler and
      * suspend points read THIS fiber's reason, not whichever request set the

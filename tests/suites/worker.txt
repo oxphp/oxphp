@@ -24,3 +24,11 @@ worker/test_worker_class_worker_mode_basic
 worker/test_await_timeout_in_request_fiber
 worker/test_worker_class_exit_reason
 worker/test_worker_class_schedule_exit
+
+# Explicit http_response_code() is honored on the worker send path: the status a
+# script sets via http_response_code() lives only in SG(sapi_headers) and must be
+# collected into the response. (The uncaught-throw variant — where the status must
+# also survive the fatal fallback — is asserted in the default/traditional profile
+# via headers/test_status_explicit_then_throw, free of the worker async
+# output-buffer interaction that makes a throwing worker request flaky here.)
+worker/test_worker_status_explicit_no_throw | GET | | 201

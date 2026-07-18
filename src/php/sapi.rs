@@ -129,6 +129,81 @@ pub fn take_request_errors() -> Vec<crate::types::PhpScriptError> {
     REQUEST_ERRORS.with(|errors| std::mem::take(&mut *errors.borrow_mut()))
 }
 
+/// Restore a request's captured PHP errors (the counterpart of
+/// `take_request_errors`, used by the per-fiber TLS save/restore so a suspended
+/// worker request's errors are not lost to — or mixed with — the errors of
+/// another request that runs on the same worker thread while it is parked).
+pub fn restore_request_errors(errors: Vec<crate::types::PhpScriptError>) {
+    REQUEST_ERRORS.with(|slot| *slot.borrow_mut() = errors);
+}
+
+/// Take the streaming chunk sender out of TLS (per-fiber save). A streaming
+/// worker request that suspends mid-stream must not leave `STREAM_TX` in the
+/// thread-global slot: another fiber's request running on the same worker thread
+/// would overwrite it, and this request's later chunks would then flow to the
+/// other client's body channel (and vice versa).
+pub fn take_stream_tx() -> Option<tokio::sync::mpsc::Sender<Bytes>> {
+    STREAM_TX.with(|s| s.borrow_mut().take())
+}
+
+/// Restore a fiber's streaming chunk sender (counterpart of `take_stream_tx`).
+pub fn restore_stream_tx(tx: Option<tokio::sync::mpsc::Sender<Bytes>>) {
+    STREAM_TX.with(|s| *s.borrow_mut() = tx);
+}
+
+/// Pop a worker-mode unhandled-exception capture (set by the fiber catch site in
+/// `oxphp_fiber.c`) into a synthetic terminal `PhpScriptError`. `None` when no
+/// capture is pending. The `exception_class` field lets the downstream parser use
+/// the real class without re-parsing a formatted message.
+unsafe fn pop_worker_unhandled_exception() -> Option<crate::types::PhpScriptError> {
+    let mut cls_len: usize = 0;
+    let cls_ptr = bindings::oxphp_bridge_pop_unhandled_class(&mut cls_len);
+    if cls_ptr.is_null() {
+        return None;
+    }
+
+    // Copy a length-delimited C buffer into an owned String (lossy for non-UTF-8)
+    // and free the C allocation. NULL/empty → None.
+    let take = |ptr: *mut std::os::raw::c_char, len: usize| -> Option<String> {
+        if ptr.is_null() {
+            return None;
+        }
+        let s = if len == 0 {
+            None
+        } else {
+            let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        };
+        unsafe { libc::free(ptr as *mut std::os::raw::c_void) };
+        s
+    };
+
+    let class = take(cls_ptr, cls_len).unwrap_or_default();
+    let mut m_len: usize = 0;
+    let message = take(
+        bindings::oxphp_bridge_pop_unhandled_message(&mut m_len),
+        m_len,
+    );
+    let mut t_len: usize = 0;
+    let stacktrace = take(
+        bindings::oxphp_bridge_pop_unhandled_trace(&mut t_len),
+        t_len,
+    );
+    let mut f_len: usize = 0;
+    let file = take(bindings::oxphp_bridge_pop_unhandled_file(&mut f_len), f_len);
+    let line = bindings::oxphp_bridge_get_unhandled_line();
+
+    Some(crate::types::PhpScriptError {
+        level: "error",
+        error_type: "E_ERROR",
+        message: message.unwrap_or_default(),
+        file: file.unwrap_or_default(),
+        line,
+        stacktrace,
+        exception_class: Some(class),
+    })
+}
+
 /// Per-request data stored in thread-local for SAPI callbacks to access.
 /// Reused across requests — `server_vars` Vec capacity is retained.
 struct RequestData {
@@ -433,6 +508,13 @@ pub fn send_streaming_headers() -> bool {
                 *s.borrow_mut() = Some(chunk_tx);
             });
 
+            // Sync the status a script set via `http_response_code()` before it
+            // started streaming — that call updates `SG(sapi_headers)` only, and
+            // for a streaming response the headers go out now (there is no later
+            // `collect_response_code()` at completion to pick it up). Without this
+            // a streamed `http_response_code(500)` would ship as 200.
+            collect_response_code();
+
             let (raw_output, raw_headers, status) = take_response();
             let body = Bytes::from(raw_output);
             let headers = parse_raw_headers(raw_headers);
@@ -442,7 +524,11 @@ pub fn send_streaming_headers() -> bool {
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: Some(chunk_rx),
-                errors: Vec::new(), // Streaming: errors accumulate during stream, not captured here.
+                // Streaming: errors accumulate on the worker thread for the rest
+                // of the stream and are not delivered to the dispatch side — a
+                // fatal thrown after these headers is a documented streaming
+                // boundary, not attached to the root span.
+                errors: Vec::new(),
                 profile_tree: None, // streaming — spans not finished yet
                 cancel_reason: 0,
             });
@@ -1510,6 +1596,10 @@ pub unsafe fn install_error_cb() {
         return;
     }
     crate::php::bindings::zend_error_cb = oxphp_error_cb;
+    // Snapshot each thrown exception's class structurally so the traditional
+    // path's "Uncaught …" fatal can report the true `exception.type` without
+    // parsing it out of the (partly user-controlled) fatal text.
+    crate::php::bindings::oxphp_bridge_install_throw_hook();
 }
 
 /// Map PHP error type constant to (tracing level, human-readable name).
@@ -1616,6 +1706,34 @@ unsafe extern "C" fn oxphp_error_cb(
         }
     }
 
+    // For a traditional-path uncaught-exception fatal, read the class the throw
+    // hook snapshotted structurally — the engine already nulled EG(exception)
+    // before this callback ran, so the class can't be read live. This becomes the
+    // authoritative `exception.type` downstream, overriding whatever the message
+    // text would parse to (so a forged "\n\nNext …" segment cannot poison it).
+    //
+    // Gate on the exact type `E_ERROR`, not merely "error"-level + prefix: only
+    // the engine's own `zend_exception_error(…, E_ERROR)` emits an uncaught-
+    // exception fatal, and it is always preceded by this request's escaping throw.
+    // `trigger_error()` can only raise E_USER_ERROR/WARNING/…, never E_ERROR — so
+    // a forged `trigger_error('Uncaught FakeClass: …', E_USER_ERROR)` (which has no
+    // corresponding throw) can no longer borrow the class of an earlier *caught*
+    // throw. Consume the snapshot after copying so no later request can read it.
+    let exception_class = if type_name == "E_ERROR" && msg.starts_with("Uncaught ") {
+        let mut len = 0usize;
+        let ptr = bindings::oxphp_bridge_peek_thrown_class(&mut len);
+        let class = if !ptr.is_null() && len > 0 {
+            let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        } else {
+            None
+        };
+        bindings::oxphp_bridge_clear_thrown_class();
+        class
+    } else {
+        None
+    };
+
     // Capture error into REQUEST_ERRORS for inclusion in ScriptResponse.
     REQUEST_ERRORS.with(|errors| {
         errors.borrow_mut().push(crate::types::PhpScriptError {
@@ -1625,6 +1743,7 @@ unsafe extern "C" fn oxphp_error_cb(
             file: file.to_string(),
             line: error_lineno,
             stacktrace: None, // Stack trace capture will be added later
+            exception_class,
         });
     });
 
@@ -1653,15 +1772,36 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
 /// destroys the request state.
 pub fn collect_response_code() {
     let code = unsafe { bindings::oxphp_bridge_get_response_code() };
-    if code > 0 {
-        RESPONSE.with(|r| {
-            let mut resp = r.borrow_mut();
-            // Don't overwrite status set by error handlers (e.g. 500 from fatal)
-            if resp.status_code == 200 {
-                resp.status_code = code as u16;
-            }
-        });
+    let cancel_reason = unsafe { bindings::oxphp_bridge_get_cancel_reason() };
+    if let Some(status) = resolve_collected_status(code, cancel_reason) {
+        RESPONSE.with(|r| r.borrow_mut().status_code = status);
     }
+}
+
+/// Decide whether PHP's `SG(sapi_headers).http_response_code` should overwrite
+/// the status already on RESPONSE. `Some(status)` overwrites; `None` leaves it.
+///
+/// `sg_code` is PHP's authoritative status — whatever the script set via
+/// `http_response_code()` or `header()`. An explicit non-200 is adopted even over
+/// a fatal fallback (e.g. a 500 that `oxphp_error_cb` stamped onto RESPONSE
+/// mid-request), mirroring PHP's own fatal handler, which substitutes 500 only
+/// when the code is still 200 (`main/main.c`).
+///
+/// But a server-side cancellation wins over `sg_code`. When `cancel_reason != 0`,
+/// `set_fatal_error_status_if_default` has already mapped the cause onto RESPONSE
+/// (504 timeout, 503 shutdown, 499 client-abort). By that point `SG` cannot be
+/// trusted: on the PHP-native `max_execution_time` path the fatal aborts with `SG`
+/// still 200, so PHP's own handler substitutes a generic 500 into `SG`
+/// (`main/main.c` — the `== 200` guard holds) — adopting it here would mask the
+/// timeout as a crash; and a stale explicit non-200 the script set before the
+/// cancel (e.g. a 206 that never completed) is equally a lie once the server cut
+/// the request off. So a cancel reason makes RESPONSE authoritative and `SG` is
+/// ignored. Only an un-cancelled request lets `SG` speak.
+fn resolve_collected_status(sg_code: std::os::raw::c_int, cancel_reason: u8) -> Option<u16> {
+    if cancel_reason != 0 {
+        return None;
+    }
+    (sg_code > 0 && sg_code != 200).then_some(sg_code as u16)
 }
 
 pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
@@ -1707,7 +1847,9 @@ pub fn clear_buffers() {
     STREAM_TX.with(|slot| {
         slot.borrow_mut().take();
     });
-    // Clear captured PHP errors from previous request.
+    // Clear captured PHP errors from previous request. A streaming request's
+    // errors accumulated here after the header-time snapshot are dropped, not
+    // delivered — a documented streaming boundary (see `ScriptResponse::errors`).
     REQUEST_ERRORS.with(|errors| errors.borrow_mut().clear());
 }
 
@@ -2516,6 +2658,52 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     // Cleanup any outstanding async promises from this request
     cleanup_outstanding_promises_callback();
 
+    // Adopt the handler's explicit `http_response_code()` as the wire status.
+    // That builtin writes `SG(sapi_headers).http_response_code` directly (not via
+    // the header handler), so without this the non-streaming worker completion —
+    // the last send path that never collected it — would ship
+    // `http_response_code(201)` as 200. On the throw path it matters more: the
+    // error callback stamps RESPONSE with a fatal 500 mid-request, so this must run
+    // before the exception block below, and because `collect_response_code()` now
+    // adopts an explicit non-200 SG status over that fallback, the script's 503
+    // wins over the 500 (as under php-fpm). A 200 SG leaves the fallback in place.
+    collect_response_code();
+
+    // Pull the fiber's unhandled-exception capture into the error stream FIRST —
+    // before the streaming / early-sent early-returns below. A handler-body throw
+    // is swallowed by the fiber before zend_exception_error runs, so (unlike a
+    // fatal or a shutdown-function throw, which the global oxphp_error_cb records)
+    // it never reaches REQUEST_ERRORS on its own. Doing it here means the common
+    // non-streaming send carries it: `take_request_errors()` below drains it onto
+    // the ScriptResponse. (A streaming or already-early-sent response returns
+    // before that drain — its accumulated errors are a documented streaming
+    // boundary and are dropped at teardown.) Also force a 500 — the worker path
+    // can't drive status off `ctx.handler_failed` (it is never set on the fiber
+    // path). For an already-streaming response the status is committed on the
+    // wire, so this only takes effect if the script had not set one yet.
+    if let Some(exc) = pop_worker_unhandled_exception() {
+        // This capture bypassed oxphp_error_cb, so emit the same error-level log
+        // the traditional fatal path produces — otherwise a worker 500 is silent.
+        tracing::error!(
+            php_error_type = "E_ERROR",
+            php_class = exc.exception_class.as_deref().unwrap_or(""),
+            php_file = %exc.file,
+            php_line = exc.line,
+            "PHP: {}",
+            exc.message
+        );
+        // Insert at the FRONT, not the back. The handler exception terminated
+        // the request *before* the shutdown functions ran (they run at
+        // `php_call_shutdown_functions()` in oxphp_fiber.c, after the fiber-catch
+        // captured this exception); any error those shutdown functions raised was
+        // already recorded into REQUEST_ERRORS by `oxphp_error_cb`. This capture
+        // is only *mechanically* last — `extract_unhandled_exception` reports the
+        // earliest error-level entry, so the true killer must lead, else a
+        // shutdown-function error would shadow it on the root span.
+        REQUEST_ERRORS.with(|e| e.borrow_mut().insert(0, exc));
+        set_fatal_error_status_if_default();
+    }
+
     // If streaming was active, close the stream
     if bindings::oxphp_bridge_is_streaming() {
         flush_stream_chunk();
@@ -2537,12 +2725,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         return 0;
     }
 
-    // If the handler failed (bailout/fatal error), force HTTP 500
-    if bindings::oxphp_bridge_get_handler_failed() {
-        set_fatal_error_status_if_default();
-    }
-
-    // Take accumulated response and send via oneshot
+    // Take accumulated response and send via oneshot. Any handler-body throw was
+    // already pulled into REQUEST_ERRORS (and forced the status) at the top.
     let (raw_output, raw_headers, status) = take_response();
     let body = Bytes::from(raw_output);
     let headers = parse_raw_headers(raw_headers);
@@ -2617,6 +2801,11 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 unsafe fn worker_request_teardown() {
     record_worker_request_metrics();
     clear_buffers();
+    // Defensive: worker_send_callback pops the unhandled-exception capture at its
+    // top, before any early return, so this is normally a no-op. Kept as a belt-
+    // and-braces free so a capture can never linger in the thread-active slot for
+    // whichever request runs next on this thread.
+    bindings::oxphp_bridge_clear_unhandled();
     bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
     WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());
     crate::php::worker_registry::end_request(bindings::oxphp_bridge_get_worker_id() as usize);
@@ -4838,6 +5027,50 @@ mod tests {
         }
 
         unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
+    }
+
+    #[test]
+    fn collect_status_cancel_reason_beats_sg() {
+        // A server-side cancellation makes RESPONSE (already 504/503/499 via
+        // set_fatal_error_status_if_default) authoritative — SG must be ignored,
+        // whatever it holds. Two concrete regressions this guards:
+        //   * PHP-native timeout: the fatal aborts with SG still 200, so PHP's own
+        //     handler stamps a generic 500 into SG (main/main.c). Adopting it would
+        //     mask a 504 timeout as a 500 crash.
+        //   * A stale explicit non-200 the script set before the cancel (e.g. a 206
+        //     that never completed) must not survive the cut-off.
+        for reason in [
+            1u8, /*abort*/
+            2,   /*timeout*/
+            3,   /*shutdown*/
+            4,   /*stuck*/
+            5,   /*user*/
+        ] {
+            assert_eq!(
+                resolve_collected_status(500, reason),
+                None,
+                "reason {reason}, SG 500"
+            );
+            assert_eq!(
+                resolve_collected_status(206, reason),
+                None,
+                "reason {reason}, SG 206"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_status_adopts_explicit_sg_when_not_cancelled() {
+        // No cancellation: SG is the script's authoritative choice. An explicit
+        // non-200 wins even over a fatal-500 already on RESPONSE:
+        // http_response_code(503) before an uncaught throw ships 503, and a worker
+        // http_response_code(201) ships 201.
+        assert_eq!(resolve_collected_status(503, 0), Some(503));
+        assert_eq!(resolve_collected_status(201, 0), Some(201));
+        // A 200 or an unset 0 leaves RESPONSE untouched so the fatal / cancel
+        // fallbacks keep whatever they stamped.
+        assert_eq!(resolve_collected_status(200, 0), None);
+        assert_eq!(resolve_collected_status(0, 0), None);
     }
 
     #[test]

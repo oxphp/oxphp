@@ -773,6 +773,45 @@ void oxphp_exception_capture(void *ex,
     char **out_message, size_t *out_message_len,
     char **out_trace, size_t *out_trace_len);
 
+/* Worker-mode unhandled-exception capture. The fiber catch site stores the
+ * failing request's exception (thread-local, one slot); the Rust worker send
+ * callback pops the fields to build a synthetic PhpScriptError. Popped buffers
+ * are caller-owned (free with free()). oxphp_bridge_clear_unhandled() frees any
+ * un-popped fields and is also called from oxphp_bridge_reset_request_ctx(). */
+void oxphp_bridge_set_unhandled_exc(
+    const char *cls, size_t cls_len,
+    const char *msg, size_t msg_len,
+    const char *trace, size_t trace_len,
+    const char *file, size_t file_len,
+    uint32_t line);
+char *oxphp_bridge_pop_unhandled_class(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_message(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_trace(size_t *out_len);
+char *oxphp_bridge_pop_unhandled_file(size_t *out_len);
+uint32_t oxphp_bridge_get_unhandled_line(void);
+void oxphp_bridge_clear_unhandled(void);
+
+/* Per-fiber save/restore of the active capture. The scheduler parks a suspended
+ * request's capture (take) off the thread-active slot and re-installs it on
+ * resume (restore), so a suspending shutdown function cannot let another
+ * request's reset wipe it and two requests never cross-attribute. take() returns
+ * an opaque heap container (NULL if empty); restore() consumes it back into the
+ * active slot; free() releases a container that will never be restored (fiber
+ * destroyed while suspended). */
+void *oxphp_bridge_take_unhandled(void);
+void oxphp_bridge_restore_unhandled(void *slot);
+void oxphp_bridge_free_unhandled(void *slot);
+
+/* Traditional-path structural class snapshot. A zend_throw_exception_hook records
+ * the class of every thrown exception; the Rust error callback reads the latest
+ * snapshot when it logs the "Uncaught …" fatal, so exception.type comes from the
+ * engine (EG(exception)->ce), never from parsing the fatal text. Install once
+ * after php_module_startup(). peek() borrows a length-delimited class name (NULL
+ * if none), valid until the next throw — copy it synchronously. */
+void oxphp_bridge_install_throw_hook(void);
+const char *oxphp_bridge_peek_thrown_class(size_t *out_len);
+void oxphp_bridge_clear_thrown_class(void);
+
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,
     uint32_t targets
