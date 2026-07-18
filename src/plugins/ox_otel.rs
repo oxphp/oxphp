@@ -334,8 +334,8 @@ impl Plugin for OtelPlugin {
         // same bare `OTEL_APM_*_MAX_BYTES` knobs as the APM child-span path so a
         // single operator setting drives both, with the same warn-on-typo and
         // blank-is-default behavior. `0` = no truncation.
-        let message_max = read_byte_cap(ctx, "OTEL_APM_MESSAGE_MAX_BYTES", 4096);
-        let stacktrace_max = read_byte_cap(ctx, "OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
+        let message_max = read_byte_cap("OTEL_APM_MESSAGE_MAX_BYTES", 4096);
+        let stacktrace_max = read_byte_cap("OTEL_APM_STACKTRACE_MAX_BYTES", 8192);
 
         // Register handlers
         ctx.on_request(OtelRequestHandler);
@@ -433,15 +433,18 @@ impl PluginRequestHandler for OtelRequestHandler {
 
 // ─── Unhandled-exception event ──────────────────────────────
 
-/// Parse a byte-cap env var through `PluginContext::config` (so the plugin reads
-/// its own configuration the same way every other plugin does, honoring a
-/// plugin-prefixed override), warning — rather than silently defaulting — on a
-/// malformed value so an operator's typo surfaces. Unset or blank uses
-/// `default`. Mirrors the APM plugin's `read_cap`, so the shared
-/// `OTEL_APM_*_MAX_BYTES` knobs behave the same on the root-span path (here) and
-/// the child-span path.
-fn read_byte_cap(ctx: &PluginContext, env: &str, default: usize) -> usize {
-    match ctx.config(env).as_deref().map(str::trim) {
+/// Parse a byte-cap env var, warning — rather than silently defaulting — on a
+/// malformed value so an operator's typo surfaces. Unset or blank uses `default`.
+///
+/// Read as a *bare* env var, NOT through `PluginContext::config`: the
+/// `OTEL_APM_*_MAX_BYTES` knobs are a single cap shared by the root-span path
+/// (here) and the APM child-span path, and `config` would prepend the plugin name
+/// to the already-namespaced key (`OTEL_OTEL_APM_…` here, `APM_OTEL_APM_…` there),
+/// so a plugin-prefixed override could silently split the two spans' caps apart.
+/// The APM plugin's `read_cap` reads the same key the same way, so they never
+/// drift.
+fn read_byte_cap(env: &str, default: usize) -> usize {
+    match std::env::var(env).ok().as_deref().map(str::trim) {
         None | Some("") => default,
         Some(v) => match v.parse() {
             Ok(n) => n,
@@ -488,6 +491,23 @@ pub(crate) fn truncate_attr(s: &str, max_bytes: usize) -> std::borrow::Cow<'_, s
     std::borrow::Cow::Owned(out)
 }
 
+/// Strip embedded NUL bytes from an attribute value. A worker-captured exception
+/// type/message/stacktrace is length-delimited and fully script-controlled, so an
+/// interior NUL (valid UTF-8) would otherwise ride into the OTLP attribute and be
+/// silently truncated by any NUL-terminating downstream consumer — e.g. a message
+/// `timeout\0admin-token` seen as `timeout`. An anonymous class name
+/// (`<parent>@anonymous\0<file>:<line>$<hash>`) carries one by construction.
+/// No-op (borrowed) when there is no NUL. Shared by the root-span path
+/// (`exception_event`) and the APM child-span path (`push_exception_event`) so
+/// every exported exception attribute is sanitized identically.
+pub(crate) fn strip_nul(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('\0') {
+        std::borrow::Cow::Owned(s.replace('\0', ""))
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// Build the OTel `exception` event for an unhandled exception / fatal error.
 /// `exception.file`/`exception.line` are an OxPHP extension (OTel standardizes
 /// only `exception.{type,message,stacktrace,escaped}`).
@@ -497,30 +517,26 @@ fn exception_event(
     message_max: usize,
     stacktrace_max: usize,
 ) -> opentelemetry::trace::Event {
-    // Strip any embedded NUL from the class name — an anonymous class arrives as
-    // "<parent>@anonymous\0<file>:<line>$<hash>" (worker capture is length-
-    // delimited), and a NUL would truncate the type again downstream.
-    let ty = if exc.exception_type.contains('\0') {
-        exc.exception_type.replace('\0', "")
-    } else {
-        exc.exception_type.clone()
-    };
+    // Sanitize every script-controlled field for embedded NUL (see `strip_nul`),
+    // then byte-cap message/stacktrace. Type is stripped too — an anonymous class
+    // name carries a NUL by construction.
+    let ty = strip_nul(&exc.exception_type);
     // Omit `exception.type` when empty (a degenerate parse), matching the APM
     // child-span path — some backends drop an event whose type is a blank string.
     let mut attrs = Vec::with_capacity(6);
     if !ty.is_empty() {
-        attrs.push(KeyValue::new("exception.type", ty));
+        attrs.push(KeyValue::new("exception.type", ty.into_owned()));
     }
     if let Some(m) = &exc.message {
         attrs.push(KeyValue::new(
             "exception.message",
-            truncate_attr(m, message_max).into_owned(),
+            truncate_attr(strip_nul(m).as_ref(), message_max).into_owned(),
         ));
     }
     if let Some(t) = &exc.stacktrace {
         attrs.push(KeyValue::new(
             "exception.stacktrace",
-            truncate_attr(t, stacktrace_max).into_owned(),
+            truncate_attr(strip_nul(t).as_ref(), stacktrace_max).into_owned(),
         ));
     }
     if let Some(f) = &exc.file {
@@ -609,12 +625,13 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         };
 
         // Build the span synchronously. The BatchSpanProcessor still exports on
-        // its own thread; doing the build inline (rather than in a detached task)
-        // guarantees the span is enqueued before this handler returns. That keeps
-        // it inside graceful drain's window — for a deferred streaming completion
-        // the drain guard is still held, and force_flush at shutdown then reaches
-        // it — instead of racing a detached task against provider.shutdown(). The
-        // build is cheap (an attribute Vec plus a non-blocking enqueue).
+        // its own thread — only the cheap build (an attribute Vec) and the
+        // non-blocking enqueue run here. Doing it inline rather than in a detached
+        // task guarantees the span is enqueued before `RequestComplete` returns,
+        // which runs before this request's connection is counted as drained. So at
+        // graceful shutdown `plugin_manager.shutdown_all()` — which runs only after
+        // `active_connections()` hits 0 — force-flushes an already-enqueued span,
+        // with no drain guard needed and no detached task racing provider.shutdown().
         {
             let provider = provider.get().unwrap(); // safe: checked above
             let tracer = provider.tracer("oxphp");
@@ -659,6 +676,13 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             }
             if let Some(us) = php_exec_us {
                 attributes.push(KeyValue::new("oxphp.php_exec_us", us));
+            }
+            // OTel HTTP semantic conventions: a server span for a failed (5xx)
+            // response carries `error.type`. Backends read it straight off the
+            // span for HTTP error grouping and metrics, independently of the
+            // exception event's own `exception.type`. Use the status code string.
+            if status_code >= 500 {
+                attributes.push(KeyValue::new("error.type", status_code.to_string()));
             }
 
             let status = if status_code >= 500 {
@@ -730,6 +754,48 @@ mod tests {
     fn truncate_zero_disables() {
         let s = "a".repeat(100_000);
         assert!(matches!(truncate_attr(&s, 0), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn strip_nul_removes_embedded_nul_from_message() {
+        // A worker exception message is length-delimited and user-controlled, so
+        // an interior NUL survives to here; strip it so a NUL-terminating
+        // downstream cannot truncate "timeout\0admin-token" to "timeout".
+        match strip_nul("timeout\0admin-token") {
+            Cow::Owned(s) => assert_eq!(s, "timeoutadmin-token"),
+            Cow::Borrowed(_) => panic!("NUL-bearing value must be rewritten"),
+        }
+    }
+
+    #[test]
+    fn strip_nul_borrows_clean_value() {
+        // Ordinary values (no NUL) must not be copied.
+        assert!(matches!(
+            strip_nul("RuntimeException"),
+            Cow::Borrowed("RuntimeException")
+        ));
+    }
+
+    #[test]
+    fn exception_event_sanitizes_message_and_stacktrace_nul() {
+        // End-to-end: a NUL in message/stacktrace must not reach the attribute.
+        let exc = crate::types::CapturedException {
+            exception_type: "Anon\0Class".into(),
+            message: Some("boom\0hidden".into()),
+            stacktrace: Some("#0 main\0trailer".into()),
+            file: None,
+            line: None,
+        };
+        let ev = exception_event(&exc, std::time::UNIX_EPOCH, 0, 0);
+        for kv in &ev.attributes {
+            if let opentelemetry::Value::String(s) = &kv.value {
+                assert!(
+                    !s.as_str().contains('\0'),
+                    "attribute {} still holds a NUL",
+                    kv.key.as_str()
+                );
+            }
+        }
     }
 
     #[test]

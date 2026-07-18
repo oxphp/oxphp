@@ -55,11 +55,6 @@ thread_local! {
     /// Streaming body chunk sender — worker thread sends chunks via `blocking_send()`.
     /// Created lazily in `send_streaming_headers()` to avoid heap alloc for non-streaming requests.
     static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
-    /// Streaming only: the oneshot that delivers the final `REQUEST_ERRORS`
-    /// snapshot to the dispatch side when the stream closes. Set in
-    /// `send_streaming_headers()`; consumed by `send_late_errors()` at stream
-    /// close, or dropped at request teardown (delivering `Err`, i.e. no errors).
-    static LATE_ERRORS_TX: RefCell<Option<oneshot::Sender<Vec<crate::types::PhpScriptError>>>> = const { RefCell::new(None) };
     /// Worker mode: channel receiver for incoming requests.
     static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
     /// Worker mode: shared last_active timestamp for scale manager idle detection.
@@ -154,20 +149,6 @@ pub fn take_stream_tx() -> Option<tokio::sync::mpsc::Sender<Bytes>> {
 /// Restore a fiber's streaming chunk sender (counterpart of `take_stream_tx`).
 pub fn restore_stream_tx(tx: Option<tokio::sync::mpsc::Sender<Bytes>>) {
     STREAM_TX.with(|s| *s.borrow_mut() = tx);
-}
-
-/// Take the late-errors sender out of TLS (per-fiber save). Paired with
-/// `STREAM_TX`: a suspended streaming request's late-error channel must travel
-/// with it so it delivers this request's terminal error, rather than being
-/// drained (with the wrong request's errors) by another request that streamed on
-/// the same worker thread while this one was parked.
-pub fn take_late_errors_tx() -> Option<oneshot::Sender<Vec<crate::types::PhpScriptError>>> {
-    LATE_ERRORS_TX.with(|s| s.borrow_mut().take())
-}
-
-/// Restore a fiber's late-errors sender (counterpart of `take_late_errors_tx`).
-pub fn restore_late_errors_tx(tx: Option<oneshot::Sender<Vec<crate::types::PhpScriptError>>>) {
-    LATE_ERRORS_TX.with(|s| *s.borrow_mut() = tx);
 }
 
 /// Pop a worker-mode unhandled-exception capture (set by the fiber catch site in
@@ -491,8 +472,7 @@ pub fn try_early_send() -> bool {
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
-                late_errors_rx: None, // non-streaming: errors already final
-                profile_tree: None,   // early response — spans not finished yet
+                profile_tree: None, // early response — spans not finished yet
                 cancel_reason: unsafe { bindings::oxphp_bridge_get_cancel_reason() },
             });
             true
@@ -528,14 +508,6 @@ pub fn send_streaming_headers() -> bool {
                 *s.borrow_mut() = Some(chunk_tx);
             });
 
-            // Late-errors channel: the final REQUEST_ERRORS snapshot is delivered
-            // here when the stream closes, so the dispatch side can defer
-            // RequestComplete and still see a fatal thrown after headers went out.
-            let (late_tx, late_rx) = oneshot::channel::<Vec<crate::types::PhpScriptError>>();
-            LATE_ERRORS_TX.with(|s| {
-                *s.borrow_mut() = Some(late_tx);
-            });
-
             // Sync the status a script set via `http_response_code()` before it
             // started streaming — that call updates `SG(sapi_headers)` only, and
             // for a streaming response the headers go out now (there is no later
@@ -552,8 +524,11 @@ pub fn send_streaming_headers() -> bool {
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: Some(chunk_rx),
-                errors: Vec::new(), // Streaming: errors accumulate during stream (see late_errors_rx).
-                late_errors_rx: Some(late_rx),
+                // Streaming: errors accumulate on the worker thread for the rest
+                // of the stream and are not delivered to the dispatch side — a
+                // fatal thrown after these headers is a documented streaming
+                // boundary, not attached to the root span.
+                errors: Vec::new(),
                 profile_tree: None, // streaming — spans not finished yet
                 cancel_reason: 0,
             });
@@ -1851,23 +1826,10 @@ pub fn clear_buffers() {
     STREAM_TX.with(|slot| {
         slot.borrow_mut().take();
     });
-    // A streaming request's errors were never put on its (header-time)
-    // ScriptResponse — hand the final snapshot to its deferred RequestComplete
-    // before the clear below drops them. No-op for a non-streaming request.
-    send_late_errors();
-    // Clear captured PHP errors from previous request.
+    // Clear captured PHP errors from previous request. A streaming request's
+    // errors accumulated here after the header-time snapshot are dropped, not
+    // delivered — a documented streaming boundary (see `ScriptResponse::errors`).
     REQUEST_ERRORS.with(|errors| errors.borrow_mut().clear());
-}
-
-/// Deliver the final `REQUEST_ERRORS` snapshot to a streaming response's deferred
-/// `RequestComplete` via the late-errors oneshot, draining `REQUEST_ERRORS`.
-/// No-op when not streaming (`LATE_ERRORS_TX` is `None`) or already delivered.
-/// A dropped receiver (client gone) makes the send a harmless `Err`.
-fn send_late_errors() {
-    if let Some(tx) = LATE_ERRORS_TX.with(|slot| slot.borrow_mut().take()) {
-        let errors = REQUEST_ERRORS.with(|e| std::mem::take(&mut *e.borrow_mut()));
-        let _ = tx.send(errors);
-    }
 }
 
 /// Set the response status if the current status is still the default 200.
@@ -2679,13 +2641,14 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     // before the streaming / early-sent early-returns below. A handler-body throw
     // is swallowed by the fiber before zend_exception_error runs, so (unlike a
     // fatal or a shutdown-function throw, which the global oxphp_error_cb records)
-    // it never reaches REQUEST_ERRORS on its own. Doing it here means every
-    // delivery path carries it: the non-streaming send drains REQUEST_ERRORS via
-    // `take_request_errors()` below, and the streaming / finish_request paths hand
-    // it off through `send_late_errors()` in the teardown. Also force a 500 — the
-    // worker path can't drive status off `ctx.handler_failed` (it is never set on
-    // the fiber path). For an already-streaming response the status is committed on
-    // the wire, so this only takes effect if the script had not set one yet.
+    // it never reaches REQUEST_ERRORS on its own. Doing it here means the common
+    // non-streaming send carries it: `take_request_errors()` below drains it onto
+    // the ScriptResponse. (A streaming or already-early-sent response returns
+    // before that drain — its accumulated errors are a documented streaming
+    // boundary and are dropped at teardown.) Also force a 500 — the worker path
+    // can't drive status off `ctx.handler_failed` (it is never set on the fiber
+    // path). For an already-streaming response the status is committed on the
+    // wire, so this only takes effect if the script had not set one yet.
     if let Some(exc) = pop_worker_unhandled_exception() {
         // This capture bypassed oxphp_error_cb, so emit the same error-level log
         // the traditional fatal path produces — otherwise a worker 500 is silent.
@@ -2697,7 +2660,15 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             "PHP: {}",
             exc.message
         );
-        REQUEST_ERRORS.with(|e| e.borrow_mut().push(exc));
+        // Insert at the FRONT, not the back. The handler exception terminated
+        // the request *before* the shutdown functions ran (they run at
+        // `php_call_shutdown_functions()` in oxphp_fiber.c, after the fiber-catch
+        // captured this exception); any error those shutdown functions raised was
+        // already recorded into REQUEST_ERRORS by `oxphp_error_cb`. This capture
+        // is only *mechanically* last — `extract_unhandled_exception` reports the
+        // earliest error-level entry, so the true killer must lead, else a
+        // shutdown-function error would shadow it on the root span.
+        REQUEST_ERRORS.with(|e| e.borrow_mut().insert(0, exc));
         set_fatal_error_status_if_default();
     }
 
@@ -2774,7 +2745,6 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
-                late_errors_rx: None, // non-streaming: errors already final
                 profile_tree,
                 cancel_reason,
             });

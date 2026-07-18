@@ -175,13 +175,6 @@ struct FiberTlsSlot {
     /// this request's later chunks would flow to the other client's body channel.
     #[cfg(feature = "php")]
     stream_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
-    /// Late-errors sender (`LATE_ERRORS_TX`) paired with `stream_tx` — carries
-    /// this request's terminal error to its deferred RequestComplete when the
-    /// stream closes. Saved alongside `stream_tx` so a suspended streaming
-    /// request's late-error channel is not drained by, or blended with, another
-    /// request that streams on the same worker thread while it is parked.
-    #[cfg(feature = "php")]
-    late_errors_tx: Option<tokio::sync::oneshot::Sender<Vec<crate::types::PhpScriptError>>>,
 }
 
 thread_local! {
@@ -201,7 +194,6 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let cancel_state = super::sapi::take_worker_cancel_state();
         let request_errors = super::sapi::take_request_errors();
         let stream_tx = super::sapi::take_stream_tx();
-        let late_errors_tx = super::sapi::take_late_errors_tx();
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(
                 fiber_id,
@@ -212,7 +204,6 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     cancel_state,
                     request_errors,
                     stream_tx,
-                    late_errors_tx,
                 },
             );
         });
@@ -240,7 +231,6 @@ pub fn restore_fiber_tls(fiber_id: u64) {
                 super::sapi::restore_worker_cancel_state(slot.cancel_state);
                 super::sapi::restore_request_errors(slot.request_errors);
                 super::sapi::restore_stream_tx(slot.stream_tx);
-                super::sapi::restore_late_errors_tx(slot.late_errors_tx);
             }
         });
     }
@@ -386,8 +376,6 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
-            #[cfg(feature = "php")]
-            late_errors_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -410,8 +398,6 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
-            #[cfg(feature = "php")]
-            late_errors_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -466,8 +452,6 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
-            #[cfg(feature = "php")]
-            late_errors_tx: None,
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);

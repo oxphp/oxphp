@@ -12,6 +12,12 @@
 //             the wire already; the capture must still be pulled into the error
 //             stream before the streaming teardown and delivered via the deferred
 //             RequestComplete, so the event reaches the span.
+//  /shadow  — throws in the handler AND registers a shutdown function that
+//             raises its own E_USER_ERROR. The shutdown error is recorded first
+//             (during php_call_shutdown_functions, before the fiber capture is
+//             pulled in), so the root span must still report the handler's
+//             exception — the killer must lead the error stream, not the later
+//             shutdown-time error.
 //  /a-fail  — throws, then registers a shutdown function that writes a marker
 //             and SUSPENDS (oxphp_sleep). The capture is parked with this fiber
 //             while /b-ok runs on the same worker thread; per-fiber save/restore
@@ -39,6 +45,18 @@ oxphp_worker(function () {
         echo 'stream-boom:partial';
         oxphp_stream_flush();
         throw new RuntimeException('worker stream fatal after headers');
+    }
+
+    if ($uri === '/shadow') {
+        // The handler's exception is the real killer. A shutdown function then
+        // raises its own E_USER_ERROR, which oxphp_error_cb records into
+        // REQUEST_ERRORS *before* the fiber capture is pulled in at send time.
+        // The root span must report the handler killer (inserted at the front of
+        // the error stream), not the shadowing shutdown error.
+        register_shutdown_function(function () {
+            trigger_error('shadow shutdown blew up', E_USER_ERROR);
+        });
+        throw new RuntimeException('shadow handler killer');
     }
 
     if ($uri === '/a-fail') {

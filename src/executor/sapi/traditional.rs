@@ -503,7 +503,6 @@ fn execute_request(
         execution_time_us: start.elapsed().as_micros() as u64,
         stream_rx: None,
         errors: sapi::take_request_errors(),
-        late_errors_rx: None, // non-streaming: errors already final
         profile_tree,
         cancel_reason: request.cancel_state.get() as u8,
     })

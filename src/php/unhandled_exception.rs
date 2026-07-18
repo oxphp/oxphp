@@ -70,19 +70,26 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
         });
     }
 
-    // No structural class (the throw-hook missed, or a classless fatal). Fall
-    // back to parsing the engine's "Uncaught …" text — the class it yields is
-    // best-effort (a chained message can shift the parse; see `parse_uncaught`).
-    if let Some((class, message, stacktrace)) =
-        parse_uncaught(&err.message, err.file.as_str(), err.line)
-    {
-        return Some(CapturedException {
-            exception_type: class,
-            message,
-            stacktrace,
-            file,
-            line,
-        });
+    // No structural class (the throw-hook missed, or a classless fatal). Only a
+    // genuine engine `E_ERROR` "Uncaught …" fatal is a real Throwable, so parse
+    // its class from the text (best-effort — a chained message can shift the
+    // parse; see `parse_uncaught`). A classless fatal whose *message* merely
+    // starts with "Uncaught " — e.g. `trigger_error('Uncaught PDOException: …',
+    // E_USER_ERROR)` — must NOT borrow that forged class: `trigger_error` cannot
+    // raise `E_ERROR`, so gating on the type keeps it on the classless branch
+    // below where `exception.type` becomes the honest error constant.
+    if err.error_type == "E_ERROR" {
+        if let Some((class, message, stacktrace)) =
+            parse_uncaught(&err.message, err.file.as_str(), err.line)
+        {
+            return Some(CapturedException {
+                exception_type: class,
+                message,
+                stacktrace,
+                file,
+                line,
+            });
+        }
     }
 
     // Plain fatal (E_USER_ERROR, OOM, timeout, …): no Throwable, no trace.
@@ -329,6 +336,48 @@ mod tests {
             Some("Allowed memory size of 134217728 bytes exhausted")
         );
         assert_eq!(c.stacktrace, None);
+    }
+
+    #[test]
+    fn classless_fatal_with_uncaught_message_is_not_forged_throwable() {
+        // A classless fatal (no structural class) whose message merely *starts*
+        // with "Uncaught " must NOT be parsed into that class — `trigger_error`
+        // cannot raise E_ERROR, so an E_USER_ERROR "Uncaught PDOException: …"
+        // is an operator/attacker forgery, not a real Throwable. exception.type
+        // stays the honest error constant.
+        let c = extract_unhandled_exception(&[err(
+            "error",
+            "E_USER_ERROR",
+            "Uncaught PDOException: forged in /app.php:10",
+            "/app.php",
+            10,
+        )])
+        .unwrap();
+        assert_eq!(c.exception_type, "E_USER_ERROR");
+        assert_ne!(c.exception_type, "PDOException");
+        // The whole forged text rides through as the message, unparsed.
+        assert_eq!(
+            c.message.as_deref(),
+            Some("Uncaught PDOException: forged in /app.php:10")
+        );
+        assert_eq!(c.stacktrace, None);
+    }
+
+    #[test]
+    fn classless_uncaught_still_parsed_for_genuine_e_error() {
+        // A real engine E_ERROR "Uncaught …" fatal with no structural class
+        // (throw-hook missed) is still parsed — the type-gate only excludes the
+        // non-E_ERROR forgery above, never a genuine uncaught throw.
+        let c = extract_unhandled_exception(&[err(
+            "error",
+            "E_ERROR",
+            "Uncaught RuntimeException: real in /app.php:9\nStack trace:\n#0 {main}\n  thrown",
+            "/app.php",
+            9,
+        )])
+        .unwrap();
+        assert_eq!(c.exception_type, "RuntimeException");
+        assert_eq!(c.message.as_deref(), Some("real"));
     }
 
     #[test]

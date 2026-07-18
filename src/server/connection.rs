@@ -286,46 +286,16 @@ pub async fn handle_request(
     let status = response.status().as_u16();
     let response_size = response.body().size_hint().exact().unwrap_or(0);
 
-    // Defer RequestComplete only for a streaming response that already committed a
-    // 5xx: its terminal fatal (thrown after the headers went out) arrives when the
-    // stream closes, and the root-span exception event needs it. A response below
-    // 500 cannot be re-flagged by a late error (documented streaming boundary), so
-    // it dispatches inline below — restoring immediate access-log / metrics for a
-    // long-lived 2xx SSE instead of withholding them until the stream ends. The
-    // deferred task holds a drain guard so graceful shutdown waits for it (and for
-    // the synchronous span build inside the completion handler) before flushing.
-    if status >= 500 {
-        if let Some(late_errors_rx) = php_exec.late_errors_rx.take() {
-            let profile_tree = php_exec.profile_tree.take();
-            let queue_wait_us = php_exec.queue_wait_us;
-            let php_exec_us = php_exec.php_exec_us;
-            let drain_guard = server.begin_deferred_completion();
-            tokio::spawn(async move {
-                let _drain_guard = drain_guard;
-                // Err = the sender was dropped (client vanished before the stream
-                // closed); fall back to no late errors.
-                let php_errors = late_errors_rx.await.unwrap_or_default();
-                let mut complete_event = RequestComplete {
-                    request_id,
-                    method,
-                    path: path_str,
-                    status,
-                    duration: start.elapsed(),
-                    remote_addr,
-                    request_body_size: request_body_size as u64,
-                    response_size,
-                    metadata,
-                    php_errors,
-                    profile_tree,
-                    queue_wait_us,
-                    php_exec_us,
-                };
-                server.dispatcher.dispatch(&mut complete_event);
-            });
-            return Ok(response);
-        }
-    }
-
+    // RequestComplete dispatches synchronously for every response — access log and
+    // metrics are never withheld for the lifetime of a long-lived stream. For a
+    // streaming or `finish_request()` response, `php_errors` is the snapshot taken
+    // when the headers went out (empty at header time for a stream; the rest
+    // accumulate on the worker thread and are dropped at teardown). A fatal thrown
+    // *after* such a response has already committed its status is therefore not
+    // attached to the root span — a documented streaming boundary, symmetric with
+    // a sub-500 stream that a late error cannot re-flag. The common non-streaming
+    // 5xx (a plain PHP fatal) carries its exception here: its errors are final by
+    // send time.
     let elapsed = start.elapsed();
     let mut complete_event = RequestComplete {
         request_id, // move — no clone
@@ -352,10 +322,6 @@ pub async fn handle_request(
 #[derive(Default)]
 struct PhpExecData {
     php_errors: Vec<crate::types::PhpScriptError>,
-    /// Streaming only: delivers the final `php_errors` when the stream closes.
-    /// When present, `RequestComplete` is deferred until it resolves so a fatal
-    /// thrown after the 5xx headers still reaches the root span.
-    late_errors_rx: Option<tokio::sync::oneshot::Receiver<Vec<crate::types::PhpScriptError>>>,
     profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     queue_wait_us: Option<u64>,
     php_exec_us: Option<u64>,
@@ -617,7 +583,6 @@ async fn dispatch_request(
             // Move PHP errors and profile tree into typed exec data.
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),
-                late_errors_rx: script_response.late_errors_rx.take(),
                 profile_tree: script_response.profile_tree.take(),
                 ..exec_data
             };

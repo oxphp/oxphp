@@ -3,7 +3,6 @@ pub mod hooks;
 pub mod php_sdk;
 pub mod sql;
 
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -31,7 +30,7 @@ use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 // The per-attribute truncation helper is owned by the OTel plugin (which this
 // plugin depends on) so both the root-span and child-span exception-event paths
 // share one implementation and cannot drift apart.
-use crate::plugins::ox_otel::truncate_attr;
+use crate::plugins::ox_otel::{strip_nul, truncate_attr};
 
 // ---------------------------------------------------------------------------
 // Thread-local to pass span local IDs between on_begin and on_end.
@@ -204,29 +203,25 @@ fn push_exception_event(
 ) {
     let mut attributes: Vec<(Arc<str>, Arc<str>)> = Vec::with_capacity(3);
     if !exc_type.is_empty() {
-        // An anonymous class name is "<parent>@anonymous\0<file>:<line>$<hash>"
-        // with an embedded NUL. It arrives length-delimited (so it is not
-        // truncated at the NUL on the way in), but a NUL is valid UTF-8 and
-        // would otherwise ride into the attribute and truncate the type again in
-        // any NUL-terminating downstream — strip it here so the type stays clean
-        // and distinct. No-op for ordinary class names, which never hold a NUL.
-        let ty: Cow<str> = if exc_type.contains('\0') {
-            Cow::Owned(exc_type.replace('\0', ""))
-        } else {
-            Cow::Borrowed(exc_type)
-        };
-        attributes.push((Arc::from("exception.type"), Arc::from(ty.as_ref())));
+        // Strip embedded NUL from every script-controlled field (see
+        // `strip_nul`) — an anonymous class name carries one by construction, and
+        // a worker message/stacktrace is fully user-controlled, so a NUL would
+        // otherwise truncate the attribute in a NUL-terminating downstream.
+        attributes.push((
+            Arc::from("exception.type"),
+            Arc::from(strip_nul(exc_type).as_ref()),
+        ));
     }
     if let Some(m) = message.filter(|s| !s.is_empty()) {
         attributes.push((
             Arc::from("exception.message"),
-            Arc::from(truncate_attr(m, message_max).as_ref()),
+            Arc::from(truncate_attr(strip_nul(m).as_ref(), message_max).as_ref()),
         ));
     }
     if let Some(t) = stacktrace.filter(|s| !s.is_empty()) {
         attributes.push((
             Arc::from("exception.stacktrace"),
-            Arc::from(truncate_attr(t, stacktrace_max).as_ref()),
+            Arc::from(truncate_attr(strip_nul(t).as_ref(), stacktrace_max).as_ref()),
         ));
     }
     span.events.push(SpanEvent {
@@ -241,6 +236,12 @@ fn push_exception_event(
 /// (the single source of truth read by the decorator and SDK on the exception
 /// path), and expose it on the internal config endpoint. Shared by the two
 /// exception-attribute caps so their parsing cannot drift apart.
+///
+/// Read as a *bare* env var, NOT through `PluginContext::config`: these
+/// `OTEL_APM_*_MAX_BYTES` knobs are shared with the root-span path in `ox_otel`,
+/// and `config` would prepend the plugin name to the already-namespaced key
+/// (`APM_OTEL_APM_…`), so a plugin-prefixed override could split this cap from the
+/// root-span one. `ox_otel::read_byte_cap` reads the same key the same way.
 fn read_cap(
     ctx: &mut PluginContext,
     env: &str,
@@ -248,7 +249,7 @@ fn read_cap(
     cell: &AtomicUsize,
     default: usize,
 ) {
-    let value = match ctx.config(env).as_deref().map(str::trim) {
+    let value = match std::env::var(env).ok().as_deref().map(str::trim) {
         // Unset, or set-but-blank (e.g. `OTEL_APM_MESSAGE_MAX_BYTES=` in a
         // compose file): treat as "use the default", silently — matching the
         // sibling caps (SLOW_QUERY_MS, TLS_MIN_VERSION).

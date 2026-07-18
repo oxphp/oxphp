@@ -20,14 +20,23 @@
 # thrown class, not the root cause), FORGE (a message forging a "\n\nNext
 # FakeClass: …" segment — the structural throw-hook class must win over the text
 # parse), STREAM (a 5xx that starts streaming then throws a late fatal — the
-# event must still reach the span via the deferred RequestComplete), HANDLED
-# (set_exception_handler swallows — no event, with a positive control), WORKER
-# (fiber-catch C capture — a handler-body throw must return 500 AND carry class /
-# trace / file / line), WORKER-STREAM (a worker handler that commits a 5xx,
-# streams, then throws — status 500 on the wire and the late fatal still reaches
-# the span), and WORKER-B (a request parked in a suspending shutdown function
-# keeps its capture while another request runs on the same worker thread — the
+# status ships but the late fatal is a documented streaming boundary, NOT
+# attached to the span), HANDLED (set_exception_handler swallows — no event, with
+# a positive control), WORKER (fiber-catch C capture — a handler-body throw must
+# return 500 AND carry class / trace / file / line), WORKER-STREAM (a worker
+# handler that commits a 5xx, streams, then throws — status 500 on the wire, the
+# late fatal being the same documented streaming boundary), WORKER-SHADOW (a
+# worker handler throws AND a shutdown function raises its own error recorded
+# first — the span must report the handler killer, not the shadowing shutdown
+# error), and WORKER-B (a request parked in a suspending shutdown function keeps
+# its capture while another request runs on the same worker thread — the
 # per-fiber save/restore guard).
+#
+# A streaming/finish_request response that commits a 5xx and then throws a fatal
+# *after* its headers are on the wire does NOT carry that fatal on the root span:
+# RequestComplete dispatches synchronously (immediate access log / metrics) and
+# the post-header errors are dropped at teardown. STREAM / WORKER-STREAM assert
+# this boundary (status ships; the late-fatal message is absent from any span).
 #
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
@@ -142,8 +151,9 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "chained HTTP %{http_code}\n" "http://$SRV:80/chained.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "forge HTTP %{http_code}\n" "http://$SRV:80/forge.php"
-docker run --rm --network "$NET" curlimages/curl:latest \
-	-s -o /dev/null -w "stream_fatal HTTP %{http_code}\n" "http://$SRV:80/stream_fatal.php"
+STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$SRV:80/stream_fatal.php")"
+echo "stream_fatal HTTP $STREAM_CODE"
 # Capture handled's body as a positive control — proves handled.php actually ran
 # (its set_exception_handler fired) so the "no event" assertion is meaningful and
 # not a false pass from a 404 / parse error.
@@ -160,14 +170,24 @@ WORKER_STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/stream-boom")"
 echo "worker /stream-boom HTTP $WORKER_STREAM_CODE"
 
-# Reset the worker's consecutive-error breaker before the scenario-B pair. An
-# uncaught handler exception legitimately increments it, and /boom + /stream-boom
-# are two consecutive 500s with /a-fail a third — WORKER_MAX_CONSECUTIVE_ERRORS
-# (3) would trip and hand /b-ok a "500 PHP Worker Error" from the restarting
-# worker. One successful request resets the counter (a test-ordering guard, not a
-# behaviour change).
+# Reset the worker's consecutive-error breaker before the remaining throwing
+# scenarios. An uncaught handler exception legitimately increments it, and /boom +
+# /stream-boom are two consecutive 500s — with /shadow and /a-fail a third and
+# fourth, WORKER_MAX_CONSECUTIVE_ERRORS (3) would trip and hand a later request a
+# "500 PHP Worker Error" from the restarting worker. A successful request resets
+# the counter (a test-ordering guard, not a behaviour change), keeping /shadow(1)
+# then /a-fail(2, parked) under the limit before /b-ok's success resets again.
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "worker /ok HTTP %{http_code}\n" "http://$WRK:80/ok"
+
+# Scenario WORKER-SHADOW: the handler throws (the killer), then a shutdown
+# function raises its own E_USER_ERROR. oxphp_error_cb records that shutdown error
+# into REQUEST_ERRORS first (during php_call_shutdown_functions), and the fiber
+# capture is pulled in only at send time — so without front-insertion the earliest
+# error-level entry would be the shutdown error, shadowing the killer on the span.
+WORKER_SHADOW_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/shadow")"
+echo "worker /shadow HTTP $WORKER_SHADOW_CODE"
 
 # Scenario B: /a-fail throws, then parks its capture in a suspending shutdown
 # function (signalled by a marker file). /b-ok deterministically spin-waits for
@@ -242,6 +262,12 @@ echo "$LOGS" | grep -qE 'exception\.line: (Int|Str)\(3\)' \
 echo "$LOGS" | grep -qF 'processPayment()' \
 	&& ok "uncaught: stacktrace frame" || bad "uncaught: stacktrace frame"
 
+# error.type on the root SERVER span (OTel HTTP semantic conventions): a failed
+# 5xx request carries `error.type` set to the status code string, read straight
+# off the span independently of the exception event's own type.
+echo "$LOGS" | grep -qF 'error.type: Str(500)' \
+	&& ok "root span: error.type on 5xx" || bad "root span: error.type on 5xx"
+
 # Scenario FATAL: a classless fatal (E_USER_ERROR, not a Throwable) still yields
 # a located event — synthetic type + message + file/line, no stacktrace.
 echo "$LOGS" | grep -qF 'exception.message: Str(fatal path: kaboom)' \
@@ -272,11 +298,13 @@ echo "$LOGS" | grep -qF 'exception.type: Str(FakeClass)' \
 	&& bad "forge: forged class must NOT appear" || ok "forge: forged class rejected"
 
 # Scenario STREAM: a 5xx response commits its headers and starts streaming, THEN
-# a fatal is thrown. The status is already on the wire, but the exception event
-# must still reach the root span — its final errors are delivered when the stream
-# closes and RequestComplete is deferred until then.
-echo "$LOGS" | grep -qF 'exception.message: Str(stream fatal after headers)' \
-	&& ok "stream: late fatal reaches span" || bad "stream: late fatal reaches span"
+# a fatal is thrown. The status ships, but a fatal thrown after the headers went
+# out is a documented streaming boundary — NOT attached to the root span (the
+# post-header errors are dropped at teardown, RequestComplete is synchronous).
+[ "$STREAM_CODE" = "500" ] \
+	&& ok "stream: streamed 5xx status ships" || bad "stream: streamed 5xx status ships (got '$STREAM_CODE')"
+echo "$LOGS" | grep -qF 'stream fatal after headers' \
+	&& bad "stream: late fatal must NOT reach span (boundary)" || ok "stream: late fatal not on span (documented boundary)"
 
 # Scenario HANDLED (negative + positive control): set_exception_handler consumed
 # the exception and rendered its own 500. The positive control proves the handler
@@ -304,15 +332,25 @@ echo "$LOGS" | grep -qF 'workerBoom()' \
 	&& ok "worker: stacktrace frame" || bad "worker: stacktrace frame"
 
 # Scenario WORKER-STREAM: a worker handler commits a 5xx, streams a chunk, then
-# throws a late fatal. The status is already on the wire, but the fiber capture
-# must still be pulled into the error stream before the streaming teardown and
-# delivered via the deferred RequestComplete, so the event reaches the span.
-# (Distinct from the traditional STREAM scenario: this drives the worker path,
-# whose early-return on an already-sent stream previously freed the capture.)
+# throws a late fatal. The status ships, but — like the traditional STREAM
+# scenario — a fatal thrown after the headers went out is a documented streaming
+# boundary and is NOT attached to the span.
 [ "$WORKER_STREAM_CODE" = "500" ] \
 	&& ok "worker-stream: streamed 5xx status" || bad "worker-stream: streamed 5xx status (got '$WORKER_STREAM_CODE')"
-echo "$LOGS" | grep -qF 'exception.message: Str(worker stream fatal after headers)' \
-	&& ok "worker-stream: late fatal reaches span" || bad "worker-stream: late fatal reaches span"
+echo "$LOGS" | grep -qF 'worker stream fatal after headers' \
+	&& bad "worker-stream: late fatal must NOT reach span (boundary)" || ok "worker-stream: late fatal not on span (documented boundary)"
+
+# Scenario WORKER-SHADOW: the handler threw the real killer, then a shutdown
+# function raised its own E_USER_ERROR (recorded into REQUEST_ERRORS first). The
+# root span must report the handler killer — front-inserted so it leads the error
+# stream — not the shadowing shutdown error. Prove BOTH: the killer's message is
+# on a span, and the shutdown error's message is not.
+[ "$WORKER_SHADOW_CODE" = "500" ] \
+	&& ok "worker-shadow: handler-throw returns 500" || bad "worker-shadow: handler-throw returns 500 (got '$WORKER_SHADOW_CODE')"
+echo "$LOGS" | grep -qF 'exception.message: Str(shadow handler killer)' \
+	&& ok "worker-shadow: span reports the handler killer" || bad "worker-shadow: span reports the handler killer"
+echo "$LOGS" | grep -qF 'shadow shutdown blew up' \
+	&& bad "worker-shadow: shutdown error must NOT shadow the killer" || ok "worker-shadow: shutdown error did not shadow the killer"
 
 # Scenario WORKER-B: /a-fail threw and parked its capture in a suspending
 # shutdown function while /b-ok ran on the same single-thread worker. /b-ok only
