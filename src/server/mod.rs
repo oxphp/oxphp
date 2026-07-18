@@ -35,6 +35,20 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// RAII guard that keeps a deferred streaming `RequestComplete` counted in
+/// `active_connections()`. A streaming 5xx defers its completion event to a
+/// spawned task that awaits the stream's final errors; without this the task is
+/// invisible to graceful drain, so `provider.shutdown()` could run before the
+/// root-span export. Held across the await, it restores the count on drop —
+/// after the completion event (and thus the synchronous span build) has run.
+pub struct DeferredCompletionGuard(Arc<Metrics>);
+
+impl Drop for DeferredCompletionGuard {
+    fn drop(&mut self) {
+        self.0.connection_closed();
+    }
+}
+
 /// Core HTTP server managing connections, routing, and shutdown.
 pub struct Server {
     pub(crate) route_config: Arc<RouteConfig>,
@@ -175,6 +189,14 @@ impl Server {
     /// Returns the number of currently active connections.
     pub fn active_connections(&self) -> usize {
         self.metrics.active_connections()
+    }
+
+    /// Begin a deferred streaming `RequestComplete`: bump the active-connection
+    /// count so graceful drain waits for it. The returned guard restores the count
+    /// on drop, which the caller does only after dispatching the completion event.
+    pub fn begin_deferred_completion(&self) -> DeferredCompletionGuard {
+        self.metrics.connection_opened();
+        DeferredCompletionGuard(Arc::clone(&self.metrics))
     }
 
     /// Handle a single TCP connection (may serve multiple HTTP requests via keep-alive).

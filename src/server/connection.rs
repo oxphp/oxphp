@@ -286,38 +286,44 @@ pub async fn handle_request(
     let status = response.status().as_u16();
     let response_size = response.body().size_hint().exact().unwrap_or(0);
 
-    // A streaming response finalizes its PHP errors only when the stream closes
-    // (the script — and any late fatal — has finished). Defer RequestComplete
-    // until the worker delivers them so the observers (metrics, access log, and
-    // the OTel root-span exception event) see a fatal thrown *after* the
-    // already-sent 5xx headers. Non-streaming responses have their final errors
-    // in hand, so they dispatch inline below.
-    if let Some(late_errors_rx) = php_exec.late_errors_rx.take() {
-        let profile_tree = php_exec.profile_tree.take();
-        let queue_wait_us = php_exec.queue_wait_us;
-        let php_exec_us = php_exec.php_exec_us;
-        tokio::spawn(async move {
-            // Err = the sender was dropped (client vanished before the stream
-            // closed); fall back to no late errors.
-            let php_errors = late_errors_rx.await.unwrap_or_default();
-            let mut complete_event = RequestComplete {
-                request_id,
-                method,
-                path: path_str,
-                status,
-                duration: start.elapsed(),
-                remote_addr,
-                request_body_size: request_body_size as u64,
-                response_size,
-                metadata,
-                php_errors,
-                profile_tree,
-                queue_wait_us,
-                php_exec_us,
-            };
-            server.dispatcher.dispatch(&mut complete_event);
-        });
-        return Ok(response);
+    // Defer RequestComplete only for a streaming response that already committed a
+    // 5xx: its terminal fatal (thrown after the headers went out) arrives when the
+    // stream closes, and the root-span exception event needs it. A response below
+    // 500 cannot be re-flagged by a late error (documented streaming boundary), so
+    // it dispatches inline below — restoring immediate access-log / metrics for a
+    // long-lived 2xx SSE instead of withholding them until the stream ends. The
+    // deferred task holds a drain guard so graceful shutdown waits for it (and for
+    // the synchronous span build inside the completion handler) before flushing.
+    if status >= 500 {
+        if let Some(late_errors_rx) = php_exec.late_errors_rx.take() {
+            let profile_tree = php_exec.profile_tree.take();
+            let queue_wait_us = php_exec.queue_wait_us;
+            let php_exec_us = php_exec.php_exec_us;
+            let drain_guard = server.begin_deferred_completion();
+            tokio::spawn(async move {
+                let _drain_guard = drain_guard;
+                // Err = the sender was dropped (client vanished before the stream
+                // closed); fall back to no late errors.
+                let php_errors = late_errors_rx.await.unwrap_or_default();
+                let mut complete_event = RequestComplete {
+                    request_id,
+                    method,
+                    path: path_str,
+                    status,
+                    duration: start.elapsed(),
+                    remote_addr,
+                    request_body_size: request_body_size as u64,
+                    response_size,
+                    metadata,
+                    php_errors,
+                    profile_tree,
+                    queue_wait_us,
+                    php_exec_us,
+                };
+                server.dispatcher.dispatch(&mut complete_event);
+            });
+            return Ok(response);
+        }
     }
 
     let elapsed = start.elapsed();

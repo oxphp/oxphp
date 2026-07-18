@@ -608,8 +608,14 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             None
         };
 
-        // Span building + OTel export happens off the hot path
-        tokio::spawn(async move {
+        // Build the span synchronously. The BatchSpanProcessor still exports on
+        // its own thread; doing the build inline (rather than in a detached task)
+        // guarantees the span is enqueued before this handler returns. That keeps
+        // it inside graceful drain's window — for a deferred streaming completion
+        // the drain guard is still held, and force_flush at shutdown then reaches
+        // it — instead of racing a detached task against provider.shutdown(). The
+        // build is cheap (an attribute Vec plus a non-blocking enqueue).
+        {
             let provider = provider.get().unwrap(); // safe: checked above
             let tracer = provider.tracer("oxphp");
 
@@ -692,7 +698,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 }
                 drop(builder.start(&tracer));
             }
-        });
+        }
     }
 
     fn priority(&self) -> Priority {

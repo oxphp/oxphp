@@ -22,20 +22,16 @@ use crate::types::{CapturedException, PhpScriptError};
 /// Scan a request's error stream for the terminal failure and normalize it.
 /// `None` if there is none.
 ///
-/// Prefers the *earliest* uncaught exception (structural `exception_class`, or a
-/// traditional `Uncaught …` fatal) over one raised *later* by a shutdown
-/// function — shutdown callbacks run after the terminating error is recorded, so
-/// the earliest uncaught is the one that actually failed the request (matching
-/// the worker path, which records the escaping exception once). Falls back to the
-/// last `error`-level entry when no uncaught exception is present.
+/// Reports the *earliest* `error`-level entry — the fatal that actually
+/// terminated the request. The first fatal bails the request out; any further
+/// `error`-level entries come from shutdown functions or destructors running
+/// afterwards and must not shadow the killer. This holds whether the killer is an
+/// uncaught exception or a classless fatal (OOM, `trigger_error(E_USER_ERROR)`,
+/// timeout): selecting "the earliest entry that has a class" would skip a
+/// classless killer in favour of a later shutdown-thrown exception. Matches the
+/// worker path, which records the single escaping exception once.
 pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<CapturedException> {
-    let err = errors
-        .iter()
-        .find(|e| {
-            e.level == "error"
-                && (e.exception_class.is_some() || e.message.starts_with("Uncaught "))
-        })
-        .or_else(|| errors.iter().rev().find(|e| e.level == "error"))?;
+    let err = errors.iter().find(|e| e.level == "error")?;
 
     // `oxphp_error_cb` substitutes the literal "unknown" for a NULL zend
     // filename; treat it as absent so `exception.file` is omitted (like
@@ -302,6 +298,37 @@ mod tests {
         let c = extract_unhandled_exception(&[killer, shutdown]).unwrap();
         assert_eq!(c.exception_type, "RuntimeException");
         assert_eq!(c.message.as_deref(), Some("real killer"));
+    }
+
+    #[test]
+    fn earliest_classless_killer_wins_over_shutdown_throw() {
+        // A classless fatal (OOM / trigger_error(E_USER_ERROR)) terminates the
+        // request first; a shutdown function then throws an uncaught exception
+        // (recorded later, and it *does* carry a class). The span must still
+        // report the real killer, not the later shutdown throw — selecting the
+        // earliest entry *with a class* would invert this.
+        let killer = err(
+            "error",
+            "E_USER_ERROR",
+            "Allowed memory size of 134217728 bytes exhausted",
+            "/app.php",
+            42,
+        );
+        let mut shutdown = err(
+            "error",
+            "E_ERROR",
+            "Uncaught LogicException: shutdown blew up in /sd.php:3\nStack trace:\n#0 {main}\n  thrown",
+            "/sd.php",
+            3,
+        );
+        shutdown.exception_class = Some("LogicException".into());
+        let c = extract_unhandled_exception(&[killer, shutdown]).unwrap();
+        assert_eq!(c.exception_type, "E_USER_ERROR");
+        assert_eq!(
+            c.message.as_deref(),
+            Some("Allowed memory size of 134217728 bytes exhausted")
+        );
+        assert_eq!(c.stacktrace, None);
     }
 
     #[test]

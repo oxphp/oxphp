@@ -810,6 +810,7 @@ void oxphp_bridge_free_unhandled(void *slot);
  * if none), valid until the next throw — copy it synchronously. */
 void oxphp_bridge_install_throw_hook(void);
 const char *oxphp_bridge_peek_thrown_class(size_t *out_len);
+void oxphp_bridge_clear_thrown_class(void);
 
 typedef void (*oxphp_decorator_register_php_fn_t)(
     const char *class_name,

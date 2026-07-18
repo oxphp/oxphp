@@ -3,8 +3,15 @@
 // never reaches zend_exception_error), so OxPHP captures it at the catch site
 // and the root SERVER span still carries an exception event.
 //
-//  /boom    — throws from a named frame so the stacktrace (workerBoom) and the
-//             file/line extension are assertable, not just the message.
+//  /boom    — throws directly in the handler body from a named frame so the
+//             stacktrace (workerBoom) and file/line are assertable. The response
+//             MUST be a 500: the fiber path cannot drive status off the (never
+//             set) ctx.handler_failed, so the capture itself must force it — else
+//             the root-span gate (>=500) drops the event.
+//  /stream-boom — commits a 5xx, streams a chunk, THEN throws. The status is on
+//             the wire already; the capture must still be pulled into the error
+//             stream before the streaming teardown and delivered via the deferred
+//             RequestComplete, so the event reaches the span.
 //  /a-fail  — throws, then registers a shutdown function that writes a marker
 //             and SUSPENDS (oxphp_sleep). The capture is parked with this fiber
 //             while /b-ok runs on the same worker thread; per-fiber save/restore
@@ -20,6 +27,18 @@ oxphp_worker(function () {
 
     if ($uri === '/boom') {
         workerBoom();
+    }
+
+    if ($uri === '/stream-boom') {
+        // Worker STREAMING failure: commit a 5xx, flush headers + a body chunk,
+        // THEN throw. The status is already on the wire, but the fiber capture must
+        // still land on the root span (pulled into REQUEST_ERRORS before the
+        // streaming teardown, delivered via the deferred RequestComplete).
+        http_response_code(500);
+        header('Content-Type: text/plain');
+        echo 'stream-boom:partial';
+        oxphp_stream_flush();
+        throw new RuntimeException('worker stream fatal after headers');
     }
 
     if ($uri === '/a-fail') {

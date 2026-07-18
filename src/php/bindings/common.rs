@@ -397,6 +397,9 @@ extern "C" {
     /// has been thrown. The pointer is valid only until the next throw — copy it
     /// synchronously.
     pub fn oxphp_bridge_peek_thrown_class(out_len: *mut usize) -> *const c_char;
+    /// Drop the thrown-class snapshot (consume-once). Called by the error callback
+    /// right after copying the class of an Uncaught `E_ERROR` fatal.
+    pub fn oxphp_bridge_clear_thrown_class();
 
     // ─── SAPI response code ─────────────────────────────
     pub fn oxphp_bridge_get_response_code() -> c_int;

@@ -142,6 +142,34 @@ pub fn restore_request_errors(errors: Vec<crate::types::PhpScriptError>) {
     REQUEST_ERRORS.with(|slot| *slot.borrow_mut() = errors);
 }
 
+/// Take the streaming chunk sender out of TLS (per-fiber save). A streaming
+/// worker request that suspends mid-stream must not leave `STREAM_TX` in the
+/// thread-global slot: another fiber's request running on the same worker thread
+/// would overwrite it, and this request's later chunks would then flow to the
+/// other client's body channel (and vice versa).
+pub fn take_stream_tx() -> Option<tokio::sync::mpsc::Sender<Bytes>> {
+    STREAM_TX.with(|s| s.borrow_mut().take())
+}
+
+/// Restore a fiber's streaming chunk sender (counterpart of `take_stream_tx`).
+pub fn restore_stream_tx(tx: Option<tokio::sync::mpsc::Sender<Bytes>>) {
+    STREAM_TX.with(|s| *s.borrow_mut() = tx);
+}
+
+/// Take the late-errors sender out of TLS (per-fiber save). Paired with
+/// `STREAM_TX`: a suspended streaming request's late-error channel must travel
+/// with it so it delivers this request's terminal error, rather than being
+/// drained (with the wrong request's errors) by another request that streamed on
+/// the same worker thread while this one was parked.
+pub fn take_late_errors_tx() -> Option<oneshot::Sender<Vec<crate::types::PhpScriptError>>> {
+    LATE_ERRORS_TX.with(|s| s.borrow_mut().take())
+}
+
+/// Restore a fiber's late-errors sender (counterpart of `take_late_errors_tx`).
+pub fn restore_late_errors_tx(tx: Option<oneshot::Sender<Vec<crate::types::PhpScriptError>>>) {
+    LATE_ERRORS_TX.with(|s| *s.borrow_mut() = tx);
+}
+
 /// Pop a worker-mode unhandled-exception capture (set by the fiber catch site in
 /// `oxphp_fiber.c`) into a synthetic terminal `PhpScriptError`. `None` when no
 /// capture is pending. The `exception_class` field lets the downstream parser use
@@ -1703,23 +1731,30 @@ unsafe extern "C" fn oxphp_error_cb(
         }
     }
 
-    // For a traditional-path uncaught-exception fatal ("Uncaught …"), read the
-    // class the throw hook snapshotted structurally — the engine already nulled
-    // EG(exception) before this callback ran, so the class can't be read live.
-    // This becomes the authoritative `exception.type` downstream, overriding
-    // whatever the message text would parse to (so a forged "\n\nNext …" segment
-    // cannot poison it). Only for "Uncaught …": other error-level fatals
-    // (trigger_error, timeout) are not exceptions and must not inherit the class
-    // of an earlier caught throw.
-    let exception_class = if level == "error" && msg.starts_with("Uncaught ") {
+    // For a traditional-path uncaught-exception fatal, read the class the throw
+    // hook snapshotted structurally — the engine already nulled EG(exception)
+    // before this callback ran, so the class can't be read live. This becomes the
+    // authoritative `exception.type` downstream, overriding whatever the message
+    // text would parse to (so a forged "\n\nNext …" segment cannot poison it).
+    //
+    // Gate on the exact type `E_ERROR`, not merely "error"-level + prefix: only
+    // the engine's own `zend_exception_error(…, E_ERROR)` emits an uncaught-
+    // exception fatal, and it is always preceded by this request's escaping throw.
+    // `trigger_error()` can only raise E_USER_ERROR/WARNING/…, never E_ERROR — so
+    // a forged `trigger_error('Uncaught FakeClass: …', E_USER_ERROR)` (which has no
+    // corresponding throw) can no longer borrow the class of an earlier *caught*
+    // throw. Consume the snapshot after copying so no later request can read it.
+    let exception_class = if type_name == "E_ERROR" && msg.starts_with("Uncaught ") {
         let mut len = 0usize;
         let ptr = bindings::oxphp_bridge_peek_thrown_class(&mut len);
-        if !ptr.is_null() && len > 0 {
+        let class = if !ptr.is_null() && len > 0 {
             let bytes = std::slice::from_raw_parts(ptr as *const u8, len);
             Some(String::from_utf8_lossy(bytes).into_owned())
         } else {
             None
-        }
+        };
+        bindings::oxphp_bridge_clear_thrown_class();
+        class
     } else {
         None
     };
@@ -2640,6 +2675,32 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     // Cleanup any outstanding async promises from this request
     cleanup_outstanding_promises_callback();
 
+    // Pull the fiber's unhandled-exception capture into the error stream FIRST —
+    // before the streaming / early-sent early-returns below. A handler-body throw
+    // is swallowed by the fiber before zend_exception_error runs, so (unlike a
+    // fatal or a shutdown-function throw, which the global oxphp_error_cb records)
+    // it never reaches REQUEST_ERRORS on its own. Doing it here means every
+    // delivery path carries it: the non-streaming send drains REQUEST_ERRORS via
+    // `take_request_errors()` below, and the streaming / finish_request paths hand
+    // it off through `send_late_errors()` in the teardown. Also force a 500 — the
+    // worker path can't drive status off `ctx.handler_failed` (it is never set on
+    // the fiber path). For an already-streaming response the status is committed on
+    // the wire, so this only takes effect if the script had not set one yet.
+    if let Some(exc) = pop_worker_unhandled_exception() {
+        // This capture bypassed oxphp_error_cb, so emit the same error-level log
+        // the traditional fatal path produces — otherwise a worker 500 is silent.
+        tracing::error!(
+            php_error_type = "E_ERROR",
+            php_class = exc.exception_class.as_deref().unwrap_or(""),
+            php_file = %exc.file,
+            php_line = exc.line,
+            "PHP: {}",
+            exc.message
+        );
+        REQUEST_ERRORS.with(|e| e.borrow_mut().push(exc));
+        set_fatal_error_status_if_default();
+    }
+
     // If streaming was active, close the stream
     if bindings::oxphp_bridge_is_streaming() {
         flush_stream_chunk();
@@ -2661,12 +2722,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         return 0;
     }
 
-    // If the handler failed (bailout/fatal error), force HTTP 500
-    if bindings::oxphp_bridge_get_handler_failed() {
-        set_fatal_error_status_if_default();
-    }
-
-    // Take accumulated response and send via oneshot
+    // Take accumulated response and send via oneshot. Any handler-body throw was
+    // already pulled into REQUEST_ERRORS (and forced the status) at the top.
     let (raw_output, raw_headers, status) = take_response();
     let body = Bytes::from(raw_output);
     let headers = parse_raw_headers(raw_headers);
@@ -2710,33 +2767,13 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     let cancel_reason = bindings::oxphp_bridge_get_cancel_reason();
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
-            // The fiber swallows an uncaught handler exception before
-            // zend_exception_error runs, so it never reaches oxphp_error_cb /
-            // REQUEST_ERRORS. Pull the fiber-side capture into the error stream
-            // so the root SERVER span carries it just like the traditional path.
-            let mut errors = take_request_errors();
-            if let Some(exc) = pop_worker_unhandled_exception() {
-                // This capture bypasses oxphp_error_cb (the fiber swallows the
-                // exception before zend_exception_error), so emit the same
-                // error-level log the traditional fatal path produces —
-                // otherwise a worker-mode 500 is silent in the logs.
-                tracing::error!(
-                    php_error_type = "E_ERROR",
-                    php_class = exc.exception_class.as_deref().unwrap_or(""),
-                    php_file = %exc.file,
-                    php_line = exc.line,
-                    "PHP: {}",
-                    exc.message
-                );
-                errors.push(exc);
-            }
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
                 body,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
-                errors,
+                errors: take_request_errors(),
                 late_errors_rx: None, // non-streaming: errors already final
                 profile_tree,
                 cancel_reason,
@@ -2762,11 +2799,10 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 unsafe fn worker_request_teardown() {
     record_worker_request_metrics();
     clear_buffers();
-    // Free any unhandled-exception capture this request left un-popped — an
-    // early-sent (finish_request) request that then threw skips the pop path
-    // above, and without this its capture would linger in the thread-active slot
-    // for whichever request runs next on this thread. Normal requests already
-    // popped it, so this is a no-op for them.
+    // Defensive: worker_send_callback pops the unhandled-exception capture at its
+    // top, before any early return, so this is normally a no-op. Kept as a belt-
+    // and-braces free so a capture can never linger in the thread-active slot for
+    // whichever request runs next on this thread.
     bindings::oxphp_bridge_clear_unhandled();
     bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null());
     WORKER_CANCEL_STATE.with(|slot| slot.borrow_mut().take());

@@ -22,9 +22,12 @@
 # parse), STREAM (a 5xx that starts streaming then throws a late fatal — the
 # event must still reach the span via the deferred RequestComplete), HANDLED
 # (set_exception_handler swallows — no event, with a positive control), WORKER
-# (fiber-catch C capture — class / trace / file / line), and WORKER-B (a request
-# parked in a suspending shutdown function keeps its capture while another
-# request runs on the same worker thread — the per-fiber save/restore guard).
+# (fiber-catch C capture — a handler-body throw must return 500 AND carry class /
+# trace / file / line), WORKER-STREAM (a worker handler that commits a 5xx,
+# streams, then throws — status 500 on the wire and the late fatal still reaches
+# the span), and WORKER-B (a request parked in a suspending shutdown function
+# keeps its capture while another request runs on the same worker thread — the
+# per-fiber save/restore guard).
 #
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
@@ -146,8 +149,25 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 # not a false pass from a 404 / parse error.
 HANDLED_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest \
 	-s "http://$SRV:80/handled.php")"
+# Capture the worker status codes: a handler-body throw and a streamed-then-thrown
+# fatal must both surface as 500. Asserting the status (not just grepping the
+# message) is what catches a silently-200 worker regression that the root-span
+# gate would then drop.
+WORKER_BOOM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "%{http_code}" "http://$WRK:80/boom")"
+echo "worker /boom HTTP $WORKER_BOOM_CODE"
+WORKER_STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/stream-boom")"
+echo "worker /stream-boom HTTP $WORKER_STREAM_CODE"
+
+# Reset the worker's consecutive-error breaker before the scenario-B pair. An
+# uncaught handler exception legitimately increments it, and /boom + /stream-boom
+# are two consecutive 500s with /a-fail a third — WORKER_MAX_CONSECUTIVE_ERRORS
+# (3) would trip and hand /b-ok a "500 PHP Worker Error" from the restarting
+# worker. One successful request resets the counter (a test-ordering guard, not a
+# behaviour change).
 docker run --rm --network "$NET" curlimages/curl:latest \
-	-s -o /dev/null -w "worker HTTP %{http_code}\n" "http://$WRK:80/boom"
+	-s -o /dev/null -w "worker /ok HTTP %{http_code}\n" "http://$WRK:80/ok"
 
 # Scenario B: /a-fail throws, then parks its capture in a suspending shutdown
 # function (signalled by a marker file). /b-ok deterministically spin-waits for
@@ -271,12 +291,28 @@ echo "$LOGS" | grep -qF 'handled path: should not appear on span' \
 # harness before zend_exception_error, yet the root span still carries the
 # exception via the C-side capture at the catch site — with the message, the
 # worker file, and the throwing frame (proving class/trace/file, not just msg).
+# The status assertion catches the regression where a handler-body throw returned
+# 200 (ctx.handler_failed is never set on the fiber path) so the >=500 gate
+# silently dropped the event — a message-only grep would not have noticed.
+[ "$WORKER_BOOM_CODE" = "500" ] \
+	&& ok "worker: handler-body throw returns 500" || bad "worker: handler-body throw returns 500 (got '$WORKER_BOOM_CODE')"
 echo "$LOGS" | grep -qF 'exception.message: Str(worker path: handler exploded)' \
 	&& ok "worker: exception on root span" || bad "worker: exception on root span"
 echo "$LOGS" | grep -qF 'exception.file: Str(/var/www/html/worker.php)' \
 	&& ok "worker: exception.file" || bad "worker: exception.file"
 echo "$LOGS" | grep -qF 'workerBoom()' \
 	&& ok "worker: stacktrace frame" || bad "worker: stacktrace frame"
+
+# Scenario WORKER-STREAM: a worker handler commits a 5xx, streams a chunk, then
+# throws a late fatal. The status is already on the wire, but the fiber capture
+# must still be pulled into the error stream before the streaming teardown and
+# delivered via the deferred RequestComplete, so the event reaches the span.
+# (Distinct from the traditional STREAM scenario: this drives the worker path,
+# whose early-return on an already-sent stream previously freed the capture.)
+[ "$WORKER_STREAM_CODE" = "500" ] \
+	&& ok "worker-stream: streamed 5xx status" || bad "worker-stream: streamed 5xx status (got '$WORKER_STREAM_CODE')"
+echo "$LOGS" | grep -qF 'exception.message: Str(worker stream fatal after headers)' \
+	&& ok "worker-stream: late fatal reaches span" || bad "worker-stream: late fatal reaches span"
 
 # Scenario WORKER-B: /a-fail threw and parked its capture in a suspending
 # shutdown function while /b-ok ran on the same single-thread worker. /b-ok only

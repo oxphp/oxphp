@@ -3877,12 +3877,12 @@ void oxphp_bridge_free_unhandled(void *vp) {
  * Instead, snapshot the class of every thrown exception here via
  * zend_throw_exception_hook; the Rust error callback reads the most-recent
  * snapshot when it records the Uncaught fatal and uses it as the authoritative
- * exception.type. Any "Uncaught" fatal is, by construction, preceded by a
- * same-request throw that overwrote this slot, so the read is never stale and no
- * per-request reset is needed (a caught exception's leftover class is always
- * overwritten by the next request's first throw before that request can fault).
- * The class is length-delimited (an anonymous class name carries an embedded
- * NUL), matching the worker capture. */
+ * exception.type. The Rust callback reads it only for a genuine engine
+ * `E_ERROR` "Uncaught" fatal — which is, by construction, preceded by this
+ * request's escaping throw that overwrote this slot — and clears it immediately
+ * after copying (oxphp_bridge_clear_thrown_class), so the read is never stale
+ * across requests. The class is length-delimited (an anonymous class name carries
+ * an embedded NUL), matching the worker capture. */
 static __thread char *thrown_class = NULL;
 static __thread size_t thrown_class_len = 0;
 
@@ -3918,6 +3918,15 @@ void oxphp_bridge_install_throw_hook(void) {
 const char *oxphp_bridge_peek_thrown_class(size_t *out_len) {
     if (out_len) *out_len = thrown_class_len;
     return thrown_class_len ? thrown_class : NULL;
+}
+
+/* Drop the thrown-class snapshot (consume-once). The Rust error callback calls
+ * this right after copying the class while recording an Uncaught E_ERROR fatal,
+ * so a stale class can never be borrowed by a later request on this thread. */
+void oxphp_bridge_clear_thrown_class(void) {
+    free(thrown_class);
+    thrown_class = NULL;
+    thrown_class_len = 0;
 }
 
 /* === Async Promise: Async Reset === */
