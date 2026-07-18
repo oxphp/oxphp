@@ -48,9 +48,12 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
         // message/stacktrace out of the text (best-effort), but keep the
         // structural class.
         if err.stacktrace.is_none() && err.message.starts_with("Uncaught ") {
-            if let Some((_parsed_class, message, stacktrace)) =
-                parse_uncaught(&err.message, err.file.as_str(), err.line)
-            {
+            if let Some((_parsed_class, message, stacktrace)) = parse_uncaught(
+                &err.message,
+                err.file.as_str(),
+                err.line,
+                Some(class.as_str()),
+            ) {
                 return Some(CapturedException {
                     exception_type: class.clone(),
                     message,
@@ -80,7 +83,7 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
     // below where `exception.type` becomes the honest error constant.
     if err.error_type == "E_ERROR" {
         if let Some((class, message, stacktrace)) =
-            parse_uncaught(&err.message, err.file.as_str(), err.line)
+            parse_uncaught(&err.message, err.file.as_str(), err.line, None)
         {
             return Some(CapturedException {
                 exception_type: class,
@@ -110,11 +113,20 @@ pub fn extract_unhandled_exception(errors: &[PhpScriptError]) -> Option<Captured
 /// The returned class is used only when no structural `exception_class` is
 /// available; the caller prefers the structural class. The `message`/`stacktrace`
 /// are always taken from here on the traditional path — they describe the
-/// outermost (thrown) exception, the last chain segment.
+/// outermost (thrown) exception.
+///
+/// `known_class` is the structural class the throw-hook captured (the exception
+/// that actually escaped), when available. It disambiguates the one text shape a
+/// purely positional parse gets wrong: a SINGLE exception whose own message
+/// contains the literal `"\n\nNext "` looks, textually, exactly like a two-link
+/// chain. Without the class we take the last `"\n\nNext "` segment (correct for a
+/// real chain); with the class we can tell the cases apart (see below) and
+/// recover the full message instead of a truncated tail.
 fn parse_uncaught(
     msg: &str,
     file: &str,
     line: u32,
+    known_class: Option<&str>,
 ) -> Option<(String, Option<String>, Option<String>)> {
     let body = msg.strip_prefix("Uncaught ")?;
     let body = body.strip_suffix("\n  thrown").unwrap_or(body);
@@ -130,24 +142,30 @@ fn parse_uncaught(
     // `Exception::__toString` (Zend/zend_exceptions.c) renders a chain
     // root-cause-first and appends the thrown exception after the final
     // "\n\nNext "; the `Uncaught` fatal's file:line is the thrown exception's
-    // origin (`file`/`line` here). Take that last chain segment's header so the
-    // parsed message describes the thrown exception, not the root cause. (This
-    // fallback class can be shifted by a message containing a literal "\n\nNext "
-    // — which is exactly why the caller overrides it with the structural class
-    // whenever one is present.)
-    let outer = body.rsplit("\n\nNext ").next().unwrap_or(body);
-    let outer_header = outer
-        .split_once("\nStack trace:\n")
-        .map(|(h, _)| h)
-        .unwrap_or(outer);
+    // origin. So for a real chain the escaped header is the last segment.
+    let outer_segment = body.rsplit("\n\nNext ").next().unwrap_or(body);
+    let outer_header = strip_origin_tail(header_line(outer_segment), file, line);
 
-    // Strip the " in <file>:<line>" tail using the known origin, isolating
-    // "<Class>[: <message>]". Robust even if the message itself contains " in ".
-    let header = if !file.is_empty() && line != 0 {
-        let tail = format!(" in {file}:{line}");
-        outer_header.strip_suffix(&tail).unwrap_or(outer_header)
-    } else {
-        outer_header
+    // But the last-segment rule is positional, and a single exception whose own
+    // message embeds "\n\nNext " is split spuriously. The structural class
+    // resolves it: the FULL first header (before any "\nStack trace:\n") starts
+    // with "<known_class>: " exactly when the outermost thrown exception is also
+    // the first-rendered one — i.e. a single exception (or a chain whose root ==
+    // thrown). Take the message from that full header so an embedded "\n\nNext …"
+    // survives intact. Otherwise the first header names a different (root-cause)
+    // class, so it is a genuine chain and the last segment is right. With no
+    // structural class we cannot tell, and keep the positional last-segment
+    // behavior (best-effort, unchanged).
+    let header = match known_class {
+        Some(class) => {
+            let full_header = strip_origin_tail(header_line(body), file, line);
+            if header_matches_class(full_header, class) {
+                full_header
+            } else {
+                outer_header
+            }
+        }
+        None => outer_header,
     };
 
     // Class is up to the first ": " (class names never contain ": ").
@@ -157,6 +175,33 @@ fn parse_uncaught(
     };
 
     Some((class, message, stacktrace))
+}
+
+/// The header line of a chain segment: everything before its `"\nStack trace:\n"`.
+fn header_line(segment: &str) -> &str {
+    segment
+        .split_once("\nStack trace:\n")
+        .map(|(h, _)| h)
+        .unwrap_or(segment)
+}
+
+/// Strip the ` in <file>:<line>` origin tail using the structurally-known origin,
+/// isolating `"<Class>[: <message>]"`. Robust even if the message contains ` in `.
+fn strip_origin_tail<'a>(header: &'a str, file: &str, line: u32) -> &'a str {
+    if !file.is_empty() && line != 0 {
+        let tail = format!(" in {file}:{line}");
+        header.strip_suffix(&tail).unwrap_or(header)
+    } else {
+        header
+    }
+}
+
+/// Whether `header` opens the `"<class>[: …]"` of `class` — either exactly the
+/// class (empty-message form) or `"<class>: "` followed by a message.
+fn header_matches_class(header: &str, class: &str) -> bool {
+    header
+        .strip_prefix(class)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(": "))
 }
 
 #[cfg(test)]
@@ -399,8 +444,74 @@ mod tests {
         assert_ne!(c.exception_type, "FakeClass");
         assert_eq!(c.file.as_deref(), Some("/app.php"));
         assert_eq!(c.line, Some(5));
+        // The whole real message rides through intact — the forged "\n\nNext
+        // FakeClass: …" is part of this exception's own message, not a chain
+        // boundary that truncates it (previously it became just "pwned").
+        assert_eq!(c.message.as_deref(), Some("oops\n\nNext FakeClass: pwned"));
         // A traditional structural entry still gets its trace from the text.
         assert!(c.stacktrace.as_deref().unwrap().contains("{main}"));
+    }
+
+    #[test]
+    fn structural_class_recovers_message_with_next_substring() {
+        // A SINGLE exception whose own message contains the literal "\n\nNext " is
+        // textually indistinguishable from a two-link chain. The structural class
+        // anchors recovery so the full message survives; previously
+        // rsplit("\n\nNext ") kept only the "steps: contact support" tail and
+        // mislabeled it (message became "contact support").
+        let mut e = err(
+            "error",
+            "E_ERROR",
+            "Uncaught RuntimeException: Payment failed.\n\nNext steps: contact support in /pay.php:5\nStack trace:\n#0 {main}\n  thrown",
+            "/pay.php",
+            5,
+        );
+        e.exception_class = Some("RuntimeException".into());
+        let c = extract_unhandled_exception(&[e]).unwrap();
+        assert_eq!(c.exception_type, "RuntimeException");
+        assert_eq!(
+            c.message.as_deref(),
+            Some("Payment failed.\n\nNext steps: contact support")
+        );
+        assert_eq!(c.file.as_deref(), Some("/pay.php"));
+        assert_eq!(c.line, Some(5));
+    }
+
+    #[test]
+    fn structural_class_real_chain_takes_thrown_message() {
+        // Structural class AND a genuine chain (root cause != thrown): the first
+        // header names the root cause (PDOException), which does NOT match the
+        // escaped class (ApiException), so the parse falls back to the last
+        // "\n\nNext " segment and reports the thrown exception's message.
+        let mut e = err(
+            "error",
+            "E_ERROR",
+            "Uncaught PDOException: db down in /db.php:10\nStack trace:\n#0 {main}\n\nNext ApiException: api failed in /api.php:20\nStack trace:\n#0 {main}\n  thrown",
+            "/api.php",
+            20,
+        );
+        e.exception_class = Some("ApiException".into());
+        let c = extract_unhandled_exception(&[e]).unwrap();
+        assert_eq!(c.exception_type, "ApiException");
+        assert_eq!(c.message.as_deref(), Some("api failed"));
+        assert!(!c.message.as_deref().unwrap().contains(" in "));
+    }
+
+    #[test]
+    fn structural_class_empty_message_form() {
+        // Empty-message form on the structural path: the header is exactly the
+        // class, so message is None (not an empty string).
+        let mut e = err(
+            "error",
+            "E_ERROR",
+            "Uncaught LogicException in /x.php:3\nStack trace:\n#0 {main}\n  thrown",
+            "/x.php",
+            3,
+        );
+        e.exception_class = Some("LogicException".into());
+        let c = extract_unhandled_exception(&[e]).unwrap();
+        assert_eq!(c.exception_type, "LogicException");
+        assert_eq!(c.message, None);
     }
 
     #[test]

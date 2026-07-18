@@ -19,7 +19,9 @@
 # (classless E_USER_ERROR), CHAINED (outer wraps a cause — must bucket on the
 # thrown class, not the root cause), FORGE (a message forging a "\n\nNext
 # FakeClass: …" segment — the structural throw-hook class must win over the text
-# parse), STREAM (a 5xx that starts streaming then throws a late fatal — the
+# parse), STALE-CLASS (throw+catch one class then die from a different uncaught
+# one — the escaped class must win over the throw-hook snapshot of the caught
+# one), STREAM (a 5xx that starts streaming then throws a late fatal — the
 # status ships but the late fatal is a documented streaming boundary, NOT
 # attached to the span), HANDLED (set_exception_handler swallows — no event, with
 # a positive control), WORKER (fiber-catch C capture — a handler-body throw must
@@ -86,6 +88,7 @@ docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/fatal.php":/var/www/html/public/fatal.php:ro \
 	-v "$FIX/chained.php":/var/www/html/public/chained.php:ro \
 	-v "$FIX/forge.php":/var/www/html/public/forge.php:ro \
+	-v "$FIX/stale_class.php":/var/www/html/public/stale_class.php:ro \
 	-v "$FIX/stream_fatal.php":/var/www/html/public/stream_fatal.php:ro \
 	-v "$FIX/handled.php":/var/www/html/public/handled.php:ro \
 	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
@@ -151,6 +154,8 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "chained HTTP %{http_code}\n" "http://$SRV:80/chained.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "forge HTTP %{http_code}\n" "http://$SRV:80/forge.php"
+docker run --rm --network "$NET" curlimages/curl:latest \
+	-s -o /dev/null -w "stale_class HTTP %{http_code}\n" "http://$SRV:80/stale_class.php"
 STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$SRV:80/stream_fatal.php")"
 echo "stream_fatal HTTP $STREAM_CODE"
@@ -296,6 +301,18 @@ echo "$LOGS" | grep -qF 'exception.type: Str(ForgeReal)' \
 	&& ok "forge: structural class wins" || bad "forge: structural class wins"
 echo "$LOGS" | grep -qF 'exception.type: Str(FakeClass)' \
 	&& bad "forge: forged class must NOT appear" || ok "forge: forged class rejected"
+
+# Scenario STALE-CLASS: a request throws AND catches one exception, then dies from
+# a DIFFERENT uncaught one. The throw-hook snapshots every thrown class and a catch
+# does not clear it, but the second (escaping) throw re-fires the hook and
+# overwrites the snapshot — so the root span must report the escaped class
+# (StaleClassEscaped), never the earlier caught one (StaleClassCaught). Guards the
+# common intra-request path of the throw-hook stale-class window (the exotic
+# residual — a terminal throw that skips the hook — is not reachable from PHP).
+echo "$LOGS" | grep -qF 'exception.type: Str(StaleClassEscaped)' \
+	&& ok "stale-class: escaped class reported" || bad "stale-class: escaped class reported"
+echo "$LOGS" | grep -qF 'exception.type: Str(StaleClassCaught)' \
+	&& bad "stale-class: caught class must NOT leak" || ok "stale-class: caught class did not leak"
 
 # Scenario STREAM: a 5xx response commits its headers and starts streaming, THEN
 # a fatal is thrown. The status ships, but a fatal thrown after the headers went
