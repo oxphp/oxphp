@@ -116,9 +116,12 @@ pub struct PhpScriptError {
     pub line: u32,
     /// Stack trace for exceptions and fatal errors.
     pub stacktrace: Option<String>,
-    /// Real Throwable class when this entry is a captured unhandled exception
-    /// (worker mode pre-fills it; the traditional path leaves it `None` and the
-    /// class is parsed from `message`). `None` for ordinary warnings/notices.
+    /// Real Throwable class when this entry is a captured unhandled exception.
+    /// Worker mode pre-fills it from `EG(exception)->ce`; the traditional path
+    /// fills it from a `zend_throw_exception_hook` snapshot taken at throw time.
+    /// `None` only when the hook missed (e.g. an exception thrown without a stack
+    /// frame) — then the class is parsed from `message` as a fallback — or for
+    /// ordinary warnings/notices.
     pub exception_class: Option<String>,
 }
 

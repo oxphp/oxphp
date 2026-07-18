@@ -8,10 +8,10 @@
 //             MUST be a 500: the fiber path cannot drive status off the (never
 //             set) ctx.handler_failed, so the capture itself must force it — else
 //             the root-span gate (>=500) drops the event.
-//  /stream-boom — commits a 5xx, streams a chunk, THEN throws. The status is on
-//             the wire already; the capture must still be pulled into the error
-//             stream before the streaming teardown and delivered via the deferred
-//             RequestComplete, so the event reaches the span.
+//  /stream-boom — commits a 5xx, streams a chunk, THEN throws. The status ships,
+//             but the request has already completed once the headers went out, so
+//             the late fatal is logged only and does NOT reach the span (a
+//             documented streaming boundary; the test asserts its absence).
 //  /shadow  — throws in the handler AND registers a shutdown function that
 //             raises its own E_USER_ERROR. The shutdown error is recorded first
 //             (during php_call_shutdown_functions, before the fiber capture is
@@ -37,9 +37,9 @@ oxphp_worker(function () {
 
     if ($uri === '/stream-boom') {
         // Worker STREAMING failure: commit a 5xx, flush headers + a body chunk,
-        // THEN throw. The status is already on the wire, but the fiber capture must
-        // still land on the root span (pulled into REQUEST_ERRORS before the
-        // streaming teardown, delivered via the deferred RequestComplete).
+        // THEN throw. The status is already on the wire and the request has
+        // completed, so the late fatal is logged only and does NOT land on the
+        // span — the documented streaming boundary, same as the traditional path.
         http_response_code(500);
         header('Content-Type: text/plain');
         echo 'stream-boom:partial';
@@ -69,7 +69,10 @@ oxphp_worker(function () {
             @file_put_contents('/tmp/a_parked', '1');
             oxphp_sleep(2.0);
         });
-        throw new LogicException('scenario-b: parked capture survived');
+        // A class distinct from every other scenario's (MANUAL uses
+        // LogicException) so the shared-collector grep for this capture cannot
+        // pass on another span's event.
+        throw new UnderflowException('scenario-b: parked capture survived');
     }
 
     if ($uri === '/b-ok') {

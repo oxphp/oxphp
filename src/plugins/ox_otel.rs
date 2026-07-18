@@ -519,7 +519,9 @@ fn exception_event(
 ) -> opentelemetry::trace::Event {
     // Sanitize every script-controlled field for embedded NUL (see `strip_nul`),
     // then byte-cap message/stacktrace. Type is stripped too — an anonymous class
-    // name carries a NUL by construction.
+    // name carries a NUL by construction — and so is `file`: on the worker path it
+    // is a length-delimited, fully script-controlled string, so an interior NUL
+    // would otherwise truncate the path in any NUL-terminating downstream.
     let ty = strip_nul(&exc.exception_type);
     // Omit `exception.type` when empty (a degenerate parse), matching the APM
     // child-span path — some backends drop an event whose type is a blank string.
@@ -540,7 +542,7 @@ fn exception_event(
         ));
     }
     if let Some(f) = &exc.file {
-        attrs.push(KeyValue::new("exception.file", f.clone()));
+        attrs.push(KeyValue::new("exception.file", strip_nul(f).into_owned()));
     }
     if let Some(l) = exc.line {
         attrs.push(KeyValue::new("exception.line", l as i64));
@@ -605,10 +607,9 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 
         // Auto-capture the unhandled exception / fatal that failed a 5xx request,
         // so the root SERVER span carries it without any PHP-side integration.
-        // Build the (already byte-capped) event here, BEFORE the spawn, so a
-        // multi-megabyte message/stacktrace is truncated on the hot path and only
-        // the bounded event — not the full-size `CapturedException` — is moved
-        // into the background task.
+        // Build the (already byte-capped) event here, so a multi-megabyte
+        // message/stacktrace is truncated up front and only the bounded event —
+        // not the full-size `CapturedException` — is carried into the span build.
         let unhandled_event = if status_code >= 500 {
             crate::php::unhandled_exception::extract_unhandled_exception(view.php_errors).map(
                 |exc| {
@@ -777,16 +778,19 @@ mod tests {
     }
 
     #[test]
-    fn exception_event_sanitizes_message_and_stacktrace_nul() {
-        // End-to-end: a NUL in message/stacktrace must not reach the attribute.
+    fn exception_event_sanitizes_every_script_controlled_nul() {
+        // End-to-end: a NUL in type/message/stacktrace/file must not reach the
+        // attribute. `file` is length-delimited and script-controlled on the
+        // worker path, so an interior NUL would truncate the path downstream.
         let exc = crate::types::CapturedException {
             exception_type: "Anon\0Class".into(),
             message: Some("boom\0hidden".into()),
             stacktrace: Some("#0 main\0trailer".into()),
-            file: None,
-            line: None,
+            file: Some("app.php\0/secret/tail".into()),
+            line: Some(7),
         };
         let ev = exception_event(&exc, std::time::UNIX_EPOCH, 0, 0);
+        let mut saw_file = false;
         for kv in &ev.attributes {
             if let opentelemetry::Value::String(s) = &kv.value {
                 assert!(
@@ -794,8 +798,14 @@ mod tests {
                     "attribute {} still holds a NUL",
                     kv.key.as_str()
                 );
+                if kv.key.as_str() == "exception.file" {
+                    saw_file = true;
+                    // The whole path survives (the NUL is stripped, not truncated at it).
+                    assert_eq!(s.as_str(), "app.php/secret/tail");
+                }
             }
         }
+        assert!(saw_file, "exception.file attribute missing");
     }
 
     #[test]

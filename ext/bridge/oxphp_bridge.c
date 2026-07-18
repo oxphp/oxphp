@@ -1970,6 +1970,16 @@ void oxphp_bridge_reset_request_ctx(void) {
     /* Free any unhandled-exception capture not popped by the send path (e.g. a
      * request whose status was forced below 500). */
     oxphp_bridge_clear_unhandled();
+
+    /* Drop any thrown-class snapshot left by this request's throws. The Rust
+     * error callback consumes it on a genuine Uncaught E_ERROR, but a request
+     * that only threw-and-caught (or threw a chained/hookless exception) leaves a
+     * live snapshot behind. Clearing it at this per-request choke point bounds
+     * the slot to a single request, so a later request whose Uncaught fatal did
+     * NOT fire the throw hook — e.g. an exception thrown without a stack frame,
+     * which the engine sends straight to zend_exception_error — cannot borrow a
+     * stale class from an earlier request on this thread. */
+    oxphp_bridge_clear_thrown_class();
 }
 
 int oxphp_bridge_worker_wait(void) {
@@ -3878,11 +3888,16 @@ void oxphp_bridge_free_unhandled(void *vp) {
  * zend_throw_exception_hook; the Rust error callback reads the most-recent
  * snapshot when it records the Uncaught fatal and uses it as the authoritative
  * exception.type. The Rust callback reads it only for a genuine engine
- * `E_ERROR` "Uncaught" fatal — which is, by construction, preceded by this
- * request's escaping throw that overwrote this slot — and clears it immediately
- * after copying (oxphp_bridge_clear_thrown_class), so the read is never stale
- * across requests. The class is length-delimited (an anonymous class name carries
- * an embedded NUL), matching the worker capture. */
+ * `E_ERROR` "Uncaught" fatal and clears it immediately after copying
+ * (oxphp_bridge_clear_thrown_class). That consume-on-read is not sufficient on
+ * its own: an Uncaught fatal is NOT always preceded by a hook-firing throw in
+ * the same request — an exception thrown without a stack frame goes straight to
+ * zend_exception_error without the hook running (Zend/zend_exceptions.c), so a
+ * snapshot left by an EARLIER request (which threw-and-caught, never clearing)
+ * would be read as this request's class. oxphp_bridge_reset_request_ctx() clears
+ * the slot per request to close that cross-request window. The class is
+ * length-delimited (an anonymous class name carries an embedded NUL), matching
+ * the worker capture. */
 static __thread char *thrown_class = NULL;
 static __thread size_t thrown_class_len = 0;
 
