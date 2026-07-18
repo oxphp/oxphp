@@ -109,7 +109,7 @@ impl Drop for ClientAbortGuard {
 /// while a service handler is running.
 pub async fn handle_request(
     req: Request<Incoming>,
-    server: std::sync::Arc<Server>,
+    server: &Server,
     remote_addr: SocketAddr,
     mut closed_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Response<ResponseBody>, Infallible> {
@@ -197,7 +197,7 @@ pub async fn handle_request(
         let dispatch = dispatch_request(
             parts,
             body,
-            &server,
+            server,
             remote_addr,
             &request_id,
             &metadata,

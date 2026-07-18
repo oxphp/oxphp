@@ -581,7 +581,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             return;
         }
 
-        // Collect owned data for background export — nothing below blocks the response
+        // Collect owned scalars up front for the span build below.
         let provider = self.provider.clone();
         let trace_id_owned = trace_id_str.to_string();
         let span_id_owned = span_id_str.to_string();

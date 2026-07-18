@@ -1772,14 +1772,16 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
 /// destroys the request state.
 pub fn collect_response_code() {
     let code = unsafe { bindings::oxphp_bridge_get_response_code() };
-    if code > 0 {
-        RESPONSE.with(|r| {
-            let mut resp = r.borrow_mut();
-            // Don't overwrite status set by error handlers (e.g. 500 from fatal)
-            if resp.status_code == 200 {
-                resp.status_code = code as u16;
-            }
-        });
+    // `SG(sapi_headers).http_response_code` is PHP's authoritative status — it holds
+    // whatever the script set via `http_response_code()` or `header()`. Adopt an
+    // explicit non-200 even over a fatal fallback (e.g. a 500 that `oxphp_error_cb`
+    // stamped onto RESPONSE mid-request, before this runs), mirroring PHP's own
+    // fatal handler, which substitutes 500 only when the code is still 200
+    // (`main/main.c`). A 200 — or an unset 0 — leaves RESPONSE untouched, so the
+    // cancel-reason fallbacks in `set_fatal_error_status_if_default` (504 timeout,
+    // 503 shutdown, 499 client-abort) still apply when the script set no status.
+    if code > 0 && code != 200 {
+        RESPONSE.with(|r| r.borrow_mut().status_code = code as u16);
     }
 }
 
@@ -2636,6 +2638,17 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Cleanup any outstanding async promises from this request
     cleanup_outstanding_promises_callback();
+
+    // Adopt the handler's explicit `http_response_code()` as the wire status.
+    // That builtin writes `SG(sapi_headers).http_response_code` directly (not via
+    // the header handler), so without this the non-streaming worker completion —
+    // the last send path that never collected it — would ship
+    // `http_response_code(201)` as 200. On the throw path it matters more: the
+    // error callback stamps RESPONSE with a fatal 500 mid-request, so this must run
+    // before the exception block below, and because `collect_response_code()` now
+    // adopts an explicit non-200 SG status over that fallback, the script's 503
+    // wins over the 500 (as under php-fpm). A 200 SG leaves the fallback in place.
+    collect_response_code();
 
     // Pull the fiber's unhandled-exception capture into the error stream FIRST —
     // before the streaming / early-sent early-returns below. A handler-body throw
