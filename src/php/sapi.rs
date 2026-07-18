@@ -1772,17 +1772,36 @@ unsafe extern "C" fn oxphp_get_request_time(request_time: *mut f64) -> zend_resu
 /// destroys the request state.
 pub fn collect_response_code() {
     let code = unsafe { bindings::oxphp_bridge_get_response_code() };
-    // `SG(sapi_headers).http_response_code` is PHP's authoritative status — it holds
-    // whatever the script set via `http_response_code()` or `header()`. Adopt an
-    // explicit non-200 even over a fatal fallback (e.g. a 500 that `oxphp_error_cb`
-    // stamped onto RESPONSE mid-request, before this runs), mirroring PHP's own
-    // fatal handler, which substitutes 500 only when the code is still 200
-    // (`main/main.c`). A 200 — or an unset 0 — leaves RESPONSE untouched, so the
-    // cancel-reason fallbacks in `set_fatal_error_status_if_default` (504 timeout,
-    // 503 shutdown, 499 client-abort) still apply when the script set no status.
-    if code > 0 && code != 200 {
-        RESPONSE.with(|r| r.borrow_mut().status_code = code as u16);
+    let cancel_reason = unsafe { bindings::oxphp_bridge_get_cancel_reason() };
+    if let Some(status) = resolve_collected_status(code, cancel_reason) {
+        RESPONSE.with(|r| r.borrow_mut().status_code = status);
     }
+}
+
+/// Decide whether PHP's `SG(sapi_headers).http_response_code` should overwrite
+/// the status already on RESPONSE. `Some(status)` overwrites; `None` leaves it.
+///
+/// `sg_code` is PHP's authoritative status — whatever the script set via
+/// `http_response_code()` or `header()`. An explicit non-200 is adopted even over
+/// a fatal fallback (e.g. a 500 that `oxphp_error_cb` stamped onto RESPONSE
+/// mid-request), mirroring PHP's own fatal handler, which substitutes 500 only
+/// when the code is still 200 (`main/main.c`).
+///
+/// But a server-side cancellation wins over `sg_code`. When `cancel_reason != 0`,
+/// `set_fatal_error_status_if_default` has already mapped the cause onto RESPONSE
+/// (504 timeout, 503 shutdown, 499 client-abort). By that point `SG` cannot be
+/// trusted: on the PHP-native `max_execution_time` path the fatal aborts with `SG`
+/// still 200, so PHP's own handler substitutes a generic 500 into `SG`
+/// (`main/main.c` — the `== 200` guard holds) — adopting it here would mask the
+/// timeout as a crash; and a stale explicit non-200 the script set before the
+/// cancel (e.g. a 206 that never completed) is equally a lie once the server cut
+/// the request off. So a cancel reason makes RESPONSE authoritative and `SG` is
+/// ignored. Only an un-cancelled request lets `SG` speak.
+fn resolve_collected_status(sg_code: std::os::raw::c_int, cancel_reason: u8) -> Option<u16> {
+    if cancel_reason != 0 {
+        return None;
+    }
+    (sg_code > 0 && sg_code != 200).then_some(sg_code as u16)
 }
 
 pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
@@ -5008,6 +5027,50 @@ mod tests {
         }
 
         unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
+    }
+
+    #[test]
+    fn collect_status_cancel_reason_beats_sg() {
+        // A server-side cancellation makes RESPONSE (already 504/503/499 via
+        // set_fatal_error_status_if_default) authoritative — SG must be ignored,
+        // whatever it holds. Two concrete regressions this guards:
+        //   * PHP-native timeout: the fatal aborts with SG still 200, so PHP's own
+        //     handler stamps a generic 500 into SG (main/main.c). Adopting it would
+        //     mask a 504 timeout as a 500 crash.
+        //   * A stale explicit non-200 the script set before the cancel (e.g. a 206
+        //     that never completed) must not survive the cut-off.
+        for reason in [
+            1u8, /*abort*/
+            2,   /*timeout*/
+            3,   /*shutdown*/
+            4,   /*stuck*/
+            5,   /*user*/
+        ] {
+            assert_eq!(
+                resolve_collected_status(500, reason),
+                None,
+                "reason {reason}, SG 500"
+            );
+            assert_eq!(
+                resolve_collected_status(206, reason),
+                None,
+                "reason {reason}, SG 206"
+            );
+        }
+    }
+
+    #[test]
+    fn collect_status_adopts_explicit_sg_when_not_cancelled() {
+        // No cancellation: SG is the script's authoritative choice. An explicit
+        // non-200 wins even over a fatal-500 already on RESPONSE (the round-6 case:
+        // http_response_code(503) before an uncaught throw ships 503, and a worker
+        // http_response_code(201) ships 201).
+        assert_eq!(resolve_collected_status(503, 0), Some(503));
+        assert_eq!(resolve_collected_status(201, 0), Some(201));
+        // A 200 or an unset 0 leaves RESPONSE untouched so the fatal / cancel
+        // fallbacks keep whatever they stamped.
+        assert_eq!(resolve_collected_status(200, 0), None);
+        assert_eq!(resolve_collected_status(0, 0), None);
     }
 
     #[test]
