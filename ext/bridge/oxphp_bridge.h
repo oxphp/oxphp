@@ -1380,6 +1380,22 @@ typedef void (*oxphp_cleanup_promises_fn_t)(void);
 void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn);
 void oxphp_bridge_cleanup_outstanding_promises(void);
 
+/* Per-fiber variant: drains only promises owned by the given request fiber.
+ * Called by the fiber scheduler when a request fiber completes; the
+ * thread-wide drain above stays reserved for RSHUTDOWN (one request per
+ * thread, or final worker-thread teardown). */
+typedef void (*oxphp_cleanup_promises_for_fiber_fn_t)(uint64_t fiber_id);
+void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fiber_fn_t fn);
+void oxphp_bridge_cleanup_promises_for_fiber(uint64_t fiber_id);
+
+/* ─── Current Request Fiber Identity ─────────────────────────
+ * Registered by the PHP extension (not Rust): returns the fiber_id of the
+ * request fiber currently executing on this thread, or 0 outside fiber
+ * context. Rust reads it to tag async promise ownership at creation. */
+typedef uint64_t (*oxphp_current_fiber_id_fn_t)(void);
+void oxphp_bridge_set_current_fiber_id_fn(oxphp_current_fiber_id_fn_t fn);
+uint64_t oxphp_bridge_current_fiber_id(void);
+
 /* ─── Async Exception Details ────────────────────────────── */
 void oxphp_bridge_set_async_exception(const char *cls, const char *msg);
 const char *oxphp_bridge_get_async_exc_class(void);

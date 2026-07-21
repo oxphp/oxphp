@@ -222,6 +222,11 @@ typedef struct {
  * Used by oxphp_async_await/oxphp_sleep to detect fiber mode. */
 extern __thread oxphp_request_fiber *oxphp_current_fiber;
 
+/* fiber_id of the currently executing request fiber, 0 outside fiber context.
+ * Registered into the bridge at MINIT (oxphp_bridge_set_current_fiber_id_fn)
+ * so Rust can tag async promise ownership at creation. */
+uint64_t oxphp_fiber_current_id(void);
+
 /* ─── Scheduler API ────────────────────────────────────── */
 
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched);

@@ -2658,6 +2658,32 @@ void oxphp_bridge_cleanup_outstanding_promises(void) {
     }
 }
 
+static oxphp_cleanup_promises_for_fiber_fn_t rust_cleanup_promises_for_fiber = NULL;
+
+void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fiber_fn_t fn) {
+    rust_cleanup_promises_for_fiber = fn;
+}
+
+void oxphp_bridge_cleanup_promises_for_fiber(uint64_t fiber_id) {
+    if (__builtin_expect(rust_cleanup_promises_for_fiber != NULL, 1)) {
+        rust_cleanup_promises_for_fiber(fiber_id);
+    }
+}
+
+/* ─── Current Request Fiber Identity ────────────────────────── */
+static oxphp_current_fiber_id_fn_t ext_current_fiber_id = NULL;
+
+void oxphp_bridge_set_current_fiber_id_fn(oxphp_current_fiber_id_fn_t fn) {
+    ext_current_fiber_id = fn;
+}
+
+uint64_t oxphp_bridge_current_fiber_id(void) {
+    if (ext_current_fiber_id != NULL) {
+        return ext_current_fiber_id();
+    }
+    return 0;
+}
+
 /* === Async Promise: Freeze/Unfreeze === */
 
 static void oxphp_freeze_zval_recursive(zval *zv);

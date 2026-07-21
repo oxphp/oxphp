@@ -3,3 +3,4 @@
 
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
+hooks/test_promise_survives_bystander
