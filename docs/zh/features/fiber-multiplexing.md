@@ -53,7 +53,7 @@ Worker 线程
 | `oxphp_stream_flush()` | 立即将数据块发送给客户端并返回。在 SSE 循环中与 `oxphp_sleep()` 配合使用 |
 | `oxphp_finish_request()` | 发送完整响应并继续 PHP 执行。不产生让步 |
 
-> **注意：** PHP 内置的 `sleep()` 和 `usleep()` 会阻塞整个 Worker 线程。请始终使用 `oxphp_sleep()` 和 `oxphp_usleep()` 以获得协作式行为。
+> **注意：** PHP 内置的 `sleep()` 和 `usleep()` 默认会阻塞整个 Worker 线程。请使用 `oxphp_sleep()` / `oxphp_usleep()`，或设置 `RUNTIME_HOOKS=sleep` 让原生内置函数自动挂起 fiber——当第三方代码直接调用 `sleep()` 时尤其有用。参见[配置](../operations/configuration.md)。
 
 ## PHP 示例
 
@@ -248,7 +248,7 @@ fiber.stack_size = 512K
 - **每个 Worker 最多 256 个 fiber** — 硬性限制，运行时不可配置
 - **仅协作式** — CPU 密集型代码（紧密循环、大量计算）会使其他 fiber 饥饿。没有抢占机制
 - **阻塞 I/O 会阻塞线程** — 所有阻塞调用必须封装在 `oxphp_async()` 中才能实现真正的并发
-- **PHP 原生的 `sleep()`/`usleep()` 不感知 fiber** — 请使用 `oxphp_sleep()`/`oxphp_usleep()`
+- **PHP 原生的 `sleep()`/`usleep()` 默认不感知 fiber** — 请使用 `oxphp_sleep()`/`oxphp_usleep()`，或启用 `RUNTIME_HOOKS=sleep`
 - **`oxphp_async_await_race()` 和 `oxphp_async_await_any()` 不产生让步** — 它们目前即使在 fiber 内部也会阻塞。`oxphp_async_await_all()` 在等待时*会*挂起 fiber，因此它是 fiber 友好的；对于 `race`/`any`，如果你需要线程保持协作，请使用顺序的 `oxphp_async_await()` 调用
 
 ## 参见

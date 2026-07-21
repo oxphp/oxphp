@@ -1,0 +1,5 @@
+# profile: hooks
+# description: Runtime hooks in worker mode — request/task fiber multiplexing of native sleep
+
+hooks/test_sleep_task_multiplex
+hooks/test_sleep_request_multiplex

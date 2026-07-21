@@ -17,6 +17,7 @@
 #include "ext/session/php_session.h"
 #include <limits.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <stdatomic.h>
 #include <time.h>
 
@@ -1307,6 +1308,135 @@ PHP_FUNCTION(oxphp_usleep)
     usleep((useconds_t)microseconds);
 }
 /* }}} */
+
+/* ─── Runtime Hooks (RUNTIME_HOOKS) ──────────────────────────
+ * Opt-in replacement of blocking native builtins with fiber-suspending
+ * implementations. Handler pointers are swapped in the master function
+ * table during MINIT — on the startup thread, before worker threads copy
+ * the table; under ZTS the per-thread copies alias the same
+ * zend_internal_function structs, so swapping after threads spawn would
+ * be a data race and is never done. Outside a fiber the hooks delegate
+ * to the saved original handler, byte-identical to native behavior. */
+
+static zif_handler oxphp_orig_sleep = NULL;
+static zif_handler oxphp_orig_usleep = NULL;
+
+/* RUNTIME_HOOKS grammar: unset/""/"0"/"false" = off; "1"/"true"/"all" =
+ * every category; otherwise a comma-separated category list. "sleep" is
+ * the only category today. */
+static bool oxphp_hooks_category_enabled(const char *category)
+{
+    const char *env = getenv("RUNTIME_HOOKS");
+    if (!env || !*env) return false;
+    if (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0) return false;
+    if (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0
+        || strcasecmp(env, "all") == 0) {
+        return true;
+    }
+    size_t cat_len = strlen(category);
+    const char *p = env;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (len == cat_len && strncasecmp(p, category, cat_len) == 0) {
+            return true;
+        }
+        p = comma ? comma + 1 : p + len;
+    }
+    return false;
+}
+
+/* Hooked sleep(): native argument contract (mirrors ext/standard
+ * PHP_FUNCTION(sleep)), cooperative suspend inside a fiber. Returns 0 —
+ * the cooperative timer always runs to completion, so the "seconds left
+ * on signal interrupt" case of the native builtin does not arise.
+ * Cancellation of a task fiber unwinds via AsyncException, matching
+ * oxphp_sleep(). */
+static ZEND_NAMED_FUNCTION(oxphp_hooked_sleep)
+{
+    if (oxphp_current_fiber == NULL) {
+        oxphp_orig_sleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    zend_long num;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(num)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (num < 0 || (zend_ulong) num > UINT_MAX) {
+        zend_argument_value_error(1, "must be between 0 and %u", UINT_MAX);
+        RETURN_THROWS();
+    }
+
+    if (num > 0 && oxphp_fiber_sleep_us((uint64_t) num * 1000000) < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return;
+    }
+    RETURN_LONG(0);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_hooked_usleep)
+{
+    if (oxphp_current_fiber == NULL) {
+        oxphp_orig_usleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    zend_long num;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+        Z_PARAM_LONG(num)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (num < 0 || (zend_ulong) num > UINT_MAX) {
+        zend_argument_value_error(1, "must be between 0 and %u", UINT_MAX);
+        RETURN_THROWS();
+    }
+
+    if (num > 0 && oxphp_fiber_sleep_us((uint64_t) num) < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+    }
+}
+
+static bool oxphp_hook_swap(const char *name, size_t name_len,
+                            zif_handler hook, zif_handler *orig_out)
+{
+    zend_function *fn = zend_hash_str_find_ptr(CG(function_table), name, name_len);
+    if (!fn || fn->type != ZEND_INTERNAL_FUNCTION) {
+        return false;
+    }
+    *orig_out = fn->internal_function.handler;
+    fn->internal_function.handler = hook;
+    return true;
+}
+
+static void oxphp_hook_restore(const char *name, size_t name_len, zif_handler orig)
+{
+    if (!orig) return;
+    zend_function *fn = zend_hash_str_find_ptr(CG(function_table), name, name_len);
+    if (fn && fn->type == ZEND_INTERNAL_FUNCTION) {
+        fn->internal_function.handler = orig;
+    }
+}
+
+static void oxphp_runtime_hooks_install(void)
+{
+    if (!oxphp_hooks_category_enabled("sleep")) return;
+    oxphp_hook_swap("sleep", sizeof("sleep") - 1,
+                    oxphp_hooked_sleep, &oxphp_orig_sleep);
+    oxphp_hook_swap("usleep", sizeof("usleep") - 1,
+                    oxphp_hooked_usleep, &oxphp_orig_usleep);
+}
+
+static void oxphp_runtime_hooks_restore(void)
+{
+    oxphp_hook_restore("sleep", sizeof("sleep") - 1, oxphp_orig_sleep);
+    oxphp_hook_restore("usleep", sizeof("usleep") - 1, oxphp_orig_usleep);
+    oxphp_orig_sleep = NULL;
+    oxphp_orig_usleep = NULL;
+}
 
 /* ─── Worker Mode: soft reset between requests ─────────────── */
 
@@ -4027,6 +4157,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         /* Continue startup — PHP's default OnUpdateTimeout still works. */
     }
 
+    /* Last: all extensions (standard included) have registered their
+     * functions by now; worker threads have not started yet. */
+    oxphp_runtime_hooks_install();
+
     return SUCCESS;
 }
 /* }}} */
@@ -4034,6 +4168,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 /* {{{ MSHUTDOWN — clear ox_shared class_entry cache */
 PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 {
+    oxphp_runtime_hooks_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;
 }

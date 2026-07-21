@@ -5,6 +5,7 @@ async/test_basic_dispatch
 async/test_nested_composition
 async/test_cancel_suspended
 async/test_cancel_sleeping
+async/test_sleep_unhooked_blocks
 async/test_cancel_race_timeout
 async/test_cancel_any_timeout
 async/test_with_args

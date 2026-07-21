@@ -53,7 +53,7 @@ These functions do **not** suspend the fiber:
 | `oxphp_stream_flush()` | Sends a chunk to the client immediately and returns. Use with `oxphp_sleep()` in SSE loops |
 | `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
 
-> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread. Always use `oxphp_sleep()` and `oxphp_usleep()` to get cooperative behavior.
+> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. See [Configuration](../operations/configuration.md).
 
 ## PHP Examples
 
@@ -128,7 +128,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - `file_get_contents()`, `fopen()`, `fread()`
 - `curl_exec()`, `curl_multi_exec()`
 - PDO queries, `mysqli_query()`
-- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead)
+- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep`)
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
