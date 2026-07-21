@@ -1,0 +1,5 @@
+# profile: hooksclassic
+# description: Runtime hooks in traditional mode — hooked task fibers + native fallback in request context
+
+hooks/test_sleep_cancel_hooked
+hooks/test_sleep_semantics

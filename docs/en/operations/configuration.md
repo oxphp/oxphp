@@ -220,6 +220,14 @@ The async worker pool handles fire-and-forget background tasks dispatched from P
 
 A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a startup error — falling back to a default would silently disable or misconfigure the pool. An exactly-empty value is treated as unset.
 
+## Runtime Hooks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUNTIME_HOOKS` | _(off)_ | Opt-in replacement of blocking PHP builtins with fiber-suspending implementations. `1`/`true`/`all` enables every hook category; a comma-separated list enables specific categories. The only category today is `sleep`: native `sleep()`/`usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
+
+Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
+
 ## Shared State
 
 In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mutex`, `Once`, `Pool`, `Atomic`, `Flag`, `Registry`). See [Shared State](../shared-state/shared-state.md) for the API tour.

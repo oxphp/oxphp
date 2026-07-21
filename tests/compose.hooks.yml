@@ -1,0 +1,34 @@
+# Runtime hooks in worker mode: RUNTIME_HOOKS=1, one PHP worker, one async
+# worker. Native sleep()/usleep() are hooked to fiber-suspending
+# implementations; with a single worker thread on each pool, wall-clock
+# assertions prove that hooked sleeps multiplex request/task fibers instead
+# of blocking the thread.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.hooks.yml up
+services:
+  oxphp-hooks:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker

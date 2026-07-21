@@ -1,0 +1,30 @@
+# Runtime hooks in traditional mode: RUNTIME_HOOKS=1 + ASYNC_WORKERS=4.
+# Native sleep()/usleep() are hooked to fiber-suspending implementations.
+# Task fibers exercise the hooked path; the request context has no fiber,
+# so it exercises the original-handler fallback path.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.hooksclassic.yml up
+services:
+  oxphp-hooksclassic:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 4
+      RUNTIME_HOOKS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

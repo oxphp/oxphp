@@ -220,6 +220,14 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 这三个变量中任何一个的格式错误值（例如 `ASYNC_WORKERS=8x`）都会导致启动错误——回退到默认值会静默禁用或错误配置该池。完全为空的值视为未设置。
 
+## 运行时钩子
+
+| 变量 | 默认值 | 描述 |
+|----------|---------|-------------|
+| `RUNTIME_HOOKS` | _（关闭）_ | 可选地将阻塞的 PHP 内置函数替换为挂起 fiber 的实现。`1`/`true`/`all` 启用所有钩子类别；逗号分隔的列表启用特定类别。目前唯一的类别是 `sleep`：原生 `sleep()`/`usleep()` 会像 `oxphp_sleep()`/`oxphp_usleep()` 一样挂起当前 fiber |
+
+钩子在 worker 模式的请求 fiber 和异步任务 fiber 内生效。在 fiber 之外（traditional/framework/SPA 请求上下文、CLI），保留原生行为，包括参数验证错误。启用 `sleep` 钩子后，调用 `sleep()` 的第三方代码不再占用 Worker 线程——无需修改任何代码。在被钩住的 sleep 期间取消异步任务会以 `OxPHP\Async\AsyncException` 展开任务；被钩住的 `sleep()` 始终返回 `0`（原生函数在信号中断时返回剩余秒数的情况在此不会出现）。
+
 ## 共享状态
 
 进程内并发原语（`OxPHP\Shared\Counter`、`Map`、`Channel`、`Mutex`、`Once`、`Pool`、`Atomic`、`Flag`、`Registry`）。API 速览参见[共享状态](../shared-state/shared-state.md)。
