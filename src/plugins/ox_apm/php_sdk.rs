@@ -407,7 +407,14 @@ pub fn register_functions(
                     call.ret_str("");
                     return;
                 }
-                let span_id = stack.current().map(|s| s.span_id.as_ref()).unwrap_or("");
+                // Prefer the current open SDK span. With none open (a call
+                // at the top level of the request), fall back to the request's
+                // root span so downstream work is parented to this request
+                // rather than starting an orphan trace.
+                let span_id = match stack.current() {
+                    Some(s) => s.span_id.as_ref(),
+                    None => stack.root_span_id(),
+                };
                 if span_id.is_empty() {
                     call.ret_str("");
                     return;

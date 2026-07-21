@@ -12,8 +12,7 @@ pub use flush::{
     set_profiling_paused, snapshot_open_stack, OxSpanEvent,
 };
 
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -588,25 +587,52 @@ pub fn now_ns() -> u64 {
         .as_nanos() as u64
 }
 
-/// Process-wide monotonic counter for span-ID generation. Each
-/// `fetch_add` is globally unique for the process lifetime, which
-/// is all we need — exporters hash these IDs before using them as
-/// keys, so sequential values are fine.
-static SPAN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Draw a fresh 64-bit seed from the OS RNG. Called once per thread
+/// by the `SPAN_ID_RNG` initializer.
+fn seed_span_rng() -> u64 {
+    let mut raw = [0u8; 8];
+    getrandom::fill(&mut raw).expect("getrandom failed");
+    u64::from_le_bytes(raw)
+}
 
-/// Generate a 16-char lowercase hex span ID.
+/// Advance a splitmix64 state in place and return the mixed 64-bit
+/// output. Canonical constants — golden-ratio increment, two mixing
+/// multipliers, and 30/27/31 shifts (pinned by
+/// `test_splitmix64_matches_canonical_vectors`). Full 2^64 period,
+/// bijective, and robust to a zero state.
+#[inline]
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Generate a 16-char lowercase hex span ID from a per-thread PRNG.
 ///
-/// Big-endian encoding of the atomic counter. No TLS access, no
-/// thread hash, deterministic across runs — same counter value
-/// always produces the same ID, which keeps pprof/collapsed
-/// snapshots diff-friendly.
+/// Advances the thread-local splitmix64 state (seeded once from OS
+/// entropy) and hex-encodes its 64-bit output. Independent per-thread
+/// seeds make child span IDs statistically unique across workers,
+/// processes, and hosts participating in one distributed trace —
+/// matching the W3C Trace Context recommendation of a random 8-byte
+/// span-id, and the source used for root spans
+/// (`trace_context::generate_span_id`). The PRNG avoids a syscall on
+/// the `ProfileAll` hot path, where every PHP call opens a span.
 ///
-/// One heap allocation — directly from the stack-buffer into
-/// `Arc<str>`. Avoids the former `String::with_capacity(16)` +
-/// `Arc::from(String)` two-alloc path.
+/// One heap allocation — hex-encode straight from the stack buffer
+/// into `Arc<str>`.
 fn generate_span_id() -> Arc<str> {
-    let counter = SPAN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let raw = counter.to_be_bytes();
+    // Advance the per-thread splitmix64 state. It is a full-period
+    // bijection, so consecutive draws never repeat within a 2^64 period.
+    let raw = SPAN_ID_RNG
+        .with(|cell| {
+            let mut state = cell.get();
+            let out = splitmix64(&mut state);
+            cell.set(state);
+            out
+        })
+        .to_be_bytes();
 
     let mut buf = [0u8; 16];
     for (i, byte) in raw.iter().enumerate() {
@@ -622,6 +648,14 @@ fn generate_span_id() -> Arc<str> {
 thread_local! {
     /// Per-worker-thread profiling context.
     pub static PROFILING_CONTEXT: RefCell<ProfilingContext> = RefCell::new(ProfilingContext::new());
+
+    /// Per-thread splitmix64 state for span-ID generation, seeded once
+    /// from OS entropy on first use. Independent seeds per thread,
+    /// process, and host keep child span IDs statistically unique
+    /// across a distributed trace (W3C recommends a random 8-byte
+    /// span-id). Not cryptographically unpredictable — span IDs are
+    /// join keys, not secrets.
+    static SPAN_ID_RNG: Cell<u64> = Cell::new(seed_span_rng());
 }
 
 #[cfg(test)]
@@ -792,6 +826,47 @@ mod tests {
         // First push should return 1, not 0.
         let id = stack.push("first".into(), vec![]);
         assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_splitmix64_matches_canonical_vectors() {
+        // Known-answer test: guards the generator constants and shift
+        // amounts against a typo that the randomness check in
+        // `test_child_span_ids_are_random_lowercase_hex` cannot detect —
+        // a wrong constant still yields random-looking hex. These are the
+        // canonical splitmix64 outputs for an initial state of 0.
+        let mut state = 0u64;
+        assert_eq!(splitmix64(&mut state), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(splitmix64(&mut state), 0x6e78_9e6a_a1b9_65f4);
+        assert_eq!(splitmix64(&mut state), 0x06c4_5d18_8009_454f);
+        assert_eq!(splitmix64(&mut state), 0xf88b_b8a8_724c_81ec);
+        assert_eq!(splitmix64(&mut state), 0x1b39_896a_51a8_749b);
+    }
+
+    #[test]
+    fn test_child_span_ids_are_random_lowercase_hex() {
+        // Regression guard: child span_ids must be random 16-hex, not the
+        // former sequential counter (0000000000000001, 0000000000000002, …).
+        let mut stack = ProfilingContext::new();
+        stack.reset(ProfilingMode::ApmOnly, "trace".into(), "root".into());
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let id = stack.push("s".into(), vec![]);
+            let sid = Arc::clone(&stack.get_mut(id).unwrap().span_id);
+            assert_eq!(sid.len(), 16, "span id is 16 hex chars: {sid}");
+            assert!(
+                sid.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                "span id is lowercase hex: {sid}"
+            );
+            assert_ne!(
+                sid.as_ref(),
+                "0000000000000001",
+                "span id is not the old sequential counter"
+            );
+            assert!(seen.insert(sid.to_string()), "span ids are unique: {sid}");
+        }
     }
 
     #[test]
