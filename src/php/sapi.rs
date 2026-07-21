@@ -87,6 +87,18 @@ thread_local! {
     /// Promise ID -> (oneshot receiver, cancellation flag). HTTP worker threads only.
     static PROMISE_MAP: RefCell<HashMap<u64, PromiseEntry>> = RefCell::new(HashMap::new());
 
+    /// Promise ID -> fiber_id of the request fiber that created it (0 = created
+    /// outside fiber context: traditional mode, CLI, worker boot code). The
+    /// promise maps above are shared by every request fiber multiplexed on
+    /// this worker thread, so the per-request cleanup must drain only the ids
+    /// owned by the finishing fiber — draining thread-wide would cancel
+    /// sibling fibers' live promises and stall their awaits to timeout.
+    /// First-writer-wins: ownership is fixed at creation and never reassigned
+    /// while the promise lives (a re-registration into CLEANUP/STRANDED runs on
+    /// the same fiber anyway). Entries are removed on cleanup, and IDs are
+    /// monotonic, so a live entry is never a stale record for a reused id.
+    static PROMISE_OWNER: RefCell<HashMap<u64, u64>> = RefCell::new(HashMap::new());
+
     /// Per-thread monotonic promise ID counter.
     static PROMISE_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 
@@ -2655,8 +2667,10 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         }
     };
 
-    // Cleanup any outstanding async promises from this request
-    cleanup_outstanding_promises_callback();
+    // Async promise cleanup happens before this callback runs: the fiber
+    // scheduler's finalize path drains the finishing fiber's own promises via
+    // `cleanup_promises_for_fiber_callback`. A thread-wide drain here would
+    // steal live promises from sibling fibers multiplexed on this thread.
 
     // Adopt the handler's explicit `http_response_code()` as the wire status.
     // That builtin writes `SG(sapi_headers).http_response_code` directly (not via
@@ -3088,11 +3102,28 @@ pub fn next_promise_id() -> u64 {
     })
 }
 
+/// fiber_id of the request fiber currently executing on this thread, or 0
+/// outside fiber context. Passed lazily to `or_insert_with` at the three
+/// promise-registration choke points, so it is evaluated once per promise —
+/// at the first choke point that sees the id (first-writer-wins: the owner is
+/// the creating fiber). Later choke points for the same id (cleanup/strand
+/// re-registration on that same fiber) find the entry already present and skip
+/// the call. Every choke point still captures ownership should a future path
+/// register a promise without a preceding `store_promise`.
+fn current_promise_owner() -> u64 {
+    unsafe { crate::bridge::ffi::oxphp_bridge_current_fiber_id() }
+}
+
 pub fn store_promise(
     id: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
     cancelled: std::sync::Arc<CancelShared>,
 ) {
+    PROMISE_OWNER.with(|m| {
+        m.borrow_mut()
+            .entry(id)
+            .or_insert_with(current_promise_owner);
+    });
     PROMISE_MAP.with(|m| {
         m.borrow_mut().insert(id, (rx, cancelled));
     });
@@ -3128,6 +3159,11 @@ pub fn take_promise(
 }
 
 pub fn store_promise_cleanup(id: u64, cleanup: PromiseCleanup) {
+    PROMISE_OWNER.with(|m| {
+        m.borrow_mut()
+            .entry(id)
+            .or_insert_with(current_promise_owner);
+    });
     PROMISE_CLEANUP.with(|m| {
         m.borrow_mut().insert(id, cleanup);
     });
@@ -3164,6 +3200,11 @@ fn stash_stranded(
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
     cancelled: Arc<CancelShared>,
 ) {
+    PROMISE_OWNER.with(|m| {
+        m.borrow_mut()
+            .entry(id)
+            .or_insert_with(current_promise_owner);
+    });
     PROMISE_STRANDED.with(|m| {
         m.borrow_mut().insert(id, (rx, cancelled));
     });
@@ -4524,6 +4565,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 unsafe fn cleanup_promise(id: u64) {
     use crate::bridge::ffi;
 
+    PROMISE_OWNER.with(|m| {
+        m.borrow_mut().remove(&id);
+    });
     if let Some(cleanup) = take_promise_cleanup(id) {
         for frozen in &cleanup.frozen {
             ffi::oxphp_unfreeze_zval(
@@ -4550,22 +4594,78 @@ unsafe fn cleanup_promise(id: u64) {
     }
 }
 
-/// RSHUTDOWN / worker-mode callback: clean up any async promises that were
-/// dispatched but never awaited by user code.  Safe to call when the map is
-/// empty (returns immediately).
+/// RSHUTDOWN callback: clean up any async promises that were dispatched but
+/// never awaited by user code.  Thread-wide drain — correct only when no
+/// other request shares this thread's promise maps: traditional mode (one
+/// request per thread at a time) and final worker-thread teardown.  The
+/// worker-mode per-request path uses `cleanup_promises_for_fiber_callback`
+/// instead.  Safe to call when the maps are empty (returns immediately).
 ///
 /// # Safety
-/// Called from C FFI (RSHUTDOWN) or internally from `worker_send_callback`.
+/// Called from C FFI (RSHUTDOWN).
 unsafe extern "C" fn cleanup_outstanding_promises_callback() {
-    use crate::bridge::ffi;
-
     let ids = outstanding_promise_ids();
+    // Forget all ownership records — including stale ones for fully-consumed
+    // promises. Nothing outlives a thread-wide drain.
+    PROMISE_OWNER.with(|m| m.borrow_mut().clear());
     if ids.is_empty() {
         return;
     }
     tracing::warn!(count = ids.len(), "Cleaning up non-awaited async promises");
+    drain_promises(&ids);
+}
 
-    for id in ids {
+/// Worker-mode per-request callback: clean up promises owned by the request
+/// fiber that just completed, leaving sibling fibers' live promises alone.
+/// Called from the fiber scheduler's finalize path via the bridge.
+///
+/// # Safety
+/// Called from C FFI on the owning worker thread.
+unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
+    // Collect and forget this fiber's ownership records in one pass.
+    let owned: Vec<u64> = PROMISE_OWNER.with(|m| {
+        let mut ids = Vec::new();
+        m.borrow_mut().retain(|&id, &mut owner| {
+            if owner == fiber_id {
+                ids.push(id);
+                false
+            } else {
+                true
+            }
+        });
+        ids
+    });
+    if owned.is_empty() {
+        return;
+    }
+    // Keep only ids still present in a promise map — a record whose promise
+    // was fully consumed carries nothing to drain.
+    let live: Vec<u64> = owned
+        .into_iter()
+        .filter(|id| {
+            PROMISE_MAP.with(|m| m.borrow().contains_key(id))
+                || PROMISE_CLEANUP.with(|m| m.borrow().contains_key(id))
+                || PROMISE_STRANDED.with(|m| m.borrow().contains_key(id))
+        })
+        .collect();
+    if live.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        count = live.len(),
+        fiber_id,
+        "Cleaning up non-awaited async promises"
+    );
+    drain_promises(&live);
+}
+
+/// Cancel and drain a batch of promises: signal cancellation, wait for each
+/// worker to acknowledge (5 s budget per promise), then release frozen and
+/// borrowed captures.
+unsafe fn drain_promises(ids: &[u64]) {
+    use crate::bridge::ffi;
+
+    for &id in ids {
         // Receivers can live in either PROMISE_MAP (never-awaited) or
         // PROMISE_STRANDED (await_race / await_any timed out). Drain
         // both before unfreezing — the rx must complete (or hit the 5 s
@@ -4662,6 +4762,9 @@ pub fn register_async_callbacks() {
         crate::bridge::ffi::oxphp_bridge_set_await_any_dispatch(Some(await_any_dispatch_callback));
         crate::bridge::ffi::oxphp_bridge_set_cleanup_promises(Some(
             cleanup_outstanding_promises_callback,
+        ));
+        crate::bridge::ffi::oxphp_bridge_set_cleanup_promises_for_fiber(Some(
+            cleanup_promises_for_fiber_callback,
         ));
     }
 }

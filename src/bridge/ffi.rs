@@ -239,6 +239,10 @@ extern "C" {
     // ── Async promise cleanup ──
     pub fn oxphp_bridge_set_cleanup_promises(f: Option<unsafe extern "C" fn()>);
     pub fn oxphp_bridge_cleanup_outstanding_promises();
+    pub fn oxphp_bridge_set_cleanup_promises_for_fiber(f: Option<unsafe extern "C" fn(u64)>);
+
+    // ── Current request fiber identity (0 outside fiber context) ──
+    pub fn oxphp_bridge_current_fiber_id() -> u64;
 
     // ── Async exception details ──
     pub fn oxphp_bridge_set_async_exception(cls: *const c_char, msg: *const c_char);

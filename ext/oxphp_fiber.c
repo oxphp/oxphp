@@ -27,6 +27,10 @@
 
 __thread oxphp_request_fiber *oxphp_current_fiber = NULL;
 
+uint64_t oxphp_fiber_current_id(void) {
+    return oxphp_current_fiber ? oxphp_current_fiber->fiber_id : 0;
+}
+
 /* ─── Forward declarations ─────────────────────────────── */
 
 static void request_fiber_coroutine(zend_fiber_transfer *transfer);
@@ -581,6 +585,13 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * for the fast path; oxphp_scheduler_tick's new-request branch for
      * the event-loop path) so PHP-side requestCount() observes the
      * current request's index, not the previous count. */
+
+    /* Cancel + drain async promises owned by THIS fiber before the response
+     * is sent. Must be per-fiber: the thread-local promise maps are shared by
+     * every fiber multiplexed on this worker thread, and a thread-wide drain
+     * here would steal sibling fibers' live promises (their awaits would then
+     * time out despite the tasks succeeding). */
+    oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id);
 
     /* Send the HTTP response via Rust (same as worker_send_callback) */
     oxphp_bridge_worker_send_response();

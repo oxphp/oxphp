@@ -4127,6 +4127,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
     oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
+    oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
 
     /* Register async-task scheduler callbacks (stub bodies for now; the
      * Rust fiber-mode async driver reaches the scheduler through these). */

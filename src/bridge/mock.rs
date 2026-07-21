@@ -343,6 +343,13 @@ pub unsafe fn oxphp_bridge_set_await_poll(_f: Option<unsafe extern "C" fn(i64) -
 
 pub unsafe fn oxphp_bridge_set_cleanup_promises(_f: Option<unsafe extern "C" fn()>) {}
 pub unsafe fn oxphp_bridge_cleanup_outstanding_promises() {}
+pub unsafe fn oxphp_bridge_set_cleanup_promises_for_fiber(_f: Option<unsafe extern "C" fn(u64)>) {}
+
+// ── Current request fiber identity ──
+
+pub unsafe fn oxphp_bridge_current_fiber_id() -> u64 {
+    0
+}
 
 // ── Async exception details ──
 
