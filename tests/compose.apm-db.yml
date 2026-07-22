@@ -1,0 +1,80 @@
+# APM database auto-instrumentation matrix: exercises the PDO (mysql, pgsql,
+# sqlite) and mysqli hook paths against real MySQL 9 and PostgreSQL 17 servers.
+#
+# Driven by tests/apm_db_matrix.sh. The oxphp service builds from
+# fixtures/apm_db/Dockerfile (dev image + pdo_mysql / mysqli / pdo_pgsql) and
+# only starts once both databases report healthy.
+services:
+  otelcol:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config", "/etc/otelcol/config.yaml"]
+    volumes:
+      - ./fixtures/apm_db/otelcol.yaml:/etc/otelcol/config.yaml:ro
+    networks: [db-net]
+
+  mysql:
+    image: mysql:9
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [db-net]
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U appuser -d appdb"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [db-net]
+
+  oxphp:
+    build:
+      context: ./fixtures/apm_db
+      dockerfile: Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_APM_ENABLED: "true"
+      OTEL_APM_SLOW_QUERY_MS: "1"
+      OTEL_APM_DB_CAPTURE_PARAMS_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4317
+      INTERNAL_ADDR: 0.0.0.0:9090
+      LOG_LEVEL: error
+      DB_MYSQL_HOST: mysql
+      DB_PG_HOST: postgres
+      DB_NAME: appdb
+      DB_USER: appuser
+      DB_PASS: apppass
+    volumes:
+      - ./fixtures/apm_db/sqlite.php:/var/www/html/public/sqlite.php:ro
+      - ./fixtures/apm_db/mysql.php:/var/www/html/public/mysql.php:ro
+      - ./fixtures/apm_db/mysqli.php:/var/www/html/public/mysqli.php:ro
+      - ./fixtures/apm_db/pgsql.php:/var/www/html/public/pgsql.php:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks: [db-net]
+
+networks:
+  db-net:

@@ -59,7 +59,7 @@ The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel
 |----------|---------|-------------|
 | `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true`. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Queries above this get `oxphp.db.slow=true` on their spans |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. **Values are recorded raw — unlike `db.statement`, they are not obfuscated, so this can place PII (emails, tokens, etc.) in your traces. Enable only where that is acceptable.** Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Maximum size in bytes of the `exception.stacktrace` attribute. Over the cap the stacktrace is truncated from the tail (the root frame is kept) with a `…(truncated)` marker. `0` disables truncation |
 | `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Maximum size in bytes of the `exception.message` attribute (default matches New Relic's per-attribute value limit). Over the cap the message is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 
@@ -200,20 +200,36 @@ When the OTel plugin is active, request IDs are derived from the trace context: 
 
 ## APM: Automatic Instrumentation
 
-When the APM plugin is enabled, OxPHP automatically hooks 33 internal PHP functions at the engine level. Every call to a hooked function creates a child span under the current request's root span — with zero code changes required.
+When the APM plugin is enabled, OxPHP automatically hooks 34 internal PHP functions at the engine level. Every call to a hooked function creates a child span under the current request's root span — with zero code changes required.
 
 ### Hooked Functions
 
 | Category | Functions |
 |----------|-----------|
 | **PDO** | `PDO::__construct`, `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute` |
-| **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::execute` |
+| **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::prepare`, `mysqli_stmt::execute` |
 | **cURL** | `curl_init`, `curl_setopt`, `curl_exec`, `curl_multi_exec` |
 | **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hget`, `Redis::hset`, `Redis::lpush`, `Redis::rpush` |
 | **Memcached** | `Memcached::get`, `Memcached::set`, `Memcached::delete`, `Memcached::getMulti`, `Memcached::setMulti` |
 | **File I/O** | `fopen`, `fread`, `fwrite`, `file_get_contents`, `file_put_contents` |
 
 Hooks are only installed for extensions that are actually loaded. If your build does not include the Redis extension, the Redis hooks are silently skipped.
+
+### Database Span Attributes
+
+Database hooks (PDO, mysqli) decorate their spans with OpenTelemetry semantic-convention attributes:
+
+| Attribute | Source | Example |
+|-----------|--------|---------|
+| `db.statement` | Query text with literal values replaced by `?`, so PII (emails, tokens) never reaches the tracing backend | `SELECT * FROM users WHERE email = ?` |
+| `db.operation` | Leading SQL keyword | `SELECT` |
+| `db.system` | Parsed from the PDO DSN / mysqli constructor | `mysql`, `postgresql`, `sqlite` |
+| `server.address`, `server.port` | Connection host/port (omitted for a unix socket or SQLite file) | `db.internal`, `5432` |
+| `db.name` | Database name, or the file path for SQLite | `shop` |
+| `oxphp.db.slow` | `true` when the call's wall-time meets or exceeds `OTEL_APM_SLOW_QUERY_MS` | `true` |
+| `db.params` | Bound parameters, recorded **raw (not obfuscated)** — so they can contain PII; **only** when `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED=true` | `[1, active]` |
+
+`db.statement` is read from each `query` / `exec` / `prepare` call's own arguments, so it appears on that span. On a `PDOStatement::execute` span it is *also* present, read from the statement object's own `queryString` property (so it can never be another statement's SQL). A `mysqli_stmt::execute` span has no `db.statement` — mysqli exposes no such property — but the SQL is on the preceding `mysqli::prepare` span. Every `execute` span carries the timing (and thus the slow-query flag) and, for PDO, `db.params`. Cache (Redis, Memcached), HTTP-client (cURL), and file-I/O hooks emit a bare timing span.
 
 ### How It Works
 

@@ -6,6 +6,17 @@ use std::collections::HashMap;
 /// Stored per PHP object handle so that subsequent query calls on the same
 /// PDO instance can look up connection attributes (db.system, server.address,
 /// server.port, db.name) for span decoration.
+///
+/// Keying by the raw PHP object handle is sound here **only because a
+/// connection object is created exclusively through a hooked constructor**
+/// (`PDO::__construct` / `mysqli::__construct`). PHP recycles object handles
+/// from a free list, but every (re)use of a handle by a connection runs
+/// `store()` first, overwriting any stale entry before a `get()` can read it.
+/// This is why there is deliberately no statement store: a statement can be
+/// created by paths that are not hooked (e.g. `stmt_init()`), so a
+/// handle-keyed statement map could serve a recycled handle's stale SQL to an
+/// unrelated `execute`. Statement SQL is instead read from each `query` /
+/// `prepare` call's own arguments.
 #[derive(Debug, Clone)]
 pub struct ConnectionMeta {
     /// Database system identifier: "mysql", "postgresql", "sqlite", "oracle", "mssql", "unknown"
