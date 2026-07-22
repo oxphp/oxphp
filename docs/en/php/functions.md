@@ -348,6 +348,8 @@ oxphp_sleep(float $seconds): void
 
 Sleeps for the specified duration. Inside a worker mode handler running in a fiber, this call is cooperative — it suspends the current fiber so other requests can be processed during the wait. Outside a fiber, it falls back to a standard blocking `usleep()`.
 
+> **Not superseded by `RUNTIME_HOOKS`.** `oxphp_sleep()` cooperates in worker mode with no configuration and accepts fractional seconds. `RUNTIME_HOOKS=sleep` is a separate, opt-in retrofit that makes *native* `sleep()`/`usleep()` calls (e.g. inside third-party code) cooperate as well — it does not remove the need for `oxphp_sleep()` in code you control. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+
 **Parameters:**
 - `$seconds` — Duration to sleep in seconds. Fractional values are accepted (e.g. `0.5` for 500 milliseconds). Values of `0` or less return immediately.
 
