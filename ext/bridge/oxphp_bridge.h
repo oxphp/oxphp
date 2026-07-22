@@ -1388,6 +1388,20 @@ typedef void (*oxphp_cleanup_promises_for_fiber_fn_t)(uint64_t fiber_id);
 void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fiber_fn_t fn);
 void oxphp_bridge_cleanup_promises_for_fiber(uint64_t fiber_id);
 
+/* ─── Deferred Promise Drain (worker mode) ───────────────────
+ * A finished request fiber's still-running fire-and-forget promises are moved
+ * to a thread-local deferred list instead of blocking the worker in block_on
+ * during finalize. `poll` drains ready/expired entries non-blockingly and is
+ * called from the scheduler tick; `has` reports whether any remain so the
+ * worker loop keeps ticking (rather than blocking in worker_wait) until they
+ * are reclaimed. */
+typedef void (*oxphp_poll_deferred_drains_fn_t)(void);
+typedef int  (*oxphp_has_deferred_drains_fn_t)(void);
+void oxphp_bridge_set_deferred_drain_callbacks(oxphp_poll_deferred_drains_fn_t poll,
+                                               oxphp_has_deferred_drains_fn_t pending);
+void oxphp_bridge_poll_deferred_drains(void);
+int  oxphp_bridge_has_deferred_drains(void);
+
 /* ─── Current Request Fiber Identity ─────────────────────────
  * Registered by the PHP extension (not Rust): returns the fiber_id of the
  * request fiber currently executing on this thread, or 0 outside fiber

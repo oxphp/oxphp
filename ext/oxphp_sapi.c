@@ -1666,8 +1666,13 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
     int consecutive_errors = 0;
 
     while (1) {
-        if (sched.fiber_count == 0) {
-            /* ── No active fibers: block-wait for next request ──────── */
+        if (sched.fiber_count == 0 && !oxphp_bridge_has_deferred_drains()) {
+            /* ── No active fibers and no deferred promise drains: block-wait
+             * for the next request. When deferred drains remain, fall through
+             * to the event-loop branch instead — its tick both accepts new
+             * requests and polls the drains, so a fire-and-forget promise left
+             * by the last request is reclaimed without waiting for the next
+             * one to arrive. ──────────────────────────────────────────── */
 
             if (oxphp_bridge_worker_wait() != 0) {
                 ctx->exit_reason = 0;

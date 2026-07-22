@@ -241,6 +241,12 @@ extern "C" {
     pub fn oxphp_bridge_cleanup_outstanding_promises();
     pub fn oxphp_bridge_set_cleanup_promises_for_fiber(f: Option<unsafe extern "C" fn(u64)>);
 
+    // ── Deferred promise drain (worker mode): poll + pending predicate ──
+    pub fn oxphp_bridge_set_deferred_drain_callbacks(
+        poll: Option<unsafe extern "C" fn()>,
+        pending: Option<unsafe extern "C" fn() -> c_int>,
+    );
+
     // ── Current request fiber identity (0 outside fiber context) ──
     pub fn oxphp_bridge_current_fiber_id() -> u64;
 

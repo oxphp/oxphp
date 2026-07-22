@@ -83,6 +83,18 @@ type PromiseEntry = (
     std::sync::Arc<CancelShared>,
 );
 
+/// A finished fiber's orphaned promise awaiting non-blocking drain. Moved out of
+/// the promise maps by `cleanup_promises_for_fiber_callback` so the worker's
+/// finalize path never blocks in `block_on`; the scheduler tick polls `rx` and,
+/// once the task settles (or `deadline` passes), runs `cleanup` to release the
+/// frozen/borrowed captures. Worker mode does not free request memory at the
+/// handler boundary, so deferring the unfreeze past the response send is safe.
+struct DeferredDrain {
+    rx: tokio::sync::oneshot::Receiver<AsyncResult>,
+    cleanup: Option<PromiseCleanup>,
+    deadline: Instant,
+}
+
 thread_local! {
     /// Promise ID -> (oneshot receiver, cancellation flag). HTTP worker threads only.
     static PROMISE_MAP: RefCell<HashMap<u64, PromiseEntry>> = RefCell::new(HashMap::new());
@@ -120,6 +132,10 @@ thread_local! {
     /// vm_interrupt observation.
     static PROMISE_STRANDED: RefCell<HashMap<u64, PromiseEntry>>
         = RefCell::new(HashMap::new());
+
+    /// Orphaned promises of finished request fibers, awaiting non-blocking drain
+    /// by the scheduler tick (see `DeferredDrain`). HTTP worker threads only.
+    static DEFERRED_DRAIN: RefCell<Vec<DeferredDrain>> = const { RefCell::new(Vec::new()) };
 
     /// True on async worker threads, false on HTTP workers.
     static IS_ASYNC_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4561,36 +4577,44 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
     }
 }
 
-/// Restore frozen and borrowed zvals for a completed/timed-out promise.
-unsafe fn cleanup_promise(id: u64) {
+/// Release a promise's frozen and borrowed captures: unfreeze frozen zvals,
+/// restore borrowed proxy zvals, and drop the closure object reference. Must run
+/// on the owning worker thread. Shared by the normal-completion, per-fiber
+/// deferred, and RSHUTDOWN drain paths.
+unsafe fn run_promise_cleanup(cleanup: &PromiseCleanup) {
     use crate::bridge::ffi;
 
+    for frozen in &cleanup.frozen {
+        ffi::oxphp_unfreeze_zval(
+            frozen.zval_ptr,
+            frozen.orig_refcount,
+            frozen.orig_gc_flags,
+            frozen.orig_type_flags,
+        );
+    }
+    for borrowed in &cleanup.borrowed {
+        let zval_size = ffi::oxphp_zval_size();
+        let copy_len = zval_size.min(16);
+        std::ptr::copy_nonoverlapping(
+            borrowed.original_zval_data.as_ptr(),
+            borrowed.proxy_zval_ptr as *mut u8,
+            copy_len,
+        );
+    }
+    // Release the closure object reference (prevents op_array from being
+    // freed while the async worker holds a pointer to it).
+    if !cleanup.closure_zval.is_null() {
+        ffi::oxphp_closure_release(cleanup.closure_zval);
+    }
+}
+
+/// Restore frozen and borrowed zvals for a completed/timed-out promise.
+unsafe fn cleanup_promise(id: u64) {
     PROMISE_OWNER.with(|m| {
         m.borrow_mut().remove(&id);
     });
     if let Some(cleanup) = take_promise_cleanup(id) {
-        for frozen in &cleanup.frozen {
-            ffi::oxphp_unfreeze_zval(
-                frozen.zval_ptr,
-                frozen.orig_refcount,
-                frozen.orig_gc_flags,
-                frozen.orig_type_flags,
-            );
-        }
-        for borrowed in &cleanup.borrowed {
-            let zval_size = ffi::oxphp_zval_size();
-            let copy_len = zval_size.min(16);
-            std::ptr::copy_nonoverlapping(
-                borrowed.original_zval_data.as_ptr(),
-                borrowed.proxy_zval_ptr as *mut u8,
-                copy_len,
-            );
-        }
-        // Release the closure object reference (prevents op_array from being
-        // freed while the async worker holds a pointer to it).
-        if !cleanup.closure_zval.is_null() {
-            ffi::oxphp_closure_release(cleanup.closure_zval);
-        }
+        run_promise_cleanup(&cleanup);
     }
 }
 
@@ -4608,11 +4632,14 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     // Forget all ownership records — including stale ones for fully-consumed
     // promises. Nothing outlives a thread-wide drain.
     PROMISE_OWNER.with(|m| m.borrow_mut().clear());
-    if ids.is_empty() {
-        return;
+    if !ids.is_empty() {
+        tracing::warn!(count = ids.len(), "Cleaning up non-awaited async promises");
+        drain_promises(&ids);
     }
-    tracing::warn!(count = ids.len(), "Cleaning up non-awaited async promises");
-    drain_promises(&ids);
+    // Flush promises deferred by the per-fiber path that were not yet polled to
+    // completion before this thread began tearing down (blocking is fine here —
+    // the thread is exiting and nothing else shares it).
+    flush_deferred_drains();
 }
 
 /// Worker-mode per-request callback: clean up promises owned by the request
@@ -4654,17 +4681,23 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
     tracing::warn!(
         count = live.len(),
         fiber_id,
-        "Cleaning up non-awaited async promises"
+        "Deferring cleanup of non-awaited async promises"
     );
-    drain_promises(&live);
+    // Defer instead of block_on'ing on the worker thread: finalize returns
+    // immediately and the scheduler tick reclaims each promise once its task
+    // settles. Worker mode keeps the request heap alive across handlers, so the
+    // unfreeze can safely happen after the response is sent.
+    for id in live {
+        defer_promise_drain(id);
+    }
 }
 
 /// Cancel and drain a batch of promises: signal cancellation, wait for each
 /// worker to acknowledge (5 s budget per promise), then release frozen and
-/// borrowed captures.
+/// borrowed captures. Blocking — reserved for the RSHUTDOWN / worker-teardown
+/// drain-all path, where the thread is exiting and no scheduler shares it. The
+/// worker-mode per-request path defers instead (see `defer_promise_drain`).
 unsafe fn drain_promises(ids: &[u64]) {
-    use crate::bridge::ffi;
-
     for &id in ids {
         // Receivers can live in either PROMISE_MAP (never-awaited) or
         // PROMISE_STRANDED (await_race / await_any timed out). Drain
@@ -4689,29 +4722,104 @@ unsafe fn drain_promises(ids: &[u64]) {
             }
         }
         if let Some(cleanup) = take_promise_cleanup(id) {
-            // Unfreeze frozen zvals
-            for frozen in &cleanup.frozen {
-                ffi::oxphp_unfreeze_zval(
-                    frozen.zval_ptr,
-                    frozen.orig_refcount,
-                    frozen.orig_gc_flags,
-                    frozen.orig_type_flags,
-                );
+            run_promise_cleanup(&cleanup);
+        }
+    }
+}
+
+/// Move a finished fiber's orphaned promise into the deferred-drain list:
+/// signal cancellation, then hand its receiver and cleanup to the scheduler
+/// tick, which releases the captures once the task settles. Non-blocking —
+/// unlike `drain_promises`, it never `block_on`s the worker thread.
+///
+/// If the receiver was already consumed (only a cleanup record remains) there
+/// is nothing to wait on, so the cleanup runs immediately — no ordering hazard.
+unsafe fn defer_promise_drain(id: u64) {
+    match take_promise(id).or_else(|| take_stranded(id)) {
+        Some((rx, cancelled)) => {
+            // Signal cancellation (Release pairs with the worker's Acquire
+            // load). The flag lives in the async side's clone, so dropping our
+            // `cancelled` here is fine — we only needed to set it.
+            cancelled
+                .cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
+            let cleanup = take_promise_cleanup(id);
+            DEFERRED_DRAIN.with(|d| {
+                d.borrow_mut().push(DeferredDrain {
+                    rx,
+                    cleanup,
+                    deadline: Instant::now() + std::time::Duration::from_secs(5),
+                });
+            });
+        }
+        None => {
+            if let Some(cleanup) = take_promise_cleanup(id) {
+                run_promise_cleanup(&cleanup);
             }
-            // Restore borrowed zvals
-            for borrowed in &cleanup.borrowed {
-                let zval_size = ffi::oxphp_zval_size();
-                let copy_len = zval_size.min(16);
-                std::ptr::copy_nonoverlapping(
-                    borrowed.original_zval_data.as_ptr(),
-                    borrowed.proxy_zval_ptr as *mut u8,
-                    copy_len,
-                );
+        }
+    }
+}
+
+/// Scheduler-tick callback (worker mode): release each deferred promise whose
+/// task has settled or whose 5 s budget has elapsed. Non-blocking — ready
+/// entries are removed under the borrow, then their captures are released after
+/// the borrow is dropped.
+///
+/// # Safety
+/// Called from C FFI on the owning HTTP worker thread.
+unsafe extern "C" fn poll_deferred_drains_callback() {
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    let now = Instant::now();
+    let ready: Vec<DeferredDrain> = DEFERRED_DRAIN.with(|d| {
+        let mut list = d.borrow_mut();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < list.len() {
+            let settled = match list[i].rx.try_recv() {
+                Ok(_) | Err(TryRecvError::Closed) => true,
+                Err(TryRecvError::Empty) => now >= list[i].deadline,
+            };
+            if settled {
+                out.push(list.swap_remove(i));
+            } else {
+                i += 1;
             }
-            // Release the closure object reference (prevents leak)
-            if !cleanup.closure_zval.is_null() {
-                ffi::oxphp_closure_release(cleanup.closure_zval);
-            }
+        }
+        out
+    });
+    for entry in &ready {
+        if let Some(cleanup) = &entry.cleanup {
+            run_promise_cleanup(cleanup);
+        }
+    }
+}
+
+/// Scheduler-loop predicate (worker mode): non-zero while any deferred promise
+/// drain is still pending, so the worker keeps ticking (and reclaiming them)
+/// instead of blocking in `worker_wait`.
+///
+/// # Safety
+/// Called from C FFI on the owning HTTP worker thread.
+unsafe extern "C" fn has_deferred_drains_callback() -> c_int {
+    DEFERRED_DRAIN.with(|d| c_int::from(!d.borrow().is_empty()))
+}
+
+/// Blocking teardown flush of the deferred-drain list (RSHUTDOWN / worker
+/// teardown): block on each remaining rx (bounded by its own 5 s budget) before
+/// releasing its captures. Safe to block here — the thread is exiting and no
+/// scheduler shares it.
+unsafe fn flush_deferred_drains() {
+    let pending: Vec<DeferredDrain> = DEFERRED_DRAIN.with(|d| d.borrow_mut().drain(..).collect());
+    for entry in pending {
+        if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
+            let remaining = entry.deadline.saturating_duration_since(Instant::now());
+            let _ = handle.block_on(async { tokio::time::timeout(remaining, entry.rx).await });
+        } else {
+            drop(entry.rx);
+        }
+        if let Some(cleanup) = &entry.cleanup {
+            run_promise_cleanup(cleanup);
         }
     }
 }
@@ -4733,6 +4841,12 @@ pub fn register_fiber_callbacks() {
             Some(crate::php::fiber::timer_register_callback),
             Some(crate::php::fiber::timer_poll_callback),
             Some(crate::php::fiber::timer_remove_callback),
+        );
+
+        // Non-blocking drain of finished fibers' orphaned promises (worker mode)
+        crate::bridge::ffi::oxphp_bridge_set_deferred_drain_callbacks(
+            Some(poll_deferred_drains_callback),
+            Some(has_deferred_drains_callback),
         );
 
         // Non-blocking await poll for fiber-aware oxphp_async_await

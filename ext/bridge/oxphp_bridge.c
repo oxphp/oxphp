@@ -2684,6 +2684,29 @@ uint64_t oxphp_bridge_current_fiber_id(void) {
     return 0;
 }
 
+/* ─── Deferred Promise Drain (worker mode) ────────────────────── */
+static oxphp_poll_deferred_drains_fn_t rust_poll_deferred_drains = NULL;
+static oxphp_has_deferred_drains_fn_t  rust_has_deferred_drains  = NULL;
+
+void oxphp_bridge_set_deferred_drain_callbacks(oxphp_poll_deferred_drains_fn_t poll,
+                                               oxphp_has_deferred_drains_fn_t pending) {
+    rust_poll_deferred_drains = poll;
+    rust_has_deferred_drains  = pending;
+}
+
+void oxphp_bridge_poll_deferred_drains(void) {
+    if (__builtin_expect(rust_poll_deferred_drains != NULL, 1)) {
+        rust_poll_deferred_drains();
+    }
+}
+
+int oxphp_bridge_has_deferred_drains(void) {
+    if (__builtin_expect(rust_has_deferred_drains != NULL, 1)) {
+        return rust_has_deferred_drains();
+    }
+    return 0;
+}
+
 /* === Async Promise: Freeze/Unfreeze === */
 
 static void oxphp_freeze_zval_recursive(zval *zv);

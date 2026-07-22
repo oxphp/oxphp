@@ -345,6 +345,13 @@ pub unsafe fn oxphp_bridge_set_cleanup_promises(_f: Option<unsafe extern "C" fn(
 pub unsafe fn oxphp_bridge_cleanup_outstanding_promises() {}
 pub unsafe fn oxphp_bridge_set_cleanup_promises_for_fiber(_f: Option<unsafe extern "C" fn(u64)>) {}
 
+// ── Deferred promise drain (worker mode) ──
+pub unsafe fn oxphp_bridge_set_deferred_drain_callbacks(
+    _poll: Option<unsafe extern "C" fn()>,
+    _pending: Option<unsafe extern "C" fn() -> c_int>,
+) {
+}
+
 // ── Current request fiber identity ──
 
 pub unsafe fn oxphp_bridge_current_fiber_id() -> u64 {
