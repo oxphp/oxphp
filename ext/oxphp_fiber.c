@@ -771,6 +771,12 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
         }
     }
 
+    /* 4. Drain orphaned promises of finished fibers, non-blocking. finalize
+     * moves a completed request's still-running fire-and-forget promises here
+     * instead of block_on'ing on the worker thread; this poll releases each
+     * one's frozen captures once its task settles (or its budget expires). */
+    oxphp_bridge_poll_deferred_drains();
+
     return work_done;
 }
 
