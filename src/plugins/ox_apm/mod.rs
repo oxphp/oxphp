@@ -4,7 +4,7 @@ pub mod php_sdk;
 pub mod sql;
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
@@ -180,6 +180,30 @@ static STACKTRACE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_STACKTRACE_M
 /// `OTEL_APM_MESSAGE_MAX_BYTES` in `ApmPlugin::init`. `0` disables truncation.
 static MESSAGE_MAX_BYTES: AtomicUsize = AtomicUsize::new(DEFAULT_MESSAGE_MAX_BYTES);
 
+/// Slow-query threshold (ms), set from `OTEL_APM_SLOW_QUERY_MS` in
+/// `ApmPlugin::init`. Read by the DB auto-instrumentation hooks
+/// (`hooks::after_callback`) to stamp `oxphp.db.slow=true` on queries whose
+/// wall-time meets or exceeds it. A global (not a plugin field) because the
+/// hook callbacks are static `extern "C"` function pointers with no `self`.
+static SLOW_QUERY_MS: AtomicU64 = AtomicU64::new(100);
+
+/// Whether to record bound parameters in the `db.params` span attribute, set
+/// from `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` in `ApmPlugin::init`. Read by the
+/// DB hooks on the `execute` path. Same static-global rationale as
+/// [`SLOW_QUERY_MS`].
+static DB_CAPTURE_PARAMS: AtomicBool = AtomicBool::new(false);
+
+/// Slow-query threshold (ms) for the DB auto-instrumentation hooks. `0`
+/// disables slow flagging.
+pub(crate) fn slow_query_ms() -> u64 {
+    SLOW_QUERY_MS.load(Ordering::Relaxed)
+}
+
+/// Whether the DB hooks should capture bound parameters into `db.params`.
+pub(crate) fn db_capture_params() -> bool {
+    DB_CAPTURE_PARAMS.load(Ordering::Relaxed)
+}
+
 /// Push an OTel-semconv `exception` span event. Each attribute is omitted when
 /// empty (`exception.type` too, so a bare string reason can be recorded as
 /// message-only). The message is truncated to `message_max` and the stacktrace
@@ -309,8 +333,6 @@ fn map_span_event(ev: &SpanEvent) -> opentelemetry::trace::Event {
 
 /// Completion handler that logs PHP errors and exports child spans to OTel.
 struct ApmCompleteHandler {
-    #[allow(dead_code)]
-    slow_query_ms: u64,
     provider: Arc<OnceLock<SdkTracerProvider>>,
 }
 
@@ -509,6 +531,11 @@ impl Plugin for ApmPlugin {
 
         self.config.db_capture_params = db_capture_params;
 
+        // Publish to the process-global cells the static hook callbacks read
+        // (they have no access to `self`).
+        SLOW_QUERY_MS.store(self.config.slow_query_ms, Ordering::Relaxed);
+        DB_CAPTURE_PARAMS.store(self.config.db_capture_params, Ordering::Relaxed);
+
         read_cap(
             ctx,
             "OTEL_APM_STACKTRACE_MAX_BYTES",
@@ -552,10 +579,7 @@ impl Plugin for ApmPlugin {
             .unwrap_or_else(|| Arc::new(OnceLock::new()));
 
         ctx.on_request(ApmRequestHandler);
-        ctx.on_complete(ApmCompleteHandler {
-            slow_query_ms: self.config.slow_query_ms,
-            provider,
-        });
+        ctx.on_complete(ApmCompleteHandler { provider });
         ctx.register_decorator(TraceDecorator);
 
         // Register internal PHP function hooks for automatic span creation.
@@ -766,7 +790,6 @@ mod tests {
     #[test]
     fn test_complete_handler_priority() {
         let handler = ApmCompleteHandler {
-            slow_query_ms: 100,
             provider: Arc::new(OnceLock::new()),
         };
         assert_eq!(handler.priority(), -70);
@@ -802,7 +825,6 @@ mod tests {
         });
 
         let handler = ApmCompleteHandler {
-            slow_query_ms: 100,
             provider: Arc::new(OnceLock::new()),
         };
 

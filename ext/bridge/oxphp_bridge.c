@@ -4327,8 +4327,16 @@ static void oxphp_apm_hook_wrapper(zend_execute_data *execute_data, zval *return
     uint32_t argc = ZEND_CALL_NUM_ARGS(execute_data);
     zval *args = ZEND_CALL_ARG(execute_data, 1);
 
+    /* Object receiver ($this) for method calls — handle 0 / NULL for global
+     * functions. The handle keys connection metadata per PDO/mysqli instance;
+     * the zval pointer lets the before-callback read a plain property such as
+     * PDOStatement::queryString. `&execute_data->This` is stable for the call. */
+    int has_this = (Z_TYPE(execute_data->This) == IS_OBJECT);
+    uint32_t this_handle = has_this ? Z_OBJ_HANDLE(execute_data->This) : 0;
+    void *this_zv = has_this ? (void *)&execute_data->This : NULL;
+
     if (apm_before_fn) {
-        apm_before_fn(cname, fname, argc, (void *)args);
+        apm_before_fn(cname, fname, argc, (void *)args, this_handle, this_zv);
     }
 
     /* Call original handler */

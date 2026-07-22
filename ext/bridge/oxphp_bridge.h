@@ -1623,10 +1623,15 @@ zend_object *oxphp_plugin_clone_object(zend_object *obj);
 
 /**
  * Callback types: Rust sets these, C calls them around the original handler.
- * class_name is "" for global functions.
+ * class_name is "" for global functions. `this_handle` is the `$this` object
+ * handle (0 for global functions / no object receiver) — the before-callback
+ * keys connection metadata (PDO DSN) by it. `this_zv` is the `$this` zval
+ * pointer (NULL when there is no object receiver) — the before-callback reads
+ * plain object properties (e.g. PDOStatement::queryString) through it.
  */
 typedef void (*oxphp_apm_before_fn_t)(const char *class_name, const char *func_name,
-                                       uint32_t argc, void *args);
+                                       uint32_t argc, void *args, uint32_t this_handle,
+                                       void *this_zv);
 typedef void (*oxphp_apm_after_fn_t)(const char *class_name, const char *func_name,
                                       uint32_t argc, void *args, void *return_value);
 
