@@ -348,6 +348,8 @@ oxphp_sleep(float $seconds): void
 
 休眠指定的时长。在以 fiber 方式运行的 Worker 模式处理程序内，此调用是协作式的——它挂起当前 fiber，使其他请求在等待期间得以处理。在 fiber 外部，则退化为标准的阻塞式 `usleep()`。
 
+> **`RUNTIME_HOOKS` 不会取代此函数。** `oxphp_sleep()` 在 worker 模式下无需任何配置即协作，并接受小数秒。`RUNTIME_HOOKS=sleep` 是一个独立的、可选的改造，它让*原生* `sleep()`/`usleep()` 调用（例如第三方代码中的调用）也变为协作式——它并不消除在你自己代码中对 `oxphp_sleep()` 的需要。参见[运行时钩子](../operations/configuration.md)。
+
 **参数：**
 - `$seconds` — 休眠时长（秒）。接受小数值（例如 `0.5` 表示 500 毫秒）。值为 `0` 或负数时立即返回。
 

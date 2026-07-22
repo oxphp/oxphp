@@ -228,6 +228,13 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 钩子在 worker 模式的请求 fiber 和异步任务 fiber 内生效。在 fiber 之外（traditional/framework/SPA 请求上下文、CLI），保留原生行为，包括参数验证错误。启用 `sleep` 钩子后，调用 `sleep()` 的第三方代码不再占用 Worker 线程——无需修改任何代码。在被钩住的 sleep 期间取消异步任务会以 `OxPHP\Async\AsyncException` 展开任务；被钩住的 `sleep()` 始终返回 `0`（原生函数在信号中断时返回剩余秒数的情况在此不会出现）。
 
+**何时用 `RUNTIME_HOOKS`，何时用 `oxphp_sleep()`。** 钩子并不取代第一方原语——两者覆盖不同场景：
+
+- 在你自己编写的代码中，使用 `oxphp_sleep()` / `oxphp_usleep()`。在 worker 模式下它们**无条件地**挂起 fiber，无需任何环境变量；而且 `oxphp_sleep()` 接受小数秒（`oxphp_sleep(0.25)`）——这是原生 `sleep()`（整数秒）无法表达的精度。
+- 对于你**无法**修改的代码——直接调用原生 `sleep()`/`usleep()` 的框架或第三方库——启用 `RUNTIME_HOOKS=sleep`。它默认关闭，仅在 fiber 内部生效，并保持原生契约（被钩住的 `sleep()` 仍接受 `int` 并返回 `0`）。
+
+在自己的处理程序中依赖 `RUNTIME_HOOKS`，会把协作性绑定到部署设置而非代码本身；那里应优先使用显式的 `oxphp_sleep()`。
+
 ## 共享状态
 
 进程内并发原语（`OxPHP\Shared\Counter`、`Map`、`Channel`、`Mutex`、`Once`、`Pool`、`Atomic`、`Flag`、`Registry`）。API 速览参见[共享状态](../shared-state/shared-state.md)。

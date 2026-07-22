@@ -228,6 +228,13 @@ A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a
 
 Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
 
+**When to use `RUNTIME_HOOKS` vs. `oxphp_sleep()`.** The hook does not replace the first-party primitive — they cover different cases:
+
+- Reach for `oxphp_sleep()` / `oxphp_usleep()` in code you write. They suspend the fiber in worker mode **unconditionally**, with no environment flag, and `oxphp_sleep()` accepts fractional seconds (`oxphp_sleep(0.25)`) — a precision native `sleep()` (integer seconds) cannot express.
+- Enable `RUNTIME_HOOKS=sleep` for code you **cannot** edit — a framework or vendor library that calls native `sleep()`/`usleep()` directly. It is off by default, applies only inside a fiber, and keeps the native contract (a hooked `sleep()` still takes an `int` and returns `0`).
+
+Relying on `RUNTIME_HOOKS` for your own handlers ties their cooperativeness to a deployment setting rather than the code; prefer the explicit `oxphp_sleep()` there.
+
 ## Shared State
 
 In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mutex`, `Once`, `Pool`, `Atomic`, `Flag`, `Registry`). See [Shared State](../shared-state/shared-state.md) for the API tour.
