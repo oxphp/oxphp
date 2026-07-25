@@ -33,6 +33,7 @@ $routes = [
     ['GET',    '/api/headers',    'Inspect all headers'],
     ['GET',    '/api/info',       'Server info JSON'],
     ['GET',    '/api/async?mode=X', 'Async demo (parallel, race, compute)'],
+    ['GET',    '/api/csp?mode=X', 'Channel CSP demo (fanin, pipeline, poll)'],
 ];
 
 $routes_html = '';
