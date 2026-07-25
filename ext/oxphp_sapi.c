@@ -2465,14 +2465,10 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
             oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
             if (!fiber) break;
 
-            if (fiber->started) {
-                /* Reused fiber — coroutine is looping, just resume it */
-                oxphp_scheduler_resume_fiber(&sched, fiber, NULL);
-            } else {
-                /* New fiber — start the coroutine for the first time */
-                fiber->started = true;
-                oxphp_scheduler_start_fiber(&sched, fiber);
-            }
+            /* Fresh fiber or recycled one, a new request is always a start —
+             * never a resume: a recycled fiber has no saved state to restore
+             * (see oxphp_scheduler_start_fiber). */
+            oxphp_scheduler_start_fiber(&sched, fiber);
 
             if (fiber->completed) {
                 oxphp_scheduler_finalize_fiber(&sched, fiber);

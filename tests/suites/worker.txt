@@ -22,6 +22,16 @@ worker/test_worker_class_legacy_aliases
 worker/test_worker_class_traditional_mode
 worker/test_worker_class_worker_mode_basic
 worker/test_await_timeout_in_request_fiber
+
+# Runs deep into the suite on purpose: by now every worker has served a request,
+# so this one probably lands on a RECYCLED request fiber. Kept ahead of the tests
+# that retire a worker (scheduleExit) so it cannot be handed a freshly spawned
+# one. Under the default multi-worker pool none of that is a guarantee, which is
+# why strict=1 is NOT passed here — drawing a fresh fiber reports "no reuse
+# coverage" in the response instead of failing the run. The hooks profile lists
+# this test too, with strict=1, and there PHP_WORKERS=1 makes reuse certain.
+worker/test_request_state_after_reuse >> ?probe=42
+
 worker/test_worker_class_exit_reason
 worker/test_worker_class_schedule_exit
 
