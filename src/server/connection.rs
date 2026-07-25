@@ -84,9 +84,9 @@ impl ClientAbortGuard {
         Self { state }
     }
 
+    /// `mark_done()` IS the disarm — `Drop` below early-returns on the flag.
     fn disarm(self) {
         self.state.mark_done();
-        std::mem::forget(self);
     }
 }
 
@@ -697,6 +697,44 @@ mod tests {
         assert_eq!(parse_content_length(b"-1"), None);
         // 21 digits — exceeds max length guard
         assert_eq!(parse_content_length(b"123456789012345678901"), None);
+    }
+
+    /// Disarming must release the guard's `Arc`, not just neutralise `Drop`.
+    /// A `mem::forget`-style disarm keeps the strong count above zero forever,
+    /// leaking one 128-byte `Arc<CancellationState>` heap block per successful
+    /// request — invisible to functional tests, ~11 GB/day at 1000 rps.
+    #[test]
+    fn test_disarm_releases_cancel_state() {
+        let state = std::sync::Arc::new(CancellationState::new());
+        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state));
+        assert_eq!(std::sync::Arc::strong_count(&state), 2);
+
+        guard.disarm();
+
+        assert_eq!(
+            std::sync::Arc::strong_count(&state),
+            1,
+            "disarm must drop the guard's Arc, not leak it"
+        );
+        assert!(state.is_done(), "disarm must mark the state done");
+        assert_eq!(
+            state.get(),
+            CancelReason::None,
+            "disarm must not report a cancellation"
+        );
+    }
+
+    /// The counterpart: dropping without disarming must still fire the abort,
+    /// so a leak fix cannot degenerate into a guard that never cancels.
+    /// A failure here can be collateral — `cancel_request` takes the worker
+    /// registry's one poison-intolerant lock.
+    #[test]
+    fn test_drop_without_disarm_cancels() {
+        let state = std::sync::Arc::new(CancellationState::new());
+        drop(ClientAbortGuard::new(std::sync::Arc::clone(&state)));
+
+        assert_eq!(state.get(), CancelReason::ClientAbort);
+        assert_eq!(std::sync::Arc::strong_count(&state), 1);
     }
 
     #[test]
