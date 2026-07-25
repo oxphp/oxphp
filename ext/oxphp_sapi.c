@@ -2465,9 +2465,7 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
             oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
             if (!fiber) break;
 
-            /* Fresh fiber or recycled one, a new request is always a start —
-             * never a resume: a recycled fiber has no saved state to restore
-             * (see oxphp_scheduler_start_fiber). */
+            /* Fresh or recycled, a new request is always a start, never a resume. */
             oxphp_scheduler_start_fiber(&sched, fiber);
 
             if (fiber->completed) {

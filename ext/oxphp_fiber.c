@@ -8,7 +8,11 @@
  * Key design:
  * - Low-level zend_fiber_context API (not PHP Fiber class)
  * - Fiber pointer stored in context->kind (read via EG(current_fiber_context)->kind)
- * - VM state saved/restored automatically by zend_fiber_switch_context
+ * - Zend VM state (vm_stack, execute_data, bailout, error_reporting,
+ *   jit_trace_num, active_fiber) is carried by zend_fiber_switch_context itself:
+ *   it captures EG into a local on the frame that switches and restores it when
+ *   that frame resumes, so each side of a switch keeps its own state and this
+ *   file does not save or restore any of it
  * - PHP superglobals, SAPI headers, Rust TLS managed explicitly per fiber */
 
 #include "oxphp_fiber.h"
@@ -40,48 +44,6 @@ uint64_t oxphp_fiber_current_id(void) {
 
 static void request_fiber_coroutine(zend_fiber_transfer *transfer);
 
-/* ─── VM State Save/Restore ────────────────────────────── */
-
-/* Mirrors the VM state zend_fiber_switch_context() carries across a switch:
- * vm_stack (PHP temporary allocations), execute_data (call frame chain),
- * bailout (setjmp buffer for zend_try — longjmp to the wrong stack = SIGSEGV),
- * error_reporting, jit_trace_num, active_fiber.
- *
- * These helpers are not load-bearing, on two counts. The engine already does
- * the job: it captures the same set (plus stack_base/stack_limit under
- * ZEND_CHECK_STACK_LIMIT) into a local on the switching frame and restores it
- * when that frame resumes, so each side of a switch preserves its own state.
- * And what the per-fiber copy holds is not a fiber's state at all but the
- * SCHEDULER's — every save runs after the scheduler's state has been restored,
- * so php_state.vm_state has never described the fiber it hangs off. Anyone who
- * needs a genuine per-fiber VM snapshot has to build one; this is not it.
- * Retained for now only because both schedulers are built around the pairing;
- * removing it touches every switch wrapper on both. */
-
-static inline void oxphp_save_vm_state(oxphp_fiber_vm_state *state) {
-    state->vm_stack = EG(vm_stack);
-    state->vm_stack_top = EG(vm_stack_top);
-    state->vm_stack_end = EG(vm_stack_end);
-    state->vm_stack_page_size = EG(vm_stack_page_size);
-    state->current_execute_data = EG(current_execute_data);
-    state->error_reporting = EG(error_reporting);
-    state->jit_trace_num = EG(jit_trace_num);
-    state->bailout = EG(bailout);
-    state->active_fiber = EG(active_fiber);
-}
-
-static inline void oxphp_restore_vm_state(oxphp_fiber_vm_state *state) {
-    EG(vm_stack) = state->vm_stack;
-    EG(vm_stack_top) = state->vm_stack_top;
-    EG(vm_stack_end) = state->vm_stack_end;
-    EG(vm_stack_page_size) = state->vm_stack_page_size;
-    EG(current_execute_data) = state->current_execute_data;
-    EG(error_reporting) = state->error_reporting;
-    EG(jit_trace_num) = state->jit_trace_num;
-    EG(bailout) = state->bailout;
-    EG(active_fiber) = state->active_fiber;
-}
-
 /* ─── Stack Limit Helper ──────────────────────────────── */
 
 /* zend_fiber_stack is an opaque (incomplete) type — we cannot access its
@@ -96,6 +58,25 @@ static inline void oxphp_fiber_set_stack_limits_from_sp(void *stack_local, size_
     EG(stack_base) = (void *)((sp + page_size - 1) & ~(page_size - 1));
     /* limit = base - usable_size + guard page */
     EG(stack_limit) = (void *)((uintptr_t)EG(stack_base) - stack_size + page_size);
+}
+
+/* Install a fiber's C-stack bounds before switching into it, from the copy its
+ * coroutine measured at entry. A NULL base means a fresh fiber, whose coroutine
+ * measures them itself on the way in; a recycled or suspended one parks below
+ * that code and never runs it again.
+ *
+ * The engine would carry the bounds across the switch on its own — but only when
+ * ZEND_CHECK_STACK_LIMIT is configured in (Zend/zend_fibers.c), and that is also
+ * the guard on every reader of EG(stack_base)/EG(stack_limit) in php-src, while
+ * the two EG fields themselves exist unconditionally. So this call is not
+ * observable in either configuration; it is here so the invariant "a fiber runs
+ * with its own stack bounds installed" holds in this file rather than resting on
+ * an upstream ifdef, and so entering a fiber looks the same on all four paths. */
+static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *fiber) {
+    if (fiber->saved_stack_base) {
+        EG(stack_base) = fiber->saved_stack_base;
+        EG(stack_limit) = fiber->saved_stack_limit;
+    }
 }
 
 /* ─── Scheduler Init / Destroy ─────────────────────────── */
@@ -297,12 +278,8 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
         zend_fiber_switch_context(&ret);
 
         /* ── HANDED THE NEXT REQUEST ─────────────────────────
-         * A new request is always a start, never a resume: the scheduler
-         * restored nothing from php_state before switching back in here (see
-         * oxphp_scheduler_start_fiber). The request's own prep installed its
-         * state — oxphp_soft_reset on the fast path, oxphp_bridge_prepare_request
-         * + oxphp_fiber_init_request_state on the event-loop path — and the top
-         * of this loop builds its VM stack. Reset per-request state. */
+         * A start, not a resume: nothing was restored from php_state, and this
+         * request's own prep has already run (oxphp_scheduler_start_fiber). */
         fiber->completed = false;
         fiber->handler_failed = false;
     }
@@ -442,9 +419,6 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * oxphp_bridge_reset_request_ctx from wiping it. NULL (the common case)
      * leaves php_state.unhandled_exc NULL. */
     fiber->php_state.unhandled_exc = oxphp_bridge_take_unhandled();
-
-    /* Step 5: Save VM state (vm_stack, execute_data, bailout) */
-    oxphp_save_vm_state(&fiber->php_state.vm_state);
 }
 
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
@@ -546,54 +520,32 @@ void oxphp_fiber_init_request_state(void) {
  * its entry point, or a recycled one whose looping coroutine is parked at the
  * bottom of its loop waiting for the next request.
  *
- * Deliberately restores NOTHING from fiber->php_state. That snapshot exists only
- * for a fiber that SUSPENDED mid-request (oxphp_fiber_save_php_state runs on the
- * suspend paths alone), and a fiber reaches the free list only by COMPLETING one
- * — so for a recycled fiber the snapshot is either zeroed or stale, and
- * installing it would overwrite this request's freshly built state: a zeroed
- * zend_llist (size 0, no dtor) in place of SG(sapi_headers).headers, so every
- * header() appends an element holding uninitialized heap; IS_UNDEF superglobals,
- * which the $_REQUEST auto-global callback dereferences unchecked; and a status
- * of 0, so http_response_code() answers false where it owes 200.
- *
- * A fiber that has suspended at least once carries a half-benign snapshot
- * instead: the resume that consumed it re-initialised the saved header list and
- * left the status field holding what that resume installed, so only the
- * superglobal slots are still wrong — and they hold freed pointers rather than
- * NULL, which faults less reliably and is therefore harder to detect. Both
- * classes are wrong to install; they differ only in how loudly they fail.
- * Everything the new
+ * Restores NOTHING from fiber->php_state, and holding that is why this is a
+ * separate operation from resume. The snapshot is written on suspend only, while
+ * a fiber reaches the free list by completing, so a recycled fiber's copy
+ * describes an earlier request: installing it put a zeroed zend_llist in place of
+ * SG(sapi_headers).headers and IS_UNDEF in place of the superglobals, which is a
+ * SIGSEGV in the request's second header() or its first $_REQUEST access, plus a
+ * status of 0 where http_response_code() owes 200. Everything the new
  * request needs is already installed by the caller's per-request prep
  * (oxphp_soft_reset on the fast path, oxphp_bridge_prepare_request +
  * oxphp_fiber_init_request_state on the event-loop path), and the coroutine
- * builds a fresh VM stack on every iteration.
- *
- * The Zend side needs nothing installed here either. For a recycled fiber
- * zend_fiber_switch_context() restores what its coroutine held at the switch it
- * made at the bottom of its request loop — vm_stack, bailout, error_reporting
- * and, under
- * ZEND_CHECK_STACK_LIMIT, the C-stack bounds it measured at entry — because the
- * capture lives on that coroutine's own switching frame (Zend/zend_fibers.c).
- * A fresh fiber has no capture to restore and instead sets its VM stack and
- * bounds up itself at coroutine entry.
+ * builds a fresh VM stack on every iteration, and zend_fiber_switch_context
+ * carries the Zend side for both kinds of fiber.
  *
  * Resuming a genuinely suspended fiber is oxphp_scheduler_resume_fiber(). */
 void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     sched->current = fiber;
 
-    /* Save scheduler's VM state + stack limits */
-    oxphp_fiber_vm_state saved_vm;
-    oxphp_save_vm_state(&saved_vm);
     void *saved_stack_base = EG(stack_base);
     void *saved_stack_limit = EG(stack_limit);
+    oxphp_fiber_install_stack_limits(fiber);
 
     zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
     ZVAL_NULL(&transfer.value);
 
     zend_fiber_switch_context(&transfer);
 
-    /* Back in scheduler — restore VM state + stack limits */
-    oxphp_restore_vm_state(&saved_vm);
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
     sched->current = NULL;
@@ -603,7 +555,7 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
         return;
     }
 
-    /* Fiber suspended — save its PHP + VM state */
+    /* Fiber suspended — snapshot its PHP state */
     oxphp_fiber_save_php_state(fiber);
 }
 
@@ -615,16 +567,9 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
 
     oxphp_current_fiber = fiber;
 
-    /* Save scheduler's VM state + stack limits */
-    oxphp_fiber_vm_state saved_vm;
-    oxphp_save_vm_state(&saved_vm);
     void *saved_stack_base = EG(stack_base);
     void *saved_stack_limit = EG(stack_limit);
-
-    /* Restore fiber's VM state + stack limits */
-    oxphp_restore_vm_state(&fiber->php_state.vm_state);
-    EG(stack_base) = fiber->saved_stack_base;
-    EG(stack_limit) = fiber->saved_stack_limit;
+    oxphp_fiber_install_stack_limits(fiber);
 
     zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
     if (value) {
@@ -635,15 +580,13 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
 
     zend_fiber_switch_context(&transfer);
 
-    /* Back in scheduler — restore VM state + stack limits */
-    oxphp_restore_vm_state(&saved_vm);
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
     oxphp_current_fiber = NULL;
     sched->current = NULL;
 
     if (!fiber->completed) {
-        /* Suspended again — save VM + PHP state */
+        /* Suspended again — re-snapshot its PHP state */
         oxphp_fiber_save_php_state(fiber);
     }
 }
@@ -1232,9 +1175,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
             sched, sched->shared_fci, sched->shared_fcc);
         if (!fiber) break;
 
-        /* Fresh or recycled, a new request is always a start — never a resume:
-         * a recycled fiber has no saved state to restore (see
-         * oxphp_scheduler_start_fiber). */
+        /* Fresh or recycled, a new request is always a start, never a resume. */
         oxphp_scheduler_start_fiber(sched, fiber);
 
         /* Check if it completed immediately (no suspend) */
@@ -1394,12 +1335,13 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
  * async_pool.rs) calls spawn → tick → poll_completed → release through
  * the bridge forwarders registered at MINIT.
  *
- * Reuses the HTTP fiber struct (oxphp_request_fiber + its task_* fields)
- * and the VM-state save/restore helpers. Unlike HTTP request fibers,
- * task fibers carry no per-request superglobal / SAPI-header / Rust-TLS
- * state: only the Zend VM state (vm_stack / execute_data / bailout) needs
- * per-fiber save/restore so concurrent suspended tasks do not corrupt
- * each other. Superglobals and output buffers stay shared on the worker
+ * Reuses the HTTP fiber struct (oxphp_request_fiber + its task_* fields).
+ * Unlike HTTP request fibers, task fibers carry no per-request superglobal /
+ * SAPI-header / Rust-TLS state, so their switch wrappers move nothing but the
+ * C-stack bounds — concurrent suspended tasks are kept apart by the Zend VM
+ * state zend_fiber_switch_context carries per switching frame, which is the
+ * same thing that keeps userland Fibers apart.
+ * Superglobals and output buffers stay shared on the worker
  * (background tasks are read-only w.r.t. them — same as the previous
  * synchronous model, which never reset superglobals between tasks).
  *
@@ -1544,50 +1486,34 @@ static void task_fiber_coroutine(zend_fiber_transfer *transfer) {
 
 /* Switch into a task fiber to run a NEW task — a fresh context whose coroutine
  * begins at its entry, or a recycled one parked at the bottom of its loop.
- * VM-state-only mirror of oxphp_scheduler_start_fiber, and it skips the saved
- * vm_state for the same reason: that snapshot is written on suspend only, so a
- * recycled fiber's copy describes a previous task. Nothing is lost — the
- * coroutine builds a fresh VM stack per task and zend_fiber_switch_context
- * restores the rest on entry. */
+ * Task-side mirror of oxphp_scheduler_start_fiber; a task carries no HTTP
+ * request state, so the C-stack bounds are the only thing installed here. */
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     sched->current = fiber;
 
-    oxphp_fiber_vm_state saved_vm;
-    oxphp_save_vm_state(&saved_vm);
     void *saved_stack_base = EG(stack_base);
     void *saved_stack_limit = EG(stack_limit);
+    oxphp_fiber_install_stack_limits(fiber);
 
     zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
     ZVAL_NULL(&transfer.value);
     zend_fiber_switch_context(&transfer);
 
-    oxphp_restore_vm_state(&saved_vm);
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
     sched->current = NULL;
-
-    if (fiber->completed) {
-        return;
-    }
-    /* Suspended — save its VM state for later resume (no HTTP request state) */
-    oxphp_save_vm_state(&fiber->php_state.vm_state);
 }
 
-/* Resume a suspended (or recycled) task fiber. VM-state-only mirror of
- * oxphp_scheduler_resume_fiber. */
+/* Resume a suspended task fiber. Task-side mirror of
+ * oxphp_scheduler_resume_fiber, with no per-request state to re-install. */
 static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
                                     oxphp_request_fiber *fiber, zval *value) {
     sched->current = fiber;
     oxphp_current_fiber = fiber;
 
-    oxphp_fiber_vm_state saved_vm;
-    oxphp_save_vm_state(&saved_vm);
     void *saved_stack_base = EG(stack_base);
     void *saved_stack_limit = EG(stack_limit);
-
-    oxphp_restore_vm_state(&fiber->php_state.vm_state);
-    EG(stack_base) = fiber->saved_stack_base;
-    EG(stack_limit) = fiber->saved_stack_limit;
+    oxphp_fiber_install_stack_limits(fiber);
 
     zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
     if (value) {
@@ -1597,15 +1523,10 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
     }
     zend_fiber_switch_context(&transfer);
 
-    oxphp_restore_vm_state(&saved_vm);
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
     oxphp_current_fiber = NULL;
     sched->current = NULL;
-
-    if (!fiber->completed) {
-        oxphp_save_vm_state(&fiber->php_state.vm_state);
-    }
 }
 
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
@@ -1647,9 +1568,6 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->cancel_cell = (_Atomic(uint8_t) *)cancel_cell;
     fiber->request_cancel_ptr = NULL; /* task fibers carry no HTTP request cell */
     fiber->drain_kill = false;
-    fiber->php_state.bridge_stream_mode = false;
-    fiber->php_state.bridge_headers_sent = false;
-    fiber->php_state.bridge_finished = false;
     oxphp_fiber_clear_suspend(fiber);
     fiber->completed = false;
     fiber->handler_failed = false;
@@ -1695,7 +1613,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->task_argc = argc;
 
     /* Run to the first suspend or to completion. A recycled fiber is started,
-     * not resumed — its saved vm_state belongs to a previous task. */
+     * never resumed: a resume is what a suspended task gets. */
     oxphp_task_start_fiber(sched, fiber);
 
     return (int64_t)fiber->fiber_id;
