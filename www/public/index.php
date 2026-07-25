@@ -30,6 +30,7 @@ match (true) {
     str_starts_with($path, '/api/cookies')    => require APP_ROOT . '/api/cookies.php',
     $path === '/api/slow'                     => require APP_ROOT . '/api/slow.php',
     $path === '/api/async'                    => require APP_ROOT . '/api/async.php',
+    $path === '/api/csp'                      => require APP_ROOT . '/api/csp.php',
     str_starts_with($path, '/api/sse-native') => require APP_ROOT . '/api/sse_native.php',
     str_starts_with($path, '/api/sse')        => require APP_ROOT . '/api/sse.php',
     $path === '/api/error'                    => require APP_ROOT . '/api/error.php',
