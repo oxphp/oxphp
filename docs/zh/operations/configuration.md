@@ -224,9 +224,36 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 
 | 变量 | 默认值 | 描述 |
 |----------|---------|-------------|
-| `RUNTIME_HOOKS` | _（关闭）_ | 可选地将阻塞的 PHP 内置函数替换为挂起 fiber 的实现。`1`/`true`/`all` 启用所有钩子类别；逗号分隔的列表启用特定类别。目前唯一的类别是 `sleep`：原生 `sleep()`/`usleep()` 会像 `oxphp_sleep()`/`oxphp_usleep()` 一样挂起当前 fiber |
+| `RUNTIME_HOOKS` | _（关闭）_ | 可选地将阻塞的 PHP 内置函数替换为挂起 fiber 的实现。`1`/`true`/`all` 启用所有钩子类别；逗号分隔的列表启用特定类别（例如 `RUNTIME_HOOKS=sleep,streams`） |
+
+| 类别 | 钩住的内容 |
+|------|-----------|
+| `sleep` | 原生 `sleep()` 和 `usleep()` 会像 `oxphp_sleep()`/`oxphp_usleep()` 一样挂起当前 fiber |
+| `streams` | `tcp://` 套接字流上的阻塞**读取**会挂起当前 fiber，而不是占用 Worker 线程。作用范围是以这种方式阻塞的客户端：`fsockopen()`、`stream_socket_client()`、HTTP 流包装器、mysqlnd（PDO_MySQL、mysqli）、phpredis——无需修改任何代码。以其他方式等待的客户端不受影响（见下文） |
 
 钩子在 worker 模式的请求 fiber 和异步任务 fiber 内生效。在 fiber 之外（traditional/framework/SPA 请求上下文、CLI），保留原生行为，包括参数验证错误。启用 `sleep` 钩子后，调用 `sleep()` 的第三方代码不再占用 Worker 线程——无需修改任何代码。在被钩住的 sleep 期间取消异步任务会以 `OxPHP\Async\AsyncException` 展开任务；被钩住的 `sleep()` 始终返回 `0`（原生函数在信号中断时返回剩余秒数的情况在此不会出现）。
+
+`streams` 钩子唯一变得协作的，是 PHP 套接字流上的阻塞读取。在指望它之前，请先确认你的客户端正是这样等待的——有几种常见客户端并非如此，对它们来说什么也不会改变：
+
+- **ext/curl。** `curl_exec()` 和 `curl_multi_*` 在 PHP 流之下自行处理套接字，钩子看不到它们。这适用于所有基于 curl 的 HTTP 客户端——包括使用默认处理器的 Guzzle。可以把 curl 客户端改为使用 stream wrapper 处理器，那条路径确实经过 PHP 流。
+- **`stream_select()` 与 `socket_select()`。** 它们直接在描述符上等待，而不经过流的读操作，因此基于 `select()` 的循环——纯 PHP 中同时等待多个套接字的惯用写法，也是 AMPHP 和 ReactPHP 的基础——仍会占用 Worker 线程。`stream_socket_accept()` 内部的等待同理。
+- **来自 `socket_export_stream()` 的流。** 它们携带另一张操作表，是 PHP 私有的，扩展无法打补丁。
+- **`unix://`、`udp://` 和 `udg://` 流。** 原因相同：它们的操作表是 PHP 私有的。
+- **在加密启用之后的 `ssl://` 与 `tls://`。** 在 `stream_socket_enable_crypto()` 成功之前，SSL 流的读取会委托给普通套接字读取，因此确实会挂起 fiber；从握手开始则不会。
+- **连接建立和 DNS 解析。** 保持连接打开的客户端在每次查询时受益；连接建立则不会。
+- **通过 `localhost` 连接的 MySQL。** MySQL 客户端将 `localhost` 理解为“使用 unix 套接字”，那并不是 `tcp://` 流——请在 DSN 中改写为 `127.0.0.1`。PDO_MySQL 和 mysqli 皆是如此；这一点很容易被忽略，因为一切照常工作，只是得不到收益。
+- **写入。** 只有读取被钩住。只要描述符由单个 fiber 拥有、没有别的代码从中取走数据，读就绪就保持有效；而发送缓冲区的空间由对端授予和收回，因此因可写而被唤醒的 fiber，在真正写入时可能发现窗口已经关闭，此后 PHP 无论如何都会为其完整超时阻塞线程。所以填满套接字缓冲区的写入，其行为与不启用钩子时完全相同。实践中代价很小：耗时的是等待应答，而不是把查询交给内核。
+
+在上述范围内，钩子保持原生契约：套接字超时（`stream_set_timeout()`、`default_socket_timeout`）照常生效，超时的读取仍通过 `stream_get_meta_data()` 报告 `timed_out`，流的标识也不改变，因此 `socket_import_stream()` 等仍可正常工作。超时有一处限制：截止时间只在每个调度 tick 检查一次，因此它不会早于下一个 tick 触发——worker 模式最快 100 微秒，异步池最快 1 毫秒；负载之下还会更晚，因为一个 tick 的长度取决于 Worker 当时正在执行的内容。在 `default_socket_timeout` 为 60 秒的情况下，多数部署无从察觉。
+
+另有两点值得了解：
+
+- 在并发 fiber 之间共享同一个连接从来就不安全（mysqlnd 不可重入），现在的失败方式有所不同：两个 fiber 都会在套接字可读时被唤醒，一个取走数据，另一个则进入阻塞等待。请为每个 fiber 分配各自的连接。
+- 在用户态 fiber 调度器（AMPHP、Revolt）之下，钩子会退回到阻塞 I/O。由这类调度器启动的 fiber 运行在自己的上下文上，OxPHP 的调度器无法恢复它；钩子会识别这一情形并走原生路径，而不是破坏两边的调度器。
+
+`1`、`true` 和 `all` 会启用**所有**类别，`streams` 也在其中。已经为 sleep 钩子设置了 `RUNTIME_HOOKS=1` 的部署，在升级后会自动开始钩住套接字——无需任何改动；若不希望如此，请显式列出类别（`RUNTIME_HOOKS=sleep`）。启用 `streams` 还会在启动时于内存中修补 PHP 流操作表的一个条目；该内存页会被恢复为原先的状态，但在无法确定其原始保护属性的平台上会保持可写——这是一处轻微的加固损失，并会记录到服务器日志。
+
+实测开销：在没有其他 fiber 挂起时，异步任务中每次套接字往返约 4–6 微秒；当有 64 个 fiber 挂起在描述符上时升至约 20–33 微秒——每个 tick 都会轮询整个挂起集合，因此每次往返的开销随等待者数量增长。空闲的 Worker 会在这些描述符上等待，而不是先睡固定间隔、再到下一个 tick 才发现就绪——这一点至关重要：盲目等待的代价约为每次往返 2 毫秒。
 
 **何时用 `RUNTIME_HOOKS`，何时用 `oxphp_sleep()`。** 钩子并不取代第一方原语——两者覆盖不同场景：
 

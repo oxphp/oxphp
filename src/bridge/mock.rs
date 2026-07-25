@@ -639,6 +639,11 @@ pub unsafe fn oxphp_bridge_set_timer_callbacks(
 ) {
 }
 
+/// No extension present, so nothing is ever parked on a descriptor.
+pub unsafe fn oxphp_bridge_async_io_backoff(_ns: u64) -> std::os::raw::c_int {
+    0
+}
+
 // ── Fiber TLS context callbacks ──
 pub unsafe fn oxphp_bridge_set_fiber_ctx_callbacks(
     _save_fn: Option<unsafe extern "C" fn(u64)>,

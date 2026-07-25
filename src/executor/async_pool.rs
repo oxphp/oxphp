@@ -493,8 +493,19 @@ fn async_worker_thread(
 
         // When fibers are suspended but nothing was ready and no new task
         // arrived, back off briefly to avoid a busy spin (timers are ms-grained).
+        //
+        // A fiber parked on a socket is different from one parked on a timer:
+        // its wake-up time is chosen by the peer, so a blind sleep adds up to a
+        // full interval of latency to every round trip. When the extension
+        // reports parked descriptors it spends the same interval waiting on
+        // them and returns non-zero, and this sleep is skipped — the wait
+        // already happened, and it ended the moment the peer replied.
         if !progressed && !in_flight.is_empty() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            let waited_on_descriptors =
+                unsafe { ffi::oxphp_bridge_async_io_backoff(1_000_000) } != 0;
+            if !waited_on_descriptors {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
     }
 

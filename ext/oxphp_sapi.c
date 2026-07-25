@@ -15,11 +15,15 @@
 #include "ext/json/php_json.h"
 #include "ext/spl/spl_exceptions.h"
 #include "ext/session/php_session.h"
+#include "main/php_network.h"
 #include <limits.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <poll.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 /* HTTP Request class */
 static zend_class_entry *oxphp_http_request_ce = NULL;
@@ -1223,6 +1227,27 @@ static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
     zend_error_noreturn(E_ERROR, "Request cancelled (shutdown)");
 }
 
+/* Whether the code calling a suspend point is running on this fiber's own
+ * context. It is not once a PHP script starts a userland Fiber (AMPHP, Revolt,
+ * a bare `new Fiber`) inside an oxphp fiber: the userland fiber executes on its
+ * own context while oxphp_current_fiber still names the outer one, since only
+ * the oxphp scheduler ever maintains that pointer.
+ *
+ * Switching away from there would be silent corruption, not a degraded wait.
+ * zend_fiber_switch_context() saves the continuation of whatever context is
+ * actually running — the userland fiber's — while the scheduler later resumes
+ * the outer fiber's now-stale handle, which still points inside Fiber::start().
+ * The outer fiber would return from start() as though the userland fiber had
+ * suspended, with no Suspension ever registered for it.
+ *
+ * So a suspend point checks this and takes its blocking path instead. Losing
+ * cooperative scheduling under a userland fiber scheduler is a real cost, but a
+ * predictable one. */
+static bool oxphp_fiber_owns_current_context(oxphp_request_fiber *self)
+{
+    return EG(current_fiber_context) == &self->context;
+}
+
 /* Internal: register timer and suspend current fiber.
  * duration_us is the sleep duration in microseconds.
  * Returns 1 if fiber-suspended (timer expired), 0 if no fiber (use blocking
@@ -1230,6 +1255,7 @@ static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
 static int oxphp_fiber_sleep_us(uint64_t duration_us)
 {
     if (oxphp_current_fiber == NULL) return 0;
+    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
 
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
@@ -1256,6 +1282,60 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     if (self->cancel_requested) {
         self->cancel_requested = false;
         return -1; /* cancelled */
+    }
+    return 1;
+}
+
+/* Suspend the current fiber until `fd` is ready for `events`, its deadline
+ * elapses, or the fiber is cancelled. The scheduler owns the readiness poll
+ * (oxphp_io_collect_ready), so the worker thread keeps serving other fibers
+ * while this one waits. Mirrors oxphp_fiber_sleep_us(), including its resume
+ * contract: an uncatchable bail on drain, a cancellation return otherwise.
+ *
+ * timeout_ns < 0 waits indefinitely. Returns 1 when the descriptor is ready,
+ * 0 when not called from a fiber, -1 when the fiber was cancelled, and -2 when
+ * the deadline elapsed first. */
+static int oxphp_fiber_io_wait(int fd, short events, int64_t timeout_ns)
+{
+    if (oxphp_current_fiber == NULL) return 0;
+    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
+
+    oxphp_request_fiber *self = oxphp_current_fiber;
+
+    uint64_t deadline_ns = 0;
+    if (timeout_ns >= 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        deadline_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec
+                      + (uint64_t)timeout_ns;
+    }
+
+    self->suspend_reason = OXPHP_SUSPEND_IO_WAIT;
+    self->suspend_data.io.fd = fd;
+    self->suspend_data.io.events = events;
+    self->suspend_data.io.expired = false;
+    self->suspend_data.io.deadline_ns = deadline_ns;
+
+    zend_fiber_transfer transfer = {
+        .context = self->scheduler,
+        .flags = 0
+    };
+    ZVAL_NULL(&transfer.value);
+
+    oxphp_current_fiber = NULL;
+    zend_fiber_switch_context(&transfer);
+    /* --- RESUMED once the descriptor is ready or the deadline passed, OR
+     * force-resumed by the scheduler when the task was cancelled (awaiter gave
+     * up) or the server is draining. */
+    if (self->drain_kill) {
+        oxphp_fiber_drain_bail();
+    }
+    if (self->cancel_requested) {
+        self->cancel_requested = false;
+        return -1; /* cancelled */
+    }
+    if (self->suspend_data.io.expired) {
+        return -2; /* deadline */
     }
     return 1;
 }
@@ -1321,27 +1401,74 @@ PHP_FUNCTION(oxphp_usleep)
 static zif_handler oxphp_orig_sleep = NULL;
 static zif_handler oxphp_orig_usleep = NULL;
 
-/* RUNTIME_HOOKS grammar: unset/""/"0"/"false" = off; "1"/"true"/"all" =
- * every category; otherwise a comma-separated category list. "sleep" is
- * the only category today. */
-static bool oxphp_hooks_category_enabled(const char *category)
+/* Drop surrounding blanks from one comma-separated token, so a list written
+ * the way a person writes one ("sleep, streams") names the same categories as
+ * a list written without spaces. */
+static void oxphp_hooks_trim_token(const char **tok, size_t *len)
+{
+    while (*len > 0 && ((*tok)[0] == ' ' || (*tok)[0] == '\t')) {
+        (*tok)++;
+        (*len)--;
+    }
+    while (*len > 0 && ((*tok)[*len - 1] == ' ' || (*tok)[*len - 1] == '\t')) {
+        (*len)--;
+    }
+}
+
+static bool oxphp_hooks_token_is(const char *tok, size_t len, const char *word)
+{
+    return len == strlen(word) && strncasecmp(tok, word, len) == 0;
+}
+
+/* The RUNTIME_HOOKS value as a (pointer, length) pair with surrounding blanks
+ * removed, or NULL when unset, empty, or nothing but blanks. Trimming here
+ * rather than per token is what makes " all" mean the same as "all". */
+static const char *oxphp_hooks_env(size_t *out_len)
 {
     const char *env = getenv("RUNTIME_HOOKS");
-    if (!env || !*env) return false;
-    if (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0) return false;
-    if (strcmp(env, "1") == 0 || strcasecmp(env, "true") == 0
-        || strcasecmp(env, "all") == 0) {
+    if (!env || !*env) return NULL;
+
+    size_t len = strlen(env);
+    oxphp_hooks_trim_token(&env, &len);
+    if (len == 0) return NULL;
+
+    *out_len = len;
+    return env;
+}
+
+/* RUNTIME_HOOKS grammar: unset/""/"0"/"false" = off; "1"/"true"/"all" = every
+ * category; otherwise a comma-separated category list, blanks around each entry
+ * ignored. This answers only "did the operator ask for this one"; the set of
+ * categories that actually exist is oxphp_hook_categories[], which is what
+ * startup validation reports against — keep the two in step when adding one. */
+static bool oxphp_hooks_category_enabled(const char *category)
+{
+    size_t env_len = 0;
+    const char *env = oxphp_hooks_env(&env_len);
+    if (env == NULL) return false;
+
+    if (oxphp_hooks_token_is(env, env_len, "0")
+        || oxphp_hooks_token_is(env, env_len, "false")) {
+        return false;
+    }
+    if (oxphp_hooks_token_is(env, env_len, "1")
+        || oxphp_hooks_token_is(env, env_len, "true")
+        || oxphp_hooks_token_is(env, env_len, "all")) {
         return true;
     }
-    size_t cat_len = strlen(category);
+
     const char *p = env;
-    while (*p) {
-        const char *comma = strchr(p, ',');
-        size_t len = comma ? (size_t)(comma - p) : strlen(p);
-        if (len == cat_len && strncasecmp(p, category, cat_len) == 0) {
+    const char *end = env + env_len;
+    while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        size_t len = comma ? (size_t)(comma - p) : (size_t)(end - p);
+        const char *tok = p;
+        p = comma ? comma + 1 : end;
+
+        oxphp_hooks_trim_token(&tok, &len);
+        if (oxphp_hooks_token_is(tok, len, category)) {
             return true;
         }
-        p = comma ? comma + 1 : p + len;
     }
     return false;
 }
@@ -1421,13 +1548,299 @@ static void oxphp_hook_restore(const char *name, size_t name_len, zif_handler or
     }
 }
 
+/* ─── Hooked socket reads (category "streams") ───────────────
+ * php_sockop_read() parks the calling thread inside php_pollfd_for() whenever a
+ * blocking socket stream has no data yet. It is reached through
+ * php_stream_socket_ops — the ops table every tcp:// stream carries — so
+ * replacing that one entry is enough to make fsockopen(),
+ * stream_socket_client() and everything layered on php_streams (mysqlnd and
+ * phpredis included) suspend the current fiber instead of pinning the worker
+ * thread while waiting for an answer.
+ *
+ * The table is patched in place rather than replaced per stream so that
+ * php_stream_is(stream, PHP_STREAM_IS_SOCKET) keeps matching: a private ops
+ * table would silently break socket_import_stream() and every other identity
+ * check, and would miss sockets that never pass through the transport factory
+ * (stream_socket_accept() results among them). unix://, udp:// and udg://
+ * carry their own tables, which php-src keeps static and out of reach, and
+ * ssl:// / tls:// layer the openssl table on top — none of them are hooked.
+ *
+ * Writes are deliberately NOT hooked. Read readiness is stable: the descriptor
+ * belongs to this fiber, nothing else drains it, so data that arrived is still
+ * there when the delegate runs. Write readiness is not — the room in the send
+ * buffer is created and taken away by the peer, so between waking on POLLOUT
+ * and the delegate's send() the window can close again, after which
+ * php_sockop_write() blocks the thread for its whole timeout anyway. Measured
+ * on a saturated socket, hooking writes made a blocking write cost its timeout
+ * twice (the fiber's wait plus the delegate's) without ever preventing the
+ * block. Serving that correctly would mean reimplementing the native retry and
+ * warning path, which is exactly what this design refuses to do. */
+
+static ssize_t (*oxphp_orig_sockop_read)(php_stream *, char *, size_t) = NULL;
+
+/* Nanoseconds left on the stream's own timeout, mirroring how php_sockop_read
+ * reads sock->timeout; tv_sec == -1 means "wait indefinitely". Nanoseconds
+ * rather than milliseconds because the deadline is compared in nanoseconds:
+ * rounding up here would coarsen a sub-millisecond timeout for nothing. What
+ * still bounds the resolution is how often the deadline is looked at — once per
+ * scheduler tick. */
+static int64_t oxphp_sock_timeout_ns(const php_netstream_data_t *sock)
+{
+    if (sock->timeout.tv_sec == -1) return -1;
+    return (int64_t) sock->timeout.tv_sec * 1000000000
+           + (int64_t) sock->timeout.tv_usec * 1000;
+}
+
+static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t count)
+{
+    php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
+
+    /* The condition under which php_sockop_read() would call
+     * php_sock_stream_wait_for_data(): a blocking socket with a nonzero
+     * timeout and nothing buffered from a previous read. Every other case it
+     * serves without waiting, so it runs unchanged. */
+    if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1
+        && sock->is_blocked && !stream->has_buffered_data
+        && !(sock->timeout.tv_sec == 0 && sock->timeout.tv_usec == 0)) {
+        /* PHP_POLLREADABLE is exactly what php_sock_stream_wait_for_data()
+         * waits for; matching it keeps this suspension from ending on an
+         * event the delegate would go on to block for. */
+        int64_t budget_ns = oxphp_sock_timeout_ns(sock);
+        struct timespec started;
+        clock_gettime(CLOCK_MONOTONIC, &started);
+
+        int rc = oxphp_fiber_io_wait(sock->socket, PHP_POLLREADABLE, budget_ns);
+        if (rc == 0) {
+            /* Declined the suspension — a userland fiber scheduler owns the
+             * context, so nothing was waited for. Step aside completely: with
+             * no time spent there is no budget to subtract, and handing the
+             * read over untouched is what this case promises. */
+            return oxphp_orig_sockop_read(stream, buf, count);
+        }
+        if (rc == -1) {
+            /* Cancelled, not timed out. php_sock_stream_wait_for_data() clears
+             * this flag before every wait, so leaving a previous read's value
+             * behind would have stream_get_meta_data() report a timeout that
+             * did not happen. */
+            sock->timeout_event = false;
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+            return -1;
+        }
+        if (rc == -2) {
+            /* Timed out — php_sockop_read's own timeout branch. Nothing is
+             * buffered in this branch, so -1 is the value it would return. */
+            sock->timeout_event = true;
+            return -1;
+        }
+
+        /* Ready. The delegate polls the descriptor once more and normally
+         * returns from that poll at once — but if the data is gone by then (a
+         * connection shared between fibers, or a spurious wake) it would wait
+         * the socket's *whole* timeout again, making the worst case twice what
+         * the caller asked for. Hand it only what is left of the budget, and
+         * put the real value back afterwards. Anything below a microsecond is
+         * floored there rather than to zero, which php_sockop_read() reads as
+         * "do not wait at all" and answers differently. */
+        if (budget_ns > 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
+                               + (int64_t)(now.tv_nsec - started.tv_nsec);
+            int64_t left_us = (budget_ns - spent_ns) / 1000;
+            if (left_us < 1) left_us = 1;
+
+            struct timeval saved = sock->timeout;
+            sock->timeout.tv_sec = (time_t)(left_us / 1000000);
+            sock->timeout.tv_usec = (suseconds_t)(left_us % 1000000);
+
+            /* php_sockop_read() runs userland code on its way out — a stream
+             * context's notification callback — so it can leave through
+             * zend_bailout(); exit() in that callback is enough. The shortened
+             * timeout must not survive that unwind: on a persistent stream the
+             * socket outlives the request, and every later read on that
+             * connection would inherit whatever fraction of the budget was
+             * left here. */
+            volatile ssize_t nr = -1;
+            zend_try {
+                nr = oxphp_orig_sockop_read(stream, buf, count);
+            } zend_catch {
+                sock->timeout = saved;
+                zend_bailout();
+            } zend_end_try();
+            sock->timeout = saved;
+
+            return nr;
+        }
+    }
+
+    return oxphp_orig_sockop_read(stream, buf, count);
+}
+
+/* Protection the page holding php_stream_socket_ops carried before the patch,
+ * so it can be put back exactly. -1 = not captured. */
+static int oxphp_socket_ops_prot = -1;
+
+/* Read a mapping's current protection out of /proc/self/maps. The table is
+ * const and normally lands in .data.rel.ro, which the loader maps read-only
+ * once relocations are done — but a build without RELRO can leave it on a page
+ * it shares with writable data, and blindly restoring PROT_READ there would
+ * take write access away from unrelated globals and fault far from the cause.
+ * Returns -1 when the mapping cannot be determined. */
+static int oxphp_page_protection(uintptr_t addr)
+{
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps == NULL) return -1;
+
+    char line[512];
+    int prot = -1;
+    while (fgets(line, sizeof(line), maps) != NULL) {
+        unsigned long start, end;
+        char perms[5];
+        if (sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3) continue;
+        if (addr < (uintptr_t) start || addr >= (uintptr_t) end) continue;
+
+        prot = 0;
+        if (perms[0] == 'r') prot |= PROT_READ;
+        if (perms[1] == 'w') prot |= PROT_WRITE;
+        if (perms[2] == 'x') prot |= PROT_EXEC;
+        break;
+    }
+    fclose(maps);
+
+    return prot;
+}
+
+static bool oxphp_socket_ops_protect(int prot)
+{
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return false;
+
+    uintptr_t addr = (uintptr_t) &php_stream_socket_ops;
+    uintptr_t start = addr & ~((uintptr_t) page_size - 1);
+    size_t len = (addr + sizeof(php_stream_ops)) - start;
+
+    return mprotect((void *) start, len, prot) == 0;
+}
+
+static bool oxphp_hook_socket_ops(void)
+{
+    php_stream_ops *ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
+
+    oxphp_socket_ops_prot = oxphp_page_protection((uintptr_t) ops);
+    if (!oxphp_socket_ops_protect(PROT_READ | PROT_WRITE)) {
+        return false;
+    }
+    oxphp_orig_sockop_read = ops->read;
+    ops->read = oxphp_hooked_sockop_read;
+
+    /* Restore the protection we found. If it could not be read, leave the page
+     * writable rather than guess: the patch itself has already succeeded and
+     * nothing about correctness depends on the page being read-only again. Both
+     * outcomes are logged — a page of function pointers staying writable weakens
+     * RELRO, which an operator should learn from the log and not from a memory
+     * dump. */
+    if (oxphp_socket_ops_prot < 0) {
+        php_log_err("oxphp: could not read the original memory protection of the stream "
+                    "ops table (/proc/self/maps unavailable); the page stays writable "
+                    "after installing the socket hooks");
+    } else if (!oxphp_socket_ops_protect(oxphp_socket_ops_prot)) {
+        php_log_err("oxphp: could not restore memory protection on the stream ops "
+                    "table after installing the socket hooks; the page stays writable");
+    }
+    return true;
+}
+
+static void oxphp_restore_socket_ops(void)
+{
+    if (oxphp_orig_sockop_read == NULL) return;
+
+    php_stream_ops *ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
+    if (oxphp_socket_ops_protect(PROT_READ | PROT_WRITE)) {
+        ops->read = oxphp_orig_sockop_read;
+        if (oxphp_socket_ops_prot >= 0) {
+            oxphp_socket_ops_protect(oxphp_socket_ops_prot);
+        }
+    }
+    oxphp_orig_sockop_read = NULL;
+    oxphp_socket_ops_prot = -1;
+}
+
+static const char *const oxphp_hook_categories[] = { "sleep", "streams" };
+
+/* A category name that matches nothing disables the hook the operator asked
+ * for, silently and identically to not setting the variable at all. Name the
+ * unrecognised ones at startup; the boolean spellings carry no category list
+ * and are left alone.
+ *
+ * This warns where the rest of the configuration would abort — a malformed
+ * ASYNC_WORKERS is a startup error, deliberately. The difference is that this
+ * value is a list of names whose vocabulary grows between releases: a config
+ * naming a category a newer build understands would stop an older binary from
+ * starting at all, which turns a rollback into an outage. A typo and a
+ * from-the-future name are indistinguishable here, so the failure mode that
+ * keeps the server up is the right one to pick. */
+static void oxphp_hooks_report_unknown_categories(void)
+{
+    size_t env_len = 0;
+    const char *env = oxphp_hooks_env(&env_len);
+    if (env == NULL) return;
+
+    if (oxphp_hooks_token_is(env, env_len, "0")
+        || oxphp_hooks_token_is(env, env_len, "false")
+        || oxphp_hooks_token_is(env, env_len, "1")
+        || oxphp_hooks_token_is(env, env_len, "true")
+        || oxphp_hooks_token_is(env, env_len, "all")) {
+        return;
+    }
+
+    const char *p = env;
+    const char *end = env + env_len;
+    while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        size_t len = comma ? (size_t)(comma - p) : (size_t)(end - p);
+        const char *tok = p;
+        p = comma ? comma + 1 : end;
+
+        oxphp_hooks_trim_token(&tok, &len);
+        if (len == 0) continue;
+
+        bool known = false;
+        for (size_t i = 0; i < sizeof(oxphp_hook_categories) / sizeof(oxphp_hook_categories[0]); i++) {
+            if (oxphp_hooks_token_is(tok, len, oxphp_hook_categories[i])) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            /* Plain buffer rather than zend_strpprintf: MINIT has no request
+             * arena to lean on, and the message is bounded anyway. */
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "oxphp: RUNTIME_HOOKS lists an unknown category \"%.*s\", which enables "
+                     "nothing; known categories are sleep and streams", (int) len, tok);
+            php_log_err(msg);
+        }
+    }
+}
+
 static void oxphp_runtime_hooks_install(void)
 {
-    if (!oxphp_hooks_category_enabled("sleep")) return;
-    oxphp_hook_swap("sleep", sizeof("sleep") - 1,
-                    oxphp_hooked_sleep, &oxphp_orig_sleep);
-    oxphp_hook_swap("usleep", sizeof("usleep") - 1,
-                    oxphp_hooked_usleep, &oxphp_orig_usleep);
+    oxphp_hooks_report_unknown_categories();
+
+    if (oxphp_hooks_category_enabled("sleep")) {
+        oxphp_hook_swap("sleep", sizeof("sleep") - 1,
+                        oxphp_hooked_sleep, &oxphp_orig_sleep);
+        oxphp_hook_swap("usleep", sizeof("usleep") - 1,
+                        oxphp_hooked_usleep, &oxphp_orig_usleep);
+    }
+    if (oxphp_hooks_category_enabled("streams") && !oxphp_hook_socket_ops()) {
+        /* MINIT has no request context, and this is the only signal that the
+         * category was dropped, so it goes to the server log rather than
+         * wherever error output happens to be pointed. */
+        php_log_err("oxphp: socket stream hooks unavailable (the stream ops table "
+                    "could not be made writable); socket reads stay blocking");
+    }
 }
 
 static void oxphp_runtime_hooks_restore(void)
@@ -1436,6 +1849,7 @@ static void oxphp_runtime_hooks_restore(void)
     oxphp_hook_restore("usleep", sizeof("usleep") - 1, oxphp_orig_usleep);
     oxphp_orig_sleep = NULL;
     oxphp_orig_usleep = NULL;
+    oxphp_restore_socket_ops();
 }
 
 /* ─── Worker Mode: soft reset between requests ─────────────── */
@@ -1724,10 +2138,15 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
             ctx->requests_done = sched.total_requests_done;
 
             if (rc == 0) {
-                /* No work done — brief sleep to avoid busy-wait.
-                 * 100μs is short enough for responsive SSE,
-                 * long enough to avoid CPU spin. */
-                usleep(100);
+                /* No work done — pause briefly to avoid busy-wait. 100μs is
+                 * short enough for responsive SSE, long enough to avoid CPU
+                 * spin. When fibers are parked on sockets, spend that same
+                 * 100μs waiting on those descriptors instead of sleeping
+                 * blind, so a peer's reply resumes its fiber immediately
+                 * rather than on the next tick. */
+                if (!oxphp_scheduler_io_backoff(&sched, 100000)) {
+                    usleep(100);
+                }
             }
         }
 
@@ -2494,21 +2913,39 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
 }
 /* }}} */
 
-/* SAPI-side predicate for `oxphp_bridge_in_fiber`. Returns 1 iff the
- * calling thread is inside an oxphp scheduler fiber — i.e. a fiber
- * that `oxphp_fiber_suspend_for_await` can suspend. User-level
- * `Fiber::start()` does NOT touch `oxphp_current_fiber`, so it
- * correctly reports 0. */
+/* Bridge-shaped adapter for the async driver's idle backoff (see
+ * oxphp_bridge_set_async_io_backoff_fn). The budget is clamped rather than
+ * cast: a value that overflowed a signed long would land in ppoll() as a
+ * negative tv_sec, which fails immediately and turns the driver's backoff into
+ * a spin. One second is far beyond any sensible idle interval. */
+static int oxphp_async_io_backoff_bridge(uint64_t ns) {
+    const uint64_t max_backoff_ns = 1000000000ULL;
+    if (ns > max_backoff_ns) ns = max_backoff_ns;
+
+    return oxphp_async_sched_io_backoff((int64_t) ns) ? 1 : 0;
+}
+
+/* SAPI-side predicate for `oxphp_bridge_in_fiber`. Returns 1 iff the calling
+ * code is running on an oxphp scheduler fiber's own context — i.e. one that
+ * `oxphp_fiber_suspend_for_await` can actually suspend.
+ *
+ * A user-level `Fiber::start()` outside any oxphp fiber never sets
+ * `oxphp_current_fiber`, so the pointer alone answers that case. It does not
+ * answer the nested one: a userland fiber started inside an oxphp fiber runs on
+ * its own context while the pointer still names the outer fiber, and suspending
+ * from there corrupts both (see oxphp_fiber_owns_current_context). */
 int oxphp_in_oxphp_fiber(void) {
-    return oxphp_current_fiber != NULL ? 1 : 0;
+    return (oxphp_current_fiber != NULL
+            && oxphp_fiber_owns_current_context(oxphp_current_fiber)) ? 1 : 0;
 }
 
 /* Fiber-aware await helper. Called from Rust handler via FFI.
  * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
  *         -1 = error (exception details in bridge TLS), -2 = timeout */
 int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval) {
-    if (oxphp_current_fiber == NULL) {
-        return 1; /* Not in fiber — caller should do blocking await */
+    if (oxphp_current_fiber == NULL
+        || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
+        return 1; /* Not on a suspendable fiber — caller does a blocking await */
     }
 
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -2566,8 +3003,9 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
  * Returns 1 if it suspended (in a fiber), 0 if not in a fiber (caller falls
  * back to blocking), -3 if the task was cancelled while yielded. */
 int oxphp_fiber_suspend_for_yield(void) {
-    if (oxphp_current_fiber == NULL) {
-        return 0; /* not in a fiber */
+    if (oxphp_current_fiber == NULL
+        || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
+        return 0; /* not on a suspendable fiber — caller falls back to blocking */
     }
 
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -4133,6 +4571,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
     oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
+    oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
 
     /* Register async-task scheduler callbacks (stub bodies for now; the
      * Rust fiber-mode async driver reaches the scheduler through these). */

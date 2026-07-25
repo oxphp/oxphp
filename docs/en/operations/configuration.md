@@ -224,9 +224,36 @@ A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUNTIME_HOOKS` | _(off)_ | Opt-in replacement of blocking PHP builtins with fiber-suspending implementations. `1`/`true`/`all` enables every hook category; a comma-separated list enables specific categories. The only category today is `sleep`: native `sleep()`/`usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
+| `RUNTIME_HOOKS` | _(off)_ | Opt-in replacement of blocking PHP builtins with fiber-suspending implementations. `1`/`true`/`all` enables every hook category; a comma-separated list enables specific categories (e.g. `RUNTIME_HOOKS=sleep,streams`) |
+
+| Category | What it hooks |
+|----------|---------------|
+| `sleep` | Native `sleep()` and `usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
+| `streams` | A blocking **read** on a `tcp://` socket stream suspends the current fiber instead of pinning the worker thread. Reaches clients that block on such a read — `fsockopen()`, `stream_socket_client()`, HTTP stream wrappers, mysqlnd (PDO_MySQL, mysqli), phpredis — with no code changes. Clients that wait some other way are unaffected (see below) |
 
 Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
+
+The one thing the `streams` hook makes cooperative is a blocking read on a PHP socket stream. Before counting on it, check that your client waits that way — several common ones do not, and for them nothing changes:
+
+- **ext/curl.** `curl_exec()` and `curl_multi_*` talk to sockets themselves, below PHP streams, so the hook never sees them. This covers every HTTP client built on curl — Guzzle with its default handler among them. A curl client can be pointed at the stream wrapper handler instead, which does go through PHP streams.
+- **`stream_select()` and `socket_select()`.** They wait on the descriptors directly rather than through the stream's read operation, so a `select()` loop — the idiomatic way to wait on several sockets in plain PHP, and what AMPHP and ReactPHP are built on — still pins the worker thread. The same applies to the wait inside `stream_socket_accept()`.
+- **Streams from `socket_export_stream()`.** They carry a different ops table, private to PHP, which cannot be patched from an extension.
+- **`unix://`, `udp://` and `udg://` streams.** Same reason: their ops tables are private to PHP.
+- **`ssl://` and `tls://` once crypto is active.** Before `stream_socket_enable_crypto()` succeeds, an SSL stream's reads are delegated to the plain socket read and therefore do suspend; from the handshake onward they do not.
+- **Connecting and DNS resolution.** A client that holds its connection open benefits on every query; connection setup does not.
+- **MySQL reached through `localhost`.** The MySQL client reads `localhost` as "use the unix socket", which is not a `tcp://` stream — write `127.0.0.1` in the DSN instead. This applies to PDO_MySQL and mysqli alike, and is easy to miss because everything still works, just without the benefit.
+- **Writes.** Only reads are hooked. Read readiness holds still as long as one fiber owns the descriptor and nothing else drains it, whereas room in the send buffer is granted and withdrawn by the peer, so a fiber woken on writability can find the window closed again by the time the write runs, after which PHP blocks the thread for its full timeout regardless. A write that fills the socket buffer therefore behaves exactly as it does without the hook. In practice this costs little: waiting on a reply is what takes time, not handing a query to the kernel.
+
+Within that scope the hook keeps the native contract: socket timeouts (`stream_set_timeout()`, `default_socket_timeout`) apply unchanged, a timed-out read still reports `timed_out` through `stream_get_meta_data()`, and stream identity is untouched, so `socket_import_stream()` and similar keep working. One limit on the timeout: the deadline is only examined once per scheduler tick, so it fires no sooner than the next tick — at best 100 µs in worker mode and 1 ms in the async pool, and longer under load, since a tick lasts as long as whatever the worker is running. With `default_socket_timeout` at 60 seconds this is not something most deployments can observe.
+
+Two more things worth knowing:
+
+- Sharing one connection between concurrent fibers was never safe (mysqlnd is not reentrant), and it now fails differently: both fibers wake when the socket is readable, one takes the data, and the other falls through to a blocking wait. Give each fiber its own connection.
+- Running the hook underneath a userland fiber scheduler (AMPHP, Revolt) falls back to blocking I/O. A fiber started by such a scheduler runs on its own context, which OxPHP's scheduler cannot resume, so the hook detects this and takes the native path rather than corrupting either scheduler.
+
+`1`, `true` and `all` enable **every** category, `streams` included. A deployment already setting `RUNTIME_HOOKS=1` for the sleep hooks therefore starts hooking sockets on upgrade without any edit of its own; list the categories explicitly (`RUNTIME_HOOKS=sleep`) if that is not what you want. Enabling `streams` also patches one entry of PHP's stream ops table in memory at startup; the page is put back the way it was found, but on a platform where its original protection cannot be determined it stays writable — a small loss of hardening, reported in the server log.
+
+Cost, measured: about 4–6 µs per socket round trip in an async task with nothing else parked, rising to roughly 20–33 µs with 64 fibers parked on descriptors — each tick polls the whole parked set, so the per-round-trip cost grows with how many fibers are waiting. An idle worker waits on those descriptors rather than sleeping for a fixed interval and noticing readiness on its next tick, which matters a great deal: sleeping blind cost roughly 2 ms per round trip instead.
 
 **When to use `RUNTIME_HOOKS` vs. `oxphp_sleep()`.** The hook does not replace the first-party primitive — they cover different cases:
 
