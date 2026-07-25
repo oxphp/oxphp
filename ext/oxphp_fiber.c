@@ -155,6 +155,12 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     sched->fibers_tail = NULL;
     sched->free_list = NULL;
     sched->fiber_count = 0;
+
+    free(sched->io_fds);
+    free(sched->io_owners);
+    sched->io_fds = NULL;
+    sched->io_owners = NULL;
+    sched->io_cap = 0;
 }
 
 /* ─── Coroutine Entry Point ────────────────────────────── */
@@ -276,6 +282,24 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
     }
 }
 
+/* End a fiber's suspension. Every path that resumes a fiber goes through here
+ * rather than assigning suspend_reason directly, because a descriptor wait has
+ * bookkeeping to undo and there are four unrelated places that end one: the two
+ * readiness passes, the drain sweep and the task cancellation pass. Keeping the
+ * assignment in one place is what stops the fifth from being written without
+ * it.
+ *
+ * Clearing the borrowed descriptor pointer matters: once the fiber resumes, the
+ * frame that owned the array may return, and a stale pointer in a struct that
+ * outlives it is the kind of thing a later reader will dereference. */
+static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber) {
+    if (fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT) {
+        fiber->suspend_data.io.fds = NULL;
+        fiber->suspend_data.io.nfds = 0;
+    }
+    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+}
+
 /* ─── Fiber Creation ───────────────────────────────────── */
 
 oxphp_request_fiber *oxphp_scheduler_create_fiber(
@@ -300,7 +324,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->fiber_id = sched->next_fiber_id++;
     fiber->fci = fci;
     fiber->fcc = fcc;
-    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+    oxphp_fiber_clear_suspend(fiber);
     fiber->handler_failed = false;
     fiber->completed = false;
     fiber->consecutive_errors = 0;
@@ -638,27 +662,53 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
  * a suspended fiber is only resumable from the thread that owns it. POLLHUP
  * and POLLERR count as ready — the delegated caller has to observe EOF and
  * socket errors itself, exactly as it would without a hook. */
-static nfds_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched,
-                                     struct pollfd *fds,
-                                     oxphp_request_fiber **waiters) {
-    nfds_t nfds = 0;
 
+/* Grow the scheduler's aggregated poll set to hold at least `need` entries.
+ * Returns false when the allocation fails, which the callers treat as "nothing
+ * to wait on" — degrading to the blocking native path rather than crashing. */
+static bool oxphp_io_reserve(oxphp_fiber_scheduler *sched, uint32_t need) {
+    if (need <= sched->io_cap) return true;
+
+    uint32_t cap = sched->io_cap ? sched->io_cap : 16;
+    while (cap < need) cap *= 2;
+
+    struct pollfd *fds = realloc(sched->io_fds, (size_t)cap * sizeof(*fds));
+    if (fds == NULL) return false;
+    sched->io_fds = fds;
+
+    struct oxphp_io_owner *owners =
+        realloc(sched->io_owners, (size_t)cap * sizeof(*owners));
+    if (owners == NULL) return false;
+    sched->io_owners = owners;
+
+    sched->io_cap = cap;
+    return true;
+}
+
+static uint32_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched) {
+    uint32_t need = 0;
     for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
         if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
             continue;
         }
-        /* Bounds the caller's fixed-size arrays. Both schedulers already cap
-         * fiber_count at OXPHP_MAX_FIBERS, so this cannot trip today; the array
-         * size is local to the caller while those caps are not, and this is the
-         * only place that has to agree with it. */
-        if (nfds == OXPHP_MAX_FIBERS) break;
-        fds[nfds].fd = fiber->suspend_data.io.fd;
-        fds[nfds].events = fiber->suspend_data.io.events;
-        fds[nfds].revents = 0;
-        if (waiters != NULL) waiters[nfds] = fiber;
-        nfds++;
+        need += fiber->suspend_data.io.nfds;
     }
-    return nfds;
+    if (need == 0 || !oxphp_io_reserve(sched, need)) return 0;
+
+    uint32_t n = 0;
+    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
+            continue;
+        }
+        for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+            sched->io_fds[n] = fiber->suspend_data.io.fds[i];
+            sched->io_fds[n].revents = 0;
+            sched->io_owners[n].fiber = fiber;
+            sched->io_owners[n].idx = i;
+            n++;
+        }
+    }
+    return n;
 }
 
 /* Wait up to `ns` nanoseconds for one of the descriptors this scheduler has
@@ -673,8 +723,7 @@ static nfds_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched,
 bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
     if (ns < 0) return false;
 
-    struct pollfd fds[OXPHP_MAX_FIBERS];
-    nfds_t nfds = oxphp_io_build_pollset(sched, fds, NULL);
+    uint32_t nfds = oxphp_io_build_pollset(sched);
     if (nfds == 0) return false;
 
     /* A signal cuts the pause short; unlike php_sock_stream_wait_for_data this
@@ -692,7 +741,7 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
         .tv_sec = (time_t)(ns / 1000000000),
         .tv_nsec = (long)(ns % 1000000000),
     };
-    if (ppoll(fds, nfds, &timeout, NULL) < 0 && errno != EINTR) {
+    if (ppoll(sched->io_fds, nfds, &timeout, NULL) < 0 && errno != EINTR) {
         return false;
     }
     return true;
@@ -700,12 +749,10 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
 
 static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                                        oxphp_request_fiber **out, uint32_t max) {
-    struct pollfd fds[OXPHP_MAX_FIBERS];
-    oxphp_request_fiber *waiters[OXPHP_MAX_FIBERS];
-    nfds_t nfds = oxphp_io_build_pollset(sched, fds, waiters);
+    uint32_t nfds = oxphp_io_build_pollset(sched);
     if (nfds == 0) return 0;
 
-    if (poll(fds, nfds, 0) < 0 && errno != EINTR) {
+    if (poll(sched->io_fds, nfds, 0) < 0 && errno != EINTR) {
         /* poll() reports a closed or invalid descriptor per entry, via POLLNVAL
          * in its revents, so this is the whole-call failure (EINVAL, ENOMEM):
          * nothing was examined and every waiter would otherwise stay parked
@@ -726,9 +773,17 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
             php_log_err("oxphp: polling parked socket descriptors failed; hooked reads "
                         "fall back to blocking the worker thread until it recovers");
         }
-        for (nfds_t i = 0; i < nfds; i++) {
-            fds[i].revents = POLLERR;
+        for (uint32_t i = 0; i < nfds; i++) {
+            sched->io_fds[i].revents = POLLERR;
         }
+    }
+
+    /* Scatter readiness back into each fiber's own array: that is where the
+     * suspended code reads it, and a fiber waiting on several descriptors needs
+     * to know which of them fired, not merely that one did. */
+    for (uint32_t i = 0; i < nfds; i++) {
+        struct oxphp_io_owner *owner = &sched->io_owners[i];
+        owner->fiber->suspend_data.io.fds[owner->idx].revents = sched->io_fds[i].revents;
     }
 
     struct timespec ts;
@@ -736,14 +791,20 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
     uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 
     uint32_t ready = 0;
-    for (nfds_t i = 0; i < nfds && ready < max; i++) {
-        oxphp_request_fiber *fiber = waiters[i];
-        bool expired = fds[i].revents == 0
-                       && fiber->suspend_data.io.deadline_ns != 0
-                       && now_ns >= fiber->suspend_data.io.deadline_ns;
-        if (fds[i].revents == 0 && !expired) {
+    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber && ready < max;
+         fiber = fiber->next) {
+        if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
             continue;
         }
+        bool any = false;
+        for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+            if (fiber->suspend_data.io.fds[i].revents != 0) { any = true; break; }
+        }
+        bool expired = !any
+                       && fiber->suspend_data.io.deadline_ns != 0
+                       && now_ns >= fiber->suspend_data.io.deadline_ns;
+        if (!any && !expired) continue;
+
         fiber->suspend_data.io.expired = expired;
         out[ready++] = fiber;
     }
@@ -824,7 +885,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
                     fiber->timed_out = true;
                 }
                 if (ready || deadline) {
-                    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                    oxphp_fiber_clear_suspend(fiber);
                     oxphp_scheduler_resume_fiber(sched, fiber, NULL);
 
                     if (fiber->completed) {
@@ -871,7 +932,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
                 oxphp_bridge_set_cancel_reason_at(fiber->request_cancel_ptr,
                                                   OXPHP_CANCEL_SHUTDOWN);
                 fiber->drain_kill = true;
-                fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                oxphp_fiber_clear_suspend(fiber);
                 oxphp_scheduler_resume_fiber(sched, fiber, NULL);
                 if (fiber->completed) {
                     oxphp_scheduler_finalize_fiber(sched, fiber);
@@ -892,7 +953,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
                 oxphp_request_fiber *next = fiber->next;
                 if (fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
                     && fiber->suspend_data.timer_id == ready_ids[i]) {
-                    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                    oxphp_fiber_clear_suspend(fiber);
                     oxphp_scheduler_resume_fiber(sched, fiber, NULL);
                     if (fiber->completed) {
                         oxphp_scheduler_finalize_fiber(sched, fiber);
@@ -921,7 +982,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
                 || ready[i]->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
                 continue;
             }
-            ready[i]->suspend_reason = OXPHP_SUSPEND_NONE;
+            oxphp_fiber_clear_suspend(ready[i]);
             oxphp_scheduler_resume_fiber(sched, ready[i], NULL);
             if (ready[i]->completed) {
                 oxphp_scheduler_finalize_fiber(sched, ready[i]);
@@ -1198,7 +1259,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->php_state.bridge_stream_mode = false;
     fiber->php_state.bridge_headers_sent = false;
     fiber->php_state.bridge_finished = false;
-    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+    oxphp_fiber_clear_suspend(fiber);
     fiber->completed = false;
     fiber->handler_failed = false;
     fiber->consecutive_errors = 0;
@@ -1277,7 +1338,7 @@ int oxphp_async_sched_tick(void) {
                  * that settles on the same tick still delivers its value. */
                 if (fiber->cancel_requested
                     || oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
-                    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                    oxphp_fiber_clear_suspend(fiber);
                     oxphp_task_resume_fiber(sched, fiber, NULL);
                 } else if (fiber->await_deadline_ns != 0) {
                     /* Per-call await timeout: unwind the await once the deadline
@@ -1289,7 +1350,7 @@ int oxphp_async_sched_tick(void) {
                                       + (uint64_t)ts.tv_nsec;
                     if (now_ns >= fiber->await_deadline_ns) {
                         fiber->timed_out = true;
-                        fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                        oxphp_fiber_clear_suspend(fiber);
                         oxphp_task_resume_fiber(sched, fiber, NULL);
                     }
                 }
@@ -1311,7 +1372,7 @@ int oxphp_async_sched_tick(void) {
                 && (fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
                     || fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT)
                 && fiber->cancel_requested) {
-                fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                oxphp_fiber_clear_suspend(fiber);
                 oxphp_task_resume_fiber(sched, fiber, NULL);
             }
             fiber = next;
@@ -1328,7 +1389,7 @@ int oxphp_async_sched_tick(void) {
                 oxphp_request_fiber *next = fiber->next;
                 if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
                     && fiber->suspend_data.timer_id == ready_ids[i]) {
-                    fiber->suspend_reason = OXPHP_SUSPEND_NONE;
+                    oxphp_fiber_clear_suspend(fiber);
                     oxphp_task_resume_fiber(sched, fiber, NULL);
                     break;
                 }
@@ -1351,7 +1412,7 @@ int oxphp_async_sched_tick(void) {
                 || ready[i]->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
                 continue;
             }
-            ready[i]->suspend_reason = OXPHP_SUSPEND_NONE;
+            oxphp_fiber_clear_suspend(ready[i]);
             oxphp_task_resume_fiber(sched, ready[i], NULL);
         }
     }
