@@ -1,5 +1,6 @@
 # Runtime hooks in traditional mode: RUNTIME_HOOKS=1 + ASYNC_WORKERS=4.
-# Native sleep()/usleep() are hooked to fiber-suspending implementations.
+# Native sleep()/usleep() and blocking tcp:// socket reads are hooked to
+# fiber-suspending implementations.
 # Task fibers exercise the hooked path; the request context has no fiber,
 # so it exercises the original-handler fallback path.
 #

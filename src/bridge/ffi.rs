@@ -541,6 +541,13 @@ extern "C" {
         remove_fn: Option<unsafe extern "C" fn(u64)>,
     );
 
+    /// Idle backoff for the async task driver, implemented by the PHP
+    /// extension: waits `ns` on the descriptors task fibers are parked on and
+    /// returns 1, or returns 0 when nothing is parked and the caller should
+    /// back off on its own. Waiting on the descriptors is what keeps a hooked
+    /// socket round trip from paying the driver's whole idle interval.
+    pub fn oxphp_bridge_async_io_backoff(ns: u64) -> c_int;
+
     // ── Fiber TLS context callbacks ──
     pub fn oxphp_bridge_set_fiber_ctx_callbacks(
         save_fn: Option<unsafe extern "C" fn(u64)>,

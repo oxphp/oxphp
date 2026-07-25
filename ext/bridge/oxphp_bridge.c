@@ -2707,6 +2707,20 @@ int oxphp_bridge_has_deferred_drains(void) {
     return 0;
 }
 
+/* ─── Async Task Scheduler: descriptor-aware idle backoff ────── */
+static oxphp_async_io_backoff_fn_t ext_async_io_backoff = NULL;
+
+void oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_fn_t fn) {
+    ext_async_io_backoff = fn;
+}
+
+int oxphp_bridge_async_io_backoff(uint64_t ns) {
+    if (ext_async_io_backoff != NULL) {
+        return ext_async_io_backoff(ns);
+    }
+    return 0;
+}
+
 /* === Async Promise: Freeze/Unfreeze === */
 
 static void oxphp_freeze_zval_recursive(zval *zv);

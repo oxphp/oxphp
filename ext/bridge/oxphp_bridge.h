@@ -1402,6 +1402,19 @@ void oxphp_bridge_set_deferred_drain_callbacks(oxphp_poll_deferred_drains_fn_t p
 void oxphp_bridge_poll_deferred_drains(void);
 int  oxphp_bridge_has_deferred_drains(void);
 
+/* ─── Async Task Scheduler: descriptor-aware idle backoff ─────
+ * Registered by the PHP extension (not Rust). The async driver's idle pause is
+ * otherwise a blind sleep, so a task fiber parked on a socket only learns its
+ * peer replied on the following tick — up to a whole interval of latency on
+ * every round trip, which on a chatty protocol dominates the cost of the
+ * hooked I/O. When any task fiber is parked on a descriptor this waits on those
+ * descriptors for the same interval instead and returns 1, telling the driver
+ * not to sleep on top of it. Returns 0 when nothing is parked (or the extension
+ * is absent), leaving the driver's own backoff in charge. */
+typedef int (*oxphp_async_io_backoff_fn_t)(uint64_t ns);
+void oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_fn_t fn);
+int  oxphp_bridge_async_io_backoff(uint64_t ns);
+
 /* ─── Current Request Fiber Identity ─────────────────────────
  * Registered by the PHP extension (not Rust): returns the fiber_id of the
  * request fiber currently executing on this thread, or 0 outside fiber

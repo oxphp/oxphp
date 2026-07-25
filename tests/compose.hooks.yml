@@ -1,8 +1,8 @@
 # Runtime hooks in worker mode: RUNTIME_HOOKS=1, one PHP worker, one async
-# worker. Native sleep()/usleep() are hooked to fiber-suspending
-# implementations; with a single worker thread on each pool, wall-clock
-# assertions prove that hooked sleeps multiplex request/task fibers instead
-# of blocking the thread.
+# worker. Native sleep()/usleep() and blocking tcp:// socket reads are hooked
+# to fiber-suspending implementations; with a single worker thread on
+# each pool, wall-clock assertions prove that hooked calls multiplex
+# request/task fibers instead of blocking the thread.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.hooks.yml up

@@ -22,6 +22,9 @@
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
 #include <time.h>   /* clock_gettime/CLOCK_MONOTONIC for per-call await deadlines */
+#include <poll.h>   /* poll() for descriptor readiness of IO_WAIT-suspended fibers */
+#include <errno.h>  /* EINTR from the readiness poll */
+#include <stdatomic.h> /* one-shot flag for the readiness-poll failure log */
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
 
@@ -616,6 +619,137 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     sched->free_list = fiber;
 }
 
+/* ─── Descriptor readiness for IO_WAIT-suspended fibers ──
+ *
+ * Collects every fiber parked on a descriptor, polls them all in one
+ * non-blocking poll(), and hands back those that may run again — either
+ * because the descriptor is ready or because their deadline elapsed. The
+ * caller resumes them with its own resume/finalize pair, which is the only
+ * part that differs between the HTTP and async-task schedulers.
+ *
+ * Collected fibers stay marked IO_WAIT: the caller clears the mark one fiber
+ * at a time, immediately before resuming that fiber. Clearing the whole batch
+ * here would leave the rest of it neither parked nor resumed should a resume
+ * ever fail to return, and the batch is the one place in the tick where the
+ * list is read before the resumes rather than between them.
+ *
+ * Readiness is checked from the tick rather than driven by an event loop for
+ * the same reason sleep timers are: the worker already runs a tick loop, and
+ * a suspended fiber is only resumable from the thread that owns it. POLLHUP
+ * and POLLERR count as ready — the delegated caller has to observe EOF and
+ * socket errors itself, exactly as it would without a hook. */
+static nfds_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched,
+                                     struct pollfd *fds,
+                                     oxphp_request_fiber **waiters) {
+    nfds_t nfds = 0;
+
+    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
+            continue;
+        }
+        /* Bounds the caller's fixed-size arrays. Both schedulers already cap
+         * fiber_count at OXPHP_MAX_FIBERS, so this cannot trip today; the array
+         * size is local to the caller while those caps are not, and this is the
+         * only place that has to agree with it. */
+        if (nfds == OXPHP_MAX_FIBERS) break;
+        fds[nfds].fd = fiber->suspend_data.io.fd;
+        fds[nfds].events = fiber->suspend_data.io.events;
+        fds[nfds].revents = 0;
+        if (waiters != NULL) waiters[nfds] = fiber;
+        nfds++;
+    }
+    return nfds;
+}
+
+/* Wait up to `ns` nanoseconds for one of the descriptors this scheduler has
+ * fibers parked on, and report whether there was anything to wait for.
+ *
+ * This exists so an idle worker sleeps *on the sockets* instead of sleeping a
+ * fixed interval and noticing readiness on the following tick. With a fixed
+ * backoff every socket round trip pays up to a full interval of latency, which
+ * on a chatty protocol is the dominant cost of the hook; waiting on the
+ * descriptors ends the pause the moment the peer answers. The interval is
+ * unchanged, so a newly queued request waits no longer than it did before. */
+bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
+    if (ns < 0) return false;
+
+    struct pollfd fds[OXPHP_MAX_FIBERS];
+    nfds_t nfds = oxphp_io_build_pollset(sched, fds, NULL);
+    if (nfds == 0) return false;
+
+    /* A signal cuts the pause short; unlike php_sock_stream_wait_for_data this
+     * does not retry on EINTR, because there is nothing to preserve — the
+     * caller loops, and an early return costs it one extra turn round that
+     * loop, not a spin: a profiler sampling at 100 Hz skips one pause per
+     * 10 ms. Readiness and deadlines are decided by oxphp_io_collect_ready(),
+     * never here.
+     *
+     * Any other failure is reported as "did not wait" so the caller sleeps its
+     * own interval instead. Claiming to have waited when the call failed would
+     * turn a persistent error into a busy loop at full CPU with nothing in the
+     * log to explain it. */
+    struct timespec timeout = {
+        .tv_sec = (time_t)(ns / 1000000000),
+        .tv_nsec = (long)(ns % 1000000000),
+    };
+    if (ppoll(fds, nfds, &timeout, NULL) < 0 && errno != EINTR) {
+        return false;
+    }
+    return true;
+}
+
+static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
+                                       oxphp_request_fiber **out, uint32_t max) {
+    struct pollfd fds[OXPHP_MAX_FIBERS];
+    oxphp_request_fiber *waiters[OXPHP_MAX_FIBERS];
+    nfds_t nfds = oxphp_io_build_pollset(sched, fds, waiters);
+    if (nfds == 0) return 0;
+
+    if (poll(fds, nfds, 0) < 0 && errno != EINTR) {
+        /* poll() reports a closed or invalid descriptor per entry, via POLLNVAL
+         * in its revents, so this is the whole-call failure (EINVAL, ENOMEM):
+         * nothing was examined and every waiter would otherwise stay parked
+         * forever. Release them all rather than strand them.
+         *
+         * Be clear about what that costs: each released fiber goes on to its
+         * delegate, which polls its own descriptor again, usually succeeds, and
+         * blocks the worker thread for the socket's full timeout — the very
+         * thing the hook exists to avoid. The hook degrades to native
+         * behaviour, which is survivable, but it is silent otherwise, so say it
+         * once. Once for the process, not once per worker: every thread that
+         * hooks sockets would otherwise repeat the same line, and the failure
+         * is a property of the platform, not of the thread that noticed it.
+         * The exchange is what makes "once" true when two workers notice
+         * together. */
+        static atomic_bool reported = false;
+        if (!atomic_exchange(&reported, true)) {
+            php_log_err("oxphp: polling parked socket descriptors failed; hooked reads "
+                        "fall back to blocking the worker thread until it recovers");
+        }
+        for (nfds_t i = 0; i < nfds; i++) {
+            fds[i].revents = POLLERR;
+        }
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+    uint32_t ready = 0;
+    for (nfds_t i = 0; i < nfds && ready < max; i++) {
+        oxphp_request_fiber *fiber = waiters[i];
+        bool expired = fds[i].revents == 0
+                       && fiber->suspend_data.io.deadline_ns != 0
+                       && now_ns >= fiber->suspend_data.io.deadline_ns;
+        if (fds[i].revents == 0 && !expired) {
+            continue;
+        }
+        fiber->suspend_data.io.expired = expired;
+        out[ready++] = fiber;
+    }
+    return ready;
+}
+
 /* ─── Event Loop Tick ──────────────────────────────────── */
 
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
@@ -768,6 +902,31 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
                 }
                 fiber = next;
             }
+        }
+    }
+
+    /* 3b. Resume fibers whose descriptor became ready (or whose read/write
+     * deadline elapsed). Hooked socket I/O parks a request fiber here instead
+     * of blocking the worker thread inside poll(). */
+    {
+        oxphp_request_fiber *ready[OXPHP_MAX_FIBERS];
+        uint32_t count = oxphp_io_collect_ready(sched, ready, OXPHP_MAX_FIBERS);
+        for (uint32_t i = 0; i < count; i++) {
+            /* Re-check each entry instead of trusting the batch. Every other
+             * pass re-reads the list between resumes because a resume runs PHP
+             * and a finalize unlinks fibers; nothing today makes one fiber's
+             * resume finalize another, and this is what keeps that assumption
+             * from being load-bearing here alone. */
+            if (ready[i]->completed
+                || ready[i]->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
+                continue;
+            }
+            ready[i]->suspend_reason = OXPHP_SUSPEND_NONE;
+            oxphp_scheduler_resume_fiber(sched, ready[i], NULL);
+            if (ready[i]->completed) {
+                oxphp_scheduler_finalize_fiber(sched, ready[i]);
+            }
+            work_done = 1;
         }
     }
 
@@ -1094,6 +1253,11 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     return (int64_t)fiber->fiber_id;
 }
 
+bool oxphp_async_sched_io_backoff(int64_t ns) {
+    if (!oxphp_task_sched_inited) return false;
+    return oxphp_scheduler_io_backoff(&oxphp_task_sched, ns);
+}
+
 int oxphp_async_sched_tick(void) {
     if (!oxphp_task_sched_inited) {
         return 0;
@@ -1134,16 +1298,18 @@ int oxphp_async_sched_tick(void) {
         }
     }
 
-    /* Force-resume sleeping fibers that were cancelled (awaiter gave up) —
-     * the suspend point unwinds on cancellation instead of waiting out the
-     * timer. Mirrors the await branch above; without it a task parked in
-     * oxphp_sleep()/oxphp_usleep() would sleep its full duration before
-     * unwinding. */
+    /* Force-resume sleeping or descriptor-waiting fibers that were cancelled
+     * (awaiter gave up) — the suspend point unwinds on cancellation instead of
+     * waiting out the timer or the peer. Mirrors the await branch above;
+     * without it a task parked in oxphp_sleep()/oxphp_usleep() or in a hooked
+     * socket read would run its full duration before unwinding. */
     {
         oxphp_request_fiber *fiber = sched->fibers_head;
         while (fiber) {
             oxphp_request_fiber *next = fiber->next;
-            if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
+            if (!fiber->completed
+                && (fiber->suspend_reason == OXPHP_SUSPEND_SLEEP
+                    || fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT)
                 && fiber->cancel_requested) {
                 fiber->suspend_reason = OXPHP_SUSPEND_NONE;
                 oxphp_task_resume_fiber(sched, fiber, NULL);
@@ -1168,6 +1334,25 @@ int oxphp_async_sched_tick(void) {
                 }
                 fiber = next;
             }
+        }
+    }
+
+    /* Resume fibers whose descriptor became ready (or whose read/write
+     * deadline elapsed) — the task-side mirror of the HTTP scheduler's
+     * readiness pass, so hooked socket I/O multiplexes async tasks too. */
+    {
+        oxphp_request_fiber *ready[OXPHP_MAX_FIBERS];
+        uint32_t count = oxphp_io_collect_ready(sched, ready, OXPHP_MAX_FIBERS);
+        for (uint32_t i = 0; i < count; i++) {
+            /* Same per-entry re-check as the HTTP scheduler's readiness pass:
+             * the list is read once before the resumes, so each entry is
+             * confirmed still parked before it is woken. */
+            if (ready[i]->completed
+                || ready[i]->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
+                continue;
+            }
+            ready[i]->suspend_reason = OXPHP_SUSPEND_NONE;
+            oxphp_task_resume_fiber(sched, ready[i], NULL);
         }
     }
 

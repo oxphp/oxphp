@@ -16,6 +16,7 @@ typedef enum {
     OXPHP_SUSPEND_AWAIT_ALL,    /* waiting for oxphp_async_await_all */
     OXPHP_SUSPEND_AWAIT_ANY,    /* waiting for oxphp_async_await_any */
     OXPHP_SUSPEND_SLEEP,        /* waiting for oxphp_sleep timer */
+    OXPHP_SUSPEND_IO_WAIT,      /* waiting for readiness of a file descriptor */
 } oxphp_suspend_reason;
 
 /* ─── Per-Fiber Saved PHP State ────────────────────────── */
@@ -117,6 +118,12 @@ typedef struct _oxphp_request_fiber {
             uint32_t count;
         } await_any;
         uint64_t timer_id;            /* SLEEP: timer ID */
+        struct {                      /* IO_WAIT: descriptor readiness */
+            int fd;
+            short events;             /* what the fiber waits for (POLLIN/POLLOUT) */
+            bool expired;             /* deadline elapsed before the fd became ready */
+            uint64_t deadline_ns;     /* CLOCK_MONOTONIC deadline, 0 = wait forever */
+        } io;
     } suspend_data;
 
     /* The zend_fcall_info/cache for the handler closure (shared, not owned) */
@@ -244,6 +251,16 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
 
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);
+
+/* Idle backoff that waits on the descriptors parked fibers are blocked on,
+ * rather than sleeping blind for the same interval. Returns false when there
+ * was nothing to wait on, or when the wait itself failed — either way the
+ * caller must fall back to its own sleep, or the loop would spin. */
+bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns);
+
+/* Same, for this thread's async-task scheduler. Returns false when nothing is
+ * parked on a descriptor (or no task scheduler exists yet). */
+bool oxphp_async_sched_io_backoff(int64_t ns);
 
 /* Save/restore PHP state around context switches. */
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber);
