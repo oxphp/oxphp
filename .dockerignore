@@ -1,1 +1,7 @@
 ext/bridge/*.o
+
+# Host build output. Every stage builds inside the image and the only target/
+# paths any Dockerfile reads come from an earlier stage, never from the build
+# context — so shipping the host's tree does nothing but send tens of gigabytes
+# to the daemon on every build.
+target/
