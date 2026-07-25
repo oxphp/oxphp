@@ -5,8 +5,15 @@
 #include "php.h"
 #include "zend_fibers.h"
 
+#include <poll.h>
+
 /* Maximum concurrent fibers per worker thread. */
 #define OXPHP_MAX_FIBERS 256
+
+/* Maximum descriptors one fiber may wait on in a single suspension. Bounds the
+ * stack array every caller of oxphp_fiber_io_wait() builds, and the width of
+ * the aggregated poll set the scheduler assembles from all parked fibers. */
+#define OXPHP_MAX_WAIT_FDS 64
 
 /* ─── Suspend Reasons ──────────────────────────────────── */
 
@@ -119,9 +126,15 @@ typedef struct _oxphp_request_fiber {
         } await_any;
         uint64_t timer_id;            /* SLEEP: timer ID */
         struct {                      /* IO_WAIT: descriptor readiness */
-            int fd;
-            short events;             /* what the fiber waits for (POLLIN/POLLOUT) */
-            bool expired;             /* deadline elapsed before the fd became ready */
+            /* Borrowed, NOT owned: points into the C stack frame of the fiber
+             * parked here. That frame stays alive for exactly as long as the
+             * fiber is suspended — a fiber only leaves this suspension by
+             * returning from zend_fiber_switch_context() inside the very frame
+             * that filled this in — so the pointer is valid for the whole wait
+             * and there is nothing to free. Do not make it outlive the wait. */
+            struct pollfd *fds;
+            uint32_t nfds;
+            bool expired;             /* deadline elapsed before any fd was ready */
             uint64_t deadline_ns;     /* CLOCK_MONOTONIC deadline, 0 = wait forever */
         } io;
     } suspend_data;
@@ -196,6 +209,14 @@ typedef struct _oxphp_request_fiber {
 
 /* ─── Fiber Scheduler ──────────────────────────────────── */
 
+/* Which fiber, and which of its descriptors, an entry of the aggregated poll
+ * set came from — so readiness can be scattered back into each fiber's own
+ * array, where the waiting code reads it. */
+struct oxphp_io_owner {
+    struct _oxphp_request_fiber *fiber;
+    uint32_t idx;
+};
+
 typedef struct {
     /* The scheduler's own context (main thread context) */
     zend_fiber_context main_context;
@@ -221,6 +242,14 @@ typedef struct {
     /* Error tracking across fibers (mirrors the outer loop's consecutive_errors) */
     int consecutive_errors;
     uint64_t total_requests_done;
+
+    /* Aggregated poll set, grown on demand and reused across ticks. Owned by
+     * the scheduler because with several descriptors per fiber the worst case
+     * (OXPHP_MAX_FIBERS * OXPHP_MAX_WAIT_FDS) is far too large for a stack
+     * frame. Freed by oxphp_scheduler_destroy(). */
+    struct pollfd *io_fds;
+    struct oxphp_io_owner *io_owners;
+    uint32_t io_cap;
 } oxphp_fiber_scheduler;
 
 /* ─── TLS: current fiber pointer ───────────────────────── */

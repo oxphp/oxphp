@@ -1286,19 +1286,26 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     return 1;
 }
 
-/* Suspend the current fiber until `fd` is ready for `events`, its deadline
- * elapses, or the fiber is cancelled. The scheduler owns the readiness poll
- * (oxphp_io_collect_ready), so the worker thread keeps serving other fibers
- * while this one waits. Mirrors oxphp_fiber_sleep_us(), including its resume
- * contract: an uncatchable bail on drain, a cancellation return otherwise.
+/* Suspend the current fiber until one of `fds` is ready for the events it asks
+ * for, its deadline elapses, or the fiber is cancelled. The scheduler owns the
+ * readiness poll (oxphp_io_collect_ready), so the worker thread keeps serving
+ * other fibers while this one waits. Mirrors oxphp_fiber_sleep_us(), including
+ * its resume contract: an uncatchable bail on drain, a cancellation return
+ * otherwise.
  *
- * timeout_ns < 0 waits indefinitely. Returns 1 when the descriptor is ready,
- * 0 when not called from a fiber, -1 when the fiber was cancelled, and -2 when
- * the deadline elapsed first. */
-static int oxphp_fiber_io_wait(int fd, short events, int64_t timeout_ns)
+ * `fds` is borrowed for the whole suspension and written back into: the
+ * scheduler fills each entry's revents before resuming, so the caller reads
+ * which of its descriptors fired. It must therefore live in the caller's frame,
+ * which by construction outlives the wait.
+ *
+ * timeout_ns < 0 waits indefinitely. Returns 1 when a descriptor is ready,
+ * 0 when not called from a fiber (or the set is unusable), -1 when the fiber
+ * was cancelled, and -2 when the deadline elapsed first. */
+static int oxphp_fiber_io_wait(struct pollfd *fds, uint32_t nfds, int64_t timeout_ns)
 {
     if (oxphp_current_fiber == NULL) return 0;
     if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
+    if (fds == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
 
@@ -1310,9 +1317,13 @@ static int oxphp_fiber_io_wait(int fd, short events, int64_t timeout_ns)
                       + (uint64_t)timeout_ns;
     }
 
+    for (uint32_t i = 0; i < nfds; i++) {
+        fds[i].revents = 0;
+    }
+
     self->suspend_reason = OXPHP_SUSPEND_IO_WAIT;
-    self->suspend_data.io.fd = fd;
-    self->suspend_data.io.events = events;
+    self->suspend_data.io.fds = fds;
+    self->suspend_data.io.nfds = nfds;
     self->suspend_data.io.expired = false;
     self->suspend_data.io.deadline_ns = deadline_ns;
 
@@ -1324,7 +1335,7 @@ static int oxphp_fiber_io_wait(int fd, short events, int64_t timeout_ns)
 
     oxphp_current_fiber = NULL;
     zend_fiber_switch_context(&transfer);
-    /* --- RESUMED once the descriptor is ready or the deadline passed, OR
+    /* --- RESUMED once one descriptor is ready or the deadline passed, OR
      * force-resumed by the scheduler when the task was cancelled (awaiter gave
      * up) or the server is draining. */
     if (self->drain_kill) {
@@ -1609,7 +1620,12 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
         struct timespec started;
         clock_gettime(CLOCK_MONOTONIC, &started);
 
-        int rc = oxphp_fiber_io_wait(sock->socket, PHP_POLLREADABLE, budget_ns);
+        struct pollfd pfd = {
+            .fd = sock->socket,
+            .events = PHP_POLLREADABLE,
+            .revents = 0,
+        };
+        int rc = oxphp_fiber_io_wait(&pfd, 1, budget_ns);
         if (rc == 0) {
             /* Declined the suspension — a userland fiber scheduler owns the
              * context, so nothing was waited for. Step aside completely: with
