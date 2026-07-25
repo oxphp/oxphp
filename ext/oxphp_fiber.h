@@ -49,13 +49,14 @@ typedef enum {
 
 /* ─── Per-Fiber VM State ───────────────────────────────── */
 
-/* Replicates zend_fiber_vm_state from zend_fibers.c (internal/static).
- * The low-level fiber API (zend_fiber_switch_context) does NOT save VM state —
- * only the high-level API (zend_fiber_start/resume) does. We must do it
- * ourselves for each context switch. Field set mirrors upstream; the
- * ZEND_CHECK_STACK_LIMIT stack_base/stack_limit pair is the only exception —
- * we handle those separately via fiber->saved_stack_* (estimated from the C
- * stack pointer at coroutine entry, since the fiber stack struct is opaque). */
+/* Replicates zend_fiber_vm_state from zend_fibers.c (internal/static), minus
+ * the ZEND_CHECK_STACK_LIMIT stack_base/stack_limit pair.
+ *
+ * zend_fiber_switch_context() already captures this state per switching frame
+ * and restores it when that frame resumes, so this copy does not substitute for
+ * the engine — and it holds the scheduler's state rather than the fiber's. See
+ * the note above the save/restore helpers in oxphp_fiber.c before relying on
+ * it for anything. */
 typedef struct {
     zend_vm_stack vm_stack;
     zval *vm_stack_top;
@@ -73,6 +74,13 @@ typedef struct {
 
 /* ─── Per-Fiber PHP State ──────────────────────────────── */
 
+/* Written only by oxphp_fiber_save_php_state, i.e. only when a fiber SUSPENDS
+ * mid-request, and read only while that fiber is suspended: by
+ * oxphp_fiber_restore_php_state on the matching resume, and by the drain sweep's
+ * open-stream test. A fiber reaches the free list by COMPLETING a request, so a
+ * recycled fiber's copy is never read and needs no reset between requests —
+ * handing a fiber a NEW request restores nothing from here (see
+ * oxphp_scheduler_start_fiber). */
 typedef struct {
     /* Superglobals: saved PG(http_globals) values */
     zval http_globals[6]; /* TRACK_VARS_POST .. TRACK_VARS_FILES */
@@ -166,16 +174,18 @@ typedef struct _oxphp_request_fiber {
     zend_fcall_info *fci;
     zend_fcall_info_cache *fcc;
 
-    /* Stack limits for this fiber's C stack (set in coroutine entry,
-     * saved on suspend, restored on resume). Needed because the low-level
-     * fiber API doesn't manage EG(stack_base/limit). */
+    /* This fiber's C-stack bounds, estimated from the stack pointer at coroutine
+     * entry (the fiber stack struct is opaque) and written exactly once, there.
+     * The engine carries EG(stack_base/limit) across a switch itself under
+     * ZEND_CHECK_STACK_LIMIT, so these are only a cached copy — nothing has to
+     * re-install them when a fiber is entered, though the two resume wrappers
+     * still do, redundantly. */
     void *saved_stack_base;
     void *saved_stack_limit;
 
     /* Handler result tracking */
     bool handler_failed;
     bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
-    bool started;            /* true after first start — reused fibers skip zend_fiber_init_context */
     int consecutive_errors;
 
     /* ── Async-task mode (oxphp_async fiber, not an HTTP request) ──
@@ -308,7 +318,10 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     zend_fcall_info_cache *fcc
 );
 
+/* Run a NEW request on `fiber`, fresh or recycled. Restores nothing from
+ * php_state — that snapshot describes a suspended request only. */
 void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
+/* Resume a fiber SUSPENDED mid-request, re-installing the state it saved. */
 void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber, zval *value);
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
 

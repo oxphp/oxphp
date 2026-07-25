@@ -1,6 +1,21 @@
 # profile: hooks
 # description: Runtime hooks in worker mode — request/task fiber multiplexing of native sleep
 
+# These two lines belong together and must stay at the top of this profile, in
+# this order. PHP_WORKERS=1 here, so every request lands on the same worker:
+# the first one gives its request fiber a completed request WITHOUT suspending,
+# and the second then runs on that recycled fiber with a never-written state
+# snapshot — the case where all of the second test's checks are live. Any
+# suspending request first (every hooks/* test awaits or sleeps) leaves a
+# half-benign snapshot behind instead: its header list and status come back
+# valid, and only the $_REQUEST check would still fail on a broken build.
+# A replacement opener must therefore satisfy both requirements — never suspend,
+# and never mention $_REQUEST, since the first script to reference it is the one
+# OPcache materialises it for, once per worker. strict=1 turns "served on a
+# fresh fiber" into a failure, which here is a real invariant, not a coin flip.
+worker/test_worker_class_get_id
+worker/test_request_state_after_reuse >> ?probe=42&strict=1
+
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
 hooks/test_promise_survives_bystander
@@ -11,3 +26,4 @@ hooks/test_stream_userland_fiber
 hooks/test_stream_timeout_worker
 hooks/test_select_task_multiplex
 hooks/test_select_request_multiplex
+
