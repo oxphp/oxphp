@@ -29,12 +29,17 @@ impl CancellationState {
         }
     }
 
-    pub fn mark_done(&self) {
-        // Release pairs with the Acquire load in `is_done()` so that any
-        // state the dispatch task established before disarming the guard
-        // (response sent, work completed) is visible to the disconnect
-        // path running on a different Tokio task before it sees done=true.
-        // x86_64's TSO model masks the bug, but ARM/POWER need this.
+    /// Disarms the request's `ClientAbortGuard` — that guard's `Drop`
+    /// early-returns on this flag. Keep this single-caller (`disarm()` in
+    /// `server/connection.rs`): calling it from anywhere else pre-disarms the
+    /// guard, and a client abort then stops cancelling the in-flight request,
+    /// silently.
+    pub(crate) fn mark_done(&self) {
+        // Release pairs with the Acquire load in `is_done()`. Today both run
+        // on one thread — `disarm()` stores, the guard's own Drop loads two
+        // lines later — so the ordering is not currently load-bearing; it is
+        // kept so the pair stays correct if the store and the load ever end
+        // up on different tasks.
         self.done.store(true, Ordering::Release);
     }
 
