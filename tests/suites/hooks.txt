@@ -10,11 +10,19 @@
 # half-benign snapshot behind instead: its header list and status come back
 # valid, and only the $_REQUEST check would still fail on a broken build.
 # A replacement opener must therefore satisfy both requirements — never suspend,
-# and never mention $_REQUEST, since the first script to reference it is the one
-# OPcache materialises it for, once per worker. strict=1 turns "served on a
-# fresh fiber" into a failure, which here is a real invariant, not a coin flip.
+# and not mention $_REQUEST. The second one is not a property of this suite but
+# of an open worker-mode defect: $_REQUEST is a lazily built auto-global that a
+# worker materialises for the first script referencing it and then never rebuilds,
+# so an earlier mention would leave the test below asserting an earlier request's
+# $_REQUEST and failing for the wrong reason. Drop that half of the rule once the
+# defect is fixed. strict=1 turns "served on a fresh fiber" into a failure, which
+# here is a real invariant, not a coin flip.
 worker/test_worker_class_get_id
 worker/test_request_state_after_reuse >> ?probe=42&strict=1
+
+# Same invariant on the other dispatch site: this one suspends and has its inner
+# self-requests served from the event-loop tick.
+hooks/test_tick_path_fiber_reuse
 
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
@@ -26,4 +34,3 @@ hooks/test_stream_userland_fiber
 hooks/test_stream_timeout_worker
 hooks/test_select_task_multiplex
 hooks/test_select_request_multiplex
-
