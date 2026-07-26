@@ -160,12 +160,6 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     sched->free_list = NULL;
     sched->fiber_count = 0;
 
-    free(sched->io_fds);
-    free(sched->io_owners);
-    sched->io_fds = NULL;
-    sched->io_owners = NULL;
-    sched->io_cap = 0;
-
     /* After the fibers, not before: closing the instance drops every
      * registration they still held, so nothing can report readiness for a fiber
      * that has already been freed. */
@@ -670,9 +664,9 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
 
 /* ─── Descriptor readiness for IO_WAIT-suspended fibers ──
  *
- * Collects every fiber parked on a descriptor, polls them all in one
- * non-blocking poll(), and hands back those that may run again — either
- * because the descriptor is ready or because their deadline elapsed. The
+ * Reads whatever the scheduler's epoll instance has to report without waiting,
+ * and hands back the fibers that may run again — either because a descriptor
+ * they wait on is ready or because their deadline elapsed. The
  * caller resumes them with its own resume/finalize pair, which is the only
  * part that differs between the HTTP and async-task schedulers.
  *
@@ -789,71 +783,15 @@ void oxphp_io_unpark(oxphp_request_fiber *fiber) {
     }
 }
 
-/* Grow the scheduler's aggregated poll set to hold at least `need` entries.
- * Returns false when the allocation fails; the poll set is then reported empty
- * for this tick rather than the process dying. What that costs each caller
- * differs: the idle backoff sleeps its own interval instead of sleeping on the
- * sockets, and the readiness sweep skips readiness but still runs its deadline
- * pass, so a parked fiber can still time out. Both recover on the first tick
- * the allocation succeeds. */
-static bool oxphp_io_reserve(oxphp_fiber_scheduler *sched, uint32_t need) {
-    if (need <= sched->io_cap) return true;
-
-    uint32_t cap = sched->io_cap ? sched->io_cap : 16;
-    while (cap < need) cap *= 2;
-
-    /* Each array keeps whatever growth it managed. io_cap is only raised once
-     * both succeeded, so a half-grown pair reports the smaller capacity and
-     * every index the callers use stays inside both allocations; the next
-     * attempt starts from the larger buffer and has one less allocation to
-     * make. */
-    struct pollfd *fds = realloc(sched->io_fds, (size_t)cap * sizeof(*fds));
-    if (fds == NULL) return false;
-    sched->io_fds = fds;
-
-    struct oxphp_io_owner *owners =
-        realloc(sched->io_owners, (size_t)cap * sizeof(*owners));
-    if (owners == NULL) return false;
-    sched->io_owners = owners;
-
-    sched->io_cap = cap;
-    return true;
-}
-
-static uint32_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched) {
-    uint32_t need = 0;
-    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
-        if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
-            continue;
-        }
-        need += fiber->suspend_data.io.nfds;
-    }
-    if (need == 0 || !oxphp_io_reserve(sched, need)) return 0;
-
-    /* Nothing runs between the two passes, so the second sees the list the first
-     * measured and `n` cannot outrun `need`. It is still written as a bound: the
-     * loop writes into a heap buffer sized by the first pass, and the day
-     * something is inserted above, a truncated poll set is a recoverable bug
-     * while an overrun is not. */
-    uint32_t n = 0;
-    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber && n < need;
+/* Whether this scheduler has anything parked on a descriptor at all. */
+static bool oxphp_io_any_parked(const oxphp_fiber_scheduler *sched) {
+    for (const oxphp_request_fiber *fiber = sched->fibers_head; fiber;
          fiber = fiber->next) {
-        if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
-            continue;
-        }
-        for (uint32_t i = 0; i < fiber->suspend_data.io.nfds && n < need; i++) {
-            /* Muted by oxphp_io_collect_ready(): the descriptor reports a
-             * condition its waiter does not act on and will keep reporting it.
-             * Leaving it in would make every poll return at once. */
-            if (fiber->suspend_data.io.fds[i].fd < 0) continue;
-            sched->io_fds[n] = fiber->suspend_data.io.fds[i];
-            sched->io_fds[n].revents = 0;
-            sched->io_owners[n].fiber = fiber;
-            sched->io_owners[n].idx = i;
-            n++;
+        if (!fiber->completed && fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT) {
+            return true;
         }
     }
-    return n;
+    return false;
 }
 
 /* Wait up to `ns` nanoseconds for one of the descriptors this scheduler has
@@ -866,37 +804,65 @@ static uint32_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched) {
  * descriptors ends the pause the moment the peer answers. The interval is
  * unchanged, so a newly queued request waits no longer than it did before. */
 bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
-    if (ns < 0) return false;
+    if (ns < 0 || sched->epfd < 0) return false;
 
-    uint32_t nfds = oxphp_io_build_pollset(sched);
-    if (nfds == 0) return false;
+    /* Nothing parked means there is nothing to wait on and the caller must sleep
+     * its own interval. Waiting on the timer alone would put a syscall where a
+     * sleep belongs and, worse, would report a wait to a caller that is meant to
+     * hear it did not happen. */
+    if (!oxphp_io_any_parked(sched)) return false;
 
-    /* A signal cuts the pause short; unlike php_sock_stream_wait_for_data this
-     * does not retry on EINTR, because there is nothing to preserve — the
-     * caller loops, and an early return costs it one extra turn round that
-     * loop, not a spin: a profiler sampling at 100 Hz skips one pause per
-     * 10 ms. Readiness and deadlines are decided by oxphp_io_collect_ready(),
-     * never here.
+    /* The periodic timer is what bounds the wait, which lets epoll_wait() block
+     * outright rather than take the millisecond timeout it offers — a resolution
+     * that would round the worker's 100µs interval either to nothing or to ten
+     * times itself. Re-armed only when the caller asks for a different interval
+     * from the one already running, which in practice is once per thread. */
+    if (sched->timer_interval_ns != ns) {
+        struct itimerspec its = {
+            .it_interval = { .tv_sec = (time_t)(ns / 1000000000),
+                             .tv_nsec = (long)(ns % 1000000000) },
+            .it_value    = { .tv_sec = (time_t)(ns / 1000000000),
+                             .tv_nsec = (long)(ns % 1000000000) },
+        };
+        if (timerfd_settime(sched->timer_fd, 0, &its, NULL) < 0) return false;
+        sched->timer_interval_ns = ns;
+    }
+
+    /* One slot: this waits, it does not resolve. Readiness and deadlines are
+     * decided by oxphp_io_collect_ready(), and the registrations are
+     * level-triggered, so whatever fired is still there for it to find.
+     *
+     * A signal cuts the pause short; unlike php_sock_stream_wait_for_data this
+     * does not retry on EINTR, because there is nothing to preserve — the caller
+     * loops, and an early return costs it one extra turn round that loop, not a
+     * spin: a profiler sampling at 100 Hz skips one pause per 10 ms.
      *
      * Any other failure is reported as "did not wait" so the caller sleeps its
      * own interval instead. Claiming to have waited when the call failed would
      * turn a persistent error into a busy loop at full CPU with nothing in the
      * log to explain it. */
-    struct timespec timeout = {
-        .tv_sec = (time_t)(ns / 1000000000),
-        .tv_nsec = (long)(ns % 1000000000),
-    };
-    if (ppoll(sched->io_fds, nfds, &timeout, NULL) < 0 && errno != EINTR) {
+    struct epoll_event ev;
+    if (epoll_wait(sched->epfd, &ev, 1, -1) < 0 && errno != EINTR) {
         return false;
     }
+
+    /* Drain the timer whether or not it was what woke this call. Its expiry
+     * count is level-triggered too, so an undrained one makes every later wait
+     * return at once — the worker would stop sleeping and spin. Unconditional
+     * because a wait that returned a socket instead may still have left an
+     * expiry behind, and the read costs one EAGAIN when it did not. */
+    uint64_t ticks;
+    ssize_t drained = read(sched->timer_fd, &ticks, sizeof(ticks));
+    (void) drained;
     return true;
 }
 
 /* Whether an entry reports something its waiter asked for.
  *
- * poll() adds POLLERR, POLLHUP and POLLNVAL to revents whether or not they were
- * requested, and those three are the only bits it can add — everything else is
- * reported solely because the caller asked for it. POLLNVAL always ends a wait:
+ * A hangup, a socket error and an invalid descriptor are reported whether or not
+ * they were asked for — epoll and poll agree on that, and those three are the
+ * only conditions either adds; everything else appears solely because the caller
+ * asked for it. An invalid descriptor always ends a wait:
  * the descriptor is unusable and the delegated caller has to find that out for
  * itself. The other two end it only when the waiter said they would act on
  * them, because that is the rule PHP's own multiplexed wait follows — it maps a
@@ -927,52 +893,82 @@ static void oxphp_io_mute_entry(oxphp_fiber_scheduler *sched, struct pollfd *ent
 
 static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                                        oxphp_request_fiber **out, uint32_t max) {
-    /* An empty poll set means either that nothing is parked or that the set
-     * could not be grown. Neither one may skip the deadline pass below: on the
-     * allocation failure the fibers are still parked, and a fiber whose timeout
-     * has already elapsed must be released whether or not anyone managed to
-     * watch its descriptor. Only the readiness half is conditional. */
-    uint32_t nfds = oxphp_io_build_pollset(sched);
+    /* No instance means nothing has ever parked here, which may skip the
+     * readiness half but never the deadline pass: a fiber whose timeout has
+     * already elapsed must be released whether or not anyone watched its
+     * descriptor. Only the readiness half is conditional. */
+    if (sched->epfd >= 0) {
+        /* Several fibers can be ready at once and one fiber can hold more
+         * descriptors than this, so the batch can overflow. Nothing is lost: the
+         * registrations are level-triggered, so whatever did not fit is reported
+         * again on the next tick. */
+        struct epoll_event evs[OXPHP_MAX_FIBERS];
+        int n = epoll_wait(sched->epfd, evs, OXPHP_MAX_FIBERS, 0);
 
-    if (nfds > 0 && poll(sched->io_fds, nfds, 0) < 0 && errno != EINTR) {
-        /* poll() reports a closed or invalid descriptor per entry, via POLLNVAL
-         * in its revents, so this is the whole-call failure (EINVAL, ENOMEM):
-         * nothing was examined and every waiter would otherwise stay parked
-         * forever. Release them all rather than strand them.
-         *
-         * Be clear about what that costs: each released fiber goes on to its
-         * delegate, which polls its own descriptor again, usually succeeds, and
-         * blocks the worker thread for the socket's full timeout — the very
-         * thing the hook exists to avoid. The hook degrades to native
-         * behaviour, which is survivable, but it is silent otherwise, so say it
-         * once. Once for the process, not once per worker: every thread that
-         * hooks sockets would otherwise repeat the same line, and the failure
-         * is a property of the platform, not of the thread that noticed it.
-         * The exchange is what makes "once" true when two workers notice
-         * together. */
-        static atomic_bool reported = false;
-        if (!atomic_exchange(&reported, true)) {
-            php_log_err("oxphp: polling parked socket descriptors failed; hooked reads "
-                        "fall back to blocking the worker thread until it recovers");
+        if (n < 0 && errno != EINTR) {
+            /* A descriptor that has been closed or was never valid is reported
+             * per registration, so this is the whole-call failure (EFAULT,
+             * EINVAL): nothing was examined and every waiter would otherwise
+             * stay parked forever. Release them all rather than strand them, by
+             * marking each entry with conditions the interest mask always lets
+             * through — POLLNVAL alongside POLLERR, or a waiter that asked only
+             * about out-of-band data would be left behind.
+             *
+             * Be clear about what that costs: each released fiber goes on to its
+             * delegate, which waits on its own descriptor again, usually
+             * succeeds, and blocks the worker thread for the socket's full
+             * timeout — the very thing the hook exists to avoid. The hook
+             * degrades to native behaviour, which is survivable, but it is
+             * silent otherwise, so say it once. Once for the process, not once
+             * per worker: every thread that hooks sockets would otherwise repeat
+             * the same line, and the failure is a property of the platform, not
+             * of the thread that noticed it. The exchange is what makes "once"
+             * true when two workers notice together. */
+            static atomic_bool reported = false;
+            if (!atomic_exchange(&reported, true)) {
+                php_log_err("oxphp: waiting on parked socket descriptors failed; hooked "
+                            "reads fall back to blocking the worker thread until it recovers");
+            }
+            for (oxphp_request_fiber *fiber = sched->fibers_head; fiber;
+                 fiber = fiber->next) {
+                if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
+                    continue;
+                }
+                for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+                    fiber->suspend_data.io.fds[i].revents = POLLERR | POLLNVAL;
+                }
+            }
         }
-        for (uint32_t i = 0; i < nfds; i++) {
-            /* POLLNVAL alongside POLLERR because the interest mask below lets
-             * it through unconditionally: this has to release every waiter,
-             * including one that asked only about out-of-band data. */
-            sched->io_fds[i].revents = POLLERR | POLLNVAL;
-        }
-    }
 
-    /* Scatter readiness back into each fiber's own array: that is where the
-     * suspended code reads it, and a fiber waiting on several descriptors needs
-     * to know which of them fired, not merely that one did. */
-    for (uint32_t i = 0; i < nfds; i++) {
-        struct oxphp_io_owner *owner = &sched->io_owners[i];
-        struct pollfd *entry = &owner->fiber->suspend_data.io.fds[owner->idx];
-        entry->revents = sched->io_fds[i].revents;
+        /* Scatter readiness back into each fiber's own array: that is where the
+         * suspended code reads it, and a fiber waiting on several descriptors
+         * needs to know which of them fired, not merely that one did. The
+         * registration carries the fiber and the index because the event itself
+         * does not carry the descriptor. The timer's own registration is skipped
+         * — the idle backoff is what consumes that one. */
+        for (int i = 0; i < n; i++) {
+            if (evs[i].data.ptr == &oxphp_io_timer_marker) continue;
 
-        if (entry->revents != 0 && !oxphp_io_entry_ready(entry)) {
-            oxphp_io_mute_entry(sched, entry);
+            struct oxphp_io_owner *owner = (struct oxphp_io_owner *) evs[i].data.ptr;
+            oxphp_request_fiber *fiber = owner->fiber;
+            if (fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) continue;
+
+            struct pollfd *entry = &fiber->suspend_data.io.fds[owner->idx];
+            /* Already muted, and only reachable if the removal did not take.
+             * Negating twice would restore the descriptor and un-mute it. */
+            if (entry->fd < 0) continue;
+
+            short revents = 0;
+            if (evs[i].events & EPOLLIN)  revents |= POLLIN;
+            if (evs[i].events & EPOLLOUT) revents |= POLLOUT;
+            if (evs[i].events & EPOLLPRI) revents |= POLLPRI;
+            if (evs[i].events & EPOLLERR) revents |= POLLERR;
+            if (evs[i].events & EPOLLHUP) revents |= POLLHUP;
+            entry->revents = revents;
+
+            if (revents != 0 && !oxphp_io_entry_ready(entry)) {
+                oxphp_io_mute_entry(sched, entry);
+            }
         }
     }
 
@@ -1161,7 +1157,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
 
     /* 3b. Resume fibers whose descriptor became ready (or whose read/write
      * deadline elapsed). Hooked socket I/O parks a request fiber here instead
-     * of blocking the worker thread inside poll(). */
+     * of blocking the worker thread inside a wait of its own. */
     {
         oxphp_request_fiber *ready[OXPHP_MAX_FIBERS];
         uint32_t count = oxphp_io_collect_ready(sched, ready, OXPHP_MAX_FIBERS);

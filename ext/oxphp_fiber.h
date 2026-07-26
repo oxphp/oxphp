@@ -265,14 +265,6 @@ typedef struct _oxphp_fiber_scheduler {
     int consecutive_errors;
     uint64_t total_requests_done;
 
-    /* Aggregated poll set, grown on demand and reused across ticks. Owned by
-     * the scheduler because with several descriptors per fiber the worst case
-     * (OXPHP_MAX_FIBERS * OXPHP_MAX_WAIT_FDS) is far too large for a stack
-     * frame. Freed by oxphp_scheduler_destroy(). */
-    struct pollfd *io_fds;
-    struct oxphp_io_owner *io_owners;
-    uint32_t io_cap;
-
     /* Readiness backend for descriptor waits: one epoll instance per scheduler,
      * which is one per thread since both schedulers are thread-local, plus a
      * periodic timer registered inside it so an idle wait can be bounded

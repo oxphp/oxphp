@@ -3254,9 +3254,9 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
 
 /* Bridge-shaped adapter for the async driver's idle backoff (see
  * oxphp_bridge_set_async_io_backoff_fn). The budget is clamped rather than
- * cast: a value that overflowed a signed long would land in ppoll() as a
- * negative tv_sec, which fails immediately and turns the driver's backoff into
- * a spin. One second is far beyond any sensible idle interval. */
+ * cast: a value that overflowed a signed long would arm the backoff's timer
+ * with a negative interval, which fails immediately and turns the driver's
+ * backoff into a spin. One second is far beyond any sensible idle interval. */
 static int oxphp_async_io_backoff_bridge(uint64_t ns) {
     const uint64_t max_backoff_ns = 1000000000ULL;
     if (ns > max_backoff_ns) ns = max_backoff_ns;
