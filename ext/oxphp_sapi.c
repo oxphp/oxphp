@@ -1300,7 +1300,13 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
  *
  * timeout_ns < 0 waits indefinitely. Returns 1 when a descriptor is ready,
  * 0 when not called from a fiber (or the set is unusable), -1 when the fiber
- * was cancelled, and -2 when the deadline elapsed first. */
+ * was cancelled, and -2 when the deadline elapsed first.
+ *
+ * A 0 means the caller must do the wait itself, blocking its thread — so the
+ * set being unusable has to stay a caller's bug rather than a size a real
+ * program reaches: OXPHP_MAX_WAIT_FDS is set at the ceiling PHP's own
+ * multiplexed wait enforces, and a wider set is one PHP would have rejected
+ * before ever calling a hook. */
 static int oxphp_fiber_io_wait(struct pollfd *fds, uint32_t nfds, int64_t timeout_ns)
 {
     if (oxphp_current_fiber == NULL) return 0;

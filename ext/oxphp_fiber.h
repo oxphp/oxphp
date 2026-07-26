@@ -10,10 +10,17 @@
 /* Maximum concurrent fibers per worker thread. */
 #define OXPHP_MAX_FIBERS 256
 
-/* Maximum descriptors one fiber may wait on in a single suspension. Bounds the
- * stack array every caller of oxphp_fiber_io_wait() builds, and the width of
- * the aggregated poll set the scheduler assembles from all parked fibers. */
-#define OXPHP_MAX_WAIT_FDS 64
+/* Maximum descriptors one fiber may wait on in a single suspension. Sized after
+ * the ceiling PHP itself imposes on a multiplexed wait — its select-based path
+ * refuses descriptors at or past FD_SETSIZE, which is 1024 on Linux — so that a
+ * wait PHP would have accepted is never turned away here. A caller waiting on
+ * that many does not put them on its stack; the array only has to outlive the
+ * suspension, so a heap buffer freed after the wait is equally valid.
+ *
+ * Deliberately not stored inside the fiber: an inline array of this width would
+ * cost 8 KiB per fiber, 2 MiB per worker thread, to spare a pointer whose
+ * lifetime is already pinned by the suspension. */
+#define OXPHP_MAX_WAIT_FDS 1024
 
 /* ─── Suspend Reasons ──────────────────────────────────── */
 
