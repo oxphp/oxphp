@@ -60,7 +60,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 | `500.html` | Internal Server Error | An uncaught or fatal PHP error |
 | `503.html` | Service Unavailable | Graceful draining during shutdown |
 | `504.html` | Gateway Timeout | The request exceeded `REQUEST_TIMEOUT_SECONDS` |
-| `529.html` | Site is overloaded | The request queue is full at `QUEUE_CAPACITY` (`Retry-After` is preserved) |
+| `529.html` | Site is overloaded | The request spent its `QUEUE_WAIT_TIMEOUT_MS` budget without reaching a worker — waiting for a queue slot, or waiting in the queue — or `QUEUE_MAX_WAITING` requests were already waiting (`Retry-After` is preserved) |
 
 Any other 4xx or 5xx works the same way — add a `403.html`, `451.html`, and so on for codes your PHP application returns, or for a custom `PHP_DENY_FALLBACK` status. The one exception is the rate limiter's `429`, which is produced before this handler runs and always uses its default body (see **Notes** below).
 

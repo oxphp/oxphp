@@ -26,7 +26,7 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
-| `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
+| `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
 ## PHP Workers
@@ -36,7 +36,21 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `EXECUTOR` | `sapi` | PHP executor backend. `sapi` for PHP execution, `stub` for benchmarking without PHP |
 | `PHP_WORKERS` | CPU / 2 (min 1) | Worker pool size. `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker stays idle before being retired (dynamic mode only) |
-| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Returns 529 when full. For dynamic pools (`MIN:MAX`), initial workers = minimum count |
+| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Requests arriving at a full queue wait for a slot (see `QUEUE_WAIT_TIMEOUT_MS`). For dynamic pools (`MIN:MAX`), initial workers = minimum count. `0` = auto |
+| `QUEUE_WAIT_TIMEOUT_MS` | `1000` | How long a request may spend waiting for a PHP worker before it is rejected with 529. One deadline, stamped on arrival, covering both waits a request can face: for a slot in the queue, and inside the queue for a worker. A request reached by a worker after its deadline has passed is refused at pickup rather than executed, so the budget bounds the whole wait and not just its admission half — it does not bound how long the handler then runs. At most `QUEUE_MAX_WAITING` requests wait at once; past that, requests are rejected immediately. `0` = reject immediately whenever the queue is full. Lower it, or set `0`, when the application calls back into this same server over HTTP — the inner call cannot be admitted until the outer one releases its worker, so the wait is spent for nothing — or when a load balancer in front has a shorter timeout of its own. A client that goes away mid-wait gives its place back immediately, so a balancer that times out and retries does not fill the waiting set with attempts it has already abandoned — but only where the disconnect is reported at all. An HTTP/1.1 client that closes mid-request is invisible to the server until it next writes, and there the abandoned attempt does hold its place for the rest of the budget; keeping the budget below the balancer's timeout is what avoids that |
+| `QUEUE_MAX_WAITING` | Initial workers × 128, capped at `MAX_CONNECTIONS` / 2 | Maximum requests parked waiting for a queue slot at once. Past it, requests are rejected immediately instead of waiting. Each waiter holds a connection and a fully buffered request body for as long as it waits, so this is a bound on resources held, not on waits that will pay off; the `MAX_CONNECTIONS` / 2 cap keeps headroom for the server to accept and refuse under sustained overload. Size it from your own handler latency — see below. `0` = auto, never below 1 |
+
+### Sizing the Waiting Set
+
+How many requests can *usefully* wait follows from how fast the pool retires them. With `W` workers and a handler that takes `T` milliseconds, the pool admits `W / T` requests per millisecond, so a budget of `B` milliseconds can let in about `W × B / T` waiters. Everything past that waits the whole budget and is refused anyway, holding a connection and a buffered request body the entire time.
+
+The default cannot compute this — service rate is not known at startup — so it is deliberately generous. That fits fast handlers, where the pool drains a deep backlog well inside the budget, and is far too large for slow ones: with 8 workers, the default 1 s budget and a 200 ms handler, only about 40 requests can be admitted in time while the default parks up to 1024.
+
+```bash
+QUEUE_MAX_WAITING=40
+```
+
+Setting it near `W × B / T` turns the surplus into an immediate 529 rather than a 529 a second later. Shortening `QUEUE_WAIT_TIMEOUT_MS` achieves the same by the other term — the two trade against each other, and on a slow handler the smaller budget is usually the better lever, because it also bounds how long a client waits for the refusal.
 
 ### Static vs Dynamic Workers
 
@@ -392,6 +406,8 @@ curl -s http://localhost:9090/config | jq .
   "php_workers": "8",
   "tokio_workers": 4,
   "queue_capacity": 1024,
+  "queue_wait_timeout_ms": 1000,
+  "queue_max_waiting": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,

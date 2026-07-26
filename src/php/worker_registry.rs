@@ -138,6 +138,35 @@ pub fn end_request(worker_id: usize) {
     slot.heartbeat.request_start_us.store(0, Ordering::Relaxed);
 }
 
+/// Worker threads with at least one request in flight — the live source for
+/// `oxphp_busy_workers`, and by subtraction for `oxphp_workers_idle`.
+///
+/// Read from the registry rather than maintained as its own counter, because
+/// the registry is the only place that already knows when a *worker* has the
+/// request: `begin_request` runs once the worker owns it (past the 499
+/// fast path in traditional mode, at pickup in worker mode) and `end_request`
+/// at its terminal cleanup, in both modes. Counting at dispatch instead — the
+/// obvious place, since that is where the request leaves the connection task —
+/// counts everything sitting in the queue as well, which is how a gauge named
+/// for worker threads came to read in the hundreds against a pool of seven.
+///
+/// Slots, not requests: worker mode multiplexes many request fibers onto one
+/// thread, so summing `active_requests` would again exceed the thread count.
+/// Deriving it at read time also means there is no decrement to miss.
+///
+/// One inaccuracy is inherited from the counter: a worker that dies abnormally
+/// leaves `active_requests` positive until the health monitor recycles its
+/// slot, so the gauge can read one high for that window. Bounded by the
+/// monitor's interval and self-healing, unlike a missed decrement.
+pub fn busy_workers() -> usize {
+    WORKERS.get().map_or(0, |workers| {
+        workers
+            .iter()
+            .filter(|slot| slot.active_requests.load(Ordering::Relaxed) > 0)
+            .count()
+    })
+}
+
 /// Raise Zend's `vm_interrupt` at `interrupt_addr` (a worker's
 /// `&EG(vm_interrupt)` byte, published in its slot). No-op on null.
 fn raise_interrupt(interrupt_addr: *mut u8) {

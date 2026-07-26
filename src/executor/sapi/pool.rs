@@ -13,7 +13,7 @@ use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::sapi::WorkerIncomingRequest;
 
 use super::traditional::{spawn_worker, WorkerLoopMode};
-use super::worker_mode::{spawn_worker_mode, WorkerModeConfig};
+use super::worker_mode::{spawn_worker_mode, WorkerModeConfig, WorkerModeMetrics};
 
 /// Alias for the channel message type used in both traditional and worker modes.
 pub(super) type WorkerRequest = WorkerIncomingRequest;
@@ -73,24 +73,37 @@ pub(super) struct SpawnArgs {
 pub(super) enum SpawnStrategy {
     Traditional {
         loop_mode: WorkerLoopMode,
+        /// Worker threads answer a request whose queue budget ran out before
+        /// they reached it, and that refusal has to be counted where every
+        /// other one is.
+        server_metrics: Arc<Metrics>,
     },
     WorkerMode {
         config: Arc<WorkerModeConfig>,
         metrics: Arc<WorkerMetrics>,
+        server_metrics: Arc<Metrics>,
     },
 }
 
 impl SpawnStrategy {
     pub(super) fn spawn(&self, args: SpawnArgs) -> std::thread::JoinHandle<()> {
         match self {
-            Self::Traditional { loop_mode } => spawn_worker(
+            Self::Traditional {
+                loop_mode,
+                server_metrics,
+            } => spawn_worker(
                 args.id,
                 args.rx,
                 args.shutdown,
                 args.last_active,
                 *loop_mode,
+                Arc::clone(server_metrics),
             ),
-            Self::WorkerMode { config, metrics } => {
+            Self::WorkerMode {
+                config,
+                metrics,
+                server_metrics,
+            } => {
                 let slot = args.id % metrics.slots.len();
                 let stats = Arc::clone(&metrics.slots[slot]);
                 spawn_worker_mode(
@@ -99,8 +112,11 @@ impl SpawnStrategy {
                     args.shutdown,
                     args.last_active,
                     config.clone(),
-                    stats,
-                    Arc::clone(metrics),
+                    WorkerModeMetrics {
+                        stats,
+                        worker: Arc::clone(metrics),
+                        server: Arc::clone(server_metrics),
+                    },
                 )
             }
         }

@@ -141,6 +141,30 @@ for profile in "${profiles[@]}"; do
     stop_profile "$profile"
 done
 
+# ── Standalone concurrency checks ────────────────────────────
+# Admission control can only be observed with concurrent requests: a 529 is the
+# answer to a *different* request than the one under test, and the suite runner
+# issues one request at a time. These ride on the overflow profile's image.
+if [[ " ${profiles[*]} " == *" overflow "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
+    overload_image="tests-oxphp-overflow:latest"
+    if docker image inspect "$overload_image" >/dev/null 2>&1; then
+        log_info "━━━ Standalone: queue admission control ━━━"
+        emitted_before=$(wc -l < "$JSONL_FILE")
+        # A failing check emits its own JSONL and turns the run red on its own,
+        # so a non-zero exit is expected and not itself news. What has to be
+        # caught is a script that dies before emitting anything: the report is
+        # assembled from JSONL, so with `|| true` alone that leaves a green run
+        # with no admission coverage in it at all.
+        "${SCRIPT_DIR}/overload_529.sh" "$overload_image" --jsonl >> "$JSONL_FILE" || true
+        if [ "$(wc -l < "$JSONL_FILE")" -eq "$emitted_before" ]; then
+            log_error "Admission checks produced no results — recording as a failure"
+            printf '%s\n' '{"test": "admission checks produced results", "group": "admission", "pass": false, "assertions": [], "error": "overload_529.sh emitted nothing", "meta": {}, "profile": "overflow"}' >> "$JSONL_FILE"
+        fi
+    else
+        log_error "Skipping admission checks: image $overload_image not found (build the overflow profile first)"
+    fi
+fi
+
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 

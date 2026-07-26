@@ -163,6 +163,16 @@ pub struct ScriptResponse {
     /// Used by the dispatch side to bump
     /// `oxphp_request_cancelled_total{reason}`.
     pub cancel_reason: u8,
+    /// Set when this response is an admission refusal rather than a script's
+    /// output — the request never reached PHP.
+    ///
+    /// Mirrored to the dispatch side like `cancel_reason`, because a refusal
+    /// decided on a worker thread (a request reached past its queue deadline)
+    /// is otherwise indistinguishable from a 529 the application returned. It
+    /// keeps refusals out of `oxphp_queue_wait_us`: their wait is by definition
+    /// the one that ran out, so recording it would leave the histogram
+    /// measuring failures alongside the queueing it is named for.
+    pub refused: bool,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -190,6 +200,7 @@ impl Default for ScriptResponse {
             errors: Vec::new(),
             profile_tree: None,
             cancel_reason: 0,
+            refused: false,
         }
     }
 }

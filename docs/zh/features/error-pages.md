@@ -60,7 +60,7 @@ OxPHP 会替换每个到达响应流水线的 4xx 或 5xx 响应的正文。以�
 | `500.html` | Internal Server Error | 未捕获的或致命的 PHP 错误 |
 | `503.html` | Service Unavailable | 关闭期间的平滑排空（drain） |
 | `504.html` | Gateway Timeout | 请求超过 `REQUEST_TIMEOUT_SECONDS` |
-| `529.html` | Site is overloaded | 请求队列在 `QUEUE_CAPACITY` 处已满（保留 `Retry-After`） |
+| `529.html` | Site is overloaded | 请求耗尽了 `QUEUE_WAIT_TIMEOUT_MS` 预算仍未抵达工作进程——无论是在等待队列槽位还是已在队列中——或已有 `QUEUE_MAX_WAITING` 个请求在等待（保留 `Retry-After`） |
 
 任何其他 4xx 或 5xx 也以相同方式工作——为你的 PHP 应用返回的状态码或自定义的 `PHP_DENY_FALLBACK` 状态添加 `403.html`、`451.html` 等。唯一的例外是速率限制器的 `429`，它在此处理器运行之前生成，始终使用其默认正文（见下方「注意事项」）。
 

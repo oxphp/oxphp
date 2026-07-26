@@ -55,8 +55,9 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_active_connections` | gauge | Currently open TCP connections on the main port |
-| `oxphp_pending_requests` | gauge | Requests currently dispatched to PHP workers (queued and in-flight) |
+| `oxphp_pending_requests` | gauge | PHP requests accepted but not yet answered — waiting for a queue slot, queued, or executing. Only requests routed to PHP: a static file, a 404 or a denied path is answered without the queue and never appears here |
 | `oxphp_dropped_requests_total` | counter | Requests where the PHP worker failed after accepting the request |
+| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first three are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those three specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
 
 ## Worker Pool Metrics
 
@@ -65,8 +66,8 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_workers_current` | gauge | Current number of PHP worker threads |
 | `oxphp_workers_min` | gauge | Minimum worker count (equals current count in static mode) |
 | `oxphp_workers_max` | gauge | Maximum worker count (equals current count in static mode) |
-| `oxphp_workers_idle` | gauge | Workers not currently processing a request |
-| `oxphp_busy_workers` | gauge | Workers currently processing a request |
+| `oxphp_workers_idle` | gauge | Worker threads with no request in flight, computed as `workers_current - busy_workers` |
+| `oxphp_busy_workers` | gauge | Worker threads currently executing at least one request; never exceeds `oxphp_workers_current`. Counts threads, not requests — in worker mode one thread multiplexes many request fibers and still counts once. Requests waiting for admission or sitting in the queue are not counted; those appear in `oxphp_pending_requests` |
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired due to idle timeout (dynamic mode only) |
 
@@ -86,9 +87,11 @@ Per-worker observability emitted by the worker supervisor. Each series carries a
 |--------|------|-------------|
 | `oxphp_queue_wait_us` | histogram | Time a request waits in the queue before a worker picks it up, in microseconds |
 
-Bucket boundaries (microseconds): `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `50000`, `+Inf`.
+Bucket boundaries (microseconds): `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `50000`, `100000`, `250000`, `500000`, `1000000`, `+Inf`.
 
-High queue wait times indicate that all workers are busy and you should increase `PHP_WORKERS` or `QUEUE_CAPACITY`.
+This measures time spent waiting — for admission and then in the queue — with the script's own execution time subtracted, so it answers "how long before a worker picked this up" rather than "how long did the request take". Requests refused with 529 never queued and are not recorded here; count those with `oxphp_admission_refused_total`.
+
+High queue wait times indicate that all workers are busy and you should increase `PHP_WORKERS`. The range reaches one second, matching the default `QUEUE_WAIT_TIMEOUT_MS`, so a request that spent most of its wait budget before running is quantified rather than lumped into `+Inf`. Nothing that gets served waits longer than the budget — past it the request is refused instead — so raising `QUEUE_WAIT_TIMEOUT_MS` is the one setting that puts waits back into `+Inf`.
 
 ## Rate Limiting Metrics
 
@@ -194,6 +197,8 @@ rate(oxphp_responses_by_status_total{status="5xx"}[5m])
 ```text
 oxphp_busy_workers / oxphp_workers_current
 ```
+
+This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
 
 **Queue saturation (drop rate per second):**
 

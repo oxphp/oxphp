@@ -510,52 +510,87 @@ async fn dispatch_request(
             };
 
             let queue_start = Instant::now();
-            server.metrics.request_queued();
-            let execute_result = server.executor.execute(script_request);
+            // Guard, not a matching decrement: it discounts the request from
+            // `pending_requests` however this scope ends, including the client
+            // vanishing mid-await and taking the whole future with it.
+            let pending = server.metrics.request_queued();
+            // `Admitting` means the queue was full and the request is waiting
+            // for a slot. `Err(())` below is the worker dropping the response
+            // channel, never a shed — a shed arrives as an ordinary response.
+            //
+            // `busy_workers` is deliberately not claimed here. Nothing this
+            // scope can observe distinguishes "queued" from "running", and a
+            // gauge named for worker threads must not count either the waiting
+            // set or the channel backlog; it is derived from the worker
+            // registry at scrape time instead.
+            let mut rejected = false;
+            let settled = match server.executor.execute(script_request) {
+                ExecuteResult::Immediate(resp) => Ok(resp),
+                ExecuteResult::Rejected(resp) => {
+                    rejected = true;
+                    Ok(resp)
+                }
+                ExecuteResult::Deferred(rx) => rx.await.map_err(|_| ()),
+                ExecuteResult::Admitting(admission) => match admission.await {
+                    Ok(rx) => rx.await.map_err(|_| ()),
+                    Err(resp) => {
+                        rejected = true;
+                        Ok(resp)
+                    }
+                },
+            };
 
-            let (mut script_response, exec_data) = match execute_result {
-                ExecuteResult::Immediate(resp) => {
-                    server.metrics.request_dequeued();
-                    let queue_wait_us = queue_start.elapsed().as_micros() as u64;
-                    server.metrics.record_queue_wait(queue_wait_us);
+            let (mut script_response, exec_data) = match settled {
+                Ok(resp) => {
+                    drop(pending);
                     let php_exec_us = resp.execution_time_us;
+                    // Everything between dispatch and the response, minus the
+                    // time PHP spent running: waiting for admission plus
+                    // waiting in the queue. The elapsed time on its own is not
+                    // a queue wait — it also carries the script's execution
+                    // time, so an idle server reported its own PHP latency as
+                    // queueing and the metric could not answer the question it
+                    // is named for.
+                    let queue_wait_us =
+                        (queue_start.elapsed().as_micros() as u64).saturating_sub(php_exec_us);
+                    // A refused request never queued at all: the fail-fast shed
+                    // would contribute a zero and the budget-expired shed the
+                    // whole budget, either way describing refusals rather than
+                    // queueing. `oxphp_admission_refused_total` counts those instead.
+                    // This has to hold for the trace attribute below as well as
+                    // the histogram — a span claiming a second of queue wait for
+                    // a request that never entered the queue is the same lie,
+                    // told where it is harder to cross-check.
+                    // `resp.refused` covers the refusals a worker decides —
+                    // a request reached past its queue deadline comes back
+                    // through the ordinary response channel, so the flag on
+                    // the executor side never sees it.
+                    let queue_wait_us = (!rejected && !resp.refused).then_some(queue_wait_us);
+                    if let Some(us) = queue_wait_us {
+                        server.metrics.record_queue_wait(us);
+                    }
                     (
                         resp,
                         PhpExecData {
-                            queue_wait_us: Some(queue_wait_us),
+                            queue_wait_us,
                             php_exec_us: Some(php_exec_us),
                             ..PhpExecData::default()
                         },
                     )
                 }
-                ExecuteResult::Deferred(rx) => match rx.await {
-                    Ok(resp) => {
-                        server.metrics.request_dequeued();
-                        let queue_wait_us = queue_start.elapsed().as_micros() as u64;
-                        server.metrics.record_queue_wait(queue_wait_us);
-                        let php_exec_us = resp.execution_time_us;
-                        (
-                            resp,
-                            PhpExecData {
-                                queue_wait_us: Some(queue_wait_us),
-                                php_exec_us: Some(php_exec_us),
-                                ..PhpExecData::default()
-                            },
-                        )
-                    }
-                    Err(_) => {
-                        server.metrics.request_dropped();
-                        return Ok((
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                                .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
-                                .unwrap(),
-                            request_body_size,
-                            PhpExecData::default(),
-                        ));
-                    }
-                },
+                Err(()) => {
+                    drop(pending);
+                    server.metrics.request_dropped();
+                    return Ok((
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(full_body(Bytes::from_static(b"500 PHP Worker Error")))
+                            .unwrap(),
+                        request_body_size,
+                        PhpExecData::default(),
+                    ));
+                }
             };
 
             // Bump the per-reason cancellation counter once per request,

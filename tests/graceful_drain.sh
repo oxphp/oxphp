@@ -49,12 +49,19 @@ trap cleanup EXIT
 
 start_container() {
 	# start_container <name> <drain_timeout_seconds>
+	#
+	# `QUEUE_WAIT_TIMEOUT_MS` is raised well past any drain window on purpose:
+	# these scenarios park requests behind a handler that monopolises the
+	# single worker for seconds, and at the default budget admission would
+	# answer them 529 before the drain ever reached them. Admission is covered
+	# by tests/overload_529.sh; here it has to stay out of the way.
 	docker run -d --name "$1" \
 		-e WORKER_FILE=/var/www/html/worker_drain.php \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS=1 \
 		-e ASYNC_WORKERS=2 \
 		-e DRAIN_TIMEOUT_SECONDS="$2" \
+		-e QUEUE_WAIT_TIMEOUT_MS=120000 \
 		-e LOG_LEVEL=info \
 		-p ${PORT}:80 \
 		-v "$FIX:/var/www/html:ro" \

@@ -1,6 +1,7 @@
 # Queue overflow mode: PHP_WORKERS=1, QUEUE_CAPACITY=1.
 # A single PHP worker with a queue capacity of 1 causes rapid queue saturation.
-# Requests that cannot be queued receive 529 Too Many Requests.
+# Requests arriving at a full queue wait up to QUEUE_WAIT_TIMEOUT_MS for a slot
+# and receive 529 Site is Overloaded only if none frees up in time.
 # Used to test backpressure enforcement and overflow error handling.
 #
 # Standalone usage:
@@ -25,6 +26,9 @@ services:
       INTERNAL_ADDR: 0.0.0.0:9090
       PHP_WORKERS: 1
       QUEUE_CAPACITY: 1
+      # Pinned rather than left to the default so this profile keeps testing
+      # the same thing if the default ever moves.
+      QUEUE_WAIT_TIMEOUT_MS: 1000
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

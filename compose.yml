@@ -66,8 +66,21 @@ services:
       # - PHP_WORKERS_IDLE_SECONDS=30
 
       # Bounded channel capacity between HTTP and PHP workers.
-      # Requests beyond this limit get 529. Default: PHP_WORKERS * 128.
+      # 0 or unset = auto (PHP_WORKERS * 128).
       # - QUEUE_CAPACITY=0
+
+      # How long a request may wait for a PHP worker before it gets a 529.
+      # One deadline covering both waits: for a queue slot, and in the queue
+      # for a worker. A request a worker reaches after its deadline is refused
+      # rather than executed.
+      # 0 = reject immediately when the queue is full, no deadline. Default: 1000.
+      # - QUEUE_WAIT_TIMEOUT_MS=1000
+
+      # How many requests may wait for a slot at once. Past this they are
+      # rejected without waiting, so a sustained overload cannot take every
+      # connection permit and leave the server unable to accept at all.
+      # 0 or unset = auto (PHP_WORKERS * 128, capped at MAX_CONNECTIONS / 2).
+      # - QUEUE_MAX_WAITING=0
 
       # ── Connections ───────────────────────────────────────────────
 

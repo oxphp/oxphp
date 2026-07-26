@@ -514,7 +514,7 @@ async fn async_main(
     let server = Arc::new(server::Server::new(
         &config.server,
         &config.h2,
-        executor,
+        Arc::clone(&executor),
         Arc::clone(&metrics),
         dispatcher,
         tls_acceptor,
@@ -625,6 +625,12 @@ async fn async_main(
                     remaining_connections = remaining,
                     "Drain timeout reached, cancelling in-flight requests"
                 );
+                // Requests still waiting for a queue slot are in no worker, so
+                // the sweep below cannot reach them. Close the gate first so
+                // they are answered (503) inside the two-second unwind beat
+                // instead of losing their connection when the runtime is
+                // dropped.
+                executor.close_admission();
                 oxphp::php::worker_registry::hard_cancel_all(
                     oxphp::php::worker_registry::CancelReason::Shutdown,
                 );
