@@ -638,7 +638,10 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     else sched->fibers_tail = fiber->prev;
     sched->fiber_count--;
 
-    /* Return to free list */
+    /* Return to free list. Clearing the suspension on the way out is what makes
+     * "a fiber outside a live wait holds no descriptor pointer" true of every
+     * fiber rather than only of the ones that reach the reuse path. */
+    oxphp_fiber_clear_suspend(fiber);
     fiber->next = sched->free_list;
     sched->free_list = fiber;
 }
@@ -664,8 +667,12 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
  * socket errors itself, exactly as it would without a hook. */
 
 /* Grow the scheduler's aggregated poll set to hold at least `need` entries.
- * Returns false when the allocation fails, which the callers treat as "nothing
- * to wait on" — degrading to the blocking native path rather than crashing. */
+ * Returns false when the allocation fails; the poll set is then reported empty
+ * for this tick rather than the process dying. What that costs each caller
+ * differs: the idle backoff sleeps its own interval instead of sleeping on the
+ * sockets, and the readiness sweep skips readiness but still runs its deadline
+ * pass, so a parked fiber can still time out. Both recover on the first tick
+ * the allocation succeeds. */
 static bool oxphp_io_reserve(oxphp_fiber_scheduler *sched, uint32_t need) {
     if (need <= sched->io_cap) return true;
 
@@ -695,12 +702,18 @@ static uint32_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched) {
     }
     if (need == 0 || !oxphp_io_reserve(sched, need)) return 0;
 
+    /* Nothing runs between the two passes, so the second sees the list the first
+     * measured and `n` cannot outrun `need`. It is still written as a bound: the
+     * loop writes into a heap buffer sized by the first pass, and the day
+     * something is inserted above, a truncated poll set is a recoverable bug
+     * while an overrun is not. */
     uint32_t n = 0;
-    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber && n < need;
+         fiber = fiber->next) {
         if (fiber->completed || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) {
             continue;
         }
-        for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+        for (uint32_t i = 0; i < fiber->suspend_data.io.nfds && n < need; i++) {
             sched->io_fds[n] = fiber->suspend_data.io.fds[i];
             sched->io_fds[n].revents = 0;
             sched->io_owners[n].fiber = fiber;
@@ -749,10 +762,14 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
 
 static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                                        oxphp_request_fiber **out, uint32_t max) {
+    /* An empty poll set means either that nothing is parked or that the set
+     * could not be grown. Neither one may skip the deadline pass below: on the
+     * allocation failure the fibers are still parked, and a fiber whose timeout
+     * has already elapsed must be released whether or not anyone managed to
+     * watch its descriptor. Only the readiness half is conditional. */
     uint32_t nfds = oxphp_io_build_pollset(sched);
-    if (nfds == 0) return 0;
 
-    if (poll(sched->io_fds, nfds, 0) < 0 && errno != EINTR) {
+    if (nfds > 0 && poll(sched->io_fds, nfds, 0) < 0 && errno != EINTR) {
         /* poll() reports a closed or invalid descriptor per entry, via POLLNVAL
          * in its revents, so this is the whole-call failure (EINVAL, ENOMEM):
          * nothing was examined and every waiter would otherwise stay parked
@@ -1487,7 +1504,10 @@ void oxphp_async_sched_release(int64_t fiber_id) {
     sched->fiber_count--;
 
     /* Recycle: the looping coroutine keeps the C stack alive for reuse.
-     * zend_fiber_destroy_context only runs in oxphp_scheduler_destroy. */
+     * zend_fiber_destroy_context only runs in oxphp_scheduler_destroy. Clear the
+     * suspension first, so no fiber sits on the free list still describing a
+     * descriptor wait. */
+    oxphp_fiber_clear_suspend(fiber);
     fiber->next = sched->free_list;
     sched->free_list = fiber;
 }
