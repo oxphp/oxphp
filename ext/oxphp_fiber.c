@@ -662,9 +662,11 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
  *
  * Readiness is checked from the tick rather than driven by an event loop for
  * the same reason sleep timers are: the worker already runs a tick loop, and
- * a suspended fiber is only resumable from the thread that owns it. POLLHUP
- * and POLLERR count as ready — the delegated caller has to observe EOF and
- * socket errors itself, exactly as it would without a hook. */
+ * a suspended fiber is only resumable from the thread that owns it. POLLHUP and
+ * POLLERR count as ready for a waiter that asked for them — the delegated
+ * caller has to observe EOF and socket errors itself, exactly as it would
+ * without a hook — and are muted for one that did not; see
+ * oxphp_io_entry_ready(). */
 
 /* Grow the scheduler's aggregated poll set to hold at least `need` entries.
  * Returns false when the allocation fails; the poll set is then reported empty
@@ -679,6 +681,11 @@ static bool oxphp_io_reserve(oxphp_fiber_scheduler *sched, uint32_t need) {
     uint32_t cap = sched->io_cap ? sched->io_cap : 16;
     while (cap < need) cap *= 2;
 
+    /* Each array keeps whatever growth it managed. io_cap is only raised once
+     * both succeeded, so a half-grown pair reports the smaller capacity and
+     * every index the callers use stays inside both allocations; the next
+     * attempt starts from the larger buffer and has one less allocation to
+     * make. */
     struct pollfd *fds = realloc(sched->io_fds, (size_t)cap * sizeof(*fds));
     if (fds == NULL) return false;
     sched->io_fds = fds;
@@ -714,6 +721,10 @@ static uint32_t oxphp_io_build_pollset(oxphp_fiber_scheduler *sched) {
             continue;
         }
         for (uint32_t i = 0; i < fiber->suspend_data.io.nfds && n < need; i++) {
+            /* Muted by oxphp_io_collect_ready(): the descriptor reports a
+             * condition its waiter does not act on and will keep reporting it.
+             * Leaving it in would make every poll return at once. */
+            if (fiber->suspend_data.io.fds[i].fd < 0) continue;
             sched->io_fds[n] = fiber->suspend_data.io.fds[i];
             sched->io_fds[n].revents = 0;
             sched->io_owners[n].fiber = fiber;
@@ -760,6 +771,22 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
     return true;
 }
 
+/* Whether an entry reports something its waiter asked for.
+ *
+ * poll() adds POLLERR, POLLHUP and POLLNVAL to revents whether or not they were
+ * requested, and those three are the only bits it can add — everything else is
+ * reported solely because the caller asked for it. POLLNVAL always ends a wait:
+ * the descriptor is unusable and the delegated caller has to find that out for
+ * itself. The other two end it only when the waiter said they would act on
+ * them, because that is the rule PHP's own multiplexed wait follows — it maps a
+ * hangup onto the read set alone and a socket error onto the read and write
+ * sets, never onto the exception set. A waiter released on a bit its delegate
+ * then declines to report would call the delegate, be told nothing happened,
+ * and park again, which for a hangup is a busy loop with no end. */
+static inline bool oxphp_io_entry_ready(const struct pollfd *pfd) {
+    return (pfd->revents & (pfd->events | POLLNVAL)) != 0;
+}
+
 static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                                        oxphp_request_fiber **out, uint32_t max) {
     /* An empty poll set means either that nothing is parked or that the set
@@ -791,7 +818,10 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                         "fall back to blocking the worker thread until it recovers");
         }
         for (uint32_t i = 0; i < nfds; i++) {
-            sched->io_fds[i].revents = POLLERR;
+            /* POLLNVAL alongside POLLERR because the interest mask below lets
+             * it through unconditionally: this has to release every waiter,
+             * including one that asked only about out-of-band data. */
+            sched->io_fds[i].revents = POLLERR | POLLNVAL;
         }
     }
 
@@ -800,7 +830,21 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
      * to know which of them fired, not merely that one did. */
     for (uint32_t i = 0; i < nfds; i++) {
         struct oxphp_io_owner *owner = &sched->io_owners[i];
-        owner->fiber->suspend_data.io.fds[owner->idx].revents = sched->io_fds[i].revents;
+        struct pollfd *entry = &owner->fiber->suspend_data.io.fds[owner->idx];
+        entry->revents = sched->io_fds[i].revents;
+
+        /* Reported something, none of it wanted. What poll() adds uninvited is
+         * POLLERR or POLLHUP, and neither ever clears — the descriptor is done.
+         * Stop watching this entry for the rest of the suspension: left in, it
+         * would return every poll instantly and the idle backoff would never
+         * sleep again, at full CPU, for as long as the waiter holds on.
+         * Anything the waiter did ask for could only arrive on a descriptor
+         * still capable of delivering it, so muting loses nothing. Negated
+         * rather than overwritten so the descriptor stays recoverable from the
+         * entry; poll() ignores a negative entry and zeroes its revents. */
+        if (entry->revents != 0 && !oxphp_io_entry_ready(entry)) {
+            entry->fd = -1 - entry->fd;
+        }
     }
 
     struct timespec ts;
@@ -815,7 +859,10 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
         }
         bool any = false;
         for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
-            if (fiber->suspend_data.io.fds[i].revents != 0) { any = true; break; }
+            if (oxphp_io_entry_ready(&fiber->suspend_data.io.fds[i])) {
+                any = true;
+                break;
+            }
         }
         bool expired = !any
                        && fiber->suspend_data.io.deadline_ns != 0
