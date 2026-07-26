@@ -1896,14 +1896,18 @@ static bool oxphp_select_collect(zval *arr, short events, bool buffered_is_ready
  * waiting for it a second time — which is what would make the worst case twice
  * the timeout the caller asked for.
  *
- * Both arguments are longs or nulls taken by value, so the substitution lives in
- * this call frame and is invisible to the caller's variables. Neither is
- * refcounted, so a zend_bailout out of the delegate leaks nothing and the
- * restore below is hygiene rather than a correctness requirement. */
+ * Dereferenced first, so this writes the same slot the caller's arguments were
+ * read from — a by-value parameter holding a reference would otherwise be read
+ * through the wrapper and written over it. After the dereference both are longs
+ * or nulls taken by value, so the substitution lives in this call frame, is
+ * invisible to the caller's variables, and holds nothing refcounted: a
+ * zend_bailout out of the delegate leaks nothing and the restore below is
+ * hygiene rather than a correctness requirement. */
 static void oxphp_select_delegate_now(zend_execute_data *execute_data,
                                       zval *return_value, uint32_t argc)
 {
     zval *sec = ZEND_CALL_ARG(execute_data, 4);
+    ZVAL_DEREF(sec);
     zval saved_sec = *sec;
     ZVAL_LONG(sec, 0);
 
@@ -1911,6 +1915,7 @@ static void oxphp_select_delegate_now(zend_execute_data *execute_data,
     zval saved_usec;
     if (argc >= 5) {
         usec = ZEND_CALL_ARG(execute_data, 5);
+        ZVAL_DEREF(usec);
         saved_usec = *usec;
         ZVAL_LONG(usec, 0);
     }
@@ -2048,6 +2053,19 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
      * zend_bailout and skips it, which leaks nothing: the stack form of the
      * buffer has nothing to release, the heap form is emalloc, and the arrays
      * are the caller's own — all three go with the request. */
+    /* A caller's own timeout ends the loop on its own. A null one does not, so
+     * something has to bound the case where waking and delegating never makes
+     * progress. The one way to reach it is the scheduler releasing every waiter
+     * because its readiness wait failed outright: the delegate then reports
+     * nothing, the fiber parks again, and the same failure releases it again.
+     * That path already promises in the log that hooked waits fall back to
+     * blocking the worker thread — this is what makes the promise true here
+     * instead of spinning. The bound is far above any number of lost races a
+     * shared connection can produce, since each of those follows a real wake-up
+     * rather than a failed wait. */
+    const int max_barren_retries = 64;
+    int barren_retries = 0;
+
     for (;;) {
         int64_t left_ns = -1;
         if (timeout_ns >= 0) {
@@ -2086,6 +2104,8 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
         zval_ptr_dtor(r); ZVAL_COPY(r, &saved_r);
         zval_ptr_dtor(w); ZVAL_COPY(w, &saved_w);
         zval_ptr_dtor(e); ZVAL_COPY(e, &saved_e);
+
+        if (++barren_retries >= max_barren_retries) goto delegate;
     }
 
 delegate:

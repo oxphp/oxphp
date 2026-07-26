@@ -9,3 +9,4 @@ hooks/test_select_semantics
 hooks/test_select_declines
 hooks/test_select_shapes
 hooks/test_select_cancel_hooked
+hooks/test_select_unwatchable_fd
