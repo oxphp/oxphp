@@ -5,3 +5,6 @@ hooks/test_sleep_cancel_hooked
 hooks/test_sleep_semantics
 hooks/test_stream_timeout_semantics
 hooks/test_stream_cancel_hooked
+hooks/test_select_semantics
+hooks/test_select_declines
+hooks/test_select_cancel_hooked
