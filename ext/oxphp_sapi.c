@@ -1808,6 +1808,8 @@ static zif_handler oxphp_orig_stream_select = NULL;
  * to represent, in which case the caller delegates and native behaviour is
  * preserved exactly:
  *
+ *   - an element that is not a live stream resource, because native's answer to
+ *     that is an exception rather than a wait;
  *   - a read stream with buffered data, because stream_select() answers from
  *     the buffer without looking at any descriptor and a hook that parked
  *     instead would sleep through data the caller already has;
@@ -1830,18 +1832,28 @@ static bool oxphp_select_collect(zval *arr, short events, bool buffered_is_ready
     zval *elem;
     ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem) {
         ZVAL_DEREF(elem);
-        php_stream *stream = NULL;
-        php_stream_from_zval_no_verify(stream, elem);
-        if (stream == NULL) continue;   /* native skips these silently too */
+        /* The fetch php_stream_from_zval_no_verify() performs, minus the type
+         * name that makes it raise a TypeError. Native raises exactly one for an
+         * element that is not a live stream and then follows its own error path;
+         * a second one from here would chain onto it, and parking a fiber with
+         * an exception already pending is worse than that: Zend does not carry
+         * EG(exception) across a fiber switch, so it would surface in whichever
+         * fiber the scheduler resumes next — another request. */
+        php_stream *stream = (php_stream *) zend_fetch_resource2_ex(
+            elem, NULL, php_file_le_stream(), php_file_le_pstream());
+        if (stream == NULL) return false;
 
         if (buffered_is_ready && (stream->writepos - stream->readpos) > 0) {
             return false;
         }
 
+        /* The cast can reach a userland wrapper's stream_cast(), which is PHP
+         * code and may throw; the rule above applies to that exception too. */
         php_socket_t sock_fd;
         if (php_stream_cast(stream,
                             PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL,
-                            (void *) &sock_fd, 0) != SUCCESS || sock_fd == -1) {
+                            (void *) &sock_fd, 0) != SUCCESS || sock_fd == -1
+            || EG(exception) != NULL) {
             return false;
         }
         if ((int) sock_fd >= FD_SETSIZE) {
@@ -1908,11 +1920,13 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
         return;
     }
 
-    /* Four required parameters, one optional timeout fraction. The upper bound
-     * is loose on purpose: a later PHP that appends a parameter keeps the same
-     * meaning for the first five, which is all this reads. */
+    /* Four required parameters, one optional timeout fraction — the whole
+     * signature on every supported version. Anything else is either the error
+     * native raises for the wrong argument count, which it must raise at once
+     * rather than after a wait, or a later PHP whose extra parameter this hook
+     * has not been taught to read. Both are native's to answer. */
     uint32_t argc = ZEND_CALL_NUM_ARGS(execute_data);
-    if (argc < 4 || argc > 6) {
+    if (argc < 4 || argc > 5) {
         oxphp_orig_stream_select(execute_data, return_value);
         return;
     }
@@ -1928,8 +1942,10 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
 
     /* Native builds the timeval from these two and throws on a negative one.
      * A shape this hook does not read the same way is not a shape it may wait
-     * on. Ten years stands in for "longer than anyone means", and keeps the
-     * nanosecond arithmetic from overflowing. */
+     * on. Ten years stands in for "longer than anyone means"; both arguments
+     * are clamped to it, because the nanosecond arithmetic below overflows on
+     * either one left unbounded, and a signed overflow that lands on a negative
+     * total reads as "wait forever". */
     int64_t timeout_ns = -1;
     if (Z_TYPE_P(sec) == IS_LONG) {
         zend_long s = Z_LVAL_P(sec);
@@ -1940,6 +1956,7 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
             return;
         }
         if (s > 315360000) s = 315360000;
+        if (us > 315360000000000LL) us = 315360000000000LL;
         timeout_ns = (int64_t) s * 1000000000 + (int64_t) us * 1000;
     } else if (Z_TYPE_P(sec) != IS_NULL) {
         oxphp_orig_stream_select(execute_data, return_value);
@@ -1950,6 +1967,15 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
          * native raises before waiting at all. Waiting forever on a call that is
          * specified to throw is the one way this hook could hang a fiber that
          * native would not, so it declines instead. */
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    /* A zero timeout is the non-blocking probe idiom, and native answers it from
+     * a select() that does not wait at all. Parking for it would hold the caller
+     * to the next scheduler tick to learn something already known, making the
+     * idiom slower with the hook than without it. */
+    if (timeout_ns == 0) {
         oxphp_orig_stream_select(execute_data, return_value);
         return;
     }
@@ -1972,8 +1998,13 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
     ALLOCA_FLAG(use_heap)
     struct pollfd *fds = do_alloca(cap * sizeof(struct pollfd), use_heap);
     uint32_t nfds = 0;
+    /* One event mask per array, each matching what PHP's own select() reports
+     * that array from: a hangup and a socket error to the read set, a socket
+     * error to the write set, and out-of-band data alone to the exception set.
+     * Waking on more than the array's own mask would resume a caller its
+     * delegate then tells nothing happened; see oxphp_io_entry_ready(). */
     if (!oxphp_select_collect(r, PHP_POLLREADABLE, true, fds, cap, &nfds)
-        || !oxphp_select_collect(w, POLLOUT, false, fds, cap, &nfds)
+        || !oxphp_select_collect(w, POLLOUT | POLLERR, false, fds, cap, &nfds)
         || !oxphp_select_collect(e, POLLPRI, false, fds, cap, &nfds)
         || nfds == 0) {
         free_alloca(fds, use_heap);
@@ -2030,7 +2061,6 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
         if (EG(exception) != NULL) goto done;
         if (Z_TYPE_P(return_value) != IS_LONG || Z_LVAL_P(return_value) != 0) goto done;
         if (rc == -2) goto done;   /* the caller's timeout really did elapse */
-        if (timeout_ns == 0) goto done;
 
         /* Zero with budget left: the readiness we woke on did not survive to
          * the delegate's own select — another fiber sharing this connection
