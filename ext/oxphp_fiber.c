@@ -171,7 +171,6 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
         close(sched->epfd);
         sched->epfd = -1;
     }
-    sched->timer_interval_ns = 0;
 }
 
 /* ─── Coroutine Entry Point ────────────────────────────── */
@@ -717,7 +716,6 @@ static bool oxphp_io_ensure_epoll(oxphp_fiber_scheduler *sched) {
 
     sched->epfd = epfd;
     sched->timer_fd = tfd;
-    sched->timer_interval_ns = 0;
     return true;
 }
 
@@ -804,7 +802,12 @@ static bool oxphp_io_any_parked(const oxphp_fiber_scheduler *sched) {
  * descriptors ends the pause the moment the peer answers. The interval is
  * unchanged, so a newly queued request waits no longer than it did before. */
 bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
-    if (ns < 0 || sched->epfd < 0) return false;
+    /* Zero is rejected alongside negative: it would arm nothing, and a wait with
+     * nothing to bound it blocks until a socket happens to fire — the worker
+     * would stop accepting requests and stop examining deadlines for as long as
+     * that took. No caller passes zero today; the guard is what keeps that from
+     * becoming a silent hang if one ever does. */
+    if (ns <= 0 || sched->epfd < 0) return false;
 
     /* Nothing parked means there is nothing to wait on and the caller must sleep
      * its own interval. Waiting on the timer alone would put a syscall where a
@@ -812,21 +815,32 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
      * hear it did not happen. */
     if (!oxphp_io_any_parked(sched)) return false;
 
-    /* The periodic timer is what bounds the wait, which lets epoll_wait() block
-     * outright rather than take the millisecond timeout it offers — a resolution
-     * that would round the worker's 100µs interval either to nothing or to ten
-     * times itself. Re-armed only when the caller asks for a different interval
-     * from the one already running, which in practice is once per thread. */
-    if (sched->timer_interval_ns != ns) {
-        struct itimerspec its = {
-            .it_interval = { .tv_sec = (time_t)(ns / 1000000000),
-                             .tv_nsec = (long)(ns % 1000000000) },
-            .it_value    = { .tv_sec = (time_t)(ns / 1000000000),
-                             .tv_nsec = (long)(ns % 1000000000) },
-        };
-        if (timerfd_settime(sched->timer_fd, 0, &its, NULL) < 0) return false;
-        sched->timer_interval_ns = ns;
-    }
+    /* Anything the timer left behind goes before the next wait is armed, or that
+     * expiry would answer the wait at once. Read first and arm second, never the
+     * other way round: arming starts the interval from now, so after it there is
+     * nothing stale to consume — whereas a read placed after the arm could eat
+     * the very expiry the wait is waiting for and block for good. */
+    uint64_t ticks;
+    ssize_t drained = read(sched->timer_fd, &ticks, sizeof(ticks));
+    (void) drained;
+
+    /* The timer is what bounds the wait, which lets epoll_wait() block outright
+     * rather than take the millisecond timeout it offers — a resolution that
+     * would round the worker's 100µs interval either to nothing or to ten times
+     * itself.
+     *
+     * One-shot, re-armed on every call, so the pause is the interval the caller
+     * asked for rather than whatever is left of a free-running period. A
+     * periodic timer keeps expiring while the worker is busy elsewhere, and
+     * those expiries cut the next pause short — on average to half the interval,
+     * and to nothing at all once one turn of the caller's loop costs more than
+     * one period, which is the busy case this is meant to damp. */
+    struct itimerspec its = {
+        .it_interval = { .tv_sec = 0, .tv_nsec = 0 },
+        .it_value    = { .tv_sec = (time_t)(ns / 1000000000),
+                         .tv_nsec = (long)(ns % 1000000000) },
+    };
+    if (timerfd_settime(sched->timer_fd, 0, &its, NULL) < 0) return false;
 
     /* One slot: this waits, it does not resolve. Readiness and deadlines are
      * decided by oxphp_io_collect_ready(), and the registrations are
@@ -845,15 +859,6 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
     if (epoll_wait(sched->epfd, &ev, 1, -1) < 0 && errno != EINTR) {
         return false;
     }
-
-    /* Drain the timer whether or not it was what woke this call. Its expiry
-     * count is level-triggered too, so an undrained one makes every later wait
-     * return at once — the worker would stop sleeping and spin. Unconditional
-     * because a wait that returned a socket instead may still have left an
-     * expiry behind, and the read costs one EAGAIN when it did not. */
-    uint64_t ticks;
-    ssize_t drained = read(sched->timer_fd, &ticks, sizeof(ticks));
-    (void) drained;
     return true;
 }
 

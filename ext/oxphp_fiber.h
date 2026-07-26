@@ -267,15 +267,12 @@ typedef struct _oxphp_fiber_scheduler {
 
     /* Readiness backend for descriptor waits: one epoll instance per scheduler,
      * which is one per thread since both schedulers are thread-local, plus a
-     * periodic timer registered inside it so an idle wait can be bounded
+     * one-shot timer registered inside it so an idle wait can be bounded
      * without asking the kernel for a millisecond-granularity timeout. Created
      * on the first park and closed by oxphp_scheduler_destroy(); -1 until then,
-     * so a worker whose requests never wait on a descriptor pays nothing.
-     * timer_interval_ns is the period currently armed, 0 when the timer has
-     * never been armed. */
+     * so a worker whose requests never wait on a descriptor pays nothing. */
     int epfd;
     int timer_fd;
-    int64_t timer_interval_ns;
 } oxphp_fiber_scheduler;
 
 /* ─── TLS: current fiber pointer ───────────────────────── */

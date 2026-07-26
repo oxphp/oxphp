@@ -257,6 +257,8 @@ Two more things worth knowing:
 
 Cost, measured: about 3–5 µs per socket round trip on a worker with nothing else parked, about 5–6 µs with 64 fibers parked on descriptors, and about 7–11 µs with 200. Readiness is resolved through a set the kernel keeps between waits, so what the figure tracks is how many descriptors became ready, not how many are waiting. An idle worker waits on those descriptors rather than sleeping for a fixed interval and noticing readiness on its next tick, which matters a great deal: sleeping blind cost roughly 2 ms per round trip instead.
 
+A wide `stream_select()` is the one case that costs materially more with the hook than without it, because every descriptor the call names is registered before the wait and removed after it. Measured per call: about 6 µs against 5 µs unhooked at one descriptor, 56 µs against 9 µs at 64, and 130–150 µs against 16–21 µs at 200 — roughly 0.65 µs per descriptor. What that buys is the worker thread, which the unhooked call holds for the whole wait. It is worth it whenever the worker has other requests to serve, and it is not when the request *is* the event loop and there is nothing else for the thread to do — for a wide poll loop of that shape, leave `streams` off.
+
 **When to use `RUNTIME_HOOKS` vs. `oxphp_sleep()`.** The hook does not replace the first-party primitive — they cover different cases:
 
 - Reach for `oxphp_sleep()` / `oxphp_usleep()` in code you write. They suspend the fiber in worker mode **unconditionally**, with no environment flag, and `oxphp_sleep()` accepts fractional seconds (`oxphp_sleep(0.25)`) — a precision native `sleep()` (integer seconds) cannot express.
