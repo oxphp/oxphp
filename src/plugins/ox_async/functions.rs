@@ -9,7 +9,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_void;
 
-use crate::bridge::call::NativeCall;
+use crate::bridge::call::{NativeCall, ZvalSlot};
 use crate::bridge::{ffi, types::ValType};
 use crate::plugin::types::{PhpType, PhpValue};
 use crate::plugin::{PhpError, PluginContext, PluginError};
@@ -313,12 +313,9 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
     // Await each promise and add its result to the array
     for (i, &pid) in ids.iter().enumerate() {
-        // Allocate a stack-aligned temporary zval for this promise's result.
-        // PHP zval is 16 bytes on 64-bit with 8-byte alignment.
-        #[repr(C, align(8))]
-        struct TempZval([u8; 16]);
-        let mut temp = TempZval([0u8; 16]);
-        let temp_ptr = &mut temp as *mut TempZval as *mut c_void;
+        // Stack-aligned temporary zval for this promise's result.
+        let mut temp = ZvalSlot::undef();
+        let temp_ptr = temp.as_mut_ptr();
 
         // Suspend on each promise in turn when inside a task fiber, falling
         // back to a blocking await otherwise. The promises already run
@@ -332,8 +329,13 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
         match rc {
             0 => {
-                // Success: add to return array keyed by promise ID
+                // Success: add to return array keyed by promise ID. The add
+                // copies (ZVAL_COPY) and the array owns its copy, so the
+                // slot's own reference is ours to release — without this the
+                // result leaks one reference per promise, freed only when the
+                // request's allocator pool is torn down.
                 unsafe { ffi::oxphp_arr_add_index_zval(retval, pid as u64, temp_ptr) };
+                unsafe { ffi::oxphp_zval_dtor(temp_ptr) };
             }
             // All-or-nothing bail: this promise timed out, was cancelled, or
             // rejected, so await_all is abandoning the whole set. Cancel and
@@ -412,11 +414,9 @@ fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErr
 
     let count = ids.len() as u32;
 
-    // Allocate a stack-aligned temporary zval for the winner's result.
-    #[repr(C, align(8))]
-    struct TempZval([u8; 16]);
-    let mut winner_zval = TempZval([0u8; 16]);
-    let winner_ptr = &mut winner_zval as *mut TempZval as *mut c_void;
+    // Stack-aligned temporary zval for the winner's result.
+    let mut winner_zval = ZvalSlot::undef();
+    let winner_ptr = winner_zval.as_mut_ptr();
     let mut winner_id: i64 = -1;
 
     let rc = unsafe {
@@ -442,7 +442,12 @@ fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErr
                     winner_id,
                 )
             };
+            // The add copies (ZVAL_COPY) and the array owns its copy, so the
+            // slot's own reference is ours to release — without this every
+            // call leaks one reference to the winning result, freed only when
+            // the request's allocator pool is torn down.
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
+            unsafe { ffi::oxphp_zval_dtor(winner_ptr) };
             Ok(())
         }
         -2 => Err(timeout_err(
@@ -496,11 +501,9 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
 
     let count = ids.len() as u32;
 
-    // Allocate a stack-aligned temporary zval for the winner's result.
-    #[repr(C, align(8))]
-    struct TempZval([u8; 16]);
-    let mut winner_zval = TempZval([0u8; 16]);
-    let winner_ptr = &mut winner_zval as *mut TempZval as *mut c_void;
+    // Stack-aligned temporary zval for the winner's result.
+    let mut winner_zval = ZvalSlot::undef();
+    let winner_ptr = winner_zval.as_mut_ptr();
     let mut winner_id: i64 = -1;
 
     let rc = unsafe {
@@ -526,7 +529,12 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
                     winner_id,
                 )
             };
+            // The add copies (ZVAL_COPY) and the array owns its copy, so the
+            // slot's own reference is ours to release — without this every
+            // call leaks one reference to the winning result, freed only when
+            // the request's allocator pool is torn down.
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
+            unsafe { ffi::oxphp_zval_dtor(winner_ptr) };
             Ok(())
         }
         // -2 → bridge threw OxPHP\Async\TimeoutException via aggregate API

@@ -10,6 +10,22 @@ use std::os::raw::{c_char, c_void};
 #[derive(Clone)]
 pub(crate) struct ZvalSlot([u8; 16]);
 
+impl ZvalSlot {
+    /// A zero-initialized slot. All-zero bytes are `IS_UNDEF`, so the slot is
+    /// safe to hand to `oxphp_zval_dtor` even if nothing ever wrote into it.
+    #[allow(dead_code)]
+    pub(crate) fn undef() -> Self {
+        debug_assert_zval_size();
+        ZvalSlot([0u8; ZVAL_SIZE])
+    }
+
+    /// Writable pointer to the slot, for FFI calls that populate a zval.
+    #[allow(dead_code)]
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut c_void {
+        self as *mut ZvalSlot as *mut c_void
+    }
+}
+
 /// Safe wrapper over raw zval pointers for a plugin function call.
 ///
 /// Provides bounds-checked, type-checked access to arguments and

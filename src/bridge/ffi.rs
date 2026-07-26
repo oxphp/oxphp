@@ -375,7 +375,14 @@ extern "C" {
     /// registered yet (MINIT hasn't run).
     pub fn oxphp_is_shareable(z: *const c_void) -> c_int;
     pub fn oxphp_bridge_set_borrow_proxy_ce(ce: *mut c_void);
+    /// Add `val` to `arr` under a string key. The value is **copied**
+    /// (`ZVAL_COPY`, i.e. addref for refcounted types): the array owns its
+    /// copy and the caller keeps ownership of `val`. A caller holding `val`
+    /// in a temporary slot must release it with `oxphp_zval_dtor` afterwards,
+    /// or the value leaks a reference until the request ends.
     pub fn oxphp_arr_add_zval(arr: *mut c_void, key: *const c_char, val: *mut c_void);
+    /// Same ownership contract as [`oxphp_arr_add_zval`], keyed by integer
+    /// index: the array gets a copy, `val` stays the caller's to release.
     pub fn oxphp_arr_add_index_zval(arr: *mut c_void, idx: u64, val: *mut c_void);
 
     // ── Async direct dispatch ──
