@@ -132,7 +132,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
-Socket **reads** are the exception once `RUNTIME_HOOKS=streams` is enabled: a blocking read on a `tcp://` stream suspends the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers). Writes, `stream_select()`, ext/curl, connecting and DNS resolution still block. See [Configuration](../operations/configuration.md#runtime-hooks).
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 

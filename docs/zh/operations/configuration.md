@@ -229,14 +229,14 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 | 类别 | 钩住的内容 |
 |------|-----------|
 | `sleep` | 原生 `sleep()` 和 `usleep()` 会像 `oxphp_sleep()`/`oxphp_usleep()` 一样挂起当前 fiber |
-| `streams` | `tcp://` 套接字流上的阻塞**读取**会挂起当前 fiber，而不是占用 Worker 线程。作用范围是以这种方式阻塞的客户端：`fsockopen()`、`stream_socket_client()`、HTTP 流包装器、mysqlnd（PDO_MySQL、mysqli）、phpredis——无需修改任何代码。以其他方式等待的客户端不受影响（见下文） |
+| `streams` | 两类等待会挂起当前 fiber，而不是占用 Worker 线程：`tcp://` 套接字流上的阻塞**读取**，以及 **`stream_select()`**。读取覆盖在单个套接字上阻塞的客户端：`fsockopen()`、`stream_socket_client()`、HTTP 流包装器、mysqlnd（PDO_MySQL、mysqli）、phpredis；`stream_select()` 覆盖同时等待多个套接字的循环。两者都无需修改任何代码。以其他方式等待的客户端不受影响（见下文） |
 
 钩子在 worker 模式的请求 fiber 和异步任务 fiber 内生效。在 fiber 之外（traditional/framework/SPA 请求上下文、CLI），保留原生行为，包括参数验证错误。启用 `sleep` 钩子后，调用 `sleep()` 的第三方代码不再占用 Worker 线程——无需修改任何代码。在被钩住的 sleep 期间取消异步任务会以 `OxPHP\Async\AsyncException` 展开任务；被钩住的 `sleep()` 始终返回 `0`（原生函数在信号中断时返回剩余秒数的情况在此不会出现）。
 
-`streams` 钩子唯一变得协作的，是 PHP 套接字流上的阻塞读取。在指望它之前，请先确认你的客户端正是这样等待的——有几种常见客户端并非如此，对它们来说什么也不会改变：
+`streams` 钩子让两件事变得协作：PHP 套接字流上的阻塞读取，以及 `stream_select()` 内部的等待。在指望它之前，请先确认你的客户端正是以这两种方式之一等待的——有几种常见客户端并非如此，对它们来说什么也不会改变：
 
 - **ext/curl。** `curl_exec()` 和 `curl_multi_*` 在 PHP 流之下自行处理套接字，钩子看不到它们。这适用于所有基于 curl 的 HTTP 客户端——包括使用默认处理器的 Guzzle。可以把 curl 客户端改为使用 stream wrapper 处理器，那条路径确实经过 PHP 流。
-- **`stream_select()` 与 `socket_select()`。** 它们直接在描述符上等待，而不经过流的读操作，因此基于 `select()` 的循环——纯 PHP 中同时等待多个套接字的惯用写法，也是 AMPHP 和 ReactPHP 的基础——仍会占用 Worker 线程。`stream_socket_accept()` 内部的等待同理。
+- **`socket_select()`。** 那是 ext/sockets——直接操作裸描述符的另一套 API，不在钩子范围内。`stream_select()` 则已被钩住。`stream_socket_accept()` 内部的等待同样不在钩子范围内。
 - **来自 `socket_export_stream()` 的流。** 它们携带另一张操作表，是 PHP 私有的，扩展无法打补丁。
 - **`unix://`、`udp://` 和 `udg://` 流。** 原因相同：它们的操作表是 PHP 私有的。
 - **在加密启用之后的 `ssl://` 与 `tls://`。** 在 `stream_socket_enable_crypto()` 成功之前，SSL 流的读取会委托给普通套接字读取，因此确实会挂起 fiber；从握手开始则不会。
@@ -245,6 +245,8 @@ PHP 执行时间由 PHP 自身的 `max_execution_time` ini 指令（以及运行
 - **写入。** 只有读取被钩住。只要描述符由单个 fiber 拥有、没有别的代码从中取走数据，读就绪就保持有效；而发送缓冲区的空间由对端授予和收回，因此因可写而被唤醒的 fiber，在真正写入时可能发现窗口已经关闭，此后 PHP 无论如何都会为其完整超时阻塞线程。所以填满套接字缓冲区的写入，其行为与不启用钩子时完全相同。实践中代价很小：耗时的是等待应答，而不是把查询交给内核。
 
 在上述范围内，钩子保持原生契约：套接字超时（`stream_set_timeout()`、`default_socket_timeout`）照常生效，超时的读取仍通过 `stream_get_meta_data()` 报告 `timed_out`，流的标识也不改变，因此 `socket_import_stream()` 等仍可正常工作。超时有一处限制：截止时间只在每个调度 tick 检查一次，因此它不会早于下一个 tick 触发——worker 模式最快 100 微秒，异步池最快 1 毫秒；负载之下还会更晚，因为一个 tick 的长度取决于 Worker 当时正在执行的内容。在 `default_socket_timeout` 为 60 秒的情况下，多数部署无从察觉。
+
+`stream_select()` 的钩法是：先等待三个数组所指的描述符就绪，然后把调用交给 PHP 本身，并将超时置零——因此所有可观察的部分仍由 PHP 决定：返回的计数、把数组重写为就绪流、警告以及参数错误。当数组中出现钩子不愿代劳的内容时，等待会被跳过，调用与没有钩子时完全一致：已缓冲数据的读取流（`stream_select()` 直接从缓冲区作答，根本不看描述符）、完全没有描述符的流，或取值达到或超过 `FD_SETSIZE` 的描述符——PHP 自己的 `select()` 会直接拒绝它。最后一条是真实的上限而非形式：繁忙的 Worker 完全可能持有超过 1024 个打开的描述符，而指向这类描述符的 `stream_select()` 无论有无钩子都以同样的方式失败。
 
 另有两点值得了解：
 
