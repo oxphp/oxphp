@@ -42,7 +42,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f drain_a drain_b drain_c >/dev/null 2>&1
+	docker rm -f drain_a drain_b drain_c drain_d drain_e >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -248,6 +248,88 @@ printf '%s' "$LOGS_C" | grep -Eq '"exit_reason":3|exit_reason=3|Dead workers det
 printf '%s' "$LOGS_C" | grep -q "Drain timeout reached" \
 	&& bad "C: drain hit its deadline — flush-path cancel failed" \
 	|| ok "C: deadline never reached"
+
+docker rm -f drain_c >/dev/null 2>&1
+
+# ── Scenario D: post-finish_request work is deadline-bounded ─
+# A request that finishes its response and then works longer than the drain
+# window. Its connection is already gone by SIGTERM, so a drain that watches
+# only connections sees nothing to wait for: it never enters, never reaches its
+# deadline branch, and the work is cut short when the workers are torn down.
+# Measured on a build without the in-flight gate: the process was gone one
+# second after SIGTERM with the work unfinished. The work must instead get the
+# window and be interrupted at the deadline.
+if start_container drain_d 5; then
+	ok "D: container up"
+else
+	bad "D: container failed to start"; docker logs drain_d 2>&1 | tail -5; exit 1
+fi
+
+# Ordinary response finished early, then 30s of background work — six times the
+# 5s drain window. `Connection: close` so the socket is gone once the response
+# lands: by SIGTERM the live connection count is already zero and only the
+# worker's in-flight counter still reports the work.
+curl -sS -H 'Connection: close' --max-time 10 \
+	"http://localhost:${PORT}/bgplain?post=30" > "$TMP/d_bg" 2>&1 &
+sleep 2 # response delivered, connection gone, background work still running
+
+docker kill -s TERM drain_d >/dev/null
+ELAPSED=$(wait_exit_seconds drain_d 45)
+
+# Deadline 5s + 2s unwind beat. Anything near 30s means the drain never applied
+# its deadline and the executor's join waited for the work to end on its own.
+[ "$ELAPSED" -le 12 ] \
+	&& ok "D: exited ${ELAPSED}s after SIGTERM (post-finish work bounded)" \
+	|| bad "D: exit took ${ELAPSED}s — background work ran past the deadline unbounded"
+
+LOGS_D="$(docker logs drain_d 2>&1)"
+printf '%s' "$LOGS_D" | grep -q "Draining in-flight connections" \
+	&& ok "D: drain entered with no live connections, work still in flight" \
+	|| bad "D: drain skipped entirely — zero connections read as nothing to drain"
+
+printf '%s' "$LOGS_D" | grep -q "Drain timeout reached, cancelling in-flight requests" \
+	&& ok "D: deadline reached while background work was in flight" \
+	|| bad "D: deadline branch never ran"
+
+printf '%s' "$LOGS_D" | grep -q "bgplain-done" \
+	&& bad "D: background work ran to completion despite the deadline" \
+	|| ok "D: background work interrupted at the deadline"
+
+docker rm -f drain_d >/dev/null 2>&1
+
+# ── Scenario E: post-finish_request work is granted the window ─
+# The other half of D's contract. Work that fits inside the drain window must
+# be allowed to finish: a drain that skips itself because no connection is
+# live truncates the work at SIGTERM instead of giving it the window the
+# early-response docs promise. Bounded (D) and granted (E) are different
+# claims — work killed on the spot satisfies the first and violates the second.
+if start_container drain_e 10; then
+	ok "E: container up"
+else
+	bad "E: container failed to start"; docker logs drain_e 2>&1 | tail -5; exit 1
+fi
+
+curl -sS -H 'Connection: close' --max-time 10 \
+	"http://localhost:${PORT}/bgplain?post=6" > "$TMP/e_bg" 2>&1 &
+sleep 2 # response delivered, connection gone, 6s of work left in a 10s window
+
+docker kill -s TERM drain_e >/dev/null
+ELAPSED=$(wait_exit_seconds drain_e 25)
+
+LOGS_E="$(docker logs drain_e 2>&1)"
+printf '%s' "$LOGS_E" | grep -q "bgplain-done" \
+	&& ok "E: background work finished inside the drain window" \
+	|| bad "E: background work truncated at SIGTERM — it never got the window"
+
+[ "$ELAPSED" -le 12 ] \
+	&& ok "E: exited ${ELAPSED}s after SIGTERM" \
+	|| bad "E: exit took ${ELAPSED}s"
+
+printf '%s' "$LOGS_E" | grep -q "Drain timeout reached" \
+	&& bad "E: deadline reached — work that fits the window was cut off" \
+	|| ok "E: deadline never reached, drain ended on completion"
+
+docker rm -f drain_e >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

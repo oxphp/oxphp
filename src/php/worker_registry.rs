@@ -27,6 +27,12 @@ pub struct WorkerSlot {
     /// stays mapped for the process lifetime: it points into the worker's TSRM
     /// interpreter block, which is released only by `ts_free_thread()`, and
     /// nothing in PHP or OxPHP ever calls it.
+    ///
+    /// A second consumer is far less tolerant of staleness: `total_in_flight`
+    /// sums this field across slots to decide when the graceful drain may
+    /// stop, so a value that stays positive with no real work behind it holds
+    /// shutdown until the drain deadline instead of costing one spurious kick.
+    /// Weigh both readers before changing how this counter is maintained.
     pub active_requests: AtomicUsize,
     pub heartbeat: crate::php::heartbeat::WorkerHeartbeat,
 }
@@ -207,10 +213,47 @@ fn cancel_all_in(workers: &[WorkerSlot], reason: CancelReason) {
     }
 }
 
+/// Sum of in-flight requests across every worker slot — the drain loop's
+/// second gate, next to live connections. A request that ended its response
+/// early via `oxphp_finish_request()` drops its connection while its
+/// background work keeps running on the worker, so gating the drain on
+/// connections alone lets it exit before the deadline ever applies to that
+/// work.
+///
+/// 0 when nothing counts requests: the stub executor never calls
+/// `begin_request`, so every slot stays at zero. The `WORKERS` guard is for
+/// callers that run before `init_workers` — unit tests and the one-shot CLI
+/// path — not for any server mode, where `main` initializes the registry
+/// unconditionally.
+pub fn total_in_flight() -> usize {
+    WORKERS
+        .get()
+        .map_or(0, |workers| total_in_flight_in(workers))
+}
+
+fn total_in_flight_in(workers: &[WorkerSlot]) -> usize {
+    workers
+        .iter()
+        .map(|slot| slot.active_requests.load(Ordering::Acquire))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn total_in_flight_sums_every_slot() {
+        // Local Vec — the process-global WORKERS is shared with the other
+        // tests in this binary.
+        let workers: Vec<WorkerSlot> = (0..3).map(|_| WorkerSlot::new()).collect();
+        assert_eq!(total_in_flight_in(&workers), 0);
+
+        workers[0].active_requests.store(2, Ordering::Release);
+        workers[2].active_requests.store(1, Ordering::Release);
+        assert_eq!(total_in_flight_in(&workers), 3);
+    }
 
     #[test]
     fn init_is_idempotent() {

@@ -24,14 +24,14 @@ OxPHP 响应两种关闭信号：
 
 1. **停止接受新连接** — 服务器停止在主端口接受新的 TCP 连接。PHP 工作进程继续运行以处理进行中的请求。
 2. **收拢存活连接** — HTTP/2 客户端收到 `GOAWAY` 帧，空闲的 HTTP/1.1 keep-alive 连接被关闭，客户端会转向健康实例，而不是继续向正在关闭的实例复用新请求。打开的流会被立即干净地结束——任何已经开始 flush 输出 chunked 内容的响应都算在内，有限下载与 SSE 同样处理——参见 [Server-Sent Events](../features/sse.md#关闭时的行为)。
-3. **排空进行中的请求** — 普通活跃请求不受打扰，正常完成并返回完整响应。服务器每 100ms 检查一次完成状态。内部健康/指标服务器在整个排空期间保持可用，就绪探针可继续正常工作。
+3. **排空进行中的请求** — 普通活跃请求不受打扰，正常完成并返回完整响应。服务器每 100ms 检查一次完成状态。内部健康/指标服务器在整个排空期间保持可用，就绪探针可继续正常工作。 请求在 `oxphp_finish_request()` 之后继续执行的工作同样计为进行中，尽管其连接已经关闭。
 4. **执行排空截止时间** — 在 `DRAIN_TIMEOUT_SECONDS` 到期时仍在运行的请求会被取消（其 `register_shutdown_function()` 回调仍会执行），并获得约 2 秒时间收尾，之后服务器继续关闭流程。
 5. **刷新插件** — 排空窗口期间累积的访问日志条目和 APM span 被刷出。
 6. **关闭异步进程池** — 后台异步任务进程池被停止。
 7. **终止内部服务器** — 排空完成后停止健康/指标服务器。
 8. **退出** — 进程以状态码 0 退出。
 
-> **注意：** PHP 工作进程在步骤 1 中被显式停止——停止主服务器时会调用执行器的 `shutdown()`，向工作线程发出信号，使其在完成进行中的请求后退出。
+> **注意：** PHP 工作线程不会在流程开始时停止——它们在最后阶段才收到退出信号并被 join，此时排空已经结束、进程正在退出。正因如此，即使已经没有任何客户端连接，排空也必须把仍在工作线程上执行的工作计算在内。
 
 ## 配置
 
@@ -113,16 +113,18 @@ services:
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"INFO","message":"Draining in-flight connections","active_connections":3}
+{"level":"INFO","message":"Draining in-flight connections","active_connections":3,"in_flight_requests":4}
 {"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
+
+这两个计数是重叠的，而非互斥：`active_connections` 是存活的客户端连接，`in_flight_requests` 是仍在 PHP 工作线程上执行的请求，持有连接的请求会同时计入两者。通过 `oxphp_finish_request()` 提前结束响应的请求只出现在 `in_flight_requests` 中——它的连接已经关闭，而后台工作仍在继续。
 
 **排空超时：**
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1}
+{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1,"in_flight_requests":1}
 {"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
