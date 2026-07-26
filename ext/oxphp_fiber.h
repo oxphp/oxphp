@@ -47,6 +47,17 @@ typedef enum {
 
 /* ─── Per-Fiber PHP State ──────────────────────────────── */
 
+#define OXPHP_SYMBOL_GLOBAL_COUNT 6
+
+struct oxphp_symbol_global_name {
+    const char *name;
+    size_t len;
+};
+
+/* Defined in oxphp_fiber.c; indexes php_state.symbol_globals. */
+extern const struct oxphp_symbol_global_name
+    oxphp_symbol_global_names[OXPHP_SYMBOL_GLOBAL_COUNT];
+
 /* Written on suspend only (oxphp_fiber_save_php_state) and read only while that
  * fiber is suspended — see oxphp_scheduler_start_fiber for why handing a fiber a
  * NEW request restores none of it. Holds no Zend VM state: zend_fiber_switch_context
@@ -54,6 +65,15 @@ typedef enum {
 typedef struct {
     /* Superglobals: saved PG(http_globals) values */
     zval http_globals[6]; /* TRACK_VARS_POST .. TRACK_VARS_FILES */
+
+    /* What userland actually reads: the EG(symbol_table) entries for _POST,
+     * _GET, _COOKIE, _SERVER, _FILES and _REQUEST, in the order of
+     * oxphp_symbol_global_names. Not derivable from http_globals above — the
+     * first `$_GET['x'] = …` separates the array by COW (the slot and the table
+     * share it, so its refcount is at least two) and only the table gets the
+     * written copy. Each entry is owned while set, IS_UNDEF when the fiber holds
+     * none. */
+    zval symbol_globals[6];
 
     /* SAPI state */
     zend_llist sapi_headers;
@@ -320,6 +340,14 @@ bool oxphp_async_sched_io_backoff(int64_t ns);
 /* Save/restore PHP state around context switches. */
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber);
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
+
+/* Rebuild the superglobals for a new worker-mode request: destroy the stale
+ * PG(http_globals), re-fire the auto-global callbacks, and force the JIT ones
+ * that describe the request (_SERVER, _REQUEST). Shared by both per-request
+ * reset paths — oxphp_soft_reset() on the fast path and
+ * oxphp_fiber_init_request_state() on the event-loop path — because the order of
+ * the steps is load-bearing and has to hold in both. */
+void oxphp_reset_request_autoglobals(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.

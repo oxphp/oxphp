@@ -250,13 +250,37 @@ if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
 
 ## $_REQUEST
 
-`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). OxPHP does not modify this behavior.
+`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). The merge itself follows PHP's rules unchanged.
 
 ```php
 <?php
 // GET /form?action=preview with POST body: action=submit
 $action = $_REQUEST['action'];  // "submit" (POST overrides GET with default order)
 ```
+
+> **Worker mode:** `$_REQUEST` is rebuilt for every request. PHP normally builds it lazily, once, when a script that mentions it is first loaded — which in a persistent worker would mean every later request reading the first one's parameters. OxPHP forces the rebuild instead, so the merged array always describes the request being served.
+
+---
+
+## $_ENV
+
+`$_ENV` holds the process environment. In traditional mode it behaves exactly as in PHP-FPM: PHP repopulates it from the environment on every request, subject to `variables_order`.
+
+**Worker mode pins it.** A worker bootstraps once, and `.env` loaders (vlucas/phpdotenv, symfony/dotenv, Laravel's `Env`) write their values straight into `$_ENV` without touching the process environment. Repopulating `$_ENV` per request would therefore erase the application's configuration from its second request onward, so in worker mode the array is kept for the life of the worker once it exists — writes your bootstrap makes there stay visible to every request that worker serves.
+
+```php
+<?php
+// bootstrap, before oxphp_worker()
+Dotenv\Dotenv::createImmutable(__DIR__)->load();   // writes into $_ENV
+
+oxphp_worker(function () {
+    echo $_ENV['DATABASE_URL'];  // still there on request 10_000
+});
+```
+
+> **Trade-off:** because nothing rebuilds `$_ENV` in worker mode, `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` report no variables there. Read the environment with `getenv()`, or from `$_ENV` directly — it holds both the process values and whatever your bootstrap added. This applies to worker mode only; traditional, framework and SPA modes are unaffected.
+
+The pinning relies on PHP's default `auto_globals_jit=1`. With `auto_globals_jit=0`, PHP repopulates `$_ENV` from the process environment on every request before any extension can intervene, and a `.env` loader's values will not survive in worker mode.
 
 ---
 

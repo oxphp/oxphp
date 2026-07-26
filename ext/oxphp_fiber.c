@@ -115,6 +115,15 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         oxphp_bridge_free_unhandled(fiber->php_state.unhandled_exc);
         fiber->php_state.unhandled_exc = NULL;
     }
+    /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
+     * while parked still holds these, since resuming hands them back to the
+     * symbol table. Released here so worker teardown does not leak the arrays. */
+    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
+        if (!Z_ISUNDEF(fiber->php_state.symbol_globals[i])) {
+            zval_ptr_dtor(&fiber->php_state.symbol_globals[i]);
+            ZVAL_UNDEF(&fiber->php_state.symbol_globals[i]);
+        }
+    }
 }
 
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
@@ -372,6 +381,16 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
 
 /* ─── State Save / Restore ─────────────────────────────── */
 
+/* The superglobals a suspended request owns, in php_state.symbol_globals order.
+ * _ENV is absent on purpose — it is process state in worker mode, not request
+ * state, so a resuming fiber must leave the table's entry alone. */
+const struct oxphp_symbol_global_name
+    oxphp_symbol_global_names[OXPHP_SYMBOL_GLOBAL_COUNT] = {
+        { ZEND_STRL("_POST") },   { ZEND_STRL("_GET") },
+        { ZEND_STRL("_COOKIE") }, { ZEND_STRL("_SERVER") },
+        { ZEND_STRL("_FILES") },  { ZEND_STRL("_REQUEST") },
+};
+
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* ORDERING IS CRITICAL:
      * 1. Flush OB first — pushes any buffered output to ub_write → RESPONSE.output
@@ -391,6 +410,28 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     for (int i = 0; i < 6; i++) {
         ZVAL_COPY_VALUE(&fiber->php_state.http_globals[i], &PG(http_globals)[i]);
         ZVAL_UNDEF(&PG(http_globals)[i]); /* prevent double-free */
+    }
+
+    /* Step 3b: save what userland reads. The slots above are the engine's own
+     * copies; a script reads EG(symbol_table), and the two part company the
+     * moment the script writes — `$_GET['x'] = 1` finds the array shared with
+     * the slot and separates it by COW, leaving the written copy in the table
+     * only. The next request's reset then overwrites that entry, so without a
+     * reference of our own this request's array (writes included) would drop to
+     * refcount zero while it is still parked. Whatever wrapper the entry
+     * carries is preserved as-is: `global $_GET` inside a function turns it into
+     * an IS_REFERENCE, and handing the same reference back on resume keeps the
+     * aliasing the function set up. */
+    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
+        zval_ptr_dtor(&fiber->php_state.symbol_globals[i]);
+        ZVAL_UNDEF(&fiber->php_state.symbol_globals[i]);
+
+        zval *entry = zend_hash_str_find(&EG(symbol_table),
+                                         oxphp_symbol_global_names[i].name,
+                                         oxphp_symbol_global_names[i].len);
+        if (entry != NULL && !Z_ISUNDEF_P(entry)) {
+            ZVAL_COPY(&fiber->php_state.symbol_globals[i], entry);
+        }
     }
 
     /* Step 4: Save SAPI header state (move, not copy) */
@@ -428,6 +469,40 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
         ZVAL_UNDEF(&fiber->php_state.http_globals[i]);
     }
 
+    /* Userland never reads PG(http_globals); it reads EG(symbol_table), whose
+     * entries every new request's reset rebinds to that request's arrays. The
+     * slot restore above therefore fixes nothing a script can see: without this
+     * loop a request parked in a hooked sleep resumes reading the $_GET,
+     * $_COOKIE and $_SERVER of whichever request the worker served meanwhile —
+     * one client's parameters, cookies and headers read by another.
+     *
+     * Hand back the entries the save took rather than rebinding from the slots.
+     * The slots are the wrong source: they hold the engine's pre-write copy of
+     * each array, so restoring from them would also roll back every write the
+     * request itself made before suspending, including when nothing else ran.
+     * zend_hash_update transfers our reference to the table, which releases
+     * whatever it was holding.
+     *
+     * _ENV is deliberately not in this set: it describes the process rather than
+     * the request, so the table must keep what it already has. */
+    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
+        if (Z_ISUNDEF(fiber->php_state.symbol_globals[i])) {
+            /* Absent at suspend must stay absent: an entry this request never
+             * had can only have come from the request served in the window, and
+             * $_REQUEST reaches that state whenever the window is what first
+             * materializes it on this worker. */
+            zend_hash_str_del(&EG(symbol_table),
+                              oxphp_symbol_global_names[i].name,
+                              oxphp_symbol_global_names[i].len);
+            continue;
+        }
+        zend_hash_str_update(&EG(symbol_table),
+                             oxphp_symbol_global_names[i].name,
+                             oxphp_symbol_global_names[i].len,
+                             &fiber->php_state.symbol_globals[i]);
+        ZVAL_UNDEF(&fiber->php_state.symbol_globals[i]);
+    }
+
     /* Restore SAPI headers */
     zend_llist_clean(&SG(sapi_headers).headers);
     SG(sapi_headers).headers = fiber->php_state.sapi_headers;
@@ -460,6 +535,70 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     oxphp_bridge_set_cancel_ptr(fiber->request_cancel_ptr);
 }
 
+/* ─── Shared per-request superglobal rebuild ───────────── */
+
+void oxphp_reset_request_autoglobals(void) {
+    /* zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
+     * are simple string arrays that never contain cyclic refs, and _nogc avoids
+     * the cycle buffer insertion overhead on every request. */
+    for (int i = 0; i < 6; i++) {
+        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
+        ZVAL_UNDEF(&PG(http_globals)[i]);
+    }
+
+    /* Fires the non-JIT callbacks (_GET, _POST, _COOKIE, _FILES): they rebuild
+     * PG(http_globals) and zend_hash_update the new arrays into
+     * EG(symbol_table). The JIT ones (_SERVER, _ENV, _REQUEST) it only re-arms. */
+    zend_activate_auto_globals();
+
+    /* _ENV is the one auto-global that must not come back: its callback destroys
+     * the array and repopulates it from environ, discarding what a .env loader
+     * wrote straight into $_ENV at a worker boot that never runs again. Not
+     * forcing it below is not enough to keep it — activate has just re-armed it,
+     * and any zend_is_auto_global() for _ENV from anywhere then fires the
+     * callback: compiling a file that mentions $_ENV, OPcache pinging one it
+     * loads from cache, filter_input() on INPUT_ENV. Disarm it instead, and only
+     * once the array exists, because until then the arm is what creates it. */
+    if (zend_hash_exists(&EG(symbol_table), ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV))) {
+        zend_auto_global *env_global =
+            zend_hash_find_ptr(CG(auto_globals), ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV));
+        if (env_global != NULL) {
+            env_global->armed = false;
+        }
+    }
+
+    /* Firing the JIT auto-globals that describe the request is this function's
+     * job: OPcache would otherwise do it when it loads a script referencing
+     * them, but only while the bit is still clear in a mask it resets in its own
+     * request startup — which worker mode runs once per worker, so that re-fire
+     * happens exactly once in a worker's life.
+     *
+     * ORDER IS LOAD-BEARING: _REQUEST must follow zend_activate_auto_globals(),
+     * because php_auto_globals_create_request() merges
+     * Z_ARRVAL(PG(http_globals)[GET/POST/COOKIE]) with no type check, and
+     * activate is what makes those slots arrays again. Fired against the
+     * IS_UNDEF slots the loop above leaves behind, it faults. */
+    zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+
+    /* _REQUEST is forced only once something has materialized it. Until then no
+     * loaded script mentions it, so there is nothing to read and nothing to go
+     * stale; the first script that does mention it materializes it correctly at
+     * compile time and leaves the symbol-table entry behind. The latch is what
+     * makes the gate safe: `unset($_REQUEST)` at global scope removes that entry,
+     * and a bare existence check would then skip for the rest of the worker's
+     * life, because the OPcache mask that would otherwise re-fire the callback
+     * never clears again in worker mode. */
+    static __thread bool request_materialized = false;
+    if (!request_materialized
+        && zend_hash_exists(&EG(symbol_table),
+                            ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST))) {
+        request_materialized = true;
+    }
+    if (request_materialized) {
+        zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST));
+    }
+}
+
 /* ─── Targeted per-fiber request init ──────────────────── */
 
 void oxphp_fiber_init_request_state(void) {
@@ -488,14 +627,7 @@ void oxphp_fiber_init_request_state(void) {
     PG(connection_status) = PHP_CONNECTION_NORMAL;
 
     /* Re-init superglobals from new request data */
-    for (int i = 0; i < 6; i++) {
-        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
-        ZVAL_UNDEF(&PG(http_globals)[i]);
-    }
-    zend_activate_auto_globals();
-
-    /* Force $_SERVER population */
-    zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+    oxphp_reset_request_autoglobals();
 
     /* Inject REQUEST_TIME and REQUEST_TIME_FLOAT */
     double req_time = oxphp_bridge_get_request_time();
@@ -1764,41 +1896,10 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
     return -1;
 }
 
-void oxphp_async_sched_release(int64_t fiber_id) {
-    if (!oxphp_task_sched_inited) {
-        return;
-    }
-    oxphp_fiber_scheduler *sched = &oxphp_task_sched;
-
-    oxphp_request_fiber *fiber = sched->fibers_head;
-    while (fiber && (int64_t)fiber->fiber_id != fiber_id) {
-        fiber = fiber->next;
-    }
-    if (!fiber) {
-        return;
-    }
-
-    /* Precondition, checked rather than assumed: the coroutine must be parked at
-     * the bottom of its loop. oxphp_task_start_fiber hands the next task to a
-     * recycled fiber at that park point, so releasing one that is still
-     * suspended would later resume it into a foreign closure — and free the
-     * payload its own task is still running on. It holds today because the
-     * driver releases only a fiber that poll_completed has handed back
-     * (src/executor/async_pool.rs), but that is discipline on the far side of an
-     * FFI boundary, invisible to this compiler and to anyone reading this file.
-     * A ZEND_ASSERT would be no check at all in a release build (ZEND_ASSERT is
-     * ZEND_ASSUME once ZEND_DEBUG is off), so refuse the recycle instead: leaking
-     * one fiber's C stack is a bounded loss, resuming a live task into someone
-     * else's closure is not. */
-    if (!fiber->completed) {
-        fprintf(stderr,
-                "oxphp_async_sched_release: task fiber %llu is still suspended "
-                "— not recycling (its state is left intact)\n",
-                (unsigned long long)fiber->fiber_id);
-        return;
-    }
-
-    /* Tear down task-owned state (the driver has already drained retval) */
+/* Tear down a finished task fiber and hand it to the reuse pool. The caller has
+ * established fiber->completed; the driver has already drained its retval. */
+static void oxphp_task_recycle_fiber(oxphp_fiber_scheduler *sched,
+                                     oxphp_request_fiber *fiber) {
     oxphp_fiber_free_task_payload(fiber);
     fiber->task_args = NULL;
     fiber->task_argc = 0;
@@ -1823,6 +1924,40 @@ void oxphp_async_sched_release(int64_t fiber_id) {
     oxphp_fiber_clear_suspend(fiber);
     fiber->next = sched->free_list;
     sched->free_list = fiber;
+}
+
+void oxphp_async_sched_release(int64_t fiber_id) {
+    if (!oxphp_task_sched_inited) {
+        return;
+    }
+    oxphp_fiber_scheduler *sched = &oxphp_task_sched;
+
+    oxphp_request_fiber *fiber = sched->fibers_head;
+    while (fiber && (int64_t)fiber->fiber_id != fiber_id) {
+        fiber = fiber->next;
+    }
+    if (!fiber) {
+        return;
+    }
+
+    /* Guard against a future caller, not against a state the current one can
+     * reach: the driver releases only what poll_completed has just handed back
+     * (src/executor/async_pool.rs), so the coroutine is parked at the bottom of
+     * its loop by construction. It stays a runtime check because the contract
+     * crosses an FFI boundary, and because releasing a still-suspended fiber
+     * would later resume it into a foreign closure and free the payload its own
+     * task is running on. ZEND_ASSERT cannot stand in: in a release build it is
+     * ZEND_ASSUME, which would license the compiler to delete this branch. */
+    if (!fiber->completed) {
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "oxphp: async task fiber %llu is still suspended — not recycling it",
+                 (unsigned long long)fiber->fiber_id);
+        php_log_err(msg);
+        return;
+    }
+
+    oxphp_task_recycle_fiber(sched, fiber);
 }
 
 int oxphp_async_sched_cancel(int64_t fiber_id) {

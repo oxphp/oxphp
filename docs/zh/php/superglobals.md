@@ -247,13 +247,37 @@ if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
 
 ## $_REQUEST
 
-`$_REQUEST` 是 `$_GET`、`$_POST` 及可选的 `$_COOKIE` 的合并数组，由 PHP 根据 `request_order` INI 指令构建（默认值：`"GP"`——先 GET，后 POST）。OxPHP 不修改此行为。
+`$_REQUEST` 是 `$_GET`、`$_POST` 及可选的 `$_COOKIE` 的合并数组，由 PHP 根据 `request_order` INI 指令构建（默认值：`"GP"`——先 GET，后 POST）。合并规则本身 OxPHP 不做修改。
 
 ```php
 <?php
 // GET /form?action=preview，POST 请求体为：action=submit
 $action = $_REQUEST['action'];  // "submit"（默认顺序下 POST 覆盖 GET）
 ```
+
+> **Worker 模式：** `$_REQUEST` 会为每个请求重建。PHP 通常只在首次加载提及它的脚本时惰性构建一次——在常驻 worker 中，这意味着之后的每个请求都会读到第一个请求的参数。OxPHP 强制重建，因此合并数组始终描述当前正在处理的请求。
+
+---
+
+## $_ENV
+
+`$_ENV` 保存进程环境。传统模式下的行为与 PHP-FPM 完全一致：PHP 在每个请求中依据 `variables_order` 从环境重新填充该数组。
+
+**Worker 模式会将其固定。** Worker 只引导一次，而 `.env` 加载器（vlucas/phpdotenv、symfony/dotenv、Laravel 的 `Env`）会直接写入 `$_ENV`，并不修改进程环境。若每个请求都重建 `$_ENV`，应用配置从第二个请求起就会被抹掉；因此在 worker 模式下，该数组一旦存在便在 worker 的整个生命周期内保留——引导阶段写入的内容对该 worker 处理的每个请求都可见。
+
+```php
+<?php
+// 引导阶段，位于 oxphp_worker() 之前
+Dotenv\Dotenv::createImmutable(__DIR__)->load();   // 写入 $_ENV
+
+oxphp_worker(function () {
+    echo $_ENV['DATABASE_URL'];  // 第 10000 个请求时依然存在
+});
+```
+
+> **取舍：** 由于 worker 模式下没有任何环节重建 `$_ENV`，`filter_input(INPUT_ENV, …)`、`filter_input_array(INPUT_ENV)` 和 `filter_has_var(INPUT_ENV, …)` 会报告没有变量。请改用 `getenv()` 读取环境，或直接读取 `$_ENV`——其中既有进程的值，也有引导阶段追加的值。此限制仅适用于 worker 模式，传统、框架和 SPA 模式不受影响。
+
+该固定行为依赖 PHP 的默认设置 `auto_globals_jit=1`。当 `auto_globals_jit=0` 时，PHP 会在扩展介入之前于每个请求从进程环境重新填充 `$_ENV`，`.env` 加载器写入的值在 worker 模式下将无法保留。
 
 ---
 

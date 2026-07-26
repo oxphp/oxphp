@@ -9,14 +9,8 @@
 # suspending request first (every hooks/* test awaits or sleeps) leaves a
 # half-benign snapshot behind instead: its header list and status come back
 # valid, and only the $_REQUEST check would still fail on a broken build.
-# A replacement opener must therefore satisfy both requirements — never suspend,
-# and not mention $_REQUEST. The second one is not a property of this suite but
-# of an open worker-mode defect: $_REQUEST is a lazily built auto-global that a
-# worker materialises for the first script referencing it and then never rebuilds,
-# so an earlier mention would leave the test below asserting an earlier request's
-# $_REQUEST and failing for the wrong reason. Drop that half of the rule once the
-# defect is fixed. strict=1 turns "served on a fresh fiber" into a failure, which
-# here is a real invariant, not a coin flip.
+# A replacement opener must therefore never suspend. strict=1 turns "served on a
+# fresh fiber" into a failure, which here is a real invariant, not a coin flip.
 worker/test_worker_class_get_id
 worker/test_request_state_after_reuse >> ?probe=42&strict=1
 
@@ -24,8 +18,35 @@ worker/test_request_state_after_reuse >> ?probe=42&strict=1
 # self-requests served from the event-loop tick.
 hooks/test_tick_path_fiber_reuse
 
+# Two requests, different probe, one worker (PHP_WORKERS=1): $_REQUEST must
+# follow the request being served. The first request compiles the file and so
+# materialises the lazy auto-global correctly whatever the build; the second gets
+# it from OPcache with no compile, which is where a worker that does not rebuild
+# $_REQUEST per request hands out the first one's parameters. Both lines are
+# needed — the second alone proves nothing without the first to leave a different
+# value behind.
+worker/test_request_autoglobal_refresh >> ?probe=alpha
+worker/test_request_autoglobal_refresh >> ?probe=beta
+
+# The other half of the same decision: $_ENV must NOT be rebuilt per request,
+# because its callback repopulates from the process environment and would erase
+# what a .env loader wrote straight into the array at worker boot. Seed a key,
+# then compile a mention of $_ENV — the trigger that fires the callback, since
+# every reset re-arms the lazy auto-globals — then require the key to still be
+# there. All three must stay adjacent and in this order. Listed here only: they
+# need one worker, which PHP_WORKERS=1 guarantees and a pool does not.
+worker/test_env_superglobal_persists >> ?mode=seed
+worker/test_env_superglobal_persists >> ?mode=touch
+worker/test_env_superglobal_persists >> ?mode=expect
+
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
+
+# A suspended request must resume with its own superglobals, not with those of
+# whatever the worker served while it was parked. Needs PHP_WORKERS=1 (this
+# profile) so the inner self-request can only be served inside the suspended
+# window. The query string is load-bearing: the test asserts on it by value.
+hooks/test_superglobals_survive_suspend >> ?probe=outer&secret=outer-only
 hooks/test_promise_survives_bystander
 hooks/test_orphan_drain_nonblocking
 hooks/test_stream_task_multiplex

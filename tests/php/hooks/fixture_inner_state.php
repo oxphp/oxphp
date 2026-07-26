@@ -14,8 +14,7 @@ declare(strict_types=1);
 // replace (the step that walks the list element by element, i.e. the one that
 // read uninitialized heap and faulted).
 //
-// Echo-style on purpose — the outer test asserts on this body, not on JSON. Must
-// not mention $_REQUEST; see the note at the top of tests/suites/hooks.txt.
+// Echo-style on purpose — the outer test asserts on this body, not on JSON.
 //
 // Must also not suspend — no await, no sleep, no socket read. The second of the
 // two inner requests only lands on a recycled fiber because the first one runs to
