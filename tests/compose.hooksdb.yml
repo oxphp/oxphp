@@ -1,0 +1,77 @@
+# Runtime hooks against real database servers: the same worker-mode setup as
+# compose.hooks.yml (RUNTIME_HOOKS=1, one PHP worker, one async worker), but
+# with MySQL and Redis alongside so the socket hooks are exercised through
+# mysqlnd and phpredis rather than through hand-written stream code.
+#
+# Both clients wait for their server's reply inside php_stream_read() on a
+# tcp:// stream. With one worker thread per pool, wall-clock assertions show
+# whether that wait parks the fiber — freeing the thread for other work — or
+# pins it, which is what the same code does without the hooks.
+#
+# The oxphp service builds from fixtures/hooks_db/Dockerfile, which layers the
+# client extensions onto the dev image; build that image first.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.hooksdb.yml up
+services:
+  hooksdb-mysql:
+    image: mysql:9
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: appdb
+      MYSQL_USER: appuser
+      MYSQL_PASSWORD: apppass
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpass"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [test-net]
+
+  hooksdb-redis:
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    networks: [test-net]
+
+  oxphp-hooksdb:
+    build:
+      context: ./fixtures/hooks_db
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${OXPHP_BASE_IMAGE:-oxphp-oxphp:latest}
+    depends_on:
+      hooksdb-mysql:
+        condition: service_healthy
+      hooksdb-redis:
+        condition: service_healthy
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "1"
+      DB_MYSQL_HOST: hooksdb-mysql
+      DB_NAME: appdb
+      DB_USER: appuser
+      DB_PASS: apppass
+      DB_REDIS_HOST: hooksdb-redis
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker

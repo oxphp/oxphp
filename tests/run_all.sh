@@ -109,7 +109,14 @@ trap cleanup EXIT
 # ── Run profiles sequentially ────────────────────────────────
 for profile in "${profiles[@]}"; do
     log_info "━━━ Profile: $profile ━━━"
-    start_profile "$profile"
+    # A profile that cannot even be brought up will never turn healthy, and
+    # waiting out the health timeout to discover that costs a minute each time.
+    # Profiles layered on the dev image (hooksdb) land here on a machine that
+    # has not built it.
+    if ! start_profile "$profile"; then
+        log_error "Profile $profile could not be started (check the prerequisites in its compose file), skipping"
+        continue
+    fi
     if ! wait_healthy "$profile" 60; then
         log_error "Profile $profile failed to start, skipping"
         stop_profile "$profile"
