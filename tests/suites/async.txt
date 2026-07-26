@@ -37,3 +37,4 @@ async/test_async_output_drain_unbuffered
 async/test_async_jit_suspend_resume
 async/test_await_all_cancel_cpu_bound
 async/test_await_all_reject_member
+async/test_await_result_refcount
