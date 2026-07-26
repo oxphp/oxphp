@@ -62,6 +62,19 @@ oxphp_worker(function () {
             error_log('bg-done');
             return;
 
+        case '/bgplain': // ORDINARY (non-streaming) response finished early,
+                         // then long background work. Unlike /bg this takes the
+                         // early-send oneshot path: the whole response goes out
+                         // at once, the connection winds down, and the live
+                         // connection count reaches zero while the worker is
+                         // still executing post-response work. The drain must
+                         // still apply its deadline to that work.
+            echo 'bgplain-start';
+            oxphp_finish_request();
+            oxphp_sleep((float)($_GET['post'] ?? 30));
+            error_log('bgplain-done');
+            return;
+
         case '/tight': // streaming request that never suspends: it flushes in a
                        // loop with a native usleep, so the scheduler's drain
                        // sweep never sees it. Only the stream-flush path's

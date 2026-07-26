@@ -603,9 +603,11 @@ async fn async_main(
     // still running is hard-cancelled and given a short beat to unwind its
     // bailout (shutdown handlers, final bytes) before the process exits.
     let active = server.active_connections();
-    if active > 0 {
+    let active_in_flight = oxphp::php::worker_registry::total_in_flight();
+    if active + active_in_flight > 0 {
         tracing::info!(
             active_connections = active,
+            in_flight_requests = active_in_flight,
             "Draining in-flight connections"
         );
         let drain_deadline = tokio::time::Instant::now()
@@ -614,7 +616,14 @@ async fn async_main(
         let mut hard_cancelled = false;
         loop {
             let remaining = server.active_connections();
-            if remaining == 0 {
+            // Requests that ended their response early (`oxphp_finish_request()`)
+            // drop their connection while their background work keeps running on
+            // the worker. Connections alone therefore report nothing left to wait
+            // for: the drain does not cover that work at all — it is cut short
+            // when the workers are torn down, never getting the window, and
+            // nothing would bound it if it did survive.
+            let in_flight = oxphp::php::worker_registry::total_in_flight();
+            if remaining + in_flight == 0 {
                 tracing::info!("All connections drained");
                 break;
             }
@@ -623,6 +632,7 @@ async fn async_main(
                 hard_cancelled = true;
                 tracing::warn!(
                     remaining_connections = remaining,
+                    in_flight_requests = in_flight,
                     "Drain timeout reached, cancelling in-flight requests"
                 );
                 // Requests still waiting for a queue slot are in no worker, so
@@ -636,7 +646,11 @@ async fn async_main(
                 );
             }
             if now >= hard_exit {
-                tracing::warn!(remaining_connections = remaining, "Forcing shutdown");
+                tracing::warn!(
+                    remaining_connections = remaining,
+                    in_flight_requests = in_flight,
+                    "Forcing shutdown"
+                );
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
