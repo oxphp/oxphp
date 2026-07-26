@@ -57,9 +57,11 @@ foreach ($results as $i => $r) {
     );
 }
 
-// assertLessThan rather than a boolean, so the span itself lands in the report:
-// a failure here is a timing claim, and the number says whether the waits
-// serialized outright or merely overlapped less than expected.
+// The measurement is the point of this test, so it is reported either way:
+// meta() carries it on a pass, and assertLessThan (rather than a boolean) puts
+// it in the failure too, where the number says whether the waits serialized
+// outright or merely overlapped less than expected.
+$t->meta('span', round($span, 3));
 $t->assertLessThan(
     'the three waits overlapped on one async worker (serial would be >= 3s)',
     $span,
