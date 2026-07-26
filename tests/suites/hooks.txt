@@ -9,3 +9,4 @@ hooks/test_stream_task_multiplex
 hooks/test_stream_request_multiplex
 hooks/test_stream_userland_fiber
 hooks/test_stream_timeout_worker
+hooks/test_select_task_multiplex
