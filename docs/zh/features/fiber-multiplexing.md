@@ -132,7 +132,7 @@ Fiber 多路复用是**协作式的，不是抢占式的**。调用阻塞函数�
 - DNS 解析（`gethostbyname()`）
 - 任何同步网络或磁盘 I/O
 
-启用 `RUNTIME_HOOKS=streams` 后，套接字**读取**是个例外：`tcp://` 流上的阻塞读取挂起的是 fiber 而不是线程，这覆盖了在 PHP 流读取上阻塞的客户端（mysqlnd、phpredis、HTTP 流包装器）。写入、`stream_select()`、ext/curl、连接建立和 DNS 解析仍然会阻塞。参见[配置](../operations/configuration.md#运行时钩子)。
+启用 `RUNTIME_HOOKS=streams` 后，套接字**读取**与 **`stream_select()`** 是例外：两者挂起的都是 fiber 而不是线程，既覆盖了在 PHP 流读取上阻塞的客户端（mysqlnd、phpredis、HTTP 流包装器），也覆盖了同时等待多个套接字的循环。写入、`socket_select()`、ext/curl、连接建立和 DNS 解析仍然会阻塞。参见[配置](../operations/configuration.md#运行时钩子)。
 
 ### 如何避免阻塞
 
