@@ -23,6 +23,7 @@
 #define OXPHP_MAX_WAIT_FDS 1024
 
 struct _oxphp_fiber_scheduler;
+struct oxphp_io_reg;
 
 /* Which fiber, and which of its descriptors, a readiness registration belongs
  * to — so an event can be scattered back into that fiber's own descriptor
@@ -273,6 +274,16 @@ typedef struct _oxphp_fiber_scheduler {
      * so a worker whose requests never wait on a descriptor pays nothing. */
     int epfd;
     int timer_fd;
+
+    /* Which registration each watched descriptor currently belongs to, so a
+     * removal can be checked against the registration that made it — a
+     * descriptor number can be closed and handed to a new connection while its
+     * first waiter is still parked. Open-addressed on the descriptor, capacity
+     * reg_mask + 1 (a power of two), NULL until the first park. Freed by
+     * oxphp_scheduler_destroy(). Layout is private to oxphp_fiber.c. */
+    struct oxphp_io_reg *reg_slots;
+    uint32_t reg_mask;
+    uint32_t reg_count;
 } oxphp_fiber_scheduler;
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
