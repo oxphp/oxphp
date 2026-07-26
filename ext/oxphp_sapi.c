@@ -1296,22 +1296,26 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
  * `fds` is borrowed for the whole suspension and written back into: the
  * scheduler fills each entry's revents before resuming, so the caller reads
  * which of its descriptors fired. It must therefore live in the caller's frame,
- * which by construction outlives the wait.
+ * which by construction outlives the wait. `owners` is borrowed on the same
+ * terms and holds the identity each registration carries back; the caller only
+ * has to supply the room, this fills it in.
  *
  * timeout_ns < 0 waits indefinitely. Returns 1 when a descriptor is ready,
- * 0 when not called from a fiber (or the set is unusable), -1 when the fiber
- * was cancelled, and -2 when the deadline elapsed first.
+ * 0 when not called from a fiber (or the set is unusable, or the scheduler
+ * cannot watch it), -1 when the fiber was cancelled, and -2 when the deadline
+ * elapsed first.
  *
  * A 0 means the caller must do the wait itself, blocking its thread — so the
  * set being unusable has to stay a caller's bug rather than a size a real
  * program reaches: OXPHP_MAX_WAIT_FDS is set at the ceiling PHP's own
  * multiplexed wait enforces, and a wider set is one PHP would have rejected
  * before ever calling a hook. */
-static int oxphp_fiber_io_wait(struct pollfd *fds, uint32_t nfds, int64_t timeout_ns)
+static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners,
+                               uint32_t nfds, int64_t timeout_ns)
 {
     if (oxphp_current_fiber == NULL) return 0;
     if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
-    if (fds == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
+    if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
 
@@ -1325,10 +1329,17 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, uint32_t nfds, int64_t timeou
 
     for (uint32_t i = 0; i < nfds; i++) {
         fds[i].revents = 0;
+        owners[i].fiber = self;
+        owners[i].idx = i;
     }
+
+    /* Before the suspension is recorded, so a set the scheduler cannot watch
+     * leaves nothing half-written to undo — the fiber simply never parked. */
+    if (!oxphp_io_park(self, fds, owners, nfds)) return 0;
 
     self->suspend_reason = OXPHP_SUSPEND_IO_WAIT;
     self->suspend_data.io.fds = fds;
+    self->suspend_data.io.owners = owners;
     self->suspend_data.io.nfds = nfds;
     self->suspend_data.io.expired = false;
     self->suspend_data.io.deadline_ns = deadline_ns;
@@ -1631,7 +1642,8 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
             .events = PHP_POLLREADABLE,
             .revents = 0,
         };
-        int rc = oxphp_fiber_io_wait(&pfd, 1, budget_ns);
+        struct oxphp_io_owner owner;
+        int rc = oxphp_fiber_io_wait(&pfd, &owner, 1, budget_ns);
         if (rc == 0) {
             /* Declined the suspension — a userland fiber scheduler owns the
              * context, so nothing was waited for. Step aside completely: with
@@ -1982,7 +1994,7 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
 
     /* Sized from the arrays rather than from OXPHP_MAX_WAIT_FDS: the cap is the
      * ceiling PHP's own select enforces, and a frame reserving all of it would
-     * be 8 KiB for a call that almost always watches one or two descriptors.
+     * be 24 KiB for a call that almost always watches one or two descriptors.
      * do_alloca keeps the small case on the stack and spills the large one to
      * the request heap; either way the buffer outlives the suspension, which is
      * all oxphp_fiber_io_wait() asks of it. */
@@ -1996,7 +2008,12 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
     }
 
     ALLOCA_FLAG(use_heap)
-    struct pollfd *fds = do_alloca(cap * sizeof(struct pollfd), use_heap);
+    struct pollfd *fds = do_alloca(
+        cap * (sizeof(struct pollfd) + sizeof(struct oxphp_io_owner)), use_heap);
+    /* One allocation for both arrays: they are created together, handed to the
+     * wait together and released together. The second half starts a whole
+     * number of 8-byte pollfds in, which is the alignment an owner needs. */
+    struct oxphp_io_owner *owners = (struct oxphp_io_owner *) (fds + cap);
     uint32_t nfds = 0;
     /* One event mask per array, each matching what PHP's own select() reports
      * that array from: a hangup and a socket error to the read set, a socket
@@ -2042,7 +2059,7 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
             if (left_ns < 0) left_ns = 0;
         }
 
-        int rc = oxphp_fiber_io_wait(fds, nfds, left_ns);
+        int rc = oxphp_fiber_io_wait(fds, owners, nfds, left_ns);
         if (rc == 0) {
             /* Declined — nothing was waited for, so the call is handed over
              * untouched, arrays included. */
