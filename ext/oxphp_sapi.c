@@ -1788,6 +1788,268 @@ static void oxphp_restore_socket_ops(void)
     oxphp_socket_ops_prot = -1;
 }
 
+/* ─── Hooked stream_select() (category "streams") ────────────
+ * stream_select() waits on descriptors directly and never reaches ops->read, so
+ * the socket read hook does nothing for it: a select loop pins the worker thread
+ * for its whole timeout. This hook reproduces only the wait. Everything the
+ * function is actually specified to do — rewriting the three arrays down to the
+ * ready streams, the return count, the warnings, the argument errors — stays
+ * with the original handler, which is called afterwards with the timeout forced
+ * to zero.
+ *
+ * Anything this hook does not fully understand delegates unchanged, so the worst
+ * case is exactly today's behaviour. */
+
+static zif_handler oxphp_orig_stream_select = NULL;
+
+/* Collect the descriptors one stream array contributes to the wait set, merging
+ * a descriptor that appears in two arrays into a single entry carrying both
+ * events. Returns false when the array holds something this hook must not try
+ * to represent, in which case the caller delegates and native behaviour is
+ * preserved exactly:
+ *
+ *   - a read stream with buffered data, because stream_select() answers from
+ *     the buffer without looking at any descriptor and a hook that parked
+ *     instead would sleep through data the caller already has;
+ *   - a stream that does not cast to a descriptor, because native emits its own
+ *     warning and selects on the remainder, which is not ours to reproduce;
+ *   - a descriptor at or past FD_SETSIZE. Native does not wait on those at all:
+ *     it warns and returns false immediately. Parking a fiber on one would
+ *     delay an answer that is already decided, and on a null timeout would
+ *     never produce it;
+ *   - more descriptors than the buffer the caller sized from the arrays.
+ *
+ * The cast asks for no error output (last argument 0) — native will do the same
+ * cast with output enabled, and a warning printed twice is a behaviour change. */
+static bool oxphp_select_collect(zval *arr, short events, bool buffered_is_ready,
+                                 struct pollfd *fds, uint32_t cap, uint32_t *nfds)
+{
+    if (arr == NULL || Z_TYPE_P(arr) == IS_NULL) return true;
+    if (Z_TYPE_P(arr) != IS_ARRAY) return false;
+
+    zval *elem;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(arr), elem) {
+        ZVAL_DEREF(elem);
+        php_stream *stream = NULL;
+        php_stream_from_zval_no_verify(stream, elem);
+        if (stream == NULL) continue;   /* native skips these silently too */
+
+        if (buffered_is_ready && (stream->writepos - stream->readpos) > 0) {
+            return false;
+        }
+
+        php_socket_t sock_fd;
+        if (php_stream_cast(stream,
+                            PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL,
+                            (void *) &sock_fd, 0) != SUCCESS || sock_fd == -1) {
+            return false;
+        }
+        if ((int) sock_fd >= FD_SETSIZE) {
+            return false;
+        }
+
+        uint32_t i = 0;
+        for (; i < *nfds; i++) {
+            if (fds[i].fd == (int) sock_fd) {
+                fds[i].events |= events;
+                break;
+            }
+        }
+        if (i == *nfds) {
+            if (*nfds == cap) return false;
+            fds[*nfds].fd = (int) sock_fd;
+            fds[*nfds].events = events;
+            fds[*nfds].revents = 0;
+            (*nfds)++;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    return true;
+}
+
+/* Call the original handler with the timeout arguments forced to zero, so its
+ * own select() answers from the readiness we have already waited for instead of
+ * waiting for it a second time — which is what would make the worst case twice
+ * the timeout the caller asked for.
+ *
+ * Both arguments are longs or nulls taken by value, so the substitution lives in
+ * this call frame and is invisible to the caller's variables. Neither is
+ * refcounted, so a zend_bailout out of the delegate leaks nothing and the
+ * restore below is hygiene rather than a correctness requirement. */
+static void oxphp_select_delegate_now(zend_execute_data *execute_data,
+                                      zval *return_value, uint32_t argc)
+{
+    zval *sec = ZEND_CALL_ARG(execute_data, 4);
+    zval saved_sec = *sec;
+    ZVAL_LONG(sec, 0);
+
+    zval *usec = NULL;
+    zval saved_usec;
+    if (argc >= 5) {
+        usec = ZEND_CALL_ARG(execute_data, 5);
+        saved_usec = *usec;
+        ZVAL_LONG(usec, 0);
+    }
+
+    oxphp_orig_stream_select(execute_data, return_value);
+
+    *sec = saved_sec;
+    if (usec != NULL) *usec = saved_usec;
+}
+
+static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *return_value)
+{
+    /* Outside a fiber there is nothing to suspend; on a userland fiber's context
+     * suspending would store the continuation in the wrong handle and corrupt
+     * both schedulers — the same guard every other suspend point carries. */
+    if (oxphp_current_fiber == NULL
+        || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    /* Four required parameters, one optional timeout fraction. The upper bound
+     * is loose on purpose: a later PHP that appends a parameter keeps the same
+     * meaning for the first five, which is all this reads. */
+    uint32_t argc = ZEND_CALL_NUM_ARGS(execute_data);
+    if (argc < 4 || argc > 6) {
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    zval *r = ZEND_CALL_ARG(execute_data, 1);
+    zval *w = ZEND_CALL_ARG(execute_data, 2);
+    zval *e = ZEND_CALL_ARG(execute_data, 3);
+    zval *sec = ZEND_CALL_ARG(execute_data, 4);
+    zval *usec = argc >= 5 ? ZEND_CALL_ARG(execute_data, 5) : NULL;
+    ZVAL_DEREF(r); ZVAL_DEREF(w); ZVAL_DEREF(e);
+    ZVAL_DEREF(sec);
+    if (usec != NULL) ZVAL_DEREF(usec);
+
+    /* Native builds the timeval from these two and throws on a negative one.
+     * A shape this hook does not read the same way is not a shape it may wait
+     * on. Ten years stands in for "longer than anyone means", and keeps the
+     * nanosecond arithmetic from overflowing. */
+    int64_t timeout_ns = -1;
+    if (Z_TYPE_P(sec) == IS_LONG) {
+        zend_long s = Z_LVAL_P(sec);
+        zend_long us = (usec != NULL && Z_TYPE_P(usec) == IS_LONG) ? Z_LVAL_P(usec) : 0;
+        if (s < 0 || us < 0 || (usec != NULL && Z_TYPE_P(usec) != IS_LONG
+                                && Z_TYPE_P(usec) != IS_NULL)) {
+            oxphp_orig_stream_select(execute_data, return_value);
+            return;
+        }
+        if (s > 315360000) s = 315360000;
+        timeout_ns = (int64_t) s * 1000000000 + (int64_t) us * 1000;
+    } else if (Z_TYPE_P(sec) != IS_NULL) {
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    } else if (usec != NULL && Z_TYPE_P(usec) != IS_NULL
+               && !(Z_TYPE_P(usec) == IS_LONG && Z_LVAL_P(usec) == 0)) {
+        /* A null $seconds with a non-zero $microseconds is an argument error
+         * native raises before waiting at all. Waiting forever on a call that is
+         * specified to throw is the one way this hook could hang a fiber that
+         * native would not, so it declines instead. */
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    /* Sized from the arrays rather than from OXPHP_MAX_WAIT_FDS: the cap is the
+     * ceiling PHP's own select enforces, and a frame reserving all of it would
+     * be 8 KiB for a call that almost always watches one or two descriptors.
+     * do_alloca keeps the small case on the stack and spills the large one to
+     * the request heap; either way the buffer outlives the suspension, which is
+     * all oxphp_fiber_io_wait() asks of it. */
+    uint32_t cap = 0;
+    if (Z_TYPE_P(r) == IS_ARRAY) cap += zend_hash_num_elements(Z_ARRVAL_P(r));
+    if (Z_TYPE_P(w) == IS_ARRAY) cap += zend_hash_num_elements(Z_ARRVAL_P(w));
+    if (Z_TYPE_P(e) == IS_ARRAY) cap += zend_hash_num_elements(Z_ARRVAL_P(e));
+    if (cap == 0 || cap > OXPHP_MAX_WAIT_FDS) {
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    ALLOCA_FLAG(use_heap)
+    struct pollfd *fds = do_alloca(cap * sizeof(struct pollfd), use_heap);
+    uint32_t nfds = 0;
+    if (!oxphp_select_collect(r, PHP_POLLREADABLE, true, fds, cap, &nfds)
+        || !oxphp_select_collect(w, POLLOUT, false, fds, cap, &nfds)
+        || !oxphp_select_collect(e, POLLPRI, false, fds, cap, &nfds)
+        || nfds == 0) {
+        free_alloca(fds, use_heap);
+        oxphp_orig_stream_select(execute_data, return_value);
+        return;
+    }
+
+    /* Native rewrites all three arrays down to the streams that were ready, and
+     * does so on every select that succeeds — including one that reports
+     * nothing. A second delegation would therefore see three empty arrays and
+     * raise the error native raises for a caller who passed none. Hold the
+     * originals and put them back before any retry; the caller is suspended
+     * inside this call and cannot observe the intermediate state. */
+    zval saved_r, saved_w, saved_e;
+    ZVAL_COPY(&saved_r, r);
+    ZVAL_COPY(&saved_w, w);
+    ZVAL_COPY(&saved_e, e);
+
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    /* Every exit from here on releases the buffer and the saved arrays through
+     * the one label. A drain bails out of oxphp_fiber_io_wait() with
+     * zend_bailout and skips it, which leaks nothing: the stack form of the
+     * buffer has nothing to release, the heap form is emalloc, and the arrays
+     * are the caller's own — all three go with the request. */
+    for (;;) {
+        int64_t left_ns = -1;
+        if (timeout_ns >= 0) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t spent = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
+                            + (int64_t)(now.tv_nsec - started.tv_nsec);
+            left_ns = timeout_ns - spent;
+            if (left_ns < 0) left_ns = 0;
+        }
+
+        int rc = oxphp_fiber_io_wait(fds, nfds, left_ns);
+        if (rc == 0) {
+            /* Declined — nothing was waited for, so the call is handed over
+             * untouched, arrays included. */
+            goto delegate;
+        }
+        if (rc == -1) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+            RETVAL_FALSE;
+            goto done;
+        }
+
+        /* Ready, or the deadline passed. Either way native decides what to
+         * report, without being allowed to wait again. */
+        oxphp_select_delegate_now(execute_data, return_value, argc);
+        if (EG(exception) != NULL) goto done;
+        if (Z_TYPE_P(return_value) != IS_LONG || Z_LVAL_P(return_value) != 0) goto done;
+        if (rc == -2) goto done;   /* the caller's timeout really did elapse */
+        if (timeout_ns == 0) goto done;
+
+        /* Zero with budget left: the readiness we woke on did not survive to
+         * the delegate's own select — another fiber sharing this connection
+         * drained it. Restore what the delegate consumed and wait out the
+         * remainder rather than report a timeout that has not happened. */
+        zval_ptr_dtor(r); ZVAL_COPY(r, &saved_r);
+        zval_ptr_dtor(w); ZVAL_COPY(w, &saved_w);
+        zval_ptr_dtor(e); ZVAL_COPY(e, &saved_e);
+    }
+
+delegate:
+    oxphp_orig_stream_select(execute_data, return_value);
+done:
+    zval_ptr_dtor(&saved_r);
+    zval_ptr_dtor(&saved_w);
+    zval_ptr_dtor(&saved_e);
+    free_alloca(fds, use_heap);
+}
+
 static const char *const oxphp_hook_categories[] = { "sleep", "streams" };
 
 /* A category name that matches nothing disables the hook the operator asked
@@ -1856,12 +2118,17 @@ static void oxphp_runtime_hooks_install(void)
         oxphp_hook_swap("usleep", sizeof("usleep") - 1,
                         oxphp_hooked_usleep, &oxphp_orig_usleep);
     }
-    if (oxphp_hooks_category_enabled("streams") && !oxphp_hook_socket_ops()) {
-        /* MINIT has no request context, and this is the only signal that the
-         * category was dropped, so it goes to the server log rather than
-         * wherever error output happens to be pointed. */
-        php_log_err("oxphp: socket stream hooks unavailable (the stream ops table "
-                    "could not be made writable); socket reads stay blocking");
+    if (oxphp_hooks_category_enabled("streams")) {
+        if (!oxphp_hook_socket_ops()) {
+            /* MINIT has no request context, and this is the only signal that
+             * part of the category was dropped, so it goes to the server log
+             * rather than wherever error output happens to be pointed. The
+             * stream_select() hook needs no writable page and stays installed. */
+            php_log_err("oxphp: socket stream hooks unavailable (the stream ops table "
+                        "could not be made writable); socket reads stay blocking");
+        }
+        oxphp_hook_swap("stream_select", sizeof("stream_select") - 1,
+                        oxphp_hooked_stream_select, &oxphp_orig_stream_select);
     }
 }
 
@@ -1871,6 +2138,9 @@ static void oxphp_runtime_hooks_restore(void)
     oxphp_hook_restore("usleep", sizeof("usleep") - 1, oxphp_orig_usleep);
     oxphp_orig_sleep = NULL;
     oxphp_orig_usleep = NULL;
+    oxphp_hook_restore("stream_select", sizeof("stream_select") - 1,
+                       oxphp_orig_stream_select);
+    oxphp_orig_stream_select = NULL;
     oxphp_restore_socket_ops();
 }
 
