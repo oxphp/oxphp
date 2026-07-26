@@ -118,7 +118,40 @@ const REQUEST_DURATION_BUCKET_BOUNDS: [u64; 12] = [
 ];
 
 /// Histogram bucket boundaries for queue wait time (microseconds).
-const QUEUE_WAIT_BUCKET_BOUNDS: [u64; 9] = [50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 50_000];
+///
+/// The tail has to reach past `QUEUE_WAIT_TIMEOUT_MS`, whose default is a
+/// second: a range that stopped at 50 ms put every wait an operator would
+/// actually want to see — the ones long enough to be worth a knob — into a
+/// single `+Inf` bucket, so the histogram could say waits were long but not
+/// how long. Shares its last four boundaries with
+/// [`REQUEST_DURATION_BUCKET_BOUNDS`] so queue wait and total duration can be
+/// read against each other bucket for bucket.
+const QUEUE_WAIT_BUCKET_BOUNDS: [u64; 13] = [
+    50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
+];
+
+/// Counts a PHP request against `pending_requests` for as long as it lives —
+/// from the moment the server routes it to the queue until it is answered,
+/// whether it reached a worker or was refused. Taken on the PHP dispatch path
+/// only: a static file, a 404 or a denied path never queues and is not
+/// counted. Obtained from [`Metrics::request_queued`].
+///
+/// Borrows rather than holding an `Arc`: this is taken and released once per
+/// request on the dispatch path, and an `Arc` here would put two refcount
+/// round-trips on a shared cache line into the hot path of a change whose
+/// whole point is throughput under load. The borrow costs nothing and gives
+/// the same guarantee — the caller's `&Metrics` already outlives the dispatch.
+pub struct PendingGuard<'a> {
+    metrics: &'a Metrics,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.metrics
+            .pending_requests
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Lock-free atomic metrics counters for the server.
 /// All operations use `Relaxed` ordering — counters are approximate and don't
@@ -129,10 +162,12 @@ pub struct Metrics {
     active_connections: AtomicUsize,
     pending_requests: AtomicUsize,
     dropped_requests: AtomicU64,
+    /// One slot per [`ShedReason`], indexed by its position in
+    /// `ShedReason::ALL` — the same array the labels are rendered from.
+    admission_refusals: [AtomicU64; crate::executor::admission::ShedReason::ALL.len()],
     requests_by_method: [AtomicU64; 10],
     responses_by_status_class: [AtomicU64; 5],
     total_response_time_us: AtomicU64,
-    busy_workers: AtomicUsize,
     workers_current: AtomicUsize,
     workers_min: AtomicUsize,
     workers_max: AtomicUsize,
@@ -150,7 +185,7 @@ pub struct Metrics {
     response_bytes_total: AtomicU64,
 
     /// Queue wait time histogram (time between queue submit and worker pickup).
-    queue_wait_buckets: [AtomicU64; 10], // 9 bounded + 1 +Inf
+    queue_wait_buckets: [AtomicU64; QUEUE_WAIT_BUCKET_BOUNDS.len() + 1], // bounded + 1 +Inf
     queue_wait_sum_us: AtomicU64,
     queue_wait_count: AtomicU64,
 
@@ -273,10 +308,10 @@ impl Metrics {
             active_connections: AtomicUsize::new(0),
             pending_requests: AtomicUsize::new(0),
             dropped_requests: AtomicU64::new(0),
+            admission_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
             requests_by_method: std::array::from_fn(|_| AtomicU64::new(0)),
             responses_by_status_class: std::array::from_fn(|_| AtomicU64::new(0)),
             total_response_time_us: AtomicU64::new(0),
-            busy_workers: AtomicUsize::new(0),
             workers_current: AtomicUsize::new(0),
             workers_min: AtomicUsize::new(0),
             workers_max: AtomicUsize::new(0),
@@ -395,18 +430,38 @@ impl Metrics {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
-    pub fn request_queued(&self) {
+    /// Count a request as in flight and hand back the guard that discounts it.
+    ///
+    /// The decrement is tied to the guard's lifetime rather than to a matching
+    /// call because the request can leave along paths that never reach one:
+    /// the client disconnects and the whole dispatch future is dropped, or the
+    /// runtime is torn down mid-request. A missed decrement never recovers —
+    /// the gauges only ever climb — so pairing is not left to the caller.
+    ///
+    /// `must_use` because dropping the guard on the spot is the one way to
+    /// misuse it: the increment and its decrement both happen and the request
+    /// never appears in the gauge at all.
+    #[must_use = "the request is counted only for as long as the guard is held"]
+    pub fn request_queued(&self) -> PendingGuard<'_> {
         self.pending_requests.fetch_add(1, Ordering::Relaxed);
-        self.busy_workers.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn request_dequeued(&self) {
-        self.pending_requests.fetch_sub(1, Ordering::Relaxed);
-        self.busy_workers.fetch_sub(1, Ordering::Relaxed);
+        PendingGuard { metrics: self }
     }
 
     pub fn request_dropped(&self) {
         self.dropped_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A request refused at admission — answered without reaching a worker.
+    ///
+    /// The reason is carried through because the conditions call for different
+    /// knobs: a pool too slow for the deadline, a waiting set at its cap, and a
+    /// queue full with no budget to wait are not the same problem, and a single
+    /// number cannot tell an operator which one they have. The metric is named
+    /// for the mechanism rather than for overload because two of the reasons
+    /// are not overload at all — a draining instance and a dead pool — and a
+    /// counter called "overloaded" would make every restart read as a spike.
+    pub fn request_admission_refused(&self, reason: crate::executor::admission::ShedReason) {
+        self.admission_refusals[reason.index()].fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn set_workers_current(&self, n: usize) {
@@ -577,7 +632,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_pending_requests Requests waiting in queue."
+            "# HELP oxphp_pending_requests PHP requests accepted but not yet answered, including those waiting for admission. Static files, 404s and denied paths are answered without the queue and are not counted."
         );
         let _ = writeln!(out, "# TYPE oxphp_pending_requests gauge");
         let _ = writeln!(
@@ -599,14 +654,34 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_busy_workers Currently busy worker threads."
+            "# HELP oxphp_admission_refused_total Requests answered without reaching a worker, by reason. 529 for the overload reasons (queue_full, wait_timeout, waiting_full), 503 for shutting_down, 500 for pool_unavailable."
         );
-        let _ = writeln!(out, "# TYPE oxphp_busy_workers gauge");
+        let _ = writeln!(out, "# TYPE oxphp_admission_refused_total counter");
+        // Labels come from the same array that assigns the counter slots, so
+        // the series a reason is counted under is the series it is rendered
+        // under by construction.
+        for (reason, count) in crate::executor::admission::ShedReason::ALL
+            .iter()
+            .zip(self.admission_refusals.iter())
+        {
+            let _ = writeln!(
+                out,
+                "oxphp_admission_refused_total{{reason=\"{}\"}} {}",
+                reason.as_str(),
+                count.load(Ordering::Relaxed)
+            );
+        }
+
+        // Both worker gauges read the live registry rather than a counter of
+        // their own: it is the only place that knows when a *worker* holds the
+        // request, so this is what makes `busy` mean busy and `idle` mean idle.
+        let busy_workers = crate::php::worker_registry::busy_workers();
         let _ = writeln!(
             out,
-            "oxphp_busy_workers {}",
-            self.busy_workers.load(Ordering::Relaxed)
+            "# HELP oxphp_busy_workers Worker threads currently executing at least one request."
         );
+        let _ = writeln!(out, "# TYPE oxphp_busy_workers gauge");
+        let _ = writeln!(out, "oxphp_busy_workers {busy_workers}");
 
         let _ = writeln!(
             out,
@@ -637,7 +712,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_workers_idle Currently idle worker threads."
+            "# HELP oxphp_workers_idle Worker threads with no request in flight (workers_current - busy_workers)."
         );
         let _ = writeln!(out, "# TYPE oxphp_workers_idle gauge");
         let _ = writeln!(
@@ -645,7 +720,7 @@ impl Metrics {
             "oxphp_workers_idle {}",
             self.workers_current
                 .load(Ordering::Relaxed)
-                .saturating_sub(self.busy_workers.load(Ordering::Relaxed))
+                .saturating_sub(busy_workers)
         );
 
         let _ = writeln!(
@@ -727,7 +802,7 @@ impl Metrics {
         // ── Queue wait histogram ──
         let _ = writeln!(
             out,
-            "# HELP oxphp_queue_wait_us Time waiting in queue before worker pickup."
+            "# HELP oxphp_queue_wait_us Time waiting for admission and for worker pickup, excluding script execution."
         );
         let _ = writeln!(out, "# TYPE oxphp_queue_wait_us histogram");
         let mut cumulative = 0u64;
@@ -738,7 +813,8 @@ impl Metrics {
                 "oxphp_queue_wait_us_bucket{{le=\"{bound}\"}} {cumulative}"
             );
         }
-        cumulative += self.queue_wait_buckets[9].load(Ordering::Relaxed);
+        cumulative +=
+            self.queue_wait_buckets[QUEUE_WAIT_BUCKET_BOUNDS.len()].load(Ordering::Relaxed);
         let _ = writeln!(
             out,
             "oxphp_queue_wait_us_bucket{{le=\"+Inf\"}} {cumulative}"
@@ -1138,6 +1214,25 @@ impl Metrics {
 mod tests {
     use super::*;
 
+    /// `WORKERS` is one process-global `OnceLock` shared by every test in this
+    /// binary, and the worker gauges are read from it. Tests that assert an
+    /// exact busy/idle count therefore have to be the only one touching
+    /// `active_requests` at that moment — hence a lock rather than the
+    /// pick-your-own-slot convention used elsewhere, which only works while
+    /// tests write disjoint fields.
+    fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Matches `worker_registry::tests` and `supervisor::tests` so whichever
+    /// test wins the `OnceLock`, the others still see the expected size.
+    const REGISTRY_SLOTS: usize = 4;
+
+    fn busy_slot() -> &'static crate::php::worker_registry::WorkerSlot {
+        &crate::php::worker_registry::WORKERS.get().unwrap()[0]
+    }
+
     #[test]
     fn test_method_index_mapping() {
         assert_eq!(method_index(&Method::GET), 0);
@@ -1202,14 +1297,115 @@ mod tests {
     #[test]
     fn test_queue_metrics() {
         let m = Metrics::new();
-        m.request_queued();
-        m.request_queued();
+        let a = m.request_queued();
+        let _b = m.request_queued();
         assert_eq!(m.pending_requests.load(Ordering::Relaxed), 2);
-        assert_eq!(m.busy_workers.load(Ordering::Relaxed), 2);
-        m.request_dequeued();
+        drop(a);
         assert_eq!(m.pending_requests.load(Ordering::Relaxed), 1);
         m.request_dropped();
         assert_eq!(m.dropped_requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn queued_requests_are_pending_but_do_not_occupy_a_worker() {
+        // The two gauges answer different questions and must not move
+        // together. A request in the queue is pending — the server owes an
+        // answer — but no worker is running it: counting it as busy lets
+        // `oxphp_busy_workers` exceed the pool size and pins `oxphp_workers_idle`,
+        // computed by subtraction, to zero on a server that is not saturated.
+        let _lock = registry_lock();
+        crate::php::worker_registry::init_workers(REGISTRY_SLOTS);
+        let m = Metrics::new();
+        m.set_workers_current(4);
+
+        let queued = m.request_queued();
+        assert_eq!(m.pending_requests.load(Ordering::Relaxed), 1);
+        let out = m.to_prometheus();
+        assert!(out.contains("oxphp_busy_workers 0"), "{out}");
+        assert!(out.contains("oxphp_workers_idle 4"), "{out}");
+
+        // Only a worker taking the request makes it busy, and that is recorded
+        // where the worker takes it — not here.
+        let slot = busy_slot();
+        slot.active_requests.fetch_add(1, Ordering::Relaxed);
+        let out = m.to_prometheus();
+        assert!(out.contains("oxphp_busy_workers 1"), "{out}");
+        assert!(out.contains("oxphp_workers_idle 3"), "{out}");
+        assert_eq!(
+            m.pending_requests.load(Ordering::Relaxed),
+            1,
+            "pending covers the whole life of the request, queued or running"
+        );
+
+        slot.active_requests.store(0, Ordering::Relaxed);
+        drop(queued);
+        assert_eq!(m.pending_requests.load(Ordering::Relaxed), 0);
+        assert!(m.to_prometheus().contains("oxphp_busy_workers 0"));
+    }
+
+    #[test]
+    fn busy_workers_counts_threads_not_requests() {
+        // Worker mode multiplexes many request fibers onto one thread. Summing
+        // in-flight requests would push a gauge named for worker threads past
+        // the thread count again, and drive `oxphp_workers_idle` to a
+        // saturating zero on a thread that is perfectly able to take more.
+        let _lock = registry_lock();
+        crate::php::worker_registry::init_workers(REGISTRY_SLOTS);
+        let m = Metrics::new();
+        m.set_workers_current(4);
+
+        let slot = busy_slot();
+        slot.active_requests.store(7, Ordering::Relaxed);
+        let out = m.to_prometheus();
+        assert!(out.contains("oxphp_busy_workers 1"), "{out}");
+        assert!(out.contains("oxphp_workers_idle 3"), "{out}");
+
+        slot.active_requests.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn pending_gauge_recovers_when_the_request_is_abandoned() {
+        // The failure this guards against is a request that never reaches a
+        // completion path — the client disconnects and the whole dispatch
+        // future is dropped. The gauge must still come back down; it only ever
+        // climbed before, so a leak here never heals without a restart.
+        let m = Metrics::new();
+        {
+            let _pending = m.request_queued();
+            assert_eq!(m.pending_requests.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(m.pending_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn admission_refused_total_separates_reasons() {
+        // One number cannot tell an operator whether to give the pool more
+        // headroom, widen the budget, or raise the connection limit — nor
+        // whether the pool is overloaded, draining or dead. The conditions
+        // have to stay distinguishable in the metric.
+        use crate::executor::admission::ShedReason;
+        let m = Metrics::new();
+        let out = m.to_prometheus();
+        for reason in ShedReason::ALL {
+            assert!(
+                out.contains(&format!(
+                    "oxphp_admission_refused_total{{reason=\"{}\"}} 0",
+                    reason.as_str()
+                )),
+                "missing zero series for {}",
+                reason.as_str()
+            );
+        }
+
+        m.request_admission_refused(ShedReason::WaitTimeout);
+        m.request_admission_refused(ShedReason::WaitTimeout);
+        m.request_admission_refused(ShedReason::WaitingFull);
+        m.request_admission_refused(ShedReason::PoolUnavailable);
+        let out = m.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 2"));
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"waiting_full\"} 1"));
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"pool_unavailable\"} 1"));
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"queue_full\"} 0"));
     }
 
     #[test]
@@ -1231,6 +1427,7 @@ mod tests {
 
     #[test]
     fn test_worker_metrics_prometheus() {
+        let _lock = registry_lock();
         let m = Metrics::new();
         m.set_workers_current(8);
         m.set_workers_min(2);
@@ -1246,21 +1443,25 @@ mod tests {
 
     #[test]
     fn test_workers_idle_computed_from_current_minus_busy() {
+        let _lock = registry_lock();
+        crate::php::worker_registry::init_workers(REGISTRY_SLOTS);
         let m = Metrics::new();
         m.set_workers_current(7);
-        m.request_queued();
-        m.request_queued();
-        m.request_queued();
+
+        let slots = crate::php::worker_registry::WORKERS.get().unwrap();
+        for slot in slots.iter().take(3) {
+            slot.active_requests.fetch_add(1, Ordering::Relaxed);
+        }
 
         let output = m.to_prometheus();
-        assert!(output.contains("oxphp_workers_idle 4"));
+        assert!(output.contains("oxphp_workers_idle 4"), "{output}");
 
-        m.request_dequeued();
-        m.request_dequeued();
-        m.request_dequeued();
+        for slot in slots.iter().take(3) {
+            slot.active_requests.store(0, Ordering::Relaxed);
+        }
 
         let output = m.to_prometheus();
-        assert!(output.contains("oxphp_workers_idle 7"));
+        assert!(output.contains("oxphp_workers_idle 7"), "{output}");
     }
 
     #[test]
@@ -1436,21 +1637,41 @@ mod tests {
         let m = Metrics::new();
         m.record_queue_wait(30); // bucket[0] (le=50)
         m.record_queue_wait(200); // bucket[2] (le=250)
-        m.record_queue_wait(100_000); // bucket[9] (+Inf)
+        m.record_queue_wait(750_000); // bucket[12] (le=1_000_000)
 
         assert_eq!(m.queue_wait_buckets[0].load(Ordering::Relaxed), 1);
         assert_eq!(m.queue_wait_buckets[2].load(Ordering::Relaxed), 1);
-        assert_eq!(m.queue_wait_buckets[9].load(Ordering::Relaxed), 1);
+        assert_eq!(m.queue_wait_buckets[12].load(Ordering::Relaxed), 1);
         assert_eq!(m.queue_wait_count.load(Ordering::Relaxed), 3);
         assert_eq!(
             m.queue_wait_sum_us.load(Ordering::Relaxed),
-            30 + 200 + 100_000
+            30 + 200 + 750_000
         );
 
         let output = m.to_prometheus();
         assert!(output.contains("oxphp_queue_wait_us_bucket{le=\"50\"} 1"));
         assert!(output.contains("oxphp_queue_wait_us_bucket{le=\"+Inf\"} 3"));
         assert!(output.contains("oxphp_queue_wait_us_count 3"));
+    }
+
+    #[test]
+    fn queue_wait_buckets_reach_past_the_default_budget() {
+        // A wait an operator would tune for — most of the default
+        // `QUEUE_WAIT_TIMEOUT_MS` — has to land in a bounded bucket. While the
+        // range stopped at 50 ms every such wait fell into `+Inf` together,
+        // and the histogram could report that waits were long but not how long.
+        let m = Metrics::new();
+        m.record_queue_wait(900_000);
+
+        let output = m.to_prometheus();
+        assert!(
+            output.contains("oxphp_queue_wait_us_bucket{le=\"1000000\"} 1"),
+            "a 900 ms wait must be quantified, not lumped into +Inf"
+        );
+        assert!(
+            output.contains("oxphp_queue_wait_us_bucket{le=\"50000\"} 0"),
+            "and must not be counted below its own boundary"
+        );
     }
 
     #[test]

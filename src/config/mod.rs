@@ -106,6 +106,11 @@ pub struct Config {
     pub tokio_workers: usize,
     /// Bounded channel capacity for PHP request queue.
     pub queue_capacity: usize,
+    /// How long a request may wait for a free queue slot before it is shed
+    /// with 529. `0` = fail fast (shed the moment the queue is full).
+    pub queue_wait_timeout_ms: u64,
+    /// Cap on requests parked waiting for a queue slot.
+    pub queue_max_waiting: usize,
     /// Trusted reverse proxy networks (CIDR). When set, X-Forwarded-* and
     /// Forwarded headers from these peers are trusted for client IP extraction.
     pub trusted_proxies: Option<TrustedProxyConfig>,
@@ -244,6 +249,54 @@ fn resolve_static_revalidate(
     }
 }
 
+/// Parse a numeric env knob fail-closed: unset or exactly-empty (`${VAR:-}`
+/// substitution) yields `default`, anything that is not a non-negative
+/// integer is a hard error naming the variable. A silent fallback would let
+/// a typo quietly change pool sizing long after startup.
+fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxError> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8").into()),
+        Ok(v) if v.is_empty() => Ok(default),
+        Ok(v) => v
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("{name} must be a non-negative integer (got {v:?})").into()),
+    }
+}
+
+/// Parse the PHP queue knobs — `QUEUE_CAPACITY`, `QUEUE_WAIT_TIMEOUT_MS` and
+/// `QUEUE_MAX_WAITING`.
+///
+/// `QUEUE_CAPACITY=0` means auto (`worker_count × 128`), matching
+/// `ASYNC_QUEUE_CAPACITY`. Taken literally it would build a zero-capacity
+/// rendezvous channel in which a request could only be handed over if a
+/// worker happened to be blocked waiting at that exact moment — never what
+/// an operator writing `0` intends.
+pub(crate) fn resolve_queue_env(
+    worker_count: usize,
+    max_connections: usize,
+) -> Result<(usize, u64, usize), crate::types::BoxError> {
+    let capacity = match parse_knob("QUEUE_CAPACITY", 0)? {
+        0 => worker_count * 128,
+        n => n,
+    };
+    let wait_timeout_ms = parse_knob("QUEUE_WAIT_TIMEOUT_MS", 1000)? as u64;
+    // How many may wait at once — a bound on resources held, not on waits that
+    // will pay off (that would be `service_rate × budget`, unknowable here).
+    // Generous by default so fast handlers are not refused out of the box; the
+    // configuration reference gives slow ones the arithmetic to size it.
+    //
+    // `worker_count`, not `capacity`: deriving it from the operator's
+    // `QUEUE_CAPACITY` would refuse burst absorption exactly where the queue is
+    // shallow. The `MAX_CONNECTIONS` ceiling keeps the accept loop fed.
+    let max_waiting = match parse_knob("QUEUE_MAX_WAITING", 0)? {
+        0 => (worker_count * 128).min(max_connections / 2).max(1),
+        n => n,
+    };
+    Ok((capacity, wait_timeout_ms, max_waiting))
+}
+
 /// Parse the async-pool env triple — `ASYNC_WORKERS`, `ASYNC_QUEUE_CAPACITY`,
 /// `ASYNC_MAX_FIBERS`. Shared by `Config::from_env` and the one-shot CLI
 /// path, which reads only the variables it actually consumes.
@@ -254,20 +307,6 @@ fn resolve_static_revalidate(
 /// `0` would quietly disable the async pool. `ASYNC_MAX_FIBERS=0` keeps its
 /// historical meaning of "use the default cap" (256).
 pub(crate) fn resolve_async_pool_env() -> Result<(usize, usize, usize), crate::types::BoxError> {
-    fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxError> {
-        match std::env::var(name) {
-            Err(std::env::VarError::NotPresent) => Ok(default),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                Err(format!("{name} is not valid UTF-8").into())
-            }
-            Ok(v) if v.is_empty() => Ok(default),
-            Ok(v) => v
-                .trim()
-                .parse::<usize>()
-                .map_err(|_| format!("{name} must be a non-negative integer (got {v:?})").into()),
-        }
-    }
-
     let async_workers = parse_knob("ASYNC_WORKERS", 0)?;
     let async_queue_capacity = parse_knob("ASYNC_QUEUE_CAPACITY", 0)?;
     let async_max_fibers = match parse_knob("ASYNC_MAX_FIBERS", 256)? {
@@ -305,10 +344,10 @@ impl Config {
         let executor_type = std::env::var("EXECUTOR")
             .unwrap_or_else(|_| "sapi".to_string())
             .to_ascii_lowercase();
-        let max_connections = std::env::var("MAX_CONNECTIONS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10_000);
+        // Strict like the queue knobs it now feeds: `MAX_CONNECTIONS=500x`
+        // falling back to 10 000 silently would also move the computed
+        // `QUEUE_MAX_WAITING` ceiling, so a typo here reshapes admission.
+        let max_connections = parse_knob("MAX_CONNECTIONS", 10_000)?;
         // Default 25s, not 30s: shutdown takes up to drain + ~2s of forced
         // unwind + the plugin flush, and the whole sequence must fit inside
         // the orchestrator's kill window — Kubernetes defaults
@@ -455,10 +494,8 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(default_workers);
 
-        let queue_capacity = std::env::var("QUEUE_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(worker_mode.worker_count() * 128);
+        let (queue_capacity, queue_wait_timeout_ms, queue_max_waiting) =
+            resolve_queue_env(worker_mode.worker_count(), max_connections)?;
 
         let trusted_proxies = TrustedProxyConfig::from_env()
             .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
@@ -500,6 +537,8 @@ impl Config {
             worker_idle_timeout_seconds,
             tokio_workers,
             queue_capacity,
+            queue_wait_timeout_ms,
+            queue_max_waiting,
             trusted_proxies,
             h2,
         })
@@ -547,6 +586,8 @@ impl Config {
             worker_idle_timeout_seconds: 30,
             tokio_workers: 1,
             queue_capacity: 128,
+            queue_wait_timeout_ms: 1000,
+            queue_max_waiting: 128,
             trusted_proxies: None,
             h2: H2Config::default(),
         }
@@ -589,6 +630,8 @@ impl Config {
             "php_workers": self.php_workers_display(),
             "tokio_workers": self.tokio_workers,
             "queue_capacity": self.queue_capacity,
+            "queue_wait_timeout_ms": self.queue_wait_timeout_ms,
+            "queue_max_waiting": self.queue_max_waiting,
             "max_connections": self.max_connections,
             "drain_timeout_seconds": self.drain_timeout_seconds,
             "internal_addr": self.internal_addr,
@@ -782,6 +825,20 @@ mod tests {
     }
 
     #[test]
+    fn max_connections_is_parsed_as_strictly_as_the_knobs_it_feeds() {
+        // Not cosmetic consistency: the default `QUEUE_MAX_WAITING` is capped
+        // at half of this value, so a silent fallback here silently reshapes
+        // admission as well as the connection limit.
+        test_env::with_env(&[("MAX_CONNECTIONS", Some("500x"))], || {
+            let err = Config::from_env().unwrap_err();
+            assert!(err.to_string().contains("MAX_CONNECTIONS"), "err: {err}");
+        });
+        test_env::with_env(&[("MAX_CONNECTIONS", Some("500"))], || {
+            assert_eq!(Config::from_env().unwrap().max_connections, 500);
+        });
+    }
+
+    #[test]
     fn async_pool_env_strictness() {
         const ASYNC_VARS: [&str; 3] = ["ASYNC_WORKERS", "ASYNC_QUEUE_CAPACITY", "ASYNC_MAX_FIBERS"];
         let cleared: Vec<(&str, Option<&str>)> = ASYNC_VARS.iter().map(|k| (*k, None)).collect();
@@ -815,6 +872,80 @@ mod tests {
                 assert!(err.to_string().contains("ASYNC_WORKERS"), "err: {err}");
             },
         );
+    }
+
+    #[test]
+    fn queue_env_strictness() {
+        // Exercised through `resolve_queue_env` rather than `Config::from_env`,
+        // which reads the whole ambient environment — an unrelated invalid var
+        // in a CI shell would turn this into a false red. Worker count is
+        // passed in, so the auto mapping is checked against a known value.
+        let both_unset = [("QUEUE_CAPACITY", None), ("QUEUE_WAIT_TIMEOUT_MS", None)];
+
+        test_env::with_env(&both_unset, || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap(), (896, 1000, 896));
+        });
+        // `0` and exactly-empty both mean auto, not a rendezvous channel.
+        test_env::with_env(&[("QUEUE_CAPACITY", Some("0"))], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().0, 896);
+        });
+        test_env::with_env(&[("QUEUE_CAPACITY", Some(""))], || {
+            assert_eq!(resolve_queue_env(2, 10_000).unwrap().0, 256);
+        });
+        test_env::with_env(&[("QUEUE_CAPACITY", Some("1"))], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().0, 1);
+        });
+        // Garbage is a hard error naming the variable, not a silent fallback
+        // to a queue depth the operator never asked for.
+        test_env::with_env(&[("QUEUE_CAPACITY", Some("896x"))], || {
+            let err = resolve_queue_env(7, 10_000).unwrap_err();
+            assert!(err.to_string().contains("QUEUE_CAPACITY"), "err: {err}");
+        });
+
+        // 0 is meaningful here — fail fast, rejecting the moment the queue is
+        // full, which is how the server behaved before admission control.
+        test_env::with_env(&[("QUEUE_WAIT_TIMEOUT_MS", Some("0"))], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().1, 0);
+        });
+        test_env::with_env(&[("QUEUE_WAIT_TIMEOUT_MS", Some("2s"))], || {
+            let err = resolve_queue_env(7, 10_000).unwrap_err();
+            assert!(
+                err.to_string().contains("QUEUE_WAIT_TIMEOUT_MS"),
+                "err: {err}"
+            );
+        });
+
+        // Scaled by the pool, not by the connection budget: the cap has to be
+        // reachable, or `waiting_full` never fires and every refusal arrives as
+        // an expired budget instead.
+        test_env::with_env(&[("QUEUE_MAX_WAITING", None)], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().2, 896);
+            // The connection budget is still a bound, and the tighter of the
+            // two wins: half of MAX_CONNECTIONS keeps the accept loop able to
+            // take a connection and refuse it.
+            assert_eq!(resolve_queue_env(7, 400).unwrap().2, 200);
+            // Never zero: a cap of 0 would turn every contended request into a
+            // shed and silently disable waiting altogether.
+            assert_eq!(resolve_queue_env(7, 1).unwrap().2, 1);
+            assert_eq!(resolve_queue_env(0, 10_000).unwrap().2, 1);
+        });
+        test_env::with_env(&[("QUEUE_MAX_WAITING", Some("32"))], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().2, 32);
+        });
+        test_env::with_env(&[("QUEUE_MAX_WAITING", Some("lots"))], || {
+            let err = resolve_queue_env(7, 10_000).unwrap_err();
+            assert!(err.to_string().contains("QUEUE_MAX_WAITING"), "err: {err}");
+        });
+    }
+
+    #[test]
+    fn queue_knobs_reach_the_config_payload() {
+        // `to_json()` backs the `/config` endpoint; a field missing there is
+        // invisible until an operator goes looking for it during an incident.
+        let json = Config::test_minimal().to_json();
+        assert_eq!(json["queue_capacity"], 128);
+        assert_eq!(json["queue_wait_timeout_ms"], 1000);
+        assert_eq!(json["queue_max_waiting"], 128);
     }
 
     #[test]

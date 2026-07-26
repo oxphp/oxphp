@@ -33,6 +33,7 @@ impl ScriptExecutor for StubExecutor {
             errors: Vec::new(),
             profile_tree: None,
             cancel_reason: 0,
+            refused: false,
         })
     }
 
@@ -83,7 +84,7 @@ mod tests {
         let result = executor.execute(make_request());
         let response = match result {
             ExecuteResult::Immediate(resp) => resp,
-            ExecuteResult::Deferred(_) => panic!("StubExecutor should return Immediate"),
+            _ => panic!("StubExecutor should return Immediate"),
         };
         assert_eq!(response.status, 200);
         assert_eq!(response.body, &b"OK"[..]);
@@ -108,6 +109,9 @@ mod tests {
         let response = match result {
             ExecuteResult::Immediate(resp) => resp,
             ExecuteResult::Deferred(rx) => rx.blocking_recv().unwrap(),
+            // The stub has no queue, so it never waits and never refuses.
+            ExecuteResult::Admitting(_) => panic!("StubExecutor should not gate on admission"),
+            ExecuteResult::Rejected(_) => panic!("StubExecutor should not reject"),
         };
         assert_eq!(response.status, 200);
     }

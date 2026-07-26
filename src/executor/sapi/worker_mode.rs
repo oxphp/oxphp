@@ -22,19 +22,27 @@ pub(super) struct WorkerModeConfig {
     pub max_memory_mib: u64,
 }
 
+/// The metric handles a worker-mode thread publishes into: its own slot, the
+/// pool-wide recycle counters, and the server-wide series a refusal decided on
+/// this thread has to land in.
+pub(super) struct WorkerModeMetrics {
+    pub stats: Arc<WorkerStats>,
+    pub worker: Arc<WorkerMetrics>,
+    pub server: Arc<crate::metrics::Metrics>,
+}
+
 pub(super) fn spawn_worker_mode(
     id: usize,
     rx: crossbeam_channel::Receiver<WorkerRequest>,
     _shutdown: Arc<AtomicBool>, // kept for ManagedWorker interface; worker mode shuts down via channel closure
     last_active: Arc<AtomicU64>,
     config: Arc<WorkerModeConfig>,
-    stats: Arc<WorkerStats>,
-    worker_metrics: Arc<WorkerMetrics>,
+    metrics: WorkerModeMetrics,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_mode_thread(id, rx, last_active, config, stats, worker_metrics);
+            worker_mode_thread(id, rx, last_active, config, metrics);
         })
         .expect("failed to spawn PHP worker mode thread")
 }
@@ -47,9 +55,13 @@ fn worker_mode_thread(
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     last_active: Arc<AtomicU64>,
     config: Arc<WorkerModeConfig>,
-    stats: Arc<WorkerStats>,
-    worker_metrics: Arc<WorkerMetrics>,
+    metrics: WorkerModeMetrics,
 ) {
+    let WorkerModeMetrics {
+        stats,
+        worker: worker_metrics,
+        server: server_metrics,
+    } = metrics;
     let thread_name = std::thread::current()
         .name()
         .unwrap_or("php-worker")
@@ -82,6 +94,7 @@ fn worker_mode_thread(
     sapi::set_worker_last_active(last_active);
     sapi::set_worker_stats(Arc::clone(&stats));
     sapi::set_worker_metrics(Arc::clone(&worker_metrics));
+    sapi::set_server_metrics(server_metrics);
 
     // Mark worker as active with spawn time
     let spawn_ms = SystemTime::now()

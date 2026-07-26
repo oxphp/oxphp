@@ -116,6 +116,8 @@ curl -s http://localhost:9090/config | jq .
   "php_workers": "8",
   "tokio_workers": 4,
   "queue_capacity": 1024,
+  "queue_wait_timeout_ms": 1000,
+  "queue_max_waiting": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,

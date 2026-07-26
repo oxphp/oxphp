@@ -38,13 +38,29 @@ pub(super) fn spawn_worker(
     shutdown: Arc<AtomicBool>,
     last_active: Arc<AtomicU64>,
     loop_mode: WorkerLoopMode,
+    metrics: Arc<crate::metrics::Metrics>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_thread(id, rx, shutdown, last_active, loop_mode);
+            worker_thread(id, rx, shutdown, last_active, loop_mode, metrics);
         })
         .expect("failed to spawn PHP worker thread")
+}
+
+/// Answer a request whose budget ran out while it sat in the queue, without
+/// starting it. The permit goes back with the rest of `wr`.
+///
+/// The wait for a queue slot and the wait inside the queue share one deadline,
+/// so this is the second half of `QUEUE_WAIT_TIMEOUT_MS` — and on a slow pool
+/// the larger half. Refusing costs nothing; executing costs a worker on a
+/// request already answered later than the operator asked for, ahead of
+/// arrivals that can still make their deadline.
+fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
+    metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+    let _ = wr
+        .response_tx
+        .send(crate::executor::sapi::overloaded_response());
 }
 
 fn worker_thread(
@@ -53,6 +69,7 @@ fn worker_thread(
     shutdown: Arc<AtomicBool>,
     last_active: Arc<AtomicU64>,
     loop_mode: WorkerLoopMode,
+    metrics: Arc<crate::metrics::Metrics>,
 ) {
     let thread_name = std::thread::current()
         .name()
@@ -93,6 +110,15 @@ fn worker_thread(
         WorkerLoopMode::Static => {
             // Blocking recv — zero CPU while idle, exits when channel closes.
             while let Ok(wr) = request_rx.recv() {
+                if wr.queue_budget_expired() {
+                    refuse_expired(wr, &metrics);
+                    continue;
+                }
+                // The request has left the queue; release its slot now rather
+                // than at the end of the iteration, so the queue depth the
+                // admission gate enforces stays "requests waiting" and not
+                // "requests waiting plus one per busy worker".
+                drop(wr.permit);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute_request(&wr.script, wr.response_tx)
                 }));
@@ -132,6 +158,12 @@ fn worker_thread(
                 match request_rx.recv_timeout(Duration::from_millis(200)) {
                     Ok(wr) => {
                         last_active.store(super::pool::now_millis(), Ordering::Relaxed);
+                        if wr.queue_budget_expired() {
+                            refuse_expired(wr, &metrics);
+                            continue;
+                        }
+                        // Slot freed at pickup — see the static-mode branch.
+                        drop(wr.permit);
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             execute_request(&wr.script, wr.response_tx)
                         }));
@@ -505,5 +537,6 @@ fn execute_request(
         errors: sapi::take_request_errors(),
         profile_tree,
         cancel_reason: request.cancel_state.get() as u8,
+        refused: false,
     })
 }

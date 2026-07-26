@@ -55,8 +55,9 @@ curl http://localhost:9090/metrics
 | 指标 | 类型 | 描述 |
 |--------|------|-------------|
 | `oxphp_active_connections` | gauge | 主端口当前打开的 TCP 连接数 |
-| `oxphp_pending_requests` | gauge | 当前已分发到 PHP 工作进程的请求数（排队中和处理中） |
+| `oxphp_pending_requests` | gauge | 已接受但尚未响应的 PHP 请求数——等待队列槽位、在队列中或正在执行。仅统计路由到 PHP 的请求：静态文件、404 与被拒绝的路径无需排队即可响应，不会出现在此处 |
 | `oxphp_dropped_requests_total` | counter | PHP 工作进程接受请求后失败的请求数 |
+| `oxphp_admission_refused_total` | counter | 未到达工作进程即被应答的请求数。标签 `reason`：`wait_timeout`（已等满 `QUEUE_WAIT_TIMEOUT_MS`，应为进程池增加余量）、`waiting_full`（等待数已达 `QUEUE_MAX_WAITING`，应调高该值或 `MAX_CONNECTIONS`）、`queue_full`（`QUEUE_WAIT_TIMEOUT_MS=0`，等待已关闭）、`shutting_down`（请求仍在等待接纳时优雅退出的期限已到）、`pool_unavailable`（已无任何工作线程可接收请求——进程池已消失，而非繁忙）。只有前三者属于过载并返回 529；`shutting_down` 与其余优雅退出流程一致返回 503，`pool_unavailable` 返回 500。过载告警应专门基于前三者：整体指标在重启时同样会变动。不计入 `oxphp_queue_wait_us` |
 
 ## 工作进程池指标
 
@@ -65,8 +66,8 @@ curl http://localhost:9090/metrics
 | `oxphp_workers_current` | gauge | 当前 PHP 工作线程数 |
 | `oxphp_workers_min` | gauge | 最小工作进程数（静态模式下等于当前数量） |
 | `oxphp_workers_max` | gauge | 最大工作进程数（静态模式下等于当前数量） |
-| `oxphp_workers_idle` | gauge | 当前未处理请求的工作进程数 |
-| `oxphp_busy_workers` | gauge | 当前正在处理请求的工作进程数 |
+| `oxphp_workers_idle` | gauge | 当前没有请求在处理的工作线程数，按 `workers_current - busy_workers` 计算 |
+| `oxphp_busy_workers` | gauge | 至少正在处理一个请求的工作线程数，绝不会超过 `oxphp_workers_current`。统计的是线程而非请求——worker 模式下一个线程复用多个请求纤程，仍只计一次。等待接纳或仍在队列中的请求不计入，它们体现在 `oxphp_pending_requests` 中 |
 | `oxphp_workers_spawned_total` | counter | 启动以来创建的工作进程总数（含初始工作进程） |
 | `oxphp_workers_retired_total` | counter | 因空闲超时退出的工作进程总数（仅动态模式） |
 
@@ -86,9 +87,11 @@ curl http://localhost:9090/metrics
 |--------|------|-------------|
 | `oxphp_queue_wait_us` | histogram | 请求在队列中等待工作进程拾取的时间（微秒） |
 
-桶边界（微秒）：`50`、`100`、`250`、`500`、`1000`、`2500`、`5000`、`10000`、`50000`、`+Inf`。
+桶边界（微秒）：`50`、`100`、`250`、`500`、`1000`、`2500`、`5000`、`10000`、`50000`、`100000`、`250000`、`500000`、`1000000`、`+Inf`。
 
-队列等待时间过高表明所有工作进程均处于繁忙状态，应增加 `PHP_WORKERS` 或 `QUEUE_CAPACITY`。
+该指标度量的是等待时间——先等待接纳、再在队列中等待——并已扣除脚本自身的执行时间，因此它回答的是「工作进程多久之后才取走该请求」，而非「该请求总共耗时多久」。以 529 被拒绝的请求从未入队，不计入此处，请改用 `oxphp_admission_refused_total` 统计。
+
+队列等待时间过高表明所有工作进程均处于繁忙状态，应增加 `PHP_WORKERS`。桶的范围可达一秒，与 `QUEUE_WAIT_TIMEOUT_MS` 的默认值一致，因此几乎耗尽等待预算后才得以执行的请求会落入可量化的桶中，而非 `+Inf`。被服务的请求不会等待超过该预算——超出即被拒绝——因此唯一会让等待重新落入 `+Inf` 的，是调高 `QUEUE_WAIT_TIMEOUT_MS`。
 
 ## 限流指标
 
@@ -194,6 +197,8 @@ rate(oxphp_responses_by_status_total{status="5xx"}[5m])
 ```text
 oxphp_busy_workers / oxphp_workers_current
 ```
+
+该值始终介于 `0` 与 `1` 之间。持续为 `1` 表示所有工作线程都已占满、新到请求开始排队；请结合 `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full"}[5m])` 判断积压是否已转化为拒绝，并结合 `oxphp_pending_requests` 观察积压深度。
 
 **队列饱和度（每秒丢弃请求数）：**
 

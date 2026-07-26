@@ -39,6 +39,31 @@ impl ResponseBuffers {
 pub struct WorkerIncomingRequest {
     pub script: ScriptRequest,
     pub response_tx: oneshot::Sender<ScriptResponse>,
+    /// Queue-slot permit taken before the request entered the channel. Dropped
+    /// when a worker picks the request up, which is what frees the slot for
+    /// the next waiter — so it must not be held for the duration of script
+    /// execution. Worker mode gets that for free (this struct dies inside
+    /// `setup_request_tls`); the traditional loop drops it explicitly.
+    pub permit: tokio::sync::OwnedSemaphorePermit,
+    /// When the request stops being worth starting, or `None` in fail-fast
+    /// mode. Set once on arrival from `QUEUE_WAIT_TIMEOUT_MS` and shared with
+    /// the wait for a queue slot, so it bounds the whole time the request
+    /// spends not executing rather than the admission half of it.
+    pub deadline: Option<Instant>,
+}
+
+impl WorkerIncomingRequest {
+    /// Whether this request sat in the queue past its budget.
+    ///
+    /// Checked at pickup, where refusing costs nothing and executing costs a
+    /// worker: with a queue `worker_count × 128` deep, a pool serving 200 ms
+    /// handlers takes some 25 seconds to reach the tail, and every request in
+    /// it is answered later than any budget the operator set. Without this the
+    /// budget would bound only the wait for a queue slot — the smaller of the
+    /// two waits, and the one that is short precisely when the other is long.
+    pub fn queue_budget_expired(&self) -> bool {
+        self.deadline.is_some_and(|at| Instant::now() > at)
+    }
 }
 
 thread_local! {
@@ -63,6 +88,8 @@ thread_local! {
     static WORKER_STATS: RefCell<Option<Arc<WorkerStats>>> = const { RefCell::new(None) };
     /// Worker mode: global worker metrics (counters, histogram).
     static WORKER_METRICS_TLS: RefCell<Option<Arc<WorkerMetrics>>> = const { RefCell::new(None) };
+    /// Worker mode: server-wide metrics, for refusals decided on this thread.
+    static SERVER_METRICS: RefCell<Option<Arc<crate::metrics::Metrics>>> = const { RefCell::new(None) };
     /// Worker mode: request start time for duration histogram.
     static WORKER_REQUEST_START: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     /// Sub-design A: whether &EG(vm_interrupt) has been captured for this worker thread.
@@ -502,6 +529,7 @@ pub fn try_early_send() -> bool {
                 errors: take_request_errors(),
                 profile_tree: None, // early response — spans not finished yet
                 cancel_reason: unsafe { bindings::oxphp_bridge_get_cancel_reason() },
+                refused: false,
             });
             true
         } else {
@@ -559,6 +587,7 @@ pub fn send_streaming_headers() -> bool {
                 errors: Vec::new(),
                 profile_tree: None, // streaming — spans not finished yet
                 cancel_reason: 0,
+                refused: false,
             });
             true
         } else {
@@ -2625,6 +2654,14 @@ pub fn set_worker_metrics(wm: Arc<WorkerMetrics>) {
     });
 }
 
+/// Hand this worker thread the server-wide metrics, so a request refused at
+/// pickup is counted in the same series as every other admission refusal.
+pub fn set_server_metrics(m: Arc<crate::metrics::Metrics>) {
+    SERVER_METRICS.with(|slot| {
+        *slot.borrow_mut() = Some(m);
+    });
+}
+
 /// Worker wait callback — called from C bridge when PHP calls oxphp_worker().
 /// Blocks on the crossbeam channel until a new request arrives.
 /// Populates SAPI TLS with the new request data.
@@ -2634,22 +2671,45 @@ pub fn set_worker_metrics(wm: Arc<WorkerMetrics>) {
 /// Called from C code via function pointer. Must only be called from a worker thread
 /// with WORKER_RX set.
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
-    let incoming = WORKER_RX.with(|slot| {
-        let rx = slot.borrow();
-        match rx.as_ref() {
-            Some(rx) => rx.recv().ok(),
-            None => None,
+    loop {
+        let incoming = WORKER_RX.with(|slot| {
+            let rx = slot.borrow();
+            match rx.as_ref() {
+                Some(rx) => rx.recv().ok(),
+                None => None,
+            }
+        });
+
+        match incoming {
+            Some(req) if req.queue_budget_expired() => continue_after_refusal(req),
+            Some(req) => {
+                // Direct call — no PENDING_REQUEST round-trip on the blocking path
+                setup_request_tls(req);
+                return 0; // success
+            }
+            None => return -1, // channel closed = shutdown
+        }
+    }
+}
+
+/// Answer a request whose queue budget ran out before this worker reached it.
+///
+/// Deliberately *before* `setup_request_tls`, unlike the 499 fast path inside
+/// it: past that point the C serve loop creates a fiber and runs the PHP
+/// handler either way, and a handler run for a request already answered here
+/// has no response channel to write to — for a streaming handler, no client to
+/// end it either. The 499 case survives that because a cancelled request's
+/// fiber bails on the cancel cell; an expired one carries no such flag, so it
+/// must never be handed over at all.
+fn continue_after_refusal(req: WorkerIncomingRequest) {
+    SERVER_METRICS.with(|slot| {
+        if let Some(ref m) = *slot.borrow() {
+            m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
         }
     });
-
-    match incoming {
-        Some(req) => {
-            // Direct call — no PENDING_REQUEST round-trip on the blocking path
-            setup_request_tls(req);
-            0 // success
-        }
-        None => -1, // channel closed = shutdown
-    }
+    let _ = req
+        .response_tx
+        .send(crate::executor::sapi::overloaded_response());
 }
 
 /// Worker send response callback — called from C bridge after each handler invocation.
@@ -2809,6 +2869,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 errors: take_request_errors(),
                 profile_tree,
                 cancel_reason,
+                refused: false,
             });
         }
     });
@@ -2903,15 +2964,23 @@ fn try_recv_inner() -> TryRecvResult {
         let rx = slot.borrow();
         match rx.as_ref() {
             None => TryRecvResult::Disconnected,
-            Some(rx) => match rx.try_recv() {
-                Ok(req) => {
-                    PENDING_REQUEST.with(|p| {
-                        *p.borrow_mut() = Some(req);
-                    });
-                    TryRecvResult::Ready
+            // Loops so an expired request is answered and the next one
+            // examined in the same poll — see `continue_after_refusal` for why
+            // it must not be staged for the scheduler.
+            Some(rx) => loop {
+                match rx.try_recv() {
+                    Ok(req) if req.queue_budget_expired() => continue_after_refusal(req),
+                    Ok(req) => {
+                        PENDING_REQUEST.with(|p| {
+                            *p.borrow_mut() = Some(req);
+                        });
+                        return TryRecvResult::Ready;
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => return TryRecvResult::Empty,
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        return TryRecvResult::Disconnected
+                    }
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => TryRecvResult::Empty,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => TryRecvResult::Disconnected,
             },
         }
     })
