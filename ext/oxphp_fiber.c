@@ -160,6 +160,11 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     sched->free_list = NULL;
     sched->fiber_count = 0;
 
+    free(sched->reg_slots);
+    sched->reg_slots = NULL;
+    sched->reg_mask = 0;
+    sched->reg_count = 0;
+
     /* After the fibers, not before: closing the instance drops every
      * registration they still held, so nothing can report readiness for a fiber
      * that has already been freed. */
@@ -719,6 +724,157 @@ static bool oxphp_io_ensure_epoll(oxphp_fiber_scheduler *sched) {
     return true;
 }
 
+/* ── Which registration a descriptor currently belongs to ──
+ *
+ * epoll_ctl(EPOLL_CTL_DEL) names a descriptor, and nothing in the call ties the
+ * removal to the registration that made it. That is a hole wherever a descriptor
+ * number outlives the registration built on it: a fiber parks on fd 7; another
+ * fiber closes that stream, which drops the registration inside the kernel with
+ * no word to us; the number is handed to a fresh connection whose fiber parks and
+ * registers it; and now the first fiber's unpark removes a registration that
+ * belongs to someone else, leaving an uninvolved fiber to wait out its deadline
+ * with no event that can ever arrive.
+ *
+ * This table is what a removal is checked against. It mirrors the instance's own
+ * contents — one entry per registered descriptor, keyed by the descriptor — and
+ * records the identity of the registration that made it, so a removal that is no
+ * longer ours is recognised and skipped. The identity is the owner record handed
+ * to epoll as the event data: one per (fiber, descriptor), living in the parked
+ * fiber's own frame, so no two registrations alive at the same moment can share
+ * one address.
+ *
+ * Open addressing with linear probing and no tombstones, because the traffic is
+ * one insert and one erase per descriptor per wait, in bursts the width of a
+ * stream_select(). Keyed on the descriptor because that is what epoll keys on,
+ * and grown rather than indexed directly by descriptor number: a container is
+ * free to hand out a descriptor limit in the millions, and an array of that width
+ * per worker thread would dwarf what it protects. */
+
+struct oxphp_io_reg {
+    int fd;                          /* -1 marks a free slot; descriptors are never negative */
+    struct oxphp_io_owner *owner;
+};
+
+static inline uint32_t oxphp_io_reg_hash(int fd) {
+    /* Descriptor numbers are dense and small, which linear probing handles
+     * badly on its own — consecutive keys pile into consecutive slots. The
+     * multiply spreads them before the mask. */
+    return (uint32_t) fd * 2654435761u;
+}
+
+/* Place a key in a table known to have room. Returns true when it took a free
+ * slot, false when it overwrote the entry already held for that descriptor —
+ * which is the stale case above, a registration the kernel dropped without us
+ * hearing about it, now taken over by whoever registered the number next. */
+static bool oxphp_io_reg_insert(struct oxphp_io_reg *slots, uint32_t mask, int fd,
+                                struct oxphp_io_owner *owner) {
+    uint32_t i = oxphp_io_reg_hash(fd) & mask;
+    while (slots[i].fd != -1 && slots[i].fd != fd) {
+        i = (i + 1) & mask;
+    }
+    bool fresh = slots[i].fd == -1;
+    slots[i].fd = fd;
+    slots[i].owner = owner;
+    return fresh;
+}
+
+/* Make room for one more entry, allocating on first use and doubling at half
+ * load. Half is the point where linear probing stops degrading; the table is
+ * small enough (16 bytes an entry) that trading space for that is free. */
+static bool oxphp_io_reg_reserve(oxphp_fiber_scheduler *sched) {
+    uint32_t cap = sched->reg_slots != NULL ? sched->reg_mask + 1 : 0;
+    if (cap != 0 && (sched->reg_count + 1) * 2 <= cap) return true;
+
+    uint32_t new_cap = cap != 0 ? cap * 2 : 64;
+    struct oxphp_io_reg *slots = malloc((size_t) new_cap * sizeof(*slots));
+    if (slots == NULL) return false;
+    for (uint32_t i = 0; i < new_cap; i++) {
+        slots[i].fd = -1;
+        slots[i].owner = NULL;
+    }
+
+    for (uint32_t i = 0; i < cap; i++) {
+        if (sched->reg_slots[i].fd != -1) {
+            oxphp_io_reg_insert(slots, new_cap - 1, sched->reg_slots[i].fd,
+                                sched->reg_slots[i].owner);
+        }
+    }
+
+    free(sched->reg_slots);
+    sched->reg_slots = slots;
+    sched->reg_mask = new_cap - 1;
+    return true;
+}
+
+static bool oxphp_io_reg_put(oxphp_fiber_scheduler *sched, int fd,
+                             struct oxphp_io_owner *owner) {
+    if (!oxphp_io_reg_reserve(sched)) return false;
+    if (oxphp_io_reg_insert(sched->reg_slots, sched->reg_mask, fd, owner)) {
+        sched->reg_count++;
+    }
+    return true;
+}
+
+static struct oxphp_io_reg *oxphp_io_reg_find(oxphp_fiber_scheduler *sched, int fd) {
+    if (sched->reg_slots == NULL) return NULL;
+
+    uint32_t i = oxphp_io_reg_hash(fd) & sched->reg_mask;
+    for (uint32_t probe = 0; probe <= sched->reg_mask; probe++) {
+        struct oxphp_io_reg *slot = &sched->reg_slots[(i + probe) & sched->reg_mask];
+        if (slot->fd == fd) return slot;
+        /* A free slot ends the probe: nothing inserted after it could have
+         * passed through, so the key is not in the table. This is what the
+         * backward shift below preserves. */
+        if (slot->fd == -1) return NULL;
+    }
+    return NULL;
+}
+
+static void oxphp_io_reg_erase(oxphp_fiber_scheduler *sched, struct oxphp_io_reg *slot) {
+    /* Linear probing without tombstones: clearing a slot opens a hole that a
+     * later key may have probed past, and a lookup would then stop at the hole
+     * and miss it. Each such key is pulled back into the hole, which moves the
+     * hole along, until a slot is reached that was already free. */
+    uint32_t mask = sched->reg_mask;
+    uint32_t hole = (uint32_t) (slot - sched->reg_slots);
+
+    sched->reg_slots[hole].fd = -1;
+    sched->reg_slots[hole].owner = NULL;
+    sched->reg_count--;
+
+    for (uint32_t i = (hole + 1) & mask; sched->reg_slots[i].fd != -1; i = (i + 1) & mask) {
+        uint32_t home = oxphp_io_reg_hash(sched->reg_slots[i].fd) & mask;
+        if (((i - home) & mask) < ((i - hole) & mask)) continue;
+        sched->reg_slots[hole] = sched->reg_slots[i];
+        sched->reg_slots[i].fd = -1;
+        sched->reg_slots[i].owner = NULL;
+        hole = i;
+    }
+}
+
+/* Stop watching a descriptor — but only if the registration on it is still the
+ * one this owner made. A mismatch, or no entry at all, means the number has
+ * moved on to someone else since; removing it then is the hole this table
+ * exists to close, and doing nothing is exactly right, because whatever we
+ * registered is already gone. */
+static void oxphp_io_drop_registration(oxphp_fiber_scheduler *sched, int fd,
+                                       struct oxphp_io_owner *owner) {
+    struct oxphp_io_reg *slot = oxphp_io_reg_find(sched, fd);
+    if (slot == NULL || slot->owner != owner) return;
+
+    epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fd, NULL);
+    oxphp_io_reg_erase(sched, slot);
+}
+
+/* Undo the registrations a park made before it had to give up. */
+static void oxphp_io_park_rollback(oxphp_fiber_scheduler *sched, struct pollfd *fds,
+                                   struct oxphp_io_owner *owners, uint32_t upto) {
+    for (uint32_t j = 0; j < upto; j++) {
+        if (fds[j].fd < 0) continue;
+        oxphp_io_drop_registration(sched, fds[j].fd, &owners[j]);
+    }
+}
+
 /* Register every descriptor a fiber is about to wait on. Any refusal means the
  * fiber must not park at all:
  *
@@ -731,6 +887,9 @@ static bool oxphp_io_ensure_epoll(oxphp_fiber_scheduler *sched) {
  *     route the wake-up to both. Two fibers reading one connection was never
  *     safe; this way the second blocks its own thread instead of quietly taking
  *     readiness meant for the first.
+ *   - a table that cannot grow. Registering without recording who registered it
+ *     would leave the removal unverifiable, which is the one thing the table is
+ *     for, so the park is declined instead of being left untracked.
  *
  * A refusal partway through rolls back what was already registered, so a
  * declined park leaves the instance exactly as it found it.
@@ -756,28 +915,30 @@ bool oxphp_io_park(oxphp_request_fiber *fiber, struct pollfd *fds,
         if (fds[i].events & POLLPRI) ev.events |= EPOLLPRI;
 
         if (epoll_ctl(sched->epfd, EPOLL_CTL_ADD, fds[i].fd, &ev) < 0) {
-            for (uint32_t j = 0; j < i; j++) {
-                if (fds[j].fd < 0) continue;
-                epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fds[j].fd, NULL);
-            }
+            oxphp_io_park_rollback(sched, fds, owners, i);
+            return false;
+        }
+        if (!oxphp_io_reg_put(sched, fds[i].fd, &owners[i])) {
+            epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fds[i].fd, NULL);
+            oxphp_io_park_rollback(sched, fds, owners, i);
             return false;
         }
     }
     return true;
 }
 
-/* Stop watching a fiber's descriptors. Deregisters muted entries too, by
- * recovering the descriptor they hold negated: muting removes the registration
- * itself, so this is a second attempt that fails harmlessly, and the alternative
- * — skipping them — would leak a registration on any path where the removal did
- * not take. */
+/* Stop watching a fiber's descriptors. Muted entries hold their descriptor
+ * negated; it is recovered so the lookup can be made, and the lookup then
+ * declines the removal of its own accord — muting already took the registration
+ * out, so the table no longer names this owner for that descriptor. */
 void oxphp_io_unpark(oxphp_request_fiber *fiber) {
     oxphp_fiber_scheduler *sched = fiber->owner_sched;
     if (sched == NULL || sched->epfd < 0) return;
 
     for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
         int fd = fiber->suspend_data.io.fds[i].fd;
-        epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fd < 0 ? -1 - fd : fd, NULL);
+        oxphp_io_drop_registration(sched, fd < 0 ? -1 - fd : fd,
+                                   &fiber->suspend_data.io.owners[i]);
     }
 }
 
@@ -889,10 +1050,9 @@ static inline bool oxphp_io_entry_ready(const struct pollfd *pfd) {
  *
  * The descriptor is negated rather than overwritten so it stays recoverable from
  * the entry — deregistering needs it, and so does anyone reading the set. */
-static void oxphp_io_mute_entry(oxphp_fiber_scheduler *sched, struct pollfd *entry) {
-    if (sched->epfd >= 0) {
-        epoll_ctl(sched->epfd, EPOLL_CTL_DEL, entry->fd, NULL);
-    }
+static void oxphp_io_mute_entry(oxphp_fiber_scheduler *sched, struct pollfd *entry,
+                                struct oxphp_io_owner *owner) {
+    oxphp_io_drop_registration(sched, entry->fd, owner);
     entry->fd = -1 - entry->fd;
 }
 
@@ -972,7 +1132,7 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
             entry->revents = revents;
 
             if (revents != 0 && !oxphp_io_entry_ready(entry)) {
-                oxphp_io_mute_entry(sched, entry);
+                oxphp_io_mute_entry(sched, entry, owner);
             }
         }
     }
