@@ -16,6 +16,11 @@ declare(strict_types=1);
 //
 // Echo-style on purpose — the outer test asserts on this body, not on JSON. Must
 // not mention $_REQUEST; see the note at the top of tests/suites/hooks.txt.
+//
+// Must also not suspend — no await, no sleep, no socket read. The second of the
+// two inner requests only lands on a recycled fiber because the first one runs to
+// completion inside the tick's accept pass; a suspend point here would hand the
+// second one a fresh fiber and quietly empty the test out.
 
 $worker = OxPHP\Server\Worker::current();
 $fail = [];

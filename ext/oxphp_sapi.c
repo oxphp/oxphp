@@ -2375,8 +2375,10 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
 /* {{{ oxphp_worker(callable $handler): bool
  * Enter worker mode loop with fiber-based request multiplexing.
  *
- * When only one request is in flight (no fibers suspended), the handler runs
- * directly via zend_call_function — zero fiber overhead (fast path).
+ * Every request runs inside a fiber. When none are suspended, the serve loop
+ * takes a fast path that skips the event loop and hands the request straight to
+ * a fiber — reusing one whose C stack is already mapped, so the cost is a
+ * context switch rather than an mmap (see oxphp_scheduler_start_fiber).
  *
  * When a handler calls oxphp_async_await() or oxphp_sleep(), it suspends its
  * fiber, and the event loop picks up new requests or resumes ready fibers.

@@ -40,8 +40,16 @@ foreach ([1, 2] as $i) {
     $t->assertContains("inner #$i reported correct request state", $bodies[$i], 'INNER-OK');
 }
 
-// Consecutive request indices on one worker: inner #2 was dispatched right after
-// inner #1 finished, which is what puts it on the fiber inner #1 recycled.
+// What this proves and what it does not. There is no PHP-visible fiber identity,
+// so neither the fixture nor this test can assert "ran on a recycled fiber" the
+// way the fast-path test asserts "not a worker's first request". The pairing
+// below shows only that nothing was served between the two inner requests. Reuse
+// itself rests on the accept loop in oxphp_scheduler_tick: it drains the queue in
+// one pass, so inner #1 runs to completion and reaches the free list before
+// inner #2 is created. That is a property of the loop, not of this test — put a
+// suspend point in fixture_inner_state.php and inner #1 would still be in flight
+// when inner #2 starts, which would leave this test passing while covering
+// nothing. Keep the fixture free of awaits, sleeps and socket reads.
 preg_match('/"worker_id":(\d+).*"request_count":(\d+)/', $bodies[1], $m1);
 preg_match('/"worker_id":(\d+).*"request_count":(\d+)/', $bodies[2], $m2);
 $t->assertTrue(
