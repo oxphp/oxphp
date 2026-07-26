@@ -65,8 +65,10 @@ $t->assertSame(
 $t->assertSame('await_all: values intact', array_values($all), array_fill(0, count($ids), payload()));
 
 // ── await_race ───────────────────────────────────────────────────────────────
+// Raced over several promises, not one: with more than one member the handler
+// also has to put the non-winners back, which is the shape real callers use.
 
-$race = oxphp_async_await_race([spawn()]);
+$race = oxphp_async_await_race([spawn(), spawn(), spawn()]);
 $race_count = probe_refcount($race, 'value');
 $t->meta('await_race', $race_count);
 $t->assertSame('await_race: winner holds no extra reference', $race_count, $baseline);
@@ -74,7 +76,7 @@ $t->assertSame('await_race: value intact', $race['value'], payload());
 
 // ── await_any ────────────────────────────────────────────────────────────────
 
-$any = oxphp_async_await_any([spawn()]);
+$any = oxphp_async_await_any([spawn(), spawn(), spawn()]);
 $any_count = probe_refcount($any, 'value');
 $t->meta('await_any', $any_count);
 $t->assertSame('await_any: winner holds no extra reference', $any_count, $baseline);

@@ -10,22 +10,6 @@ use std::os::raw::{c_char, c_void};
 #[derive(Clone)]
 pub(crate) struct ZvalSlot([u8; 16]);
 
-impl ZvalSlot {
-    /// A zero-initialized slot. All-zero bytes are `IS_UNDEF`, so the slot is
-    /// safe to hand to `oxphp_zval_dtor` even if nothing ever wrote into it.
-    #[allow(dead_code)]
-    pub(crate) fn undef() -> Self {
-        debug_assert_zval_size();
-        ZvalSlot([0u8; ZVAL_SIZE])
-    }
-
-    /// Writable pointer to the slot, for FFI calls that populate a zval.
-    #[allow(dead_code)]
-    pub(crate) fn as_mut_ptr(&mut self) -> *mut c_void {
-        self as *mut ZvalSlot as *mut c_void
-    }
-}
-
 /// Safe wrapper over raw zval pointers for a plugin function call.
 ///
 /// Provides bounds-checked, type-checked access to arguments and
@@ -835,8 +819,10 @@ pub(crate) fn debug_assert_zval_size() {
     );
 }
 
-/// Owned result from `call_php` — calls `zval_ptr_dtor` on drop to prevent
-/// refcounted value leaks (strings, arrays, objects).
+/// A zval slot whose contents this value owns — calls `zval_ptr_dtor` on drop
+/// to prevent refcounted value leaks (strings, arrays, objects). Returned by
+/// `call_php`, and used directly wherever an FFI call materializes a value into
+/// a temporary slot that must be released once it has been handed on.
 /// Pointer is computed from `slot` field address on each access rather than
 /// cached as a raw pointer — avoids use-after-move UB.
 pub struct OwnedResult {
@@ -844,6 +830,28 @@ pub struct OwnedResult {
 }
 
 impl OwnedResult {
+    /// An empty owned slot. All-zero bytes are `IS_UNDEF`, so dropping one that
+    /// was never written is a no-op — which makes it safe to hand
+    /// [`as_mut_ptr`](Self::as_mut_ptr) to an FFI call that only writes on some
+    /// of its return paths.
+    // Not `pub`: handing plugin authors a raw pointer into a live zval slot is
+    // the footgun this type exists to remove. Crate-internal, hence the lint
+    // waiver for feature combinations that do not build the callers.
+    #[allow(dead_code)]
+    pub(crate) fn undef() -> Self {
+        debug_assert_zval_size();
+        OwnedResult {
+            slot: ZvalSlot([0u8; ZVAL_SIZE]),
+        }
+    }
+
+    /// Writable pointer to the slot, for an FFI call that populates a zval.
+    /// Whatever it writes becomes this value's to release on drop.
+    #[allow(dead_code)]
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut c_void {
+        &mut self.slot as *mut ZvalSlot as *mut c_void
+    }
+
     /// Borrow as Val for reading.
     /// Pointer is computed from field address on each call — safe after moves.
     pub fn val(&self) -> Val<'_> {
