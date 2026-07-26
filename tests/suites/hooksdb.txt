@@ -1,0 +1,7 @@
+# profile: hooksdb
+# description: Runtime hooks against real MySQL and Redis — mysqlnd and phpredis waits multiplex fibers
+
+hooksdb/test_db_clients_reachable
+hooksdb/test_mysql_task_multiplex
+hooksdb/test_mysql_request_multiplex
+hooksdb/test_redis_task_multiplex
