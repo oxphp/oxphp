@@ -16,6 +16,18 @@
 #include "ext/spl/spl_exceptions.h"
 #include "ext/session/php_session.h"
 #include "main/php_network.h"
+/* PDO's own header, so that a claim can name the connection rather than the PHP
+ * object holding it: PDO::ATTR_PERSISTENT reuses one pdo_dbh_t for every object
+ * built from the same DSN, and an object address is recycled by the allocator
+ * while a connection is not. Guarded because PDO is an optional extension whose
+ * headers a build may not have — without them the object is the only identity
+ * available, and the gap is reported at startup. */
+#if defined(__has_include)
+#  if __has_include("ext/pdo/php_pdo_driver.h")
+#    include "ext/pdo/php_pdo_driver.h"
+#    define OXPHP_HAVE_PDO_HEADERS 1
+#  endif
+#endif
 #include <limits.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -1593,16 +1605,19 @@ static void oxphp_hook_restore(const char *name, size_t name_len, zif_handler or
  * carry their own tables, which php-src keeps static and out of reach, and
  * ssl:// / tls:// layer the openssl table on top — none of them are hooked.
  *
- * Writes are deliberately NOT hooked. Read readiness is stable: the descriptor
- * belongs to this fiber, nothing else drains it, so data that arrived is still
- * there when the delegate runs. Write readiness is not — the room in the send
- * buffer is created and taken away by the peer, so between waking on POLLOUT
- * and the delegate's send() the window can close again, after which
- * php_sockop_write() blocks the thread for its whole timeout anyway. Measured
- * on a saturated socket, hooking writes made a blocking write cost its timeout
- * twice (the fiber's wait plus the delegate's) without ever preventing the
- * block. Serving that correctly would mean reimplementing the native retry and
- * warning path, which is exactly what this design refuses to do. */
+ * Write readiness is deliberately NOT hooked. Read readiness is stable: while
+ * the descriptor is this fiber's — which the claim below is what makes true —
+ * nothing else drains it, so data that arrived is still there when the delegate
+ * runs. Write readiness is not: the room in the send buffer is created and taken
+ * away by the peer, so between waking on POLLOUT and the delegate's send() the
+ * window can close again, after which php_sockop_write() blocks the thread for
+ * its whole timeout anyway. Measured on a saturated socket, waiting for
+ * writability made a blocking write cost its timeout twice (the fiber's wait plus
+ * the delegate's) without ever preventing the block. Serving that correctly would
+ * mean reimplementing the native retry and warning path, which is exactly what
+ * this design refuses to do. The write op is still patched, but only to ask whose
+ * exchange this is — see the claim section below; an uncontended write goes to the
+ * original handler untouched. */
 
 static ssize_t (*oxphp_orig_sockop_read)(php_stream *, char *, size_t) = NULL;
 
@@ -1619,9 +1634,234 @@ static int64_t oxphp_sock_timeout_ns(const php_netstream_data_t *sock)
            + (int64_t) sock->timeout.tv_usec * 1000;
 }
 
+/* ── Keeping one fiber's exchange out of another's ───────────
+ *
+ * Suspending a read mid-exchange is only safe while the connection is this
+ * fiber's alone. An application that opens its database or cache client when the
+ * worker boots — which is what WordPress, Laravel and Symfony do — hands every
+ * request on that worker the same connection, and a second fiber's command
+ * written into the middle of the first one's exchange breaks the protocol on the
+ * wire. So a hooked operation claims the stream for its fiber (the table lives in
+ * oxphp_fiber.c, which also releases the claim when the request or task ends),
+ * and a fiber that meets someone else's claim waits for it to be given up.
+ *
+ * Waiting is a cooperative suspension, never a blocking one: the holder needs
+ * this very worker thread to finish its own read and release, so blocking here
+ * would deadlock the pair. It is built on oxphp_fiber_sleep_us() rather than on a
+ * suspend reason of its own — polling at this granularity costs nothing on what
+ * is by definition the contended path, and the timer suspension already carries
+ * the whole resume contract: an uncatchable bail on drain, a cancellation
+ * return. */
+
+/* How often a waiting fiber looks again, and the ceiling the interval backs off
+ * to. A millisecond is the floor either way — the timer these suspensions are
+ * built on is registered in whole milliseconds — and it is fine enough to pick a
+ * released connection back up well inside the noise of a query, while the backoff
+ * keeps fifty fibers queued on one connection from costing anything measurable. */
+#define OXPHP_STREAM_CLAIM_POLL_US     1000
+#define OXPHP_STREAM_CLAIM_POLL_MAX_US 4000
+
+typedef enum {
+    OXPHP_CLAIM_OK = 0,   /* the stream is this fiber's; the caller may go ahead */
+    OXPHP_CLAIM_BUSY,     /* another fiber holds it and this call was not going to wait */
+    OXPHP_CLAIM_REFUSED,  /* another fiber held it past what this call would wait */
+    OXPHP_CLAIM_THREW,    /* the wait was cancelled and an exception is pending */
+} oxphp_stream_claim_result;
+
+/* How long a fiber waits for a connection before giving up on the claim. The
+ * holder releases when its request ends, so a wait that outlives the waiting
+ * request's own budget would trade an immediate error for a stall — and the
+ * stream's own timeout is no substitute for that budget: mysqlnd sets its streams
+ * to mysqlnd.net_read_timeout, which ships as 86400 seconds, and a stream with no
+ * timeout at all asks to wait forever. A deployment that configures neither ini
+ * lands on 30s rather than on the fallback below: a server SAPI adds no ini
+ * defaults of its own, so both stand at the engine's — 30 and 60. The 60 below is
+ * for the deployment that disables both. */
+static int64_t oxphp_claim_budget_ns(void)
+{
+    zend_long limits[2] = {
+        /* Current value, deliberately: set_time_limit() is how a request says how
+         * long it may run, and a wait inside it is bound by that. */
+        zend_ini_long("max_execution_time", sizeof("max_execution_time") - 1, 0),
+        /* Startup value, equally deliberately. This one names the default deadline
+         * of a socket *operation*, and waiting for a connection is not one — while
+         * ini_set('default_socket_timeout', …) around a single fsockopen() or
+         * file_get_contents() is ordinary library practice, and libraries routinely
+         * do not put it back. A worker serves every request inside one
+         * php_request_startup, so nothing deactivates ini values between them: read
+         * as the current value, one library's unrestored setting would shorten this
+         * bound for every later request on that worker, in the direction of giving
+         * up early. zend_ini_long()'s orig flag answers with the value the process
+         * started with once an entry has been modified, which in worker mode it
+         * stays. */
+        zend_ini_long("default_socket_timeout", sizeof("default_socket_timeout") - 1, 1),
+    };
+
+    zend_long seconds = 0;
+    for (size_t i = 0; i < 2; i++) {
+        if (limits[i] <= 0) continue; /* 0 or negative: that ini imposes no bound */
+        if (seconds == 0 || limits[i] < seconds) seconds = limits[i];
+    }
+    if (seconds <= 0) seconds = 60;
+
+    return (int64_t) seconds * 1000000000;
+}
+
+/* Whether the site this is called from may write its line now, at most one a
+ * second per thread. Contention is a per-operation event, and an application that
+ * meets it once meets it in a loop: without this, a shared connection under load
+ * writes a log line per query and the file says nothing the first line did not.
+ * Thread-local rather than shared, so the counting costs no synchronisation and
+ * each worker still gets to speak. */
+static bool oxphp_contended_log_ready(int64_t *last_ns)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ns = (int64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
+
+    if (*last_ns != 0 && now_ns - *last_ns < 1000000000) return false;
+    *last_ns = now_ns;
+    return true;
+}
+
+/* One line per refusal, to the server log. Deliberately not an E_WARNING: the
+ * operation fails exactly as a socket timeout fails, and adding a diagnostic the
+ * engine can promote to an exception would make it fail differently — an
+ * application whose error handler throws on warnings would unwind where a
+ * timed-out read does not. Carries the descriptor, so a log full of these can be
+ * read as one connection in trouble or as many. */
+static void oxphp_stream_claim_refused_log(int fd, const char *why)
+{
+    static __thread int64_t last_ns = 0;
+    if (!oxphp_contended_log_ready(&last_ns)) return;
+
+    /* Plain buffer rather than zend_strpprintf: this can be reached from a
+     * shutdown path with no request arena, and the message is bounded. */
+    char msg[360];
+    snprintf(msg, sizeof(msg),
+             "oxphp: refused a socket operation on fd %d because another fiber holds this "
+             "stream (%s). One connection is shared between concurrent fibers, so the "
+             "operation fails the way a timeout would instead of corrupting the exchange "
+             "(further refusals on this thread are logged at most once a second)", fd, why);
+    php_log_err(msg);
+}
+
+/* Whether the operation was going to wait at all. One that was not must not be
+ * made to fail by a claim: its caller is written for an immediate answer, and
+ * "nothing moved" is a reply it already handles, whereas a failure it never asked
+ * for is not. */
+static bool oxphp_sock_would_wait(const php_netstream_data_t *sock)
+{
+    return sock->is_blocked
+           && !(sock->timeout.tv_sec == 0 && sock->timeout.tv_usec == 0);
+}
+
+/* Whether the fiber holding this stream is, at this very moment, waiting for its
+ * descriptor to become readable — which is what being parked half-way through an
+ * exchange looks like from here, and the only moment at which another fiber's
+ * bytes can land in the middle of one.
+ *
+ * Asked instead of trusting the claim outright, because a claim names a
+ * `php_stream` and lives until its owner's request ends, while the stream itself
+ * can be closed long before that: PHP frees the struct, the allocator hands the
+ * same address to the next stream, and the entry would then answer for a
+ * connection it has nothing to do with. There is no reliable moment to erase it —
+ * the close op of the table these streams actually carry is not ours to see, since
+ * with ext/openssl loaded (and it always is) the tcp transport is openssl's and
+ * its close never delegates to PHP's own. So the question is asked of the owner
+ * rather than of the entry, and a stale entry cannot pass it: whatever the old
+ * owner is doing, it is not waiting on the descriptor of a stream that no longer
+ * exists.
+ *
+ * Read off the fiber itself rather than the scheduler's descriptor registry: a
+ * parked fiber's suspension data is filled in by the frame it is parked in, so it
+ * is valid exactly as long as the parking is, which is the window being asked
+ * about. */
+static bool oxphp_owner_awaits_fd(const oxphp_request_fiber *owner, int fd)
+{
+    if (owner == NULL || fd == -1) return false;
+    if (owner->suspend_reason != OXPHP_SUSPEND_IO_WAIT) return false;
+
+    const struct pollfd *fds = owner->suspend_data.io.fds;
+    if (fds == NULL) return false;
+
+    for (uint32_t i = 0; i < owner->suspend_data.io.nfds; i++) {
+        if (fds[i].fd == fd) return true;
+    }
+    return false;
+}
+
+/* Ask to use `stream` on behalf of the running fiber, and record the claim.
+ *
+ * Refuses rather than waits, and that is the whole shape of the socket level: a
+ * fiber waiting here would have to hold `stream` and its php_netstream_data_t
+ * across the suspension, and the holder can close both while it sleeps — after
+ * which the waiter, and every engine frame above it, reads freed memory. Waiting
+ * belongs where no such pointer is held, which is the client entry points; here
+ * the answer is the one a socket timeout gives.
+ *
+ * A conflict is therefore refused only in the window where it is real — the holder
+ * parked on this descriptor waiting for its reply — and otherwise the claim is
+ * taken over, which is also what clears an entry left behind by a stream that has
+ * since been freed. */
+static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
+                                                   const php_netstream_data_t *sock,
+                                                   oxphp_request_fiber *self)
+{
+    oxphp_request_fiber *owner = oxphp_claim_owner(stream);
+    if (owner != NULL && owner != self && oxphp_owner_awaits_fd(owner, sock->socket)) {
+        /* An operation that was never going to wait keeps the answer it already
+         * has for a descriptor with nothing on it, rather than being handed a
+         * failure it did not ask for. */
+        if (!oxphp_sock_would_wait(sock)) return OXPHP_CLAIM_BUSY;
+
+        oxphp_stream_claim_refused_log(sock->socket,
+                                       "it is parked on this connection waiting for a reply");
+        return OXPHP_CLAIM_REFUSED;
+    }
+
+    if (!oxphp_claim_acquire(stream, self)) {
+        /* The claim table could not grow. The operation still goes ahead —
+         * turning an allocation failure into a failed request would be worse
+         * than the exposure — but from here on this stream is unprotected, so
+         * say so once. */
+        static atomic_flag warned = ATOMIC_FLAG_INIT;
+        if (!atomic_flag_test_and_set(&warned)) {
+            php_log_err("oxphp: could not record which fiber holds a socket stream (out of "
+                        "memory); socket operations on it are no longer kept apart between "
+                        "concurrent fibers");
+        }
+    }
+    return OXPHP_CLAIM_OK;
+}
+
 static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t count)
 {
     php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
+
+    /* Before anything else, and for every read rather than only the ones that
+     * would wait: bytes already buffered on the stream belong to whichever
+     * fiber's exchange put them there, so handing them to another one is the
+     * same defect as reading them off the wire. */
+    if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+        oxphp_stream_claim_result claim =
+            oxphp_stream_claim(stream, sock, oxphp_current_fiber);
+        if (claim == OXPHP_CLAIM_BUSY) {
+            /* A read that was never going to wait gets the answer it already has
+             * for a descriptor with nothing on it: zero bytes, try again.
+             * php_sockop_read() reaches the same value through recv()'s EAGAIN,
+             * and its callers stop reading on it. */
+            return 0;
+        }
+        if (claim == OXPHP_CLAIM_REFUSED) {
+            /* php_sockop_read()'s own timeout answer with nothing handed over.
+             * Not the `has_buffered_data ? 0 : -1` it uses there: those buffered
+             * bytes are the holder's, so this read must come away empty either
+             * way. */
+            sock->timeout_event = true;
+            return -1;
+        }
+    }
 
     /* The condition under which php_sockop_read() would call
      * php_sock_stream_wait_for_data(): a blocking socket with a nonzero
@@ -1670,9 +1910,10 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
 
         /* Ready. The delegate polls the descriptor once more and normally
          * returns from that poll at once — but if the data is gone by then (a
-         * connection shared between fibers, or a spurious wake) it would wait
-         * the socket's *whole* timeout again, making the worst case twice what
-         * the caller asked for. Hand it only what is left of the budget, and
+         * spurious wake, or something outside php_streams draining the same
+         * descriptor) it would wait the socket's *whole* timeout again, making
+         * the worst case twice what the caller asked for. Hand it only what is
+         * left of the budget, and
          * put the real value back afterwards. Anything below a microsecond is
          * floored there rather than to zero, which php_sockop_read() reads as
          * "do not wait at all" and answers differently. */
@@ -1709,6 +1950,57 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
     }
 
     return oxphp_orig_sockop_read(stream, buf, count);
+}
+
+/* Hooked socket write. Not a readiness hook — write readiness stays with PHP,
+ * for the reason set out above the read hook — and when the stream is free or
+ * already this fiber's, the call goes straight to the original handler, byte for
+ * byte the native path. It exists for the other half of an exchange: writing the
+ * command is what starts one, so a second fiber's command landing in the middle
+ * of the first one's is what actually breaks the protocol, and no read hook can
+ * see that happen. */
+static ssize_t (*oxphp_orig_sockop_write)(php_stream *, const char *, size_t) = NULL;
+
+static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, size_t count)
+{
+    php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
+
+    if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+        oxphp_stream_claim_result claim =
+            oxphp_stream_claim(stream, sock, oxphp_current_fiber);
+        if (claim == OXPHP_CLAIM_BUSY) {
+            /* Nothing sent, which is what php_sockop_write() reports for a write
+             * that cannot proceed and was not going to wait. */
+            return 0;
+        }
+        if (claim == OXPHP_CLAIM_REFUSED) {
+            /* php_sockop_write()'s own timeout answer: mark the stream and report
+             * that nothing was sent. */
+            sock->timeout_event = true;
+            return -1;
+        }
+    }
+
+    return oxphp_orig_sockop_write(stream, buf, count);
+}
+
+/* Hooked socket close: bookkeeping only. A claim names the php_stream, and the
+ * allocator is free to hand that address to the next stream, so the entry has to
+ * go when the stream it names does. Forgotten before delegating, so that an early
+ * return inside the original handler cannot skip it. */
+static int (*oxphp_orig_sockop_close)(php_stream *, int) = NULL;
+
+static int oxphp_hooked_sockop_close(php_stream *stream, int close_handle)
+{
+    /* Before delegating, so an early return inside the original handler cannot skip
+     * it. Best-effort only: in any build with ext/openssl the tcp transport is
+     * openssl's and its close does not delegate here, so this fires for streams
+     * that do carry PHP's own table (an accepted connection inherits its
+     * listener's ops) and not for a mysqlnd or phpredis connection. Nothing
+     * depends on it — a claim outliving its stream is answered by asking the owner
+     * what it is waiting for, not by trusting the entry. */
+    oxphp_claim_forget(stream);
+    return oxphp_orig_sockop_close(stream, close_handle);
 }
 
 /* Protection the page holding php_stream_socket_ops carried before the patch,
@@ -1767,6 +2059,10 @@ static bool oxphp_hook_socket_ops(void)
     }
     oxphp_orig_sockop_read = ops->read;
     ops->read = oxphp_hooked_sockop_read;
+    oxphp_orig_sockop_write = ops->write;
+    ops->write = oxphp_hooked_sockop_write;
+    oxphp_orig_sockop_close = ops->close;
+    ops->close = oxphp_hooked_sockop_close;
 
     /* Restore the protection we found. If it could not be read, leave the page
      * writable rather than guess: the patch itself has already succeeded and
@@ -1792,12 +2088,722 @@ static void oxphp_restore_socket_ops(void)
     php_stream_ops *ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
     if (oxphp_socket_ops_protect(PROT_READ | PROT_WRITE)) {
         ops->read = oxphp_orig_sockop_read;
+        ops->write = oxphp_orig_sockop_write;
+        ops->close = oxphp_orig_sockop_close;
         if (oxphp_socket_ops_prot >= 0) {
             oxphp_socket_ops_protect(oxphp_socket_ops_prot);
         }
     }
     oxphp_orig_sockop_read = NULL;
+    oxphp_orig_sockop_write = NULL;
+    oxphp_orig_sockop_close = NULL;
     oxphp_socket_ops_prot = -1;
+}
+
+/* ─── Claiming a database connection (category "streams") ────
+ *
+ * The socket claim above keeps the bytes on the wire in order, and for a client
+ * that simply writes and reads — phpredis, the HTTP stream wrappers — that is the
+ * whole problem. mysqlnd is different: it tracks its own connection state, and a
+ * command issued while the connection is mid-exchange is refused from that state
+ * (`Commands out of sync`, which pdo_mysql rewords as "unbuffered queries are
+ * active") *before any I/O happens at all*. No guard on the stream ops can be
+ * reached, so the claim has to be taken one level up, where the connection is
+ * named by the client's own object.
+ *
+ * The hooked calls are the ones that can put a command on the wire: they claim
+ * the connection for the running fiber, and a fiber that finds it claimed waits,
+ * exactly as the socket hooks do, until the holder's request ends. Which calls
+ * those are, and which are deliberately left out, is set out at the table below.
+ * One case has no hooked call in front of it either way — a statement object kept
+ * across requests — and behaves as it does with no claim at all, which is what
+ * giving up looks like here rather than something worse.
+ *
+ * What happens when the holder has not released within the bound below depends on
+ * what the client does with a command it should not have sent. For PDO and mysqli
+ * the call is handed to the original handler: mysqlnd refuses it from its own
+ * connection state before any I/O, so the result is the client's own error —
+ * precisely the behaviour without this hook, and a PDOException or
+ * mysqli_sql_exception the application already handles, rather than a failure of
+ * our own invention. phpredis has no such state, and delegating there is the
+ * silent reply-swapping this whole mechanism exists to prevent, so that path
+ * raises a RedisException instead — which is the class phpredis itself raises when
+ * a connection cannot carry a command. */
+
+/* Wait for the fiber holding this connection to give it up.
+ *
+ * The key is only ever hashed, never dereferenced, so unlike the socket wait this
+ * one cannot be left holding freed memory: a connection destroyed while a fiber
+ * waits for it makes the wait pointless, not unsafe, and the bound below ends it.
+ *
+ * OK      — the holder released it, and the caller may take it.
+ * REFUSED — the holder never released, or this context cannot be suspended at
+ *           all. What the caller does with that depends on what running
+ *           unguarded costs for the client in question, but it must NOT record
+ *           a claim either way: the connection still belongs to a fiber that is
+ *           mid-exchange on it, and overwriting that would erase the real
+ *           holder's protection along with its release.
+ * THREW   — cancelled, with an exception pending; the caller returns. */
+static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_fiber *self)
+{
+    int64_t budget_ns = oxphp_claim_budget_ns();
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
+    for (;;) {
+        int rc = oxphp_fiber_sleep_us(step_us);
+        if (rc == 0) {
+            /* Nothing to suspend into — outside a fiber, or under a userland
+             * fiber scheduler whose context ours cannot resume. Blocking the
+             * thread would deadlock against the holder, which needs it. */
+            static __thread int64_t last_ns = 0;
+            if (oxphp_contended_log_ready(&last_ns)) {
+                char msg[400];
+                snprintf(msg, sizeof(msg),
+                         "oxphp: database call on connection %p, which another fiber holds, ran "
+                         "anyway because this context cannot be suspended cooperatively (a "
+                         "userland fiber scheduler owns it). The client answers for itself, "
+                         "which on a shared connection is the error it raises for a reused "
+                         "connection (logged at most once a second on this thread)", key);
+                php_log_err(msg);
+            }
+            return OXPHP_CLAIM_REFUSED;
+        }
+        if (rc < 0) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+            return OXPHP_CLAIM_THREW;
+        }
+
+        oxphp_request_fiber *owner = oxphp_claim_owner(key);
+        if (owner == NULL || owner == self) return OXPHP_CLAIM_OK;
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
+                           + (int64_t)(now.tv_nsec - started.tv_nsec);
+        if (spent_ns >= budget_ns) {
+            static __thread int64_t last_ns = 0;
+            if (oxphp_contended_log_ready(&last_ns)) {
+                char msg[400];
+                snprintf(msg, sizeof(msg),
+                         "oxphp: gave up waiting for connection %p after %lld s because the "
+                         "fiber holding it did not release it in time. One connection is "
+                         "shared between concurrent fibers and one of them held it for longer "
+                         "than this call's own deadline (logged at most once a second on this "
+                         "thread)", key, (long long) (budget_ns / 1000000000));
+                php_log_err(msg);
+            }
+            return OXPHP_CLAIM_REFUSED;
+        }
+
+        step_us *= 2;
+        if (step_us > OXPHP_STREAM_CLAIM_POLL_MAX_US) {
+            step_us = OXPHP_STREAM_CLAIM_POLL_MAX_US;
+        }
+    }
+}
+
+/* What a claim on a database connection is keyed by.
+ *
+ * For PDO it is the driver's own connection handle, not the PHP object: with
+ * PDO::ATTR_PERSISTENT one pdo_dbh_t — and so one connection — is shared by
+ * every object built from the same DSN, and two objects would otherwise be two
+ * keys that never collide on the one connection they both use.
+ *
+ * For mysqli and phpredis the object IS the connection: both pool by handing a
+ * free connection to one object at a time rather than one connection to two live
+ * objects. Checked for phpredis rather than assumed, because pconnect() reads like
+ * PDO::ATTR_PERSISTENT and is not the same thing — two objects built with
+ * identical pconnect() arguments report different CLIENT IDs, with connection
+ * pooling both on (the default) and off. */
+static void *oxphp_db_conn_key(zend_object *obj, bool is_pdo)
+{
+    if (obj == NULL) return NULL;
+#ifdef OXPHP_HAVE_PDO_HEADERS
+    if (is_pdo) return php_pdo_dbh_fetch_inner(obj);
+#else
+    (void) is_pdo;
+#endif
+    return obj;
+}
+
+/* The body every hooked client entry point shares: find the connection this call
+ * is about, make sure it is this fiber's, then run the original handler.
+ *
+ * `fail_unguarded` picks what happens when the wait gives up, and it differs by
+ * client for one reason: what running unguarded costs. mysqlnd refuses a command
+ * issued mid-exchange from its own connection state, so delegating there produces
+ * a loud, catchable client error and nothing reaches the wire. phpredis has no
+ * such check — delegating puts the command on the wire and each fiber reads the
+ * other's reply, which is the silent data crossing this whole mechanism exists to
+ * prevent. Sixty seconds in, the choice is not between cheap and expensive but
+ * between an error and corruption, so that path raises instead. */
+static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_pdo,
+                                 bool fail_unguarded, INTERNAL_FUNCTION_PARAMETERS)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    zend_object *conn = NULL;
+
+    if (self != NULL) {
+        if (conn_is_arg1) {
+            /* The procedural mysqli form, mysqli_query($link, …): the connection
+             * is the first argument. Read without touching it — the original
+             * handler is still the one that validates and consumes the arguments. */
+            if (ZEND_NUM_ARGS() >= 1) {
+                zval *arg = ZEND_CALL_ARG(execute_data, 1);
+                if (arg != NULL && Z_TYPE_P(arg) == IS_OBJECT) conn = Z_OBJ_P(arg);
+            }
+        } else if (getThis() != NULL) {
+            conn = Z_OBJ_P(getThis());
+        }
+    }
+
+    void *key = oxphp_db_conn_key(conn, is_pdo);
+    if (key != NULL) {
+        oxphp_request_fiber *owner = oxphp_claim_owner(key);
+        bool ours = (owner == NULL || owner == self);
+
+        if (!ours) {
+            switch (oxphp_db_await_owner(key, self)) {
+                case OXPHP_CLAIM_THREW:
+                    return; /* cancelled; the exception is already pending */
+                case OXPHP_CLAIM_OK:
+                    ours = true;
+                    break;
+                default:
+                    /* Gave up. Either way the holder's claim is left alone — it is
+                     * still mid-exchange and overwriting it would erase its
+                     * protection along with its release. */
+                    if (fail_unguarded) {
+                        oxphp_throw_exception(
+                            "RedisException",
+                            "oxphp: another fiber holds this Redis connection and did not give "
+                            "it up in time, so the command was not sent. Sending it would have "
+                            "landed in the middle of that fiber's exchange, and phpredis reads "
+                            "whatever reply comes next — the two would have been swapped with "
+                            "no error raised. The server log says which connection and why",
+                            0);
+                        return;
+                    }
+                    break; /* delegate; the client answers for itself */
+            }
+        }
+
+        /* Failure here means the table could not grow, which the socket path
+         * already reports; the call goes ahead either way. */
+        if (ours) (void) oxphp_claim_acquire(key, self);
+    }
+
+    orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* The hooked entry points, as (id, lowercase class or NULL, lowercase name,
+ * connection-is-first-argument, connection-is-a-PDO-handle). Names are lowercase
+ * because that is how both Zend tables key them. mysqli's methods and its
+ * procedural functions run the same handler but are separate table entries, so
+ * both are listed; each wrapper reads the connection from wherever its own form
+ * puts it.
+ *
+ * Every call that can put a command on the wire belongs here, including the ones
+ * that look like local bookkeeping: set_charset, stat, kill, dump_debug_info,
+ * refresh and autocommit all send one, mysqli::execute_query() prepares and
+ * executes in a single step with no other hooked call before it, and PDO's
+ * setAttribute/getAttribute reach mysqlnd for the attributes pdo_mysql maps onto
+ * connection state — those two filter on the attribute first, since PDO answers
+ * many of them out of pdo_dbh_t without the driver being called at all.
+ * mysqli::connect() belongs here for the same reason phpredis's connect() does:
+ * called on a live object it reconnects that object's link, replacing the socket
+ * under whoever is mid-exchange on it (the procedural mysqli_connect() is a
+ * different call — it builds a new object, so there is nothing to displace).
+ * close() is here too: closing a connection another fiber is mid-exchange on is
+ * the same defect as querying it.
+ *
+ * Statement and result methods are absent because none is reachable without one
+ * of these in front of it *within a request* — `execute()` needs `prepare()`,
+ * `fetch()` needs `query()` — so by then the fiber holds the connection. The
+ * exception is a statement kept across requests, which has no claimed call in
+ * front of it at all and behaves as it does with no claim; that case is out of
+ * scope rather than covered here. */
+#define OXPHP_DB_ENTRIES(X)                                                      \
+    X(pdo_query,                "pdo", "query",                    false, true)  \
+    X(pdo_exec,                 "pdo", "exec",                     false, true)  \
+    X(pdo_prepare,              "pdo", "prepare",                  false, true)  \
+    X(pdo_begin,                "pdo", "begintransaction",         false, true)  \
+    X(pdo_commit,               "pdo", "commit",                   false, true)  \
+    X(pdo_rollback,             "pdo", "rollback",                 false, true)  \
+    X(pdo_lastid,               "pdo", "lastinsertid",             false, true)  \
+    X(my_query,              "mysqli", "query",                    false, false) \
+    X(my_real_query,         "mysqli", "real_query",               false, false) \
+    X(my_execute_query,      "mysqli", "execute_query",            false, false) \
+    X(my_multi_query,        "mysqli", "multi_query",              false, false) \
+    X(my_prepare,            "mysqli", "prepare",                  false, false) \
+    X(my_store_result,       "mysqli", "store_result",             false, false) \
+    X(my_use_result,         "mysqli", "use_result",               false, false) \
+    X(my_next_result,        "mysqli", "next_result",              false, false) \
+    X(my_ping,               "mysqli", "ping",                     false, false) \
+    X(my_begin,              "mysqli", "begin_transaction",        false, false) \
+    X(my_commit,             "mysqli", "commit",                   false, false) \
+    X(my_rollback,           "mysqli", "rollback",                 false, false) \
+    X(my_autocommit,         "mysqli", "autocommit",               false, false) \
+    X(my_savepoint,          "mysqli", "savepoint",                false, false) \
+    X(my_release_savepoint,  "mysqli", "release_savepoint",        false, false) \
+    X(my_select_db,          "mysqli", "select_db",                false, false) \
+    X(my_set_charset,        "mysqli", "set_charset",              false, false) \
+    X(my_stat,               "mysqli", "stat",                     false, false) \
+    X(my_kill,               "mysqli", "kill",                     false, false) \
+    X(my_dump_debug_info,    "mysqli", "dump_debug_info",          false, false) \
+    X(my_refresh,            "mysqli", "refresh",                  false, false) \
+    X(my_stmt_init,          "mysqli", "stmt_init",                false, false) \
+    X(my_real_connect,       "mysqli", "real_connect",             false, false) \
+    X(my_connect,            "mysqli", "connect",                  false, false) \
+    X(my_change_user,        "mysqli", "change_user",              false, false) \
+    X(my_close,              "mysqli", "close",                    false, false) \
+    X(myf_query,                 NULL, "mysqli_query",             true,  false) \
+    X(myf_real_query,            NULL, "mysqli_real_query",        true,  false) \
+    X(myf_execute_query,         NULL, "mysqli_execute_query",     true,  false) \
+    X(myf_multi_query,           NULL, "mysqli_multi_query",       true,  false) \
+    X(myf_prepare,               NULL, "mysqli_prepare",           true,  false) \
+    X(myf_store_result,          NULL, "mysqli_store_result",      true,  false) \
+    X(myf_use_result,            NULL, "mysqli_use_result",        true,  false) \
+    X(myf_next_result,           NULL, "mysqli_next_result",       true,  false) \
+    X(myf_ping,                  NULL, "mysqli_ping",              true,  false) \
+    X(myf_begin,                 NULL, "mysqli_begin_transaction", true,  false) \
+    X(myf_commit,                NULL, "mysqli_commit",            true,  false) \
+    X(myf_rollback,              NULL, "mysqli_rollback",          true,  false) \
+    X(myf_autocommit,            NULL, "mysqli_autocommit",        true,  false) \
+    X(myf_savepoint,             NULL, "mysqli_savepoint",         true,  false) \
+    X(myf_release_savepoint,     NULL, "mysqli_release_savepoint", true,  false) \
+    X(myf_select_db,             NULL, "mysqli_select_db",         true,  false) \
+    X(myf_set_charset,           NULL, "mysqli_set_charset",       true,  false) \
+    X(myf_stat,                  NULL, "mysqli_stat",              true,  false) \
+    X(myf_kill,                  NULL, "mysqli_kill",              true,  false) \
+    X(myf_dump_debug_info,       NULL, "mysqli_dump_debug_info",   true,  false) \
+    X(myf_refresh,               NULL, "mysqli_refresh",           true,  false) \
+    X(myf_stmt_init,             NULL, "mysqli_stmt_init",         true,  false) \
+    X(myf_real_connect,          NULL, "mysqli_real_connect",      true,  false) \
+    X(myf_change_user,           NULL, "mysqli_change_user",       true,  false) \
+    X(myf_close,                 NULL, "mysqli_close",             true,  false)
+
+/* One wrapper and one saved handler per entry, so a call reaches its own original
+ * directly instead of looking itself up in a table on every query. */
+#define OXPHP_DB_DEFINE(id, cls, name, arg1, pdo)                             \
+    static zif_handler oxphp_db_orig_##id = NULL;                             \
+    static ZEND_NAMED_FUNCTION(oxphp_db_hook_##id)                            \
+    {                                                                         \
+        oxphp_db_guarded_call(oxphp_db_orig_##id, (arg1), (pdo), false,       \
+                              INTERNAL_FUNCTION_PARAM_PASSTHRU);              \
+    }
+OXPHP_DB_ENTRIES(OXPHP_DB_DEFINE)
+#undef OXPHP_DB_DEFINE
+
+/* PDO::getAttribute() and ::setAttribute() are hooked by hand, because only some
+ * attributes reach the driver. PHP_METHOD(PDO, getAttribute) answers eight of them
+ * straight out of pdo_dbh_t and returns before `dbh->methods->get_attribute` is
+ * ever consulted; pdo_dbh_attribute_set() does the same for five. Claiming the
+ * connection for those would make `$pdo->getAttribute(PDO::ATTR_DRIVER_NAME)` —
+ * which Doctrine and Laravel call constantly, error paths included — wait out
+ * whichever fiber holds the connection, for a value that never leaves the process.
+ *
+ * The two lists differ because PHP's two switches differ, so they are written out
+ * separately rather than merged into one "local attributes" set. Anything not
+ * listed, including PDO_ATTR_STRINGIFY_FETCHES on the set side (which updates
+ * pdo_dbh_t *and* calls into the driver), keeps the claim.
+ *
+ * Only with PDO's headers: without them the enum has no names here, and the
+ * fallback is the conservative one — claim for every attribute. */
+static zif_handler oxphp_db_orig_pdo_getattr = NULL;
+static zif_handler oxphp_db_orig_pdo_setattr = NULL;
+
+#ifdef OXPHP_HAVE_PDO_HEADERS
+static bool oxphp_pdo_attr_answered_locally(zend_long attr, bool setting)
+{
+    switch (attr) {
+        /* Both switches hold these in pdo_dbh_t and never call the driver. */
+        case PDO_ATTR_CASE:
+        case PDO_ATTR_ERRMODE:
+        case PDO_ATTR_ORACLE_NULLS:
+        case PDO_ATTR_DEFAULT_FETCH_MODE:
+        case PDO_ATTR_STATEMENT_CLASS:
+            return true;
+        /* Readable from pdo_dbh_t; setting them falls through to the driver. */
+        case PDO_ATTR_PERSISTENT:
+        case PDO_ATTR_DRIVER_NAME:
+        case PDO_ATTR_STRINGIFY_FETCHES:
+            return !setting;
+        default:
+            return false;
+    }
+}
+
+static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool setting)
+{
+    if (ZEND_NUM_ARGS() < 1) return false;
+
+    /* Read without touching it: the original handler is still the one that
+     * validates the arguments, and a non-int here is its error to raise. */
+    zval *arg = ZEND_CALL_ARG(execute_data, 1);
+    if (arg == NULL || Z_TYPE_P(arg) != IS_LONG) return false;
+
+    return oxphp_pdo_attr_answered_locally(Z_LVAL_P(arg), setting);
+}
+#else
+static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool setting)
+{
+    (void) execute_data;
+    (void) setting;
+    return false;
+}
+#endif
+
+static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_getattr)
+{
+    if (oxphp_pdo_attr_call_is_local(execute_data, false)) {
+        oxphp_db_orig_pdo_getattr(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    oxphp_db_guarded_call(oxphp_db_orig_pdo_getattr, false, true, false,
+                          INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_setattr)
+{
+    if (oxphp_pdo_attr_call_is_local(execute_data, true)) {
+        oxphp_db_orig_pdo_setattr(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    oxphp_db_guarded_call(oxphp_db_orig_pdo_setattr, false, true, false,
+                          INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+struct oxphp_db_hook {
+    const char *cls;      /* NULL for a plain function */
+    const char *name;
+    zif_handler hook;
+    zif_handler *orig;
+};
+
+static const struct oxphp_db_hook oxphp_db_hooks[] = {
+#define OXPHP_DB_ROW(id, cls, name, arg1, pdo) \
+    { (cls), (name), oxphp_db_hook_##id, &oxphp_db_orig_##id },
+    OXPHP_DB_ENTRIES(OXPHP_DB_ROW)
+#undef OXPHP_DB_ROW
+    { "pdo", "getattribute", oxphp_db_hook_pdo_getattr, &oxphp_db_orig_pdo_getattr },
+    { "pdo", "setattribute", oxphp_db_hook_pdo_setattr, &oxphp_db_orig_pdo_setattr },
+};
+
+/* Point every internal copy of one method's handler at `to`, wherever a class
+ * inheriting from `base` holds one, and report how many were changed.
+ *
+ * The copies are the reason this is not a single assignment. Internal-class
+ * inheritance duplicates the whole zend_internal_function struct
+ * (zend_duplicate_internal_function in Zend/zend_inheritance.c), so a subclass
+ * registered before this runs — PHP 8.4 registers Pdo\Mysql and its siblings in
+ * pdo_mysql's own module startup, and module startup order is not fixed relative
+ * to ours — carries its own handler field that patching PDO does not reach.
+ * Classes declared afterwards are fine either way: they copy whatever the parent
+ * has at that point, which is the hook.
+ *
+ * Matching on the handler value is what keeps this to copies of THIS function: a
+ * subclass that overrides the method with an implementation of its own has a
+ * different handler and must keep it. */
+static uint32_t oxphp_retarget_inherited(zend_class_entry *base, const char *method,
+                                         zif_handler from, zif_handler to)
+{
+    uint32_t changed = 0;
+    zend_class_entry *sub;
+
+    ZEND_HASH_FOREACH_PTR(CG(class_table), sub) {
+        if (sub == NULL || sub == base) continue;
+        if (sub->type != ZEND_INTERNAL_CLASS) continue;
+        if (!instanceof_function(sub, base)) continue;
+
+        zend_function *fn = zend_hash_str_find_ptr(&sub->function_table, method, strlen(method));
+        if (fn != NULL && fn->type == ZEND_INTERNAL_FUNCTION
+            && fn->internal_function.handler == from) {
+            fn->internal_function.handler = to;
+            changed++;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    return changed;
+}
+
+/* Swap one method handler in a class's own function table and in every internal
+ * subclass that inherited a copy of it. A missing class is not an error and not
+ * logged: PDO, pdo_mysql and mysqli are optional extensions, and a build without
+ * one simply has nothing to guard there. A class that IS there without the method
+ * we expect is different — it means this table no longer matches the extension —
+ * and that is reported, because a silently unguarded entry point looks exactly
+ * like a guarded one until data crosses between requests. */
+static bool oxphp_hook_method_swap(const char *cls, const char *method,
+                                   zif_handler hook, zif_handler *orig_out)
+{
+    zend_class_entry *ce = zend_hash_str_find_ptr(CG(class_table), cls, strlen(cls));
+    if (ce == NULL) return false;
+
+    zend_function *fn = zend_hash_str_find_ptr(&ce->function_table, method, strlen(method));
+    if (fn == NULL || fn->type != ZEND_INTERNAL_FUNCTION) {
+        char msg[240];
+        snprintf(msg, sizeof(msg),
+                 "oxphp: %s::%s is not an internal method in this build, so calls to it are not "
+                 "kept apart between concurrent fibers sharing one connection", cls, method);
+        php_log_err(msg);
+        return false;
+    }
+
+    zif_handler orig = fn->internal_function.handler;
+    *orig_out = orig;
+    fn->internal_function.handler = hook;
+    (void) oxphp_retarget_inherited(ce, method, orig, hook);
+    return true;
+}
+
+static void oxphp_hook_method_restore(const char *cls, const char *method, zif_handler orig)
+{
+    if (orig == NULL) return;
+
+    zend_class_entry *ce = zend_hash_str_find_ptr(CG(class_table), cls, strlen(cls));
+    if (ce == NULL) return;
+
+    zend_function *fn = zend_hash_str_find_ptr(&ce->function_table, method, strlen(method));
+    if (fn != NULL && fn->type == ZEND_INTERNAL_FUNCTION) {
+        zif_handler hook = fn->internal_function.handler;
+        fn->internal_function.handler = orig;
+        (void) oxphp_retarget_inherited(ce, method, hook, orig);
+    }
+}
+
+/* Defined below, next to the rest of the phpredis handling. */
+static void oxphp_hook_redis_entries(void);
+static void oxphp_restore_redis_entries(void);
+
+/* The client classes with entry points of their own, and which of them existed when
+ * the hooks went in — the second is what tells a class that turned up late apart
+ * from one whose methods did not match, which is reported per method at the time. */
+static const char *const oxphp_db_guarded_classes[] = {"pdo", "mysqli", "redis"};
+static bool oxphp_db_class_seen[sizeof(oxphp_db_guarded_classes)
+                                / sizeof(*oxphp_db_guarded_classes)];
+
+static void oxphp_hook_db_entries(void)
+{
+    for (size_t i = 0; i < sizeof(oxphp_db_guarded_classes) / sizeof(*oxphp_db_guarded_classes);
+         i++) {
+        const char *cls = oxphp_db_guarded_classes[i];
+        oxphp_db_class_seen[i] =
+            zend_hash_str_find_ptr(CG(class_table), cls, strlen(cls)) != NULL;
+    }
+
+    for (size_t i = 0; i < sizeof(oxphp_db_hooks) / sizeof(oxphp_db_hooks[0]); i++) {
+        const struct oxphp_db_hook *h = &oxphp_db_hooks[i];
+        if (h->cls != NULL) {
+            oxphp_hook_method_swap(h->cls, h->name, h->hook, h->orig);
+        } else {
+            oxphp_hook_swap(h->name, strlen(h->name), h->hook, h->orig);
+        }
+    }
+
+    oxphp_hook_redis_entries();
+
+#ifndef OXPHP_HAVE_PDO_HEADERS
+    /* Said once, at startup, rather than per call: without PDO's headers a claim
+     * can only name the PDO object, and one persistent connection reached through
+     * several objects is then several keys that never collide. */
+    if (zend_hash_str_find_ptr(CG(class_table), "pdo", sizeof("pdo") - 1) != NULL) {
+        php_log_err("oxphp: built without PDO's headers, so a claim on a PDO connection names "
+                    "the PDO object rather than the connection itself; a connection opened "
+                    "with PDO::ATTR_PERSISTENT and reached through more than one object is "
+                    "not kept apart between concurrent fibers");
+    }
+#endif
+}
+
+/* ── phpredis, hooked wholesale ──────────────────────────────
+ *
+ * PDO and mysqli have a short list of calls that begin an exchange, so they are
+ * named one at a time. phpredis does not: every one of its two hundred-odd methods
+ * sends its own command, and a name left out of a list would be a command with no
+ * guard on it and nothing to say so. So every internal method of the Redis class
+ * is wrapped except the ones that never reach the wire, and each call finds its
+ * original by name — by name rather than by function pointer, because a userland
+ * subclass inherits a copy that is a different struct with the same name.
+ *
+ * Redis only, not RedisCluster or RedisArray: keying originals by name is sound
+ * exactly while one name means one implementation, and those classes bring names
+ * of their own with different handlers. They keep the socket-level answer, which
+ * is a refusal in the window where a command would otherwise land mid-exchange. */
+static HashTable oxphp_redis_origs;
+static bool oxphp_redis_hooked = false;
+
+/* Methods that must not take the connection: they never reach the wire, or they
+ * are what an application calls to find out whether it can, or they run on an
+ * object no other fiber can be in the middle of using — a constructor's object has
+ * no other referent yet, and a destructor's is being freed, so a wait in either
+ * would suspend inside object lifecycle for a conflict that cannot exist.
+ *
+ * connect/pconnect are deliberately NOT here: they do reach the wire, and one
+ * called on an object another fiber is mid-exchange on replaces the socket under
+ * it, which is the same defect as sending a command into that exchange. */
+static const char *const oxphp_redis_local[] = {
+    "__construct", "__destruct",
+    "isConnected", "getLastError", "clearLastError", "getOption", "setOption",
+    "getHost", "getPort", "getDbNum", "getTimeout", "getReadTimeout",
+    /* Counters the client keeps for itself. Measured rather than assumed: with a
+     * connection of their own they move no bytes, while serverName() — which reads
+     * like their neighbour — sends and is therefore not here. */
+    "getTransferredBytes", "clearTransferredBytes",
+    "getPersistentID", "getAuth", "getMode", "_prefix", "_serialize",
+    "_unserialize", "_pack", "_unpack", "_compress", "_uncompress",
+};
+
+static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
+{
+    zend_string *name = execute_data->func->common.function_name;
+    zif_handler orig = name != NULL
+        ? zend_hash_str_find_ptr(&oxphp_redis_origs, ZSTR_VAL(name), ZSTR_LEN(name))
+        : NULL;
+
+    if (orig == NULL) {
+        /* Only reachable if a method was renamed between the swap and the call,
+         * which nothing does. Reported rather than silently skipped: calling
+         * nothing would return null from a command that never ran. */
+        zend_throw_error(NULL, "oxphp: no original handler recorded for Redis::%s",
+                         name != NULL ? ZSTR_VAL(name) : "?");
+        return;
+    }
+
+    oxphp_db_guarded_call(orig, false, false, true, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static bool oxphp_redis_is_local(const char *name)
+{
+    for (size_t i = 0; i < sizeof(oxphp_redis_local) / sizeof(*oxphp_redis_local); i++) {
+        if (strcasecmp(name, oxphp_redis_local[i]) == 0) return true;
+    }
+    return false;
+}
+
+static void oxphp_hook_redis_entries(void)
+{
+    zend_class_entry *ce = zend_hash_str_find_ptr(CG(class_table), "redis", sizeof("redis") - 1);
+    if (ce == NULL) return; /* phpredis not installed: nothing to guard */
+
+    zend_hash_init(&oxphp_redis_origs, 256, NULL, NULL, 1);
+    oxphp_redis_hooked = true;
+
+    zend_string *table_key;
+    zend_function *fn;
+    ZEND_HASH_FOREACH_STR_KEY_PTR(&ce->function_table, table_key, fn) {
+        if (table_key == NULL || fn == NULL || fn->type != ZEND_INTERNAL_FUNCTION) continue;
+
+        zend_string *name = fn->common.function_name;
+        if (name == NULL || oxphp_redis_is_local(ZSTR_VAL(name))) continue;
+
+        zif_handler orig = fn->internal_function.handler;
+        if (orig == oxphp_redis_hook) continue;
+
+        /* A name already recorded means two methods answer to it, which would make
+         * the lookup ambiguous; that one keeps the socket-level answer instead. */
+        if (zend_hash_str_add_ptr(&oxphp_redis_origs, ZSTR_VAL(name), ZSTR_LEN(name),
+                                  (void *) orig) == NULL) {
+            continue;
+        }
+
+        fn->internal_function.handler = oxphp_redis_hook;
+        /* The table key is the lowercase form the function tables are keyed by. */
+        (void) oxphp_retarget_inherited(ce, ZSTR_VAL(table_key), orig, oxphp_redis_hook);
+    } ZEND_HASH_FOREACH_END();
+}
+
+static void oxphp_restore_redis_entries(void)
+{
+    if (!oxphp_redis_hooked) return;
+
+    zend_class_entry *ce = zend_hash_str_find_ptr(CG(class_table), "redis", sizeof("redis") - 1);
+    if (ce != NULL) {
+        zend_string *table_key;
+        zend_function *fn;
+        ZEND_HASH_FOREACH_STR_KEY_PTR(&ce->function_table, table_key, fn) {
+            if (table_key == NULL || fn == NULL || fn->type != ZEND_INTERNAL_FUNCTION) continue;
+            if (fn->internal_function.handler != oxphp_redis_hook) continue;
+
+            zend_string *name = fn->common.function_name;
+            zif_handler orig = name != NULL
+                ? zend_hash_str_find_ptr(&oxphp_redis_origs, ZSTR_VAL(name), ZSTR_LEN(name))
+                : NULL;
+            if (orig == NULL) continue;
+
+            fn->internal_function.handler = orig;
+            (void) oxphp_retarget_inherited(ce, ZSTR_VAL(table_key), oxphp_redis_hook, orig);
+        } ZEND_HASH_FOREACH_END();
+    }
+
+    zend_hash_destroy(&oxphp_redis_origs);
+    oxphp_redis_hooked = false;
+}
+
+static void oxphp_restore_db_entries(void)
+{
+    oxphp_restore_redis_entries();
+
+    for (size_t i = 0; i < sizeof(oxphp_db_hooks) / sizeof(oxphp_db_hooks[0]); i++) {
+        const struct oxphp_db_hook *h = &oxphp_db_hooks[i];
+        if (h->cls != NULL) {
+            oxphp_hook_method_restore(h->cls, h->name, *h->orig);
+        } else {
+            oxphp_hook_restore(h->name, strlen(h->name), *h->orig);
+        }
+        *h->orig = NULL;
+    }
+}
+
+/* Whether any entry point of a client class was actually hooked. */
+static bool oxphp_db_class_guarded(const char *cls)
+{
+    if (strcmp(cls, "redis") == 0) return oxphp_redis_hooked;
+
+    for (size_t i = 0; i < sizeof(oxphp_db_hooks) / sizeof(oxphp_db_hooks[0]); i++) {
+        const struct oxphp_db_hook *h = &oxphp_db_hooks[i];
+        if (h->cls != NULL && strcmp(h->cls, cls) == 0 && *h->orig != NULL) return true;
+    }
+    return false;
+}
+
+/* Report client classes that turned up after the hooks went in.
+ *
+ * Asked at the first request rather than at startup, because a class that is
+ * absent when module startup runs is indistinguishable there from an extension
+ * that is not installed: extensions start in the order their ini files are read,
+ * and one whose file sorts after ours (or names its extension in a file of its
+ * own) has not registered its classes yet when we look. By the first request every
+ * module has started, so a class that is present now and unguarded was loaded too
+ * late — worth a line, because an unguarded entry point looks exactly like a
+ * guarded one until data crosses between requests.
+ *
+ * Diagnostic only; the hook is not installed from here. Internal class entries are
+ * shared between worker threads — each thread copies the global function table,
+ * but classes are copied by pointer with a refcount — so rewriting a method table
+ * from inside a request would race every other worker for a structure that only
+ * module startup can touch alone. */
+static void oxphp_db_report_late_classes(void)
+{
+    for (size_t i = 0; i < sizeof(oxphp_db_guarded_classes) / sizeof(*oxphp_db_guarded_classes);
+         i++) {
+        const char *cls = oxphp_db_guarded_classes[i];
+        if (oxphp_db_class_seen[i]) continue; /* was there; any gap is already reported */
+        if (zend_hash_str_find_ptr(CG(class_table), cls, strlen(cls)) == NULL) continue;
+        if (oxphp_db_class_guarded(cls)) continue;
+
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+                 "oxphp: the %s extension registered its classes after oxphp started, so its "
+                 "calls are not kept apart between concurrent fibers sharing one connection. "
+                 "oxphp has to start after it: its ini file must sort after the one that "
+                 "enables %s",
+                 cls, cls);
+        php_log_err(msg);
+    }
 }
 
 /* ─── Hooked stream_select() (category "streams") ────────────
@@ -2196,6 +3202,10 @@ static void oxphp_runtime_hooks_install(void)
         }
         oxphp_hook_swap("stream_select", sizeof("stream_select") - 1,
                         oxphp_hooked_stream_select, &oxphp_orig_stream_select);
+        /* Part of the same category: a suspended socket read is only safe while
+         * the connection belongs to one fiber, and for the database clients that
+         * has to be established above the stream — see the claim section. */
+        oxphp_hook_db_entries();
     }
 }
 
@@ -2208,6 +3218,7 @@ static void oxphp_runtime_hooks_restore(void)
     oxphp_hook_restore("stream_select", sizeof("stream_select") - 1,
                        oxphp_orig_stream_select);
     oxphp_orig_stream_select = NULL;
+    oxphp_restore_db_entries();
     oxphp_restore_socket_ops();
 }
 
@@ -4999,6 +6010,14 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * arm64). RSHUTDOWN still runs zend_hash_clean() to dtor cached instances
      * while they are valid; this only forces a fresh table next request. */
     decorator_instance_cache_initialized = 0;
+
+    /* Once per process, at the first request: module startup is too early to tell a
+     * client extension that has not started yet from one that is not installed. */
+    static atomic_flag late_classes_checked = ATOMIC_FLAG_INIT;
+    if (oxphp_hooks_category_enabled("streams")
+        && !atomic_flag_test_and_set(&late_classes_checked)) {
+        oxphp_db_report_late_classes();
+    }
 
     return SUCCESS;
 }

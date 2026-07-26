@@ -43,6 +43,8 @@ uint64_t oxphp_fiber_current_id(void) {
 /* ─── Forward declarations ─────────────────────────────── */
 
 static void request_fiber_coroutine(zend_fiber_transfer *transfer);
+static void oxphp_claim_release_fiber(const oxphp_request_fiber *fiber);
+static void oxphp_claim_reset_if_empty(void);
 
 /* ─── Stack Limit Helper ──────────────────────────────── */
 
@@ -131,6 +133,10 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     oxphp_request_fiber *fiber = sched->fibers_head;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
+        /* A fiber suspended mid-request may still hold socket streams; its
+         * entries would name freed memory once it is gone. Fibers on the free
+         * list below released theirs by completing. */
+        oxphp_claim_release_fiber(fiber);
         zend_fiber_destroy_context(&fiber->context);
         oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
         oxphp_fiber_free_task_payload(fiber);
@@ -157,6 +163,13 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     sched->reg_slots = NULL;
     sched->reg_mask = 0;
     sched->reg_count = 0;
+
+    /* Stream claims are thread-local, not per scheduler, so the table can only
+     * go once nothing holds an entry any more — on a thread running both a
+     * request scheduler and a task scheduler, the first of them to be destroyed
+     * must not take the other's claims with it. With one scheduler per thread,
+     * which is the usual case, the loops above emptied it. */
+    oxphp_claim_reset_if_empty();
 
     /* After the fibers, not before: closing the instance drops every
      * registration they still held, so nothing can report readiness for a fiber
@@ -268,6 +281,13 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
 
         php_call_shutdown_functions();
         php_free_shutdown_functions();
+
+        /* The request is over, so any socket stream this fiber claimed is free
+         * for the next fiber that wants it. Here rather than in finalize because
+         * this point is inside the zend_try above's reach: it is passed on every
+         * outcome, an uncaught exception and a bailout included, and it is the
+         * one place both request dispatch paths share. */
+        oxphp_claim_release_fiber(fiber);
 
         oxphp_current_fiber = NULL;
 
@@ -998,9 +1018,11 @@ static void oxphp_io_park_rollback(oxphp_fiber_scheduler *sched, struct pollfd *
  *     cannot arrive.
  *   - EEXIST is another fiber already waiting on this descriptor. An epoll
  *     instance holds one registration per descriptor, so there is no way to
- *     route the wake-up to both. Two fibers reading one connection was never
- *     safe; this way the second blocks its own thread instead of quietly taking
- *     readiness meant for the first.
+ *     route the wake-up to both, and the second waiter blocks its own thread
+ *     rather than quietly taking readiness meant for the first. Two fibers
+ *     reading one *stream* no longer reach here at all — the claim below keeps
+ *     them apart, and this is what remains: the same descriptor arrived at by two
+ *     routes, such as a dup() or one stream read while another selects on it.
  *   - a table that cannot grow. Registering without recording who registered it
  *     would leave the removal unverifiable, which is the one thing the table is
  *     for, so the park is declined instead of being left untracked.
@@ -1054,6 +1076,207 @@ void oxphp_io_unpark(oxphp_request_fiber *fiber) {
         oxphp_io_drop_registration(sched, fd < 0 ? -1 - fd : fd,
                                    &fiber->suspend_data.io.owners[i]);
     }
+}
+
+/* ─── Which fiber a connection belongs to ─────────────────
+ *
+ * A client protocol on a socket is a sequence of exchanges — write a command,
+ * read the answer — and the connection carries no marker for where one ends.
+ * Once a hooked read parks a fiber halfway through one, the worker runs another
+ * fiber on the same PHP context, and an application that opened its database or
+ * cache client when the worker booted hands both fibers the same connection. The
+ * second fiber's command then lands in the middle of the first one's exchange.
+ * Clients answer that differently and neither answer is usable: mysqlnd tracks
+ * its connection state and refuses the command outright, while phpredis has no
+ * such check, so both commands reach the server and each fiber reads the other's
+ * reply — one request's data returned to another, with no error raised.
+ *
+ * So a fiber claims a connection before using it, and a fiber that meets a
+ * connection another one has claimed waits for it to be given up instead of
+ * joining in. The claim is dropped when the owning fiber's request or task ends,
+ * not when its read returns: the exchange boundary cannot be seen from here, and
+ * the end of the request is the first moment certainly past it. Holding it that
+ * long over-serializes — a fiber that queried once keeps the connection until its
+ * request is done — and the cost of that is the hook's benefit on a shared
+ * connection, nothing else. Such a connection then carries the throughput it had
+ * before the hook existed, which is the intended trade: the gain stays where
+ * connections are not shared, and correctness does not depend on which of those
+ * an application does.
+ *
+ * The key is a `void *` because a connection is named at two levels and both need
+ * claiming. The socket ops name a `php_stream`, which is what keeps the bytes on
+ * the wire in order. The database clients need one level up: mysqlnd refuses a
+ * reentrant command from its own connection state, before any I/O, so no
+ * stream-level guard can be reached at all — for those, the hooked client entry
+ * points claim whatever names the connection there (the driver's own connection
+ * handle where it can be reached, the client object otherwise). Keyed on the
+ * stream rather than the descriptor for the same reason a claim is not keyed on
+ * the client object where the handle is available: a descriptor number, like a
+ * PHP object, names a connection for less time than the connection lasts.
+ *
+ * No key outlives what it names by construction, so all of them rely on the entry
+ * going away in time. A closed stream erases its entry (the close op is hooked for
+ * that alone). A connection has no equally cheap hook, so one closed mid-request
+ * can leave an entry that a later connection at the same address inherits; the
+ * consequence is one bounded wait that ends in the unguarded behaviour, and every
+ * entry is gone by the end of the request either way.
+ *
+ * Open addressing with linear probing and no tombstones, exactly as
+ * oxphp_io_reg_* above: the same traffic shape, and one idiom to read rather
+ * than two. Thread-local rather than per scheduler because fibers only ever
+ * multiplex within a thread, so one table covers the request fibers and the task
+ * fibers on it without either scheduler having to know about the other. */
+
+struct oxphp_claim {
+    void *key;                       /* NULL marks a free slot */
+    oxphp_request_fiber *owner;
+};
+
+static __thread struct oxphp_claim *oxphp_claim_slots = NULL;
+static __thread uint32_t oxphp_claim_mask = 0;
+static __thread uint32_t oxphp_claim_count = 0;
+
+static inline uint32_t oxphp_claim_hash(const void *key) {
+    /* Heap addresses are allocator-aligned, so their low bits say almost
+     * nothing; dropping them before the multiply is what keeps a run of
+     * consecutive allocations from probing as a run. */
+    return (uint32_t) ((((uintptr_t) key) >> 4) * 2654435761u);
+}
+
+/* Place a key in a table known to have room. Returns true when it took a free
+ * slot, false when it overwrote the entry already held for that stream. */
+static bool oxphp_claim_insert(struct oxphp_claim *slots, uint32_t mask,
+                               void *key, oxphp_request_fiber *owner) {
+    uint32_t i = oxphp_claim_hash(key) & mask;
+    while (slots[i].key != NULL && slots[i].key != key) {
+        i = (i + 1) & mask;
+    }
+    bool fresh = slots[i].key == NULL;
+    slots[i].key = key;
+    slots[i].owner = owner;
+    return fresh;
+}
+
+/* Make room for one more entry, allocating on first use and doubling at half
+ * load — the point where linear probing stops degrading. */
+static bool oxphp_claim_reserve(void) {
+    uint32_t cap = oxphp_claim_slots != NULL ? oxphp_claim_mask + 1 : 0;
+    if (cap != 0 && (oxphp_claim_count + 1) * 2 <= cap) return true;
+
+    uint32_t new_cap = cap != 0 ? cap * 2 : 16;
+    struct oxphp_claim *slots = malloc((size_t) new_cap * sizeof(*slots));
+    if (slots == NULL) return false;
+    for (uint32_t i = 0; i < new_cap; i++) {
+        slots[i].key = NULL;
+        slots[i].owner = NULL;
+    }
+
+    for (uint32_t i = 0; i < cap; i++) {
+        if (oxphp_claim_slots[i].key != NULL) {
+            oxphp_claim_insert(slots, new_cap - 1, oxphp_claim_slots[i].key,
+                               oxphp_claim_slots[i].owner);
+        }
+    }
+
+    free(oxphp_claim_slots);
+    oxphp_claim_slots = slots;
+    oxphp_claim_mask = new_cap - 1;
+    return true;
+}
+
+static struct oxphp_claim *oxphp_claim_find(void *key) {
+    if (oxphp_claim_slots == NULL) return NULL;
+
+    uint32_t i = oxphp_claim_hash(key) & oxphp_claim_mask;
+    for (uint32_t probe = 0; probe <= oxphp_claim_mask; probe++) {
+        struct oxphp_claim *slot = &oxphp_claim_slots[(i + probe) & oxphp_claim_mask];
+        if (slot->key == key) return slot;
+        /* A free slot ends the probe: nothing inserted after it could have
+         * passed through, so the key is not in the table. */
+        if (slot->key == NULL) return NULL;
+    }
+    return NULL;
+}
+
+/* Clear one slot, pulling back the keys that probed past it — the same backward
+ * shift oxphp_io_reg_erase does, and for the same reason: a hole left in place
+ * would end a probe that should have carried on through it. */
+static void oxphp_claim_erase(struct oxphp_claim *slot) {
+    uint32_t mask = oxphp_claim_mask;
+    uint32_t hole = (uint32_t) (slot - oxphp_claim_slots);
+
+    oxphp_claim_slots[hole].key = NULL;
+    oxphp_claim_slots[hole].owner = NULL;
+    oxphp_claim_count--;
+
+    for (uint32_t i = (hole + 1) & mask; oxphp_claim_slots[i].key != NULL;
+         i = (i + 1) & mask) {
+        uint32_t home = oxphp_claim_hash(oxphp_claim_slots[i].key) & mask;
+        if (((i - home) & mask) < ((i - hole) & mask)) continue;
+        oxphp_claim_slots[hole] = oxphp_claim_slots[i];
+        oxphp_claim_slots[i].key = NULL;
+        oxphp_claim_slots[i].owner = NULL;
+        hole = i;
+    }
+}
+
+oxphp_request_fiber *oxphp_claim_owner(void *key) {
+    struct oxphp_claim *slot = oxphp_claim_find(key);
+    return slot != NULL ? slot->owner : NULL;
+}
+
+bool oxphp_claim_acquire(void *key, oxphp_request_fiber *owner) {
+    struct oxphp_claim *slot = oxphp_claim_find(key);
+    if (slot != NULL) {
+        /* Already recorded: either this fiber's own claim being renewed, or one
+         * the previous owner released and left the entry of. The caller has
+         * established which — this is not the place that decides. */
+        slot->owner = owner;
+        return true;
+    }
+
+    if (!oxphp_claim_reserve()) return false;
+    if (oxphp_claim_insert(oxphp_claim_slots, oxphp_claim_mask, key, owner)) {
+        oxphp_claim_count++;
+    }
+    return true;
+}
+
+void oxphp_claim_forget(void *key) {
+    struct oxphp_claim *slot = oxphp_claim_find(key);
+    if (slot != NULL) oxphp_claim_erase(slot);
+}
+
+/* Give up every stream this fiber holds. Called where a request or task ends,
+ * which is the release point the claim is defined against. */
+static void oxphp_claim_release_fiber(const oxphp_request_fiber *fiber) {
+    if (oxphp_claim_slots == NULL || oxphp_claim_count == 0) return;
+
+    uint32_t i = 0;
+    while (i <= oxphp_claim_mask) {
+        if (oxphp_claim_slots[i].key != NULL && oxphp_claim_slots[i].owner == fiber) {
+            /* The erase pulls a later key back into this slot, so the slot has
+             * to be looked at again rather than stepped over. Each pass through
+             * here removes one entry, so this terminates. */
+            oxphp_claim_erase(&oxphp_claim_slots[i]);
+            continue;
+        }
+        i++;
+    }
+}
+
+/* Drop the table once it holds nothing. Called from scheduler teardown, which is
+ * where a thread stops having fibers — and a worker thread does come and go
+ * under dynamic scaling, so the table must not simply be left behind. Guarded on
+ * being empty because the table is thread-local while teardown is per scheduler:
+ * a thread carrying both would otherwise have one scheduler's exit take the
+ * other's claims with it. */
+static void oxphp_claim_reset_if_empty(void) {
+    if (oxphp_claim_count != 0) return;
+
+    free(oxphp_claim_slots);
+    oxphp_claim_slots = NULL;
+    oxphp_claim_mask = 0;
 }
 
 /* Whether this scheduler has anything parked on a descriptor at all. */
@@ -1601,6 +1824,11 @@ static void task_fiber_coroutine(zend_fiber_transfer *transfer) {
         } zend_catch {
             task_capture_fatal(fiber);
         } zend_end_try();
+
+        /* The task is over: release the socket streams it claimed, so a sibling
+         * task waiting for one of them can go on. Same point, same reasoning as
+         * in request_fiber_coroutine. */
+        oxphp_claim_release_fiber(fiber);
 
         oxphp_current_fiber = NULL;
 
