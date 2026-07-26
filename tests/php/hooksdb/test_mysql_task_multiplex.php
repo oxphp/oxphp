@@ -48,7 +48,7 @@ $results = oxphp_async_await_all($tasks);
 // nothing about whether they overlapped.
 $span = max(array_column($results, 'finished')) - min(array_column($results, 'started'));
 
-// Keyed by task id, so it is re-indexed to keep the labels below positional.
+// Keyed by promise ID, so it is re-indexed to keep the labels below positional.
 foreach (array_values($results) as $i => $r) {
     $t->assertSame("task {$i} got the query result", (string) $r['slept'], '0');
     $t->assertGreaterThan(

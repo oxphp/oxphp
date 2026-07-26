@@ -46,8 +46,7 @@ $queryStarted = microtime(true);
 $pdo->query('SELECT SLEEP(1)')->fetchColumn();
 $ownWait = microtime(true) - $queryStarted;
 
-// Keyed by task id, not by position, so the single result is taken by value.
-$inner = array_values(oxphp_async_await_all([$task]))[0];
+$inner = oxphp_async_await($task);
 $total = microtime(true) - $started;
 
 $t->assertContains('the inner request was served while this fiber waited', $inner['body'], 'db-done');

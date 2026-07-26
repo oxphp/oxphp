@@ -37,7 +37,7 @@ $results = oxphp_async_await_all($tasks);
 
 $span = max(array_column($results, 'finished')) - min(array_column($results, 'started'));
 
-// Keyed by task id, so it is re-indexed to keep the labels below positional.
+// Keyed by promise ID, so it is re-indexed to keep the labels below positional.
 foreach (array_values($results) as $i => $r) {
     $t->assertTrue(
         "task {$i} timed out on an empty list rather than popping a value",
