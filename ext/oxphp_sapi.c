@@ -2326,22 +2326,10 @@ static void oxphp_soft_reset(void) {
     /* 5. Reset execution timer (max_execution_time) to prevent timeout across requests */
     zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
 
-    /* 6. Destroy http_globals and repopulate superglobals.
-     * zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
-     * are simple string arrays that never contain cyclic refs, and _nogc avoids
-     * the cycle buffer insertion overhead on every request.
-     * zend_activate_auto_globals() fires non-JIT callbacks (_GET, _POST, _COOKIE, _FILES)
-     * which create new PG(http_globals) entries and zend_hash_update into EG(symbol_table),
-     * replacing the stale entries and releasing the old zvals properly.
-     * JIT globals (_SERVER, _ENV, _REQUEST) are re-armed but only _SERVER is forced
-     * here — $_ENV rarely changes between requests and $_REQUEST is a merge of
-     * _GET+_POST+_COOKIE that PHP can resolve lazily on first access. */
-    for (int i = 0; i < 6; i++) {
-        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
-        ZVAL_UNDEF(&PG(http_globals)[i]);
-    }
-    zend_activate_auto_globals();
-    zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+    /* 6. Rebuild the superglobals for this request. Shared verbatim with the
+     * event-loop path's oxphp_fiber_init_request_state(); the ordering inside is
+     * a correctness constraint, so it lives in one place rather than two. */
+    oxphp_reset_request_autoglobals();
 
     /* 7. Inject REQUEST_TIME and REQUEST_TIME_FLOAT into $_SERVER.
      * In normal mode php_request_startup() does this internally, but in worker
@@ -2425,6 +2413,19 @@ PHP_FUNCTION(oxphp_worker)
 static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
 {
     oxphp_ctx_t *ctx = oxphp_bridge_get_ctx();
+
+    /* Worker mode keeps $_ENV for the life of the worker so that values a .env
+     * loader wrote at boot survive — it does that by disarming the _ENV
+     * auto-global after each reset. With auto_globals_jit=0 the engine fires
+     * that callback from zend_activate_auto_globals() itself, before anything
+     * here can intervene, and the guarantee is silently gone. Say so once per
+     * worker rather than letting the application discover it as vanished
+     * configuration. */
+    if (!PG(auto_globals_jit)) {
+        php_log_err("oxphp: auto_globals_jit=0 — worker mode cannot keep $_ENV across "
+                    "requests; values written there at bootstrap (.env loaders) are "
+                    "replaced by the process environment on every request");
+    }
 
     /* Prevent handler closure from being GC'd during worker lifetime */
     zend_fcc_addref(fcc);

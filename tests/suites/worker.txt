@@ -32,6 +32,16 @@ worker/test_await_timeout_in_request_fiber
 # this test too, with strict=1, and there PHP_WORKERS=1 makes reuse certain.
 worker/test_request_state_after_reuse >> ?probe=42
 
+# Two requests, different probe: $_REQUEST must follow the request being served,
+# not the one that first loaded the script on that worker. The check is live only
+# on the second sighting by the same worker — the first compiles the file, and
+# compiling materialises the lazy auto-global correctly on any build — so under
+# this profile's multi-worker pool the pair is a likelihood rather than a
+# guarantee, and each response names the worker that answered. The hooks profile
+# lists the same pair with PHP_WORKERS=1, where it is certain.
+worker/test_request_autoglobal_refresh >> ?probe=alpha
+worker/test_request_autoglobal_refresh >> ?probe=beta
+
 worker/test_worker_class_exit_reason
 worker/test_worker_class_schedule_exit
 

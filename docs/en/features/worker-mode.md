@@ -12,7 +12,7 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 1. **Set `WORKER_MODE_ENABLED=true`** and point **`ENTRY_FILE`** at your bootstrap script. This enables worker mode for all PHP workers in the pool.
 2. **PHP starts and runs the outer scope once** — autoloader registration, configuration loading, database connections, and any other initialization code execute a single time.
 3. **Call `oxphp_worker(callback)`** to enter the request loop. OxPHP begins dispatching incoming HTTP requests to your callback.
-4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `php://input`), output buffers, and response headers are reset automatically. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope.
+4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, and response headers are reset automatically. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is the exception and is deliberately **not** reset — see [Superglobals](../php/superglobals.md#_env).
 5. **Outer scope persists** — variables defined before `oxphp_worker()`, static properties, database connections, and autoloaders remain available across all requests handled by that worker.
 
 > **Note:** Worker mode changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.

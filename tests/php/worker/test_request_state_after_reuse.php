@@ -79,13 +79,6 @@ if ($two !== ['X-Reuse-Two: replaced']) {
 // PG(http_globals) — $_REQUEST is a lazy auto-global built by merging
 // PG(http_globals)[GET/POST/COOKIE], so it is the one observable that reads
 // those slots directly.
-//
-// Keep this file the only one in the worker profile that mentions $_REQUEST,
-// and keep it to a single suite line. OPcache materializes a lazy auto-global
-// when a script referencing it is loaded and the bit is still clear in
-// ZCG(auto_globals_mask), which worker mode clears once per worker lifetime —
-// so a second $_REQUEST user on the same worker would read a stale array here
-// and fail this check on perfectly good code.
 if (($_GET['probe'] ?? null) !== '42') {
     $fail[] = '$_GET[probe] = ' . var_export($_GET['probe'] ?? null, true);
 }
