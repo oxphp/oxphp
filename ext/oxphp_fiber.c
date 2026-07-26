@@ -22,9 +22,11 @@
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
 #include <time.h>   /* clock_gettime/CLOCK_MONOTONIC for per-call await deadlines */
-#include <poll.h>   /* poll() for descriptor readiness of IO_WAIT-suspended fibers */
-#include <errno.h>  /* EINTR from the readiness poll */
-#include <stdatomic.h> /* one-shot flag for the readiness-poll failure log */
+#include <poll.h>   /* struct pollfd: how a waiter states its interest and reads the outcome */
+#include <sys/epoll.h>   /* the readiness backend for IO_WAIT-suspended fibers */
+#include <sys/timerfd.h> /* periodic timer that bounds an idle wait inside epoll */
+#include <errno.h>  /* EINTR from the readiness wait */
+#include <stdatomic.h> /* one-shot flag for the readiness-wait failure log */
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
 
@@ -94,6 +96,8 @@ static inline void oxphp_fiber_set_stack_limits_from_sp(void *stack_local, size_
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     memset(sched, 0, sizeof(*sched));
     sched->next_fiber_id = 1;
+    sched->epfd = -1;
+    sched->timer_fd = -1;
 }
 
 /* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
@@ -161,6 +165,19 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     sched->io_fds = NULL;
     sched->io_owners = NULL;
     sched->io_cap = 0;
+
+    /* After the fibers, not before: closing the instance drops every
+     * registration they still held, so nothing can report readiness for a fiber
+     * that has already been freed. */
+    if (sched->timer_fd >= 0) {
+        close(sched->timer_fd);
+        sched->timer_fd = -1;
+    }
+    if (sched->epfd >= 0) {
+        close(sched->epfd);
+        sched->epfd = -1;
+    }
+    sched->timer_interval_ns = 0;
 }
 
 /* ─── Coroutine Entry Point ────────────────────────────── */
@@ -294,7 +311,11 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
  * outlives it is the kind of thing a later reader will dereference. */
 static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber) {
     if (fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT) {
+        /* Before the pointers are dropped: unparking reads the set to know what
+         * to stop watching. */
+        oxphp_io_unpark(fiber);
         fiber->suspend_data.io.fds = NULL;
+        fiber->suspend_data.io.owners = NULL;
         fiber->suspend_data.io.nfds = 0;
     }
     fiber->suspend_reason = OXPHP_SUSPEND_NONE;
@@ -322,6 +343,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     }
 
     fiber->fiber_id = sched->next_fiber_id++;
+    fiber->owner_sched = sched;
     fiber->fci = fci;
     fiber->fcc = fcc;
     oxphp_fiber_clear_suspend(fiber);
@@ -668,6 +690,105 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
  * without a hook — and are muted for one that did not; see
  * oxphp_io_entry_ready(). */
 
+/* Stored in the timer's registration so a wake-up from it can be told apart
+ * from a fiber's descriptor without a lookup. Its address is the whole value;
+ * the fields are never read. */
+static struct oxphp_io_owner oxphp_io_timer_marker;
+
+/* Create this scheduler's epoll instance and its periodic timer on first use.
+ * Returns false if either could not be made, which every caller reads as
+ * "cannot park": the hooks then delegate and the server keeps working, blocking
+ * the way it did before the hooks existed. */
+static bool oxphp_io_ensure_epoll(oxphp_fiber_scheduler *sched) {
+    if (sched->epfd >= 0) return true;
+
+    int epfd = epoll_create1(EPOLL_CLOEXEC);
+    if (epfd < 0) return false;
+
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (tfd < 0) {
+        close(epfd);
+        return false;
+    }
+
+    struct epoll_event ev = {
+        .events = EPOLLIN,
+        .data = { .ptr = &oxphp_io_timer_marker },
+    };
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, tfd, &ev) < 0) {
+        close(tfd);
+        close(epfd);
+        return false;
+    }
+
+    sched->epfd = epfd;
+    sched->timer_fd = tfd;
+    sched->timer_interval_ns = 0;
+    return true;
+}
+
+/* Register every descriptor a fiber is about to wait on. Any refusal means the
+ * fiber must not park at all:
+ *
+ *   - EPERM is a descriptor epoll declines to watch, a regular file being the
+ *     common one. Those are always ready as far as a wait is concerned, so the
+ *     caller has to go on to its delegate rather than wait for an event that
+ *     cannot arrive.
+ *   - EEXIST is another fiber already waiting on this descriptor. An epoll
+ *     instance holds one registration per descriptor, so there is no way to
+ *     route the wake-up to both. Two fibers reading one connection was never
+ *     safe; this way the second blocks its own thread instead of quietly taking
+ *     readiness meant for the first.
+ *
+ * A refusal partway through rolls back what was already registered, so a
+ * declined park leaves the instance exactly as it found it.
+ *
+ * Entries whose descriptor is negated are skipped: those were muted by an
+ * earlier wait in the same call (see oxphp_io_collect_ready), and re-registering
+ * one would put back the condition that muted it. A set where every entry is
+ * muted registers nothing and simply waits out its deadline. */
+bool oxphp_io_park(oxphp_request_fiber *fiber, struct pollfd *fds,
+                   struct oxphp_io_owner *owners, uint32_t nfds) {
+    oxphp_fiber_scheduler *sched = fiber->owner_sched;
+    if (sched == NULL || !oxphp_io_ensure_epoll(sched)) return false;
+
+    for (uint32_t i = 0; i < nfds; i++) {
+        if (fds[i].fd < 0) continue;
+
+        struct epoll_event ev = {
+            .events = 0,
+            .data = { .ptr = &owners[i] },
+        };
+        if (fds[i].events & POLLIN)  ev.events |= EPOLLIN;
+        if (fds[i].events & POLLOUT) ev.events |= EPOLLOUT;
+        if (fds[i].events & POLLPRI) ev.events |= EPOLLPRI;
+
+        if (epoll_ctl(sched->epfd, EPOLL_CTL_ADD, fds[i].fd, &ev) < 0) {
+            for (uint32_t j = 0; j < i; j++) {
+                if (fds[j].fd < 0) continue;
+                epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fds[j].fd, NULL);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Stop watching a fiber's descriptors. Deregisters muted entries too, by
+ * recovering the descriptor they hold negated: muting removes the registration
+ * itself, so this is a second attempt that fails harmlessly, and the alternative
+ * — skipping them — would leak a registration on any path where the removal did
+ * not take. */
+void oxphp_io_unpark(oxphp_request_fiber *fiber) {
+    oxphp_fiber_scheduler *sched = fiber->owner_sched;
+    if (sched == NULL || sched->epfd < 0) return;
+
+    for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+        int fd = fiber->suspend_data.io.fds[i].fd;
+        epoll_ctl(sched->epfd, EPOLL_CTL_DEL, fd < 0 ? -1 - fd : fd, NULL);
+    }
+}
+
 /* Grow the scheduler's aggregated poll set to hold at least `need` entries.
  * Returns false when the allocation fails; the poll set is then reported empty
  * for this tick rather than the process dying. What that costs each caller
@@ -787,6 +908,23 @@ static inline bool oxphp_io_entry_ready(const struct pollfd *pfd) {
     return (pfd->revents & (pfd->events | POLLNVAL)) != 0;
 }
 
+/* Stop watching one entry for the rest of its suspension, after it reported
+ * something and none of it was wanted. What is reported uninvited is POLLERR or
+ * POLLHUP, and neither ever clears — the descriptor is finished. Left in place
+ * it would answer every wait instantly and the idle backoff would stop sleeping
+ * at all, at full CPU, for as long as the waiter holds on. Nothing is lost:
+ * whatever the waiter did ask for could only arrive on a descriptor still
+ * capable of delivering it.
+ *
+ * The descriptor is negated rather than overwritten so it stays recoverable from
+ * the entry — deregistering needs it, and so does anyone reading the set. */
+static void oxphp_io_mute_entry(oxphp_fiber_scheduler *sched, struct pollfd *entry) {
+    if (sched->epfd >= 0) {
+        epoll_ctl(sched->epfd, EPOLL_CTL_DEL, entry->fd, NULL);
+    }
+    entry->fd = -1 - entry->fd;
+}
+
 static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
                                        oxphp_request_fiber **out, uint32_t max) {
     /* An empty poll set means either that nothing is parked or that the set
@@ -833,17 +971,8 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
         struct pollfd *entry = &owner->fiber->suspend_data.io.fds[owner->idx];
         entry->revents = sched->io_fds[i].revents;
 
-        /* Reported something, none of it wanted. What poll() adds uninvited is
-         * POLLERR or POLLHUP, and neither ever clears — the descriptor is done.
-         * Stop watching this entry for the rest of the suspension: left in, it
-         * would return every poll instantly and the idle backoff would never
-         * sleep again, at full CPU, for as long as the waiter holds on.
-         * Anything the waiter did ask for could only arrive on a descriptor
-         * still capable of delivering it, so muting loses nothing. Negated
-         * rather than overwritten so the descriptor stays recoverable from the
-         * entry; poll() ignores a negative entry and zeroes its revents. */
         if (entry->revents != 0 && !oxphp_io_entry_ready(entry)) {
-            entry->fd = -1 - entry->fd;
+            oxphp_io_mute_entry(sched, entry);
         }
     }
 
@@ -1313,6 +1442,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     }
 
     fiber->fiber_id = sched->next_fiber_id++;
+    fiber->owner_sched = sched;
     fiber->task_mode = true;
     fiber->cancel_requested = false;
     fiber->timed_out = false;

@@ -22,6 +22,17 @@
  * lifetime is already pinned by the suspension. */
 #define OXPHP_MAX_WAIT_FDS 1024
 
+struct _oxphp_fiber_scheduler;
+
+/* Which fiber, and which of its descriptors, a readiness registration belongs
+ * to — so an event can be scattered back into that fiber's own descriptor
+ * array, where the waiting code reads it. One per descriptor, living beside the
+ * descriptors themselves. */
+struct oxphp_io_owner {
+    struct _oxphp_request_fiber *fiber;
+    uint32_t idx;
+};
+
 /* ─── Suspend Reasons ──────────────────────────────────── */
 
 typedef enum {
@@ -140,6 +151,10 @@ typedef struct _oxphp_request_fiber {
              * that filled this in — so the pointer is valid for the whole wait
              * and there is nothing to free. Do not make it outlive the wait. */
             struct pollfd *fds;
+            /* Borrowed on the same terms, from the same frame: one entry per
+             * descriptor, holding the identity the readiness registration
+             * carries back (which fiber, which of its descriptors). */
+            struct oxphp_io_owner *owners;
             uint32_t nfds;
             bool expired;             /* deadline elapsed before any fd was ready */
             uint64_t deadline_ns;     /* CLOCK_MONOTONIC deadline, 0 = wait forever */
@@ -209,6 +224,14 @@ typedef struct _oxphp_request_fiber {
     char *task_exc_class;           /* malloc'd, NULL if none */
     char *task_exc_message;         /* malloc'd, NULL if none */
 
+    /* The scheduler that created this fiber — the HTTP one for a request fiber,
+     * the task one for an async fiber. Distinct from `scheduler` above, which is
+     * the context to switch back into. Needed because a fiber registers its own
+     * descriptors from inside its own frame, where the only thing in reach is
+     * the fiber; resolving it from thread-local state instead would depend on
+     * which tick happens to be running. */
+    struct _oxphp_fiber_scheduler *owner_sched;
+
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
     struct _oxphp_request_fiber *prev;
@@ -216,15 +239,7 @@ typedef struct _oxphp_request_fiber {
 
 /* ─── Fiber Scheduler ──────────────────────────────────── */
 
-/* Which fiber, and which of its descriptors, an entry of the aggregated poll
- * set came from — so readiness can be scattered back into each fiber's own
- * array, where the waiting code reads it. */
-struct oxphp_io_owner {
-    struct _oxphp_request_fiber *fiber;
-    uint32_t idx;
-};
-
-typedef struct {
+typedef struct _oxphp_fiber_scheduler {
     /* The scheduler's own context (main thread context) */
     zend_fiber_context main_context;
 
@@ -257,6 +272,18 @@ typedef struct {
     struct pollfd *io_fds;
     struct oxphp_io_owner *io_owners;
     uint32_t io_cap;
+
+    /* Readiness backend for descriptor waits: one epoll instance per scheduler,
+     * which is one per thread since both schedulers are thread-local, plus a
+     * periodic timer registered inside it so an idle wait can be bounded
+     * without asking the kernel for a millisecond-granularity timeout. Created
+     * on the first park and closed by oxphp_scheduler_destroy(); -1 until then,
+     * so a worker whose requests never wait on a descriptor pays nothing.
+     * timer_interval_ns is the period currently armed, 0 when the timer has
+     * never been armed. */
+    int epfd;
+    int timer_fd;
+    int64_t timer_interval_ns;
 } oxphp_fiber_scheduler;
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
@@ -284,6 +311,19 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
 void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
 void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber, zval *value);
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
+
+/* Start watching a fiber's descriptors, so the scheduler can resolve their
+ * readiness while the fiber is suspended. Returns false when the set cannot be
+ * watched at all, which the caller must read as "this fiber may not park" — the
+ * wait then falls to the caller's own blocking path. Takes the set as arguments
+ * rather than reading it off the fiber, so a refusal leaves no half-written
+ * suspension to undo. */
+bool oxphp_io_park(oxphp_request_fiber *fiber, struct pollfd *fds,
+                   struct oxphp_io_owner *owners, uint32_t nfds);
+
+/* Stop watching them. Reads the set off the fiber, so it must run before the
+ * suspension data is cleared. */
+void oxphp_io_unpark(oxphp_request_fiber *fiber);
 
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);
