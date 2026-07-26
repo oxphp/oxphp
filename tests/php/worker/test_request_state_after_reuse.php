@@ -29,8 +29,16 @@ $fail = [];
 // Nothing below exercises the recycled-fiber path on a worker's first request,
 // and a silent pass would look like coverage. Where reuse is guaranteed (a
 // single-PHP-worker profile, this test listed second) the caller passes
-// strict=1 and a fresh fiber is a failure; where the pool size makes it a
+// strict=1 and a first request is a failure; where the pool size makes it a
 // likelihood, the run stays green and says so in the body instead.
+//
+// requestCount() is the only probe PHP has here, and it is a NECESSARY, not a
+// sufficient, condition for reuse: a request that arrives while a sibling is
+// suspended gets a fiber of its own whatever the worker's request index. In the
+// strict case reuse is guaranteed by the suite's placement (single worker, a
+// preceding request that did not suspend), so the count only rules out the one
+// case placement cannot — being first. Outside it the reported flag says
+// "probably", because from PHP it cannot say more.
 $count = $worker->requestCount();
 $fresh = $count < 2;
 $strict = ($_GET['strict'] ?? null) === '1';
@@ -86,9 +94,9 @@ if (($_REQUEST['probe'] ?? null) !== '42') {
 }
 
 $where = json_encode([
-    'worker_id'     => $worker->id(),
-    'request_count' => $count,
-    'fiber_reused'  => !$fresh,
+    'worker_id'        => $worker->id(),
+    'request_count'    => $count,
+    'probably_reused'  => !$fresh,
 ]);
 
 if ($fail !== []) {

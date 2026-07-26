@@ -61,17 +61,13 @@ static inline void oxphp_fiber_set_stack_limits_from_sp(void *stack_local, size_
 }
 
 /* Install a fiber's C-stack bounds before switching into it, from the copy its
- * coroutine measured at entry. A NULL base means a fresh fiber, whose coroutine
- * measures them itself on the way in; a recycled or suspended one parks below
- * that code and never runs it again.
+ * coroutine measured at entry (NULL = a fresh fiber, which measures its own on
+ * the way in). Called on every path into a fiber so they all read alike.
  *
- * The engine would carry the bounds across the switch on its own — but only when
- * ZEND_CHECK_STACK_LIMIT is configured in (Zend/zend_fibers.c), and that is also
- * the guard on every reader of EG(stack_base)/EG(stack_limit) in php-src, while
- * the two EG fields themselves exist unconditionally. So this call is not
- * observable in either configuration; it is here so the invariant "a fiber runs
- * with its own stack bounds installed" holds in this file rather than resting on
- * an upstream ifdef, and so entering a fiber looks the same on all four paths. */
+ * The engine carries these two across a switch itself, but only under
+ * ZEND_CHECK_STACK_LIMIT — a configure-time guard, on fields that
+ * zend_globals.h declares unconditionally. Keeping the install makes the
+ * invariant local instead of upstream's to withdraw. */
 static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *fiber) {
     if (fiber->saved_stack_base) {
         EG(stack_base) = fiber->saved_stack_base;
@@ -521,17 +517,14 @@ void oxphp_fiber_init_request_state(void) {
  * bottom of its loop waiting for the next request.
  *
  * Restores NOTHING from fiber->php_state, and holding that is why this is a
- * separate operation from resume. The snapshot is written on suspend only, while
- * a fiber reaches the free list by completing, so a recycled fiber's copy
- * describes an earlier request: installing it put a zeroed zend_llist in place of
- * SG(sapi_headers).headers and IS_UNDEF in place of the superglobals, which is a
- * SIGSEGV in the request's second header() or its first $_REQUEST access, plus a
- * status of 0 where http_response_code() owes 200. Everything the new
- * request needs is already installed by the caller's per-request prep
+ * separate operation from resume: the snapshot describes a request that
+ * SUSPENDED, while a fiber reaches the free list by COMPLETING one, so a
+ * recycled fiber's copy belongs to nothing that is still running. Everything the
+ * new request needs is already installed by the caller's per-request prep
  * (oxphp_soft_reset on the fast path, oxphp_bridge_prepare_request +
- * oxphp_fiber_init_request_state on the event-loop path), and the coroutine
- * builds a fresh VM stack on every iteration, and zend_fiber_switch_context
- * carries the Zend side for both kinds of fiber.
+ * oxphp_fiber_init_request_state on the event-loop path); the coroutine builds a
+ * fresh VM stack on every iteration, and zend_fiber_switch_context carries the
+ * Zend side for both kinds of fiber.
  *
  * Resuming a genuinely suspended fiber is oxphp_scheduler_resume_fiber(). */
 void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
@@ -592,6 +585,18 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
 }
 
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
+    /* Precondition: this fiber's coroutine is parked at the bottom of its
+     * request loop. Finalize both sends the response and recycles the fiber, and
+     * oxphp_scheduler_start_fiber hands the next request straight to that park
+     * point installing nothing, so finalizing one that is suspended mid-request
+     * would drop a new request onto a fiber whose own is still live. Every
+     * caller reaches here under `if (fiber->completed)`, so this only pins a
+     * guarantee the callers already give — and only in a debug build, since
+     * ZEND_ASSERT is ZEND_ASSUME once ZEND_DEBUG is off. The FFI-driven recycle
+     * in oxphp_async_sched_release has no such caller discipline and carries a
+     * real runtime guard instead. */
+    ZEND_ASSERT(fiber->completed);
+
     /* Track per-fiber handler failure in scheduler-level counter. A drain
      * kill is an administrative unwind, not a handler defect: it must neither
      * trip the consecutive-error breaker (3+ drain kills would error-exit the
@@ -1770,6 +1775,26 @@ void oxphp_async_sched_release(int64_t fiber_id) {
         fiber = fiber->next;
     }
     if (!fiber) {
+        return;
+    }
+
+    /* Precondition, checked rather than assumed: the coroutine must be parked at
+     * the bottom of its loop. oxphp_task_start_fiber hands the next task to a
+     * recycled fiber at that park point, so releasing one that is still
+     * suspended would later resume it into a foreign closure — and free the
+     * payload its own task is still running on. It holds today because the
+     * driver releases only a fiber that poll_completed has handed back
+     * (src/executor/async_pool.rs), but that is discipline on the far side of an
+     * FFI boundary, invisible to this compiler and to anyone reading this file.
+     * A ZEND_ASSERT would be no check at all in a release build (ZEND_ASSERT is
+     * ZEND_ASSUME once ZEND_DEBUG is off), so refuse the recycle instead: leaking
+     * one fiber's C stack is a bounded loss, resuming a live task into someone
+     * else's closure is not. */
+    if (!fiber->completed) {
+        fprintf(stderr,
+                "oxphp_async_sched_release: task fiber %llu is still suspended "
+                "— not recycling (its state is left intact)\n",
+                (unsigned long long)fiber->fiber_id);
         return;
     }
 
