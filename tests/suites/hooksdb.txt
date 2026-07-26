@@ -5,3 +5,37 @@ hooksdb/test_db_clients_reachable
 hooksdb/test_mysql_task_multiplex
 hooksdb/test_mysql_request_multiplex
 hooksdb/test_redis_task_multiplex
+
+# One connection shared by concurrent fibers — the shape every worker-mode
+# application has, since its client is built when the worker boots. Each of these
+# fires a second request or task that holds a query open on the shared connection
+# and then uses that same connection from the other fiber, so what they measure is
+# whether the two exchanges stay apart.
+hooksdb/test_shared_mysql_no_crosstalk
+hooksdb/test_shared_mysqli_no_crosstalk
+# Not a query but a reconnect: mysqli::connect() on a live object replaces that
+# object's socket, which is the same defect from the other direction.
+hooksdb/test_shared_mysqli_connect_no_crosstalk
+hooksdb/test_shared_redis_no_crosstalk
+hooksdb/test_shared_redis_task_multiplex
+
+# The same case reached the ways an application actually reaches it: through the
+# constructor that returns the driver's own subclass, through two objects sharing
+# one pooled connection, and as several complete short exchanges landing on top of
+# each other rather than one long one probed late.
+hooksdb/test_shared_pdo_connect_no_crosstalk
+hooksdb/test_shared_persistent_no_crosstalk
+hooksdb/test_shared_db_concurrent_queries
+
+# A premise the phpredis claim key rests on rather than a scenario: one live Redis
+# object is one connection, including through pconnect(), which reads like PDO's
+# persistent connections and does not behave like them.
+hooksdb/test_shared_pconnect_two_objects
+
+# Both sides of the one list whose mistakes are unsafe: a call left unclaimed that
+# should have been claimed sends a command into someone else's exchange, while the
+# reverse only costs a wait.
+hooksdb/test_shared_pdo_attribute_filter
+
+# The other half of the guarantee: what a fiber gets when the wait does not win.
+hooksdb/test_shared_redis_wait_gives_up

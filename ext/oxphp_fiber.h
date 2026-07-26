@@ -324,6 +324,30 @@ bool oxphp_io_park(oxphp_request_fiber *fiber, struct pollfd *fds,
  * suspension data is cleared. */
 void oxphp_io_unpark(oxphp_request_fiber *fiber);
 
+/* ─── Which fiber a connection belongs to ─────────────────
+ * Keeps one fiber's exchange on a connection out of another's while the first is
+ * parked mid-exchange — see the block comment on the implementation for why a
+ * shared connection needs this and what it costs. The key is whatever names the
+ * connection at the level being guarded: a `php_stream *` for the socket ops, and
+ * for the database entry points — which have to be guarded a level up, because
+ * their client refuses a reentrant call before any I/O — the driver's own
+ * connection handle where it can be reached, the client object otherwise. Used by
+ * the runtime hooks only; inert when nothing ever claims anything, which is every
+ * mode with the hooks off. */
+
+/* The fiber currently holding `key`, or NULL when no one does. */
+oxphp_request_fiber *oxphp_claim_owner(void *key);
+
+/* Record `owner` as holding `key`. The caller must have established that it is
+ * unclaimed or already its own — this does not arbitrate. Returns false only when
+ * the table could not grow, which leaves the connection unprotected and is the
+ * caller's to report. */
+bool oxphp_claim_acquire(void *key, oxphp_request_fiber *owner);
+
+/* Forget `key` entirely, whoever held it. Called when a stream is closed, so that
+ * an address handed out again starts unclaimed. */
+void oxphp_claim_forget(void *key);
+
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);
 

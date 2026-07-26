@@ -2,6 +2,14 @@
 static $requestCount = 0;
 static $previousHeaders = [];
 
+// A per-worker store for tests that need one object shared by every request the
+// worker serves. That is the shape a real application has: WordPress, Laravel
+// and Symfony build their database and cache clients once when the worker boots
+// and hand the same ones to every request, so a client's connection is process
+// state, not request state. Included test files reach it because PHP `include`
+// runs in the includer's scope.
+static $sharedState = [];
+
 // Captured during the worker boot phase (before oxphp_worker enters its
 // receive loop). With the request_time consistency fix these values must
 // both be exactly 0.0 because no request is being processed yet. Passed
@@ -12,7 +20,7 @@ $bootInfo = [
     'request_start_time' => oxphp_http_request()->startTime(true),
 ];
 
-oxphp_worker(function () use (&$requestCount, &$previousHeaders, $bootInfo) {
+oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo) {
     $requestCount++;
 
     // If the request targets a test PHP file, include it directly inside
