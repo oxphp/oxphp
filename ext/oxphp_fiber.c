@@ -40,9 +40,29 @@ uint64_t oxphp_fiber_current_id(void) {
     return oxphp_current_fiber ? oxphp_current_fiber->fiber_id : 0;
 }
 
+/* Exported by the engine (ZEND_API in Zend/zend_fibers.c) but left out of
+ * zend_fibers.h. Declared here rather than reimplemented: delivering a throw
+ * into a suspended fiber is the engine's own force-unwind path, and
+ * hand-rolling it would mean writing the fiber's stack_bottom by hand. */
+ZEND_API void zend_fiber_resume_exception(zend_fiber *fiber, zval *exception, zval *return_value);
+
 /* ─── Userland fiber object plumbing ───────────────────── */
 
 __thread oxphp_request_fiber *oxphp_fiber_starting = NULL;
+__thread oxphp_request_fiber *oxphp_fiber_resume_token = NULL;
+
+/* FiberError is what the engine itself throws for every illegal fiber switch, so
+ * it is what the two refusals below throw too — but its class entry is file-
+ * static in zend_fibers.c, so it has to be resolved by name. Both callers are
+ * cold (a userland program doing something the scheduler cannot honour), which
+ * is why this looks the class up per refusal instead of caching it. A NULL here
+ * is harmless: zend_throw_error() falls back to Error. */
+static zend_class_entry *oxphp_fiber_error_ce(void) {
+    zend_string *name = zend_string_init("FiberError", sizeof("FiberError") - 1, 0);
+    zend_class_entry *ce = zend_lookup_class(name);
+    zend_string_release(name);
+    return ce;
+}
 
 /* The callable every request/task fiber runs. Deliberately never registered in
  * CG(function_table): zend_call_function skips name resolution when the cache
@@ -113,6 +133,49 @@ static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *f
  * fiber goes through the first and every park goes through the second, so the
  * pair is the single seam where the switching mechanism can be changed. */
 
+/* Refuse a suspension the scheduler did not ask for.
+ *
+ * Running a request as a real \Fiber makes \Fiber::suspend() reachable from
+ * inside it. The engine honours it — the request's own fiber suspends and
+ * control lands back here — but it records no reason for the suspension, so
+ * nothing in this scheduler will ever resume it and the request would park until
+ * its timeout. An event loop handed the request's fiber by \Fiber::getCurrent()
+ * suspends it the same way.
+ *
+ * `!completed` with no reason recorded is exactly that case: all four of our own
+ * suspend points set a reason before parking, and the loop marks itself
+ * completed before its own park. Resume the fiber once with a FiberError so the
+ * attempt unwinds where it was made, and the request carries on. Repeated,
+ * because a program that catches the error is free to try again. */
+static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
+    while (!fiber->completed
+           && fiber->suspend_reason == OXPHP_SUSPEND_NONE
+           && fiber->zf->context.status == ZEND_FIBER_STATUS_SUSPENDED) {
+        zend_throw_error(oxphp_fiber_error_ce(),
+                         "Cannot suspend an OxPHP request fiber: the server drives it, "
+                         "not the caller");
+
+        /* Take the throw off the scheduler and hand it to the fiber instead:
+         * delivering it while it is still pending would chain the exception onto
+         * itself as its own previous. */
+        zval err;
+        ZVAL_OBJ_COPY(&err, EG(exception));
+        zend_clear_exception();
+
+        zval retval;
+        ZVAL_UNDEF(&retval);
+        oxphp_fiber_resume_token = fiber;
+        zend_fiber_resume_exception(fiber->zf, &err, &retval);
+        oxphp_fiber_resume_token = NULL;
+        zval_ptr_dtor(&retval);
+        zval_ptr_dtor(&err);
+
+        if (UNEXPECTED(EG(exception))) {
+            zend_clear_exception();
+        }
+    }
+}
+
 void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
     if (fiber->zf == NULL) {
         /* Bare-context fiber (task mode). Switches straight to the context;
@@ -124,7 +187,9 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
             ZVAL_NULL(&transfer.value);
         }
 
+        oxphp_fiber_resume_token = fiber;
         zend_fiber_switch_context(&transfer);
+        oxphp_fiber_resume_token = NULL;
         return;
     }
 
@@ -136,14 +201,19 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
          * up to its first park. The handoff is read on the handler's first
          * line. */
         oxphp_fiber_starting = fiber;
+        oxphp_fiber_resume_token = fiber;
         if (zend_fiber_start(fiber->zf, &retval) == FAILURE) {
             oxphp_fiber_starting = NULL;
+            oxphp_fiber_resume_token = NULL;
             fiber->completed = true;
             fiber->handler_failed = true;
             return;
         }
+        oxphp_fiber_resume_token = NULL;
     } else {
+        oxphp_fiber_resume_token = fiber;
         zend_fiber_resume(fiber->zf, value, &retval);
+        oxphp_fiber_resume_token = NULL;
     }
 
     zval_ptr_dtor(&retval);
@@ -155,6 +225,8 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
     if (UNEXPECTED(EG(exception))) {
         zend_clear_exception();
     }
+
+    oxphp_fiber_refuse_foreign_suspend(fiber);
 }
 
 int oxphp_fiber_park(oxphp_request_fiber *fiber) {
@@ -167,26 +239,51 @@ int oxphp_fiber_park(oxphp_request_fiber *fiber) {
         return 0;
     }
 
-    /* A destroyed fiber must not park again — zend_fiber_suspend asserts on it,
-     * and the caller's contract is to unwind instead. */
-    if (UNEXPECTED(fiber->zf->flags & ZEND_FIBER_FLAG_DESTROYED)) {
-        return -1;
+    for (;;) {
+        /* A destroyed fiber must not park again — zend_fiber_suspend asserts on
+         * it, and the caller's contract is to unwind instead. */
+        if (UNEXPECTED(fiber->zf->flags & ZEND_FIBER_FLAG_DESTROYED)) {
+            return -1;
+        }
+
+        zval retval;
+        ZVAL_UNDEF(&retval);
+        zend_fiber_suspend(fiber->zf, NULL, &retval);
+        zval_ptr_dtor(&retval);
+
+        /* Destruction is the one wake that does not come from the scheduler and
+         * still has to be obeyed: it flags the fiber, then resumes it with a
+         * graceful exit pending. Report it to the caller, which returns to PHP
+         * at once and lets the VM unwind. */
+        if (UNEXPECTED(fiber->zf->flags & ZEND_FIBER_FLAG_DESTROYED)) {
+            return -1;
+        }
+
+        if (EXPECTED(oxphp_fiber_resume_token == fiber)) {
+            oxphp_fiber_resume_token = NULL;
+
+            /* A resume that carries an exception leaves it pending here. */
+            if (UNEXPECTED(EG(exception))) {
+                return -1;
+            }
+
+            return 0;
+        }
+
+        /* Woken by userland: something got hold of this request's own \Fiber
+         * object and resumed or threw into it. The request's state was never
+         * re-installed for that wake and nothing in the scheduler is waiting on
+         * it, so obeying it would run the rest of this request on whatever state
+         * the resumer happened to have — and would leave the scheduler resuming
+         * a fiber that has already moved on. Refuse: drop whatever was
+         * delivered, hand the resumer the error, and park again for the
+         * scheduler that is actually driving this request. */
+        if (EG(exception)) {
+            zend_clear_exception();
+        }
+        zend_throw_error(oxphp_fiber_error_ce(),
+                         "Cannot resume an OxPHP request fiber from userland");
     }
-
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    zend_fiber_suspend(fiber->zf, NULL, &retval);
-    zval_ptr_dtor(&retval);
-
-    /* zend_fiber_suspend delivers a resume that carries an exception by leaving
-     * it pending here (graceful exit from destruction, or a throw from a
-     * userland resumer). Report it to the caller, which returns to PHP at once
-     * and lets the VM unwind. */
-    if (UNEXPECTED(EG(exception))) {
-        return -1;
-    }
-
-    return 0;
 }
 
 /* ─── Scheduler Init / Destroy ─────────────────────────── */
