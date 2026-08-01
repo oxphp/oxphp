@@ -23,6 +23,7 @@
 
 #include "SAPI.h"
 #include "Zend/zend_exceptions.h"
+#include "Zend/zend_closures.h"   /* ZEND_CLOSURE_OBJECT: a frame a fatal abandons can hold one */
 #include "Zend/zend_generators.h" /* zend_generator: a frame a fatal abandons can be one */
 #include "main/php_main.h"
 #include "main/php_output.h"
@@ -152,6 +153,29 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->execute_data = EG(current_execute_data);
 }
 
+/* Give back the one reference a frame holds on whatever it is running: the
+ * object a method was called on, or the closure a call went through. Written as
+ * the engine writes it, an either/or rather than two tests, because a frame is
+ * only ever handed one of the two — `$obj->m()` takes a reference to the object,
+ * `$fn()` takes one to the closure, and each is given back by the frame that
+ * took it (`zend_vm_def.h`, zend_leave_helper).
+ *
+ * The closure half is what keeps a closure alive past the request that declared
+ * it: the reference exists so that a closure can destroy itself mid-call, and a
+ * frame a fatal abandons never reaches the point where it is given back. A
+ * closure declared inside a request is a new object every time, so this is the
+ * closure and everything it closed over, per fatal, for the life of the worker.
+ *
+ * Callers must free anything read through `ex->func` first: releasing a closure
+ * can free the op_array that pointer refers to. */
+static inline void oxphp_release_frame_owner(zend_execute_data *ex, uint32_t info) {
+    if (info & ZEND_CALL_RELEASE_THIS) {
+        OBJ_RELEASE(Z_OBJ(ex->This));
+    } else if (info & ZEND_CALL_CLOSURE) {
+        OBJ_RELEASE(ZEND_CLOSURE_OBJECT(ex->func));
+    }
+}
+
 /* Release what the frames the bailout abandoned were holding. Runs before the
  * rewind below, which frees the pages those frames stand on.
  *
@@ -172,6 +196,8 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
  *   - the arguments of the internal calls it was inside, and the objects those
  *     were called on, which a PHP-level frame does not account for: the fatal
  *     is usually raised from inside one of them.
+ *   - the closures any of those frames were running, which are a fresh object
+ *     per request whenever a script declares one — see the helper above.
  *
  * A generator that was running is in this chain too, and is the one thing in it
  * that must be handled rather than released — see below. */
@@ -227,6 +253,11 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
                 if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
                     zend_free_extra_named_params(ex->extra_named_params);
                 }
+                /* This, but deliberately not the closure a generator function
+                 * may have come from — that one the object still answers for,
+                 * through generator->func in zend_generator_free_storage, which
+                 * runs whether or not the frame is still attached. So not
+                 * oxphp_release_frame_owner here, which would release both. */
                 if (info & ZEND_CALL_RELEASE_THIS) {
                     OBJ_RELEASE(Z_OBJ(ex->This));
                 }
@@ -266,12 +297,12 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
             if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
                 zend_free_extra_named_params(ex->extra_named_params);
             }
-            if (info & ZEND_CALL_RELEASE_THIS) {
-                OBJ_RELEASE(Z_OBJ(ex->This));
-            }
             /* Arguments past the ones the function declares are not variables
-             * and are not freed with them; func_get_args() is what reads them. */
+             * and are not freed with them; func_get_args() is what reads them.
+             * Before the closure below, because releasing a closure can free the
+             * op_array these are read through — the order the engine states. */
             zend_vm_stack_free_extra_args_ex(info, ex);
+            oxphp_release_frame_owner(ex, info);
         } else {
             /* An internal function the fatal was raised inside — trigger_error
              * itself, or any of the ones that call back into PHP. It has no
@@ -285,9 +316,7 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
             if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
                 zend_free_extra_named_params(ex->extra_named_params);
             }
-            if (info & ZEND_CALL_RELEASE_THIS) {
-                OBJ_RELEASE(Z_OBJ(ex->This));
-            }
+            oxphp_release_frame_owner(ex, info);
         }
 
         ex = prev;

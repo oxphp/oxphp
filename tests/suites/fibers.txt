@@ -9,3 +9,4 @@ fibers/test_async_task_is_a_fiber
 fibers/test_switch_blocked_falls_back
 fibers/test_suspend_retry_is_bounded
 fibers/test_generator_fatal_releases_once
+fibers/test_closure_fatal_releases_it
