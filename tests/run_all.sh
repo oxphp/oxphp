@@ -167,11 +167,11 @@ fi
 
 # ── Standalone worker-lifetime checks ────────────────────────
 # Neither of these can be asserted from inside a request. A request cannot
-# observe its own teardown, and the residue a fatal leaves behind only shows up
-# as the whole worker's allocator across hundreds of requests. Both drive the
-# fibers profile themselves, from outside, after its suite has finished.
+# observe its own teardown, and what a request leaves behind only shows up as
+# the whole worker's allocator across hundreds of them. Both drive the fibers
+# profile themselves, from outside, after its suite has finished.
 if [[ " ${profiles[*]} " == *" fibers "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
-    for check in verify_teardown_unwind verify_fatal_does_not_grow_worker; do
+    for check in verify_teardown_unwind verify_worker_does_not_grow; do
         log_info "━━━ Standalone: ${check#verify_} ━━━"
         emitted_before=$(wc -l < "$JSONL_FILE")
         # Same reasoning as the admission checks above: a failing check turns the

@@ -978,6 +978,8 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     zend_llist_init(&SG(sapi_headers).headers,
                     sizeof(sapi_header_struct),
                     (void(*)(void*))sapi_free_header, 0);
+    fiber->php_state.sapi_mimetype = SG(sapi_headers).mimetype;
+    SG(sapi_headers).mimetype = NULL;
     fiber->php_state.http_response_code = SG(sapi_headers).http_response_code;
     fiber->php_state.headers_sent = SG(headers_sent);
     fiber->php_state.connection_status = PG(connection_status);
@@ -1048,6 +1050,14 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     zend_llist_init(&fiber->php_state.sapi_headers, /* reinit saved slot */
                     sizeof(sapi_header_struct),
                     (void(*)(void*))sapi_free_header, 0);
+    /* Whatever stands here belongs to a request that has either finished or
+     * saved its own — the same assumption the header list above is restored
+     * under. */
+    if (SG(sapi_headers).mimetype) {
+        efree(SG(sapi_headers).mimetype);
+    }
+    SG(sapi_headers).mimetype = fiber->php_state.sapi_mimetype;
+    fiber->php_state.sapi_mimetype = NULL;
     SG(sapi_headers).http_response_code = fiber->php_state.http_response_code;
     SG(headers_sent) = fiber->php_state.headers_sent;
     PG(connection_status) = fiber->php_state.connection_status;
@@ -1148,6 +1158,16 @@ void oxphp_fiber_init_request_state(void) {
 
     /* Clear SAPI headers for this new request */
     zend_llist_clean(&SG(sapi_headers).headers);
+    /* sapi_send_headers() allocates this and hands it over to the request; only
+     * sapi_deactivate_destroy() gives it back, and that runs once per worker
+     * rather than once per request. Released here for the same reason the list
+     * above is: what the engine hands a request is this reset's to return. A
+     * request that sends no Content-Type of its own gets a fresh one every
+     * time, so leaving it costs the worker one string per such request. */
+    if (SG(sapi_headers).mimetype) {
+        efree(SG(sapi_headers).mimetype);
+        SG(sapi_headers).mimetype = NULL;
+    }
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
     SG(headers_sent) = 0;

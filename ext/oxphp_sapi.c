@@ -3330,6 +3330,14 @@ static void oxphp_soft_reset(void) {
 
     /* 2. SAPI headers: clear list, reset status to 200 */
     zend_llist_clean(&SG(sapi_headers).headers);
+    /* sapi_send_headers() allocates this and hands it over to the request; only
+     * sapi_deactivate_destroy() gives it back, and that runs once per worker
+     * rather than once per request. Released here for the same reason the list
+     * above is: what the engine hands a request is this reset's to return. */
+    if (SG(sapi_headers).mimetype) {
+        efree(SG(sapi_headers).mimetype);
+        SG(sapi_headers).mimetype = NULL;
+    }
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
     SG(headers_sent) = 0;
