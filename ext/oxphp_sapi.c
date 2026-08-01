@@ -1278,14 +1278,8 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     self->suspend_reason = OXPHP_SUSPEND_SLEEP;
     self->suspend_data.timer_id = timer_id;
 
-    zend_fiber_transfer transfer = {
-        .context = self->scheduler,
-        .flags = 0
-    };
-    ZVAL_NULL(&transfer.value);
-
     oxphp_current_fiber = NULL;
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_park(self);
     /* --- RESUMED on timer expiry, OR force-resumed by the scheduler when the
      * task was cancelled (awaiter gave up) or the server is draining. */
     if (self->drain_kill) {
@@ -1356,14 +1350,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     self->suspend_data.io.expired = false;
     self->suspend_data.io.deadline_ns = deadline_ns;
 
-    zend_fiber_transfer transfer = {
-        .context = self->scheduler,
-        .flags = 0
-    };
-    ZVAL_NULL(&transfer.value);
-
     oxphp_current_fiber = NULL;
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_park(self);
     /* --- RESUMED once one descriptor is ready or the deadline passed, OR
      * force-resumed by the scheduler when the task was cancelled (awaiter gave
      * up) or the server is draining. */
@@ -4333,14 +4321,8 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
         self->await_deadline_ns = 0;
     }
 
-    zend_fiber_transfer transfer = {
-        .context = self->scheduler,
-        .flags = 0
-    };
-    ZVAL_NULL(&transfer.value);
-
     oxphp_current_fiber = NULL;
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_park(self);
     /* --- RESUMED by scheduler when promise result is ready, when the task was
      * cancelled (awaiter gave up), or when the per-call deadline elapsed. Disarm
      * the deadline first; then unwind on cancel/timeout by signalling the caller
@@ -4380,14 +4362,8 @@ int oxphp_fiber_suspend_for_yield(void) {
     self->suspend_reason = OXPHP_SUSPEND_SLEEP;
     self->suspend_data.timer_id = timer_id;
 
-    zend_fiber_transfer transfer = {
-        .context = self->scheduler,
-        .flags = 0
-    };
-    ZVAL_NULL(&transfer.value);
-
     oxphp_current_fiber = NULL;
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_park(self);
     /* --- RESUMED on the next scheduler tick once the timer expires --- */
     if (self->drain_kill) {
         oxphp_fiber_drain_bail();
