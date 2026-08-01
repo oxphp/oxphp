@@ -1257,10 +1257,7 @@ static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
  * predictable one. */
 static bool oxphp_fiber_owns_current_context(oxphp_request_fiber *self)
 {
-    if (self->zf) {
-        return EG(current_fiber_context) == &self->zf->context;
-    }
-    return EG(current_fiber_context) == &self->context;
+    return EG(current_fiber_context) == &self->zf->context;
 }
 
 /* Internal: register timer and suspend current fiber.

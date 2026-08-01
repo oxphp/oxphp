@@ -117,22 +117,14 @@ typedef struct {
 /* ─── Request Fiber ────────────────────────────────────── */
 
 typedef struct _oxphp_request_fiber {
-    /* Low-level fiber context (VM state saved automatically on switch).
-     * Used by task fibers, which still run as bare contexts. Request fibers
-     * leave it zeroed and run inside `zf` below instead. */
-    zend_fiber_context context;
-
-    /* The userland Fiber object a REQUEST fiber runs as; NULL for a task fiber.
-     * Owned: one reference from creation until oxphp_scheduler_destroy. Its
-     * embedded zend_fiber_context stands in for the bare `context` above, which
-     * is what makes \Fiber::getCurrent() inside a request return an object
-     * unique to that request — and that in turn is what stops libraries keyed on
+    /* The userland Fiber object this fiber runs as — one per HTTP request in
+     * worker mode, one per oxphp_async() task. Owned: one reference from
+     * creation until oxphp_scheduler_destroy. Running on a real Fiber object is
+     * what makes \Fiber::getCurrent() inside a request or a task return an
+     * object unique to it — and that in turn is what stops libraries keyed on
      * the current fiber (event loops, context storages, fiber-locals) from
-     * filing every concurrent request under one key. */
+     * filing every concurrent request or task under one key. */
     zend_fiber *zf;
-
-    /* Pointer back to scheduler context for suspend */
-    zend_fiber_context *scheduler;
 
     /* Unique ID for this fiber (used as key for Rust TLS slot management) */
     uint64_t fiber_id;
