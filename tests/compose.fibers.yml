@@ -1,0 +1,31 @@
+# Fiber semantics in worker mode: one PHP worker so every request lands on the
+# same thread, runtime hooks on so a request can park on a native sleep.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.fibers.yml up
+services:
+  oxphp-fibers:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker

@@ -1,0 +1,5 @@
+# profile: fibers
+# description: Fiber-visible semantics of a worker-mode request — identity, nesting, suspend refusal
+
+fibers/test_fiber_identity
+fibers/test_nested_userland_fiber
