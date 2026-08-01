@@ -1268,6 +1268,15 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
 {
     if (oxphp_current_fiber == NULL) return 0;
     if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
+    /* The engine blocks fiber switching where leaving the current frame is not
+     * safe — around a declare(ticks) handler, and around pcntl's signal
+     * dispatch. Take the blocking path there, for the same reason the userland
+     * Fiber methods refuse outright: a switch would return into a frame the
+     * engine is in the middle of running on someone else's behalf. Returning 0
+     * rather than throwing keeps the program's meaning, since every suspend
+     * point already has a correct non-suspending fallback. The other three
+     * suspend points carry the same guard. */
+    if (zend_fiber_switch_blocked()) return 0;
 
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
@@ -1326,6 +1335,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
 {
     if (oxphp_current_fiber == NULL) return 0;
     if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
+    /* Switching blocked — see oxphp_fiber_sleep_us. */
+    if (zend_fiber_switch_blocked()) return 0;
     if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -4332,6 +4343,9 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
         || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
         return 1; /* Not on a suspendable fiber — caller does a blocking await */
     }
+    /* Switching blocked — see oxphp_fiber_sleep_us. Returns this function's own
+     * "not suspendable" code, not 0, which here means "done via fiber". */
+    if (zend_fiber_switch_blocked()) return 1;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
@@ -4391,6 +4405,8 @@ int oxphp_fiber_suspend_for_yield(void) {
         || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
         return 0; /* not on a suspendable fiber — caller falls back to blocking */
     }
+    /* Switching blocked — see oxphp_fiber_sleep_us. */
+    if (zend_fiber_switch_blocked()) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
