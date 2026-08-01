@@ -10,12 +10,38 @@
 # Verified from outside the container on purpose: the behaviour under test is
 # what happens to a request that is still parked when its worker is torn down,
 # and a request cannot assert on its own teardown.
+#
+# Usage: verify_teardown_unwind.sh [--jsonl]
+#   --jsonl  emit one result object per check on stdout instead of a human
+#            report, for run_all.sh to fold into its report
 set -euo pipefail
+
+JSONL=""
+for arg in "$@"; do
+	case "$arg" in
+		--jsonl) JSONL=1 ;;
+		*) echo "Unknown argument: $arg" >&2; exit 1 ;;
+	esac
+done
 
 cd "$(dirname "$0")/.."
 COMPOSE="docker compose -f compose.yml -f compose.fibers.yml"
 
-$COMPOSE up -d --wait
+# One JSONL object per check, matching what run_profile.sh emits so the
+# standalone results land in the same report as the PHP suites. In --jsonl mode
+# stdout carries only these objects, so everything else goes to stderr.
+emit() {
+	python3 -c 'import json,sys; print(json.dumps({"test": sys.argv[1], "group": "fibers", "pass": sys.argv[2] == "1", "assertions": [], "error": sys.argv[3], "meta": {}, "profile": "fibers"}, ensure_ascii=False))' "$1" "$2" "$3"
+}
+ok() {
+	if [ -n "$JSONL" ]; then emit "$1" 1 ""; else printf '  \033[32mPASS\033[0m %s\n' "$1"; fi
+}
+bad() {
+	if [ -n "$JSONL" ]; then emit "$1" 0 "$2"; else printf '  \033[31mFAIL\033[0m %s: %s\n' "$1" "$2"; fi
+	fail=1
+}
+
+$COMPOSE up -d --wait >&2
 port="$($COMPOSE port oxphp-fibers 80 | head -1 | cut -d: -f2)"
 base="http://127.0.0.1:${port}"
 
@@ -25,22 +51,30 @@ fail=0
 # The request schedules its own worker's exit and then parks, so the scheduler
 # is torn down with this fiber suspended. It must not hang, and the worker the
 # pool respawns must serve normally afterwards.
-curl -s --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1" > /tmp/oxphp_park_exit.out
+curl -s --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1" > /dev/null
 sleep 2
 
 state="$($COMPOSE ps -a --format '{{.State}}' oxphp-fibers)"
-[ "$state" = "running" ] || { echo "FAIL: container is $state after a worker exited under a parked request"; fail=1; }
+if [ "$state" = "running" ]; then
+	ok "worker exit under a parked request leaves the server up"
+else
+	bad "worker exit under a parked request leaves the server up" "container is $state"
+fi
 
 after="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "${base}/tests/fibers/test_fiber_identity.php")"
-[ "$after" = "200" ] || { echo "FAIL: respawned worker answered $after (want 200)"; fail=1; }
+if [ "$after" = "200" ]; then
+	ok "the respawned worker serves normally"
+else
+	bad "the respawned worker serves normally" "answered $after (want 200)"
+fi
 
 # ── 2. Process teardown with a request parked mid-request ─────────────────
-curl -s --max-time 30 "${base}/tests/fibers/fixture_long_park.php" > /tmp/oxphp_park_stop.out &
+curl -s --max-time 30 "${base}/tests/fibers/fixture_long_park.php" > /dev/null &
 curl_pid=$!
 sleep 1
 
 start=$(date +%s)
-$COMPOSE stop -t 25 oxphp-fibers
+$COMPOSE stop -t 25 oxphp-fibers >&2
 elapsed=$(( $(date +%s) - start ))
 
 exit_code="$($COMPOSE ps -a --format '{{.ExitCode}}' oxphp-fibers)"
@@ -49,12 +83,29 @@ wait "$curl_pid" || true
 log="$($COMPOSE logs oxphp-fibers 2>&1)"
 $COMPOSE down -v > /dev/null 2>&1
 
-[ "$exit_code" = "0" ] || { echo "FAIL: container exit code $exit_code (want 0)"; fail=1; }
-[ "$elapsed" -lt 25 ] || { echo "FAIL: took ${elapsed}s, was killed at the stop timeout"; fail=1; }
-echo "$log" | grep -qiE "segmentation fault|SIGSEGV|SIGABRT|panicked at" \
-  && { echo "FAIL: crash in log"; fail=1; }
-echo "$log" | grep -qiE "leak|still referenced" \
-  && { echo "FAIL: leak report in log"; fail=1; }
+if [ "$exit_code" = "0" ]; then
+	ok "the process stops on its own with a request parked"
+else
+	bad "the process stops on its own with a request parked" "exit code $exit_code (want 0)"
+fi
 
-[ "$fail" = "0" ] && echo "PASS: teardown unwound a parked request, worker exit and process stop, in ${elapsed}s"
+if [ "$elapsed" -lt 25 ]; then
+	ok "the parked request does not hold the shutdown to the stop timeout"
+else
+	bad "the parked request does not hold the shutdown to the stop timeout" "took ${elapsed}s, was killed at the timeout"
+fi
+
+if echo "$log" | grep -qiE "segmentation fault|SIGSEGV|SIGABRT|panicked at"; then
+	bad "teardown leaves no crash in the log" "$(echo "$log" | grep -iE "segmentation fault|SIGSEGV|SIGABRT|panicked at" | head -1)"
+else
+	ok "teardown leaves no crash in the log"
+fi
+
+if echo "$log" | grep -qiE "leak|still referenced"; then
+	bad "teardown leaves no leak report in the log" "$(echo "$log" | grep -iE "leak|still referenced" | head -1)"
+else
+	ok "teardown leaves no leak report in the log"
+fi
+
+[ -n "$JSONL" ] || [ "$fail" != "0" ] || echo "PASS: teardown unwound a parked request, worker exit and process stop, in ${elapsed}s"
 exit "$fail"

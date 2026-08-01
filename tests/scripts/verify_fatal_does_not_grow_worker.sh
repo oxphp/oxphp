@@ -3,41 +3,112 @@
 #
 # A fatal is a bailout: a longjmp out of the frame that raised it. The request
 # loop catches it and serves the next request on the same fiber, so whatever the
-# interrupted call left on that fiber's VM stack stays there unless the loop
-# rewinds it — and a fiber lives as long as its worker. Left alone, the stack
-# runs past its page and the worker takes another one, for every few hundred
-# fatals, forever.
+# interrupted call left behind stays there unless the loop releases it — and a
+# fiber lives as long as its worker. Two things are left behind, and this checks
+# both:
+#
+#   1. the VM stack the interrupted frames stood on. Left alone it runs past its
+#      page and the worker takes another one every few hundred fatals, which
+#      shows up as the allocator's total size growing.
+#   2. what those frames were holding: the copy of the script's op_array the
+#      interrupted include ran on, the symbol table behind it, and the variables
+#      of every function the fatal was inside. All of it is released when a
+#      request returns and a fatal never returns, so each one keeps its share
+#      for the life of the worker. This does not grow the allocator's total for
+#      a long time — it fills space already claimed — so it is measured against
+#      a control of the same requests without the fatal.
 #
 # Checked from outside the request harness on purpose: the signal is the whole
 # worker's allocator across many requests, which no single request can observe.
 #
-# Usage: verify_fatal_does_not_grow_worker.sh [count]
+# Usage: verify_fatal_does_not_grow_worker.sh [count] [--jsonl]
+#   count    how many requests per phase (default 1500)
+#   --jsonl  emit one result object per check on stdout instead of a human
+#            report, for run_all.sh to fold into its report
 set -euo pipefail
 
-N="${1:-1500}"
+N=1500
+JSONL=""
+for arg in "$@"; do
+	case "$arg" in
+		--jsonl) JSONL=1 ;;
+		*) N="$arg" ;;
+	esac
+done
+
+# What a request is allowed to cost a worker on top of its control. The control
+# is the same request without the fatal, so this covers only the difference
+# between the two paths; a single leaked op_array copy is an order of magnitude
+# more than this for even a small script.
+SLACK_PER_REQUEST=64
+
 cd "$(dirname "$0")/.."
 COMPOSE="docker compose -f compose.yml -f compose.fibers.yml"
 
-$COMPOSE up -d --wait
+# One JSONL object per check, matching what run_profile.sh emits so the
+# standalone results land in the same report as the PHP suites. In --jsonl mode
+# stdout carries only these objects, so everything else goes to stderr.
+emit() {
+	python3 -c 'import json,sys; print(json.dumps({"test": sys.argv[1], "group": "fibers", "pass": sys.argv[2] == "1", "assertions": [], "error": sys.argv[3], "meta": {}, "profile": "fibers"}, ensure_ascii=False))' "$1" "$2" "$3"
+}
+ok() {
+	if [ -n "$JSONL" ]; then emit "$1" 1 ""; else printf '  \033[32mPASS\033[0m %s\n' "$1"; fi
+}
+bad() {
+	if [ -n "$JSONL" ]; then emit "$1" 0 "$2"; else printf '  \033[31mFAIL\033[0m %s: %s\n' "$1" "$2"; fi
+	fail=1
+}
+say() { [ -n "$JSONL" ] || printf '%s\n' "$1"; }
+
+$COMPOSE up -d --wait >&2
 port="$($COMPOSE port oxphp-fibers 80 | head -1 | cut -d: -f2)"
 base="http://127.0.0.1:${port}/tests/fibers"
 
-read_real() { curl -s "${base}/fixture_memory.php" | sed 's/.*real=\([0-9]*\).*/\1/'; }
+# real: what the allocator holds from the system. used: what is live inside it.
+read_mem() { curl -s "${base}/fixture_memory.php" | sed "s/.*$1=\([0-9]*\).*/\1/"; }
 
-before="$(read_real)"
+# One connection, N sequential requests: each is its own request, and the fiber
+# they land on is the same one every time with a single worker.
+fire() {
+	local urls=() _
+	for _ in $(seq 1 "$N"); do urls+=("$1"); done
+	# `-o` binds to one URL only, so the bodies of the rest would land on stdout
+	# — which in --jsonl mode is the report stream.
+	curl -s "${urls[@]}" > /dev/null || true
+}
 
-# One connection, N sequential requests: each fatal is its own request, and the
-# fiber they land on is the same one every time with a single worker.
-urls=()
-for _ in $(seq 1 "$N"); do urls+=("${base}/fixture_fatal.php?fatal=1"); done
-curl -s -o /dev/null "${urls[@]}" || true
+fail=0
 
-after="$(read_real)"
+# Phase 1: the same requests without the fatal, as the control.
+curl -s -o /dev/null "${base}/fixture_fatal.php"
+clean_before="$(read_mem used)"
+fire "${base}/fixture_fatal.php"
+clean_after="$(read_mem used)"
+clean_cost=$(( (clean_after - clean_before) / N ))
+
+# Phase 2: the fatal.
+real_before="$(read_mem real)"
+fatal_before="$(read_mem used)"
+fire "${base}/fixture_fatal.php?fatal=1"
+fatal_after="$(read_mem used)"
+real_after="$(read_mem real)"
+
 $COMPOSE down -v > /dev/null 2>&1
 
-echo "worker allocator after ${N} fatals: ${before} -> ${after} bytes"
-if [ "$after" -gt "$before" ]; then
-  echo "FAIL: the worker took more memory from the allocator across ${N} fatals"
-  exit 1
+fatal_cost=$(( (fatal_after - fatal_before) / N ))
+say "per request over ${N}: clean ${clean_cost} B, fatal ${fatal_cost} B; allocator ${real_before} -> ${real_after} B"
+
+if [ "$real_after" -le "$real_before" ]; then
+	ok "${N} fatals leave the worker's allocator where it was"
+else
+	bad "${N} fatals leave the worker's allocator where it was" "grew from ${real_before} to ${real_after} bytes"
 fi
-echo "PASS: ${N} fatals left the worker's allocator where it was"
+
+if [ "$fatal_cost" -le $(( clean_cost + SLACK_PER_REQUEST )) ]; then
+	ok "a fatal costs a worker no more than the same request without one"
+else
+	bad "a fatal costs a worker no more than the same request without one" \
+		"${fatal_cost} B per fatal against ${clean_cost} B per clean request, over ${N} each"
+fi
+
+exit "$fail"
