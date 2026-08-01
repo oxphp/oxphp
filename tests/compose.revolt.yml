@@ -1,0 +1,40 @@
+# revolt/event-loop under worker mode: one PHP worker, runtime hooks on.
+#
+# PHP_WORKERS=1 is what makes the cross-request assertions decisive — the inner
+# request a test issues over a socket can only be served by the very worker
+# thread running the outer request's fiber, so the two are provably multiplexed
+# on one thread rather than merely concurrent.
+#
+# RUNTIME_HOOKS=1 is what lets the outer request park instead of pinning that
+# thread while it waits for the inner response; without it the inner request is
+# never picked up and the wait runs out its timeout.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.revolt.yml up
+services:
+  oxphp-revolt:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+      - ./fixtures/revolt:/var/www/html/revolt
