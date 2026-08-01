@@ -99,6 +99,44 @@ void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 static void oxphp_claim_release_fiber(const oxphp_request_fiber *fiber);
 static void oxphp_claim_reset_if_empty(void);
 
+/* ─── VM stack rewind after a bailout ─────────────────── */
+
+/* Where the VM stack stood at a point the loop can return to. */
+typedef struct {
+    zend_vm_stack stack;
+    zval *top;
+    zval *end;
+    zend_execute_data *execute_data;
+} oxphp_vm_stack_mark;
+
+static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
+    mark->stack = EG(vm_stack);
+    mark->top = EG(vm_stack_top);
+    mark->end = EG(vm_stack_end);
+    mark->execute_data = EG(current_execute_data);
+}
+
+/* Undo everything the interrupted call left on the VM stack.
+ *
+ * Only for the bailout path: a normal return has already unwound, and calling
+ * this then would be a no-op at best. Pages pushed since the mark are freed
+ * (the engine links them newest-first through ->prev, and zend_vm_stack_destroy
+ * walks the same chain), then the three EG cursors go back to where they were.
+ *
+ * The fiber's own page is never freed — the mark always sits inside it, because
+ * zend_fiber_execute allocated it before calling this loop and points
+ * zf->stack_bottom into it for the lifetime of the fiber. */
+static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
+    while (EG(vm_stack) != mark->stack) {
+        zend_vm_stack prev = EG(vm_stack)->prev;
+        efree(EG(vm_stack));
+        EG(vm_stack) = prev;
+    }
+    EG(vm_stack_top) = mark->top;
+    EG(vm_stack_end) = mark->end;
+    EG(current_execute_data) = mark->execute_data;
+}
+
 /* ─── Stack Limit Helper ──────────────────────────────── */
 
 /* zend_fiber_stack is an opaque (incomplete) type — we cannot access its
@@ -149,11 +187,54 @@ static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *f
  * suspend points set a reason before parking, and the loop marks itself
  * completed before its own park. Resume the fiber once with a FiberError so the
  * attempt unwinds where it was made, and the request carries on. Repeated,
- * because a program that catches the error is free to try again. */
+ * because a program that catches the error is free to try again — but only up
+ * to a limit, because a program that catches it and retries in a loop would
+ * otherwise never give this function back. It runs inside a scheduler tick, so
+ * an unbounded refusal is not one stuck request: the tick never returns, no
+ * cancel or timeout from the server side is observed, and every other in-flight
+ * request on the worker stops with it. Past the limit the request is ended
+ * instead of argued with, the same way teardown ends one — a graceful exit,
+ * which userland cannot catch and retry. */
+#define OXPHP_MAX_SUSPEND_REFUSALS 32
+
+/* End a request that will not stop suspending itself. A graceful exit is what
+ * the engine uses to unwind a fiber nobody will resume again: userland cannot
+ * catch it, so this terminates however many nested try/catch frames the retry
+ * loop is buried in, and the request still unwinds properly — finally blocks,
+ * destructors and shutdown functions all run. Once the fiber stops suspending
+ * itself the loop below is free to finish, so the caller's tick returns. */
+static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
+    zval exit_obj;
+    ZVAL_OBJ(&exit_obj, zend_create_graceful_exit());
+
+    zval retval;
+    ZVAL_UNDEF(&retval);
+    oxphp_fiber_resume_token = fiber;
+    zend_fiber_resume_exception(fiber->zf, &exit_obj, &retval);
+    oxphp_fiber_resume_token = NULL;
+    zval_ptr_dtor(&retval);
+    zval_ptr_dtor(&exit_obj);
+
+    if (UNEXPECTED(EG(exception))) {
+        zend_clear_exception();
+    }
+
+    /* The request is over however it ended: the loop marks itself completed on
+     * its way out, and if it did not get that far the scheduler must still not
+     * wait for a resume that will never come. */
+    fiber->completed = true;
+    fiber->handler_failed = true;
+}
+
 static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
+    unsigned refusals = 0;
     while (!fiber->completed
            && fiber->suspend_reason == OXPHP_SUSPEND_NONE
            && fiber->zf->context.status == ZEND_FIBER_STATUS_SUSPENDED) {
+        if (++refusals > OXPHP_MAX_SUSPEND_REFUSALS) {
+            oxphp_fiber_end_after_refusals(fiber);
+            return;
+        }
         zend_throw_error(oxphp_fiber_error_ce(),
                          "Cannot suspend an OxPHP request fiber: the server drives it, "
                          "not the caller");
@@ -342,14 +423,40 @@ static void oxphp_fiber_release(oxphp_request_fiber *fiber) {
     fiber->zf = NULL;
 }
 
+/* Release one fiber, containing a fatal raised by its unwind.
+ *
+ * Releasing a request fiber now runs PHP — the destructor resumes it with a
+ * graceful exit, and the request unwinds through finally blocks, object
+ * destructors and shutdown functions, any of which can raise a fatal. The
+ * engine forwards a fiber's bailout to whoever resumed it (zend_fiber_switch_to
+ * calls zend_bailout() on the resumer's stack), so without this it would
+ * longjmp straight out of the loop below, leaving every remaining fiber with a
+ * live C stack, a bridge context and a task payload, and the list head
+ * dangling. One request's bad shutdown must not cost the worker the rest of its
+ * teardown.
+ *
+ * The object reference is deliberately left alone on that path: after a bailout
+ * the only safe thing to do with this fiber is stop touching it. */
+static void oxphp_fiber_release_guarded(oxphp_request_fiber *fiber) {
+    zend_try {
+        oxphp_fiber_release(fiber);
+    } zend_catch {
+        CG(unclean_shutdown) = 0;
+        if (EG(exception)) {
+            OBJ_RELEASE(EG(exception));
+            EG(exception) = NULL;
+        }
+    } zend_end_try();
+}
+
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     /* Free any remaining active fibers */
-    oxphp_request_fiber *fiber = sched->fibers_head;
+    oxphp_request_fiber * volatile fiber = sched->fibers_head;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
         /* Before the bridge context and the parked state below: the unwind runs
          * PHP, which still reads both. */
-        oxphp_fiber_release(fiber);
+        oxphp_fiber_release_guarded(fiber);
         /* And after it, for the same reason: the unwind is PHP, so the request
          * is still using — and can still take — a socket stream on its way out.
          * A fiber suspended mid-request may hold claims whose entries would name
@@ -367,7 +474,7 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     fiber = sched->free_list;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
-        oxphp_fiber_release(fiber);
+        oxphp_fiber_release_guarded(fiber);
         oxphp_fiber_free_task_payload(fiber);
         efree(fiber);
         fiber = next;
@@ -483,6 +590,19 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * once on entry; the loop needs it per iteration. */
         EG(jit_trace_num) = 0;
 
+        /* Where the VM stack stands before this iteration runs any PHP. A
+         * normal return unwinds to here by itself, but a bailout does not: it
+         * longjmps out of the interrupted frame with EG(vm_stack_top) and
+         * EG(current_execute_data) still pointing into it, and this loop —
+         * unlike zend_fiber_execute, which lets the fiber die — carries that
+         * state into the next request on this fiber. Left alone it costs the
+         * abandoned frames and their zvals for the life of the worker, and
+         * chains the next request's frames onto a dead one, which is what a
+         * backtrace or an exception trace would then walk. The zend_catch arms
+         * below rewind to this snapshot. */
+        oxphp_vm_stack_mark mark;
+        oxphp_vm_stack_save(&mark);
+
         if (fiber->task_mode) {
             /* An oxphp_async() task: run the per-task closure that spawn
              * reconstructed into task_fci/task_fcc, capture its result where the
@@ -510,6 +630,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 }
             } zend_catch {
                 task_capture_fatal(fiber);
+                oxphp_vm_stack_rewind(&mark);
             } zend_end_try();
 
             /* The task is over: release the socket streams it claimed, so a
@@ -567,6 +688,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 EG(exception) = NULL;
             }
             CG(unclean_shutdown) = 0;
+            oxphp_vm_stack_rewind(&mark);
         } zend_end_try();
 
         php_call_shutdown_functions();
@@ -664,12 +786,9 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
         /* Create the Fiber object this request runs as. The C stack and the VM
          * stack are allocated by zend_fiber_start on first entry, from
          * oxphp_fiber_enter — not here. */
-        zend_object *obj = zend_ce_fiber->create_object(zend_ce_fiber);
-        if (!obj) {
-            efree(fiber);
-            return NULL;
-        }
-        fiber->zf = (zend_fiber *)obj;
+        /* create_object allocates through the Zend allocator, which bails out
+         * rather than returning NULL, so there is no failure to handle. */
+        fiber->zf = (zend_fiber *)zend_ce_fiber->create_object(zend_ce_fiber);
         oxphp_fiber_loop_fci(&fiber->zf->fci, &fiber->zf->fci_cache);
     }
     /* Reused fibers: the loop is parked inside zend_fiber_suspend, waiting to be
@@ -2119,12 +2238,9 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
         /* Create the Fiber object this task runs as. The C stack and the VM
          * stack are allocated by zend_fiber_start on first entry, from
          * oxphp_fiber_enter — not here. */
-        zend_object *obj = zend_ce_fiber->create_object(zend_ce_fiber);
-        if (!obj) {
-            efree(fiber);
-            return -1;
-        }
-        fiber->zf = (zend_fiber *)obj;
+        /* create_object allocates through the Zend allocator, which bails out
+         * rather than returning NULL, so there is no failure to handle. */
+        fiber->zf = (zend_fiber *)zend_ce_fiber->create_object(zend_ce_fiber);
         oxphp_fiber_loop_fci(&fiber->zf->fci, &fiber->zf->fci_cache);
     }
 
