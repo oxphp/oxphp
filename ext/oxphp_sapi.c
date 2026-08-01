@@ -5916,6 +5916,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
 
+    /* Build the callable that fibers run as. Once per process, before any
+     * fiber exists. */
+    oxphp_fiber_minit();
+
     /* Register async-task scheduler callbacks (stub bodies for now; the
      * Rust fiber-mode async driver reaches the scheduler through these). */
     oxphp_bridge_set_async_sched_callbacks(

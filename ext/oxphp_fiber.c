@@ -40,6 +40,40 @@ uint64_t oxphp_fiber_current_id(void) {
     return oxphp_current_fiber ? oxphp_current_fiber->fiber_id : 0;
 }
 
+/* ─── Userland fiber object plumbing ───────────────────── */
+
+__thread oxphp_request_fiber *oxphp_fiber_starting = NULL;
+
+/* The callable every request/task fiber runs. Deliberately never registered in
+ * CG(function_table): zend_call_function skips name resolution when the cache
+ * already carries a handler, so this stays reachable only from here — a script
+ * can neither see it in get_defined_functions() nor call it by name. */
+static zend_internal_function oxphp_fiber_loop_fn;
+
+static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
+    (void)execute_data;
+    (void)return_value;
+}
+
+void oxphp_fiber_minit(void) {
+    memset(&oxphp_fiber_loop_fn, 0, sizeof(oxphp_fiber_loop_fn));
+    oxphp_fiber_loop_fn.type = ZEND_INTERNAL_FUNCTION;
+    oxphp_fiber_loop_fn.fn_flags = ZEND_ACC_PUBLIC;
+    oxphp_fiber_loop_fn.function_name =
+        zend_string_init_interned("oxphp fiber loop", sizeof("oxphp fiber loop") - 1, 1);
+    oxphp_fiber_loop_fn.handler = oxphp_fiber_loop_handler;
+}
+
+/* ZVAL_UNDEF on function_name is load-bearing: zend_fiber_execute and
+ * zend_fiber_object_free both zval_ptr_dtor it, and that is a no-op on UNDEF. */
+void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
+    memset(fci, 0, sizeof(*fci));
+    memset(fcc, 0, sizeof(*fcc));
+    fci->size = sizeof(*fci);
+    ZVAL_UNDEF(&fci->function_name);
+    fcc->function_handler = (zend_function *)&oxphp_fiber_loop_fn;
+}
+
 /* ─── Forward declarations ─────────────────────────────── */
 
 static void request_fiber_coroutine(zend_fiber_transfer *transfer);

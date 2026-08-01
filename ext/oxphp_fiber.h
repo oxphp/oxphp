@@ -293,6 +293,22 @@ extern __thread oxphp_request_fiber *oxphp_current_fiber;
  * so Rust can tag async promise ownership at creation. */
 uint64_t oxphp_fiber_current_id(void);
 
+/* ─── Userland fiber object plumbing ───────────────────── */
+
+/* Build the fabricated internal function that every request/task fiber runs as
+ * its callable. Called once from the extension MINIT. */
+void oxphp_fiber_minit(void);
+
+/* Fill `fci`/`fcc` with a zero-argument call to that function. The fcc carries
+ * the handler directly, so no name lookup happens and the function stays out of
+ * the global function table — userland can neither see nor call it. */
+void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
+
+/* One-shot handoff: set immediately before zend_fiber_start(), consumed by the
+ * loop handler on its first line. Safe because zend_fiber_start() enters the
+ * fiber synchronously on the same thread with nothing running in between. */
+extern __thread oxphp_request_fiber *oxphp_fiber_starting;
+
 /* ─── Context switch primitives ────────────────────────── */
 
 /* Switch from the scheduler into `fiber`, delivering `value` (NULL = null).
