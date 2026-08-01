@@ -23,6 +23,7 @@
 
 #include "SAPI.h"
 #include "Zend/zend_exceptions.h"
+#include "Zend/zend_generators.h" /* zend_generator: a frame a fatal abandons can be one */
 #include "main/php_main.h"
 #include "main/php_output.h"
 #include "ext/standard/basic_functions.h"
@@ -81,7 +82,13 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler);
  * time the request loop's zend_catch runs, the frames the fatal left behind can
  * no longer be reached. The engine reports the error before it bails, which is
  * the last point where that chain is still readable — so it is read here, from
- * an error callback chained ahead of the one the server installs. */
+ * an error callback of our own.
+ *
+ * Where it lands in the chain does not matter, only that it is in it: the server
+ * installs its own after module startup, so that one runs first and this one
+ * behind it, and both run before the bailout. What does matter is that every
+ * callback in the chain delegates — one that answered a fatal without calling
+ * the next would leave the frame unrecorded. */
 static __thread zend_execute_data *oxphp_bailout_frame = NULL;
 
 typedef void (*oxphp_error_cb_t)(int type, zend_string *file, const uint32_t line, zend_string *message);
@@ -161,7 +168,13 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
  *     frame that owns the table then releases it, so the two are done here in
  *     that same order.
  *   - the variables of the functions the fatal was inside, which are the whole
- *     cost when a request fatals holding something large. */
+ *     cost when a request fatals holding something large.
+ *   - the arguments of the internal calls it was inside, and the objects those
+ *     were called on, which a PHP-level frame does not account for: the fatal
+ *     is usually raised from inside one of them.
+ *
+ * A generator that was running is in this chain too, and is the one thing in it
+ * that must be handled rather than released — see below. */
 static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
     zend_execute_data *ex = oxphp_bailout_frame;
     oxphp_bailout_frame = NULL;
@@ -181,6 +194,47 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
         uint32_t info = ZEND_CALL_INFO(ex);
 
         if (ex->func == NULL) {
+            ex = prev;
+            continue;
+        }
+
+        if (info & ZEND_CALL_GENERATOR) {
+            /* A generator that was running when the fatal came is in this chain
+             * — resuming one links its frame to the frame that resumed it — but
+             * the frame is not the request's. It belongs to the generator
+             * object: allocated on the heap rather than on the VM stack, and
+             * released by zend_generator_close, which does what the branch below
+             * does. Treated like the rest, every variable it holds is given up
+             * twice, and the second time is on a value already handed back.
+             *
+             * So the frame is taken off the generator instead, in the order
+             * zend_generator_close takes it off itself, and given back here.
+             * Leaving it to the close is not the alternative it looks like: the
+             * close does the half below and stops only while the engine's
+             * unclean-shutdown flag is up, and this worker has to lower that
+             * flag to serve anything else. A generator released after that —
+             * one a script left in a registry, say — would be closed as if
+             * nothing had happened, and the rest of that close walks the frames
+             * the interrupted call had half pushed, which the rewind below has
+             * since given back to the allocator. */
+            zend_generator *generator = (zend_generator *)ex->return_value;
+            if (generator != NULL && generator->execute_data == ex) {
+                generator->execute_data = NULL; /* first, as the engine does */
+                if (info & ZEND_CALL_HAS_SYMBOL_TABLE) {
+                    zend_clean_and_cache_symbol_table(ex->symbol_table);
+                }
+                zend_free_compiled_variables(ex);
+                if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+                    zend_free_extra_named_params(ex->extra_named_params);
+                }
+                if (info & ZEND_CALL_RELEASE_THIS) {
+                    OBJ_RELEASE(Z_OBJ(ex->This));
+                }
+                /* Reads only the frame's own zvals, so it is as safe here as
+                 * freeing the variables above — and the frame goes next. */
+                zend_vm_stack_free_extra_args_ex(info, ex);
+                efree(ex);
+            }
             ex = prev;
             continue;
         }
@@ -209,6 +263,25 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
                 zend_clean_and_cache_symbol_table(ex->symbol_table);
             }
             zend_free_compiled_variables(ex);
+            if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+                zend_free_extra_named_params(ex->extra_named_params);
+            }
+            if (info & ZEND_CALL_RELEASE_THIS) {
+                OBJ_RELEASE(Z_OBJ(ex->This));
+            }
+            /* Arguments past the ones the function declares are not variables
+             * and are not freed with them; func_get_args() is what reads them. */
+            zend_vm_stack_free_extra_args_ex(info, ex);
+        } else {
+            /* An internal function the fatal was raised inside — trigger_error
+             * itself, or any of the ones that call back into PHP. It has no
+             * variables, but the frame holds every argument it was called with
+             * and, for a method, the object it was called on. The engine gives
+             * those back when the call returns, so a call that never returns
+             * keeps them: a fatal inside array_map() would hold its array, and
+             * one inside a database method its connection, for as long as the
+             * worker lives. */
+            zend_vm_stack_free_args(ex);
             if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
                 zend_free_extra_named_params(ex->extra_named_params);
             }
@@ -490,6 +563,13 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         oxphp_bridge_free_unhandled(fiber->php_state.unhandled_exc);
         fiber->php_state.unhandled_exc = NULL;
     }
+    /* Same shape again: a parked request holds the content type its response was
+     * going to carry, and resuming hands it back to SG(sapi_headers). Torn down
+     * while parked, this is the only place left to give it back. */
+    if (fiber->php_state.sapi_mimetype) {
+        efree(fiber->php_state.sapi_mimetype);
+        fiber->php_state.sapi_mimetype = NULL;
+    }
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
      * symbol table. Released here so worker teardown does not leak the arrays. */
@@ -744,6 +824,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 task_capture_fatal(fiber);
                 oxphp_release_abandoned_frames(&mark);
                 oxphp_vm_stack_rewind(&mark);
+                CG(unclean_shutdown) = 0;
             } zend_end_try();
 
             /* The task is over: release the socket streams it claimed, so a
@@ -800,9 +881,16 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 OBJ_RELEASE(EG(exception));
                 EG(exception) = NULL;
             }
-            CG(unclean_shutdown) = 0;
             oxphp_release_abandoned_frames(&mark);
             oxphp_vm_stack_rewind(&mark);
+            /* Not before the release above: the engine raises this flag for the
+             * whole of what a bailout leaves behind, and everything the release
+             * gives up is part of that. A generator whose last reference is one
+             * of those variables is closed by giving it up, and closing one is
+             * where the flag decides between the safe half of the work and the
+             * half that walks a frame the VM left the way it did. Lowered once
+             * the request is off that state and the worker is back to serving. */
+            CG(unclean_shutdown) = 0;
         } zend_end_try();
 
         php_call_shutdown_functions();
@@ -832,9 +920,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
             sapi_send_headers();
         } zend_catch {
-            CG(unclean_shutdown) = 0;
             oxphp_release_abandoned_frames(&mark);
             oxphp_vm_stack_rewind(&mark);
+            CG(unclean_shutdown) = 0;
         } zend_end_try();
 
         /* The request is over, so any socket stream this fiber claimed is free
@@ -2342,7 +2430,6 @@ static void task_capture_fatal(oxphp_request_fiber *fiber) {
         fiber->task_exc_class = strdup("Error");
         fiber->task_exc_message = strdup("Fatal error in async closure");
     }
-    CG(unclean_shutdown) = 0;
 }
 
 /* Switch into a task fiber to run a NEW task — a fresh fiber whose loop begins
