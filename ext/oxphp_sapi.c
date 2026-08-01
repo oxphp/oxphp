@@ -3328,8 +3328,17 @@ static void oxphp_soft_reset(void) {
     php_output_deactivate();
     php_output_activate();
 
-    /* 2. SAPI headers: clear list, reset status to 200 */
-    zend_llist_clean(&SG(sapi_headers).headers);
+    /* 2. SAPI headers: clear list, reset status to 200.
+     * Through sapi_header_op rather than zend_llist_clean, because the server
+     * keeps a list of its own — the one the response is built from — and only
+     * the engine's delete-all reaches both. Anything sent between the response
+     * buffers being cleared and this point, such as the header flush that the
+     * output teardown above can trigger, would otherwise stay in the server's
+     * list and go out on top of the headers this request sets.
+     * headers_sent is cleared first: sapi_header_op refuses to touch headers
+     * while it is set, warning that they have already gone out. */
+    SG(headers_sent) = 0;
+    sapi_header_op(SAPI_HEADER_DELETE_ALL, NULL);
     /* sapi_send_headers() allocates this and hands it over to the request; only
      * sapi_deactivate_destroy() gives it back, and that runs once per worker
      * rather than once per request. Released here for the same reason the list
@@ -3340,7 +3349,6 @@ static void oxphp_soft_reset(void) {
     }
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
-    SG(headers_sent) = 0;
 
     /* 3. SAPI request state: allow POST re-read and cookie refresh.
      * This replaces the heavyweight sapi_activate() — we only reset

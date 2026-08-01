@@ -711,6 +711,10 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * belonged to this one. */
         oxphp_bailout_frame = NULL;
 
+        /* Where the output buffer stack stands before this request opens any
+         * of its own — what the end of the request ends down to. */
+        int ob_level = php_output_get_level();
+
         if (fiber->task_mode) {
             /* An oxphp_async() task: run the per-task closure that spawn
              * reconstructed into task_fci/task_fcc, capture its result where the
@@ -804,11 +808,40 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         php_call_shutdown_functions();
         php_free_shutdown_functions();
 
+        /* Close the request the way php_request_shutdown closes one, and for
+         * the same two reasons. An output buffer the request left open holds
+         * its response body: ended here it reaches the client that asked for
+         * it, and left open it is flushed by whatever the worker resets for
+         * next — which sends one client's content to another. And a response
+         * that wrote nothing still has headers to send; without this the
+         * engine's own Content-Type never reaches the wire, which every other
+         * SAPI does send.
+         *
+         * Only the layers this request opened are ended: the stack is
+         * thread-wide and a request parked mid-buffer still owns the ones it
+         * left below this mark. Both calls are no-ops for a request that has
+         * already flushed. */
+        zend_try {
+            /* php_output_end() only pops a handler that can be removed, and
+             * answers FAILURE for one that cannot — zlib's output compression
+             * is the common case. Stopping there leaves that handler where the
+             * request left it, which is what happened to every buffer before
+             * this loop existed; looping on it would not end. */
+            while (php_output_get_level() > ob_level && php_output_end() == SUCCESS) {
+                /* ended one layer */
+            }
+            sapi_send_headers();
+        } zend_catch {
+            CG(unclean_shutdown) = 0;
+            oxphp_release_abandoned_frames(&mark);
+            oxphp_vm_stack_rewind(&mark);
+        } zend_end_try();
+
         /* The request is over, so any socket stream this fiber claimed is free
          * for the next fiber that wants it. Here rather than in finalize because
-         * this point is inside the zend_try above's reach: it is passed on every
-         * outcome, an uncaught exception and a bailout included, and it is the
-         * one place both request dispatch paths share. */
+         * this point is past every zend_try above and inside none of them: it is
+         * reached on every outcome, an uncaught exception and a bailout
+         * included, and it is the one place both request dispatch paths share. */
         oxphp_claim_release_fiber(fiber);
 
         oxphp_current_fiber = NULL;
@@ -1156,8 +1189,13 @@ void oxphp_fiber_init_request_state(void) {
      * headers for the new request. Safe to call while other fibers are
      * suspended with their state saved. */
 
-    /* Clear SAPI headers for this new request */
-    zend_llist_clean(&SG(sapi_headers).headers);
+    /* Clear SAPI headers for this new request. Through sapi_header_op rather
+     * than zend_llist_clean: the server keeps the list the response is built
+     * from, and only the engine's delete-all reaches that one too. headers_sent
+     * is cleared first because sapi_header_op refuses to touch headers while it
+     * is set, warning that they have already gone out. */
+    SG(headers_sent) = 0;
+    sapi_header_op(SAPI_HEADER_DELETE_ALL, NULL);
     /* sapi_send_headers() allocates this and hands it over to the request; only
      * sapi_deactivate_destroy() gives it back, and that runs once per worker
      * rather than once per request. Released here for the same reason the list
@@ -1170,7 +1208,6 @@ void oxphp_fiber_init_request_state(void) {
     }
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
-    SG(headers_sent) = 0;
 
     /* Reset SAPI post state */
     SG(read_post_bytes) = 0;
