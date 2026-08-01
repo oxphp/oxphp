@@ -75,7 +75,36 @@ static zend_internal_function oxphp_fiber_loop_fn;
 
 static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler);
 
+/* ─── The frame a fatal bailed out of ──────────────────── */
+
+/* zend_bailout clears EG(current_execute_data) before it longjmps, so by the
+ * time the request loop's zend_catch runs, the frames the fatal left behind can
+ * no longer be reached. The engine reports the error before it bails, which is
+ * the last point where that chain is still readable — so it is read here, from
+ * an error callback chained ahead of the one the server installs. */
+static __thread zend_execute_data *oxphp_bailout_frame = NULL;
+
+typedef void (*oxphp_error_cb_t)(int type, zend_string *file, const uint32_t line, zend_string *message);
+static oxphp_error_cb_t oxphp_next_error_cb = NULL;
+
+/* The error types that end in a bailout. E_RECOVERABLE_ERROR is not one of
+ * them — it throws — and recording a frame no bailout follows would leave a
+ * stale pointer for the next fatal to walk. */
+#define OXPHP_BAILOUT_ERROR_TYPES (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE)
+
+static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t line, zend_string *message) {
+    if (type & OXPHP_BAILOUT_ERROR_TYPES) {
+        oxphp_bailout_frame = EG(current_execute_data);
+    }
+    oxphp_next_error_cb(type, file, line, message);
+}
+
 void oxphp_fiber_minit(void) {
+    if (!oxphp_next_error_cb) {
+        oxphp_next_error_cb = zend_error_cb;
+        zend_error_cb = oxphp_bailout_frame_cb;
+    }
+
     memset(&oxphp_fiber_loop_fn, 0, sizeof(oxphp_fiber_loop_fn));
     oxphp_fiber_loop_fn.type = ZEND_INTERNAL_FUNCTION;
     oxphp_fiber_loop_fn.fn_flags = ZEND_ACC_PUBLIC;
@@ -114,6 +143,82 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->top = EG(vm_stack_top);
     mark->end = EG(vm_stack_end);
     mark->execute_data = EG(current_execute_data);
+}
+
+/* Release what the frames the bailout abandoned were holding. Runs before the
+ * rewind below, which frees the pages those frames stand on.
+ *
+ * Everything a request leaves behind this way is held for the life of the
+ * worker, because a fiber outlives the request that fataled on it and the
+ * memory a request runs on is only ever reclaimed when the worker exits:
+ *
+ *   - the script runs on a copy of its own op_array, with the run time cache
+ *     allocated alongside it. Both are freed when an include returns, so
+ *     without this a fatal keeps a copy per request — kilobytes for a script of
+ *     a few hundred statements, since the cache carries a slot per call site.
+ *   - entering the script hangs a symbol table off the frame that included it.
+ *     The include gives its variables back to that table on the way out and the
+ *     frame that owns the table then releases it, so the two are done here in
+ *     that same order.
+ *   - the variables of the functions the fatal was inside, which are the whole
+ *     cost when a request fatals holding something large. */
+static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
+    zend_execute_data *ex = oxphp_bailout_frame;
+    oxphp_bailout_frame = NULL;
+
+    /* Walk the chain first and require it to end exactly on the frame the mark
+     * was taken from. A fatal reported from another fiber, or a bailout no
+     * error preceded, leaves a pointer that has nothing to do with these
+     * frames, and freeing along it would be freeing live memory. */
+    for (zend_execute_data *probe = ex; probe != mark->execute_data; probe = probe->prev_execute_data) {
+        if (probe == NULL) {
+            return;
+        }
+    }
+
+    while (ex != mark->execute_data) {
+        zend_execute_data *prev = ex->prev_execute_data;
+        uint32_t info = ZEND_CALL_INFO(ex);
+
+        if (ex->func == NULL) {
+            ex = prev;
+            continue;
+        }
+
+        if ((info & ZEND_CALL_CODE) && !(info & ZEND_CALL_TOP)) {
+            /* An include: code rather than a function, nested rather than the
+             * top-level script. Detaching first hands the script's variables
+             * back to the symbol table, which the frame that owns it releases
+             * below — the order the engine unwinds them in. */
+            if (ex->func->op_array.last_var > 0) {
+                zend_detach_symbol_table(ex);
+            }
+            zend_destroy_static_vars(&ex->func->op_array);
+            destroy_op_array(&ex->func->op_array);
+            efree_size(ex->func, sizeof(zend_op_array));
+        } else if (ZEND_USER_CODE(ex->func->type)) {
+            /* A function the fatal was inside. Its variables are released the
+             * way the engine releases a generator's when it has to abandon one
+             * mid-run — and only as far: past this point zend_generator_close
+             * stops too when a bailout has been through, because the temporaries
+             * a frame was holding and the calls it had half pushed cannot be
+             * walked safely once the VM left the way it did. */
+            if ((info & ZEND_CALL_HAS_SYMBOL_TABLE) && ex->symbol_table != &EG(symbol_table)) {
+                /* Never the globals: those outlive every request the worker
+                 * serves. */
+                zend_clean_and_cache_symbol_table(ex->symbol_table);
+            }
+            zend_free_compiled_variables(ex);
+            if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+                zend_free_extra_named_params(ex->extra_named_params);
+            }
+            if (info & ZEND_CALL_RELEASE_THIS) {
+                OBJ_RELEASE(Z_OBJ(ex->This));
+            }
+        }
+
+        ex = prev;
+    }
 }
 
 /* Undo everything the interrupted call left on the VM stack.
@@ -602,6 +707,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * below rewind to this snapshot. */
         oxphp_vm_stack_mark mark;
         oxphp_vm_stack_save(&mark);
+        /* Nothing recorded by an earlier iteration may be walked as if it
+         * belonged to this one. */
+        oxphp_bailout_frame = NULL;
 
         if (fiber->task_mode) {
             /* An oxphp_async() task: run the per-task closure that spawn
@@ -630,6 +738,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 }
             } zend_catch {
                 task_capture_fatal(fiber);
+                oxphp_release_abandoned_frames(&mark);
                 oxphp_vm_stack_rewind(&mark);
             } zend_end_try();
 
@@ -688,6 +797,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 EG(exception) = NULL;
             }
             CG(unclean_shutdown) = 0;
+            oxphp_release_abandoned_frames(&mark);
             oxphp_vm_stack_rewind(&mark);
         } zend_end_try();
 
