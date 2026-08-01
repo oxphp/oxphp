@@ -4166,28 +4166,42 @@ unsafe fn push_aggregate_rejections(collected: &mut Vec<AggregateRejection>, inp
     }
 }
 
-/// Yield the current task fiber for one scheduler cycle. Returns true if the
-/// task was cancelled while yielded (the cancellation exception is set in
-/// bridge TLS and the caller should abort with -1); false to keep looping.
+/// What a fan-out loop should do after yielding its fiber for one scheduler
+/// cycle.
+enum Yielded {
+    /// Resumed normally — keep polling.
+    Poll,
+    /// Cancelled while yielded. The cancellation exception is in bridge TLS;
+    /// the caller aborts with -1.
+    Cancelled,
+    /// The fiber is being torn down and an exception is already pending. The
+    /// caller must return without adding one of its own and without yielding
+    /// again — the fiber is no longer the current one, so a second yield would
+    /// report "outside a fiber" and turn the unwind into a synthetic error.
+    Unwinding,
+}
+
+/// Yield the current task fiber for one scheduler cycle.
 ///
 /// # Safety
 /// Must run inside an oxphp task fiber (callers guarantee this).
-unsafe fn yield_or_cancel() -> bool {
+unsafe fn yield_or_cancel() -> Yielded {
     use crate::bridge::ffi;
     match ffi::oxphp_bridge_fiber_yield() {
+        ffi::OXPHP_FIBER_UNWIND => Yielded::Unwinding,
         -3 => {
             let cls = CString::new("OxPHP\\Async\\AsyncException").unwrap_or_default();
             let msg = CString::new("Async task cancelled").unwrap_or_default();
             ffi::oxphp_bridge_set_async_exception(cls.as_ptr(), msg.as_ptr());
-            true
+            Yielded::Cancelled
         }
         0 => {
             // Not in a fiber (should be impossible — caller checked). Abort
             // rather than spin hot.
             set_bridge_internal_error("await fan-out: fiber yield outside a fiber");
-            true
+            Yielded::Cancelled
         }
-        _ => false,
+        _ => Yielded::Poll,
     }
 }
 
@@ -4257,8 +4271,10 @@ unsafe fn await_race_in_fiber(
             }
         }
 
-        if yield_or_cancel() {
-            return -1;
+        match yield_or_cancel() {
+            Yielded::Poll => {}
+            Yielded::Cancelled => return -1,
+            Yielded::Unwinding => return ffi::OXPHP_FIBER_UNWIND,
         }
     }
 }
@@ -4351,8 +4367,10 @@ unsafe fn await_any_in_fiber(
             }
         }
 
-        if yield_or_cancel() {
-            return -1;
+        match yield_or_cancel() {
+            Yielded::Poll => {}
+            Yielded::Cancelled => return -1,
+            Yielded::Unwinding => return ffi::OXPHP_FIBER_UNWIND,
         }
     }
 }
