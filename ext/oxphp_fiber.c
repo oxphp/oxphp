@@ -1,18 +1,21 @@
 /* ext/oxphp_fiber.c — Fiber scheduler implementation.
  *
- * Provides cooperative multitasking for OxPHP worker mode. Each HTTP request
- * runs in its own zend_fiber_context. When a request calls oxphp_async_await()
- * or oxphp_sleep(), the fiber suspends and the scheduler resumes another fiber
- * or accepts new work.
+ * Provides cooperative multitasking for OxPHP worker mode. Each HTTP request,
+ * and each oxphp_async() task, runs in a fiber of its own. When one calls
+ * oxphp_async_await() or oxphp_sleep(), the fiber suspends and the scheduler
+ * resumes another fiber or accepts new work.
  *
  * Key design:
- * - Low-level zend_fiber_context API (not PHP Fiber class)
- * - Fiber pointer stored in context->kind (read via EG(current_fiber_context)->kind)
+ * - Every fiber is a userland \Fiber object driven through zend_fiber_start /
+ *   zend_fiber_resume / zend_fiber_suspend, so the engine tracks it as the
+ *   active fiber and \Fiber::getCurrent() inside one names that request or task
+ * - The fiber pointer lives in the frame of the looping callable each fiber
+ *   runs, which never returns while the fiber is alive
  * - Zend VM state (vm_stack, execute_data, bailout, error_reporting,
- *   jit_trace_num, active_fiber) is carried by zend_fiber_switch_context itself:
- *   it captures EG into a local on the frame that switches and restores it when
- *   that frame resumes, so each side of a switch keeps its own state and this
- *   file does not save or restore any of it
+ *   jit_trace_num, active_fiber) is carried by the engine's context switch
+ *   itself: it captures EG into a local on the frame that switches and restores
+ *   it when that frame resumes, so each side of a switch keeps its own state and
+ *   this file does not save or restore any of it
  * - PHP superglobals, SAPI headers, Rust TLS managed explicitly per fiber */
 
 #include "oxphp_fiber.h"
@@ -177,22 +180,6 @@ static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
 }
 
 void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
-    if (fiber->zf == NULL) {
-        /* Bare-context fiber (task mode). Switches straight to the context;
-         * nothing tracks it as the engine's active fiber. */
-        zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
-        if (value) {
-            ZVAL_COPY_VALUE(&transfer.value, value);
-        } else {
-            ZVAL_NULL(&transfer.value);
-        }
-
-        oxphp_fiber_resume_token = fiber;
-        zend_fiber_switch_context(&transfer);
-        oxphp_fiber_resume_token = NULL;
-        return;
-    }
-
     zval retval;
     ZVAL_UNDEF(&retval);
 
@@ -230,15 +217,6 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
 }
 
 int oxphp_fiber_park(oxphp_request_fiber *fiber) {
-    if (fiber->zf == NULL) {
-        zend_fiber_transfer transfer = { .context = fiber->scheduler, .flags = 0 };
-        ZVAL_NULL(&transfer.value);
-
-        zend_fiber_switch_context(&transfer);
-
-        return 0;
-    }
-
     for (;;) {
         /* A destroyed fiber must not park again — zend_fiber_suspend asserts on
          * it, and the caller's contract is to unwind instead. */
@@ -337,25 +315,24 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     }
 }
 
-/* Release a fiber's execution resources — its C stack, and for a request fiber
- * the VM stack and the Fiber object it runs as. Called at scheduler teardown,
- * where a request fiber can still be suspended in the middle of its request.
+/* Release a fiber's execution resources — the Fiber object it runs as, and with
+ * it the C and VM stacks the engine allocated for that object. Called at
+ * scheduler teardown, where a fiber can still be suspended in the middle of its
+ * request or task.
  *
  * The Fiber object's destructor is what resumes such a fiber with a graceful
- * exit, so the request unwinds through the loop's zend_try instead of being
+ * exit, so the work unwinds through the loop's zend_try instead of being
  * abandoned with its C and VM stacks live. It is called explicitly rather than
  * left to the reference drop below, because the drop is not guaranteed to reach
  * it: a request that handed \Fiber::getCurrent() to something outliving the
  * request keeps the object alive past that drop, and an unwind deferred to then
  * would run on a loop frame whose fiber pointer the caller has already freed.
  *
- * Async task fibers still run as bare contexts and have no object to destroy. */
+ * Every live fiber has an object, so there is no NULL case to skip: the two
+ * lists oxphp_scheduler_destroy walks are disjoint (both recycle paths unlink
+ * from the active list before pushing onto the free list), so no fiber reaches
+ * here twice. */
 static void oxphp_fiber_release(oxphp_request_fiber *fiber) {
-    if (!fiber->zf) {
-        zend_fiber_destroy_context(&fiber->context);
-        return;
-    }
-
     zend_object *obj = &fiber->zf->std;
     if (!(OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED)) {
         GC_ADD_FLAGS(obj, IS_OBJ_DESTRUCTOR_CALLED);
@@ -459,10 +436,16 @@ static void oxphp_capture_unhandled(zend_object *ex) {
     free(trace);
 }
 
-/* The loop every request fiber runs, as the body of the fabricated callable the
- * engine starts it with. Its C stack is allocated once by zend_fiber_start and
- * reused for every request assigned to this fiber: after each one the loop parks
- * back to the scheduler, which resumes it for the next without mmap/munmap.
+/* Defined with the rest of the task scheduler; used by the task arm of the loop
+ * below, which is the one place the two halves of this file meet. */
+static void task_capture_exception(oxphp_request_fiber *fiber);
+static void task_capture_fatal(oxphp_request_fiber *fiber);
+
+/* The loop every fiber runs, as the body of the fabricated callable the engine
+ * starts it with. Its C stack is allocated once by zend_fiber_start and reused
+ * for every request or task assigned to this fiber: after each one the loop
+ * parks back to the scheduler, which resumes it for the next without
+ * mmap/munmap.
  *
  * The frame this runs in never returns while the fiber is alive, which is why
  * the fiber pointer can live in it — no back-pointer on the context is needed.
@@ -479,15 +462,13 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
     oxphp_fiber_starting = NULL;
     ZEND_ASSERT(fiber != NULL);
 
-    fiber->scheduler = fiber->zf->caller;
-
     /* Set stack overflow detection limits ONCE (C stack is reused) */
     int stack_anchor;
     oxphp_fiber_set_stack_limits_from_sp(&stack_anchor, EG(fiber_stack_size));
     fiber->saved_stack_base = EG(stack_base);
     fiber->saved_stack_limit = EG(stack_limit);
 
-    /* ── Request processing loop ────────────────────────── */
+    /* ── Request/task processing loop ───────────────────── */
     for (;;) {
         oxphp_current_fiber = fiber;
 
@@ -497,10 +478,60 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * the stack per request would hand the engine freed memory on the next
          * resume. One stack now lives as long as the fiber does. */
 
-        /* Start each request uncoupled from any trace recording left in flight
-         * by the previous one on this fiber. zend_fiber_execute does this once
-         * on entry; the loop needs it per iteration. */
+        /* Start each request or task uncoupled from any trace recording left in
+         * flight by the previous one on this fiber. zend_fiber_execute does this
+         * once on entry; the loop needs it per iteration. */
         EG(jit_trace_num) = 0;
+
+        if (fiber->task_mode) {
+            /* An oxphp_async() task: run the per-task closure that spawn
+             * reconstructed into task_fci/task_fcc, capture its result where the
+             * driver can drain it, and park. The fiber stays in the active list
+             * until the driver has drained it and released it. */
+            ZVAL_UNDEF(&fiber->task_retval);
+
+            zend_try {
+                fiber->task_fci.retval = &fiber->task_retval;
+                fiber->task_fci.param_count = fiber->task_argc;
+                fiber->task_fci.params = fiber->task_args;
+                if (zend_call_function(&fiber->task_fci, &fiber->task_fcc) != SUCCESS) {
+                    fiber->task_exc_class = strdup("RuntimeException");
+                    fiber->task_exc_message = strdup("Failed to call async closure");
+                } else if (EG(exception)) {
+                    /* A destroyed fiber is resumed with a graceful exit so it
+                     * unwinds; that is the scheduler tearing this fiber down,
+                     * not an outcome of the task, so it is left pending for
+                     * zend_fiber_execute to consume rather than reported as a
+                     * result. exit()/die() raises UnwindExit instead, which IS
+                     * the task's outcome and is captured like any other. */
+                    if (!zend_is_graceful_exit(EG(exception))) {
+                        task_capture_exception(fiber);
+                    }
+                }
+            } zend_catch {
+                task_capture_fatal(fiber);
+            } zend_end_try();
+
+            /* The task is over: release the socket streams it claimed, so a
+             * sibling task waiting for one of them can go on. Same point, and
+             * the same reasoning, as the release the request branch below does
+             * at its own end. */
+            oxphp_claim_release_fiber(fiber);
+
+            oxphp_current_fiber = NULL;
+            fiber->completed = true;
+
+            if (oxphp_fiber_park(fiber) != 0) {
+                /* Torn down rather than handed another task — return and let
+                 * the engine unwind. */
+                return;
+            }
+
+            /* ── HANDED THE NEXT TASK ────────────────────────
+             * spawn has reconstructed a fresh closure into task_fci/task_fcc,
+             * set task_args/argc, and cleared `completed` before resuming. */
+            continue;
+        }
 
         /* Call the PHP handler with zend_try protection */
         zval retval;
@@ -1967,7 +1998,6 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
 static __thread oxphp_fiber_scheduler oxphp_task_sched;
 static __thread bool oxphp_task_sched_inited = false;
 
-static void task_fiber_coroutine(zend_fiber_transfer *transfer);
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
 static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
                                     oxphp_request_fiber *fiber, zval *value);
@@ -2030,74 +2060,8 @@ static void task_capture_fatal(oxphp_request_fiber *fiber) {
     CG(unclean_shutdown) = 0;
 }
 
-/* Looping coroutine for task fibers. Runs the per-task closure (already
- * reconstructed by spawn into task_fci/task_fcc), captures retval/exception,
- * marks completed, and suspends back to the scheduler. When the fiber is
- * recycled for a later task, spawn sets fresh task state and resumes the
- * loop. */
-static void task_fiber_coroutine(zend_fiber_transfer *transfer) {
-    oxphp_request_fiber *fiber = (oxphp_request_fiber *)EG(current_fiber_context)->kind;
-    fiber->scheduler = transfer->context;
-
-    /* Set stack-overflow detection limits ONCE (C stack is reused) */
-    int stack_anchor;
-    oxphp_fiber_set_stack_limits_from_sp(&stack_anchor, EG(fiber_stack_size));
-    fiber->saved_stack_base = EG(stack_base);
-    fiber->saved_stack_limit = EG(stack_limit);
-
-    for (;;) {
-        oxphp_current_fiber = fiber;
-
-        /* Fresh VM stack per task (cheap emalloc, not mmap) */
-        EG(vm_stack) = zend_vm_stack_new_page(ZEND_FIBER_VM_STACK_SIZE, NULL);
-        EG(vm_stack_top) = EG(vm_stack)->top;
-        EG(vm_stack_end) = EG(vm_stack)->end;
-        EG(vm_stack_page_size) = ZEND_FIBER_VM_STACK_SIZE;
-        EG(current_execute_data) = NULL;
-        /* Start uncoupled from any in-progress trace recording (upstream
-         * zend_fiber_execute does the same on coroutine entry). */
-        EG(jit_trace_num) = 0;
-
-        ZVAL_UNDEF(&fiber->task_retval);
-
-        zend_try {
-            fiber->task_fci.retval = &fiber->task_retval;
-            fiber->task_fci.param_count = fiber->task_argc;
-            fiber->task_fci.params = fiber->task_args;
-            if (zend_call_function(&fiber->task_fci, &fiber->task_fcc) != SUCCESS) {
-                fiber->task_exc_class = strdup("RuntimeException");
-                fiber->task_exc_message = strdup("Failed to call async closure");
-            } else if (EG(exception)) {
-                task_capture_exception(fiber);
-            }
-        } zend_catch {
-            task_capture_fatal(fiber);
-        } zend_end_try();
-
-        /* The task is over: release the socket streams it claimed, so a sibling
-         * task waiting for one of them can go on. Same point, same reasoning as
-         * in request_fiber_coroutine. */
-        oxphp_claim_release_fiber(fiber);
-
-        oxphp_current_fiber = NULL;
-
-        /* Destroy this task's VM stack (emalloc'd — cheap) */
-        zend_vm_stack_destroy();
-
-        /* Mark completed and suspend back to scheduler. The fiber stays in
-         * the active list until the driver drains it (poll) and releases it. */
-        fiber->completed = true;
-
-        oxphp_fiber_park(fiber);
-
-        /* ── Resumed to run the next task (recycled fiber) ──
-         * spawn has reconstructed a fresh closure into task_fci/task_fcc,
-         * set task_args/argc, and cleared `completed` before resuming. */
-    }
-}
-
-/* Switch into a task fiber to run a NEW task — a fresh context whose coroutine
- * begins at its entry, or a recycled one parked at the bottom of its loop.
+/* Switch into a task fiber to run a NEW task — a fresh fiber whose loop begins
+ * at its entry, or a recycled one parked at the bottom of that loop.
  * Task-side mirror of oxphp_scheduler_start_fiber; a task carries no HTTP
  * request state, so the C-stack bounds are the only thing installed here. */
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
@@ -2153,14 +2117,16 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     }
 
     if (!reused) {
-        if (zend_fiber_init_context(
-                &fiber->context,
-                (void *)fiber,
-                task_fiber_coroutine,
-                EG(fiber_stack_size)) != SUCCESS) {
+        /* Create the Fiber object this task runs as. The C stack and the VM
+         * stack are allocated by zend_fiber_start on first entry, from
+         * oxphp_fiber_enter — not here. */
+        zend_object *obj = zend_ce_fiber->create_object(zend_ce_fiber);
+        if (!obj) {
             efree(fiber);
             return -1;
         }
+        fiber->zf = (zend_fiber *)obj;
+        oxphp_fiber_loop_fci(&fiber->zf->fci, &fiber->zf->fci_cache);
     }
 
     fiber->fiber_id = sched->next_fiber_id++;
@@ -2384,10 +2350,10 @@ static void oxphp_task_recycle_fiber(oxphp_fiber_scheduler *sched,
     }
     sched->fiber_count--;
 
-    /* Recycle: the looping coroutine keeps the C stack alive for reuse.
-     * zend_fiber_destroy_context only runs in oxphp_scheduler_destroy. Clear the
-     * suspension first, so no fiber sits on the free list still describing a
-     * descriptor wait. */
+    /* Recycle: the parked loop keeps the fiber's stacks alive for reuse, so the
+     * Fiber object is kept too — oxphp_fiber_release only runs in
+     * oxphp_scheduler_destroy. Clear the suspension first, so no fiber sits on
+     * the free list still describing a descriptor wait. */
     oxphp_fiber_clear_suspend(fiber);
     fiber->next = sched->free_list;
     sched->free_list = fiber;
