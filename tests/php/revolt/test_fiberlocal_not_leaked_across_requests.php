@@ -1,13 +1,12 @@
 <?php
 
 /**
- * RED. Fails on current behaviour.
- *
  * Revolt\EventLoop\FiberLocal keys its storage on \Fiber::getCurrent() and falls
  * back to one process-wide dummy fiber when there is none (FiberLocal::getFiberStorage()).
- * Worker-mode request fibers are not userland \Fiber objects, so every request on
- * the worker lands in that one slot — the storage amphp uses for per-operation
- * context becomes shared mutable state between unrelated requests.
+ * Worker-mode requests run as real \Fiber objects, so each gets its own slot.
+ * Were they bare fiber contexts instead, every request on the worker would land
+ * in that one fallback slot and the storage amphp uses for per-operation context
+ * would become shared mutable state between unrelated requests.
  *
  * Two directions are asserted, because the leak runs both ways:
  *   - a concurrent request must not read what this request wrote;

@@ -1,0 +1,33 @@
+# revolt/event-loop in traditional mode — the counterpart to compose.revolt.yml.
+#
+# No WORKER_FILE, so requests are not fiberized: \Fiber::getCurrent() is null
+# inside one and Revolt classifies the request as {main}. That is what keeps
+# EventLoop::run() usable here, and pinning it is the point of this profile —
+# the worker-mode profile asserts the opposite, and the two together record
+# exactly where the boundary falls.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.revoltclassic.yml up
+services:
+  oxphp-revoltclassic:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      RUNTIME_HOOKS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/revolt:/var/www/html/revolt

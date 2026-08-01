@@ -10,6 +10,10 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
+/// Mirrors `ffi::OXPHP_FIBER_UNWIND` so the suspend-point callers compile on a
+/// host without PHP. Nothing here ever returns it — the mocks never suspend.
+pub const OXPHP_FIBER_UNWIND: c_int = -9;
+
 // ── Value reading ──
 
 pub unsafe fn oxphp_val_type(_zv: *mut c_void) -> u8 {

@@ -3,6 +3,12 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
+/// Returned by a fiber suspend point when the resume that ended it delivered a
+/// pending PHP exception — the fiber is unwinding, not carrying on. Callers must
+/// return without raising an error of their own: one is already in flight, and
+/// adding a second would replace the real cause with a synthetic one.
+pub const OXPHP_FIBER_UNWIND: c_int = -9;
+
 #[allow(dead_code)]
 extern "C" {
     // ── Value reading ──
@@ -363,6 +369,8 @@ extern "C" {
 
     // ── Async plugin helpers ──
     pub fn oxphp_ht_has_non_shareable_objects(ht: *mut c_void) -> c_int;
+    // A suspend point returns FIBER_UNWIND when the resume that ended it
+    // delivered a pending PHP exception. See the constant below.
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_in_fiber() -> c_int;
     /// Cooperatively yield the current task fiber for one scheduler cycle.

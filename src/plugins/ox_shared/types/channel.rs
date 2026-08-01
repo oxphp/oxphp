@@ -2590,6 +2590,11 @@ fn invoke_channel_send(
                 -2 => {
                     return results::write_send(call, SendKind::Timeout);
                 }
+                // Unwinding with an exception already pending in PHP: leave the
+                // return value alone and raise nothing on top of it.
+                bridge_ffi::OXPHP_FIBER_UNWIND => {
+                    return Ok(());
+                }
                 other => {
                     // rc=1 means "not in oxphp fiber"; we only land here
                     // when in_fiber == true, so the SAPI predicate and
@@ -2703,6 +2708,9 @@ fn invoke_channel_recv(
                 // their payload arrives pre-serialised.)
                 results::write_recv_ok_inplace(call)
             }
+            // Unwinding with an exception already pending in PHP: leave the
+            // return value alone and raise nothing on top of it.
+            bridge_ffi::OXPHP_FIBER_UNWIND => Ok(()),
             -1 => {
                 // The waker dispatcher (`await_dispatch_callback`) reports
                 // failures through the bridge async-exception TLS — NOT
