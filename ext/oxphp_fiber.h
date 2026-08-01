@@ -324,6 +324,15 @@ void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
  * fiber synchronously on the same thread with nothing running in between. */
 extern __thread oxphp_request_fiber *oxphp_fiber_starting;
 
+/* Names the fiber the scheduler is currently switching into, for the whole time
+ * it is in there, and NULL otherwise. A fiber that wakes from a park to find the
+ * token naming someone else was resumed by userland — a request's own \Fiber
+ * object escapes through \Fiber::getCurrent() into any library that keys on the
+ * running fiber, and one of them resumed it. That wake installs none of the
+ * request's state and nothing in the scheduler is waiting on it, so the fiber
+ * refuses it instead of running on. */
+extern __thread oxphp_request_fiber *oxphp_fiber_resume_token;
+
 /* ─── Context switch primitives ────────────────────────── */
 
 /* Switch from the scheduler into `fiber`, delivering `value` (NULL = null).
