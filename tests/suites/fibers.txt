@@ -1,9 +1,9 @@
 # profile: fibers
-# description: Fiber-visible semantics of a worker-mode request — identity, nesting, suspend and resume refusal, blocked-switch fallback
+# description: Fiber-visible semantics of a worker-mode request — identity, nesting, suspend and resume refusal, sleeping from a tick handler
 
 fibers/test_fiber_identity
 fibers/test_nested_userland_fiber
 fibers/test_foreign_suspend_is_refused
 fibers/test_foreign_resume_is_refused
 fibers/test_async_task_is_a_fiber
-fibers/test_switch_blocked_falls_back
+fibers/test_sleep_in_tick_handler
