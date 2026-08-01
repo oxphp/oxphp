@@ -240,24 +240,48 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     }
 }
 
+/* Release a fiber's execution resources — its C stack, and for a request fiber
+ * the VM stack and the Fiber object it runs as. Called at scheduler teardown,
+ * where a request fiber can still be suspended in the middle of its request.
+ *
+ * The Fiber object's destructor is what resumes such a fiber with a graceful
+ * exit, so the request unwinds through the loop's zend_try instead of being
+ * abandoned with its C and VM stacks live. It is called explicitly rather than
+ * left to the reference drop below, because the drop is not guaranteed to reach
+ * it: a request that handed \Fiber::getCurrent() to something outliving the
+ * request keeps the object alive past that drop, and an unwind deferred to then
+ * would run on a loop frame whose fiber pointer the caller has already freed.
+ *
+ * Async task fibers still run as bare contexts and have no object to destroy. */
+static void oxphp_fiber_release(oxphp_request_fiber *fiber) {
+    if (!fiber->zf) {
+        zend_fiber_destroy_context(&fiber->context);
+        return;
+    }
+
+    zend_object *obj = &fiber->zf->std;
+    if (!(OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED)) {
+        GC_ADD_FLAGS(obj, IS_OBJ_DESTRUCTOR_CALLED);
+        obj->handlers->dtor_obj(obj);
+    }
+    OBJ_RELEASE(obj);
+    fiber->zf = NULL;
+}
+
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     /* Free any remaining active fibers */
     oxphp_request_fiber *fiber = sched->fibers_head;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
-        /* A fiber suspended mid-request may still hold socket streams; its
-         * entries would name freed memory once it is gone. Fibers on the free
-         * list below released theirs by completing. */
+        /* Before the bridge context and the parked state below: the unwind runs
+         * PHP, which still reads both. */
+        oxphp_fiber_release(fiber);
+        /* And after it, for the same reason: the unwind is PHP, so the request
+         * is still using — and can still take — a socket stream on its way out.
+         * A fiber suspended mid-request may hold claims whose entries would name
+         * freed memory once it is gone; fibers on the free list below released
+         * theirs by completing. */
         oxphp_claim_release_fiber(fiber);
-        if (fiber->zf) {
-            /* Transitional: releases the C and VM stacks of a request fiber
-             * parked at the bottom of its loop. Unwinding one suspended
-             * mid-request is the next step of this migration. */
-            OBJ_RELEASE(&fiber->zf->std);
-            fiber->zf = NULL;
-        } else {
-            zend_fiber_destroy_context(&fiber->context);
-        }
         oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
         oxphp_fiber_free_task_payload(fiber);
         efree(fiber);
@@ -269,15 +293,7 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     fiber = sched->free_list;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
-        if (fiber->zf) {
-            /* Transitional: releases the C and VM stacks of a request fiber
-             * parked at the bottom of its loop. Unwinding one suspended
-             * mid-request is the next step of this migration. */
-            OBJ_RELEASE(&fiber->zf->std);
-            fiber->zf = NULL;
-        } else {
-            zend_fiber_destroy_context(&fiber->context);
-        }
+        oxphp_fiber_release(fiber);
         oxphp_fiber_free_task_payload(fiber);
         efree(fiber);
         fiber = next;
