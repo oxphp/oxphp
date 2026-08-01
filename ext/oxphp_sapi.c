@@ -1257,6 +1257,9 @@ static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
  * predictable one. */
 static bool oxphp_fiber_owns_current_context(oxphp_request_fiber *self)
 {
+    if (self->zf) {
+        return EG(current_fiber_context) == &self->zf->context;
+    }
     return EG(current_fiber_context) == &self->context;
 }
 
@@ -1279,7 +1282,12 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     self->suspend_data.timer_id = timer_id;
 
     oxphp_current_fiber = NULL;
-    oxphp_fiber_park(self);
+    if (oxphp_fiber_park(self) != 0) {
+        /* Unwinding: an exception is already pending. Return to PHP without
+         * adding one of our own so the VM tears the request down through the
+         * loop's zend_try, which already recognises a graceful exit. */
+        return OXPHP_FIBER_UNWIND;
+    }
     /* --- RESUMED on timer expiry, OR force-resumed by the scheduler when the
      * task was cancelled (awaiter gave up) or the server is draining. */
     if (self->drain_kill) {
@@ -1351,7 +1359,12 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     self->suspend_data.io.deadline_ns = deadline_ns;
 
     oxphp_current_fiber = NULL;
-    oxphp_fiber_park(self);
+    if (oxphp_fiber_park(self) != 0) {
+        /* Unwinding: an exception is already pending. Return to PHP without
+         * adding one of our own so the VM tears the request down through the
+         * loop's zend_try, which already recognises a graceful exit. */
+        return OXPHP_FIBER_UNWIND;
+    }
     /* --- RESUMED once one descriptor is ready or the deadline passed, OR
      * force-resumed by the scheduler when the task was cancelled (awaiter gave
      * up) or the server is draining. */
@@ -1382,6 +1395,7 @@ PHP_FUNCTION(oxphp_sleep)
 
     uint64_t duration_us = (uint64_t)(seconds * 1000000.0);
     int rc = oxphp_fiber_sleep_us(duration_us);
+    if (rc == OXPHP_FIBER_UNWIND) return;
     if (rc < 0) {
         oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                               "Async task cancelled", 0);
@@ -1406,6 +1420,7 @@ PHP_FUNCTION(oxphp_usleep)
     if (microseconds <= 0) return;
 
     int rc = oxphp_fiber_sleep_us((uint64_t)microseconds);
+    if (rc == OXPHP_FIBER_UNWIND) return;
     if (rc < 0) {
         oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                               "Async task cancelled", 0);
@@ -1524,10 +1539,14 @@ static ZEND_NAMED_FUNCTION(oxphp_hooked_sleep)
         RETURN_THROWS();
     }
 
-    if (num > 0 && oxphp_fiber_sleep_us((uint64_t) num * 1000000) < 0) {
-        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
-                              "Async task cancelled", 0);
-        return;
+    if (num > 0) {
+        int rc = oxphp_fiber_sleep_us((uint64_t) num * 1000000);
+        if (rc == OXPHP_FIBER_UNWIND) return;
+        if (rc < 0) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+            return;
+        }
     }
     RETURN_LONG(0);
 }
@@ -1549,9 +1568,13 @@ static ZEND_NAMED_FUNCTION(oxphp_hooked_usleep)
         RETURN_THROWS();
     }
 
-    if (num > 0 && oxphp_fiber_sleep_us((uint64_t) num) < 0) {
-        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
-                              "Async task cancelled", 0);
+    if (num > 0) {
+        int rc = oxphp_fiber_sleep_us((uint64_t) num);
+        if (rc == OXPHP_FIBER_UNWIND) return;
+        if (rc < 0) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+        }
     }
 }
 
@@ -1872,6 +1895,11 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
         };
         struct oxphp_io_owner owner;
         int rc = oxphp_fiber_io_wait(&pfd, &owner, 1, budget_ns);
+        if (rc == OXPHP_FIBER_UNWIND) {
+            /* Unwinding with an exception already pending — return the read's
+             * error value and add nothing of our own. */
+            return -1;
+        }
         if (rc == 0) {
             /* Declined the suspension — a userland fiber scheduler owns the
              * context, so nothing was waited for. Step aside completely: with
@@ -3072,6 +3100,11 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
         }
 
         int rc = oxphp_fiber_io_wait(fds, owners, nfds, left_ns);
+        if (rc == OXPHP_FIBER_UNWIND) {
+            /* Unwinding with an exception already pending — leave the return
+             * value alone and add nothing of our own. */
+            goto done;
+        }
         if (rc == 0) {
             /* Declined — nothing was waited for, so the call is handed over
              * untouched, arrays included. */
@@ -4322,7 +4355,12 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     }
 
     oxphp_current_fiber = NULL;
-    oxphp_fiber_park(self);
+    if (oxphp_fiber_park(self) != 0) {
+        /* Unwinding: an exception is already pending. Return to PHP without
+         * adding one of our own so the VM tears the request down through the
+         * loop's zend_try, which already recognises a graceful exit. */
+        return OXPHP_FIBER_UNWIND;
+    }
     /* --- RESUMED by scheduler when promise result is ready, when the task was
      * cancelled (awaiter gave up), or when the per-call deadline elapsed. Disarm
      * the deadline first; then unwind on cancel/timeout by signalling the caller
@@ -4363,7 +4401,12 @@ int oxphp_fiber_suspend_for_yield(void) {
     self->suspend_data.timer_id = timer_id;
 
     oxphp_current_fiber = NULL;
-    oxphp_fiber_park(self);
+    if (oxphp_fiber_park(self) != 0) {
+        /* Unwinding: an exception is already pending. Return to PHP without
+         * adding one of our own so the VM tears the request down through the
+         * loop's zend_try, which already recognises a graceful exit. */
+        return OXPHP_FIBER_UNWIND;
+    }
     /* --- RESUMED on the next scheduler tick once the timer expires --- */
     if (self->drain_kill) {
         oxphp_fiber_drain_bail();

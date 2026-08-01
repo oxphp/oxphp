@@ -1,0 +1,11 @@
+# profile: revoltclassic
+# description: revolt/event-loop in traditional mode — where run() still works
+#
+# revolt/event-loop v1.0.9 is vendored at tests/fixtures/revolt (MIT).
+#
+# The counterpart to the revolt suite. Traditional-mode requests are not
+# fiberized, so everything the worker-mode profile asserts about per-request
+# fiber identity is absent here — including the one consequence users can trip
+# over, that Revolt refuses to run its loop from inside a fiber.
+
+revoltclassic/test_traditional_request_runs_the_loop

@@ -248,6 +248,9 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
     match fiber_rc {
         // 0 = done via fiber, retval already written
         0 => Ok(()),
+        // The fiber is unwinding with an exception already pending in PHP.
+        // Return without raising one of our own so the real cause survives.
+        ffi::OXPHP_FIBER_UNWIND => Ok(()),
         // 1 = not in a fiber, fall through to blocking path
         1 => {
             let rc = unsafe { ffi::oxphp_bridge_await_dispatch(promise_id, timeout, retval) };
@@ -352,6 +355,12 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
             -3 => {
                 strand_promises(&ids[i..]);
                 return Err(async_err("Async task cancelled"));
+            }
+            // Unwinding with an exception already pending: abandon the rest of
+            // the set as the other bail arms do, but raise nothing.
+            ffi::OXPHP_FIBER_UNWIND => {
+                strand_promises(&ids[i..]);
+                return Ok(());
             }
             _ => {
                 strand_promises(&ids[i..]);

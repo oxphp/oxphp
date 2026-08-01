@@ -45,6 +45,10 @@ typedef enum {
     OXPHP_SUSPEND_IO_WAIT,      /* waiting for readiness of a file descriptor */
 } oxphp_suspend_reason;
 
+/* A suspend point returns this when its resume delivered a pending exception:
+ * the caller must return to PHP at once and add no exception of its own. */
+#define OXPHP_FIBER_UNWIND (-9)
+
 /* ─── Per-Fiber PHP State ──────────────────────────────── */
 
 #define OXPHP_SYMBOL_GLOBAL_COUNT 6
@@ -113,8 +117,19 @@ typedef struct {
 /* ─── Request Fiber ────────────────────────────────────── */
 
 typedef struct _oxphp_request_fiber {
-    /* Low-level fiber context (VM state saved automatically on switch) */
+    /* Low-level fiber context (VM state saved automatically on switch).
+     * Used by task fibers, which still run as bare contexts. Request fibers
+     * leave it zeroed and run inside `zf` below instead. */
     zend_fiber_context context;
+
+    /* The userland Fiber object a REQUEST fiber runs as; NULL for a task fiber.
+     * Owned: one reference from creation until oxphp_scheduler_destroy. Its
+     * embedded zend_fiber_context stands in for the bare `context` above, which
+     * is what makes \Fiber::getCurrent() inside a request return an object
+     * unique to that request — and that in turn is what stops libraries keyed on
+     * the current fiber (event loops, context storages, fiber-locals) from
+     * filing every concurrent request under one key. */
+    zend_fiber *zf;
 
     /* Pointer back to scheduler context for suspend */
     zend_fiber_context *scheduler;

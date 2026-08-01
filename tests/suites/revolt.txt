@@ -3,11 +3,11 @@
 #
 # revolt/event-loop v1.0.9 is vendored at tests/fixtures/revolt (MIT).
 #
-# Characterization first: it establishes that Revolt runs at all in a worker
-# request and why (\Fiber::getCurrent() is null there, so Revolt sees {main}).
-# The two that follow are RED — they assert the isolation that follows from
-# "one request, one context", which the shared {main} key does not provide.
+# Characterization first: it establishes that a worker request is a real \Fiber,
+# so Revolt keys per-request rather than collapsing every request onto {main}.
+# The two that follow assert the isolation that follows from "one request, one
+# context".
 
-revolt/test_worker_request_looks_like_main
+revolt/test_worker_request_is_a_fiber
 revolt/test_suspension_not_shared_across_requests
 revolt/test_fiberlocal_not_leaked_across_requests
