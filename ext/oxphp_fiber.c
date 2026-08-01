@@ -964,9 +964,8 @@ void oxphp_fiber_init_request_state(void) {
  * recycled fiber's copy belongs to nothing that is still running. Everything the
  * new request needs is already installed by the caller's per-request prep
  * (oxphp_soft_reset on the fast path, oxphp_bridge_prepare_request +
- * oxphp_fiber_init_request_state on the event-loop path); the coroutine builds a
- * fresh VM stack on every iteration, and zend_fiber_switch_context carries the
- * Zend side for both kinds of fiber.
+ * oxphp_fiber_init_request_state on the event-loop path), and the engine carries
+ * the Zend side across the switch itself.
  *
  * Resuming a genuinely suspended fiber is oxphp_scheduler_resume_fiber(). */
 void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
@@ -1061,8 +1060,8 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * Must happen AFTER send_response since the response reads from RESPONSE TLS. */
     oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
 
-    /* Do NOT destroy fiber context — the looping coroutine keeps the C stack
-     * alive for reuse. zend_fiber_destroy_context is only called in
+    /* Do NOT release the fiber — its loop is parked at the bottom, keeping the C
+     * and VM stacks alive for the next request. oxphp_fiber_release runs only in
      * scheduler_destroy (final cleanup). */
 
     /* Remove from active list */
