@@ -293,6 +293,17 @@ extern __thread oxphp_request_fiber *oxphp_current_fiber;
  * so Rust can tag async promise ownership at creation. */
 uint64_t oxphp_fiber_current_id(void);
 
+/* ─── Context switch primitives ────────────────────────── */
+
+/* Switch from the scheduler into `fiber`, delivering `value` (NULL = null).
+ * Returns once the fiber suspends or parks at the bottom of its loop. Callers
+ * are responsible for the C-stack-bound save/restore around it. */
+void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value);
+
+/* Suspend the running fiber back to its scheduler. Called from the fiber's own
+ * context only. Returns 0 when the fiber was resumed normally. */
+int oxphp_fiber_park(oxphp_request_fiber *fiber);
+
 /* ─── Scheduler API ────────────────────────────────────── */
 
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched);

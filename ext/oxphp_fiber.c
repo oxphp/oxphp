@@ -77,6 +77,32 @@ static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *f
     }
 }
 
+/* ─── Context switch primitives ────────────────────────── */
+
+/* The only two places the engine's context switch is called. Every path into a
+ * fiber goes through the first and every park goes through the second, so the
+ * pair is the single seam where the switching mechanism can be changed. */
+
+void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
+    zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
+    if (value) {
+        ZVAL_COPY_VALUE(&transfer.value, value);
+    } else {
+        ZVAL_NULL(&transfer.value);
+    }
+
+    zend_fiber_switch_context(&transfer);
+}
+
+int oxphp_fiber_park(oxphp_request_fiber *fiber) {
+    zend_fiber_transfer transfer = { .context = fiber->scheduler, .flags = 0 };
+    ZVAL_NULL(&transfer.value);
+
+    zend_fiber_switch_context(&transfer);
+
+    return 0;
+}
+
 /* ─── Scheduler Init / Destroy ─────────────────────────── */
 
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
@@ -298,9 +324,7 @@ static void request_fiber_coroutine(zend_fiber_transfer *transfer) {
          * Scheduler will resume us for the next request (looping coroutine). */
         fiber->completed = true;
 
-        zend_fiber_transfer ret = { .context = fiber->scheduler, .flags = 0 };
-        ZVAL_NULL(&ret.value);
-        zend_fiber_switch_context(&ret);
+        oxphp_fiber_park(fiber);
 
         /* ── HANDED THE NEXT REQUEST ─────────────────────────
          * A start, not a resume: nothing was restored from php_state, and this
@@ -686,10 +710,7 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
-    zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
-    ZVAL_NULL(&transfer.value);
-
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_enter(fiber, NULL);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -716,14 +737,7 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
-    zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
-    if (value) {
-        ZVAL_COPY_VALUE(&transfer.value, value);
-    } else {
-        ZVAL_NULL(&transfer.value);
-    }
-
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_enter(fiber, value);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -1839,9 +1853,7 @@ static void task_fiber_coroutine(zend_fiber_transfer *transfer) {
          * the active list until the driver drains it (poll) and releases it. */
         fiber->completed = true;
 
-        zend_fiber_transfer ret = { .context = fiber->scheduler, .flags = 0 };
-        ZVAL_NULL(&ret.value);
-        zend_fiber_switch_context(&ret);
+        oxphp_fiber_park(fiber);
 
         /* ── Resumed to run the next task (recycled fiber) ──
          * spawn has reconstructed a fresh closure into task_fci/task_fcc,
@@ -1860,9 +1872,7 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
-    zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
-    ZVAL_NULL(&transfer.value);
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_enter(fiber, NULL);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -1880,13 +1890,7 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
-    zend_fiber_transfer transfer = { .context = &fiber->context, .flags = 0 };
-    if (value) {
-        ZVAL_COPY_VALUE(&transfer.value, value);
-    } else {
-        ZVAL_NULL(&transfer.value);
-    }
-    zend_fiber_switch_context(&transfer);
+    oxphp_fiber_enter(fiber, value);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
