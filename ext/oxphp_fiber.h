@@ -81,6 +81,12 @@ typedef struct {
 
     /* SAPI state */
     zend_llist sapi_headers;
+    /* The content type the engine recorded for this response, which output
+     * handlers (mbstring, iconv) read to decide whether to convert what a
+     * request writes. Thread-global like the rest of SG(sapi_headers), so a
+     * suspended request would otherwise resume reading whichever request
+     * touched it last. Owned while set. */
+    char *sapi_mimetype;
     int http_response_code;
     bool headers_sent;
 

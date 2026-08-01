@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Verify that fatals do not make a worker grow without bound.
+# Verify that serving requests does not make a worker grow without bound.
+#
+# A worker keeps the memory its requests run on: nothing gives a request's
+# allocations back at the end of one, the way a request-per-script server does.
+# Anything a request does not return is therefore held for the life of the
+# worker, and anything it holds per request grows without bound. Two shapes of
+# request are checked — one that fatals, and one that ends normally.
+#
+# ── The fatal ────────────────────────────────────────────────────────────────
 #
 # A fatal is a bailout: a longjmp out of the frame that raised it. The request
 # loop catches it and serves the next request on the same fiber, so whatever the
@@ -18,10 +26,17 @@
 #      a long time — it fills space already claimed — so it is measured against
 #      a control of the same requests without the fatal.
 #
+# ── The ordinary request ─────────────────────────────────────────────────────
+#
+# A request that ends normally must cost its worker nothing at all. The shape
+# that is easiest to get wrong is the one that sends no Content-Type of its own:
+# the engine allocates the default and hands it to the request, expecting it
+# back at a request end that worker mode does not have.
+#
 # Checked from outside the request harness on purpose: the signal is the whole
 # worker's allocator across many requests, which no single request can observe.
 #
-# Usage: verify_fatal_does_not_grow_worker.sh [count] [--jsonl]
+# Usage: verify_worker_does_not_grow.sh [count] [--jsonl]
 #   count    how many requests per phase (default 1500)
 #   --jsonl  emit one result object per check on stdout instead of a human
 #            report, for run_all.sh to fold into its report
@@ -36,11 +51,17 @@ for arg in "$@"; do
 	esac
 done
 
-# What a request is allowed to cost a worker on top of its control. The control
-# is the same request without the fatal, so this covers only the difference
-# between the two paths; a single leaked op_array copy is an order of magnitude
-# more than this for even a small script.
-SLACK_PER_REQUEST=64
+# What a fatal is allowed to cost on top of its control. The control is the same
+# request without the fatal, so this covers only the difference between the two
+# paths; a single leaked op_array copy is an order of magnitude more than this
+# for even a small script.
+SLACK_PER_FATAL=64
+
+# What an ordinary request is allowed to cost. Not a difference between two
+# paths this time but the whole cost, and the whole cost of a request that
+# returns everything it took is zero — so this is a rounding allowance, not a
+# budget. One leaked default content type is 32 bytes.
+SLACK_PER_REQUEST=8
 
 cd "$(dirname "$0")/.."
 COMPOSE="docker compose -f compose.yml -f compose.fibers.yml"
@@ -93,10 +114,17 @@ fire "${base}/fixture_fatal.php?fatal=1"
 fatal_after="$(read_mem used)"
 real_after="$(read_mem real)"
 
+# Phase 3: an ordinary request that leaves the Content-Type to the engine.
+curl -s -o /dev/null "${base}/fixture_no_content_type.php"
+plain_before="$(read_mem used)"
+fire "${base}/fixture_no_content_type.php"
+plain_after="$(read_mem used)"
+plain_cost=$(( (plain_after - plain_before) / N ))
+
 $COMPOSE down -v > /dev/null 2>&1
 
 fatal_cost=$(( (fatal_after - fatal_before) / N ))
-say "per request over ${N}: clean ${clean_cost} B, fatal ${fatal_cost} B; allocator ${real_before} -> ${real_after} B"
+say "per request over ${N}: clean ${clean_cost} B, fatal ${fatal_cost} B, no Content-Type ${plain_cost} B; allocator ${real_before} -> ${real_after} B"
 
 if [ "$real_after" -le "$real_before" ]; then
 	ok "${N} fatals leave the worker's allocator where it was"
@@ -104,11 +132,18 @@ else
 	bad "${N} fatals leave the worker's allocator where it was" "grew from ${real_before} to ${real_after} bytes"
 fi
 
-if [ "$fatal_cost" -le $(( clean_cost + SLACK_PER_REQUEST )) ]; then
+if [ "$fatal_cost" -le $(( clean_cost + SLACK_PER_FATAL )) ]; then
 	ok "a fatal costs a worker no more than the same request without one"
 else
 	bad "a fatal costs a worker no more than the same request without one" \
 		"${fatal_cost} B per fatal against ${clean_cost} B per clean request, over ${N} each"
+fi
+
+if [ "$plain_cost" -le "$SLACK_PER_REQUEST" ]; then
+	ok "a request that sends no Content-Type of its own costs the worker nothing"
+else
+	bad "a request that sends no Content-Type of its own costs the worker nothing" \
+		"${plain_cost} B per request over ${N}"
 fi
 
 exit "$fail"
