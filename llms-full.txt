@@ -187,7 +187,7 @@ This copies your application into the container. The default `DOCUMENT_ROOT` is 
 
 For real-world applications, use a multi-stage Dockerfile with separate `dev` and `prod` targets. The `dev` target includes PHP CLI, Composer, and Xdebug. The `prod` target builds on the minimal OxPHP image with only what's needed in production.
 
-> **Tip:** A ready-to-use version of this Dockerfile is available at [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository. Copy it into your project and adjust the extensions to match your needs.
+> **Tip:** A ready-to-use version of this Dockerfile is available at [`examples/dockerfile/Dockerfile`](../../examples/dockerfile/Dockerfile) in the repository. Copy it into your project and adjust the extensions to match your needs.
 
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
@@ -839,7 +839,7 @@ COPY --chown=www-data:www-data . /var/www/html
 
 The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.10.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
-> **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
+> **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
 ### 3. Add a compose.yaml
 
@@ -2908,6 +2908,7 @@ Additional constraints:
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
+- **No end of script inside a task** — a task is not a request, so `register_shutdown_function()` called from an async closure registers a callback that never runs: there is no response for it to write into and no request for it to be the end of, and it is discarded when the task finishes. Do that work at the end of the closure itself
 
 ## Docker Example
 
@@ -3179,7 +3180,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 | `500.html` | Internal Server Error | An uncaught or fatal PHP error |
 | `503.html` | Service Unavailable | Graceful draining during shutdown |
 | `504.html` | Gateway Timeout | The request exceeded `REQUEST_TIMEOUT_SECONDS` |
-| `529.html` | Site is overloaded | The request queue is full at `QUEUE_CAPACITY` (`Retry-After` is preserved) |
+| `529.html` | Site is overloaded | The request spent its `QUEUE_WAIT_TIMEOUT_MS` budget without reaching a worker — waiting for a queue slot, or waiting in the queue — or `QUEUE_MAX_WAITING` requests were already waiting (`Retry-After` is preserved) |
 
 Any other 4xx or 5xx works the same way — add a `403.html`, `451.html`, and so on for codes your PHP application returns, or for a custom `PHP_DENY_FALLBACK` status. The one exception is the rate limiter's `429`, which is produced before this handler runs and always uses its default body (see **Notes** below).
 
@@ -3763,7 +3764,7 @@ The APM plugin is a compile-time feature (`plugin-apm`) that depends on the OTel
 |----------|---------|-------------|
 | `OTEL_APM_ENABLED` | `false` | Enable APM: auto-instrumentation, error capture, PHP SDK. Requires `OTEL_ENABLED=true`. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_SLOW_QUERY_MS` | `100` | Slow query threshold in milliseconds. Queries above this get `oxphp.db.slow=true` on their spans |
-| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
+| `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED` | `false` | Record bind parameters in the `db.params` span attribute. **Values are recorded raw — unlike `db.statement`, they are not obfuscated, so this can place PII (emails, tokens, etc.) in your traces. Enable only where that is acceptable.** Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Maximum size in bytes of the `exception.stacktrace` attribute. Over the cap the stacktrace is truncated from the tail (the root frame is kept) with a `…(truncated)` marker. `0` disables truncation |
 | `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Maximum size in bytes of the `exception.message` attribute (default matches New Relic's per-attribute value limit). Over the cap the message is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 
@@ -3904,20 +3905,36 @@ When the OTel plugin is active, request IDs are derived from the trace context: 
 
 ## APM: Automatic Instrumentation
 
-When the APM plugin is enabled, OxPHP automatically hooks 33 internal PHP functions at the engine level. Every call to a hooked function creates a child span under the current request's root span — with zero code changes required.
+When the APM plugin is enabled, OxPHP automatically hooks 34 internal PHP functions at the engine level. Every call to a hooked function creates a child span under the current request's root span — with zero code changes required.
 
 ### Hooked Functions
 
 | Category | Functions |
 |----------|-----------|
 | **PDO** | `PDO::__construct`, `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute` |
-| **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::execute` |
+| **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::prepare`, `mysqli_stmt::execute` |
 | **cURL** | `curl_init`, `curl_setopt`, `curl_exec`, `curl_multi_exec` |
 | **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hget`, `Redis::hset`, `Redis::lpush`, `Redis::rpush` |
 | **Memcached** | `Memcached::get`, `Memcached::set`, `Memcached::delete`, `Memcached::getMulti`, `Memcached::setMulti` |
 | **File I/O** | `fopen`, `fread`, `fwrite`, `file_get_contents`, `file_put_contents` |
 
 Hooks are only installed for extensions that are actually loaded. If your build does not include the Redis extension, the Redis hooks are silently skipped.
+
+### Database Span Attributes
+
+Database hooks (PDO, mysqli) decorate their spans with OpenTelemetry semantic-convention attributes:
+
+| Attribute | Source | Example |
+|-----------|--------|---------|
+| `db.statement` | Query text with literal values replaced by `?`, so PII (emails, tokens) never reaches the tracing backend | `SELECT * FROM users WHERE email = ?` |
+| `db.operation` | Leading SQL keyword | `SELECT` |
+| `db.system` | Parsed from the PDO DSN / mysqli constructor | `mysql`, `postgresql`, `sqlite` |
+| `server.address`, `server.port` | Connection host/port (omitted for a unix socket or SQLite file) | `db.internal`, `5432` |
+| `db.name` | Database name, or the file path for SQLite | `shop` |
+| `oxphp.db.slow` | `true` when the call's wall-time meets or exceeds `OTEL_APM_SLOW_QUERY_MS` | `true` |
+| `db.params` | Bound parameters, recorded **raw (not obfuscated)** — so they can contain PII; **only** when `OTEL_APM_DB_CAPTURE_PARAMS_ENABLED=true` | `[1, active]` |
+
+`db.statement` is read from each `query` / `exec` / `prepare` call's own arguments, so it appears on that span. On a `PDOStatement::execute` span it is *also* present, read from the statement object's own `queryString` property (so it can never be another statement's SQL). A `mysqli_stmt::execute` span has no `db.statement` — mysqli exposes no such property — but the SQL is on the preceding `mysqli::prepare` span. Every `execute` span carries the timing (and thus the slow-query flag) and, for PDO, `db.params`. Cache (Redis, Memcached), HTTP-client (cURL), and file-I/O hooks emit a bare timing span.
 
 ### How It Works
 
@@ -4419,7 +4436,7 @@ These functions do **not** suspend the fiber:
 | `oxphp_stream_flush()` | Sends a chunk to the client immediately and returns. Use with `oxphp_sleep()` in SSE loops |
 | `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
 
-> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread. Always use `oxphp_sleep()` and `oxphp_usleep()` to get cooperative behavior.
+> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. See [Configuration](../operations/configuration.md).
 
 ## PHP Examples
 
@@ -4494,9 +4511,11 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - `file_get_contents()`, `fopen()`, `fread()`
 - `curl_exec()`, `curl_multi_exec()`
 - PDO queries, `mysqli_query()`
-- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead)
+- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep`)
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
+
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 
@@ -4730,6 +4749,8 @@ curl -s http://localhost:9090/config | jq .
   "php_workers": "8",
   "tokio_workers": 4,
   "queue_capacity": 1024,
+  "queue_wait_timeout_ms": 1000,
+  "queue_max_waiting": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
@@ -7436,7 +7457,7 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 1. **Set `WORKER_MODE_ENABLED=true`** and point **`ENTRY_FILE`** at your bootstrap script. This enables worker mode for all PHP workers in the pool.
 2. **PHP starts and runs the outer scope once** — autoloader registration, configuration loading, database connections, and any other initialization code execute a single time.
 3. **Call `oxphp_worker(callback)`** to enter the request loop. OxPHP begins dispatching incoming HTTP requests to your callback.
-4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `php://input`), output buffers, and response headers are reset automatically. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope.
+4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, and response headers are reset automatically. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is the exception and is deliberately **not** reset — see [Superglobals](../php/superglobals.md#_env).
 5. **Outer scope persists** — variables defined before `oxphp_worker()`, static properties, database connections, and autoloaders remain available across all requests handled by that worker.
 
 > **Note:** Worker mode changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.
@@ -7506,6 +7527,8 @@ Workers are automatically recycled (restarted with a fresh PHP process) when any
 - **Consecutive errors** — the worker encounters 3 consecutive handler failures (fatal errors, timeouts, or unhandled exceptions). Note that `exit()`/`die()` calls are not counted as failures
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
+
+Other requests the same worker was serving concurrently — suspended in `oxphp_async_await()`, `oxphp_sleep()`, or a socket read under `RUNTIME_HOOKS` — do not get to finish: each is cancelled where it is suspended and answered with `503 Service Unavailable` and a `Retry-After`, after running its own shutdown functions. Recycling is therefore visible to clients whose requests happen to be in flight, which is worth knowing when choosing `WORKER_MAX_MEMORY_MIB` or calling `scheduleExit()` on a worker that serves concurrent requests. A full server shutdown is different: there, in-flight requests get the drain window to finish normally.
 
 ## Development Reloading
 
@@ -10826,7 +10849,7 @@ This is deliberate. The two numbers exist for capacity / OOM monitoring; that mo
 - `Registry::count()` is **not** equal to `count(Registry::keys())`. `keys()` is the named namespace only.
 - `memoryUsage()` is a **static accounting estimate**, not actual RSS. It is the same number that `SHARED_MAX_BYTES` caps. For the real heap footprint, use a heap profiler (`heaptrack`, `jemalloc_stats_print`, `mi_stats_print`) or container memory metrics.
 
-Per-entry detail — id, type, refcount, byte cost — lives on the [internal introspection endpoint](../operations/internal-server.md) at `/__ox_shared/entries`. There is intentionally no per-entry PHP API to avoid duplicating that surface.
+Per-entry detail — id, type, refcount, byte cost — lives on the [internal introspection endpoint](../features/internal-server.md) at `/__ox_shared/entries`. There is intentionally no per-entry PHP API to avoid duplicating that surface.
 
 ## When not to use
 
@@ -12550,6 +12573,8 @@ oxphp_sleep(float $seconds): void
 
 Sleeps for the specified duration. Inside a worker mode handler running in a fiber, this call is cooperative — it suspends the current fiber so other requests can be processed during the wait. Outside a fiber, it falls back to a standard blocking `usleep()`.
 
+> **Not superseded by `RUNTIME_HOOKS`.** `oxphp_sleep()` cooperates in worker mode with no configuration and accepts fractional seconds. `RUNTIME_HOOKS=sleep` is a separate, opt-in retrofit that makes *native* `sleep()`/`usleep()` calls (e.g. inside third-party code) cooperate as well — it does not remove the need for `oxphp_sleep()` in code you control. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+
 **Parameters:**
 - `$seconds` — Duration to sleep in seconds. Fractional values are accepted (e.g. `0.5` for 500 milliseconds). Values of `0` or less return immediately.
 
@@ -13639,13 +13664,37 @@ if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
 
 ## $_REQUEST
 
-`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). OxPHP does not modify this behavior.
+`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). The merge itself follows PHP's rules unchanged.
 
 ```php
 <?php
 // GET /form?action=preview with POST body: action=submit
 $action = $_REQUEST['action'];  // "submit" (POST overrides GET with default order)
 ```
+
+> **Worker mode:** `$_REQUEST` is rebuilt for every request. PHP normally builds it lazily, once, when a script that mentions it is first loaded — which in a persistent worker would mean every later request reading the first one's parameters. OxPHP forces the rebuild instead, so the merged array always describes the request being served.
+
+---
+
+## $_ENV
+
+`$_ENV` holds the process environment. In traditional mode it behaves exactly as in PHP-FPM: PHP repopulates it from the environment on every request, subject to `variables_order`.
+
+**Worker mode pins it.** A worker bootstraps once, and `.env` loaders (vlucas/phpdotenv, symfony/dotenv, Laravel's `Env`) write their values straight into `$_ENV` without touching the process environment. Repopulating `$_ENV` per request would therefore erase the application's configuration from its second request onward, so in worker mode the array is kept for the life of the worker once it exists — writes your bootstrap makes there stay visible to every request that worker serves.
+
+```php
+<?php
+// bootstrap, before oxphp_worker()
+Dotenv\Dotenv::createImmutable(__DIR__)->load();   // writes into $_ENV
+
+oxphp_worker(function () {
+    echo $_ENV['DATABASE_URL'];  // still there on request 10_000
+});
+```
+
+> **Trade-off:** because nothing rebuilds `$_ENV` in worker mode, `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` report no variables there. Read the environment with `getenv()`, or from `$_ENV` directly — it holds both the process values and whatever your bootstrap added. This applies to worker mode only; traditional, framework and SPA modes are unaffected.
+
+The pinning relies on PHP's default `auto_globals_jit=1`. With `auto_globals_jit=0`, PHP repopulates `$_ENV` from the process environment on every request before any extension can intervene, and a `.env` loader's values will not survive in worker mode.
 
 ---
 
@@ -13877,7 +13926,7 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
-| `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections |
+| `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
 ## PHP Workers
@@ -13887,7 +13936,21 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `EXECUTOR` | `sapi` | PHP executor backend. `sapi` for PHP execution, `stub` for benchmarking without PHP |
 | `PHP_WORKERS` | CPU / 2 (min 1) | Worker pool size. `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker stays idle before being retired (dynamic mode only) |
-| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Returns 529 when full. For dynamic pools (`MIN:MAX`), initial workers = minimum count |
+| `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Requests arriving at a full queue wait for a slot (see `QUEUE_WAIT_TIMEOUT_MS`). For dynamic pools (`MIN:MAX`), initial workers = minimum count. `0` = auto |
+| `QUEUE_WAIT_TIMEOUT_MS` | `1000` | How long a request may spend waiting for a PHP worker before it is rejected with 529. One deadline, stamped on arrival, covering both waits a request can face: for a slot in the queue, and inside the queue for a worker. A request reached by a worker after its deadline has passed is refused at pickup rather than executed, so the budget bounds the whole wait and not just its admission half — it does not bound how long the handler then runs. At most `QUEUE_MAX_WAITING` requests wait at once; past that, requests are rejected immediately. `0` = reject immediately whenever the queue is full. Lower it, or set `0`, when the application calls back into this same server over HTTP — the inner call cannot be admitted until the outer one releases its worker, so the wait is spent for nothing — or when a load balancer in front has a shorter timeout of its own. A client that goes away mid-wait gives its place back immediately, so a balancer that times out and retries does not fill the waiting set with attempts it has already abandoned — but only where the disconnect is reported at all. An HTTP/1.1 client that closes mid-request is invisible to the server until it next writes, and there the abandoned attempt does hold its place for the rest of the budget; keeping the budget below the balancer's timeout is what avoids that |
+| `QUEUE_MAX_WAITING` | Initial workers × 128, capped at `MAX_CONNECTIONS` / 2 | Maximum requests parked waiting for a queue slot at once. Past it, requests are rejected immediately instead of waiting. Each waiter holds a connection and a fully buffered request body for as long as it waits, so this is a bound on resources held, not on waits that will pay off; the `MAX_CONNECTIONS` / 2 cap keeps headroom for the server to accept and refuse under sustained overload. Size it from your own handler latency — see below. `0` = auto, never below 1 |
+
+### Sizing the Waiting Set
+
+How many requests can *usefully* wait follows from how fast the pool retires them. With `W` workers and a handler that takes `T` milliseconds, the pool admits `W / T` requests per millisecond, so a budget of `B` milliseconds can let in about `W × B / T` waiters. Everything past that waits the whole budget and is refused anyway, holding a connection and a buffered request body the entire time.
+
+The default cannot compute this — service rate is not known at startup — so it is deliberately generous. That fits fast handlers, where the pool drains a deep backlog well inside the budget, and is far too large for slow ones: with 8 workers, the default 1 s budget and a 200 ms handler, only about 40 requests can be admitted in time while the default parks up to 1024.
+
+```bash
+QUEUE_MAX_WAITING=40
+```
+
+Setting it near `W × B / T` turns the surplus into an immediate 529 rather than a 529 a second later. Shortening `QUEUE_WAIT_TIMEOUT_MS` achieves the same by the other term — the two trade against each other, and on a slow handler the smaller budget is usually the better lever, because it also bounds how long a client waits for the refusal.
 
 ### Static vs Dynamic Workers
 
@@ -14071,6 +14134,54 @@ The async worker pool handles fire-and-forget background tasks dispatched from P
 
 A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a startup error — falling back to a default would silently disable or misconfigure the pool. An exactly-empty value is treated as unset.
 
+## Runtime Hooks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUNTIME_HOOKS` | _(off)_ | Opt-in replacement of blocking PHP builtins with fiber-suspending implementations. `1`/`true`/`all` enables every hook category; a comma-separated list enables specific categories (e.g. `RUNTIME_HOOKS=sleep,streams`) |
+
+| Category | What it hooks |
+|----------|---------------|
+| `sleep` | Native `sleep()` and `usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
+| `streams` | Two waits suspend the current fiber instead of pinning the worker thread: a blocking **read** on a `tcp://` socket stream, and **`stream_select()`**. The read covers clients that block on one socket — `fsockopen()`, `stream_socket_client()`, HTTP stream wrappers, mysqlnd (PDO_MySQL, mysqli), phpredis; `stream_select()` covers loops that wait on several at once. No code changes either way. Clients that wait some other way are unaffected (see below) |
+
+Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
+
+What the `streams` hook makes cooperative is a blocking read on a PHP socket stream and a wait inside `stream_select()`. Before counting on it, check that your client waits one of those two ways — several common ones do not, and for them nothing changes:
+
+- **ext/curl.** `curl_exec()` and `curl_multi_*` talk to sockets themselves, below PHP streams, so the hook never sees them. This covers every HTTP client built on curl — Guzzle with its default handler among them. A curl client can be pointed at the stream wrapper handler instead, which does go through PHP streams.
+- **`socket_select()`.** That is ext/sockets, a different API on raw descriptors, and it is not hooked. `stream_select()` is. The same applies to the wait inside `stream_socket_accept()`, which is not hooked either.
+- **Streams from `socket_export_stream()`.** They carry a different ops table, private to PHP, which cannot be patched from an extension.
+- **`unix://`, `udp://` and `udg://` streams.** Same reason: their ops tables are private to PHP.
+- **`ssl://` and `tls://` once crypto is active.** Before `stream_socket_enable_crypto()` succeeds, an SSL stream's reads are delegated to the plain socket read and therefore do suspend; from the handshake onward they do not.
+- **Connecting and DNS resolution.** A client that holds its connection open benefits on every query; connection setup does not.
+- **MySQL reached through `localhost`.** The MySQL client reads `localhost` as "use the unix socket", which is not a `tcp://` stream — write `127.0.0.1` in the DSN instead. This applies to PDO_MySQL and mysqli alike, and is easy to miss because everything still works, just without the benefit.
+- **Writes.** Only reads wait. Read readiness holds still as long as one fiber owns the descriptor and nothing else drains it, whereas room in the send buffer is granted and withdrawn by the peer, so a fiber woken on writability can find the window closed again by the time the write runs, after which PHP blocks the thread for its full timeout regardless. A write that fills the socket buffer therefore behaves exactly as it does without the hook. In practice this costs little: waiting on a reply is what takes time, not handing a query to the kernel. (Writes are still looked at, for one thing only: which fiber's exchange the connection is currently carrying — see the note on shared connections below. On a connection no other fiber is using, which is every connection in the ordinary case, the write runs the native path untouched.)
+
+Within that scope the hook keeps the native contract: socket timeouts (`stream_set_timeout()`, `default_socket_timeout`) apply unchanged, a timed-out read still reports `timed_out` through `stream_get_meta_data()`, and stream identity is untouched, so `socket_import_stream()` and similar keep working. One limit on the timeout: the deadline is only examined once per scheduler tick, so it fires no sooner than the next tick — at best 100 µs in worker mode and 1 ms in the async pool, and longer under load, since a tick lasts as long as whatever the worker is running. With `default_socket_timeout` at 60 seconds this is not something most deployments can observe.
+
+`stream_select()` is hooked by waiting on the descriptors its three arrays name and then handing the call to PHP with the timeout set to zero, so PHP still decides everything you can observe: the return count, the rewriting of the arrays down to the ready streams, the warnings, and the argument errors. The wait is skipped — and the call runs exactly as it would without the hook — whenever the arrays hold something the hook will not stand in for: a read stream with data already buffered (which `stream_select()` answers from the buffer, without looking at a descriptor), a stream that has no descriptor at all, an element that is not a live stream (a closed one left in the array, say — PHP answers that with an error, not a wait), a descriptor the kernel will not watch for readiness at all — a regular file is the usual case, and one counts as ready the moment you ask — or a descriptor at or past `FD_SETSIZE`, which PHP's own `select()` refuses outright. That last one is a real ceiling rather than a formality: a busy worker can hold more than 1024 open descriptors, and a `stream_select()` naming one of them fails the same way with or without the hook.
+
+Two more things worth knowing:
+
+- **One connection shared between concurrent fibers is safe for the clients OxPHP guards, and gains nothing.** This is the normal shape of a worker-mode application rather than an edge case: WordPress, Laravel and Symfony open their database and cache clients once when the worker boots and hand the same ones to every request, and short of rewriting their data-access layer they cannot be asked for one connection per fiber. A client protocol is a sequence of exchanges — write a command, read the answer — with nothing on the connection marking where one ends, so a fiber parked on a read is parked in the middle of one, and a second fiber's command landing there breaks the protocol. The two clients fail at that differently, and neither well: mysqlnd tracks its connection state and refuses the command from it, before sending anything, while phpredis has no such check and the two fibers read each other's replies — one request's data returned to another with no error raised. A fiber therefore claims a connection before using it, at both of the levels this has to happen at: the socket ops, which keep the bytes in order, and the client entry points of PDO and mysqli, since mysqlnd's refusal comes before any I/O and nothing at the socket can be reached in time to prevent it. Another fiber reaching the same connection waits for it to be given up at the client level, where nothing but the connection's identity is held; at the socket level it does not wait but is refused, the way a socket timeout is refused, because a fiber suspended inside an operation on someone else's stream would be holding a pointer its owner may free. phpredis is guarded at the client level too, method by method, for exactly that reason. What the client level claims is the connection itself and not the PHP object holding it, so a persistent connection reached through several PDO objects counts as one, and a connection opened with `PDO::connect()` — which returns the driver's own subclass rather than a `PDO` — is covered like any other. Read the hook's gain, then, as belonging to connections a fiber opens for itself: an async task making its own HTTP or database calls, a request opening its own client. What a shared connection gets is the worker thread back while it waits, so other requests can run the work that is not on that connection; its own exchanges run one after another, exactly as they do with the hook off. Three boundaries are worth knowing. **First**, a fiber that queried once keeps the connection to the end of its request, because the end of the request is the first moment certainly past the end of an exchange — and it keeps it while parked on anything else as well, so a request that has queried and then waits on work of its own that needs the same connection is waiting for itself, and the two come apart on the bound below instead of proceeding. **Second**, waiting is always bounded: by the smaller of `max_execution_time` and `default_socket_timeout`. Set neither and that bound is 30 seconds, since a server SAPI takes the engine's defaults — 30 for the first and 60 for the second; it is `default_socket_timeout`'s 60 only where `max_execution_time` is 0. `max_execution_time` is read as the request currently has it, since `set_time_limit()` is how a request states how long it may run; `default_socket_timeout` is read as the process started with, because it is the default deadline of a socket *operation* and a request narrowing it for a call of its own — a common thing for a library to do, and to leave behind — must not shorten this bound for the requests that follow it on the same worker. Past the bound the call falls back on unguarded behaviour and says why in the server log — for PDO and mysqli it is handed to the client, whose own refusal of a command issued mid-exchange is the error the application already handles, while for phpredis, which has no such refusal and would instead read someone else's reply, it raises a `RedisException` and sends nothing. A socket-level conflict has no bound of its own because it never waits: the operation fails at once the way a timeout does, so `stream_get_meta_data()` reports `timed_out`. Two fibers each holding what the other waits for therefore come apart on that bound instead of waiting on each other for good. **Third**, some cases are deliberately left uncovered. A statement or result object kept across requests, which no claimed call precedes — `PDOStatement::execute()` on a statement prepared in an earlier request behaves as it does with no claim at all. Constructing a second handle on a persistent connection while another fiber is mid-exchange on it: PDO checks that a pooled connection is alive before handing it over, that check fails mid-exchange, and PDO answers by dropping the connection. A protocol written by hand on a raw socket — write a command, suspend on something else, read the reply later — since the socket level only refuses while the holder is parked on the reply itself, and between those two points another fiber takes the connection over; the three clients above are covered here by their client-level claim, which a hand-written protocol has no equivalent of. And anything that reaches a connection outside a fiber altogether, such as a destructor run by the engine's cycle collector between requests, which no claim can see.
+- Running the hook underneath a userland fiber scheduler (AMPHP, Revolt) falls back to blocking I/O. A fiber started by such a scheduler runs on its own context, which OxPHP's scheduler cannot resume, so the hook detects this and takes the native path rather than corrupting either scheduler. This is about a fiber a userland scheduler starts *inside* a request. The request's own fiber is one OxPHP drives, and in worker mode it is a real `Fiber` — `Fiber::getCurrent()` inside a request returns it — so libraries that only need to tell concurrent requests apart work without any fallback. The same fact is why Revolt refuses to run its event loop from inside a worker-mode request; see the note on that in the changelog.
+
+`1`, `true` and `all` enable **every** category, `streams` included. A deployment already setting `RUNTIME_HOOKS=1` for the sleep hooks therefore starts hooking sockets on upgrade without any edit of its own; list the categories explicitly (`RUNTIME_HOOKS=sleep`) if that is not what you want. Enabling `streams` also patches one entry of PHP's stream ops table in memory at startup; the page is put back the way it was found, but on a platform where its original protection cannot be determined it stays writable — a small loss of hardening, reported in the server log.
+
+Cost, measured: about 3–5 µs per socket round trip on a worker with nothing else parked, about 5–6 µs with 64 fibers parked on descriptors, and about 7–11 µs with 200. Readiness is resolved through a set the kernel keeps between waits, so what the figure tracks is how many descriptors became ready, not how many are waiting. An idle worker waits on those descriptors rather than sleeping for a fixed interval and noticing readiness on its next tick, which matters a great deal: sleeping blind cost roughly 2 ms per round trip instead.
+
+A wide `stream_select()` carries an overhead the narrow case does not, because every descriptor a call names is registered before the wait and removed after it. Measured with the waiting itself taken out — every descriptor already readable, so the call returns at once and only the overhead remains — it is about 6 µs against 5 µs unhooked at one descriptor, 56 µs against 9 µs at 64, and 130–150 µs against 16–21 µs at 200: roughly 0.65 µs per descriptor.
+
+Read that as a fixed cost per call, not as a slowdown of the same work. A `stream_select()` that actually waits — which is what a select loop is written for — dwarfs it: a millisecond of waiting makes even the 200-descriptor figure about a tenth of the call, and what it buys is the worker thread, which the unhooked call holds for the whole wait. Two shapes are the exception, and for them the category is better left off: a call over many descriptors that almost never waits, because there is no thread time to recover; and a request that *is* the event loop, where the thread has nothing else to run anyway. Clients that wait on one connection — mysqlnd, phpredis, the HTTP stream wrappers — sit at the top of the table, where the overhead is around a microsecond.
+
+**When to use `RUNTIME_HOOKS` vs. `oxphp_sleep()`.** The hook does not replace the first-party primitive — they cover different cases:
+
+- Reach for `oxphp_sleep()` / `oxphp_usleep()` in code you write. They suspend the fiber in worker mode **unconditionally**, with no environment flag, and `oxphp_sleep()` accepts fractional seconds (`oxphp_sleep(0.25)`) — a precision native `sleep()` (integer seconds) cannot express.
+- Enable `RUNTIME_HOOKS=sleep` for code you **cannot** edit — a framework or vendor library that calls native `sleep()`/`usleep()` directly. It is off by default, applies only inside a fiber, and keeps the native contract (a hooked `sleep()` still takes an `int` and returns `0`).
+
+Relying on `RUNTIME_HOOKS` for your own handlers ties their cooperativeness to a deployment setting rather than the code; prefer the explicit `oxphp_sleep()` there.
+
 ## Shared State
 
 In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mutex`, `Once`, `Pool`, `Atomic`, `Flag`, `Registry`). See [Shared State](../shared-state/shared-state.md) for the API tour.
@@ -14195,6 +14306,8 @@ curl -s http://localhost:9090/config | jq .
   "php_workers": "8",
   "tokio_workers": 4,
   "queue_capacity": 1024,
+  "queue_wait_timeout_ms": 1000,
+  "queue_max_waiting": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
@@ -14270,14 +14383,14 @@ When a shutdown signal is received, OxPHP follows this sequence:
 
 1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port. PHP workers continue running to process in-flight requests.
 2. **Wind down live connections** — HTTP/2 clients receive a `GOAWAY` frame and idle HTTP/1.1 keep-alive connections are closed, so clients move to a healthy instance instead of multiplexing new requests into the dying one. Open streams are ended promptly and cleanly — any response that has started flushing chunked output counts, finite downloads as well as SSE — see [Server-Sent Events](../features/sse.md#behaviour-on-shutdown).
-3. **Drain in-flight requests** — ordinary active requests are left alone to finish with their full responses. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work.
+3. **Drain in-flight requests** — ordinary active requests are left alone to finish with their full responses. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work. Work that a request keeps doing after `oxphp_finish_request()` counts as in-flight too, even though its connection is already gone.
 4. **Enforce the drain deadline** — requests still running after `DRAIN_TIMEOUT_SECONDS` are cancelled (their `register_shutdown_function()` callbacks still run) and given ~2 seconds to unwind before the server proceeds.
 5. **Flush plugins** — access-log entries and APM spans buffered during the drain window are flushed.
 6. **Shut down async pool** — the background async task pool is stopped.
 7. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
 8. **Exit** — the process exits with status code 0.
 
-> **Note:** PHP workers are stopped explicitly during step 1 — the executor's `shutdown()` is called as part of stopping the main server, which signals worker threads to exit after finishing any in-progress request.
+> **Note:** PHP worker threads are not stopped at the start of the sequence — they are signalled to exit and joined at the very end, once the drain has finished and the process is on its way out. That is why the drain has to account for work still running on a worker even when no client connection is left.
 
 ## Configuration
 
@@ -14359,16 +14472,18 @@ During a graceful shutdown, OxPHP emits structured log messages you can monitor:
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"INFO","message":"Draining in-flight connections","active_connections":3}
+{"level":"INFO","message":"Draining in-flight connections","active_connections":3,"in_flight_requests":4}
 {"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
+
+The two counts overlap rather than partition: `active_connections` is live client connections, `in_flight_requests` is requests still executing on PHP workers, and a request holding a connection is counted in both. A request that ended its response early with `oxphp_finish_request()` appears only in `in_flight_requests` — its connection is already gone while its background work runs.
 
 **Drain deadline reached:**
 
 ```json
 {"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1}
+{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1,"in_flight_requests":1}
 {"level":"INFO","message":"All connections drained"}
 {"level":"INFO","message":"Server stopped"}
 ```
@@ -14497,6 +14612,8 @@ curl -s http://localhost:9090/config | jq .
   "php_workers": "8",
   "tokio_workers": 4,
   "queue_capacity": 1024,
+  "queue_wait_timeout_ms": 1000,
+  "queue_max_waiting": 1024,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
@@ -14652,8 +14769,9 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_active_connections` | gauge | Currently open TCP connections on the main port |
-| `oxphp_pending_requests` | gauge | Requests currently dispatched to PHP workers (queued and in-flight) |
+| `oxphp_pending_requests` | gauge | PHP requests accepted but not yet answered — waiting for a queue slot, queued, or executing. Only requests routed to PHP: a static file, a 404 or a denied path is answered without the queue and never appears here |
 | `oxphp_dropped_requests_total` | counter | Requests where the PHP worker failed after accepting the request |
+| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first three are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those three specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
 
 ## Worker Pool Metrics
 
@@ -14662,8 +14780,8 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_workers_current` | gauge | Current number of PHP worker threads |
 | `oxphp_workers_min` | gauge | Minimum worker count (equals current count in static mode) |
 | `oxphp_workers_max` | gauge | Maximum worker count (equals current count in static mode) |
-| `oxphp_workers_idle` | gauge | Workers not currently processing a request |
-| `oxphp_busy_workers` | gauge | Workers currently processing a request |
+| `oxphp_workers_idle` | gauge | Worker threads with no request in flight, computed as `workers_current - busy_workers` |
+| `oxphp_busy_workers` | gauge | Worker threads currently executing at least one request; never exceeds `oxphp_workers_current`. Counts threads, not requests — in worker mode one thread multiplexes many request fibers and still counts once. Requests waiting for admission or sitting in the queue are not counted; those appear in `oxphp_pending_requests` |
 | `oxphp_workers_spawned_total` | counter | Total workers spawned since startup (includes initial workers) |
 | `oxphp_workers_retired_total` | counter | Total workers retired due to idle timeout (dynamic mode only) |
 
@@ -14683,9 +14801,11 @@ Per-worker observability emitted by the worker supervisor. Each series carries a
 |--------|------|-------------|
 | `oxphp_queue_wait_us` | histogram | Time a request waits in the queue before a worker picks it up, in microseconds |
 
-Bucket boundaries (microseconds): `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `50000`, `+Inf`.
+Bucket boundaries (microseconds): `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `50000`, `100000`, `250000`, `500000`, `1000000`, `+Inf`.
 
-High queue wait times indicate that all workers are busy and you should increase `PHP_WORKERS` or `QUEUE_CAPACITY`.
+This measures time spent waiting — for admission and then in the queue — with the script's own execution time subtracted, so it answers "how long before a worker picked this up" rather than "how long did the request take". Requests refused with 529 never queued and are not recorded here; count those with `oxphp_admission_refused_total`.
+
+High queue wait times indicate that all workers are busy and you should increase `PHP_WORKERS`. The range reaches one second, matching the default `QUEUE_WAIT_TIMEOUT_MS`, so a request that spent most of its wait budget before running is quantified rather than lumped into `+Inf`. Nothing that gets served waits longer than the budget — past it the request is refused instead — so raising `QUEUE_WAIT_TIMEOUT_MS` is the one setting that puts waits back into `+Inf`.
 
 ## Rate Limiting Metrics
 
@@ -14791,6 +14911,8 @@ rate(oxphp_responses_by_status_total{status="5xx"}[5m])
 ```text
 oxphp_busy_workers / oxphp_workers_current
 ```
+
+This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
 
 **Queue saturation (drop rate per second):**
 
@@ -14916,7 +15038,15 @@ When all current workers are busy, OxPHP spawns new workers up to the maximum. W
 
 Between the async HTTP layer and the worker pool sits a bounded queue. Its capacity defaults to the initial worker count multiplied by 128 and can be overridden with `QUEUE_CAPACITY`. For a static pool, the initial count is the configured worker count. For a dynamic pool (`MIN:MAX`), the initial count is the minimum.
 
-When the queue is full — meaning all workers are busy and the queue has reached capacity — OxPHP immediately returns a `529 Site is Overloaded` response to the client with a `Retry-After` header. Status code 529 (non-standard, used by Cloudflare and others) clearly distinguishes overload from application errors (500) and maintenance (503), making it easier to configure alerts and load balancers.
+A request that arrives at a full queue is not rejected outright — it waits for a slot for up to `QUEUE_WAIT_TIMEOUT_MS` (default: 1000 ms) and is admitted as soon as a worker picks up the request ahead of it. Waiting requests are admitted in arrival order. The budget is a single deadline stamped on arrival and it follows the request into the queue: one reached by a worker after that deadline has passed is refused at pickup instead of executed, so the budget bounds the whole wait rather than its admission half — which matters because the queue is deep enough that reaching its tail on a slow pool takes far longer than any budget an operator would set. Load is therefore shed on elapsed wait time rather than on the queue depth at the instant the request arrived: a burst that drains in microseconds is served, while a pool that genuinely cannot keep up still sheds.
+
+The budget bounds how long a request waits to **enter** the queue, not how long it waits overall. An admitted request still sits in the queue until a worker reaches it, so response time under load is the admission wait plus the queue wait plus execution time — the budget is not a ceiling on any of the latter two.
+
+`QUEUE_MAX_WAITING` caps how many requests may be waiting at once (default: initial workers × 128, capped at half of `MAX_CONNECTIONS`); past it, admission goes back to rejecting immediately. Waiting is not free — a waiting request holds its connection, and its already-buffered body, until it is admitted or the budget runs out — so an uncapped waiting set would consume every connection permit under sustained overload, block the accept loop, and leave the server dropping new connections instead of answering them. The default approximates how many requests the pool can actually admit inside the budget: waiting past that only defers a rejection while holding those resources. The `MAX_CONNECTIONS` / 2 ceiling is what keeps the server able to accept a connection and refuse it. Note that both terms are sized in connections while the budget is spent by requests: over HTTP/2 one connection carries many requests, so an h2-heavy deployment reaches the cap from a fraction of its connection budget and should set `QUEUE_MAX_WAITING` explicitly.
+
+Only when the wait budget runs out does OxPHP return a `529 Site is Overloaded` response with a `Retry-After` header. Status code 529 (non-standard, used by Cloudflare and others) clearly distinguishes overload from application errors (500) and maintenance (503), making it easier to configure alerts and load balancers. Setting `QUEUE_WAIT_TIMEOUT_MS=0` disables the wait and rejects the moment the queue is full.
+
+Because waiting requests occupy a connection rather than a queue slot, the concurrency ceiling under overload is set by `MAX_CONNECTIONS` rather than `QUEUE_CAPACITY` — and over HTTP/2 by `MAX_CONNECTIONS` multiplied by `H2_MAX_CONCURRENT_STREAMS`, since each stream carries a request of its own. Size the wait budget with that in mind: the request body is already buffered by the time a request reaches the queue, so a longer budget means a genuinely overloaded server holds proportionally more requests — and their bodies — in memory before answering.
 
 ## Request Flow
 

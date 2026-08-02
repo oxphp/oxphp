@@ -69,6 +69,12 @@ All notable changes to OxPHP are documented in this file.
 - **`oxphp_queue_wait_us` now has buckets reaching one second.** The boundaries stopped at 50 ms, while a request may wait up to `QUEUE_WAIT_TIMEOUT_MS` — a second by default — before it is refused, so every wait long enough to be worth acting on landed in `+Inf` together and the histogram could report that waits were long but not how long. The range and the budget now line up: a request that is served waited less than the budget by construction, so the top boundary is the point past which there is nothing left to resolve. Four boundaries are added (`100000`, `250000`, `500000`, `1000000`); the existing `le` series keep their meaning and existing queries keep working. The new tail matches `oxphp_request_duration_us`, so queue wait and total duration can now be read against each other bucket for bucket.
 - **The default `FRAME_OPTIONS` is now `SAMEORIGIN` instead of `DENY`.** Out of the box OxPHP now allows a page to be framed by other pages on the same origin, while still blocking the cross-origin framing that clickjacking relies on — matching the common default of nginx, Rails, and other servers, and unbreaking legitimate same-origin embedding (admin previews, dashboard widgets, same-origin payment components) that `DENY` blocked. This is a slight relaxation of the default policy: a deployment that relied on the built-in `DENY` to forbid *all* framing, including same-origin, must now set `FRAME_OPTIONS=DENY` explicitly to keep that behavior. The emitted headers are unchanged per value (`SAMEORIGIN` → `X-Frame-Options: SAMEORIGIN` + `Content-Security-Policy: frame-ancestors 'self'`), and an application that sets its own `X-Frame-Options` or a CSP `frame-ancestors` directive still overrides the server default entirely. An invalid `FRAME_OPTIONS` value now falls back to `SAMEORIGIN` (the new default) rather than `DENY`.
 
+- **The documentation moved from `docs/en/` up to `docs/`.** With the translations gone (see below) the language directory held one language and named nothing, so every page lost a path segment: `docs/en/features/tls.md` is now `docs/features/tls.md`. Links between documentation pages are relative and were unaffected; links from the README, the changelog, the PHP stub's `@link` annotations, and the generated `llms.txt` were rewritten. Existing links into `docs/en/…` — from old release notes, issues, or search results — no longer resolve.
+
+### Removed
+
+- **The Russian and Chinese translations have left the repository for [oxphp.dev](https://oxphp.dev/).** `docs/ru/`, `docs/zh/`, `README.ru.md` and `README.zh.md` are gone. Both languages are published on the site alongside French, Polish and Japanese, which the repository never carried — keeping a second and third copy of every page in git meant every documentation change was either three commits or two pages that quietly drifted out of date, and the site is where the translations are maintained now. The English documentation stays in the repository under `docs/`. Links into `docs/ru/…` or `docs/zh/…` no longer resolve; the language switcher in the README and in `docs/index.md` points at the site instead.
+
 ## [0.10.0] - 2026-07-12
 
 ### Migration from 0.9.0
@@ -207,7 +213,7 @@ The client/proxy source port stays available to PHP via `$_SERVER['REMOTE_PORT']
 - A `Shared\*` value returned from an `oxphp_async()` closure could be freed before the awaiting fiber materialized it, so `await` resolved a dead reference to `NULL`. The async return path now pins nested shared references into a keepalive before deep-freeing the return `zval` and releases it only after the fiber deserializes — mirroring the same in-transit fix already present on the channel path.
 - Decorator nesting overflow now fails loudly. Past the nesting limit (raised 32 → 256) the per-thread context stack silently reused its top slot, corrupting outer frames' context during unwind; `begin()` now throws the new `OxPHP\Decorator\StackOverflowException` and `begin`/`end` stay balanced. The depth counter is reset per request so it cannot accumulate on a long-lived worker.
 - `OxPHP\Shared\Map\KeyCursor::key()` is declared as `mixed` rather than the union `int|string`. The bridge's return-type wire format cannot encode a union, so the union degraded to "no return type" and tripped PHP's tentative-return-type deprecation against the `Iterator::key(): mixed` contract; `mixed` matches the interface (the stub keeps the precise `int|string` hint for IDEs and static analysis).
-- `OxPHP\Http\Request::file()` and `Request::files()` now return the uploaded files instead of always `null` / `[]`. The object upload API documented in `docs/en/php/request-api.md` is wired to the request's parsed `$_FILES`: `file('avatar')` yields an `OxPHP\Http\UploadedFile` (or the first file of an array field `name="avatar[]"`, or `null` when the field is absent), `files('photos')` returns every file of one field, and `files()` returns a flat list of every upload. The scalar (`name="avatar"`), sequential-array (`name="avatar[]"`) and associative-array (`name="avatar[key]"`) `$_FILES` shapes are all handled. The `UploadedFile` accessors (`name()`, `clientType()`, content-detected `type()`, `size()`, `tmpPath()`, `error()`, `isValid()`, `moveTo()`) were already present; only the two `Request` entry points were stubbed, so code following the documented examples saw no files and had to fall back to the `$_FILES` superglobal.
+- `OxPHP\Http\Request::file()` and `Request::files()` now return the uploaded files instead of always `null` / `[]`. The object upload API documented in `docs/php/request-api.md` is wired to the request's parsed `$_FILES`: `file('avatar')` yields an `OxPHP\Http\UploadedFile` (or the first file of an array field `name="avatar[]"`, or `null` when the field is absent), `files('photos')` returns every file of one field, and `files()` returns a flat list of every upload. The scalar (`name="avatar"`), sequential-array (`name="avatar[]"`) and associative-array (`name="avatar[key]"`) `$_FILES` shapes are all handled. The `UploadedFile` accessors (`name()`, `clientType()`, content-detected `type()`, `size()`, `tmpPath()`, `error()`, `isValid()`, `moveTo()`) were already present; only the two `Request` entry points were stubbed, so code following the documented examples saw no files and had to fall back to the `$_FILES` superglobal.
 
 ## [0.6.0] - 2026-05-28
 
@@ -273,7 +279,7 @@ $prev = $c->set(0);
 `Map`, `Channel`, and `Pool` now also implement `\Countable`, so
 `count($map)`, `count($ch)`, `count($pool)` work without calling the
 method directly. The rationale and the rules for new methods live in
-[`docs/en/shared-state/shared-naming.md`](docs/en/shared-state/shared-naming.md).
+[`docs/shared-state/shared-naming.md`](docs/shared-state/shared-naming.md).
 
 **5. `OxPHP\Server\Worker` — drop the `get` prefix**
 
@@ -381,7 +387,7 @@ $f->compareAndSet($e, $n); // unchanged (now also accepts optional $success / $f
   Timeout parameters on the `*Timeout` methods are `int $ms (> 0)` in milliseconds, not `?float $seconds` — zero, negative, non-int, and absent values raise `OxPHP\Shared\TypeException` (use `try*` or the bare verb for those policies). The Channel `RecvResult` `value()` accessor throws `OxPHP\Shared\SharedException` if called on a non-Ok variant; use `isOk()` / `valueOr()` / `status()` to dispatch. The Mutex closure signature changed from `function ($value): mixed` (return-to-commit) to `function (&$value): mixed` (by-ref mutation; the return value becomes the caller's return value). `Shared\TimeoutException` is removed — `OperationTimeoutException` (now under `Async\AsyncException`) replaces it for `withLockTimeout` and the Pool-saturated path; `Shared\ClosedException` remains registered but is deprecated and only thrown by the still-unmigrated `Shared\Pool`; `Shared\PoisonedException` is now a first-class part of the redesigned `Shared\Once` (its `Poison` failure mode) and is no longer deprecated. `Shared\DeadlockException` is reparented from `Shared\TimeoutException` to `Async\AsyncException`, so a single `catch (Async\AsyncException)` now sweeps every concurrency outcome across Shared\* and Async\*.
 - `Shared\Counter` reshaped to a minimal accumulator: `inc()`, `dec()`, `addBatch()`, and `reset()` were removed in favour of `add(int $delta = 1)` (covers increment and decrement) and `set(0)` (windowed reset, returns the previous value). `get()`, `set()`, `compareAndSet()`, and `id()` are retained with their 0.5.0 signatures; `add()` gains a default delta of `1`. All operations switched from `SeqCst` to `Relaxed` — a Counter is statistics, not a synchronisation point; use `Shared\Atomic` (with an explicit `Ordering`) to synchronise other memory, run an ordered CAS, or store arbitrary atomic int state.
 - `oxphp_async_await_any(array, ?float): array` was renamed to `oxphp_async_await_race(array, ?float): array`. The implementation is unchanged — first settled (success or failure) wins, as before. If your code relied on this behavior, replace the function name in-place.
-- `OxPHP\Shared\*` method naming unified across types. The renames below are mechanical (semantics and signatures unchanged), and ship without alias shims — update call sites with sed before upgrading. The rules are documented at [`docs/en/shared-state/shared-naming.md`](docs/en/shared-state/shared-naming.md).
+- `OxPHP\Shared\*` method naming unified across types. The renames below are mechanical (semantics and signatures unchanged), and ship without alias shims — update call sites with sed before upgrading. The rules are documented at [`docs/shared-state/shared-naming.md`](docs/shared-state/shared-naming.md).
   - `Channel::pending()` → `Channel::count()`
   - `Pool::size()` → `Pool::count()`
   - `Flag::test()` → `Flag::isSet()`
@@ -401,7 +407,7 @@ $f->compareAndSet($e, $n); // unchanged (now also accepts optional $success / $f
 - `OxPHP\Async\AggregateAsyncException` (extends `AsyncException`) — new exception class. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>`.
 - `OxPHP\Async\TimeoutException::getPartialErrors(): array<int, \Throwable>` and `getCancelledPromiseIds(): list<int>` — new methods. Existing throw sites (`oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`) populate them with empty arrays; only `oxphp_async_await_any()` timeouts fill them. The cancelled-id list is an audit trail — those promises have already been signalled to cancel and their receivers stranded, so they cannot be re-awaited.
 - `OxPHP\Shared\Map`, `OxPHP\Shared\Channel`, and `OxPHP\Shared\Pool` now `implements \Countable`. `count($map)`, `count($channel)`, and `count($pool)` work directly without calling the `->count()` method. For `Pool` the count covers total live slots (in-use + idle).
-- Naming guide for `OxPHP\Shared\*` published at `docs/en/shared-state/shared-naming.md`. New `Shared\*` primitives must follow the rules listed there (`get`/`load` for reads, `set`/`store` for writes, `count()` via `\Countable`, `is*` for boolean getters, `try*` for non-blocking attempts, `fetch*` for atomic RMW returning prev value).
+- Naming guide for `OxPHP\Shared\*` published at `docs/shared-state/shared-naming.md`. New `Shared\*` primitives must follow the rules listed there (`get`/`load` for reads, `set`/`store` for writes, `count()` via `\Countable`, `is*` for boolean getters, `try*` for non-blocking attempts, `fetch*` for atomic RMW returning prev value).
 - `OxPHP\Shared\Once\Status` (unbacked enum: `Uninitialized`, `Pending`, `Ready`, `Poisoned`) and `OxPHP\Shared\Once\FailureMode` (backed-int enum: `Reset = 0`, `Poison = 1`). `Once::status(): Once\Status` reports the cell's state and never throws; `Once::getOrInit(callable): mixed` is the canonical race-free get-or-init (it replaces `init()`). `Once::__construct` takes `Once\FailureMode $onFactoryError = Reset` to choose retryable-vs-terminal factory-failure behaviour.
 - `OxPHP\Shared\Registry` — name-keyed process-global handles for every `Shared\*` type. `Registry::map($key, $factory)`, `Registry::counter($key, $factory)`, etc. (one method per type, plus an untyped `Registry::global($key, $factory)` escape hatch) bind a `Shared\*` entry under a string key so every worker thread and every request that reaches the same key converges on the same entry. The factory runs at most once per successful bind (block-losers across worker threads; reentrancy from inside its own factory throws `Shared\DeadlockException`). Named entries are pinned for process lifetime; `Registry::remove($key): bool` drops the binding (the underlying object survives while any handle holds it, and the next typed call under the same key creates a NEW entry — documented namespace-management semantics). `Registry::keys(): array` lists currently-bound keys. `Registry::memoryUsage(): int` and `Registry::count(): int` report the whole Shared\* layer (estimate, not RSS; transient — `count() != count(keys())`). Closes the gap where the `new Shared\*()` bootstrap pattern produced per-worker instances rather than one shared entry; in traditional mode it also gives same-host APCu-style cross-request persistence.
 
@@ -458,10 +464,10 @@ Headline work since `v0.4.0`: a **canonical entry-script + worker-mode model** (
 
 ### Added
 
-- New PHP class `OxPHP\Server\Worker` — unified runtime handle for worker introspection. Methods: `current`, `isWorkerMode`, `getId`, `getStartTime`, `getRequestCount` (1-based count of requests handled by this OS thread; grows in both modes since traditional reuses persistent threads), `getMemoryUsage`, `getRss`, `getMaxMemoryBytes`, `scheduleExit`, `isExitScheduled`, `getExitReason`, `serve`. Available in both traditional and worker modes. See `docs/en/php/worker-class.md`.
+- New PHP class `OxPHP\Server\Worker` — unified runtime handle for worker introspection. Methods: `current`, `isWorkerMode`, `getId`, `getStartTime`, `getRequestCount` (1-based count of requests handled by this OS thread; grows in both modes since traditional reuses persistent threads), `getMemoryUsage`, `getRss`, `getMaxMemoryBytes`, `scheduleExit`, `isExitScheduled`, `getExitReason`, `serve`. Available in both traditional and worker modes. See `docs/php/worker-class.md`.
 - New PHP exception `OxPHP\Server\Exception\InvalidServeContextException`, thrown by `Worker::serve()` when called outside worker mode.
 - `Worker::scheduleExit()` — application-driven worker recycling. Marks the current worker for graceful exit after the active request completes; the supervisor respawns a fresh worker, re-running the outer scope. Companion methods `Worker::isExitScheduled()` and `Worker::getExitReason()` expose the pending exit state. No-op in traditional mode.
-- Environment variables `ENTRY_FILE` and `WORKER_MODE_ENABLED` — single canonical entry script plus an explicit worker-mode toggle. `ENTRY_FILE` selects the routing mode by extension (unset = direct mapping, `*.php` = front controller, non-`.php` = SPA fallback). When `WORKER_MODE_ENABLED=true`, `ENTRY_FILE` must point at a `.php` script and the server runs persistent workers. Resolution accepts relative paths (against `DOCUMENT_ROOT`, including `..`) and absolute paths. The startup `mode_decided` log line records which combination was selected. See `docs/en/operations/configuration.md`.
+- Environment variables `ENTRY_FILE` and `WORKER_MODE_ENABLED` — single canonical entry script plus an explicit worker-mode toggle. `ENTRY_FILE` selects the routing mode by extension (unset = direct mapping, `*.php` = front controller, non-`.php` = SPA fallback). When `WORKER_MODE_ENABLED=true`, `ENTRY_FILE` must point at a `.php` script and the server runs persistent workers. Resolution accepts relative paths (against `DOCUMENT_ROOT`, including `..`) and absolute paths. The startup `mode_decided` log line records which combination was selected. See `docs/operations/configuration.md`.
 
 ### Changed
 
@@ -513,19 +519,19 @@ Headline work since `v0.2.0`: **shared state for PHP workers without Redis** (se
 
 #### `OxPHP\Shared\*` primitives
 
-See the [Shared State overview](docs/en/shared-state/shared-state.md) for the concept and mental model, and the per-type docs for API reference, runnable examples, and gotchas.
+See the [Shared State overview](docs/shared-state/shared-state.md) for the concept and mental model, and the per-type docs for API reference, runnable examples, and gotchas.
 
-- [`Shared\Counter`](docs/en/shared-state/shared-counter.md) — atomic int64 with `inc` / `dec` / `add` / `compareAndSet` / `addBatch` / `reset`.
-- [`Shared\Flag`](docs/en/shared-state/shared-flag.md) — atomic bool with `test` / `set` / `clear` / `exchange` / `compareAndSet`.
-- [`Shared\Once`](docs/en/shared-state/shared-once.md) — run-once container with `init(factory)` / `trySet` / `get`. Reentrant `init` throws `DeadlockException`.
-- [`Shared\Mutex`](docs/en/shared-state/shared-mutex.md) — poisoning mutex guarding a stored value. `with(callable, timeout)` and `tryWith(callable)` scope-guard the critical section; poisoning isolates failed-mid-update state.
-- [`Shared\Channel`](docs/en/shared-state/shared-channel.md) — bounded MPMC queue with fiber-aware `send` / `recv`. `sendMany` / `recvMany` for batching.
-- [`Shared\Map`](docs/en/shared-state/shared-map.md) — concurrent `string → mixed` store with `get` / `set` / `update` / `getOrSet` / `setIfAbsent` / batched `setMany` / `getMany` / `removeMany`. Per-instance cap via `maxEntries`.
-- [`Shared\Pool`](docs/en/shared-state/shared-pool.md) — bounded object pool with lazy factory, optional destroy callback, strict `maxSize` budget, per-thread affinity, and idle-timeout eviction. `with($body)` scope-guards acquire/release.
+- [`Shared\Counter`](docs/shared-state/shared-counter.md) — atomic int64 with `inc` / `dec` / `add` / `compareAndSet` / `addBatch` / `reset`.
+- [`Shared\Flag`](docs/shared-state/shared-flag.md) — atomic bool with `test` / `set` / `clear` / `exchange` / `compareAndSet`.
+- [`Shared\Once`](docs/shared-state/shared-once.md) — run-once container with `init(factory)` / `trySet` / `get`. Reentrant `init` throws `DeadlockException`.
+- [`Shared\Mutex`](docs/shared-state/shared-mutex.md) — poisoning mutex guarding a stored value. `with(callable, timeout)` and `tryWith(callable)` scope-guard the critical section; poisoning isolates failed-mid-update state.
+- [`Shared\Channel`](docs/shared-state/shared-channel.md) — bounded MPMC queue with fiber-aware `send` / `recv`. `sendMany` / `recvMany` for batching.
+- [`Shared\Map`](docs/shared-state/shared-map.md) — concurrent `string → mixed` store with `get` / `set` / `update` / `getOrSet` / `setIfAbsent` / batched `setMany` / `getMany` / `removeMany`. Per-instance cap via `maxEntries`.
+- [`Shared\Pool`](docs/shared-state/shared-pool.md) — bounded object pool with lazy factory, optional destroy callback, strict `maxSize` budget, per-thread affinity, and idle-timeout eviction. `with($body)` scope-guards acquire/release.
 
 #### Shared-registry observability
 
-See [Shared Observability](docs/en/shared-state/shared-observability.md) for the operator's reference.
+See [Shared Observability](docs/shared-state/shared-observability.md) for the operator's reference.
 
 - Internal-server endpoints: `/__ox_shared/summary`, `/entries`, `/entry?id=…`, `/preview?id=…`, `/types`, `/graph?id=…` for live registry introspection.
 - Prometheus metrics under `oxphp_shared_*` — aggregate-per-type (`objects_total`, `operations_total`, `bytes`, `capacity_saturation`) plus per-instance for Channel / Map / Pool.
@@ -585,7 +591,7 @@ See [Shared Observability](docs/en/shared-state/shared-observability.md) for the
 
 #### Configuration
 
-All Shared-state tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to `OX_SHARED_*` and bare keys). See [Shared State → Configuration](docs/en/shared-state/shared-state.md#configuration) for the full table. Highlights:
+All Shared-state tunables are read at startup via the `SHARED_*` env-var prefix (fallbacks to `OX_SHARED_*` and bare keys). See [Shared State → Configuration](docs/shared-state/shared-state.md#configuration) for the full table. Highlights:
 
 - `SHARED_MAX_ENTRIES` (default 100 000) / `SHARED_MAX_BYTES` (default 1 GiB) — global caps.
 - `SHARED_CYCLE_DETECT_DEPTH` (16) / `SHARED_CYCLE_DETECT_EDGES` (10 000) — cycle-check walker bounds.
@@ -598,14 +604,14 @@ All Shared-state tunables are read at startup via the `SHARED_*` env-var prefix 
 
 #### Documentation
 
-- [`docs/en/shared-state/shared-state.md`](docs/en/shared-state/shared-state.md) — overview, mental model, type-selection matrix, canonical hand-rolled-counter → `Shared\*` migration example.
+- [`docs/shared-state/shared-state.md`](docs/shared-state/shared-state.md) — overview, mental model, type-selection matrix, canonical hand-rolled-counter → `Shared\*` migration example.
 - Per-type docs for all seven Shared\* v1 types (see list above).
-- [`docs/en/shared-state/shared-observability.md`](docs/en/shared-state/shared-observability.md) — introspection endpoints, Prometheus catalogue, diagnostic playbooks.
-- [`docs/en/shared-state/migrating-to-external-store.md`](docs/en/shared-state/migrating-to-external-store.md) — when and how to promote `Shared\*` state to Redis / NATS / Kafka.
+- [`docs/shared-state/shared-observability.md`](docs/shared-state/shared-observability.md) — introspection endpoints, Prometheus catalogue, diagnostic playbooks.
+- [`docs/shared-state/migrating-to-external-store.md`](docs/shared-state/migrating-to-external-store.md) — when and how to promote `Shared\*` state to Redis / NATS / Kafka.
 
 #### Tooling
 
-- `tests/soak/pool_soak.sh` + `tests/soak/workload.php` — manual (non-CI) 24h soak harness for pre-release Shared\Pool stability sign-off. Not wired into `tests/run_all.sh`; [invocation notes in the observability doc](docs/en/shared-state/shared-observability.md#long-running-soak-harness).
+- `tests/soak/pool_soak.sh` + `tests/soak/workload.php` — manual (non-CI) 24h soak harness for pre-release Shared\Pool stability sign-off. Not wired into `tests/run_all.sh`; [invocation notes in the observability doc](docs/shared-state/shared-observability.md#long-running-soak-harness).
 
 ### Changed
 

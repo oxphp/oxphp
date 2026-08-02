@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# gen-llms-txt.sh — generate llms.txt and llms-full.txt from docs/en.
+# gen-llms-txt.sh — generate llms.txt and llms-full.txt from docs.
 #
-# Walks docs/en/**/*.md, reads each file's frontmatter (title, description),
+# Walks docs/**/*.md, reads each file's frontmatter (title, description),
 # groups files by their subdirectory into H2 sections, and writes two files to
 # the project root:
 #
 #   llms.txt       — index of links, per the https://llmstxt.org spec
 #   llms-full.txt  — same header plus the full markdown body of every page
 #
-# Links are relative to the project root by default (e.g. docs/en/features/tls.md).
+# Links are relative to the project root by default (e.g. docs/features/tls.md).
 # Set BASE_URL (env or --base-url) to prepend an absolute prefix and emit
-# absolute links, e.g. BASE_URL=https://oxphp.dev/ -> https://oxphp.dev/docs/en/...
+# absolute links, e.g. BASE_URL=https://oxphp.dev/ -> https://oxphp.dev/docs/...
 #
 # Usage:
 #   scripts/gen-llms-txt.sh [--base-url URL]
@@ -26,7 +26,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-DOCS_REL="docs/en"
+DOCS_REL="docs"
 DOCS_DIR="$ROOT/$DOCS_REL"
 
 # --- args --------------------------------------------------------------------
