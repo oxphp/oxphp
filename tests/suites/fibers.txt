@@ -15,3 +15,4 @@ fibers/test_gc_survives_fatal
 fibers/test_gc_survives_shutdown_fatal
 fibers/test_shutdown_throw_is_reported
 fibers/test_last_error_survives_suspend
+fibers/test_shutdown_function_survives_suspend
