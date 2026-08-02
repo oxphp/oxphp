@@ -170,6 +170,13 @@ get_suite_tests() {
 list_profiles() {
     for f in "${TESTS_DIR}"/compose.*.yml; do
         [ -f "$f" ] || continue
+        # A profile marked manual is opt-in and stays out of the full sweep:
+        # it pulls heavy images, needs prerequisites the sweep does not build,
+        # or is driven by its own script rather than a suite. Without this the
+        # sweep starts it, fails, and logs an error that reads like a broken
+        # profile rather than one that was never meant to run here.
+        # `--profile=<name>` still runs it.
+        grep -qE '^#[[:space:]]*manual:[[:space:]]*true' "$f" && continue
         basename "$f" | sed 's/^compose\.//;s/\.yml$//'
     done
 }

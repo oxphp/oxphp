@@ -1,0 +1,47 @@
+# manual: true
+#
+# Extensions that only work on a ZTS build of PHP, exercised against a resident
+# server. Today that is `parallel` alone: it spawns its own interpreter threads
+# and keeps process-global state, which is the part worth checking here — a
+# one-shot CLI run cannot show what that state does on the second request.
+#
+# Marked manual because it compiles an extension at image build time and covers
+# something that changes only when PHP or parallel itself does, so it is not
+# worth a slot in every full run. The sweep skips it; run it on demand:
+#   ./tests/run_all.sh --profile=zts_ext
+#
+# Traditional mode on purpose: it is the mode where each request is its own
+# script execution, so anything a test still sees on request two crossed the
+# request boundary rather than merely staying in scope. Worker-mode behaviour is
+# not covered here and is not known.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.zts_ext.yml up
+services:
+  oxphp-zts_ext:
+    build:
+      context: ./fixtures/zts_ext
+      dockerfile: Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      # At least two workers. A test here proves a channel crossed the request
+      # boundary by firing a second request and reading its response before
+      # continuing, and this profile runs without RUNTIME_HOOKS, so that read
+      # blocks the worker thread rather than suspending a fiber. With one worker
+      # the inner request has nobody left to serve it and the outer request
+      # deadlocks until its timeout.
+      PHP_WORKERS: "2"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

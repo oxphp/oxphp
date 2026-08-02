@@ -1,0 +1,12 @@
+# profile: zts_ext
+# description: ZTS-only extensions (parallel) against a resident server
+
+zts_ext/test_parallel_available
+zts_ext/test_parallel_runtime_future
+
+# What a one-shot CLI run cannot show. parallel keeps its named-channel table in
+# a persistent hash built at MINIT and torn down only at MSHUTDOWN, so on a
+# server the table spans the life of the process rather than the life of a
+# request. This pins that: the channel is still there on the next request, and
+# it is the same channel, not just a name that collides.
+zts_ext/test_parallel_channel_outlives_request
