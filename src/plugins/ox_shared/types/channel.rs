@@ -1179,8 +1179,29 @@ impl ChannelInner {
             );
             return;
         }
-        let mut waiters = self.send_waiters.lock();
-        waiters.push(promise_id);
+        {
+            let mut waiters = self.send_waiters.lock();
+            waiters.push(promise_id);
+        }
+        // Race cover, symmetric to the re-drain `register_recv_waiter` performs
+        // after its own push. A consumer that freed a slot between the caller's
+        // failed `try_send` and the push above ran
+        // `drain_one_send_waiter_on_slot_free` while this list was still empty,
+        // so nothing is left to wake this id: it would park until its timeout,
+        // and `send()` passes none, so for good. Re-check now that it is
+        // parked. Waking on a slot that is taken again before the sender
+        // retries is safe — the contract is "retry your try_send", and a
+        // sender that finds the channel full re-parks.
+        //
+        // The occupancy test is `pending` against capacity, not the crossbeam
+        // buffer's own fullness: a front-stashed item frees a buffer slot while
+        // remaining in the channel, and refilling that slot would put cap+1
+        // items in a channel of cap (see the bounce-overshoot tests). An item
+        // in the stash instead wakes the sender when it is genuinely consumed,
+        // from `pop_front_stash`.
+        if self.pending() < self.capacity() {
+            self.drain_one_send_waiter_on_slot_free();
+        }
     }
 
     /// Pop one live recv-waiter and resolve it with `payload`. Returns
@@ -3732,6 +3753,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_send_waiter_fires_when_slot_freed_before_parking() {
+        // The park-vs-slot-free race, mirror of the one `register_recv_waiter`
+        // closes with its post-park re-drain.
+        //
+        // A fiber sender runs try_send -> Full -> register_send_waiter ->
+        // await. A consumer that takes the item in the window between the
+        // failed try_send and the push onto `send_waiters` runs
+        // `drain_one_send_waiter_on_slot_free` against a list that is still
+        // empty, so it wakes nobody — and the sender then parks on a channel
+        // that already has room. `send()` passes no timeout, so it parks for
+        // good; `sendTimeout()` loses its whole budget.
+        //
+        // The two tests above park the waiter *before* the recv and so never
+        // reach this window.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+
+        // The sender's own try_send fails here — the channel is full.
+        assert!(matches!(
+            ch.try_send(Payload::bytes_only(vec![2])),
+            Err(TrySendErr::Full(_))
+        ));
+
+        // Consumer drains inside the window, before the sender has parked.
+        let _ = ch.try_recv().unwrap();
+        assert_eq!(ch.pending(), 0, "the slot really is free");
+
+        // Only now does the sender park. Room exists, so it must not wait.
+        let (id, rx) = synthetic::alloc();
+        ch.register_send_waiter(id);
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("send-waiter parked after the slot was freed was never woken")
+            .unwrap();
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 0);
+    }
+
+    #[tokio::test]
     async fn register_send_waiter_cancelled_with_closed_on_close() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
@@ -3898,14 +3960,17 @@ mod tests {
         let (rid, _rrx) = synthetic::alloc();
         ch.register_recv_waiter(rid);
         assert!(synthetic::cancel(rid));
-        // A fiber send-waiter parked, waiting for a slot.
-        let (sid, mut srx) = synthetic::alloc();
-        ch.register_send_waiter(sid);
-        // Now fill the buffer directly (bypass `try_send`, which would reap
-        // the dead waiter / drain itself), reproducing a buffered item with
-        // a dead recv-waiter still parked ahead of it.
+        // Fill the buffer directly (bypass `try_send`, which would reap the
+        // dead waiter / drain itself), reproducing a buffered item with a dead
+        // recv-waiter still parked ahead of it.
         ch.tx.try_send(Payload::bytes_only(vec![0xAA])).unwrap();
         ch.bump_pending();
+        // Only now park the send-waiter, which is the order production
+        // produces: a sender parks because its `try_send` found the channel
+        // full. Parking against a full channel also makes `register_send_waiter`
+        // leave it parked, so what the drain below does is observable.
+        let (sid, mut srx) = synthetic::alloc();
+        ch.register_send_waiter(sid);
         // Drain: the item bounces to the front-stash. The send-waiter must
         // NOT be woken — the channel still holds exactly one item.
         ch.drain_buffered_to_waiters();
@@ -3939,13 +4004,16 @@ mod tests {
         let (rid, _rrx) = synthetic::alloc();
         ch.register_recv_waiter(rid);
         assert!(synthetic::cancel(rid));
-        // A fiber send-waiter parked, waiting for a slot.
-        let (sid, mut srx) = synthetic::alloc();
-        ch.register_send_waiter(sid);
         // Seed the item directly in the FRONT-STASH (not the buffer), so the
         // drain sources it from the stash and must bounce it back unchanged.
         ch.push_front_stash(Payload::bytes_only(vec![0xAA]));
         assert_eq!(ch.pending(), 1);
+        // Park the send-waiter against the now-occupied channel, the order
+        // production produces — a stashed item counts towards occupancy, so
+        // `register_send_waiter` leaves it parked and the drain below is what
+        // the assertions observe.
+        let (sid, mut srx) = synthetic::alloc();
+        ch.register_send_waiter(sid);
         // Drain: stash item is taken for the dead waiter and re-stashed. The
         // send-waiter must NOT be woken — occupancy is unchanged.
         ch.drain_buffered_to_waiters();
