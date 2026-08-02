@@ -83,6 +83,8 @@ Workers are automatically recycled (restarted with a fresh PHP process) when any
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
+Other requests the same worker was serving concurrently — suspended in `oxphp_async_await()`, `oxphp_sleep()`, or a socket read under `RUNTIME_HOOKS` — do not get to finish: each is cancelled where it is suspended and answered with `503 Service Unavailable` and a `Retry-After`, after running its own shutdown functions. Recycling is therefore visible to clients whose requests happen to be in flight, which is worth knowing when choosing `WORKER_MAX_MEMORY_MIB` or calling `scheduleExit()` on a worker that serves concurrent requests. A full server shutdown is different: there, in-flight requests get the drain window to finish normally.
+
 ## Development Reloading
 
 Worker Mode persists bootstrap state (autoloader, DI container, DB connections) in memory, so `opcache.validate_timestamps=1` alone is not enough to pick up changes to code that ran during the outer scope. For development loops there are two options:

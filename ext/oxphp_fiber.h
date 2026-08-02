@@ -374,6 +374,11 @@ int oxphp_fiber_park(oxphp_request_fiber *fiber);
 /* ─── Scheduler API ────────────────────────────────────── */
 
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched);
+/* End the requests still parked on a worker that is retiring, each on its own
+ * state and into its own response, before the teardown below — which cannot.
+ * Request schedulers only: it finalizes what it unwinds, and finalizing sends a
+ * response. */
+void oxphp_scheduler_retire_fibers(oxphp_fiber_scheduler *sched);
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched);
 
 oxphp_request_fiber *oxphp_scheduler_create_fiber(
