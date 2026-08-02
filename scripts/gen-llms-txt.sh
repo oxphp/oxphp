@@ -15,10 +15,11 @@
 #
 # Usage:
 #   scripts/gen-llms-txt.sh [--base-url URL]
+#   scripts/gen-llms-txt.sh --check
 #
-# TODO: add a --check mode for CI that regenerates into temp files and diffs
-#       them against the committed llms.txt / llms-full.txt, exiting non-zero on
-#       drift, so a docs change that forgets to refresh these files fails the build.
+# --check regenerates into temp files and diffs them against the committed
+# llms.txt / llms-full.txt, printing the drift and exiting non-zero instead of
+# writing anything, so a docs change that forgets to refresh them fails the build.
 
 set -euo pipefail
 
@@ -31,15 +32,22 @@ DOCS_DIR="$ROOT/$DOCS_REL"
 
 # --- args --------------------------------------------------------------------
 BASE_URL="${BASE_URL:-}"
-usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+CHECK=0
+usage() { sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-url) BASE_URL="${2:-}"; shift 2 ;;
     --base-url=*) BASE_URL="${1#*=}"; shift ;;
+    --check) CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "gen-llms-txt: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+if [ "$CHECK" = 1 ] && [ -n "$BASE_URL" ]; then
+  echo "gen-llms-txt: --check compares against the committed relative-link files; drop --base-url" >&2
+  exit 2
+fi
 
 [ -d "$DOCS_DIR" ] || { echo "gen-llms-txt: $DOCS_DIR not found" >&2; exit 1; }
 
@@ -138,6 +146,31 @@ for name in $sections; do
     count=$((count + 1))
   done < <(gather "$DOCS_DIR/$name")
 done
+
+if [ "$CHECK" = 1 ]; then
+  drift=0
+  for name in llms.txt llms-full.txt; do
+    case "$name" in
+      llms.txt) generated="$tmp_index" ;;
+      *)        generated="$tmp_full" ;;
+    esac
+    if [ ! -f "$ROOT/$name" ]; then
+      echo "gen-llms-txt: $name is missing" >&2
+      drift=1
+      continue
+    fi
+    if ! diff -u --label "$name (committed)" --label "$name (regenerated)" \
+         "$ROOT/$name" "$generated" >&2; then
+      drift=1
+    fi
+  done
+  if [ "$drift" = 1 ]; then
+    echo "gen-llms-txt: generated files are stale — run scripts/gen-llms-txt.sh and commit the result" >&2
+    exit 1
+  fi
+  echo "gen-llms-txt: llms.txt and llms-full.txt are up to date ($count pages)" >&2
+  exit 0
+fi
 
 mv "$tmp_index" "$ROOT/llms.txt"
 mv "$tmp_full" "$ROOT/llms-full.txt"

@@ -159,3 +159,28 @@ jobs:
             diff -u THIRD_PARTY_LICENSES.html /tmp/notices.html | head -200 || true
             exit 1
           fi
+
+  # Two things nothing else catches: a documentation link that points at a page
+  # or heading which no longer exists, and llms.txt / llms-full.txt left behind
+  # by a docs edit. Both are pure shell over the working tree — no toolchain, no
+  # cache, a couple of seconds — so they run on every PR rather than behind a
+  # path filter, which also covers a link added to the README by a Rust-only PR.
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Links resolve
+        run: |
+          if ! scripts/check-links.sh; then
+            echo "::error::Broken links listed above. Reproduce locally with scripts/check-links.sh"
+            exit 1
+          fi
+
+      - name: llms.txt and llms-full.txt match docs/
+        run: |
+          if ! scripts/gen-llms-txt.sh --check; then
+            echo "::error::Generated files are stale. Run scripts/gen-llms-txt.sh and commit the result."
+            exit 1
+          fi
