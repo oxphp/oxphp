@@ -3582,7 +3582,11 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
         }
     }
 
-    /* Cleanup: finalize any remaining fibers */
+    /* Cleanup. The loop above leaves the moment it sees an exit condition, so
+     * requests this worker was multiplexing can still be parked here: end them
+     * first, each into its own response, while the state they parked with is
+     * still theirs to be given back. Then finalize whatever is left. */
+    oxphp_scheduler_retire_fibers(&sched);
     oxphp_scheduler_destroy(&sched);
     zend_fcc_dtor(fcc);
 }

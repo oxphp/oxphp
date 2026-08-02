@@ -83,6 +83,8 @@ OxPHP 在请求之间执行软重置。以下状态会自动清理：
 
 当 Worker 被回收时，PHP 进程终止，新进程启动，重新执行 Worker 脚本的外部作用域。对于内存回收和 `scheduleExit()` 触发的回收，当前请求会正常完成后 Worker 才退出。对于基于错误的回收，Worker 在失败的请求之后退出。
 
+同一 Worker 并发服务的其他请求——挂起在 `oxphp_async_await()`、`oxphp_sleep()` 或 `RUNTIME_HOOKS` 下的套接字读取中——则来不及完成：每个请求都会在挂起处被取消，运行自己的 shutdown 函数，并以 `503 Service Unavailable` 和 `Retry-After` 响应头作答。因此对于恰好在处理中的请求，回收对客户端是可见的——在设置 `WORKER_MAX_MEMORY_MIB` 或在服务并发请求的 Worker 上调用 `scheduleExit()` 时值得注意。服务器整体关闭则不同：此时在处理中的请求会获得排空窗口并正常完成。
+
 ## 开发模式下的代码热重载
 
 Worker 模式将 bootstrap 状态（自动加载器、DI 容器、数据库连接）保留在内存中，因此仅靠 `opcache.validate_timestamps=1` 不足以加载在外层作用域中执行过的代码的变更。开发循环中有两种选择：

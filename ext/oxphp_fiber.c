@@ -1749,6 +1749,59 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     sched->free_list = fiber;
 }
 
+/* End every request still parked on this worker, before its scheduler is torn
+ * down.
+ *
+ * A worker retires itself in the middle of serving — `Worker::scheduleExit()`,
+ * the memory ceiling, the consecutive-error breaker — and the loop that serves
+ * requests leaves the tick as soon as it sees that, with whatever else it was
+ * multiplexing still parked. The teardown that follows does not finish those
+ * requests: it unwinds them through the Fiber object's destructor, which
+ * restores none of the state a parked request holds, so their finally blocks,
+ * destructors and shutdown functions run against whatever the worker thread has
+ * standing — another request's superglobals, headers and output stack, and a
+ * response bound for nobody. Their clients get the server's generic worker-error
+ * page, and nothing anywhere says why.
+ *
+ * Ended here instead, by the same route the drain sweep ends a straggler: each
+ * one is resumed on its own state, bails uncatchably at the suspend point it
+ * parked in, runs its own shutdown functions and answers its own client with its
+ * own output and a cancellation reason that names the shutdown. The kill is what
+ * a drain past its deadline already does; what is new is only that a worker
+ * going away on its own account does it too, instead of leaving the requests to
+ * a teardown that cannot.
+ *
+ * Bounded, because a shutdown function may park again on the way out: the mark
+ * stays set, so every pass forces such a fiber one suspend point further, and a
+ * handler that parks in a loop stops holding the worker's exit open after the
+ * cap. Whatever is still parked then is destroy's to unwind, as before. */
+#define OXPHP_RETIRE_MAX_PASSES 4
+
+void oxphp_scheduler_retire_fibers(oxphp_fiber_scheduler *sched) {
+    for (int pass = 0; pass < OXPHP_RETIRE_MAX_PASSES; pass++) {
+        bool unwound = false;
+        oxphp_request_fiber *fiber = sched->fibers_head;
+        while (fiber) {
+            oxphp_request_fiber *next = fiber->next;
+            if (!fiber->completed && fiber->suspend_reason != OXPHP_SUSPEND_NONE) {
+                oxphp_bridge_set_cancel_reason_at(fiber->request_cancel_ptr,
+                                                  OXPHP_CANCEL_SHUTDOWN);
+                fiber->drain_kill = true;
+                oxphp_fiber_clear_suspend(fiber);
+                oxphp_scheduler_resume_fiber(sched, fiber, NULL);
+                if (fiber->completed) {
+                    oxphp_scheduler_finalize_fiber(sched, fiber);
+                }
+                unwound = true;
+            }
+            fiber = next;
+        }
+        if (!unwound) {
+            break;
+        }
+    }
+}
+
 /* ─── Descriptor readiness for IO_WAIT-suspended fibers ──
  *
  * Reads whatever the scheduler's epoll instance has to report without waiting,

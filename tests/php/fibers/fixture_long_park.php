@@ -17,6 +17,17 @@ declare(strict_types=1);
 // suspended mid-request rather than after it finishes.
 header('Content-Type: text/plain');
 
+// Ending a request means running these, and running them means the registry
+// they sit in is still the one this request registered into — a request torn
+// down without being ended never reaches them at all.
+//
+// Written to a file rather than echoed because this request is ended by a
+// cancellation, and output from a cancelled request re-raises the cancellation
+// at the first write; the file is the only marker that survives that.
+register_shutdown_function(static function (): void {
+    @file_put_contents('/tmp/oxphp-parked-shutdown-ran', "ran\n");
+});
+
 if (isset($_GET['exit'])) {
     OxPHP\Server\Worker::current()->scheduleExit();
 }

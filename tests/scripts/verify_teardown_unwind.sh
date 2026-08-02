@@ -48,11 +48,34 @@ base="http://127.0.0.1:${port}"
 fail=0
 
 # ── 1. Worker teardown with a request parked mid-request ──────────────────
-# The request schedules its own worker's exit and then parks, so the scheduler
-# is torn down with this fiber suspended. It must not hang, and the worker the
-# pool respawns must serve normally afterwards.
-curl -s --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1" > /dev/null
+# The request schedules its own worker's exit and then parks, so the worker
+# reaches its exit with this fiber suspended mid-request. It must be ended
+# rather than dropped, it must not hang, and the worker the pool respawns must
+# serve normally afterwards.
+$COMPOSE exec -T oxphp-fibers rm -f /tmp/oxphp-parked-shutdown-ran >&2 || true
+parked="$(curl -s -w '\n%{http_code}' --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1")"
 sleep 2
+
+# A request the worker never ends is answered by the server on its behalf, with
+# the generic worker-error page and none of what the request itself produced.
+# Its own output coming back instead says the worker gave the request the state
+# it had parked with and ended it into its own response.
+if printf '%s' "$parked" | grep -q 'parked'; then
+	ok "the request parked at worker exit answers with its own output"
+else
+	bad "the request parked at worker exit answers with its own output" \
+		"answered: $(printf '%s' "$parked" | tr '\n' '|')"
+fi
+
+# And ending a request runs its shutdown functions — out of the registry it
+# registered into, which travels with a parked request rather than staying on
+# the worker. The marker is a file because output from a cancelled request is
+# refused; see the fixture.
+if $COMPOSE exec -T oxphp-fibers test -f /tmp/oxphp-parked-shutdown-ran 2>/dev/null; then
+	ok "its shutdown functions run at worker exit"
+else
+	bad "its shutdown functions run at worker exit" "marker file was never written"
+fi
 
 state="$($COMPOSE ps -a --format '{{.State}}' oxphp-fibers)"
 if [ "$state" = "running" ]; then
