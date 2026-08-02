@@ -1,9 +1,16 @@
+# manual: true
+#
 # APM database auto-instrumentation matrix: exercises the PDO (mysql, pgsql,
 # sqlite) and mysqli hook paths against real MySQL 9 and PostgreSQL 17 servers.
 #
 # Driven by tests/apm_db_matrix.sh. The oxphp service builds from
 # fixtures/apm_db/Dockerfile (dev image + pdo_mysql / mysqli / pdo_pgsql) and
 # only starts once both databases report healthy.
+#
+# Marked manual: it has no suite, its service is named for its own script rather
+# than for the sweep's `oxphp-<profile>` convention, and it pulls two database
+# images. The sweep used to pick it up from the compose glob, fail to start it,
+# and log an error for a profile that was never meant to run there.
 services:
   otelcol:
     image: otel/opentelemetry-collector:latest
