@@ -3,6 +3,7 @@
 #define OXPHP_FIBER_H
 
 #include "php.h"
+#include "main/php_output.h" /* php_output_handler: a suspended request parks its own */
 #include "zend_fibers.h"
 
 #include <poll.h>
@@ -116,8 +117,16 @@ typedef struct {
      * fiber holds no parked capture (the common case). */
     void *unhandled_exc;
 
-    /* Output buffer: we flush OB to ub_write on suspend,
-     * so no OB state needs saving. The output is in Rust RESPONSE TLS. */
+    /* The output buffers this request has open. The stack they sit on is
+     * thread-wide, so a request that suspends with one open would otherwise
+     * catch the echo of whichever request the worker serves meanwhile — one
+     * client's content written into another's buffer, and ended into the wrong
+     * response. Parked whole: the next request finds the empty stack a request
+     * starts with, and this one gets its layers, their content and any handler a
+     * script installed back on resume. Owned while parked. */
+    zend_stack ob_handlers;
+    php_output_handler *ob_active;
+    php_output_handler *ob_running;
 } oxphp_fiber_php_state;
 
 /* ─── Request Fiber ────────────────────────────────────── */
