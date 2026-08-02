@@ -138,6 +138,15 @@ typedef struct {
     int last_error_lineno;
     zend_string *last_error_message;
     zend_string *last_error_file;
+
+    /* The shutdown functions this request has registered. The registry they sit
+     * in is thread-wide, and the end of a request runs everything standing in it
+     * and then frees the lot — so a request that suspends holding a registration
+     * would have it run by whichever request the worker serves in the window,
+     * into that request's response, and freed before its own end could run it.
+     * Owned while parked; NULL when the request registered none, which is what
+     * the engine's own empty state is. */
+    HashTable *shutdown_functions;
 } oxphp_fiber_php_state;
 
 /* ─── Request Fiber ────────────────────────────────────── */

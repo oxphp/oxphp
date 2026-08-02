@@ -684,6 +684,16 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         zend_string_release(fiber->php_state.last_error_file);
         fiber->php_state.last_error_file = NULL;
     }
+    /* And the shutdown functions it registered, with everything they were
+     * holding — the closures, and the arguments they were registered with. A
+     * fiber torn down while parked has no end of a request left to run them at,
+     * so they are destroyed rather than called, which is what a request that
+     * never finishes gets from every other SAPI too. */
+    if (fiber->php_state.shutdown_functions) {
+        zend_hash_destroy(fiber->php_state.shutdown_functions);
+        FREE_HASHTABLE(fiber->php_state.shutdown_functions);
+        fiber->php_state.shutdown_functions = NULL;
+    }
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
      * symbol table. Released here so worker teardown does not leak the arrays. */
@@ -1269,6 +1279,21 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     PG(last_error_message) = NULL;
     PG(last_error_file) = NULL;
 
+    /* Step 1c: and the shutdown functions it registered, by the same move once
+     * more. The registry is thread-wide, and the end of a request runs
+     * everything standing in it and then frees the lot — so a registration left
+     * here is run by the request the worker serves in the window, echoing into
+     * that request's response and doing that request's session write, log flush
+     * or error report on behalf of one that has not finished, and is gone by the
+     * time the request that registered it ends.
+     *
+     * Safe to take mid-run: a shutdown function may itself suspend, and the walk
+     * that is calling it holds the registry it was handed rather than re-reading
+     * this slot, so what it does with the entries after the resume below hands
+     * this one back is unaffected. */
+    fiber->php_state.shutdown_functions = BG(user_shutdown_function_names);
+    BG(user_shutdown_function_names) = NULL;
+
     /* Step 2: Save Rust TLS (RESPONSE, EARLY_TX, REQUEST_DATA, deadline) */
     oxphp_bridge_fiber_save_ctx(fiber->fiber_id);
 
@@ -1427,6 +1452,18 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.last_error_lineno = 0;
     fiber->php_state.last_error_message = NULL;
     fiber->php_state.last_error_file = NULL;
+
+    /* And the shutdown functions it registered. What stands in their place is
+     * given up on the same terms as the three above: the request it belonged to
+     * has either ended, which frees the registry, or parked, which takes it, so
+     * an empty registry is what every path into a resume leaves — and the
+     * request being resumed here has its own. Freed rather than overwritten so
+     * that the paths that are not, such as a completed async task's
+     * registrations, which nothing runs shutdown functions for, cost the worker
+     * nothing and reach no request. */
+    php_free_shutdown_functions();
+    BG(user_shutdown_function_names) = fiber->php_state.shutdown_functions;
+    fiber->php_state.shutdown_functions = NULL;
 
     /* The bridge's per-request ctx flags are thread-global, reset by every new
      * multiplexed request's prep (oxphp_bridge_reset_request_ctx) and not part
