@@ -379,7 +379,9 @@ static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
  * handler that calls Worker::scheduleExit() takes: it finishes what it is
  * serving and the pool replaces it. Deliberately not a recycle reason of its
  * own — a fatal raised from inside a collection is rare enough that a counter
- * for it would say less than the one it shares. */
+ * for it would say less than the one it shares. Sharing the route is why it is
+ * logged: without a line here a worker retired for this reads, everywhere it
+ * can be read, as an application that asked to be recycled. */
 static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
     oxphp_release_abandoned_frames(mark);
     oxphp_vm_stack_rewind(mark);
@@ -388,6 +390,9 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
     zend_gc_status gc_status;
     zend_gc_get_status(&gc_status);
     if (gc_status.active) {
+        php_log_err("oxphp: a fatal interrupted a cycle collection — the "
+                    "collector cannot be restarted in this process, so this "
+                    "worker is retiring and the pool will replace it");
         oxphp_bridge_schedule_exit();
     } else {
         gc_protect(false);
@@ -949,6 +954,30 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 oxphp_recover_from_bailout(&mark);
             } zend_end_try();
 
+            /* Whatever the task registered with register_shutdown_function()
+             * ends with the task, the way a request's registrations end with the
+             * request below. The registry is one per thread, and the thread a
+             * task runs on opens a single request for its whole life and closes
+             * it only when the process stops — so a registration left standing
+             * here stays for as long as that thread lives, holding the closure
+             * and everything the closure captured, and every task's would then
+             * run together at the end, at a point where there is no task left to
+             * run them for.
+             *
+             * Freed rather than called: a task has no response for a shutdown
+             * function to write into and no caller for one to throw at, so what
+             * registering one from a task should mean is a question this does
+             * not answer. It only keeps the registry from being somewhere things
+             * accumulate.
+             *
+             * Destroying the entries runs the destructors of what they held, and
+             * a destructor can fatal; the free swallows that bailout of its own,
+             * so the flag is asked after it, as at the end of a request. */
+            php_free_shutdown_functions();
+            if (CG(unclean_shutdown)) {
+                oxphp_recover_from_bailout(&mark);
+            }
+
             /* The task is over: release the socket streams it claimed, so a
              * sibling task waiting for one of them can go on. Same point, and
              * the same reasoning, as the release the request branch below does
@@ -1453,15 +1482,19 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.last_error_message = NULL;
     fiber->php_state.last_error_file = NULL;
 
-    /* And the shutdown functions it registered. What stands in their place is
-     * given up on the same terms as the three above: the request it belonged to
-     * has either ended, which frees the registry, or parked, which takes it, so
-     * an empty registry is what every path into a resume leaves — and the
-     * request being resumed here has its own. Freed rather than overwritten so
-     * that the paths that are not, such as a completed async task's
-     * registrations, which nothing runs shutdown functions for, cost the worker
-     * nothing and reach no request. */
-    php_free_shutdown_functions();
+    /* And the shutdown functions it registered. Unlike the three above, nothing
+     * stands in their place to be given up: a request on this thread has either
+     * ended, which runs its registrations and frees the registry, or parked,
+     * which takes the registry with it, so an empty registry is what every path
+     * into a resume leaves behind. Task registrations cannot reach here either —
+     * they belong to the threads that run tasks, and those run no requests.
+     *
+     * Asserted rather than freed. Freeing a registry means destroying the
+     * entries, which runs the destructors of everything they held, and this is
+     * the middle of a restore — half of this request's state installed, half of
+     * it not yet — which is the worst place on the worker to be running user
+     * code, for an invariant that holds. */
+    ZEND_ASSERT(BG(user_shutdown_function_names) == NULL);
     BG(user_shutdown_function_names) = fiber->php_state.shutdown_functions;
     fiber->php_state.shutdown_functions = NULL;
 

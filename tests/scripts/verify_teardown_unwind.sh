@@ -53,7 +53,9 @@ fail=0
 # rather than dropped, it must not hang, and the worker the pool respawns must
 # serve normally afterwards.
 $COMPOSE exec -T oxphp-fibers rm -f /tmp/oxphp-parked-shutdown-ran >&2 || true
-parked="$(curl -s -w '\n%{http_code}' --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1")"
+parked_headers="$(mktemp)"
+parked="$(curl -s -D "$parked_headers" -w '\n%{http_code}' --max-time 20 "${base}/tests/fibers/fixture_long_park.php?exit=1")"
+parked_code="$(printf '%s' "$parked" | tail -n1)"
 sleep 2
 
 # A request the worker never ends is answered by the server on its behalf, with
@@ -66,6 +68,17 @@ else
 	bad "the request parked at worker exit answers with its own output" \
 		"answered: $(printf '%s' "$parked" | tr '\n' '|')"
 fi
+
+# Ended is not finished: the request is cancelled at the point it parked on, so
+# it answers 503 with a Retry-After, the way any request cancelled by the server
+# does — not the 200 it would have reached had the worker stayed.
+if [ "$parked_code" = "503" ] && grep -qi '^retry-after:' "$parked_headers"; then
+	ok "it answers 503 with a Retry-After"
+else
+	bad "it answers 503 with a Retry-After" \
+		"code $parked_code, headers: $(tr -d '\r' < "$parked_headers" | tr '\n' '|')"
+fi
+rm -f "$parked_headers"
 
 # And ending a request runs its shutdown functions — out of the registry it
 # registered into, which travels with a parked request rather than staying on

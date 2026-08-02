@@ -231,6 +231,7 @@ Additional constraints:
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
+- **No end of script inside a task** — a task is not a request, so `register_shutdown_function()` called from an async closure registers a callback that never runs: there is no response for it to write into and no request for it to be the end of, and it is discarded when the task finishes. Do that work at the end of the closure itself
 
 ## Docker Example
 
