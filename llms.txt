@@ -4,82 +4,82 @@
 
 ## Getting Started
 
-- [Command-Line Interface](docs/en/getting-started/cli.md): The oxphp binary command grammar — serve the HTTP server, run a single PHP script under CLI semantics, validate configuration, and drop privileges with --user.
-- [Docker Guide](docs/en/getting-started/docker.md): Run OxPHP with Docker. Covers minimal and multi-stage Dockerfiles, Compose configuration, PHP ini mounts, health checks, and port reference.
-- [Installation](docs/en/getting-started/installation.md): Install OxPHP via Docker image or build from source. Covers prerequisites, verification, and platform notes.
-- [Quick Start](docs/en/getting-started/quick-start.md): Get OxPHP running in under 5 minutes. Create a project, write a PHP app, start the server, and make your first request.
+- [Command-Line Interface](docs/getting-started/cli.md): The oxphp binary command grammar — serve the HTTP server, run a single PHP script under CLI semantics, validate configuration, and drop privileges with --user.
+- [Docker Guide](docs/getting-started/docker.md): Run OxPHP with Docker. Covers minimal and multi-stage Dockerfiles, Compose configuration, PHP ini mounts, health checks, and port reference.
+- [Installation](docs/getting-started/installation.md): Install OxPHP via Docker image or build from source. Covers prerequisites, verification, and platform notes.
+- [Quick Start](docs/getting-started/quick-start.md): Get OxPHP running in under 5 minutes. Create a project, write a PHP app, start the server, and make your first request.
 
 ## Examples
 
-- [Craft CMS on OxPHP](docs/en/examples/cms/craft.md): Run Craft CMS 5 on OxPHP in framework routing mode with MySQL — Dockerfile, Compose file, console-driven install, and OxPHP-specific notes.
-- [Drupal on OxPHP](docs/en/examples/cms/drupal.md): Run Drupal 11 on OxPHP in framework routing mode with MySQL and drush — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
-- [Laravel on OxPHP](docs/en/examples/framework/laravel.md): Run a Laravel application on OxPHP in framework routing mode with a MySQL database — Dockerfile, Compose file, install steps, and the OxPHP-specific configuration.
-- [Magento on OxPHP](docs/en/examples/ecommerce/magento.md): Run Magento Open Source 2.4 on OxPHP in framework routing mode with MySQL and OpenSearch — Dockerfile, Compose file, install steps, the static-asset version symlink, and OxPHP-specific notes.
-- [October CMS on OxPHP](docs/en/examples/cms/october.md): Run October CMS 4 on OxPHP in framework routing mode with a public/ mirror and SYMLINK_ALLOW_PATHS — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
-- [OpenCart on OxPHP](docs/en/examples/ecommerce/opencart.md): Run OpenCart 4 on OxPHP in traditional routing mode with MySQL and PHP_DENY_PATHS — Dockerfile, Compose file, CLI install, and OxPHP-specific notes.
-- [Symfony on OxPHP](docs/en/examples/framework/symfony.md): Run a Symfony application on OxPHP in framework routing mode with no database — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
-- [WordPress on OxPHP](docs/en/examples/cms/wordpress.md): Run WordPress on OxPHP in traditional routing mode with MySQL and a WP-CLI sidecar — Dockerfile that extends the OxPHP runtime, Compose file, and OxPHP-specific notes.
-- [Yii3 on OxPHP](docs/en/examples/framework/yii3.md): Run a Yii3 (yiisoft/app) application on OxPHP in framework routing mode with no database — the leanest example. Dockerfile, Compose file, and OxPHP-specific notes.
+- [Craft CMS on OxPHP](docs/examples/cms/craft.md): Run Craft CMS 5 on OxPHP in framework routing mode with MySQL — Dockerfile, Compose file, console-driven install, and OxPHP-specific notes.
+- [Drupal on OxPHP](docs/examples/cms/drupal.md): Run Drupal 11 on OxPHP in framework routing mode with MySQL and drush — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [Laravel on OxPHP](docs/examples/framework/laravel.md): Run a Laravel application on OxPHP in framework routing mode with a MySQL database — Dockerfile, Compose file, install steps, and the OxPHP-specific configuration.
+- [Magento on OxPHP](docs/examples/ecommerce/magento.md): Run Magento Open Source 2.4 on OxPHP in framework routing mode with MySQL and OpenSearch — Dockerfile, Compose file, install steps, the static-asset version symlink, and OxPHP-specific notes.
+- [October CMS on OxPHP](docs/examples/cms/october.md): Run October CMS 4 on OxPHP in framework routing mode with a public/ mirror and SYMLINK_ALLOW_PATHS — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [OpenCart on OxPHP](docs/examples/ecommerce/opencart.md): Run OpenCart 4 on OxPHP in traditional routing mode with MySQL and PHP_DENY_PATHS — Dockerfile, Compose file, CLI install, and OxPHP-specific notes.
+- [Symfony on OxPHP](docs/examples/framework/symfony.md): Run a Symfony application on OxPHP in framework routing mode with no database — Dockerfile, Compose file, install steps, and OxPHP-specific notes.
+- [WordPress on OxPHP](docs/examples/cms/wordpress.md): Run WordPress on OxPHP in traditional routing mode with MySQL and a WP-CLI sidecar — Dockerfile that extends the OxPHP runtime, Compose file, and OxPHP-specific notes.
+- [Yii3 on OxPHP](docs/examples/framework/yii3.md): Run a Yii3 (yiisoft/app) application on OxPHP in framework routing mode with no database — the leanest example. Dockerfile, Compose file, and OxPHP-specific notes.
 
 ## Features
 
-- [Access Logging](docs/en/features/access-logging.md): Structured JSON access logs for every HTTP request in OxPHP, with configurable modes for all requests or errors only.
-- [Async Promises](docs/en/features/async-promises.md): Run PHP closures in background threads and await results without blocking the worker pool.
-- [Compression](docs/en/features/compression.md): OxPHP compresses responses with Brotli by default, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
-- [Custom Error Pages](docs/en/features/error-pages.md): Serve branded HTML error pages for 4xx and 5xx responses in OxPHP, loaded once at startup and served from memory.
-- [Decorators](docs/en/features/decorators.md): Intercept PHP function and method calls with attribute-based decorators for logging, timing, caching, and access control.
-- [Distributed Tracing & APM](docs/en/features/distributed-tracing.md): W3C Trace Context propagation, OpenTelemetry integration, automatic instrumentation, PHP tracing SDK, and end-to-end observability with OxPHP.
-- [Early Response](docs/en/features/early-response.md): Send the HTTP response immediately with oxphp_finish_request() and continue running background tasks in OxPHP.
-- [Fiber Multiplexing](docs/en/features/fiber-multiplexing.md): Handle hundreds of concurrent requests on a single PHP worker thread using cooperative multitasking with fibers.
-- [Internal Server](docs/en/features/internal-server.md): A dedicated HTTP server for health checks, Prometheus metrics, live configuration, and plugin endpoints.
-- [Profiling PHP code](docs/en/features/profiling.md): The definitive practical guide — from first run to production use. Triggers, PHP SDK, attributes, export formats, integration with speedscope/xhgui/pprof, metrics, troubleshooting.
-- [Rate Limiting](docs/en/features/rate-limiting.md): Built-in per-IP rate limiting for OxPHP with configurable thresholds, time windows, and standard HTTP rate limit response headers.
-- [Request IDs](docs/en/features/request-ids.md): Automatic unique request identifiers in OxPHP for distributed tracing and log correlation across your stack.
-- [Routing](docs/en/features/routing.md): Configure OxPHP routing with three modes — traditional file mapping, framework front-controller, and SPA fallback. Each mode mirrors the equivalent nginx try_files directive.
-- [Server-Sent Events (SSE)](docs/en/features/sse.md): Stream real-time data to browser clients using Server-Sent Events in OxPHP with built-in backpressure and connection management.
-- [Static Files](docs/en/features/static-files.md): OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
-- [Timeouts](docs/en/features/timeouts.md): Configure header read timeouts and PHP execution timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
-- [TLS](docs/en/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
-- [Worker Mode](docs/en/features/worker-mode.md): Persistent PHP processes that bootstrap once and handle multiple requests, eliminating per-request startup overhead in OxPHP.
+- [Access Logging](docs/features/access-logging.md): Structured JSON access logs for every HTTP request in OxPHP, with configurable modes for all requests or errors only.
+- [Async Promises](docs/features/async-promises.md): Run PHP closures in background threads and await results without blocking the worker pool.
+- [Compression](docs/features/compression.md): OxPHP compresses responses with Brotli by default, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
+- [Custom Error Pages](docs/features/error-pages.md): Serve branded HTML error pages for 4xx and 5xx responses in OxPHP, loaded once at startup and served from memory.
+- [Decorators](docs/features/decorators.md): Intercept PHP function and method calls with attribute-based decorators for logging, timing, caching, and access control.
+- [Distributed Tracing & APM](docs/features/distributed-tracing.md): W3C Trace Context propagation, OpenTelemetry integration, automatic instrumentation, PHP tracing SDK, and end-to-end observability with OxPHP.
+- [Early Response](docs/features/early-response.md): Send the HTTP response immediately with oxphp_finish_request() and continue running background tasks in OxPHP.
+- [Fiber Multiplexing](docs/features/fiber-multiplexing.md): Handle hundreds of concurrent requests on a single PHP worker thread using cooperative multitasking with fibers.
+- [Internal Server](docs/features/internal-server.md): A dedicated HTTP server for health checks, Prometheus metrics, live configuration, and plugin endpoints.
+- [Profiling PHP code](docs/features/profiling.md): The definitive practical guide — from first run to production use. Triggers, PHP SDK, attributes, export formats, integration with speedscope/xhgui/pprof, metrics, troubleshooting.
+- [Rate Limiting](docs/features/rate-limiting.md): Built-in per-IP rate limiting for OxPHP with configurable thresholds, time windows, and standard HTTP rate limit response headers.
+- [Request IDs](docs/features/request-ids.md): Automatic unique request identifiers in OxPHP for distributed tracing and log correlation across your stack.
+- [Routing](docs/features/routing.md): Configure OxPHP routing with three modes — traditional file mapping, framework front-controller, and SPA fallback. Each mode mirrors the equivalent nginx try_files directive.
+- [Server-Sent Events (SSE)](docs/features/sse.md): Stream real-time data to browser clients using Server-Sent Events in OxPHP with built-in backpressure and connection management.
+- [Static Files](docs/features/static-files.md): OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
+- [Timeouts](docs/features/timeouts.md): Configure header read timeouts and PHP execution timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
+- [TLS](docs/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
+- [Worker Mode](docs/features/worker-mode.md): Persistent PHP processes that bootstrap once and handle multiple requests, eliminating per-request startup overhead in OxPHP.
 
 ## Shared State
 
-- [Migrating Shared\* to an external store](docs/en/shared-state/migrating-to-external-store.md): When to promote in-process Shared\* state to Redis, NATS, or another durable store — the patterns, the semantic gaps, and the concrete migration shape for each Shared\* type.
-- [Shared State](docs/en/shared-state/shared-state.md): Process-wide primitives — counters, flags, maps, channels, pools — that let PHP workers coordinate without an external store like Redis or APCu.
-- [Shared\* Naming Conventions](docs/en/shared-state/shared-naming.md): Naming conventions for the OxPHP\Shared\* concurrency API — the canonical method vocabulary (get/set, try*/timeout wait policies, is*, fetch*, compareAndSet) that every shared primitive follows.
-- [Shared\* Observability](docs/en/shared-state/shared-observability.md): Introspection endpoints, Prometheus metrics, and diagnostic playbooks for the OxPHP\Shared\* primitives — inspect live registry entries, trace reachability graphs, and alert on saturation.
-- [Shared\Atomic](docs/en/shared-state/shared-atomic.md): Generic atomic int64 shared across PHP workers — load/store, swap, CAS, fetch-arithmetic and fetch-bitwise with explicit memory-ordering control.
-- [Shared\Channel](docs/en/shared-state/shared-channel.md): Bounded MPMC channel shared across PHP workers, with fiber-aware send and recv that return value-typed results for explicit dispatch.
-- [Shared\Counter](docs/en/shared-state/shared-counter.md): Atomic int64 accumulator shared across PHP workers — lock-free signed add, atomic exchange, compare-and-set, windowed reset via set(0).
-- [Shared\Flag](docs/en/shared-state/shared-flag.md): Atomic boolean shared across PHP workers — kill-switches, circuit breakers, and one-shot markers with lock-free load/store/swap/compareAndSet and explicit memory ordering.
-- [Shared\Map](docs/en/shared-state/shared-map.md): Process-wide concurrent hash-map for coordinating state across PHP workers — null-as-absence model, a single linearisable compareAndSet, lazy iteration, and cycle-safe nested Shareable values.
-- [Shared\Mutex](docs/en/shared-state/shared-mutex.md): Cross-thread mutual exclusion over a stored value — atomic multi-step updates from PHP workers via withLock / tryWithLock / withLockTimeout with explicit wait policies.
-- [Shared\Once](docs/en/shared-state/shared-once.md): Run-once container — exactly one worker's factory produces the value, everyone else sees the memoised result, across the whole OxPHP process.
-- [Shared\Pool](docs/en/shared-state/shared-pool.md): Process-wide bounded object pool for expensive per-thread resources — database connections, JSON parsers, HTTP clients — with strict budget, per-thread affinity, and idle-timeout eviction.
-- [Shared\Registry](docs/en/shared-state/shared-registry.md): Name-keyed process-global handles for Shared\* primitives — one Map / Counter / Channel that every worker and every request converges on, without external stores.
+- [Migrating Shared\* to an external store](docs/shared-state/migrating-to-external-store.md): When to promote in-process Shared\* state to Redis, NATS, or another durable store — the patterns, the semantic gaps, and the concrete migration shape for each Shared\* type.
+- [Shared State](docs/shared-state/shared-state.md): Process-wide primitives — counters, flags, maps, channels, pools — that let PHP workers coordinate without an external store like Redis or APCu.
+- [Shared\* Naming Conventions](docs/shared-state/shared-naming.md): Naming conventions for the OxPHP\Shared\* concurrency API — the canonical method vocabulary (get/set, try*/timeout wait policies, is*, fetch*, compareAndSet) that every shared primitive follows.
+- [Shared\* Observability](docs/shared-state/shared-observability.md): Introspection endpoints, Prometheus metrics, and diagnostic playbooks for the OxPHP\Shared\* primitives — inspect live registry entries, trace reachability graphs, and alert on saturation.
+- [Shared\Atomic](docs/shared-state/shared-atomic.md): Generic atomic int64 shared across PHP workers — load/store, swap, CAS, fetch-arithmetic and fetch-bitwise with explicit memory-ordering control.
+- [Shared\Channel](docs/shared-state/shared-channel.md): Bounded MPMC channel shared across PHP workers, with fiber-aware send and recv that return value-typed results for explicit dispatch.
+- [Shared\Counter](docs/shared-state/shared-counter.md): Atomic int64 accumulator shared across PHP workers — lock-free signed add, atomic exchange, compare-and-set, windowed reset via set(0).
+- [Shared\Flag](docs/shared-state/shared-flag.md): Atomic boolean shared across PHP workers — kill-switches, circuit breakers, and one-shot markers with lock-free load/store/swap/compareAndSet and explicit memory ordering.
+- [Shared\Map](docs/shared-state/shared-map.md): Process-wide concurrent hash-map for coordinating state across PHP workers — null-as-absence model, a single linearisable compareAndSet, lazy iteration, and cycle-safe nested Shareable values.
+- [Shared\Mutex](docs/shared-state/shared-mutex.md): Cross-thread mutual exclusion over a stored value — atomic multi-step updates from PHP workers via withLock / tryWithLock / withLockTimeout with explicit wait policies.
+- [Shared\Once](docs/shared-state/shared-once.md): Run-once container — exactly one worker's factory produces the value, everyone else sees the memoised result, across the whole OxPHP process.
+- [Shared\Pool](docs/shared-state/shared-pool.md): Process-wide bounded object pool for expensive per-thread resources — database connections, JSON parsers, HTTP clients — with strict budget, per-thread affinity, and idle-timeout eviction.
+- [Shared\Registry](docs/shared-state/shared-registry.md): Name-keyed process-global handles for Shared\* primitives — one Map / Counter / Channel that every worker and every request converges on, without external stores.
 
 ## Security
 
-- [Dot-Path Blocking](docs/en/security/dot-path-blocking.md): OxPHP blocks access to hidden files and directories (starting with ".") to prevent exposure of sensitive configuration, version control data, and other dotfiles.
-- [PHP Execution Deny-List](docs/en/security/php-deny.md): Block PHP execution at specific URI paths to harden legacy applications against uploaded PHP shells and unintended script exposure.
-- [Symlink Allow Paths](docs/en/security/symlink-allow-paths.md): Explicit allow-list for symlink targets outside DOCUMENT_ROOT — Laravel-style storage links, shared asset volumes, multi-tenant uploads.
-- [Trusted Proxies](docs/en/security/trusted-proxies.md): Configure OxPHP to extract the real client IP, protocol, and host from reverse proxy headers (Forwarded, X-Forwarded-For/Proto/Host).
+- [Dot-Path Blocking](docs/security/dot-path-blocking.md): OxPHP blocks access to hidden files and directories (starting with ".") to prevent exposure of sensitive configuration, version control data, and other dotfiles.
+- [PHP Execution Deny-List](docs/security/php-deny.md): Block PHP execution at specific URI paths to harden legacy applications against uploaded PHP shells and unintended script exposure.
+- [Symlink Allow Paths](docs/security/symlink-allow-paths.md): Explicit allow-list for symlink targets outside DOCUMENT_ROOT — Laravel-style storage links, shared asset volumes, multi-tenant uploads.
+- [Trusted Proxies](docs/security/trusted-proxies.md): Configure OxPHP to extract the real client IP, protocol, and host from reverse proxy headers (Forwarded, X-Forwarded-For/Proto/Host).
 
 ## PHP
 
-- [HTTP Request API](docs/en/php/request-api.md): Object-oriented API for accessing HTTP request data in OxPHP, replacing PHP superglobals with a type-safe, lazy-loading interface.
-- [OPcache and JIT](docs/en/php/opcache.md): Configure OPcache and JIT compilation for optimal PHP performance with OxPHP, including preloading and development settings.
-- [PHP Functions](docs/en/php/functions.md): Complete reference for all oxphp_* PHP functions provided by OxPHP, including async, streaming, worker mode, and decorator APIs.
-- [Superglobals](docs/en/php/superglobals.md): How OxPHP populates $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES, and php://input for each request.
-- [Worker Class](docs/en/php/worker-class.md): Reference for the OxPHP\Server\Worker class — a unified runtime handle for worker introspection, the worker entry point, and per-thread metrics.
+- [HTTP Request API](docs/php/request-api.md): Object-oriented API for accessing HTTP request data in OxPHP, replacing PHP superglobals with a type-safe, lazy-loading interface.
+- [OPcache and JIT](docs/php/opcache.md): Configure OPcache and JIT compilation for optimal PHP performance with OxPHP, including preloading and development settings.
+- [PHP Functions](docs/php/functions.md): Complete reference for all oxphp_* PHP functions provided by OxPHP, including async, streaming, worker mode, and decorator APIs.
+- [Superglobals](docs/php/superglobals.md): How OxPHP populates $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES, and php://input for each request.
+- [Worker Class](docs/php/worker-class.md): Reference for the OxPHP\Server\Worker class — a unified runtime handle for worker introspection, the worker entry point, and per-thread metrics.
 
 ## Operations
 
-- [Configuration Reference](docs/en/operations/configuration.md): Complete environment variable reference for OxPHP. Every setting, its default, and what it controls — all in one place.
-- [Graceful Shutdown](docs/en/operations/graceful-shutdown.md): How OxPHP handles SIGTERM and SIGINT signals to drain connections and shut down cleanly, with Kubernetes and Docker configuration examples.
-- [Health Checks](docs/en/operations/health-checks.md): Internal server endpoints for health monitoring, Kubernetes probes, Prometheus metrics, and runtime configuration inspection.
-- [Prometheus Metrics](docs/en/operations/metrics.md): Reference for all Prometheus-compatible metrics exposed by OxPHP at the /metrics endpoint, including request, connection, worker, and compression metrics.
+- [Configuration Reference](docs/operations/configuration.md): Complete environment variable reference for OxPHP. Every setting, its default, and what it controls — all in one place.
+- [Graceful Shutdown](docs/operations/graceful-shutdown.md): How OxPHP handles SIGTERM and SIGINT signals to drain connections and shut down cleanly, with Kubernetes and Docker configuration examples.
+- [Health Checks](docs/operations/health-checks.md): Internal server endpoints for health monitoring, Kubernetes probes, Prometheus metrics, and runtime configuration inspection.
+- [Prometheus Metrics](docs/operations/metrics.md): Reference for all Prometheus-compatible metrics exposed by OxPHP at the /metrics endpoint, including request, connection, worker, and compression metrics.
 
 ## Architecture
 
-- [Architecture Overview](docs/en/architecture/overview.md): How OxPHP works: async HTTP handling, PHP worker pool, request flow, worker mode, and built-in safety guarantees — from a user's perspective.
+- [Architecture Overview](docs/architecture/overview.md): How OxPHP works: async HTTP handling, PHP worker pool, request flow, worker mode, and built-in safety guarantees — from a user's perspective.

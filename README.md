@@ -10,11 +10,13 @@
 </p>
 
 <p align="center">
-  <b>English</b> · <a href="README.ru.md">Русский</a> · <a href="README.zh.md">中文</a>
-</p>
-
-<p align="center">
-  Documents: <a href="docs/en/">English</a> · <a href="docs/ru/">Русский</a> · <a href="docs/zh/">中文</a>
+  Documentation:
+  <a href="https://oxphp.dev/en/docs/">English</a> ·
+  <a href="https://oxphp.dev/ru/docs/">Русский</a> ·
+  <a href="https://oxphp.dev/zh/docs/">中文</a> ·
+  <a href="https://oxphp.dev/fr/docs/">Français</a> ·
+  <a href="https://oxphp.dev/pl/docs/">Polski</a> ·
+  <a href="https://oxphp.dev/ja/docs/">日本語</a>
 </p>
 
 <p align="center">
@@ -56,7 +58,7 @@ curl http://localhost/
 
 No nginx config. No PHP-FPM pool tuning. No process manager. Just your app.
 
-See the full [Quick Start guide](docs/en/getting-started/quick-start.md) for more details.
+See the full [Quick Start guide](docs/getting-started/quick-start.md) for more details.
 
 ---
 
@@ -85,7 +87,7 @@ OxPHP replaces nginx + PHP-FPM with a single container. The server works out of 
 | License | BSD-2 / PHP License | Apache-2.0 | MIT | AGPL-3.0 |
 | Age / production track record | 20+ years | 2+ years | 7+ years | <1 year |
 
-See the full [documentation](docs/en/index.md) for details.
+See the full [documentation](docs/index.md) for details.
 
 ---
 
@@ -99,24 +101,24 @@ See the full [documentation](docs/en/index.md) for details.
 
 ### PHP Runtime
 - **Native PHP execution** — PHP runs directly inside the server process, in a dedicated thread pool
-- **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input` — see [Superglobals](docs/en/php/superglobals.md)
-- **HTTP Object API** — `oxphp_http_request()` returns a typed, lazy-loading request object with built-in JSON body parsing, content-detected MIME types for uploads, and a mutable attributes container for middleware — see [HTTP Request API](docs/en/php/request-api.md)
-- **Worker Runtime API** — `OxPHP\Server\Worker::current()` exposes per-thread introspection (`id`, `requestCount`, `startTime`, `memoryUsage`, `rss`, `maxMemoryBytes`) and the worker entry point (`serve`) — see [Worker class](docs/en/php/worker-class.md)
-- **Shared OPcache** across all workers — one worker compiles a file, every worker uses the cached bytecode — see [OPcache and JIT](docs/en/php/opcache.md)
-- **PHP extension functions** — `oxphp_*()` helpers for streaming, early response, async, tracing, and request access — see [PHP functions reference](docs/en/php/functions.md)
+- **Full superglobals** support: `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `php://input` — see [Superglobals](docs/php/superglobals.md)
+- **HTTP Object API** — `oxphp_http_request()` returns a typed, lazy-loading request object with built-in JSON body parsing, content-detected MIME types for uploads, and a mutable attributes container for middleware — see [HTTP Request API](docs/php/request-api.md)
+- **Worker Runtime API** — `OxPHP\Server\Worker::current()` exposes per-thread introspection (`id`, `requestCount`, `startTime`, `memoryUsage`, `rss`, `maxMemoryBytes`) and the worker entry point (`serve`) — see [Worker class](docs/php/worker-class.md)
+- **Shared OPcache** across all workers — one worker compiles a file, every worker uses the cached bytecode — see [OPcache and JIT](docs/php/opcache.md)
+- **PHP extension functions** — `oxphp_*()` helpers for streaming, early response, async, tracing, and request access — see [PHP functions reference](docs/php/functions.md)
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
-- **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS` — see [Decorators](docs/en/features/decorators.md)
+- **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS` — see [Decorators](docs/features/decorators.md)
 - **Crash isolation** — a fatal error in one request does not take down the server
 
 ### Worker Model
-- **Worker mode** — persistent PHP processes that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/en/features/worker-mode.md)
-- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/en/features/fiber-multiplexing.md)
+- **Worker mode** — persistent PHP processes that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
+- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/features/fiber-multiplexing.md)
 - **Automatic recycling** by request count or memory threshold
 - **Worker health monitoring** — crashed workers are automatically detected and restarted
-- **Early response** via `oxphp_finish_request()` — send the response and keep running background work — see [Early response](docs/en/features/early-response.md)
+- **Early response** via `oxphp_finish_request()` — send the response and keep running background work — see [Early response](docs/features/early-response.md)
 
 ### Async Promises
-See the full [Async promises guide](docs/en/features/async-promises.md).
+See the full [Async promises guide](docs/features/async-promises.md).
 
 - **`oxphp_async()` / `oxphp_async_await()`** — dispatch closures to a dedicated thread pool for true parallel execution
 - **Portable serialization** for `use` variables, arguments, and return values — safe cross-thread binary transfer
@@ -126,53 +128,53 @@ See the full [Async promises guide](docs/en/features/async-promises.md).
 - **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — batch, race (first settled), and any (first fulfilled, JS `Promise.any` style) primitives
 
 ### Shared State (`OxPHP\Shared\*`)
-Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/en/shared-state/shared-state.md) and [observability reference](docs/en/shared-state/shared-observability.md).
+Process-wide concurrent primitives that let PHP workers coordinate mutable state without Redis, Memcached, or APCu. Everything lives in-process — per-op cost is microseconds, not network round-trips. See the full [Shared state guide](docs/shared-state/shared-state.md) and [observability reference](docs/shared-state/shared-observability.md).
 
-- **`Shared\Counter`** — atomic int64 accumulator (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/en/shared-state/shared-counter.md)
-- **`Shared\Atomic`** — full lock-free int64 primitive (`load`, `store`, `swap`, `compareAndSet`, `fetchAdd/Sub/And/Or/Xor`) with explicit memory ordering — see [Atomic](docs/en/shared-state/shared-atomic.md)
-- **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/en/shared-state/shared-flag.md)
-- **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/en/shared-state/shared-once.md)
-- **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/en/shared-state/shared-mutex.md)
-- **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/en/shared-state/shared-channel.md)
-- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/en/shared-state/shared-map.md)
-- **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/en/shared-state/shared-pool.md)
-- **`Shared\Registry`** — name-keyed handles (`Registry::counter('hits', fn() => ...)`) so every worker and every request converges on the same entry without external stores — see [Registry](docs/en/shared-state/shared-registry.md)
+- **`Shared\Counter`** — atomic int64 accumulator (`get`, `set`, `add`, `compareAndSet`) — see [Counter](docs/shared-state/shared-counter.md)
+- **`Shared\Atomic`** — full lock-free int64 primitive (`load`, `store`, `swap`, `compareAndSet`, `fetchAdd/Sub/And/Or/Xor`) with explicit memory ordering — see [Atomic](docs/shared-state/shared-atomic.md)
+- **`Shared\Flag`** — atomic bool with `compareAndSet` for one-shot transitions — see [Flag](docs/shared-state/shared-flag.md)
+- **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/shared-state/shared-once.md)
+- **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/shared-state/shared-mutex.md)
+- **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/shared-state/shared-channel.md)
+- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/shared-state/shared-map.md)
+- **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/shared-state/shared-pool.md)
+- **`Shared\Registry`** — name-keyed handles (`Registry::counter('hits', fn() => ...)`) so every worker and every request converges on the same entry without external stores — see [Registry](docs/shared-state/shared-registry.md)
 - **Built-in observability** — `oxphp_shared_*` Prometheus counters and `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON endpoints on the internal port
 - **Refcount + lifecycle safety** — handles cannot outlive the registry entry; cycle detector rejects graphs that would leak memory
-- When you outgrow it, see [Migrating to an external store](docs/en/shared-state/migrating-to-external-store.md)
+- When you outgrow it, see [Migrating to an external store](docs/shared-state/migrating-to-external-store.md)
 
 ### HTTP & Networking
-- **HTTP/1.1 + HTTP/2 on one port** — the protocol is auto-detected per connection: prior-knowledge h2c over cleartext, or `h2` via ALPN under TLS, with transparent HTTP/1.1 fallback. Flow-control windows are tuned for typical PHP response sizes — see [HTTP/2](docs/en/features/tls.md#http2)
-- **TLS 1.3** with ALPN — both HTTP/2 and HTTP/1.1 over TLS — see [TLS](docs/en/features/tls.md)
-- **3 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (`index.php` rewrite with `PATH_INFO=$request_uri`), SPA (`index.html` for no-extension paths, hard 404 for missing assets). Each mode mirrors a familiar nginx `try_files` configuration — see [Routing](docs/en/features/routing.md)
-- **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing — see [Server-Sent Events](docs/en/features/sse.md)
-- **Configurable timeouts** — header read, request, and keep-alive — see [Timeouts](docs/en/features/timeouts.md)
+- **HTTP/1.1 + HTTP/2 on one port** — the protocol is auto-detected per connection: prior-knowledge h2c over cleartext, or `h2` via ALPN under TLS, with transparent HTTP/1.1 fallback. Flow-control windows are tuned for typical PHP response sizes — see [HTTP/2](docs/features/tls.md#http2)
+- **TLS 1.3** with ALPN — both HTTP/2 and HTTP/1.1 over TLS — see [TLS](docs/features/tls.md)
+- **3 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (`index.php` rewrite with `PATH_INFO=$request_uri`), SPA (`index.html` for no-extension paths, hard 404 for missing assets). Each mode mirrors a familiar nginx `try_files` configuration — see [Routing](docs/features/routing.md)
+- **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing — see [Server-Sent Events](docs/features/sse.md)
+- **Configurable timeouts** — header read, request, and keep-alive — see [Timeouts](docs/features/timeouts.md)
 
 ### Performance
-- **LRU file cache** for static files (in-memory ≤1 MB, streaming for larger) — see [Static files](docs/en/features/static-files.md)
+- **LRU file cache** for static files (in-memory ≤1 MB, streaming for larger) — see [Static files](docs/features/static-files.md)
 - **HTTP caching** with ETag, Last-Modified, and 304 Not Modified
-- **Brotli compression** for text responses (256 B – 3 MB range) — see [Compression](docs/en/features/compression.md)
+- **Brotli compression** for text responses (256 B – 3 MB range) — see [Compression](docs/features/compression.md)
 - **mimalloc** allocator for lower allocation latency under contention
 - **Configurable HTTP server threads** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
 
 ### Observability
-Full guide: [Distributed tracing](docs/en/features/distributed-tracing.md).
+Full guide: [Distributed tracing](docs/features/distributed-tracing.md).
 
 - **W3C Trace Context** — automatic `traceparent`/`tracestate` propagation, `$_SERVER['OXPHP_TRACE_ID']` for PHP log correlation
 - **OpenTelemetry** — OTLP span export (gRPC/HTTP) with semantic conventions, configurable sampling, batch processing
 - **APM auto-instrumentation** — internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O hooked at the engine level; every call becomes a span with zero code changes
 - **`#[OxPHP\Apm\Trace]` decorator** — annotate any function or method with a PHP 8 attribute to create spans automatically
 - **PHP tracing SDK** — 10 `oxphp_apm_*()` functions (`start`, `end`, `attribute`, `event`, `error`, `status`, `header`, `trace`, `trace_id`, `span_id`) for manual span creation, attributes, events, error recording, and trace context propagation
-- **Prometheus metrics** at `/metrics` — per-worker, zero dependencies — see [Metrics](docs/en/operations/metrics.md)
-- **Health check** at `/health` — ready for K8s readiness probes — see [Health checks](docs/en/operations/health-checks.md)
-- **Internal server** on a separate port for health, metrics, and runtime config — see [Internal server](docs/en/features/internal-server.md)
+- **Prometheus metrics** at `/metrics` — per-worker, zero dependencies — see [Metrics](docs/operations/metrics.md)
+- **Health check** at `/health` — ready for K8s readiness probes — see [Health checks](docs/operations/health-checks.md)
+- **Internal server** on a separate port for health, metrics, and runtime config — see [Internal server](docs/features/internal-server.md)
 - **Structured error logging** — PHP errors appear in the server log with `php_error_type`, `php_file`, `php_line` fields
-- **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`) — see [Access logging](docs/en/features/access-logging.md)
-- **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled — see [Request IDs](docs/en/features/request-ids.md)
+- **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`) — see [Access logging](docs/features/access-logging.md)
+- **Request ID** generation + pass-through (`X-Request-ID`); trace-derived when OTel enabled — see [Request IDs](docs/features/request-ids.md)
 
 ### Profiling (`plugin-profiler` feature)
 
-Full guide: [Profiling](docs/en/features/profiling.md).
+Full guide: [Profiling](docs/features/profiling.md).
 
 - **Per-request profile capture** — triggered by cookie (`OXPROF`), header (`X-OxPHP-Profile`), query (`?__oxprof=`), or statistical sampling (`PROFILER_SAMPLE_RATE`); constant-time token compare
 - **Four export formats** — xhprof (for xhgui), speedscope (for speedscope.app), pprof (Go tools / Pyroscope), collapsed (FlameGraph)
@@ -186,12 +188,12 @@ Full guide: [Profiling](docs/en/features/profiling.md).
 
 ### Reliability & Operations
 - **Bounded request queue** with 529 backpressure when full
-- **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/en/features/rate-limiting.md)
-- **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/en/features/error-pages.md)
-- **Graceful shutdown** — in-flight requests drain within `DRAIN_TIMEOUT_SECONDS` on SIGTERM/SIGINT — see [Graceful shutdown](docs/en/operations/graceful-shutdown.md)
-- **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/en/security/symlink-allow-paths.md)
-- **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/en/security/trusted-proxies.md)
-- **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/en/security/dot-path-blocking.md)
+- **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/features/rate-limiting.md)
+- **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/features/error-pages.md)
+- **Graceful shutdown** — in-flight requests drain within `DRAIN_TIMEOUT_SECONDS` on SIGTERM/SIGINT — see [Graceful shutdown](docs/operations/graceful-shutdown.md)
+- **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/security/symlink-allow-paths.md)
+- **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/security/trusted-proxies.md)
+- **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/security/dot-path-blocking.md)
 - **Non-root container** execution as www-data (UID 82)
 
 ---
@@ -321,7 +323,7 @@ The essentials — what most deployments need to get a service up:
 | `SUPERGLOBALS_ENABLED` | `true` | Populate `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`; set `false` to rely solely on `oxphp_http_request()` |
 | `ASYNC_WORKERS` | `0` (disabled) | Dedicated async worker threads for `oxphp_async()` |
 
-Worker pool, queue, rate limiting, timeouts, TLS tuning, static file caching, compression, access logs, trusted proxies, PHP-execution deny rules, and every plugin-scoped variable live in the consolidated reference — see [Configuration](docs/en/operations/configuration.md) for the full table.
+Worker pool, queue, rate limiting, timeouts, TLS tuning, static file caching, compression, access logs, trusted proxies, PHP-execution deny rules, and every plugin-scoped variable live in the consolidated reference — see [Configuration](docs/operations/configuration.md) for the full table.
 
 > **Boolean values** (case-insensitive, trimmed): truthy = `on` / `true` / `1` / `yes`; falsy = `off` / `false` / `0` / `no`. Any non-empty value outside that set — typos like `ture` — fails fast at startup with an error naming the variable. An unset variable or empty assignment (`FOO=`) falls back to the default, so Docker Compose / Kubernetes substitutions like `FOO=${FOO}` work cleanly when the host variable is missing.
 
@@ -329,9 +331,9 @@ Worker pool, queue, rate limiting, timeouts, TLS tuning, static file caching, co
 
 Plugin-scoped env vars (the `OTEL_*`, `OTEL_APM_*`, and `SHARED_*` families) live in the consolidated configuration reference so there is one source of truth:
 
-- **OpenTelemetry** (`plugin-otel`): [Configuration → OpenTelemetry](docs/en/operations/configuration.md#opentelemetry). For the export pipeline end-to-end, see the [Distributed tracing guide](docs/en/features/distributed-tracing.md).
-- **APM** (`plugin-apm`): [Configuration → APM](docs/en/operations/configuration.md#apm). Requires `OTEL_ENABLED=true`.
-- **Shared State** (`plugin-shared`): [Configuration → Shared State](docs/en/operations/configuration.md#shared-state). Concept-level walkthrough lives in the [Shared state guide](docs/en/shared-state/shared-state.md).
+- **OpenTelemetry** (`plugin-otel`): [Configuration → OpenTelemetry](docs/operations/configuration.md#opentelemetry). For the export pipeline end-to-end, see the [Distributed tracing guide](docs/features/distributed-tracing.md).
+- **APM** (`plugin-apm`): [Configuration → APM](docs/operations/configuration.md#apm). Requires `OTEL_ENABLED=true`.
+- **Shared State** (`plugin-shared`): [Configuration → Shared State](docs/operations/configuration.md#shared-state). Concept-level walkthrough lives in the [Shared state guide](docs/shared-state/shared-state.md).
 
 ---
 
@@ -361,7 +363,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O, `#[OxPHP\Apm\Trace]` decorator, 10 `oxphp_apm_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
-| ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/en/features/profiling.md) |
+| ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/features/profiling.md) |
 | **Dockerfile.bookworm** | Official Debian Bookworm-based image as an alternative to Alpine |
 | **Non-Docker Install** | *(speculative)* Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |
@@ -377,9 +379,9 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 
 ## Documentation
 
-- [English](docs/en/)
-- [Русский](docs/ru/)
-- [中文](docs/zh/)
+[oxphp.dev](https://oxphp.dev/) — [English](https://oxphp.dev/en/docs/) · [Русский](https://oxphp.dev/ru/docs/) · [中文](https://oxphp.dev/zh/docs/) · [Français](https://oxphp.dev/fr/docs/) · [Polski](https://oxphp.dev/pl/docs/) · [日本語](https://oxphp.dev/ja/docs/)
+
+The English source of the documentation also lives in this repository under [`docs/`](docs/).
 
 ## License
 
