@@ -7,10 +7,10 @@ require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('parallel_channel_outlives_request', 'zts_ext');
 
 // parallel keeps named channels in one hash allocated persistently at the
-// extension's MINIT and destroyed at MSHUTDOWN (src/channel.c); channel.c
-// registers no RINIT and no RSHUTDOWN. On a server that table therefore lives
-// for the life of the process, and a name claimed by one request is still
-// claimed for every request after it.
+// extension's MINIT and destroyed at MSHUTDOWN (its own src/channel.c, not a
+// file in this repository); that file registers no RINIT and no RSHUTDOWN. On a
+// server the table therefore lives for the life of the process, and a name
+// claimed by one request is still claimed for every request after it.
 //
 // This is the extension's own design rather than anything the server does, and
 // there is no reset to call: the table is file-static and the extension exposes
