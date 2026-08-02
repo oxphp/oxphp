@@ -368,7 +368,18 @@ static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
  * returns immediately, nothing reaches the collector, and no cycle any later
  * request builds is ever collected. Not lowered while a collection is what the
  * bailout interrupted, though: the flag doubles as the collector's own
- * re-entrancy guard, and a run abandoned mid-way is one nothing will finish. */
+ * re-entrancy guard, and a run abandoned mid-way is one nothing will finish —
+ * its root buffer holds objects already marked as garbage, and lowering the
+ * guard on that would hand the next run a half-marked buffer to walk.
+ *
+ * Which leaves that worker in exactly the state the paragraph above is about,
+ * just by a narrower route: the run flag stays up too, so zend_gc_collect_cycles
+ * returns without doing anything for as long as the worker lives. In-process
+ * repair is not on offer, so the worker is retired instead, by the same route a
+ * handler that calls Worker::scheduleExit() takes: it finishes what it is
+ * serving and the pool replaces it. Deliberately not a recycle reason of its
+ * own — a fatal raised from inside a collection is rare enough that a counter
+ * for it would say less than the one it shares. */
 static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
     oxphp_release_abandoned_frames(mark);
     oxphp_vm_stack_rewind(mark);
@@ -376,7 +387,9 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
 
     zend_gc_status gc_status;
     zend_gc_get_status(&gc_status);
-    if (!gc_status.active) {
+    if (gc_status.active) {
+        oxphp_bridge_schedule_exit();
+    } else {
         gc_protect(false);
     }
 }
@@ -662,6 +675,15 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     oxphp_output_stack_free(&fiber->php_state.ob_handlers);
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+
+    if (fiber->php_state.last_error_message) {
+        zend_string_release(fiber->php_state.last_error_message);
+        fiber->php_state.last_error_message = NULL;
+    }
+    if (fiber->php_state.last_error_file) {
+        zend_string_release(fiber->php_state.last_error_file);
+        fiber->php_state.last_error_file = NULL;
+    }
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
      * symbol table. Released here so worker teardown does not leak the arrays. */
@@ -974,25 +996,68 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_recover_from_bailout(&mark);
         } zend_end_try();
 
-        php_call_shutdown_functions();
-        php_free_shutdown_functions();
-
-        /* A fatal raised by a shutdown function never reaches the arm above.
-         * php_call_shutdown_functions runs them under a zend_try of its own with
-         * no catch, so the bailout stops there and this loop is handed a normal
-         * return with everything the fatal left in place: the abandoned frames,
-         * a VM stack top inside them, EG(current_execute_data) cleared, and both
-         * flags up. Carried into the next request on this fiber, the cleared
-         * cursor alone is enough to cost the release walk its safety check —
-         * "the chain must end on the frame the mark names" degenerates into
-         * "must end on NULL", which the chain of any fiber does.
+        /* Neither of the two ways a shutdown function can end badly reaches the
+         * arm above, and each needs undoing here.
          *
-         * The flag is a reliable witness of it: nothing but zend_bailout raises
-         * it, and the arm above has already lowered it for the fatal it caught.
-         * Wrapping the call instead would not work — the inner zend_try catches
-         * first, and this loop's would never see it. */
+         * A fatal: php_call_shutdown_functions runs them under a zend_try of its
+         * own with no catch, so the bailout stops there and this loop is handed a
+         * normal return with everything the fatal left in place — the abandoned
+         * frames, a VM stack top inside them, EG(current_execute_data) cleared,
+         * and both flags up. Carried into the next request on this fiber, the
+         * cleared cursor alone is enough to cost the release walk its safety
+         * check: "the chain must end on the frame the mark names" degenerates
+         * into "must end on NULL", which the chain of any fiber does. The flag is
+         * a reliable witness of it — nothing but zend_bailout raises it, and the
+         * arm above has already lowered it for the fatal it caught. Wrapping the
+         * call instead would not work: the inner zend_try catches first, and this
+         * loop's would never see it.
+         *
+         * Undone before the free below rather than after it, because the free
+         * destroys the registered entries and runs the destructors of everything
+         * they were holding — a __destruct with both flags still up buffers no
+         * possible root, and a generator closed there gives up its frame the
+         * short way and loses the rest. That free swallows a bailout of its own
+         * too, so the flag is asked after it as well. */
+        php_call_shutdown_functions();
         if (CG(unclean_shutdown)) {
             oxphp_recover_from_bailout(&mark);
+        }
+        php_free_shutdown_functions();
+        if (CG(unclean_shutdown)) {
+            oxphp_recover_from_bailout(&mark);
+        }
+
+        /* An exception: with no bailout there is no flag, and nothing reports it
+         * either. Every other SAPI calls the shutdown functions from
+         * php_request_shutdown, with no frame on the stack — so the tail of
+         * zend_call_function finds EG(current_execute_data) NULL and hands the
+         * exception to zend_throw_exception_internal, which is what turns it into
+         * the "Uncaught ..." fatal a shutdown function's exception is everywhere
+         * else. A worker calls them from inside this frame, which is neither NULL
+         * nor user code, so neither branch of that tail runs: the exception is
+         * not reported, not rethrown, and simply stays in EG(exception) until
+         * this fiber parks and the backstop in oxphp_fiber_enter drops it. So it
+         * costs the next request nothing — and the request that raised it answers
+         * the 200 of a request that did nothing wrong, with no fatal, no log
+         * line, and nothing in its body. The error is not mishandled anywhere; it
+         * disappears.
+         *
+         * Reported the way that tail reports it, minus the user exception
+         * handler: that slot is thread-wide and outlives the request that
+         * installed it, so calling it here would run one request's handler for
+         * another request's exception. zend_exception_error consumes what it
+         * reports and asks for no bailout, but it does call __toString on the
+         * exception, which is user code and can fatal — hence the arm. */
+        if (EG(exception)) {
+            zend_try {
+                zend_exception_error(EG(exception), E_ERROR);
+            } zend_catch {
+                oxphp_recover_from_bailout(&mark);
+            } zend_end_try();
+            if (EG(exception)) {
+                OBJ_RELEASE(EG(exception));
+                EG(exception) = NULL;
+            }
         }
 
         /* Close the request the way php_request_shutdown closes one, and for
@@ -1172,13 +1237,37 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * sent — and through any handler the script installed, called with half of
      * what it was given to transform. The bytes stay where the request put them
      * and reach ub_write when it flushes or ends, with this fiber's Rust ctx
-     * installed, since a resume restores that before returning to PHP. */
+     * installed, since a resume restores that before returning to PHP.
+     *
+     * The rest of the output globals stay with the worker. OG(flags) is mostly
+     * the thread's — PHP_OUTPUT_ACTIVATED says the stack exists at all — and
+     * output_start_filename/lineno name whichever file wrote first, which the
+     * "headers already sent by" warning quotes. Those two are per-request state
+     * a worker on this path carries from one request into the next whether or
+     * not anything suspends, since nothing resets them between requests here;
+     * parking them would close the half of that a suspension opens and leave the
+     * other half exactly as it is. */
     fiber->php_state.ob_handlers = OG(handlers);
     fiber->php_state.ob_active = OG(active);
     fiber->php_state.ob_running = OG(running);
     zend_stack_init(&OG(handlers), sizeof(php_output_handler *));
     OG(active) = NULL;
     OG(running) = NULL;
+
+    /* Step 1b: and its last error, for the same reason and by the same move. A
+     * request that suspends holding one must find it again on resume, and must
+     * not leave it where the request the worker serves in the window would read
+     * it as its own. Taken rather than copied, so what stands here is empty
+     * until something installs a request's own — a resume below, or the reset a
+     * new request runs. */
+    fiber->php_state.last_error_type = PG(last_error_type);
+    fiber->php_state.last_error_lineno = PG(last_error_lineno);
+    fiber->php_state.last_error_message = PG(last_error_message);
+    fiber->php_state.last_error_file = PG(last_error_file);
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+    PG(last_error_message) = NULL;
+    PG(last_error_file) = NULL;
 
     /* Step 2: Save Rust TLS (RESPONSE, EARLY_TX, REQUEST_DATA, deadline) */
     oxphp_bridge_fiber_save_ctx(fiber->fiber_id);
@@ -1301,10 +1390,19 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     PG(connection_status) = fiber->php_state.connection_status;
 
     /* Give this request its output buffers back, and give up what stands in
-     * their place under the same assumption the header list above is restored
-     * under: it belongs to a request that has already ended its own, so what is
-     * left is an empty stack — freed rather than overwritten, because the
-     * allocation behind an empty one is still an allocation. */
+     * their place. It belongs to a request that has already ended its own, and
+     * ending is not the same as emptying: php_output_end() answers FAILURE for a
+     * handler that cannot be removed, and the loop that ends a request stops on
+     * the first of those. Whatever is left standing that way is nobody's — the
+     * request it belonged to is gone, and this one has its own — so it is freed
+     * rather than overwritten, which the empty case needs too, since the
+     * allocation behind an empty stack is still an allocation.
+     *
+     * That the save takes the whole stack while the end of a request only ends
+     * down to the level it started at says the same thing twice as long as a
+     * request starts at level zero, which is what every path into one leaves:
+     * the reset before a worker's first request flattens the stack, and no later
+     * request opens a default buffer for the next one to stand on. */
     oxphp_output_stack_free(&OG(handlers));
     OG(handlers) = fiber->php_state.ob_handlers;
     OG(active) = fiber->php_state.ob_active;
@@ -1312,6 +1410,23 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     zend_stack_init(&fiber->php_state.ob_handlers, sizeof(php_output_handler *));
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+
+    /* And its last error back, giving up whatever stands in its place on the
+     * same terms as the two above. */
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+    }
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+    }
+    PG(last_error_type) = fiber->php_state.last_error_type;
+    PG(last_error_lineno) = fiber->php_state.last_error_lineno;
+    PG(last_error_message) = fiber->php_state.last_error_message;
+    PG(last_error_file) = fiber->php_state.last_error_file;
+    fiber->php_state.last_error_type = 0;
+    fiber->php_state.last_error_lineno = 0;
+    fiber->php_state.last_error_message = NULL;
+    fiber->php_state.last_error_file = NULL;
 
     /* The bridge's per-request ctx flags are thread-global, reset by every new
      * multiplexed request's prep (oxphp_bridge_reset_request_ctx) and not part
@@ -1437,8 +1552,22 @@ void oxphp_fiber_init_request_state(void) {
         SG(request_info).cookie_data = sapi_module.read_cookies();
     }
 
-    /* Reset error state */
+    /* Reset error state. The last error is part of it: error_get_last() is what
+     * a shutdown function reads to decide whether the request it is closing died,
+     * so a new request must not start able to read the one before it. The fast
+     * path's reset clears it for the same reason; on this path nothing did, so a
+     * request served after one that fataled reported that fatal as its own. */
     PG(connection_status) = PHP_CONNECTION_NORMAL;
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+        PG(last_error_message) = NULL;
+    }
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+        PG(last_error_file) = NULL;
+    }
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
 
     /* Re-init superglobals from new request data */
     oxphp_reset_request_autoglobals();

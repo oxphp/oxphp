@@ -127,6 +127,17 @@ typedef struct {
     zend_stack ob_handlers;
     php_output_handler *ob_active;
     php_output_handler *ob_running;
+
+    /* What error_get_last() answers, which is thread-wide like the rest of this
+     * struct. A request that suspends would otherwise come back reading the last
+     * error of whichever request the worker served in the window — and reporting
+     * it as its own, since reading this in a shutdown function to decide whether
+     * the request died is exactly what frameworks and test harnesses do with it.
+     * The two strings are owned while parked. */
+    int last_error_type;
+    int last_error_lineno;
+    zend_string *last_error_message;
+    zend_string *last_error_file;
 } oxphp_fiber_php_state;
 
 /* ─── Request Fiber ────────────────────────────────────── */
