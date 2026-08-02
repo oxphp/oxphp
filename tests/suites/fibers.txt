@@ -10,3 +10,6 @@ fibers/test_switch_blocked_falls_back
 fibers/test_suspend_retry_is_bounded
 fibers/test_generator_fatal_releases_once
 fibers/test_closure_fatal_releases_it
+fibers/test_ob_survives_suspend
+fibers/test_gc_survives_fatal
+fibers/test_gc_survives_shutdown_fatal
