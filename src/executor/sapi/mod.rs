@@ -13,6 +13,12 @@ use crate::php::bindings;
 use crate::php::sapi;
 use crate::types::{ScriptRequest, ScriptResponse};
 
+/// How long a worker that can be retired sleeps between looks at its shutdown
+/// flag. Shared by both worker models on purpose: the interval is the upper
+/// bound on how long a retirement takes to be noticed, and having the two
+/// loops drift apart would make that bound depend on which model is running.
+pub(crate) const WORKER_RETIRE_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
 mod pool;
 mod traditional;
 mod worker_mode;
@@ -53,6 +59,12 @@ fn php_startup() {
 /// - registers `oxphp_bridge_set_worker_callbacks`,
 /// - creates `WorkerMetrics` and publishes it via `metrics.set_worker_metrics`.
 fn build_spawn_strategy(config: &Config, metrics: &Arc<Metrics>) -> SpawnStrategy {
+    // Both models need it: only a dynamic pool ever retires a worker, so only
+    // there does a thread have to interrupt its wait to read its own flag.
+    let loop_mode = match &config.worker_mode {
+        WorkerMode::Static(_) => WorkerLoopMode::Static,
+        WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
+    };
     if config.worker_mode_enabled {
         // Validated at startup: worker mode requires a `.php` entry file.
         let entry_file = config
@@ -77,15 +89,12 @@ fn build_spawn_strategy(config: &Config, metrics: &Arc<Metrics>) -> SpawnStrateg
         metrics.set_worker_metrics(Arc::clone(&wm));
 
         SpawnStrategy::WorkerMode {
+            loop_mode,
             config: wmc,
             metrics: wm,
             server_metrics: Arc::clone(metrics),
         }
     } else {
-        let loop_mode = match &config.worker_mode {
-            WorkerMode::Static(_) => WorkerLoopMode::Static,
-            WorkerMode::Dynamic { .. } => WorkerLoopMode::Dynamic,
-        };
         SpawnStrategy::Traditional {
             loop_mode,
             server_metrics: Arc::clone(metrics),
