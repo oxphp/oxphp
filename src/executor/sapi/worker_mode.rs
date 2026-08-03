@@ -13,6 +13,7 @@ use crate::php::{bindings, sapi};
 use crate::types::ScriptResponse;
 
 use super::pool::WorkerRequest;
+use super::traditional::WorkerLoopMode;
 
 /// Configuration for worker mode threads.
 /// Wrapped in Arc to avoid PathBuf heap clones on every worker spawn/respawn.
@@ -34,15 +35,16 @@ pub(super) struct WorkerModeMetrics {
 pub(super) fn spawn_worker_mode(
     id: usize,
     rx: crossbeam_channel::Receiver<WorkerRequest>,
-    _shutdown: Arc<AtomicBool>, // kept for ManagedWorker interface; worker mode shuts down via channel closure
+    shutdown: Arc<AtomicBool>,
     last_active: Arc<AtomicU64>,
+    loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_mode_thread(id, rx, last_active, config, metrics);
+            worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics);
         })
         .expect("failed to spawn PHP worker mode thread")
 }
@@ -53,7 +55,9 @@ pub(super) fn spawn_worker_mode(
 fn worker_mode_thread(
     worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
+    shutdown: Arc<AtomicBool>,
     last_active: Arc<AtomicU64>,
+    loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,
 ) {
@@ -91,6 +95,11 @@ fn worker_mode_thread(
 
     // 3. Store channel receiver, last_active, and metrics in thread-local
     sapi::set_worker_rx(request_rx);
+    // Only a dynamic pool retires workers, and only a worker that can be
+    // retired pays for looking at the flag — see `sapi::set_worker_shutdown`.
+    if matches!(loop_mode, WorkerLoopMode::Dynamic) {
+        sapi::set_worker_shutdown(shutdown);
+    }
     sapi::set_worker_last_active(last_active);
     sapi::set_worker_stats(Arc::clone(&stats));
     sapi::set_worker_metrics(Arc::clone(&worker_metrics));

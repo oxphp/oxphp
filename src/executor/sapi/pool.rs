@@ -79,6 +79,9 @@ pub(super) enum SpawnStrategy {
         server_metrics: Arc<Metrics>,
     },
     WorkerMode {
+        /// Same meaning as in `Traditional`: whether the thread's wait for the
+        /// next request has to come up for air to read its shutdown flag.
+        loop_mode: WorkerLoopMode,
         config: Arc<WorkerModeConfig>,
         metrics: Arc<WorkerMetrics>,
         server_metrics: Arc<Metrics>,
@@ -100,6 +103,7 @@ impl SpawnStrategy {
                 Arc::clone(server_metrics),
             ),
             Self::WorkerMode {
+                loop_mode,
                 config,
                 metrics,
                 server_metrics,
@@ -111,6 +115,7 @@ impl SpawnStrategy {
                     args.rx,
                     args.shutdown,
                     args.last_active,
+                    *loop_mode,
                     config.clone(),
                     WorkerModeMetrics {
                         stats,
@@ -375,8 +380,17 @@ pub(super) async fn run_scale_manager(
                 free_ids.push_back(retired_id);
                 // Join on Tokio's blocking pool so the async runtime isn't blocked
                 // and we don't pay pthread_create latency per scale-down event.
+                // The log line on the far side is the only trace a retirement
+                // that never completes leaves behind: the join itself is silent,
+                // and a thread that outlives its retirement keeps taking work
+                // off the shared queue as if nothing had happened.
+                // `retired_id` names the slot this worker held when it was
+                // retired, not one it still owns: the id went back to the free
+                // list above, so by the time this prints a replacement may
+                // already be serving under it.
                 tokio::task::spawn_blocking(move || {
                     let _ = worker.handle.join();
+                    tracing::info!(retired_id, "Scale-down: retired worker thread stopped");
                 });
                 total -= 1;
                 last_scale_down = Instant::now();

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_void};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -82,6 +82,10 @@ thread_local! {
     static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
     /// Worker mode: channel receiver for incoming requests.
     static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
+    /// Worker mode: this worker's retirement flag, set only for a dynamic pool.
+    /// Its presence is what makes the wait loop poll — a static pool leaves it
+    /// unset and keeps sleeping on a plain `recv()`. See `set_worker_shutdown`.
+    static WORKER_SHUTDOWN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     /// Worker mode: shared last_active timestamp for scale manager idle detection.
     static WORKER_LAST_ACTIVE: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
     /// Worker mode: per-worker stats (memory, requests_done, uptime).
@@ -2636,6 +2640,24 @@ pub fn set_worker_rx(rx: crossbeam_channel::Receiver<WorkerIncomingRequest>) {
     });
 }
 
+/// Hand this worker thread its retirement flag. Called only for a dynamic
+/// pool: a static pool never retires anyone, so leaving the flag unset keeps
+/// an idle worker asleep on `recv()` at zero CPU instead of waking to read a
+/// flag that can never be set.
+pub fn set_worker_shutdown(shutdown: Arc<AtomicBool>) {
+    WORKER_SHUTDOWN.with(|slot| {
+        *slot.borrow_mut() = Some(shutdown);
+    });
+}
+
+fn worker_retiring() -> bool {
+    WORKER_SHUTDOWN.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+    })
+}
+
 pub fn set_worker_last_active(last_active: Arc<AtomicU64>) {
     WORKER_LAST_ACTIVE.with(|slot| {
         *slot.borrow_mut() = Some(last_active);
@@ -2662,32 +2684,57 @@ pub fn set_server_metrics(m: Arc<crate::metrics::Metrics>) {
     });
 }
 
+/// Take the next request off the channel, or report that this thread should
+/// stop. A worker with a retirement flag (dynamic pool) waits in
+/// `WORKER_RETIRE_POLL` slices so it can notice the flag; one without (static
+/// pool) sleeps on a plain `recv()` until the channel closes, exactly as before.
+///
+/// This is the only place the flag is read, and the serve loop only gets here
+/// once it has no request left to run. That cuts both ways, and the second half
+/// is the one worth knowing: a retirement is taken at an idle moment, so
+/// nothing the worker was serving is cut short — and a worker holding a request
+/// that never ends (a stream, a read from a peer that stops answering) never
+/// reaches this function, so it does not retire at all. Its thread stops only
+/// when the channel closes, which is what the event-loop branch watches for.
+fn worker_recv_blocking() -> Option<WorkerIncomingRequest> {
+    WORKER_RX.with(|slot| {
+        let rx = slot.borrow();
+        let rx = rx.as_ref()?;
+        if WORKER_SHUTDOWN.with(|s| s.borrow().is_none()) {
+            return rx.recv().ok();
+        }
+        loop {
+            if worker_retiring() {
+                return None;
+            }
+            match rx.recv_timeout(crate::executor::sapi::WORKER_RETIRE_POLL) {
+                Ok(req) => return Some(req),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    })
+}
+
 /// Worker wait callback — called from C bridge when PHP calls oxphp_worker().
 /// Blocks on the crossbeam channel until a new request arrives.
 /// Populates SAPI TLS with the new request data.
-/// Returns 0 on success (request ready), -1 on shutdown (channel closed).
+/// Returns 0 on success (request ready), -1 on shutdown (channel closed or
+/// this worker retired by the scale manager).
 ///
 /// # Safety
 /// Called from C code via function pointer. Must only be called from a worker thread
 /// with WORKER_RX set.
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
     loop {
-        let incoming = WORKER_RX.with(|slot| {
-            let rx = slot.borrow();
-            match rx.as_ref() {
-                Some(rx) => rx.recv().ok(),
-                None => None,
-            }
-        });
-
-        match incoming {
+        match worker_recv_blocking() {
             Some(req) if req.queue_budget_expired() => continue_after_refusal(req),
             Some(req) => {
                 // Direct call — no PENDING_REQUEST round-trip on the blocking path
                 setup_request_tls(req);
                 return 0; // success
             }
-            None => return -1, // channel closed = shutdown
+            None => return -1, // channel closed or retired = shutdown
         }
     }
 }

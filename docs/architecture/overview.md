@@ -42,6 +42,8 @@ PHP_WORKERS=2:16    # start with 2, scale up to 16 under load
 
 When all current workers are busy, OxPHP spawns new workers up to the maximum. When a worker has been idle for longer than `PHP_WORKERS_IDLE_SECONDS` (default: 30 seconds), it is retired back down toward the minimum.
 
+Retirement is taken at a moment when the worker has nothing in flight, so a request it is still serving always runs to its own response. The same rule sets the boundary: a worker holding a request that never ends — an open stream, a read from a peer that stops answering — never reaches such a moment, and so is not retired while it holds it.
+
 ### Queue and Backpressure
 
 Between the async HTTP layer and the worker pool sits a bounded queue. Its capacity defaults to the initial worker count multiplied by 128 and can be overridden with `QUEUE_CAPACITY`. For a static pool, the initial count is the configured worker count. For a dynamic pool (`MIN:MAX`), the initial count is the minimum.

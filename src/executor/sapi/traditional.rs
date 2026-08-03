@@ -5,7 +5,7 @@
 use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bytes::Bytes;
 use crossbeam_channel::RecvTimeoutError;
@@ -149,13 +149,14 @@ fn worker_thread(
             }
         }
         WorkerLoopMode::Dynamic => {
-            // Timeout-based recv — wakes every 200ms to check shutdown flag.
-            // Stores last_active timestamp for the scale manager's idle detection.
+            // Timeout-based recv — wakes on WORKER_RETIRE_POLL to check the
+            // shutdown flag. Stores last_active timestamp for the scale
+            // manager's idle detection.
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
-                match request_rx.recv_timeout(Duration::from_millis(200)) {
+                match request_rx.recv_timeout(super::WORKER_RETIRE_POLL) {
                     Ok(wr) => {
                         last_active.store(super::pool::now_millis(), Ordering::Relaxed);
                         if wr.queue_budget_expired() {
