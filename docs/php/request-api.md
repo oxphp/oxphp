@@ -157,20 +157,43 @@ Access query string parameters.
 
 | Call | Returns |
 |------|---------|
-| `$request->query()` | All parameters as an array, including nested arrays |
+| `$request->query()` | All parameters as a flat array of name-value pairs |
 | `$request->query('page')` | The value of `page`, or `null` if absent |
 | `$request->query('page', 1)` | The value of `page`, or `1` if absent |
 
-Bracket notation (`?tags[]=php&tags[]=async`) is parsed into nested arrays:
+> **Known gap:** bracket notation is not expanded into nested arrays yet. `?tags[]=php&tags[]=async` currently yields a flat entry named `tags[]` rather than a `tags` array, and a repeated name resolves to its first occurrence through `query('name')` while `query()` keeps the last. Use `$_GET` for array parameters until this is fixed.
 
 ```php
 // Request: GET /search?q=oxphp&tags[]=php&tags[]=async
 $q    = $request->query('q');      // "oxphp"
-$tags = $request->query('tags');   // ["php", "async"]
-$all  = $request->query();         // ["q" => "oxphp", "tags" => ["php", "async"]]
+$tags = $_GET['tags'];             // ["php", "async"]
 ```
 
-Found values are always strings. `$default` is returned as-is when the key is absent.
+Found values are always strings. `$default` is returned as-is when the key is absent. A parameter sent without a value (`?flag`) and one sent empty (`?flag=`) both read as `''` — only an absent parameter gives `null`.
+
+#### Decoding
+
+Names and values are percent-decoded, and `+` is read as a space — the same rules PHP applies when building `$_GET`:
+
+```php
+// Request: GET /search?q=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82&tag=a+b
+$request->query('q');    // "Привет"
+$request->query('tag');  // "a b"
+```
+
+Values are byte strings, so an escape encoding something that is not valid UTF-8 survives intact — a signed token or a binary id can still be verified against the bytes as sent. `queryString()` remains the way to read the query string exactly as it arrived, undecoded.
+
+Names are reported as the client sent them, where `$_GET` reports them as PHP files them. PHP rewrites `' '`, `'.'` and `'['` in superglobal names, so `?a.b=1` lands in `$_GET` as `a_b`:
+
+```php
+// Request: GET /?a.b=1
+$_GET['a_b'];            // "1"
+$request->query('a.b');  // "1"
+```
+
+A name is also kept whole where PHP would cut it — PHP handles superglobal names as C strings, so `?a%00b=1` becomes `$_GET['a']` while `query()` keeps `a\0b`. Do not read that as a reason to validate through one API and read through the other: the truncation lets one parameter land on another's key, so `?a=1&a%00x=2` gives `$_GET['a'] === '2'` where `query('a') === '1'`, and the two disagree on the value rather than merely on the set of names.
+
+At most 1000 parameters are parsed. PHP applies its own limit, `max_input_vars`, which defaults to the same 1000 but is configurable — raise it and `$_GET` will hold parameters past the point where `query()` stops.
 
 ---
 
@@ -251,13 +274,28 @@ $all = $request->headers();
 $request->cookie(string $name, ?string $default = null): ?string
 ```
 
-Returns the value of a single cookie, or `$default` if the cookie is not present.
+Returns the value of a single cookie, or `$default` if the cookie is not present. A cookie sent empty (`Cookie: a=`) reads as `''`; only an absent cookie gives `$default`.
 
 ```php
 $request->cookies(): array
 ```
 
 Returns all cookies as an associative array of name-value pairs.
+
+#### Decoding
+
+Cookies decode differently from query parameters, following what PHP does when building `$_COOKIE`: values are percent-decoded, but `+` stays a literal `+`, and names are not decoded at all.
+
+```php
+// Cookie: token=a%20b; sep=a+b; %D0%BA=1
+$request->cookie('token');  // "a b"   — percent-escapes decoded
+$request->cookie('sep');    // "a+b"   — unlike query(), "+" is not a space
+$request->cookie('%D0%BA'); // "1"     — look up by the name as sent
+```
+
+Names are reported as sent here too. PHP rewrites `' '`, `'.'` and `'['` in every superglobal name, cookies included, so `Cookie: a.b=1` lands in `$_COOKIE` as `a_b` while `cookie('a.b')` and `cookies()['a.b']` use the name the client sent.
+
+Values are byte strings, so a signed cookie or `setcookie('sid', random_bytes(16))` round-trips as the exact bytes it was set with.
 
 ```php
 <?php

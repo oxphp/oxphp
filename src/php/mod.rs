@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod fiber;
 pub mod header_match;
 pub mod heartbeat;
+pub mod request_decode;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod supervisor;

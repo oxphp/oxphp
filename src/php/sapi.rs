@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use crate::async_types::{AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
+use crate::php::request_decode::{parse_query_pairs, url_decode, value_ptr};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -308,8 +309,17 @@ struct RequestData {
     is_secure: bool,
     /// Raw headers as (lowercase_name, value) pairs.
     headers_raw: Vec<(String, String)>,
-    /// Parsed cookies as (name, value) pairs.
-    cookies_parsed: Vec<(String, String)>,
+    /// Parsed cookies as (raw name, decoded value) byte pairs.
+    cookies_parsed: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Parsed query parameters as (decoded name, decoded value) byte pairs.
+    ///
+    /// Decoded up front rather than sliced out of `query_string_raw` on
+    /// demand: the accessor callbacks hand a borrowed pointer back to C, so
+    /// the decoded bytes need an owner that lives as long as the request.
+    /// This costs one allocation per name and value on every request that
+    /// carries a query string, in line with `headers_raw` and
+    /// `cookies_parsed` above; `parse_query_pairs` caps how far that can go.
+    query_parsed: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl RequestData {
@@ -336,6 +346,7 @@ impl RequestData {
             is_secure: false,
             headers_raw: Vec::with_capacity(16),
             cookies_parsed: Vec::new(),
+            query_parsed: Vec::new(),
         }
     }
 }
@@ -976,6 +987,11 @@ pub fn set_request_data(req: &ScriptRequest) {
         data.query_string_raw.clear();
         data.query_string_raw.push_str(&req.query_string);
 
+        // `queryString()` keeps reporting the raw form above; the object API's
+        // query() reads the decoded pairs so it agrees with $_GET.
+        data.query_parsed.clear();
+        parse_query_pairs(&req.query_string, &mut data.query_parsed);
+
         data.remote_addr_str.clear();
         data.remote_addr_str.push_str(&remote_ip);
 
@@ -1025,8 +1041,11 @@ pub fn set_request_data(req: &ScriptRequest) {
                 for pair in cookie_str.split(';') {
                     let pair = pair.trim();
                     if let Some(eq) = pair.find('=') {
+                        // Cookie names are not decoded (PHP leaves them raw),
+                        // values are percent-decoded but keep a literal '+'.
+                        let bytes = pair.as_bytes();
                         data.cookies_parsed
-                            .push((pair[..eq].to_owned(), pair[eq + 1..].to_owned()));
+                            .push((bytes[..eq].to_vec(), url_decode(&bytes[eq + 1..], false)));
                     }
                 }
             }
@@ -1128,6 +1147,7 @@ pub fn clear_request_data() {
         data.is_secure = false;
         data.headers_raw.clear();
         data.cookies_parsed.clear();
+        data.query_parsed.clear();
     });
 
     // Clear SG(request_info) and bridge context so PHP doesn't hold stale references.
@@ -5121,12 +5141,14 @@ unsafe extern "C" fn req_cookie_cb(
             *out_len = 0;
             return std::ptr::null();
         }
+        // Compared as bytes: a PHP caller may pass any byte string as the
+        // name, so validating it as UTF-8 would be a lie either way.
         let key = std::slice::from_raw_parts(name as *const u8, name_len);
-        let key_str = std::str::from_utf8_unchecked(key);
         for (k, v) in &data.cookies_parsed {
-            if k == key_str {
-                *out_len = v.len();
-                return v.as_ptr() as *const c_char;
+            if k.as_slice() == key {
+                let (ptr, len) = value_ptr(v);
+                *out_len = len;
+                return ptr;
             }
         }
         *out_len = 0;
@@ -5141,23 +5163,19 @@ unsafe extern "C" fn req_query_param_cb(
 ) -> *const c_char {
     REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        if !data.active || data.query_string_raw.is_empty() {
+        if !data.active {
             *out_len = 0;
             return std::ptr::null();
         }
+        // Both sides are decoded bytes, so a key like `%D0%BA%D0%BB%D1%8E%D1%87`
+        // is found by the name PHP callers actually pass — and a name that is
+        // not valid UTF-8 compares correctly instead of being assumed.
         let search = std::slice::from_raw_parts(key as *const u8, key_len);
-        let search_str = std::str::from_utf8_unchecked(search);
-        // Simple query string parsing for single-value lookup
-        for pair in data.query_string_raw.split('&') {
-            if let Some(eq) = pair.find('=') {
-                if &pair[..eq] == search_str {
-                    let val = &pair[eq + 1..];
-                    *out_len = val.len();
-                    return val.as_ptr() as *const c_char;
-                }
-            } else if pair == search_str {
-                *out_len = 0;
-                return c"".as_ptr(); // empty value, not null
+        for (k, v) in &data.query_parsed {
+            if k.as_slice() == search {
+                let (ptr, len) = value_ptr(v);
+                *out_len = len;
+                return ptr;
             }
         }
         *out_len = 0;
@@ -5192,13 +5210,9 @@ unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
             return;
         }
         for (k, v) in &data.cookies_parsed {
-            cb(
-                k.as_ptr() as *const c_char,
-                k.len(),
-                v.as_ptr() as *const c_char,
-                v.len(),
-                user_data,
-            );
+            let (key_ptr, key_len) = value_ptr(k);
+            let (val_ptr, val_len) = value_ptr(v);
+            cb(key_ptr, key_len, val_ptr, val_len, user_data);
         }
     });
 }
@@ -5206,29 +5220,13 @@ unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
 unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void) {
     REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        if !data.active || data.query_string_raw.is_empty() {
+        if !data.active {
             return;
         }
-        for pair in data.query_string_raw.split('&') {
-            if let Some(eq) = pair.find('=') {
-                let k = &pair[..eq];
-                let v = &pair[eq + 1..];
-                cb(
-                    k.as_ptr() as *const c_char,
-                    k.len(),
-                    v.as_ptr() as *const c_char,
-                    v.len(),
-                    user_data,
-                );
-            } else {
-                cb(
-                    pair.as_ptr() as *const c_char,
-                    pair.len(),
-                    c"".as_ptr(),
-                    0,
-                    user_data,
-                );
-            }
+        for (k, v) in &data.query_parsed {
+            let (key_ptr, key_len) = value_ptr(k);
+            let (val_ptr, val_len) = value_ptr(v);
+            cb(key_ptr, key_len, val_ptr, val_len, user_data);
         }
     });
 }
