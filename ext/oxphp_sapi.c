@@ -349,7 +349,9 @@ ZEND_METHOD(OxPHP_Http_Request, cookie) {
 
     size_t len = 0;
     const char *val = oxphp_req_cookie(ZSTR_VAL(name), ZSTR_LEN(name), &len);
-    if (val && len > 0) {
+    /* A present-but-empty cookie ("Cookie: a=") is "", not absent — $_COOKIE
+     * reports it that way, and only a NULL pointer means "no such cookie". */
+    if (val) {
         RETURN_STRINGL(val, len);
     }
     if (def) {
