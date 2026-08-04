@@ -1384,6 +1384,16 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     /* Restore Rust TLS first (so ub_write goes to the right buffer) */
     oxphp_bridge_fiber_restore_ctx(fiber->fiber_id);
 
+    /* And point the SAPI at this request's cookie string, the way a new
+     * request's init does (see oxphp_fiber_init_request_state). The engine
+     * holds the pointer for the length of a request, and what stands here names
+     * the per-request data the restore above just replaced — freeing the string
+     * it points into. The rest of SG(request_info) is re-pointed by the restore
+     * itself, which owns those strings on the Rust side. */
+    if (sapi_module.read_cookies) {
+        SG(request_info).cookie_data = sapi_module.read_cookies();
+    }
+
     /* Restore superglobals */
     for (int i = 0; i < 6; i++) {
         zval_ptr_dtor_nogc(&PG(http_globals)[i]); /* free current */

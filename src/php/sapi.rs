@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_uint, c_void};
+use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
@@ -266,15 +266,24 @@ unsafe fn pop_worker_unhandled_exception() -> Option<crate::types::PhpScriptErro
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
 /// Reused across requests — `server_vars` Vec capacity is retained.
-struct RequestData {
+///
+/// Under worker-mode fiber multiplexing this travels with the request rather
+/// than with the thread: a suspended request's copy is parked in its fiber's
+/// TLS slot (`take_request_data` / `restore_request_data`) so the request the
+/// worker serves in the window gets a slot of its own to fill.
+pub(crate) struct RequestData {
     /// Pre-built $_SERVER key-value pairs as CStrings (must outlive php_request_shutdown).
     server_vars: Vec<(CString, CString)>,
     /// Raw Cookie header string for read_cookies callback (must outlive request).
     cookie_string: Option<CString>,
+    /// Request method for SG(request_info) — must outlive php_request_shutdown.
+    method_cstr: Option<CString>,
     /// Query string for SG(request_info) — must outlive php_request_shutdown.
     query_string: Option<CString>,
     /// Content-Type string for SG(request_info) — must outlive php_request_shutdown.
     content_type_string: Option<CString>,
+    /// Body length declared by the request, for SG(request_info).
+    content_length: i64,
     /// Request ID CString — must outlive php_request_shutdown.
     request_id_cstr: Option<CString>,
     /// Request body for read_post callback.
@@ -323,12 +332,14 @@ struct RequestData {
 }
 
 impl RequestData {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             server_vars: Vec::with_capacity(32),
             cookie_string: None,
+            method_cstr: None,
             query_string: None,
             content_type_string: None,
+            content_length: 0,
             request_id_cstr: None,
             body: Bytes::new(),
             body_offset: 0,
@@ -1063,51 +1074,95 @@ pub fn set_request_data(req: &ScriptRequest) {
         // Set SG(request_info) so PHP parses $_GET, $_POST, $_FILES, $_COOKIE.
         // This MUST happen before php_request_startup().
         // When superglobals disabled, still set method/content-type for php://input.
-        let method_cstr_owned = CString::new(req.method.as_str()).ok();
-        let method_cstr = if sg_enabled {
-            data.server_vars
-                .iter()
-                .find(|(k, _)| k.as_bytes() == b"REQUEST_METHOD")
-                .map(|(_, v)| v.as_ptr())
-                .unwrap_or(std::ptr::null())
-        } else {
-            method_cstr_owned
-                .as_ref()
-                .map(|c| c.as_ptr())
-                .unwrap_or(std::ptr::null())
-        };
-
-        let qs_ptr = if sg_enabled {
-            data.query_string
-                .as_ref()
-                .map(|cs| cs.as_ptr())
-                .unwrap_or(std::ptr::null())
-        } else {
-            std::ptr::null()
-        };
-
-        let ct_ptr = data
-            .content_type_string
-            .as_ref()
-            .map(|cs| cs.as_ptr())
-            .unwrap_or(std::ptr::null());
-
-        let content_length = req
+        //
+        // The method string is owned by the slot rather than by this call: PHP
+        // holds the pointer for the whole request, and a resumed fiber has to be
+        // handed the same one again (see `restore_request_data`).
+        data.method_cstr = CString::new(req.method.as_str()).ok();
+        data.content_length = req
             .headers
             .get(header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
+        let (method_cstr, qs_ptr, ct_ptr, content_length) = request_info_ptrs(&data);
         unsafe {
-            bindings::oxphp_bridge_set_request_info(
-                method_cstr,
-                qs_ptr,
-                ct_ptr,
-                content_length as std::os::raw::c_long,
-            );
+            bindings::oxphp_bridge_set_request_info(method_cstr, qs_ptr, ct_ptr, content_length);
         }
     });
+}
+
+/// The pointers `SG(request_info)` holds for a request, borrowed from the slot
+/// that owns the strings. PHP keeps them for the whole request, so they must
+/// come from `RequestData` and not from a temporary.
+fn request_info_ptrs(data: &RequestData) -> (*const c_char, *const c_char, *const c_char, c_long) {
+    let ptr_of = |s: &Option<CString>| s.as_ref().map_or(std::ptr::null(), |cs| cs.as_ptr());
+    (
+        ptr_of(&data.method_cstr),
+        // A query string is only handed over when superglobals are on: it is
+        // what PHP parses $_GET out of.
+        if data.sg_enabled {
+            ptr_of(&data.query_string)
+        } else {
+            std::ptr::null()
+        },
+        ptr_of(&data.content_type_string),
+        data.content_length as c_long,
+    )
+}
+
+/// Take this request's SAPI data out of TLS (per-fiber save).
+///
+/// The slot is one per worker thread, and the scheduler prepares the next
+/// request into it from the event-loop tick — that is, while other requests are
+/// parked. Left standing, a suspended request's path, headers, cookies, query
+/// and body are overwritten by whichever request the worker accepts in the
+/// window, and the object API hands them to it on resume while its superglobals
+/// (already carried across the suspension) still say otherwise.
+pub(crate) fn take_request_data() -> RequestData {
+    REQUEST_DATA.with(|rd| std::mem::replace(&mut *rd.borrow_mut(), RequestData::new()))
+}
+
+/// Give a fiber its SAPI data back (counterpart of `take_request_data`).
+///
+/// Re-points `SG(request_info)` at this request's strings, which is not
+/// optional: PHP holds those pointers for the length of a request, and they
+/// currently name the strings of whatever request the thread touched last —
+/// strings this call frees along with the slot it replaces.
+///
+/// The bridge's request-info setter also resets `SG(sapi_headers)`
+/// `.http_response_code` to 200, so this must run before the caller re-installs
+/// the resumed request's own status — which is the order
+/// `oxphp_fiber_restore_php_state` has: it restores the Rust context first and
+/// the saved SAPI headers after.
+pub(crate) fn restore_request_data(data: RequestData) {
+    // The pointers are projected under the borrow and handed on without it, the
+    // way the SAPI callbacks do it: they name strings the slot owns, and the
+    // slot is only ever rebuilt between requests.
+    let (method, query_string, content_type, content_length, request_id) =
+        REQUEST_DATA.with(|rd| {
+            let mut slot = rd.borrow_mut();
+            *slot = data;
+            let (method, query_string, content_type, content_length) = request_info_ptrs(&slot);
+            let request_id = slot
+                .request_id_cstr
+                .as_ref()
+                .map_or(std::ptr::null(), |cs| cs.as_ptr());
+            (
+                method,
+                query_string,
+                content_type,
+                content_length,
+                request_id,
+            )
+        });
+
+    unsafe {
+        bindings::oxphp_bridge_set_request_info(method, query_string, content_type, content_length);
+        // Copied into the bridge context rather than held, unlike the four above.
+        bindings::oxphp_bridge_set_request_id(request_id);
+    }
 }
 
 /// Typical number of $_SERVER variables per request (~20 CGI vars + headers).
@@ -1126,8 +1181,10 @@ pub fn clear_request_data() {
             data.server_vars.shrink_to(SERVER_VARS_NORMAL_CAPACITY);
         }
         data.cookie_string = None;
+        data.method_cstr = None;
         data.query_string = None;
         data.content_type_string = None;
+        data.content_length = 0;
         data.request_id_cstr = None;
         data.body = Bytes::new();
         data.body_offset = 0;

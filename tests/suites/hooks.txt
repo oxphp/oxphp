@@ -47,6 +47,13 @@ hooks/test_sleep_request_multiplex
 # profile) so the inner self-request can only be served inside the suspended
 # window. The query string is load-bearing: the test asserts on it by value.
 hooks/test_superglobals_survive_suspend >> ?probe=outer&secret=outer-only
+
+# The other half of the same window: the request object must survive it too, and
+# must still agree with the superglobals afterwards. Same requirement of one
+# worker, same load-bearing query string — this one asserts on `probe` by value
+# through both views.
+hooks/test_request_object_survives_suspend >> ?probe=outer
+
 hooks/test_promise_survives_bystander
 hooks/test_orphan_drain_nonblocking
 hooks/test_stream_task_multiplex
