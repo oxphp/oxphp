@@ -143,8 +143,9 @@ pub(crate) struct ResponseBuffers {
 
 /// Saved per-fiber TLS state.
 ///
-/// Saves RESPONSE, EARLY_TX, and WORKER_REQUEST_START per fiber.
-/// REQUEST_DATA is not yet saved (TODO — needs CString pointer safety analysis).
+/// Everything a request owns that otherwise lives in a slot shared by every
+/// request the worker thread multiplexes — see the fields for what each one
+/// would cost if it stayed behind.
 #[allow(dead_code)]
 struct FiberTlsSlot {
     response: ResponseBuffers,
@@ -175,6 +176,14 @@ struct FiberTlsSlot {
     /// this request's later chunks would flow to the other client's body channel.
     #[cfg(feature = "php")]
     stream_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    /// This request's SAPI data (`REQUEST_DATA`): its path, headers, cookies,
+    /// query, body and the strings `SG(request_info)` points at. Thread-global
+    /// like the rest, and rewritten by every request the scheduler accepts — so
+    /// a request parked here would resume reading another one's through the
+    /// `OxPHP\Http\Request` object while its superglobals, saved below, still
+    /// say otherwise.
+    #[cfg(feature = "php")]
+    request_data: super::sapi::RequestData,
 }
 
 thread_local! {
@@ -194,6 +203,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let cancel_state = super::sapi::take_worker_cancel_state();
         let request_errors = super::sapi::take_request_errors();
         let stream_tx = super::sapi::take_stream_tx();
+        let request_data = super::sapi::take_request_data();
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(
                 fiber_id,
@@ -204,6 +214,7 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     cancel_state,
                     request_errors,
                     stream_tx,
+                    request_data,
                 },
             );
         });
@@ -221,18 +232,21 @@ pub fn save_fiber_tls(fiber_id: u64) {
 pub fn restore_fiber_tls(fiber_id: u64) {
     #[cfg(feature = "php")]
     {
-        FIBER_TLS_SLOTS.with(|slots| {
-            if let Some(slot) = slots.borrow_mut().remove(&fiber_id) {
-                RESPONSE.with(|r| {
-                    *r.borrow_mut() = slot.response;
-                });
-                super::sapi::restore_early_tx(slot.early_tx);
-                super::sapi::restore_request_start(slot.request_start);
-                super::sapi::restore_worker_cancel_state(slot.cancel_state);
-                super::sapi::restore_request_errors(slot.request_errors);
-                super::sapi::restore_stream_tx(slot.stream_tx);
-            }
-        });
+        // Taken out of the map before anything is handed back: the restore of
+        // the request data calls into the bridge, and an `if let` on
+        // `borrow_mut()` would hold the map borrowed for the whole body.
+        let slot = FIBER_TLS_SLOTS.with(|slots| slots.borrow_mut().remove(&fiber_id));
+        if let Some(slot) = slot {
+            RESPONSE.with(|r| {
+                *r.borrow_mut() = slot.response;
+            });
+            super::sapi::restore_early_tx(slot.early_tx);
+            super::sapi::restore_request_start(slot.request_start);
+            super::sapi::restore_worker_cancel_state(slot.cancel_state);
+            super::sapi::restore_request_errors(slot.request_errors);
+            super::sapi::restore_stream_tx(slot.stream_tx);
+            super::sapi::restore_request_data(slot.request_data);
+        }
     }
     #[cfg(not(feature = "php"))]
     {
@@ -279,6 +293,8 @@ pub unsafe extern "C" fn fiber_drop_ctx_callback(fiber_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "php")]
+    use crate::php::sapi::RequestData;
     use std::thread;
     use std::time::Duration;
 
@@ -376,6 +392,8 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
+            #[cfg(feature = "php")]
+            request_data: RequestData::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(1, slot1);
@@ -398,6 +416,8 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
+            #[cfg(feature = "php")]
+            request_data: RequestData::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(2, slot2);
@@ -452,6 +472,8 @@ mod tests {
             request_errors: Vec::new(),
             #[cfg(feature = "php")]
             stream_tx: None,
+            #[cfg(feature = "php")]
+            request_data: RequestData::new(),
         };
         FIBER_TLS_SLOTS.with(|slots| {
             slots.borrow_mut().insert(42, slot);
