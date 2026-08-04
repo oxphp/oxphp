@@ -1381,34 +1381,57 @@ unsafe extern "C" fn cli_log_message(message: *const c_char, _syslog_type: c_int
 ///
 /// Registers static env snapshot first (by reference — no per-request clone),
 /// then per-request CGI/HTTP vars which override any env duplicates.
+///
+/// The `REQUEST_DATA` borrow is projected to a raw slice and released before
+/// the first call into PHP. `php_register_variable_safe` allocates on the Zend
+/// heap, and an allocation that hits `memory_limit` raises a fatal — which
+/// unwinds by longjmp, straight out of this frame, running no Rust destructor
+/// on the way. A borrow guard still alive at that point would leave
+/// `REQUEST_DATA` borrowed for the rest of this thread's life, and the next
+/// `borrow_mut` would panic inside an `extern "C"` frame: a non-unwinding
+/// panic, which aborts the process rather than failing one request. PHP reads
+/// the unconsumed request body through that same state from
+/// `php_request_shutdown` on every request, so the abort is immediate.
+///
+/// Dropping the guard is safe for the walk: `REQUEST_DATA` is thread-local,
+/// and `server_vars` is only ever rebuilt between requests by
+/// `set_request_data` / `clear_request_data`, never from inside PHP.
 unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_void) {
-    REQUEST_DATA.with(|rd| {
+    let Some((sg_enabled, vars_ptr, vars_len)) = REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        if data.active {
-            // Register static process environment vars first (zero clones).
-            // Per-request CGI vars below will override any matching keys.
-            if data.sg_enabled {
-                for (key, value) in env_snapshot() {
-                    php_register_variable_safe(
-                        key.as_ptr(),
-                        value.as_ptr(),
-                        value.to_bytes().len(),
-                        track_vars_array,
-                    );
-                }
-            }
+        data.active.then(|| {
+            (
+                data.sg_enabled,
+                data.server_vars.as_ptr(),
+                data.server_vars.len(),
+            )
+        })
+    }) else {
+        return;
+    };
 
-            // Register per-request CGI/HTTP variables (override env vars).
-            for (key, value) in &data.server_vars {
-                php_register_variable_safe(
-                    key.as_ptr(),
-                    value.as_ptr(),
-                    value.to_bytes().len(),
-                    track_vars_array,
-                );
-            }
+    // Register static process environment vars first (zero clones).
+    // Per-request CGI vars below will override any matching keys.
+    if sg_enabled {
+        for (key, value) in env_snapshot() {
+            php_register_variable_safe(
+                key.as_ptr(),
+                value.as_ptr(),
+                value.to_bytes().len(),
+                track_vars_array,
+            );
         }
-    });
+    }
+
+    // Register per-request CGI/HTTP variables (override env vars).
+    for (key, value) in std::slice::from_raw_parts(vars_ptr, vars_len) {
+        php_register_variable_safe(
+            key.as_ptr(),
+            value.as_ptr(),
+            value.to_bytes().len(),
+            track_vars_array,
+        );
+    }
 }
 
 /// Callback: return raw Cookie header string for PHP to parse into $_COOKIE.
@@ -5185,50 +5208,56 @@ unsafe extern "C" fn req_query_param_cb(
 
 type PairsCb = unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void);
 
-unsafe extern "C" fn req_headers_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    REQUEST_DATA.with(|rd| {
+/// Hand every pair of a request-data list to `cb`, with the `REQUEST_DATA`
+/// borrow already released.
+///
+/// `cb` builds a PHP array, so it allocates on the Zend heap for every entry
+/// and can longjmp out of this frame on a fatal — see
+/// `oxphp_register_server_variables` for why no borrow guard may be alive
+/// across that. `project` runs under the borrow and hands back only the list's
+/// address and length; the list is rebuilt only between requests, so it stays
+/// put for the walk.
+unsafe fn visit_request_pairs<T: AsRef<[u8]>>(
+    project: impl FnOnce(&RequestData) -> (*const (T, T), usize),
+    cb: PairsCb,
+    user_data: *mut c_void,
+) {
+    let Some((ptr, len)) = REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        if !data.active {
-            return;
-        }
-        for (k, v) in &data.headers_raw {
-            cb(
-                k.as_ptr() as *const c_char,
-                k.len(),
-                v.as_ptr() as *const c_char,
-                v.len(),
-                user_data,
-            );
-        }
-    });
+        data.active.then(|| project(&data))
+    }) else {
+        return;
+    };
+
+    for (k, v) in std::slice::from_raw_parts(ptr, len) {
+        let (key_ptr, key_len) = value_ptr(k.as_ref());
+        let (val_ptr, val_len) = value_ptr(v.as_ref());
+        cb(key_ptr, key_len, val_ptr, val_len, user_data);
+    }
+}
+
+unsafe extern "C" fn req_headers_all_cb(cb: PairsCb, user_data: *mut c_void) {
+    visit_request_pairs(
+        |data| (data.headers_raw.as_ptr(), data.headers_raw.len()),
+        cb,
+        user_data,
+    );
 }
 
 unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    REQUEST_DATA.with(|rd| {
-        let data = rd.borrow();
-        if !data.active {
-            return;
-        }
-        for (k, v) in &data.cookies_parsed {
-            let (key_ptr, key_len) = value_ptr(k);
-            let (val_ptr, val_len) = value_ptr(v);
-            cb(key_ptr, key_len, val_ptr, val_len, user_data);
-        }
-    });
+    visit_request_pairs(
+        |data| (data.cookies_parsed.as_ptr(), data.cookies_parsed.len()),
+        cb,
+        user_data,
+    );
 }
 
 unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    REQUEST_DATA.with(|rd| {
-        let data = rd.borrow();
-        if !data.active {
-            return;
-        }
-        for (k, v) in &data.query_parsed {
-            let (key_ptr, key_len) = value_ptr(k);
-            let (val_ptr, val_len) = value_ptr(v);
-            cb(key_ptr, key_len, val_ptr, val_len, user_data);
-        }
-    });
+    visit_request_pairs(
+        |data| (data.query_parsed.as_ptr(), data.query_parsed.len()),
+        cb,
+        user_data,
+    );
 }
 
 unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
