@@ -8,12 +8,14 @@ require_once __DIR__ . '/../test_helper.php';
 // touches php://input before it suspends must not find someone else's body
 // there afterwards.
 //
-// Nothing of this request's is standing in the thread-wide SAPI post state when
-// it parks — it read no body, so there is no stream of its own and no flag set.
-// What it must come back to is that same emptiness, which is what makes the SAPI
-// hand it its own bytes on the first read. Come back to what the request served
-// in the window left instead, and the first read of php://input in a request
-// that has read nothing returns another client's body in full.
+// What stands in the thread-wide SAPI post state when this request parks is its
+// own: the per-request reset buffers the body for $_POST before the handler runs,
+// so a POST parks holding its own stream and the flag saying the body has been
+// read. What it must come back to is exactly that, since with the flag set
+// php://input does not ask the SAPI for anything — it rewinds the stream it
+// finds and reads that one. Come back to what the request served in the window
+// left instead, and the first read of php://input in a request that has read
+// nothing returns another client's body in full.
 //
 // PHP_WORKERS=1, so the inner self-request below can only be served while this
 // fiber is suspended.

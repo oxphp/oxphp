@@ -28,6 +28,8 @@
 #include "Zend/zend_gc.h"         /* gc_protect: a bailout raises the collector's guard too */
 #include "main/php_main.h"
 #include "main/php_output.h"
+#include "main/php_streams.h" /* php_stream_close: the request body is a stream */
+#include "main/rfc1867.h"     /* destroy_uploaded_files_hash: $_FILES temp files */
 #include "ext/standard/basic_functions.h"
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
@@ -698,6 +700,24 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         zend_hash_destroy(fiber->php_state.shutdown_functions);
         FREE_HASHTABLE(fiber->php_state.shutdown_functions);
         fiber->php_state.shutdown_functions = NULL;
+    }
+    /* And the body it parked, with the temp files of its uploads. A fiber torn
+     * down while parked never reaches the end of a request that would have
+     * released them, and the worker's resource list — the only other thing that
+     * would close the stream — is about to go away with the worker itself, which
+     * is too late to keep upload_tmp_dir clean. The hash is put back where
+     * destroy_uploaded_files_hash() reads it, since unlinking every path in it is
+     * the engine's own routine and not worth duplicating here. */
+    if (fiber->php_state.rfc1867_uploaded_files) {
+        HashTable *standing = SG(rfc1867_uploaded_files);
+        SG(rfc1867_uploaded_files) = fiber->php_state.rfc1867_uploaded_files;
+        destroy_uploaded_files_hash();
+        fiber->php_state.rfc1867_uploaded_files = NULL;
+        SG(rfc1867_uploaded_files) = standing;
+    }
+    if (fiber->php_state.request_body) {
+        php_stream_close(fiber->php_state.request_body);
+        fiber->php_state.request_body = NULL;
     }
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
@@ -1372,14 +1392,22 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * and whose own body is gone by the time it resumes. What stands here after
      * the take is what a new request's init leaves anyway (see
      * oxphp_fiber_init_request_state), which is what makes the SAPI hand the next
-     * request its own bytes. The stream itself is not ours to close: it belongs
-     * to the engine's resource list. */
+     * request its own bytes. The stream comes with them: worker mode closes it
+     * where the request ends rather than leaving it to the engine's resource
+     * list, which here belongs to the worker and outlives every request on it.
+     *
+     * The uploaded-file hash travels for the same reason and by the same move —
+     * left standing, this request's temp files are unlinked by the end of
+     * whichever request the worker takes in the window, and is_uploaded_file()
+     * on resume answers about that request's uploads instead of its own. */
     fiber->php_state.request_body = SG(request_info).request_body;
     fiber->php_state.read_post_bytes = SG(read_post_bytes);
     fiber->php_state.post_read = SG(post_read);
+    fiber->php_state.rfc1867_uploaded_files = SG(rfc1867_uploaded_files);
     SG(request_info).request_body = NULL;
     SG(read_post_bytes) = 0;
     SG(post_read) = 0;
+    SG(rfc1867_uploaded_files) = NULL;
 
     /* The thread-local bridge ctx is still THIS fiber's request here (the
      * fiber just suspended; nothing else ran yet) — capture its per-request
@@ -1469,18 +1497,20 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     SG(headers_sent) = fiber->php_state.headers_sent;
     PG(connection_status) = fiber->php_state.connection_status;
 
-    /* And the body it had read, so php://input goes on reading this request's.
-     * What stands here is dropped rather than closed: it belongs to a request
-     * that has already ended — one still running would have parked its own on
-     * the way out — and the stream behind it is a resource of that request, which
-     * the engine's resource list closes. Dropping the pointer is exactly what a
-     * new request's init does with it. */
+    /* And the body it had read, so php://input goes on reading this request's,
+     * with the uploads that came out of it. What stands here is dropped rather
+     * than released: it belongs to a request that has already ended — one still
+     * running would have parked its own on the way out — and ending is what
+     * closed the body and unlinked the temp files. Dropping the pointers is
+     * exactly what a new request's init does with them. */
     SG(request_info).request_body = fiber->php_state.request_body;
     SG(read_post_bytes) = fiber->php_state.read_post_bytes;
     SG(post_read) = fiber->php_state.post_read;
+    SG(rfc1867_uploaded_files) = fiber->php_state.rfc1867_uploaded_files;
     fiber->php_state.request_body = NULL;
     fiber->php_state.read_post_bytes = 0;
     fiber->php_state.post_read = 0;
+    fiber->php_state.rfc1867_uploaded_files = NULL;
 
     /* Give this request its output buffers back, and give up what stands in
      * their place. It belongs to a request that has already ended its own, and
@@ -1623,6 +1653,91 @@ void oxphp_reset_request_autoglobals(void) {
     }
 }
 
+/* ─── Shared per-request body parse ────────────────────── */
+
+void oxphp_reset_request_post_state(void) {
+    /* Give back what the request before this one left standing. post_entry and
+     * content_type_dup travel as a pair — sapi_handle_post() consumes both or
+     * neither — so the dup outlives its request whenever there was no entry to
+     * consume it with, which is every Content-Type with no reader registered for
+     * it: application/json first of all, and every other body an API takes.
+     * (A variables_order without 'P' leaves it standing too, for the other
+     * reason: the callback that would consume it never runs.) Every other SAPI
+     * frees it at the end of the request (php-src main/SAPI.c,
+     * sapi_deactivate_module); a worker's request has no such end of its own. */
+    if (SG(request_info).content_type_dup) {
+        efree(SG(request_info).content_type_dup);
+        SG(request_info).content_type_dup = NULL;
+    }
+    SG(request_info).post_entry = NULL;
+    SG(read_post_bytes) = 0;
+    SG(post_read) = 0;
+    SG(request_info).request_body = NULL;
+    SG(rfc1867_uploaded_files) = NULL;
+
+    /* The context request_parse_body() runs the parse under, reset the way
+     * sapi_activate() resets it. That function restores both fields itself when
+     * it returns, but a bailout inside the parse — a fatal, exit(), the memory
+     * limit, the execution timeout — jumps straight past the line that would,
+     * and in worker mode nothing else puts them back. Left standing, the flag
+     * turns every later oversized or malformed body on that worker into a thrown
+     * RequestParseBodyException raised from this reset, where no request is
+     * running to catch it, and the option cache silently applies one request's
+     * post_max_size / max_file_uploads / max_input_vars to every request after
+     * it. Both are only reachable at all because the parse below now runs per
+     * request. */
+    SG(request_parse_body_context).throw_exceptions = false;
+    memset(&SG(request_parse_body_context).options_cache, 0,
+           sizeof(SG(request_parse_body_context).options_cache));
+
+    /* And then do the part worker mode used to skip entirely. $_POST is built by
+     * the auto-global callback below, but all that callback can do is ask the
+     * SAPI to hand over the parsed body — and the SAPI has nothing to hand over
+     * until a reader has been picked for the Content-Type and run. Picking it is
+     * what sapi_read_post_data() does, and the only callers of it are
+     * sapi_activate() — i.e. php_request_startup(), one per WORKER here, not one
+     * per request — and userland request_parse_body(). So without this call
+     * $_POST, $_FILES and the POST half of $_REQUEST were empty for every
+     * request a worker ever served, silently: the callback still ran, found no
+     * reader registered, and left the empty array it had just created.
+     *
+     * The four conditions are sapi_activate()'s own, verbatim, down to
+     * enable_post_data_reading — the ini switch an application turns off exactly
+     * when it wants the body left alone for php://input. */
+    if (SG(server_context)
+        && PG(enable_post_data_reading)
+        && SG(request_info).content_type
+        && SG(request_info).request_method
+        && !strcmp(SG(request_info).request_method, "POST")) {
+        sapi_read_post_data();
+    }
+}
+
+/* ─── Shared per-request body teardown ─────────────────── */
+
+void oxphp_release_request_post_state(void) {
+    /* The end of a request, for the two things the body parse leaves behind.
+     *
+     * In every other SAPI both are released by machinery that runs once per
+     * request: the uploaded-file hash by sapi_deactivate_module(), and the
+     * buffered body by the destruction of the request's resource list. A worker
+     * runs each of those once per WORKER, so without this the temp files of
+     * every upload stay in upload_tmp_dir and every POST leaves its buffered
+     * body — a whole copy of it — behind for the life of the worker.
+     *
+     * Called from the point a request is finalized, which is the only place the
+     * fields in SG() are known to belong to the request being ended: a suspended
+     * fiber has taken its own away (oxphp_fiber_save_php_state), and the reset
+     * that starts the next request is already looking at someone else's. */
+    if (SG(rfc1867_uploaded_files)) {
+        destroy_uploaded_files_hash();
+    }
+    if (SG(request_info).request_body) {
+        php_stream_close(SG(request_info).request_body);
+        SG(request_info).request_body = NULL;
+    }
+}
+
 /* ─── Targeted per-fiber request init ──────────────────── */
 
 void oxphp_fiber_init_request_state(void) {
@@ -1651,11 +1766,6 @@ void oxphp_fiber_init_request_state(void) {
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
 
-    /* Reset SAPI post state */
-    SG(read_post_bytes) = 0;
-    SG(post_read) = 0;
-    SG(request_info).request_body = NULL;
-
     /* Re-read cookies from the new request data */
     if (sapi_module.read_cookies) {
         SG(request_info).cookie_data = sapi_module.read_cookies();
@@ -1677,6 +1787,13 @@ void oxphp_fiber_init_request_state(void) {
     }
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
+
+    /* Reset the SAPI post state and read this request's body, so the rebuild
+     * below has something to build $_POST and $_FILES from. After the error
+     * reset above on purpose: reading the body is what raises "POST
+     * Content-Length exceeds the limit", and a request has to be able to read
+     * that back out of error_get_last(). */
+    oxphp_reset_request_post_state();
 
     /* Re-init superglobals from new request data */
     oxphp_reset_request_autoglobals();
@@ -1794,6 +1911,12 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * here would steal sibling fibers' live promises (their awaits would then
      * time out despite the tasks succeeding). */
     oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id);
+
+    /* Release what this request's body parse left behind — its uploaded-file
+     * temp files and its buffered body. Before the response rather than after
+     * only because everything else this function does to end the request is
+     * grouped this way; nothing in the response reads either one. */
+    oxphp_release_request_post_state();
 
     /* Send the HTTP response via Rust (same as worker_send_callback) */
     oxphp_bridge_worker_send_response();

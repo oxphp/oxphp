@@ -100,15 +100,26 @@ typedef struct {
      * asks the SAPI for this request's bytes at all, it rewinds the stream it
      * finds standing here and reads that one.
      *
-     * The stream is BORROWED, not owned, unlike everything else in this struct
-     * that travels by move. It is a registered resource of the request the
-     * engine opened it for, and the resource list is what closes it. So the
-     * restore drops whatever stands in its place rather than freeing it —
-     * exactly what a new request's reset already does with the same pointer —
-     * and a fiber torn down while parked with one leaves it to that list too. */
+     * The stream travels by move like the rest of this struct, and the request
+     * owns it: the resource list that closes it in every other SAPI belongs to
+     * the WORKER here, not to the request, so a request that did not close its
+     * own body would leave a whole copy of it standing for the life of the
+     * worker. The close happens where the request ends
+     * (oxphp_release_request_post_state), which is why the restore may drop
+     * whatever stands in its place — that pointer belongs to a request that has
+     * already been ended, and ending it is what set this one's field to NULL. */
     struct _php_stream *request_body;
     int64_t read_post_bytes;
     unsigned char post_read;
+
+    /* The temp files rfc1867 wrote for this request's $_FILES, by which
+     * is_uploaded_file() and move_uploaded_file() recognise a path as an upload
+     * of the request asking. Thread-wide like the fields above, so a request
+     * that suspends would otherwise come back holding whichever request's
+     * uploads the worker took in the window — and have its own unlinked by that
+     * request's end. Owned while parked; NULL when the request uploaded
+     * nothing, which is the engine's own empty state. */
+    HashTable *rfc1867_uploaded_files;
 
     /* PG(connection_status) is thread-global; without per-fiber save/restore
      * one fiber's PHP_CONNECTION_ABORTED (drain bail, client abort) would leak
@@ -474,6 +485,22 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
  * oxphp_fiber_init_request_state() on the event-loop path — because the order of
  * the steps is load-bearing and has to hold in both. */
 void oxphp_reset_request_autoglobals(void);
+
+/* Clear the SAPI post state a previous request left and read this request's
+ * body, picking the reader registered for its Content-Type — the step
+ * sapi_activate() performs for every request in every other SAPI, and that
+ * worker mode has to perform itself because it runs php_request_startup() once
+ * per worker. Without it $_POST, $_FILES and the POST half of $_REQUEST are
+ * empty for every request. Shared by both reset paths, and called from each
+ * immediately before oxphp_reset_request_autoglobals(): the auto-global
+ * callbacks that build those arrays read what this leaves behind. */
+void oxphp_reset_request_post_state(void);
+
+/* Release what the body parse left: the uploaded-file temp files and the
+ * buffered body stream. The counterpart of the call above, at the end of the
+ * request rather than the start, because that is the only point at which the
+ * fields in SG() are known to describe the request being ended. */
+void oxphp_release_request_post_state(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.

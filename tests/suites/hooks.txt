@@ -71,3 +71,16 @@ hooks/test_stream_userland_fiber
 hooks/test_stream_timeout_worker
 hooks/test_select_task_multiplex
 hooks/test_select_request_multiplex
+
+# Three POSTs, one worker: the request body is a stream resource, and worker mode
+# has no per-request resource list to close it. Listed three times because the
+# assertion is about the delta between two consecutive requests, not about any
+# single count.
+hooks/test_post_body_streams_bounded >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=stream-count" | |
+hooks/test_post_body_streams_bounded >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=stream-count" | |
+hooks/test_post_body_streams_bounded >> ?sighting=3 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=stream-count" | |
+
+# A multipart upload in a request that suspends. The uploaded-file registry is
+# one slot per worker thread and is the only thing is_uploaded_file() and
+# move_uploaded_file() consult, so a parked request has to take it with it.
+hooks/test_files_survive_suspend | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
