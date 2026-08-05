@@ -52,3 +52,28 @@ worker/test_worker_class_schedule_exit
 # via headers/test_status_explicit_then_throw, free of the worker async
 # output-buffer interaction that makes a throwing worker request flaky here.)
 worker/test_worker_status_explicit_no_throw | GET | | 201
+
+# $_POST and $_FILES are built from the request body by sapi_read_post_data(),
+# which a classic request gets from php_request_startup() and a worker-mode
+# request has to be handed by its own per-request reset. Ported from the default
+# profile, where they have always passed: worker mode had no coverage of either
+# superglobal at all, which is why a whole form's worth of data going missing
+# stayed invisible.
+get_post_request/test_post_urlencoded | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "name=dio&lang=php" | |
+get_post_request/test_post_multipart | POST | -F "name=dio" -F "lang=php" | |
+get_post_request/test_request_merge >> ?get_key=get_val | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "post_key=post_val" | |
+files/test_upload_single | POST | -F "file=@$FIXTURES_DIR/small.txt" | |
+files/test_upload_content | POST | -F "file=@$FIXTURES_DIR/small.txt" | |
+files/test_upload_array | POST | -F "files[]=@$FIXTURES_DIR/small.txt" -F "files[]=@$FIXTURES_DIR/small.txt" | |
+files/test_object_file_move | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+
+# The other half of the same parse: PHP consumes the body itself for multipart,
+# so php://input is empty. Worker mode has to reproduce that too, or a script
+# reading the raw body gets a different answer depending on the mode it runs in.
+input/test_php_input_multipart_empty | POST | -F "field=value" | |
+
+# Pair, in order: the first request uploads, the second checks the temp file it
+# left behind is gone. See the test for why the second half is the one that
+# matters.
+worker/test_upload_tmp_cleaned_after_request >> ?phase=upload | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+worker/test_upload_tmp_cleaned_after_request >> ?phase=check

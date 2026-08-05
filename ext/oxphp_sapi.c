@@ -3352,16 +3352,12 @@ static void oxphp_soft_reset(void) {
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
 
-    /* 3. SAPI request state: allow POST re-read and cookie refresh.
+    /* 3. SAPI request state: allow cookie refresh.
      * This replaces the heavyweight sapi_activate() — we only reset
-     * the fields needed for superglobal repopulation. */
-    SG(read_post_bytes) = 0;
-    SG(post_read) = 0;
-    SG(request_info).request_body = NULL;
-    SG(request_info).post_entry = NULL;
+     * the fields needed for superglobal repopulation. The post state is reset
+     * further down, together with the body read that depends on it. */
     SG(request_info).current_user = NULL;
     SG(request_info).current_user_length = 0;
-    SG(rfc1867_uploaded_files) = NULL;
     /* Cookie data for PARSE_COOKIE callback. server_context was set by
      * set_request_data() in worker_wait_callback. */
     if (SG(server_context)) {
@@ -3383,6 +3379,14 @@ static void oxphp_soft_reset(void) {
 
     /* 5. Reset execution timer (max_execution_time) to prevent timeout across requests */
     zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
+
+    /* 5b. Reset the SAPI post state and read this request's body, so the rebuild
+     * below has something to build $_POST and $_FILES from. After the error
+     * reset above on purpose: reading the body is what raises "POST
+     * Content-Length exceeds the limit", and a request has to be able to read
+     * that back out of error_get_last(). Shared verbatim with the event-loop
+     * path's oxphp_fiber_init_request_state(). */
+    oxphp_reset_request_post_state();
 
     /* 6. Rebuild the superglobals for this request. Shared verbatim with the
      * event-loop path's oxphp_fiber_init_request_state(); the ordering inside is
