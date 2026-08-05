@@ -1365,6 +1365,22 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.headers_sent = SG(headers_sent);
     fiber->php_state.connection_status = PG(connection_status);
 
+    /* Step 4b: and the body it has read, by the same move. The stream php://input
+     * reads from, and the two counters that say how much of the body has already
+     * come out of the SAPI, are one set per thread — so a request left holding
+     * them is a request whose body the one served in the window reads as its own,
+     * and whose own body is gone by the time it resumes. What stands here after
+     * the take is what a new request's init leaves anyway (see
+     * oxphp_fiber_init_request_state), which is what makes the SAPI hand the next
+     * request its own bytes. The stream itself is not ours to close: it belongs
+     * to the engine's resource list. */
+    fiber->php_state.request_body = SG(request_info).request_body;
+    fiber->php_state.read_post_bytes = SG(read_post_bytes);
+    fiber->php_state.post_read = SG(post_read);
+    SG(request_info).request_body = NULL;
+    SG(read_post_bytes) = 0;
+    SG(post_read) = 0;
+
     /* The thread-local bridge ctx is still THIS fiber's request here (the
      * fiber just suspended; nothing else ran yet) — capture its per-request
      * flags before the next multiplexed request's prep wipes them. */
@@ -1452,6 +1468,19 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     SG(sapi_headers).http_response_code = fiber->php_state.http_response_code;
     SG(headers_sent) = fiber->php_state.headers_sent;
     PG(connection_status) = fiber->php_state.connection_status;
+
+    /* And the body it had read, so php://input goes on reading this request's.
+     * What stands here is dropped rather than closed: it belongs to a request
+     * that has already ended — one still running would have parked its own on
+     * the way out — and the stream behind it is a resource of that request, which
+     * the engine's resource list closes. Dropping the pointer is exactly what a
+     * new request's init does with it. */
+    SG(request_info).request_body = fiber->php_state.request_body;
+    SG(read_post_bytes) = fiber->php_state.read_post_bytes;
+    SG(post_read) = fiber->php_state.post_read;
+    fiber->php_state.request_body = NULL;
+    fiber->php_state.read_post_bytes = 0;
+    fiber->php_state.post_read = 0;
 
     /* Give this request its output buffers back, and give up what stands in
      * their place. It belongs to a request that has already ended its own, and

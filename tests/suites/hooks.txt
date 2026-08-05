@@ -54,6 +54,15 @@ hooks/test_superglobals_survive_suspend >> ?probe=outer&secret=outer-only
 # through both views.
 hooks/test_request_object_survives_suspend >> ?probe=outer
 
+# The third view of the same window: php://input. The request body is load-bearing
+# and asserted by value, so the -d payload here and the literal in each test have
+# to stay in step. Two cases, because the request's own SAPI post state differs
+# between them: one reads php://input before suspending and must come back to its
+# own stream, the other reads it for the first time after resuming and must find
+# the emptiness it parked with rather than the intruder's stream.
+hooks/test_php_input_survives_suspend | POST | -H "Content-Type: application/json" -d '{"who":"outer","marker":"outer-body-4a71"}' | |
+hooks/test_php_input_first_read_after_suspend | POST | -H "Content-Type: application/json" -d '{"who":"outer","marker":"outer-body-2b60"}' | |
+
 hooks/test_promise_survives_bystander
 hooks/test_orphan_drain_nonblocking
 hooks/test_stream_task_multiplex
