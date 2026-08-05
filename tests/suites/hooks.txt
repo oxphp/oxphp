@@ -80,6 +80,12 @@ hooks/test_post_body_streams_bounded >> ?sighting=1 | POST | -H "Content-Type: a
 hooks/test_post_body_streams_bounded >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=stream-count" | |
 hooks/test_post_body_streams_bounded >> ?sighting=3 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=stream-count" | |
 
+# The handle a request deliberately keeps: the first request parks it in the
+# worker-scope store, the second asks what became of it. It must be closed, not
+# left pointing at the body its own request already released.
+hooks/test_php_input_handle_closed_after_request >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=survivor" | |
+hooks/test_php_input_handle_closed_after_request >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=survivor" | |
+
 # A multipart upload in a request that suspends. The uploaded-file registry is
 # one slot per worker thread and is the only thing is_uploaded_file() and
 # move_uploaded_file() consult, so a parked request has to take it with it.
