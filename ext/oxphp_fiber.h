@@ -91,6 +91,25 @@ typedef struct {
     int http_response_code;
     bool headers_sent;
 
+    /* What php://input reads: the buffered body stream the engine opened for
+     * this request, the number of body bytes the SAPI has handed over so far,
+     * and the flag saying there are no more. All three are thread-wide, and
+     * every new request resets them — so a request that suspends would
+     * otherwise resume reading the body of whichever request the worker served
+     * in the window, and read it verbatim: with post_read set, php://input never
+     * asks the SAPI for this request's bytes at all, it rewinds the stream it
+     * finds standing here and reads that one.
+     *
+     * The stream is BORROWED, not owned, unlike everything else in this struct
+     * that travels by move. It is a registered resource of the request the
+     * engine opened it for, and the resource list is what closes it. So the
+     * restore drops whatever stands in its place rather than freeing it —
+     * exactly what a new request's reset already does with the same pointer —
+     * and a fiber torn down while parked with one leaves it to that list too. */
+    struct _php_stream *request_body;
+    int64_t read_post_bytes;
+    unsigned char post_read;
+
     /* PG(connection_status) is thread-global; without per-fiber save/restore
      * one fiber's PHP_CONNECTION_ABORTED (drain bail, client abort) would leak
      * into every other multiplexed fiber on the same worker thread. */
