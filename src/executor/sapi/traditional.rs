@@ -3,13 +3,14 @@
 //! per channel message, driven by `worker_thread`.
 
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
 use crossbeam_channel::RecvTimeoutError;
 
+use crate::executor::idle_clock::LastActive;
 use crate::php::{bindings, sapi};
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -36,7 +37,7 @@ pub(super) fn spawn_worker(
     id: usize,
     rx: crossbeam_channel::Receiver<WorkerRequest>,
     shutdown: Arc<AtomicBool>,
-    last_active: Arc<AtomicU64>,
+    last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     metrics: Arc<crate::metrics::Metrics>,
 ) -> std::thread::JoinHandle<()> {
@@ -67,7 +68,7 @@ fn worker_thread(
     worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     shutdown: Arc<AtomicBool>,
-    last_active: Arc<AtomicU64>,
+    last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     metrics: Arc<crate::metrics::Metrics>,
 ) {
@@ -158,7 +159,7 @@ fn worker_thread(
                 }
                 match request_rx.recv_timeout(super::WORKER_RETIRE_POLL) {
                     Ok(wr) => {
-                        last_active.store(super::pool::now_millis(), Ordering::Relaxed);
+                        last_active.touch();
                         if wr.queue_budget_expired() {
                             refuse_expired(wr, &metrics);
                             continue;

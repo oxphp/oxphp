@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod async_fiber;
 pub mod async_pool;
+pub(crate) mod idle_clock;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod stub;
