@@ -510,8 +510,27 @@ impl SharedRegistry {
     /// Enumerate every live entry. Dead `Weak`s (an `Entry` mid-drop)
     /// are filtered out via `upgrade()`. Consumers: introspection /
     /// observability.
+    ///
+    /// Returns a **materialised snapshot**, not a lazy view over the
+    /// map — and must stay that way. `Entry::drop` deregisters
+    /// synchronously via `entries.remove`, taking the entry's shard
+    /// write lock; a lazy DashMap iterator holds that same shard's read
+    /// lock across the consumer's loop body, and the lock is not
+    /// reentrant. A consumer whose yielded `Arc` happens to be the last
+    /// strong reference (the owning PHP handle released its own while
+    /// the scan was running) would therefore park forever against
+    /// itself, and every later writer of that shard behind it.
+    ///
+    /// Collecting first is safe because `Weak::upgrade` never drops
+    /// anything: all the guard-held work is refcount increments, and
+    /// every drop happens after the shards are released.
     pub fn iter_entries(&self) -> impl Iterator<Item = Arc<Entry>> + '_ {
-        self.entries.iter().filter_map(|w| w.value().upgrade())
+        let snapshot: Vec<Arc<Entry>> = self
+            .entries
+            .iter()
+            .filter_map(|w| w.value().upgrade())
+            .collect();
+        snapshot.into_iter()
     }
 
     /// Drain: wake blocked ops, mark shutting-down.
@@ -546,10 +565,12 @@ impl SharedRegistry {
         // `on_drop`, NOT `on_shutdown_notify`) — Channel/Pool would close
         // their `Notify`/`Condvar` only via the drop path, masking the
         // shutdown signal for any inner that distinguishes the two hooks.
-        for w in self.entries.iter() {
-            if let Some(entry) = w.value().upgrade() {
-                entry.inner.on_shutdown_notify();
-            }
+        // Goes through `iter_entries` rather than iterating the map
+        // directly: a shutting-down worker can release the last handle to
+        // an entry at any moment, and dropping that `Arc` under a live
+        // shard guard would deadlock against `Entry::drop`'s own removal.
+        for entry in self.iter_entries() {
+            entry.inner.on_shutdown_notify();
         }
         // Drop every Bound pin in the Shared\Registry name index. Without
         // this, named entries (which the names index keeps alive via a
@@ -1125,6 +1146,63 @@ mod tests {
         reg.adjust_mem_bytes(id, -(i64::from(u32::MAX) as isize));
         assert_eq!(reg.total_bytes(), 0);
         drop(arc);
+    }
+
+    /// Pins the contract that `iter_entries` holds no registry lock
+    /// while the consumer processes an item.
+    ///
+    /// `Entry::drop` deregisters synchronously (`entries.remove`), which
+    /// takes the entry's shard write lock. A lazy DashMap iterator keeps
+    /// that same shard's read lock alive across the loop body, and the
+    /// lock is not reentrant — so a consumer holding the last strong
+    /// reference parks forever the moment its `Arc` drops, taking every
+    /// subsequent writer of that shard down with it.
+    ///
+    /// The scenario is deterministic, not a race: the reference released
+    /// belongs to the item the iterator has just yielded, so it always
+    /// hits the shard whose guard the iterator would be holding. Driven
+    /// from a helper thread so a regression fails on the timeout instead
+    /// of hanging the whole test binary.
+    #[test]
+    fn iter_entries_tolerates_last_ref_drop_during_iteration() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const N: usize = 8;
+        let reg = SharedRegistry::new_for_test(capped_config(16, 1 << 20));
+        let owners: Vec<Arc<Entry>> = (0..N)
+            .map(|i| {
+                reg.insert(SharedType::Counter, Arc::new(TestInner { bytes: 16 }))
+                    .unwrap_or_else(|e| panic!("insert {i}/{N} must succeed: {e:?}"))
+            })
+            .collect();
+        let ids: Vec<SharedId> = owners.iter().map(|e| e.id).collect();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut owners = owners;
+            for e in reg.iter_entries() {
+                // The "owner" (a PHP handle in production) releases its
+                // reference mid-iteration; the iterator's own Arc is now
+                // the last one, and dropping it fires `Entry::drop`.
+                owners.retain(|o| o.id != e.id);
+                drop(e);
+            }
+            let _ = tx.send(());
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "iter_entries deadlocked: dropping the last Arc<Entry> mid-iteration \
+             re-entered the shard lock the iterator was holding"
+        );
+        // Second half of the guarantee: the loop not only finished, the
+        // drops actually deregistered. A timeout assert alone would also
+        // be satisfied by an iteration that never released anything.
+        assert_eq!(reg.total_entries(), 0, "every entry must be deregistered");
+        for id in ids {
+            assert_eq!(reg.lookup(id).unwrap_err(), SharedError::StaleHandle);
+        }
     }
 
     /// `*const Entry` is not `Send` by default. The stress tests below
