@@ -2,12 +2,13 @@
 //! the thread, PHP-land `oxphp_worker()` loops on bridge worker callbacks.
 
 use std::ffi::CString;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use bytes::Bytes;
 
+use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::{bindings, sapi};
 use crate::types::ScriptResponse;
@@ -36,7 +37,7 @@ pub(super) fn spawn_worker_mode(
     id: usize,
     rx: crossbeam_channel::Receiver<WorkerRequest>,
     shutdown: Arc<AtomicBool>,
-    last_active: Arc<AtomicU64>,
+    last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,
@@ -56,7 +57,7 @@ fn worker_mode_thread(
     worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
     shutdown: Arc<AtomicBool>,
-    last_active: Arc<AtomicU64>,
+    last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,

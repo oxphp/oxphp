@@ -32,7 +32,11 @@ pub struct WorkerSlot {
     /// sums this field across slots to decide when the graceful drain may
     /// stop, so a value that stays positive with no real work behind it holds
     /// shutdown until the drain deadline instead of costing one spurious kick.
-    /// Weigh both readers before changing how this counter is maintained.
+    /// A third is stricter still: the scale manager refuses to retire a worker
+    /// whose slot reads positive, so a count stuck above zero pins that worker
+    /// in a dynamic pool for good — and once more slots are stuck than the
+    /// configured minimum, the pool stops shrinking back to it.
+    /// Weigh all three readers before changing how this counter is maintained.
     pub active_requests: AtomicUsize,
     pub heartbeat: crate::php::heartbeat::WorkerHeartbeat,
 }

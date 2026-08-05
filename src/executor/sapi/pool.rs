@@ -4,11 +4,12 @@
 //! respawn paths never branch on worker-mode configuration.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::WorkerMode;
+use crate::executor::idle_clock::{now_millis, LastActive};
 use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::sapi::WorkerIncomingRequest;
 
@@ -25,15 +26,37 @@ pub(super) struct ManagedWorker {
     pub id: usize,
     pub handle: std::thread::JoinHandle<()>,
     pub shutdown: Arc<AtomicBool>,
-    pub last_active: Arc<AtomicU64>,
+    pub last_active: Arc<LastActive>,
 }
 
-/// Monotonic ms-since-process-start. Used for `last_active` stamps and
-/// idle-timeout math — never for user-visible timestamps. Monotonic clock
-/// avoids false idle detection if the system wall clock jumps backwards.
-pub(super) fn now_millis() -> u64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+/// Whether this worker's registry slot has requests in flight.
+///
+/// A busy worker is not a scale-down candidate. What the pool needs to know is
+/// whether the thread will act on the flag it is about to raise, and one with
+/// work on it will not: the flag is read only while waiting for the next
+/// request, which in worker mode means only once the last fiber is gone.
+/// Retiring such a worker changes the pool's accounting long before the thread
+/// acts on it — the published count drops, the slot id goes back to the free
+/// list for the next spawn, and the join sits on the blocking pool that
+/// shutdown waits for — while the thread keeps taking requests off the shared
+/// queue.
+///
+/// The counter is a proxy for that question, not an answer to it. It returns
+/// to zero when a handler returns, whereas the serve loop stays in the branch
+/// that never reads the flag for as long as a fiber or a deferred promise
+/// drain outlives that handler; and the check is not atomic with raising the
+/// flag, so a request taken in between leaves a retired worker serving. What
+/// it removes is the case that the clock fix would otherwise have made
+/// ordinary — a worker plainly in the middle of its work being offered up
+/// because its last arrival is older than the threshold.
+///
+/// An absent registry reads as "not busy", which is how the pool behaved
+/// before this check existed.
+fn worker_busy(id: usize) -> bool {
+    crate::php::worker_registry::WORKERS
+        .get()
+        .and_then(|workers| workers.get(id))
+        .is_some_and(|slot| slot.active_requests.load(Ordering::Relaxed) > 0)
 }
 
 /// Best-effort wipe of a recycled WORKERS slot: drops the request's
@@ -63,7 +86,7 @@ pub(super) struct SpawnArgs {
     pub id: usize,
     pub rx: crossbeam_channel::Receiver<WorkerRequest>,
     pub shutdown: Arc<AtomicBool>,
-    pub last_active: Arc<AtomicU64>,
+    pub last_active: Arc<LastActive>,
 }
 
 /// How to spawn a worker thread. Built once in `SapiExecutor::new()` and
@@ -137,7 +160,7 @@ pub(super) fn spawn_initial(
     let mut managed = Vec::with_capacity(count);
     for id in 0..count {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let last_active = Arc::new(AtomicU64::new(now_millis()));
+        let last_active = Arc::new(LastActive::now());
         let handle = strategy.spawn(SpawnArgs {
             id,
             rx: request_rx.clone(),
@@ -222,7 +245,7 @@ pub(super) async fn run_worker_monitor(
         let mut new = Vec::with_capacity(to_spawn);
         for _ in 0..to_spawn {
             let shutdown = Arc::new(AtomicBool::new(false));
-            let last_active = Arc::new(AtomicU64::new(now_millis()));
+            let last_active = Arc::new(LastActive::now());
             // Free-list invariant: every spawn matches a prior death,
             // and the initial pool occupies 0..target — so on the first
             // respawn iteration, free_ids holds exactly `dead` IDs.
@@ -306,7 +329,7 @@ pub(super) async fn run_scale_manager(
         let mut new = Vec::with_capacity(to_spawn_min);
         for _ in 0..to_spawn_min {
             let shutdown = Arc::new(AtomicBool::new(false));
-            let last_active = Arc::new(AtomicU64::new(now));
+            let last_active = Arc::new(LastActive::now());
             let id = free_ids
                 .pop_front()
                 .expect("free-id underflow in scale-manager respawn");
@@ -332,7 +355,7 @@ pub(super) async fn run_scale_manager(
         // Count idle workers (last_active > 200ms ago).
         let idle_count = workers_guard
             .iter()
-            .filter(|w| now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > 200)
+            .filter(|w| w.last_active.idle_ms(now) > 200)
             .count();
 
         let needs_scale_up =
@@ -342,7 +365,7 @@ pub(super) async fn run_scale_manager(
             // Prepare Arcs inside the lock, then drop it before spawning the OS thread —
             // pthread_create must not run under `workers`.
             let shutdown = Arc::new(AtomicBool::new(false));
-            let last_active = Arc::new(AtomicU64::new(now));
+            let last_active = Arc::new(LastActive::now());
             // total<max plus the invariant `len(alive)+len(free_ids)==max`
             // guarantees free_ids has at least one entry here.
             let spawn_id = free_ids.pop_front().expect("free-id underflow in scale-up");
@@ -367,10 +390,14 @@ pub(super) async fn run_scale_manager(
             metrics.worker_spawned();
             tracing::info!(id = spawn_id, total, "Scale-up: spawned worker");
         } else if total > min && last_scale_down.elapsed() >= Duration::from_secs(5) {
-            // Scale-down: retire one worker idle longer than the threshold.
-            if let Some(pos) = workers_guard.iter().position(|w| {
-                now.saturating_sub(w.last_active.load(Ordering::Relaxed)) > idle_timeout_ms
-            }) {
+            // Scale-down: retire one worker idle longer than the threshold and
+            // holding nothing — an idle stamp says when work last arrived, not
+            // whether it has finished, so on its own it would offer up a worker
+            // still serving a request that outlasts the threshold.
+            if let Some(pos) = workers_guard
+                .iter()
+                .position(|w| w.last_active.idle_ms(now) > idle_timeout_ms && !worker_busy(w.id))
+            {
                 let worker = workers_guard.remove(pos);
                 let retired_id = worker.id;
                 worker.shutdown.store(true, Ordering::Relaxed);

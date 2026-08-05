@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -11,6 +11,7 @@ use http::{HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
 use crate::async_types::{AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
+use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::php::request_decode::{parse_query_pairs, url_decode, value_ptr};
@@ -88,7 +89,7 @@ thread_local! {
     /// unset and keeps sleeping on a plain `recv()`. See `set_worker_shutdown`.
     static WORKER_SHUTDOWN: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
     /// Worker mode: shared last_active timestamp for scale manager idle detection.
-    static WORKER_LAST_ACTIVE: RefCell<Option<Arc<AtomicU64>>> = const { RefCell::new(None) };
+    static WORKER_LAST_ACTIVE: RefCell<Option<Arc<LastActive>>> = const { RefCell::new(None) };
     /// Worker mode: per-worker stats (memory, requests_done, uptime).
     static WORKER_STATS: RefCell<Option<Arc<WorkerStats>>> = const { RefCell::new(None) };
     /// Worker mode: global worker metrics (counters, histogram).
@@ -2758,7 +2759,7 @@ fn worker_retiring() -> bool {
     })
 }
 
-pub fn set_worker_last_active(last_active: Arc<AtomicU64>) {
+pub(crate) fn set_worker_last_active(last_active: Arc<LastActive>) {
     WORKER_LAST_ACTIVE.with(|slot| {
         *slot.borrow_mut() = Some(last_active);
     });
@@ -3161,15 +3162,18 @@ pub fn get_worker_try_recv_callback() -> Option<unsafe extern "C" fn() -> c_int>
 /// Called by both `worker_wait_callback` (direct) and `prepare_received_request`
 /// (via PENDING_REQUEST staging slot for the non-blocking fiber path).
 fn setup_request_tls(req: WorkerIncomingRequest) {
-    // Single syscall for both last_active and request_time
+    // Wall clock, for $_SERVER['REQUEST_TIME'] and everything downstream of it.
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
 
-    // Update last_active timestamp for dynamic scaling
+    // Idle detection for a dynamic pool runs on its own monotonic clock, so
+    // this is a second reading rather than a conversion of the one above —
+    // the scale manager's arithmetic is meaningless against any other origin,
+    // and a wall clock that steps backwards would make a busy worker look idle.
     WORKER_LAST_ACTIVE.with(|slot| {
         if let Some(ref la) = *slot.borrow() {
-            la.store(now.as_millis() as u64, Ordering::Relaxed);
+            la.touch();
         }
     });
 
