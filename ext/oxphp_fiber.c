@@ -638,6 +638,140 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
     zend_stack_init(handlers, sizeof(php_output_handler *));
 }
 
+/* Close every php://input handle that reads through `body`, before `body` is
+ * closed.
+ *
+ * The wrapper php://input opens is a stream of its own, and it holds the body it
+ * reads through as a bare pointer that counts no references
+ * (php_stream_input_t.body, php-src ext/standard/php_fopen_wrapper.c — the same
+ * two-field struct in 8.4, 8.5 and master, with the body first). Everywhere else
+ * that costs nothing, because the two are released together by the destruction
+ * of the request's resource list. A worker's request has no resource list of its
+ * own, so the body is closed by hand where the request ends — and a handle the
+ * request opened and left standing in worker-scope state (assigned to a static
+ * or a global, or carried there by a PSR-7 ServerRequest that a per-worker
+ * container holds on to) is left pointing into freed memory, where before it
+ * merely read a stale body. Closed here instead, so the next read of it raises
+ * PHP's own "supplied resource is not a valid stream resource" at the point of
+ * misuse.
+ *
+ * Matching is on the body pointer, not on the wrapper alone: a suspended request
+ * carries its own body away with it (oxphp_fiber_save_php_state), and its handle
+ * has to keep working when it comes back.
+ *
+ * Closed the way fclose() closes one — PHP_STREAM_FREE_KEEP_RSRC — and not with
+ * php_stream_close(). The resource list holds no reference of its own: the one
+ * reference a stream is registered with is the one handed to the script
+ * (php_stream_to_zval does not add another), so the delete php_stream_close()
+ * performs takes the count to zero and frees the zend_resource while the
+ * variable still names it. That trades the stale body for a use-after-free of
+ * the handle itself, which is strictly worse. KEEP_RSRC leaves the resource
+ * standing, marked closed — type -1, ptr NULL — and the script's last reference
+ * to it going away is what frees it.
+ *
+ * Everything else here is because freeing one of these handles is not a leaf
+ * operation. Releasing a stream flushes it and tears down its filter chains, and
+ * a filter a script registered itself is a PHP object: its dtor calls the
+ * object's onclose(), and the flush ahead of that runs its filter(). So
+ * arbitrary PHP runs from here, and it can do all three of the things this walk
+ * would otherwise assume away.
+ *
+ * It can move the table. Registering a resource reallocates EG(regular_list),
+ * so nothing may dereference the iterator after a close — hence one close per
+ * pass and then start over, which is the same reason php-src walks this table by
+ * index in zend_close_rsrc_list() rather than with the FOREACH macros. A quieter
+ * second route to the same move: _php_stream_free() ends with zend_list_delete()
+ * on the stream's context, and while php://input carries none when it is opened,
+ * a script asking any of the stream_context_* accessors about the handle gives
+ * it one — decode_context_param() allocates a context for a stream that has none
+ * and assigns it without adding a reference, so the stream holds the only one.
+ *
+ * It can free the resource this walk is looking at, by dropping the script's
+ * last reference to the handle — an unset() in onclose(), or a __destruct on
+ * anything the filter object was holding. list_entry_destructor() efrees the
+ * zend_resource outright, so `res` is not readable after the close either. The
+ * walk therefore asks nothing about the outcome and bounds itself instead: one
+ * pass per resource present at entry is more than any run of successful closes
+ * can need, and a close that made no progress cannot spin the loop for ever.
+ *
+ * And it can bail out, which is what the guard below is for. */
+static void oxphp_close_input_wrapper_guarded(php_stream *stream) {
+    /* A fatal raised by one request's onclose() must not longjmp out of request
+     * finalization: that leaves the worker loop without ending the requests
+     * still multiplexed on this worker, and they answer nobody. Recovered with
+     * the worker's own routine rather than by lowering CG(unclean_shutdown) the
+     * way the teardown-time release does — that one runs on a worker that is
+     * going away, this one on a worker that keeps serving, and the difference is
+     * the collector: zend_bailout raises gc_protect() beside the other flag, and
+     * only zend_activate lowers it, which worker mode runs once per worker. */
+    oxphp_vm_stack_mark mark;
+    oxphp_vm_stack_save(&mark);
+
+    zend_try {
+        php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC | PHP_STREAM_FREE_CLOSE);
+    } zend_catch {
+        if (EG(exception)) {
+            OBJ_RELEASE(EG(exception));
+            EG(exception) = NULL;
+        }
+        oxphp_recover_from_bailout(&mark);
+    } zend_end_try();
+}
+
+static void oxphp_close_input_wrappers_for(php_stream *body) {
+    if (!body) {
+        return;
+    }
+
+    int stream_type = php_file_le_stream();
+    /* One pass per resource standing at entry, plus the pass that finds nothing.
+     * Every close that gets as far as retiring its resource removes one possible
+     * match, so this bounds a walk that is making progress without ever asking
+     * whether it did — and caps the two ways it would not: a close that bailed
+     * before retiring anything, and userland opening a fresh handle on this same
+     * body from inside its own onclose(). */
+    uint32_t passes_left = zend_hash_num_elements(&EG(regular_list)) + 1;
+    bool restart = true;
+
+    while (restart && passes_left > 0) {
+        zend_resource *res;
+
+        passes_left--;
+        restart = false;
+        ZEND_HASH_FOREACH_PTR(&EG(regular_list), res) {
+            /* A NULL ptr is a resource already closed — including one an earlier
+             * pass of this walk closed, which is what keeps the passes finite. */
+            if (!res || res->type != stream_type || !res->ptr) {
+                continue;
+            }
+            php_stream *stream = (php_stream *) res->ptr;
+            /* "Input" is php_stream_input_ops' label and is unique in php-src,
+             * so it names this wrapper and nothing else. Checked before the
+             * abstract is read, because it is what makes reading it as a
+             * php_stream_input_t valid at all. */
+            if (!stream->ops || !stream->ops->label
+                || strcmp(stream->ops->label, "Input") != 0
+                || !stream->abstract
+                || *(php_stream **) stream->abstract != body) {
+                continue;
+            }
+            /* Left alone if php-src has marked it not the caller's to close.
+             * SplFileObject raises this flag on the stream it then holds by raw
+             * pointer, with the stated purpose of stopping an fclose() from
+             * outside leaving that pointer dangling — freeing it here is that
+             * fclose(). Such a handle keeps the stale body it had before this
+             * walk existed, which is the open problem it already had, rather
+             * than being handed a worse one in exchange. */
+            if (stream->flags & PHP_STREAM_FLAG_NO_FCLOSE) {
+                continue;
+            }
+            oxphp_close_input_wrapper_guarded(stream);
+            restart = true;
+            break;
+        } ZEND_HASH_FOREACH_END();
+    }
+}
+
 /* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
  * closure, captured return value, captured-exception strings) and any parked
  * unhandled-exception capture. The borrowed task_args belong to the Rust driver
@@ -716,6 +850,7 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         SG(rfc1867_uploaded_files) = standing;
     }
     if (fiber->php_state.request_body) {
+        oxphp_close_input_wrappers_for(fiber->php_state.request_body);
         php_stream_close(fiber->php_state.request_body);
         fiber->php_state.request_body = NULL;
     }
@@ -1733,6 +1868,10 @@ void oxphp_release_request_post_state(void) {
         destroy_uploaded_files_hash();
     }
     if (SG(request_info).request_body) {
+        /* Before the close rather than after it: the match is on this pointer,
+         * and after the close it names freed memory. php_stream_input_close()
+         * does not touch the body, so the wrappers going first costs nothing. */
+        oxphp_close_input_wrappers_for(SG(request_info).request_body);
         php_stream_close(SG(request_info).request_body);
         SG(request_info).request_body = NULL;
     }
