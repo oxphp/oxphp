@@ -3354,8 +3354,9 @@ static void oxphp_soft_reset(void) {
 
     /* 3. SAPI request state: allow cookie refresh.
      * This replaces the heavyweight sapi_activate() — we only reset
-     * the fields needed for superglobal repopulation. The post state is reset
-     * further down, together with the body read that depends on it. */
+     * the fields needed for superglobal repopulation. The post state is reset by
+     * the request itself, inside its fiber, together with the body read that
+     * depends on it. */
     SG(request_info).current_user = NULL;
     SG(request_info).current_user_length = 0;
     /* Cookie data for PARSE_COOKIE callback. server_context was set by
@@ -3380,40 +3381,14 @@ static void oxphp_soft_reset(void) {
     /* 5. Reset execution timer (max_execution_time) to prevent timeout across requests */
     zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
 
-    /* 5b. Reset the SAPI post state and read this request's body, so the rebuild
-     * below has something to build $_POST and $_FILES from. After the error
-     * reset above on purpose: reading the body is what raises "POST
-     * Content-Length exceeds the limit", and a request has to be able to read
-     * that back out of error_get_last(). Shared verbatim with the event-loop
-     * path's oxphp_fiber_init_request_state(). */
-    oxphp_reset_request_post_state();
-
-    /* 6. Rebuild the superglobals for this request. Shared verbatim with the
-     * event-loop path's oxphp_fiber_init_request_state(); the ordering inside is
-     * a correctness constraint, so it lives in one place rather than two. */
-    oxphp_reset_request_autoglobals();
-
-    /* 7. Inject REQUEST_TIME and REQUEST_TIME_FLOAT into $_SERVER.
-     * In normal mode php_request_startup() does this internally, but in worker
-     * mode we skip php_request_startup() per request — the soft reset rebuilds
-     * $_SERVER from scratch via register_server_variables which doesn't include
-     * these. Read the current request time from bridge TLS (set by
-     * worker_wait_callback before this function runs). */
-    {
-        double rt = oxphp_bridge_get_request_time();
-        zval *server = &PG(http_globals)[TRACK_VARS_SERVER];
-        if (Z_TYPE_P(server) == IS_ARRAY && rt > 0.0) {
-            zval zt;
-            ZVAL_LONG(&zt, (zend_long)rt);
-            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME", sizeof("REQUEST_TIME") - 1, &zt);
-
-            zval zf;
-            ZVAL_DOUBLE(&zf, rt);
-            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME_FLOAT", sizeof("REQUEST_TIME_FLOAT") - 1, &zf);
-        }
-    }
-
-    /* Note: bridge TLS reset (request_id, request_time, deadline, etc.) is handled
+    /* Note: the request's own input — its SAPI post state, its body and its
+     * superglobals — is NOT built here. That runs inside the request's fiber,
+     * because reading the body calls the application's error handler; see the
+     * three oxphp_reset_request_* functions in oxphp_fiber.h. This function is
+     * only the thread-wide state a worker has to put back before the next
+     * request can use it at all.
+     *
+     * Note: bridge TLS reset (request_id, request_time, deadline, etc.) is handled
      * by worker_wait_callback BEFORE populating new request data, not here.
      * This ensures the soft reset only touches PHP-level state. */
 }

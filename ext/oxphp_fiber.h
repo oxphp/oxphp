@@ -478,23 +478,27 @@ bool oxphp_async_sched_io_backoff(int64_t ns);
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber);
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
 
-/* Rebuild the superglobals for a new worker-mode request: destroy the stale
- * PG(http_globals), re-fire the auto-global callbacks, and force the JIT ones
- * that describe the request (_SERVER, _REQUEST). Shared by both per-request
- * reset paths — oxphp_soft_reset() on the fast path and
- * oxphp_fiber_init_request_state() on the event-loop path — because the order of
- * the steps is load-bearing and has to hold in both. */
-void oxphp_reset_request_autoglobals(void);
-
-/* Clear the SAPI post state a previous request left and read this request's
- * body, picking the reader registered for its Content-Type — the step
- * sapi_activate() performs for every request in every other SAPI, and that
- * worker mode has to perform itself because it runs php_request_startup() once
- * per worker. Without it $_POST, $_FILES and the POST half of $_REQUEST are
- * empty for every request. Shared by both reset paths, and called from each
- * immediately before oxphp_reset_request_autoglobals(): the auto-global
- * callbacks that build those arrays read what this leaves behind. */
+/* Build a worker-mode request's input. Called in this order, and from inside the
+ * request's own fiber (oxphp_fiber_loop_handler) rather than from the prep that
+ * runs on the worker's stack, because the middle step runs PHP: the body parse
+ * raises its limit diagnostics through the application's set_error_handler.
+ *
+ *   1. oxphp_reset_request_post_state()      — give back the SAPI post state of
+ *      whoever ran last, so that nothing of theirs is still registered when the
+ *      auto-global callbacks below ask the SAPI for a parsed body.
+ *   2. oxphp_reset_request_context_globals() — $_GET, $_COOKIE and above all
+ *      $_SERVER, complete with REQUEST_TIME. $_POST and $_FILES come out of this
+ *      empty; step 3 fires them again once there is a body to build them from.
+ *   3. oxphp_reset_request_body_globals()    — read the body, then $_POST,
+ *      $_FILES and $_REQUEST. Everything it raises reads step 2's $_SERVER.
+ *
+ * The counterpart is the end of the request, which destroys all of it
+ * (oxphp_scheduler_finalize_fiber): between two requests a worker holds no
+ * request's superglobals at all, so there is nothing for the next one — or for
+ * anything running in the gap — to read as its own. */
 void oxphp_reset_request_post_state(void);
+void oxphp_reset_request_context_globals(void);
+void oxphp_reset_request_body_globals(void);
 
 /* Release what the body parse left: the uploaded-file temp files and the
  * buffered body stream. The counterpart of the call above, at the end of the
