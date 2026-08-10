@@ -1158,7 +1158,62 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         zval retval;
         ZVAL_UNDEF(&retval);
 
+        /* Whether the input build below is still holding fiber switching down.
+         * volatile because the zend_catch arm reads it after a longjmp. */
+        volatile bool input_switch_blocked = false;
+
         zend_try {
+            /* Build this request's input here, inside the request, rather than
+             * in the per-request prep that runs on the worker's own stack.
+             *
+             * Reading the body runs PHP: post_max_size, max_input_vars,
+             * max_file_uploads and every upload error are php_error_docref()
+             * calls, and an application with a set_error_handler installed —
+             * which in worker mode outlives the request that installed it, since
+             * nothing here runs the shutdown that would drop it — has that
+             * handler called from wherever the read happens. On the worker's
+             * stack that means userland running outside any request: with no
+             * user frame beneath it, with the previous request's superglobals
+             * still bound, with an exception it throws left pending where the
+             * handler call below returns on sight of it and answers nothing, and
+             * with a fatal longjmping past the scheduler teardown, taking every
+             * request parked on this worker with it. In here it is an ordinary
+             * part of the request: the arms below own the fatal, the branch
+             * below owns the exception, and everything it reads is its own.
+             *
+             * The order is the point. The SAPI post state of whoever ran last
+             * goes first, so that nothing of theirs is still registered when the
+             * auto-globals fire; then the context — $_SERVER above all, which is
+             * what a Sentry-style handler reports the request by; then the body
+             * and the arrays it produces.
+             *
+             * Switching is held down for the length of it, because the userland
+             * this runs is the one thing here that could ask to park. Some of
+             * what the parse works through is one slot per worker thread and is
+             * NOT part of what a fiber takes with it when it suspends:
+             * SG(request_info).post_entry and content_type_dup, which
+             * sapi_read_post_data() sets and sapi_handle_post() reads back after
+             * the reader has returned, and PG(rfc1867_protected_variables),
+             * which rfc1867_post_handler initialises on the way in and destroys
+             * on the way out. A request parked between those two points would
+             * come back to a sibling's entry, to a content type the sibling had
+             * already freed, and — for two multipart bodies at once — to a
+             * protected-variables table the sibling had destroyed, which is a
+             * read and then a write into freed memory and a second destroy after
+             * it. Blocked switching is what the worker's own stack used to give
+             * this code for free; the suspend points answer it by taking their
+             * blocking path, and a userland Fiber::suspend() by throwing, which
+             * is the same answer the engine gives inside a tick handler. */
+            zend_fiber_switch_block();
+            input_switch_blocked = true;
+
+            oxphp_reset_request_post_state();
+            oxphp_reset_request_context_globals();
+            oxphp_reset_request_body_globals();
+
+            input_switch_blocked = false;
+            zend_fiber_switch_unblock();
+
             fiber->fci->retval = &retval;
             fiber->fci->param_count = 0;
             fiber->fci->params = NULL;
@@ -1183,6 +1238,12 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
         } zend_catch {
             fiber->handler_failed = true;
+            /* A fatal inside the input build jumps over the line that lifts the
+             * block, and the counter is the worker's rather than the request's —
+             * left up, nothing on this worker would ever park again. */
+            if (input_switch_blocked) {
+                zend_fiber_switch_unblock();
+            }
             if (EG(exception)) {
                 OBJ_RELEASE(EG(exception));
                 EG(exception) = NULL;
@@ -1726,7 +1787,35 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
 
 /* ─── Shared per-request superglobal rebuild ───────────── */
 
-void oxphp_reset_request_autoglobals(void) {
+/* Whether anything on this worker has ever materialized $_REQUEST. Latched
+ * rather than re-asked, see oxphp_reset_request_body_globals(). */
+static __thread bool oxphp_request_autoglobal_materialized = false;
+
+static void oxphp_latch_request_autoglobal(void) {
+    if (!oxphp_request_autoglobal_materialized
+        && zend_hash_exists(&EG(symbol_table),
+                            ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST))) {
+        oxphp_request_autoglobal_materialized = true;
+    }
+}
+
+/* Fire an auto-global's callback whether or not it is still armed.
+ *
+ * zend_activate_auto_globals() leaves the non-JIT ones disarmed — their
+ * callbacks answer "don't rearm" — and the rebuild below fires two of them a
+ * second time, once the body they describe has been read. Arming by hand rather
+ * than calling the callback directly keeps the flag the compiler and OPcache
+ * read in step with what has actually been built. */
+static void oxphp_refire_auto_global(const char *name, size_t len) {
+    zend_auto_global *ag = zend_hash_str_find_ptr(CG(auto_globals), name, len);
+    if (ag == NULL) {
+        return;
+    }
+    ag->armed = true;
+    zend_is_auto_global_str(name, len);
+}
+
+void oxphp_reset_request_context_globals(void) {
     /* zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
      * are simple string arrays that never contain cyclic refs, and _nogc avoids
      * the cycle buffer insertion overhead on every request. */
@@ -1737,7 +1826,12 @@ void oxphp_reset_request_autoglobals(void) {
 
     /* Fires the non-JIT callbacks (_GET, _POST, _COOKIE, _FILES): they rebuild
      * PG(http_globals) and zend_hash_update the new arrays into
-     * EG(symbol_table). The JIT ones (_SERVER, _ENV, _REQUEST) it only re-arms. */
+     * EG(symbol_table). The JIT ones (_SERVER, _ENV, _REQUEST) it only re-arms.
+     *
+     * _POST and _FILES come out of this empty, and are meant to: the body has
+     * not been read yet, and reading it is the next step rather than this one.
+     * oxphp_reset_request_body_globals() fires those two again once there is
+     * something to build them from. */
     zend_activate_auto_globals();
 
     /* _ENV is the one auto-global that must not come back: its callback destroys
@@ -1760,35 +1854,105 @@ void oxphp_reset_request_autoglobals(void) {
      * job: OPcache would otherwise do it when it loads a script referencing
      * them, but only while the bit is still clear in a mask it resets in its own
      * request startup — which worker mode runs once per worker, so that re-fire
-     * happens exactly once in a worker's life.
-     *
-     * ORDER IS LOAD-BEARING: _REQUEST must follow zend_activate_auto_globals(),
-     * because php_auto_globals_create_request() merges
-     * Z_ARRVAL(PG(http_globals)[GET/POST/COOKIE]) with no type check, and
-     * activate is what makes those slots arrays again. Fired against the
-     * IS_UNDEF slots the loop above leaves behind, it faults. */
+     * happens exactly once in a worker's life. */
     zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
 
-    /* _REQUEST is forced only once something has materialized it. Until then no
-     * loaded script mentions it, so there is nothing to read and nothing to go
-     * stale; the first script that does mention it materializes it correctly at
-     * compile time and leaves the symbol-table entry behind. The latch is what
-     * makes the gate safe: `unset($_REQUEST)` at global scope removes that entry,
-     * and a bare existence check would then skip for the rest of the worker's
-     * life, because the OPcache mask that would otherwise re-fire the callback
-     * never clears again in worker mode. */
-    static __thread bool request_materialized = false;
-    if (!request_materialized
-        && zend_hash_exists(&EG(symbol_table),
-                            ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST))) {
-        request_materialized = true;
-    }
-    if (request_materialized) {
-        zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST));
+    /* And the request time with it, so that $_SERVER is complete before anything
+     * reads it — the request's own body parse first of all, whose diagnostics
+     * reach the application's set_error_handler. In every other SAPI
+     * php_request_startup() puts these two there; worker mode runs that once per
+     * worker, and register_server_variables() does not carry them. The guard is
+     * for the boot request, which has no time of its own yet. */
+    {
+        double rt = oxphp_bridge_get_request_time();
+        zval *server = &PG(http_globals)[TRACK_VARS_SERVER];
+        if (Z_TYPE_P(server) == IS_ARRAY && rt > 0.0) {
+            zval zt;
+            ZVAL_LONG(&zt, (zend_long)rt);
+            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME",
+                                 sizeof("REQUEST_TIME") - 1, &zt);
+
+            zval ztf;
+            ZVAL_DOUBLE(&ztf, rt);
+            zend_hash_str_update(Z_ARRVAL_P(server), "REQUEST_TIME_FLOAT",
+                                 sizeof("REQUEST_TIME_FLOAT") - 1, &ztf);
+        }
     }
 }
 
-/* ─── Shared per-request body parse ────────────────────── */
+/* The other half: the arrays a request's body produces. Split from the context
+ * half above because the body is read between the two, and reading it is what
+ * raises "POST Content-Length exceeds the limit", "Input variables exceeded",
+ * "Maximum number of allowable file uploads exceeded" and every upload error —
+ * php_error_docref() calls that reach the application's set_error_handler. Those
+ * have to see the $_SERVER of the request being parsed, which is why the context
+ * half runs first, and they have to run inside that request's fiber, which is
+ * why both are called from there. */
+void oxphp_reset_request_body_globals(void) {
+    /* The four conditions are sapi_activate()'s own, verbatim, down to
+     * enable_post_data_reading — the ini switch an application turns off exactly
+     * when it wants the body left alone for php://input. */
+    if (SG(server_context)
+        && PG(enable_post_data_reading)
+        && SG(request_info).content_type
+        && SG(request_info).request_method
+        && !strcmp(SG(request_info).request_method, "POST")) {
+
+        /* Give back the empty $_FILES the context rebuild left standing, its
+         * symbol-table entry included, so that the parse below fills an array
+         * nobody else is holding — the state every other SAPI parses into, since
+         * there the read happens before the auto-globals are built at all.
+         * rfc1867 writes into PG(http_globals)[TRACK_VARS_FILES] in place and
+         * separates nothing. The entry is bound again once the array is full. */
+        zend_hash_str_del(&EG(symbol_table), "_FILES", sizeof("_FILES") - 1);
+        zval_ptr_dtor_nogc(&PG(http_globals)[TRACK_VARS_FILES]);
+        ZVAL_UNDEF(&PG(http_globals)[TRACK_VARS_FILES]);
+
+        /* The part worker mode used to skip entirely. $_POST is built by the
+         * auto-global callback below, but all that callback can do is ask the
+         * SAPI to hand over the parsed body — and the SAPI has nothing to hand
+         * over until a reader has been picked for the Content-Type and run.
+         * Picking it is what sapi_read_post_data() does, and the only callers of
+         * it are sapi_activate() — i.e. php_request_startup(), one per WORKER
+         * here, not one per request — and userland request_parse_body(). So
+         * without this call $_POST, $_FILES and the POST half of $_REQUEST were
+         * empty for every request a worker ever served, silently: the callback
+         * still ran, found no reader registered, and left the empty array it had
+         * just created. */
+        sapi_read_post_data();
+
+        /* And then the two arrays the body produces. _POST is where the parse of
+         * a urlencoded body and of a multipart one both actually happen —
+         * sapi_handle_post() runs from this callback rather than from the read
+         * above, which only picks the reader and buffers — so this is the line
+         * the body's own diagnostics are raised from. _FILES after it, because
+         * rfc1867 fills the slot from inside the _POST callback and this is what
+         * binds the name back to what it filled. */
+        oxphp_refire_auto_global(ZEND_STRL("_POST"));
+        oxphp_refire_auto_global(ZEND_STRL("_FILES"));
+    }
+
+    /* _REQUEST last. php_auto_globals_create_request() merges
+     * Z_ARRVAL(PG(http_globals)[GET/POST/COOKIE]) with no type check, so it has
+     * to follow both halves of the rebuild: fired against the IS_UNDEF slots the
+     * context half starts from it faults, and fired between the halves it would
+     * carry an empty POST.
+     *
+     * Forced only once something has materialized it. Until then no loaded
+     * script mentions it, so there is nothing to read and nothing to go stale;
+     * the first script that does mention it materializes it correctly at compile
+     * time and leaves the symbol-table entry behind. The latch is what makes the
+     * gate safe: `unset($_REQUEST)` at global scope removes that entry, and a
+     * bare existence check would then skip for the rest of the worker's life,
+     * because the OPcache mask that would otherwise re-fire the callback never
+     * clears again in worker mode. */
+    oxphp_latch_request_autoglobal();
+    if (oxphp_request_autoglobal_materialized) {
+        oxphp_refire_auto_global(ZEND_STRL("_REQUEST"));
+    }
+}
+
+/* ─── Shared per-request body state ────────────────────── */
 
 void oxphp_reset_request_post_state(void) {
     /* Give back what the request before this one left standing. post_entry and
@@ -1824,28 +1988,6 @@ void oxphp_reset_request_post_state(void) {
     SG(request_parse_body_context).throw_exceptions = false;
     memset(&SG(request_parse_body_context).options_cache, 0,
            sizeof(SG(request_parse_body_context).options_cache));
-
-    /* And then do the part worker mode used to skip entirely. $_POST is built by
-     * the auto-global callback below, but all that callback can do is ask the
-     * SAPI to hand over the parsed body — and the SAPI has nothing to hand over
-     * until a reader has been picked for the Content-Type and run. Picking it is
-     * what sapi_read_post_data() does, and the only callers of it are
-     * sapi_activate() — i.e. php_request_startup(), one per WORKER here, not one
-     * per request — and userland request_parse_body(). So without this call
-     * $_POST, $_FILES and the POST half of $_REQUEST were empty for every
-     * request a worker ever served, silently: the callback still ran, found no
-     * reader registered, and left the empty array it had just created.
-     *
-     * The four conditions are sapi_activate()'s own, verbatim, down to
-     * enable_post_data_reading — the ini switch an application turns off exactly
-     * when it wants the body left alone for php://input. */
-    if (SG(server_context)
-        && PG(enable_post_data_reading)
-        && SG(request_info).content_type
-        && SG(request_info).request_method
-        && !strcmp(SG(request_info).request_method, "POST")) {
-        sapi_read_post_data();
-    }
 }
 
 /* ─── Shared per-request body teardown ─────────────────── */
@@ -1881,9 +2023,13 @@ void oxphp_release_request_post_state(void) {
 
 void oxphp_fiber_init_request_state(void) {
     /* Unlike oxphp_soft_reset(), this does NOT touch global OB or other
-     * thread-wide state. It only initializes fresh superglobals and SAPI
-     * headers for the new request. Safe to call while other fibers are
-     * suspended with their state saved. */
+     * thread-wide state. It only initializes the SAPI headers and error state
+     * for the new request. Safe to call while other fibers are suspended with
+     * their state saved.
+     *
+     * The request's input — its superglobals and its body — is not built here:
+     * that runs inside the request's own fiber, because reading the body runs
+     * the application's error handler. See oxphp_fiber_loop_handler(). */
 
     /* Clear SAPI headers for this new request. Through sapi_header_op rather
      * than zend_llist_clean: the server keeps the list the response is built
@@ -1910,6 +2056,29 @@ void oxphp_fiber_init_request_state(void) {
         SG(request_info).cookie_data = sapi_module.read_cookies();
     }
 
+    /* Anything the worker left pending is not this request's to carry. The
+     * worker runs PHP outside any request in more than one place — the session
+     * write at the top of the fast path's reset, a destructor reached by the
+     * deferred promise drain at the end of every tick, a GC pass — and an
+     * exception from any of them stays in EG(exception), which is thread-wide.
+     * Handed to a fiber it is fatal to that request rather than merely wrong:
+     * zend_call_function returns on sight of a pending exception without running
+     * what it was given, so a fresh fiber dies before entering its request loop,
+     * the scheduler files it as suspended, and the request answers nothing at
+     * all. The fast path clears it for the same reason (oxphp_soft_reset step 1);
+     * this path never did.
+     *
+     * Through zend_clear_exception() rather than a release in place: the engine
+     * refuses to run a destructor on the object EG(exception) still names and
+     * makes that refusal a fatal error, so an exception class of its own with a
+     * __destruct — released here at its last reference — would take down the
+     * whole worker instead of the one request. Clearing the slot before the
+     * release is what avoids it, and that is what the engine's own discard
+     * does. */
+    if (UNEXPECTED(EG(exception))) {
+        zend_clear_exception();
+    }
+
     /* Reset error state. The last error is part of it: error_get_last() is what
      * a shutdown function reads to decide whether the request it is closing died,
      * so a new request must not start able to read the one before it. The fast
@@ -1926,28 +2095,6 @@ void oxphp_fiber_init_request_state(void) {
     }
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
-
-    /* Reset the SAPI post state and read this request's body, so the rebuild
-     * below has something to build $_POST and $_FILES from. After the error
-     * reset above on purpose: reading the body is what raises "POST
-     * Content-Length exceeds the limit", and a request has to be able to read
-     * that back out of error_get_last(). */
-    oxphp_reset_request_post_state();
-
-    /* Re-init superglobals from new request data */
-    oxphp_reset_request_autoglobals();
-
-    /* Inject REQUEST_TIME and REQUEST_TIME_FLOAT */
-    double req_time = oxphp_bridge_get_request_time();
-    if (Z_TYPE(PG(http_globals)[TRACK_VARS_SERVER]) == IS_ARRAY) {
-        zval zt, ztf;
-        ZVAL_LONG(&zt, (zend_long)req_time);
-        ZVAL_DOUBLE(&ztf, req_time);
-        zend_hash_str_update(Z_ARRVAL(PG(http_globals)[TRACK_VARS_SERVER]),
-                             "REQUEST_TIME", sizeof("REQUEST_TIME") - 1, &zt);
-        zend_hash_str_update(Z_ARRVAL(PG(http_globals)[TRACK_VARS_SERVER]),
-                             "REQUEST_TIME_FLOAT", sizeof("REQUEST_TIME_FLOAT") - 1, &ztf);
-    }
 }
 
 /* ─── Start / Resume / Finalize ────────────────────────── */
@@ -2063,6 +2210,49 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     /* Drop the fiber's Rust TLS slot (RESPONSE, EARLY_TX, REQUEST_DATA).
      * Must happen AFTER send_response since the response reads from RESPONSE TLS. */
     oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
+
+    /* And the request's superglobals with it, the symbol-table entries included.
+     * What a worker leaves standing here is what the next request reads as its
+     * own until its rebuild gets to each name, and what anything running in the
+     * gap reads too — a session write on the way in, a destructor a GC pass
+     * calls, a drain. None of that belongs to the request that has just ended,
+     * and there is no reading of it that would be right. The next request builds
+     * its own from nothing, inside its own fiber.
+     *
+     * After the response rather than before it: the send path is the last thing
+     * that may still be describing this request.
+     *
+     * $_ENV keeps its entry — it describes the process rather than the request
+     * in worker mode, a .env loader writes it at a boot that never runs again —
+     * which is what the name list leaving it out is for. Its slot is skipped
+     * below only because the rebuild has already emptied it.
+     *
+     * The slots are emptied rather than undefined. IS_UNDEF is not a resting
+     * state for these: it only rewrites the type word, so the value goes on
+     * naming the array this loop has just freed, and the engine reads two of
+     * these slots without asking the type first —
+     * php_auto_globals_create_request() merges Z_ARRVAL of GET, POST and COOKIE
+     * with no check at all. That callback is armed for the whole gap between two
+     * requests on a worker whose application never mentions $_REQUEST (the latch
+     * below stays clear), and PHP does run in that gap: a session write through
+     * a userland save handler, a destructor reached by the deferred promise
+     * drain, a destructor from a GC pass. Any of them compiling a file that
+     * names $_REQUEST fires it, over three freed tables. The immutable empty
+     * array is free — nothing to allocate, nothing to release, and every reader
+     * finds an array with nothing in it, which is the truth between requests. */
+    oxphp_latch_request_autoglobal();
+    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
+        zend_hash_str_del(&EG(symbol_table),
+                          oxphp_symbol_global_names[i].name,
+                          oxphp_symbol_global_names[i].len);
+    }
+    for (int i = 0; i < 6; i++) {
+        if (i == TRACK_VARS_ENV) {
+            continue;
+        }
+        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
+        ZVAL_EMPTY_ARRAY(&PG(http_globals)[i]);
+    }
 
     /* Do NOT release the fiber — its loop is parked at the bottom, keeping the C
      * and VM stacks alive for the next request. oxphp_fiber_release runs only in

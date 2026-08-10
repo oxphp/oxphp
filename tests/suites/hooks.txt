@@ -90,3 +90,22 @@ hooks/test_php_input_handle_closed_after_request >> ?sighting=2 | POST | -H "Con
 # one slot per worker thread and is the only thing is_uploaded_file() and
 # move_uploaded_file() consult, so a parked request has to take it with it.
 hooks/test_files_survive_suspend | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+
+# Two pairs, each in this order and adjacent: the arm installs the error handler
+# that the NEXT request's body parse will call, and the probe sends a body over
+# one of PHP's parse limits. Needs one worker, which PHP_WORKERS=1 gives, or the
+# probe can land on a worker that was never armed. The bodies are files rather
+# than curl form fields only because 21 uploads and 1001 variables do not fit on
+# a line; both are plain request bodies with nothing else to them.
+hooks/test_parse_diag_sees_its_own_request >> ?phase=arm
+hooks/test_parse_diag_sees_its_own_request >> ?phase=multipart | POST | -H "Content-Type: multipart/form-data; boundary=oxphpParseDiag21" --data-binary "@$FIXTURES_DIR/twentyone_uploads.multipart" | |
+hooks/test_parse_diag_sees_its_own_request >> ?phase=arm
+hooks/test_parse_diag_sees_its_own_request >> ?phase=urlencoded | POST | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/thousand_and_one.urlencoded" | |
+
+# The same guarantee on the other dispatch path: this one suspends and has its
+# over-limit inner self-request served from the event-loop tick.
+hooks/test_parse_diag_tick_path
+
+# And the worst thing that parse can do to the worker: an error handler that
+# throws rather than returns. One request must end, and only that one.
+hooks/test_parse_throw_ends_only_its_request >> ?probe=outer
