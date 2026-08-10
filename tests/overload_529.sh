@@ -29,6 +29,8 @@
 #      time left over but reached long after it ran out is refused at pickup
 #      rather than executed, so QUEUE_WAIT_TIMEOUT_MS bounds the whole wait and
 #      not just its admission half.
+#   H: a queue sized to hold every connection the server may accept is reported
+#      at startup and by `config --check`, instead of being found under load.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -441,6 +443,62 @@ if docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
 	ok "G: counted as wait_timeout, in the same series as the gate's own"
 else
 	bad "G: the pickup refusal was not counted under reason=\"wait_timeout\""
+fi
+
+# ── H: a queue sized to hold every connection says so at startup ─────
+# The queue, the waiting set and the workers each hold a connection until
+# their request is answered, so once they add up to MAX_CONNECTIONS the accept
+# loop parks and clients get no answer at all — worse than the 529 this whole
+# file is about, and previously silent. The check is diagnostic, so the only
+# thing to assert is the diagnosis: present when the sum reaches the budget,
+# absent when it does not. Both containers use the same knobs and differ only
+# in MAX_CONNECTIONS, so nothing but the comparison can explain the difference.
+WARN_RE='the PHP path alone can hold every allowed connection'
+
+# The warning is emitted while the configuration is parsed, long before the
+# listener is up, so a server answering a request has certainly emitted it if it
+# was going to. Waiting for that rather than for a fixed interval is what keeps
+# the absence half from passing on a runner that was merely slow.
+start_sized_container() {
+	# start_sized_container <max_connections>
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html -e PHP_WORKERS=1 \
+		-e QUEUE_CAPACITY=4 -e QUEUE_MAX_WAITING=4 -e MAX_CONNECTIONS="$1" \
+		-e LOG_LEVEL=info -p "${PORT}":80 -v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/pause.php?ms=0" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+if start_sized_container 8; then
+	if docker logs "$SRV" 2>&1 | grep -q "$WARN_RE"; then
+		ok "H: a PHP path sized to take every connection warns at startup"
+	else
+		bad "H: 1 worker + 4 queued + 4 parked against MAX_CONNECTIONS=8 went unreported"
+	fi
+	if docker exec -e PHP_WORKERS=1 -e QUEUE_CAPACITY=4 -e QUEUE_MAX_WAITING=4 \
+		-e MAX_CONNECTIONS=8 -e DOCUMENT_ROOT=/var/www/html \
+		"$SRV" oxphp config --check 2>&1 | grep -q '^  ! PHP_WORKERS'; then
+		ok "H: config --check reports it too, where the startup log is not yet running"
+	else
+		bad "H: config --check stayed silent about a queue that can take every connection"
+	fi
+else
+	bad "H: container failed to start"
+fi
+
+if start_sized_container 64; then
+	if docker logs "$SRV" 2>&1 | grep -q "$WARN_RE"; then
+		bad "H: the same queue under a connection budget with room to spare still warned"
+	else
+		ok "H: room to spare in the connection budget stays quiet"
+	fi
+else
+	bad "H: control container failed to start"
 fi
 
 say ""
