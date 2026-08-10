@@ -150,7 +150,16 @@ oxphp config --check
 config: OK
 ```
 
-The check covers filesystem sanity only — path existence and file/directory kind (`DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`, …). PHP runtime, the TLS handshake, and network binding are out of scope. It exits non-zero and prints `config: INVALID` with one line per problem when validation fails, which makes it suitable as a pre-start gate in an entrypoint or CI job.
+Validation covers filesystem sanity only — path existence and file/directory kind (`DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`, …). PHP runtime, the TLS handshake, and network binding are out of scope. It exits non-zero and prints `config: INVALID` with one line per problem when validation fails, which makes it suitable as a pre-start gate in an entrypoint or CI job.
+
+A sizing advisory can follow the verdict on a `  ! ` line — currently one, for a PHP queue sized to hold every connection the server is allowed to accept:
+
+```
+config: OK
+  ! PHP_WORKERS (7) + QUEUE_CAPACITY (896) + QUEUE_MAX_WAITING (500) = 1403 >= MAX_CONNECTIONS (1000): …
+```
+
+It is not a validation failure: the configuration is legal and the exit code is unchanged, so the same line can follow either verdict. A gate should therefore test the exit code rather than match the output exactly.
 
 ## `--help` and `--version`
 

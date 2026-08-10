@@ -626,9 +626,14 @@ fn enabled_features() -> String {
 /// config parses and all filesystem checks pass, `Err` otherwise — the caller
 /// decides the exit code.
 ///
-/// Only filesystem sanity checks are performed: path existence and
-/// file/directory kind. PHP runtime, TLS handshake, and network binding are
-/// intentionally out of scope.
+/// Validation is filesystem sanity only: path existence and file/directory
+/// kind. PHP runtime, TLS handshake, and network binding are intentionally out
+/// of scope.
+///
+/// A sizing advisory may follow the verdict on a `  ! ` line. It is not
+/// validation — the configuration is legal and the exit code is unaffected —
+/// so a caller gating on this command must read the exit code rather than
+/// match the output exactly.
 pub fn check_config() -> Result<(), BoxError> {
     let config = match Config::from_env() {
         Ok(c) => c,
@@ -640,7 +645,7 @@ pub fn check_config() -> Result<(), BoxError> {
     };
 
     let errors = config.validate();
-    if errors.is_empty() {
+    let result = if errors.is_empty() {
         println!("config: OK");
         Ok(())
     } else {
@@ -649,7 +654,33 @@ pub fn check_config() -> Result<(), BoxError> {
             println!("  - {e}");
         }
         Err(format!("{} validation error(s)", errors.len()).into())
+    };
+
+    // Legal but hazardous, so it warns rather than failing the check. Printed
+    // here as well as logged at startup because this path runs before logging
+    // is initialised — a `tracing::warn!` from `Config::from_env()` goes
+    // nowhere, and this command is where an operator looks for exactly this.
+    let workers = config.worker_mode.worker_count();
+    if let Some(backlog) = crate::config::php_backlog_over_connection_budget(
+        workers,
+        config.queue_capacity,
+        config.queue_max_waiting,
+        config.max_connections,
+    ) {
+        println!(
+            "  ! PHP_WORKERS ({workers}) + QUEUE_CAPACITY ({}) + QUEUE_MAX_WAITING ({}) \
+             = {backlog} >= MAX_CONNECTIONS ({}): the PHP path alone can hold every \
+             allowed connection, so under sustained overload the accept loop stops \
+             accepting and clients get no response at all instead of 529. Lower \
+             QUEUE_CAPACITY, or set QUEUE_MAX_WAITING explicitly and raise \
+             MAX_CONNECTIONS past the backlog — raising it on its own does not clear \
+             this, because the default waiting set is half of it. Expected on an \
+             HTTP/2-heavy deployment, where one connection carries many requests.",
+            config.queue_capacity, config.queue_max_waiting, config.max_connections
+        );
     }
+
+    result
 }
 
 #[cfg(test)]

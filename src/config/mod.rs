@@ -289,12 +289,70 @@ pub(crate) fn resolve_queue_env(
     //
     // `worker_count`, not `capacity`: deriving it from the operator's
     // `QUEUE_CAPACITY` would refuse burst absorption exactly where the queue is
-    // shallow. The `MAX_CONNECTIONS` ceiling keeps the accept loop fed.
+    // shallow. The `MAX_CONNECTIONS` ceiling bounds this part of the backlog
+    // only — what keeps the accept loop fed is the check below, over all three.
     let max_waiting = match parse_knob("QUEUE_MAX_WAITING", 0)? {
         0 => (worker_count * 128).min(max_connections / 2).max(1),
         n => n,
     };
+    if let Some(backlog) =
+        php_backlog_over_connection_budget(worker_count, capacity, max_waiting, max_connections)
+    {
+        tracing::warn!(
+            php_workers = worker_count,
+            queue_capacity = capacity,
+            queue_max_waiting = max_waiting,
+            max_connections,
+            backlog,
+            "the PHP path alone can hold every allowed connection — under sustained \
+             overload the accept loop stops accepting and clients get no response at \
+             all instead of 529. Lower QUEUE_CAPACITY, or set QUEUE_MAX_WAITING \
+             explicitly and raise MAX_CONNECTIONS past the backlog: raising it on its \
+             own does not clear this, because the default waiting set is half of it. \
+             Expected on an HTTP/2-heavy deployment, where one connection carries many \
+             requests"
+        );
+    }
     Ok((capacity, wait_timeout_ms, max_waiting))
+}
+
+/// How many requests the PHP path can hold without answering — running in a
+/// worker, sitting in the queue, or parked in admission — when that is enough
+/// to take every connection the server is allowed to have.
+///
+/// All three hold a connection, and therefore a `MAX_CONNECTIONS` permit, until
+/// their request is answered. They are three separate populations because a
+/// queue slot is released the moment a worker picks the request up, before the
+/// script runs: a running request occupies neither buffer and still holds its
+/// connection. `QUEUE_MAX_WAITING`'s own `MAX_CONNECTIONS / 2` ceiling covers
+/// one of the three.
+///
+/// Past that sum the accept loop is the thing that stops: it takes a permit
+/// before spawning a connection task, so it parks with a connection already
+/// accepted and answers nothing — a worse signal than the 529 the wait budget
+/// exists to produce, because a balancer cannot tell it from a dead node.
+///
+/// **Necessary, not sufficient.** The running term is `worker_count`, which is
+/// a floor rather than a bound: a dynamic pool grows past its initial count,
+/// and in worker mode one thread multiplexes fibers, so it can hold many
+/// unanswered requests at once. Connections that never reach PHP at all — idle
+/// keep-alives, static files, handshakes in progress — take permits too and
+/// cannot be counted at startup. A configuration this clears can still exhaust
+/// the budget; one it flags is exhausting it by configuration alone.
+///
+/// The terms count connections while the budget is spent by requests, so over
+/// HTTP/2 — one connection carrying many streams — exceeding it can be
+/// intentional.
+pub(crate) fn php_backlog_over_connection_budget(
+    worker_count: usize,
+    capacity: usize,
+    max_waiting: usize,
+    max_connections: usize,
+) -> Option<usize> {
+    let backlog = worker_count
+        .saturating_add(capacity)
+        .saturating_add(max_waiting);
+    (backlog >= max_connections).then_some(backlog)
 }
 
 /// Parse the async-pool env triple — `ASYNC_WORKERS`, `ASYNC_QUEUE_CAPACITY`,
@@ -921,8 +979,10 @@ mod tests {
         test_env::with_env(&[("QUEUE_MAX_WAITING", None)], || {
             assert_eq!(resolve_queue_env(7, 10_000).unwrap().2, 896);
             // The connection budget is still a bound, and the tighter of the
-            // two wins: half of MAX_CONNECTIONS keeps the accept loop able to
-            // take a connection and refuse it.
+            // two wins. Half of MAX_CONNECTIONS is not by itself headroom for
+            // the accept loop, though — queued and running requests hold
+            // connections too, and neither has a ceiling of its own; see
+            // `php_path_alone_can_take_the_whole_connection_budget`.
             assert_eq!(resolve_queue_env(7, 400).unwrap().2, 200);
             // Never zero: a cap of 0 would turn every contended request into a
             // shed and silently disable waiting altogether.
@@ -936,6 +996,97 @@ mod tests {
             let err = resolve_queue_env(7, 10_000).unwrap_err();
             assert!(err.to_string().contains("QUEUE_MAX_WAITING"), "err: {err}");
         });
+    }
+
+    #[test]
+    fn php_path_alone_can_take_the_whole_connection_budget() {
+        // Measured before this check existed: PHP_WORKERS=1, QUEUE_CAPACITY=4,
+        // QUEUE_MAX_WAITING=4, MAX_CONNECTIONS=8. Nine concurrent requests
+        // pinned all eight permits and a further client got no response at all
+        // (curl exit 28) where the same load under MAX_CONNECTIONS=64 was
+        // refused with 529 in 3 ms.
+        assert_eq!(php_backlog_over_connection_budget(1, 4, 4, 8), Some(9));
+        assert_eq!(php_backlog_over_connection_budget(1, 4, 4, 64), None);
+        // The running request is a third population, not a rounding error: its
+        // queue slot was released at pickup, so it is in neither buffer and
+        // still holds its connection. Counting only the two buffers passes this
+        // configuration, which pins all nine permits exactly as the RED did.
+        assert_eq!(php_backlog_over_connection_budget(1, 4, 4, 9), Some(9));
+        // Equality already loses: the last permit the PHP path can take is the
+        // one the accept loop needs to answer anybody else.
+        assert_eq!(
+            php_backlog_over_connection_budget(7, 493, 500, 1000),
+            Some(1000)
+        );
+        assert_eq!(php_backlog_over_connection_budget(7, 492, 500, 1000), None);
+        // A sum past `usize` must report the hazard, not wrap into safety.
+        assert_eq!(
+            php_backlog_over_connection_budget(1, usize::MAX, 1, 10),
+            Some(usize::MAX)
+        );
+
+        // Reachable through the defaults, because `QUEUE_CAPACITY` does not
+        // follow `MAX_CONNECTIONS` down: 7 workers give a queue of 896 against
+        // a waiting set the ceiling holds to 500 — 1403 against a budget of
+        // 1000.
+        test_env::with_env(
+            &[
+                ("QUEUE_CAPACITY", None),
+                ("QUEUE_MAX_WAITING", None),
+                ("QUEUE_WAIT_TIMEOUT_MS", None),
+            ],
+            || {
+                let (capacity, _, max_waiting) = resolve_queue_env(7, 1000).unwrap();
+                assert_eq!(
+                    php_backlog_over_connection_budget(7, capacity, max_waiting, 1000),
+                    Some(1403)
+                );
+                // Raising `MAX_CONNECTIONS` on its own does not clear it while
+                // the waiting set is left at its default, because that default
+                // is half of `MAX_CONNECTIONS` and rises with it. This is why
+                // the warning does not tell an operator to just raise the one
+                // knob.
+                let (capacity, _, max_waiting) = resolve_queue_env(7, 1500).unwrap();
+                assert_eq!(max_waiting, 750);
+                assert_eq!(
+                    php_backlog_over_connection_budget(7, capacity, max_waiting, 1500),
+                    Some(1653)
+                );
+                // A small pool on the stock budget is clear of it. A large one
+                // is not: at 40 workers the queue and waiting defaults come to
+                // 5120 and 5000, and with the pool itself that is 10 160
+                // against 10 000 — the warning fires on a configuration nobody
+                // edited, correctly by its own model. An auto-sized pool
+                // reaches it from 39 workers up.
+                let (capacity, _, max_waiting) = resolve_queue_env(7, 10_000).unwrap();
+                assert_eq!(
+                    php_backlog_over_connection_budget(7, capacity, max_waiting, 10_000),
+                    None
+                );
+                let (capacity, _, max_waiting) = resolve_queue_env(40, 10_000).unwrap();
+                assert_eq!(
+                    php_backlog_over_connection_budget(40, capacity, max_waiting, 10_000),
+                    Some(10_160)
+                );
+            },
+        );
+
+        // And through an explicit setting, which the `MAX_CONNECTIONS / 2`
+        // ceiling never touches — it applies to the computed default only.
+        test_env::with_env(
+            &[
+                ("QUEUE_CAPACITY", None),
+                ("QUEUE_MAX_WAITING", Some("20000")),
+            ],
+            || {
+                let (capacity, _, max_waiting) = resolve_queue_env(7, 10_000).unwrap();
+                assert_eq!(max_waiting, 20_000);
+                assert_eq!(
+                    php_backlog_over_connection_budget(7, capacity, max_waiting, 10_000),
+                    Some(20_903)
+                );
+            },
+        );
     }
 
     #[test]
