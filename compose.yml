@@ -82,6 +82,13 @@ services:
       # 0 or unset = auto (PHP_WORKERS * 128, capped at MAX_CONNECTIONS / 2).
       # - QUEUE_MAX_WAITING=0
 
+      # How much request-body memory those waiting requests may hold between
+      # them, in bytes. A body that would push the total past it is rejected
+      # at once instead of waiting; a request with no body never is. The cap
+      # above counts requests, which says nothing about how large they are.
+      # 0 or unset = auto (64 MiB).
+      # - QUEUE_MAX_WAITING_BYTES=0
+
       # ── Connections ───────────────────────────────────────────────
 
       # Maximum concurrent connections. New connections are rejected above this limit.

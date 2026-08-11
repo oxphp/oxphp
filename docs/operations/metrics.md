@@ -57,7 +57,7 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_active_connections` | gauge | Currently open TCP connections on the main port |
 | `oxphp_pending_requests` | gauge | PHP requests accepted but not yet answered — waiting for a queue slot, queued, or executing. Only requests routed to PHP: a static file, a 404 or a denied path is answered without the queue and never appears here |
 | `oxphp_dropped_requests_total` | counter | Requests where the PHP worker failed after accepting the request |
-| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first three are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those three specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
+| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `waiting_bytes` (the bodies already parked fill `QUEUE_MAX_WAITING_BYTES`, so this request's body had nowhere to sit — raise that, or lower how much a client may upload), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first four are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those four specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
 
 ## Worker Pool Metrics
 
@@ -198,7 +198,7 @@ rate(oxphp_responses_by_status_total{status="5xx"}[5m])
 oxphp_busy_workers / oxphp_workers_current
 ```
 
-This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
+This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full|waiting_bytes"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
 
 **Queue saturation (drop rate per second):**
 

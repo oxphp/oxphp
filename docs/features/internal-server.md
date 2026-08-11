@@ -107,6 +107,7 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
+  "queue_max_waiting_bytes": 67108864,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,

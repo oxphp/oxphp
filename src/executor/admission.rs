@@ -18,17 +18,21 @@
 //! - **The waiting set is capped.** A waiter holds its connection, so an
 //!   uncapped set lets a sustained overload consume every connection permit
 //!   until the accept loop stalls — answering overload by not answering.
+//! - **And capped twice.** A waiter also holds its request body, buffered in
+//!   full before dispatch, so a cap counted in requests bounds the set in
+//!   places but not in memory. The second cap is counted in bytes.
 //!
 //! Kept out of `super::sapi` (which is gated behind the `php` feature) so the
 //! policy is unit-testable on a host without `libphp.so`.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 /// Why a request never reached a worker. The distinction is what an operator
-/// needs to act on: the first three are overload and answer 529, the other two
+/// needs to act on: the first four are overload and answer 529, the other two
 /// are the pool going away, and counting those as overload is how an ordinary
 /// restart comes to look like a traffic spike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +44,11 @@ pub enum ShedReason {
     WaitTimeout,
     /// Too many requests were already waiting for a slot.
     WaitingFull,
+    /// The bodies already parked in the waiting set leave no room for this
+    /// one's. Separate from `WaitingFull` because the two are cleared by
+    /// different knobs: one bounds how many may wait, the other how much
+    /// memory their buffered bodies may hold while they do.
+    WaitingBytes,
     /// The gate is closed because the server is shutting down.
     ShuttingDown,
     /// No receiver is left on the queue: every worker thread is gone. Not
@@ -54,10 +63,11 @@ impl ShedReason {
     /// Both the counter slot and the label rendered next to it are derived
     /// from this array, so adding or reordering a variant can move a series
     /// but cannot leave one counting under another's name.
-    pub const ALL: [ShedReason; 5] = [
+    pub const ALL: [ShedReason; 6] = [
         Self::QueueFull,
         Self::WaitTimeout,
         Self::WaitingFull,
+        Self::WaitingBytes,
         Self::ShuttingDown,
         Self::PoolUnavailable,
     ];
@@ -68,6 +78,7 @@ impl ShedReason {
             Self::QueueFull => "queue_full",
             Self::WaitTimeout => "wait_timeout",
             Self::WaitingFull => "waiting_full",
+            Self::WaitingBytes => "waiting_bytes",
             Self::ShuttingDown => "shutting_down",
             Self::PoolUnavailable => "pool_unavailable",
         }
@@ -94,6 +105,47 @@ pub enum Admitted {
     Shed(ShedReason),
 }
 
+/// Bytes of request body held by the requests parked in the waiting set.
+///
+/// Counted rather than derived, because the quantity a cap on *places* leaves
+/// unbounded is memory: bodies are buffered in full before dispatch, so
+/// `QUEUE_MAX_WAITING` requests can park anything from nothing at all to that
+/// many times the per-request body limit.
+struct WaitingBytes {
+    cap: usize,
+    held: AtomicUsize,
+}
+
+/// One parked request's charge against [`WaitingBytes`], released on `Drop`.
+///
+/// RAII for the same reason the parking permit is: a client that goes away
+/// mid-wait has its future dropped by the connection layer, and the bytes have
+/// to come back then and not when someone notices. The admitted path releases
+/// them too — once the request is in the channel it is no longer waiting, and
+/// what the queue holds is bounded by `QUEUE_CAPACITY`.
+///
+/// `must_use` because dropping it on the spot is indistinguishable from having
+/// no budget at all, and the compiler is the only thing that would notice.
+#[must_use = "the charge must be held for the wait it belongs to; dropping it \
+              here releases the bytes immediately and the budget bounds nothing"]
+pub struct BytesCharge {
+    /// `None` for a request that charged nothing, so an empty body costs no
+    /// atomic on the way in and none on the way out.
+    budget: Option<Arc<WaitingBytes>>,
+    bytes: usize,
+}
+
+impl Drop for BytesCharge {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            // Relaxed throughout: this counter publishes no data, it only
+            // bounds a sum. Nothing is freed or read on the strength of it
+            // reaching a particular value.
+            budget.held.fetch_sub(self.bytes, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Queue admission gate: a permit per queue slot, the budget a request may
 /// spend not executing, and a cap on how many may wait at once.
 pub struct Admission {
@@ -101,6 +153,9 @@ pub struct Admission {
     /// One permit per request allowed to park waiting for `slots`. Held only
     /// for the duration of the wait.
     parking: Arc<Semaphore>,
+    /// The same waiting set, bounded in the memory its buffered bodies hold
+    /// rather than in requests.
+    waiting_bytes: Arc<WaitingBytes>,
     /// `None` = fail fast: a request that finds no free slot is shed
     /// immediately rather than waiting.
     budget: Option<Duration>,
@@ -116,10 +171,20 @@ impl Admission {
     /// the budget, not of how deep the queue is. Tying it to capacity would
     /// refuse burst absorption exactly where the queue is shallow, which is
     /// where absorbing bursts matters most.
-    pub fn new(capacity: usize, wait_timeout_ms: u64, max_waiting: usize) -> Self {
+    /// `max_waiting_bytes` bounds the same set in the bodies it holds.
+    pub fn new(
+        capacity: usize,
+        wait_timeout_ms: u64,
+        max_waiting: usize,
+        max_waiting_bytes: usize,
+    ) -> Self {
         Self {
             slots: Arc::new(Semaphore::new(capacity)),
             parking: Arc::new(Semaphore::new(max_waiting)),
+            waiting_bytes: Arc::new(WaitingBytes {
+                cap: max_waiting_bytes,
+                held: AtomicUsize::new(0),
+            }),
             budget: (wait_timeout_ms > 0).then(|| Duration::from_millis(wait_timeout_ms)),
         }
     }
@@ -159,6 +224,49 @@ impl Admission {
                 TryAcquireError::Closed => ShedReason::ShuttingDown,
                 TryAcquireError::NoPermits => ShedReason::WaitingFull,
             })
+    }
+
+    /// Charge this request's buffered body against the waiting set's byte
+    /// budget, before committing to a wait.
+    ///
+    /// A body of zero bytes is never refused: it cannot push the sum anywhere,
+    /// and refusing it would let a full budget shed the requests that are not
+    /// the reason it is full. It also costs no atomic, which keeps the bound
+    /// off the path of every `GET` that has to wait.
+    ///
+    /// Synchronous, like [`Admission::try_park`], and for the same reason.
+    pub fn try_park_bytes(&self, bytes: usize) -> Result<BytesCharge, ShedReason> {
+        if bytes == 0 {
+            return Ok(BytesCharge {
+                budget: None,
+                bytes: 0,
+            });
+        }
+
+        // Compare-and-swap rather than add-then-check: an add that has to be
+        // rolled back is visible to everyone who reads the sum in between, so
+        // concurrent arrivals would refuse each other over bytes no one ended
+        // up holding.
+        let mut held = self.waiting_bytes.held.load(Ordering::Relaxed);
+        loop {
+            if held.saturating_add(bytes) > self.waiting_bytes.cap {
+                return Err(ShedReason::WaitingBytes);
+            }
+            match self.waiting_bytes.held.compare_exchange_weak(
+                held,
+                held + bytes,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(BytesCharge {
+                        budget: Some(Arc::clone(&self.waiting_bytes)),
+                        bytes,
+                    })
+                }
+                Err(actual) => held = actual,
+            }
+        }
     }
 
     /// Refuse all further admissions and wake every waiter with a shed.
@@ -228,7 +336,7 @@ mod tests {
 
     #[test]
     fn try_admit_hands_out_exactly_capacity_permits() {
-        let admission = Admission::new(2, 1000, 64);
+        let admission = Admission::new(2, 1000, 64, usize::MAX);
         let a = admission.try_admit();
         let b = admission.try_admit();
         assert!(a.is_ok() && b.is_ok());
@@ -250,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_sheds_once_the_budget_expires() {
-        let admission = Admission::new(1, 250, 64);
+        let admission = Admission::new(1, 250, 64, usize::MAX);
         let _held = admission.try_admit().expect("first claim succeeds");
 
         let start = std::time::Instant::now();
@@ -270,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn admit_takes_a_slot_freed_mid_wait() {
-        let admission = Admission::new(1, 30_000, 64);
+        let admission = Admission::new(1, 30_000, 64, usize::MAX);
         let held = admission.try_admit().expect("first claim succeeds");
 
         let releaser = tokio::spawn(async move {
@@ -289,7 +397,7 @@ mod tests {
     async fn close_wakes_waiters_instead_of_holding_them_to_the_budget() {
         // Teardown must not leave a waiter parked for its whole budget — it
         // would hold a sender clone and keep the workers' channel open.
-        let admission = Arc::new(Admission::new(1, 30_000, 64));
+        let admission = Arc::new(Admission::new(1, 30_000, 64, usize::MAX));
         let _held = admission.try_admit().expect("first claim succeeds");
 
         let closer = {
@@ -320,7 +428,7 @@ mod tests {
         // One queue slot, one parking spot. With the slot held and the spot
         // taken by a parked waiter, a third arrival must be shed on the spot
         // rather than join the queue of waiters.
-        let admission = Arc::new(Admission::new(1, 30_000, 1));
+        let admission = Arc::new(Admission::new(1, 30_000, 1, usize::MAX));
         let _held = admission.try_admit().expect("first claim succeeds");
 
         let parked = {
@@ -355,7 +463,7 @@ mod tests {
         // a return through the connection layer, so a slot can free in
         // between. An already-expired deadline makes the retry the only thing
         // that can produce a permit here.
-        let admission = Admission::new(1, 1000, 1);
+        let admission = Admission::new(1, 1000, 1, usize::MAX);
         let held = admission.try_admit().expect("first claim succeeds");
         let parked = admission.try_park().expect("the set is empty");
         drop(held);
@@ -374,7 +482,7 @@ mod tests {
         // The cap bounds concurrent waiters, not total waits: a shed waiter
         // must free its parking spot for the next arrival, or the gate
         // ratchets shut after `max_waiting` sheds.
-        let admission = Admission::new(1, 60, 1);
+        let admission = Admission::new(1, 60, 1, usize::MAX);
         let _held = admission.try_admit().expect("first claim succeeds");
 
         for attempt in 0..3 {
@@ -399,7 +507,7 @@ mod tests {
         // a request arriving during shutdown is answered "overloaded, retry in
         // 3" — the client is told to come back to an instance that is leaving,
         // and the shed is counted as backpressure that never happened.
-        let admission = Admission::new(1, 0, 64);
+        let admission = Admission::new(1, 0, 64, usize::MAX);
         admission.close();
 
         assert_eq!(
@@ -418,7 +526,7 @@ mod tests {
     fn closed_gate_reports_teardown_even_with_slots_free() {
         // The distinction cannot come from "were there permits left": here
         // every permit is free and the answer must still be ShuttingDown.
-        let admission = Admission::new(8, 1000, 64);
+        let admission = Admission::new(8, 1000, 64, usize::MAX);
         admission.close();
         assert_eq!(
             admission.try_admit().err(),
@@ -431,7 +539,7 @@ mod tests {
     fn zero_budget_reports_no_deadline_to_wait_against() {
         // `budget()` is what the caller branches on to stay off the wait path
         // entirely; `None` is the fail-fast contract.
-        let admission = Admission::new(1, 0, 64);
+        let admission = Admission::new(1, 0, 64, usize::MAX);
         assert!(admission.budget().is_none());
         let _held = admission.try_admit().expect("first claim succeeds");
         assert_eq!(admission.try_admit().err(), Some(ShedReason::QueueFull));
@@ -444,7 +552,7 @@ mod tests {
         // which releases the parking permit. This is what keeps a balancer's
         // timed-out retries from holding a cap they are no longer using, so it
         // is worth a test even though no code here implements it.
-        let admission = Admission::new(1, 30_000, 1);
+        let admission = Admission::new(1, 30_000, 1, usize::MAX);
         let _held = admission.try_admit().expect("first claim succeeds");
 
         // An outer timeout drops the wait mid-flight, exactly as the
@@ -467,6 +575,83 @@ mod tests {
     }
 
     #[test]
+    fn parked_bodies_are_bounded_in_bytes_not_only_in_places() {
+        // Places and bytes bound different things: two places are free
+        // throughout, so nothing here can be refused for the count cap.
+        let admission = Admission::new(1, 30_000, 8, 1024);
+
+        let first = admission.try_park_bytes(768).expect("768 fits in 1024");
+        assert_eq!(
+            admission.try_park_bytes(512).err(),
+            Some(ShedReason::WaitingBytes),
+            "768 + 512 is past the budget — must refuse, and say the bytes are why"
+        );
+
+        // And the refusal is not a latch: what the first waiter was holding
+        // becomes available again the moment its wait ends, however it ends.
+        drop(first);
+        let second = admission.try_park_bytes(512);
+        assert!(
+            second.is_ok(),
+            "the departed waiter's bytes were never given back"
+        );
+    }
+
+    #[test]
+    fn a_request_holding_nothing_is_never_refused_for_bytes() {
+        // A bodyless request cannot move the sum, so refusing it would let a
+        // budget filled by uploads shed the traffic that is not the reason it
+        // is full — and that traffic is most of it.
+        let admission = Admission::new(1, 30_000, 8, 1024);
+        let _full = admission.try_park_bytes(1024).expect("exactly the budget");
+
+        assert!(
+            admission.try_park_bytes(0).is_ok(),
+            "an empty body was refused for memory it does not hold"
+        );
+    }
+
+    #[test]
+    fn a_body_larger_than_the_whole_budget_never_waits() {
+        // Nothing is held, and it still cannot be admitted: waiting would put
+        // the set past its bound on its own. Refusing at once is the honest
+        // answer — the alternative is a second spent holding the body before
+        // the same refusal.
+        let admission = Admission::new(1, 30_000, 8, 1024);
+        assert_eq!(
+            admission.try_park_bytes(4096).err(),
+            Some(ShedReason::WaitingBytes),
+            "a body past the whole budget must be refused against an empty set"
+        );
+    }
+
+    #[test]
+    fn concurrent_charges_cannot_oversubscribe_the_budget() {
+        // The check and the charge have to be one step. Add-then-roll-back
+        // would let two arrivals each see the other's transient add and refuse
+        // each other, and — worse in the other direction — a plain
+        // load-then-add would let both pass a check only one can satisfy.
+        let admission = Arc::new(Admission::new(1, 30_000, 64, 1024));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let admission = Arc::clone(&admission);
+            handles.push(std::thread::spawn(move || {
+                admission.try_park_bytes(256).ok()
+            }));
+        }
+        let charges: Vec<_> = handles
+            .into_iter()
+            .filter_map(|h| h.join().expect("charging thread panicked"))
+            .collect();
+
+        assert_eq!(
+            charges.len(),
+            4,
+            "8 × 256 against a 1024 budget must admit exactly 4"
+        );
+    }
+
+    #[test]
     fn every_reason_has_its_own_slot_and_label() {
         // Adding a variant without listing it in ALL fails to compile here:
         // the match is exhaustive and has no wildcard arm.
@@ -475,6 +660,7 @@ mod tests {
                 ShedReason::QueueFull
                 | ShedReason::WaitTimeout
                 | ShedReason::WaitingFull
+                | ShedReason::WaitingBytes
                 | ShedReason::ShuttingDown
                 | ShedReason::PoolUnavailable => {}
             }

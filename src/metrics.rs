@@ -454,9 +454,10 @@ impl Metrics {
     /// A request refused at admission — answered without reaching a worker.
     ///
     /// The reason is carried through because the conditions call for different
-    /// knobs: a pool too slow for the deadline, a waiting set at its cap, and a
-    /// queue full with no budget to wait are not the same problem, and a single
-    /// number cannot tell an operator which one they have. The metric is named
+    /// knobs: a pool too slow for the deadline, a waiting set at its cap in
+    /// places or in the bodies it holds, and a queue full with no budget to
+    /// wait are not the same problem, and a single number cannot tell an
+    /// operator which one they have. The metric is named
     /// for the mechanism rather than for overload because two of the reasons
     /// are not overload at all — a draining instance and a dead pool — and a
     /// counter called "overloaded" would make every restart read as a spike.
@@ -654,7 +655,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_admission_refused_total Requests answered without reaching a worker, by reason. 529 for the overload reasons (queue_full, wait_timeout, waiting_full), 503 for shutting_down, 500 for pool_unavailable."
+            "# HELP oxphp_admission_refused_total Requests answered without reaching a worker, by reason. 529 for the overload reasons (queue_full, wait_timeout, waiting_full, waiting_bytes), 503 for shutting_down, 500 for pool_unavailable."
         );
         let _ = writeln!(out, "# TYPE oxphp_admission_refused_total counter");
         // Labels come from the same array that assigns the counter slots, so
