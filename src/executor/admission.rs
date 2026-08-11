@@ -180,8 +180,10 @@ impl Admission {
     /// A client that goes away mid-wait needs no handling here: the connection
     /// layer drops the request future, this future goes with it, and the place
     /// is released on the spot — sooner than any signal could be delivered.
-    /// That only covers disconnects the connection layer sees at all; an
-    /// HTTP/1.1 close mid-request is not one of them.
+    /// That covers a client that closes, on either protocol, under the
+    /// preconditions `handle_request` documents. A client that stops waiting
+    /// without closing is invisible to every layer, and does hold its place
+    /// until it is admitted or the budget runs out.
     pub async fn admit(&self, parked: OwnedSemaphorePermit, deadline: Instant) -> Admitted {
         // A slot can free between the caller's fast-path attempt and this
         // future's first poll — the two are separated by a return through the

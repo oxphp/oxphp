@@ -31,6 +31,8 @@
 #      not just its admission half.
 #   H: a queue sized to hold every connection the server may accept is reported
 #      at startup and by `config --check`, instead of being found under load.
+#   I: F over HTTP/1.1 — a client that closes mid-wait is seen on that protocol
+#      too, so its place comes back and its script is never run.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -120,6 +122,16 @@ fire() {
 
 codes()  { cat "$TMP/$1".* | awk '{print $1}'; }
 count()  { codes "$1" | grep -c "^$2\$"; }
+
+# Accepted PHP requests not yet answered: the ones in a worker, the ones queued
+# behind it, and the ones parked in admission. A failed scrape prints -1, which
+# is a count no check can expect: an empty string would make `[ -eq ]` a syntax
+# error, and a 0 would quietly satisfy any check whose healthy value is "nothing
+# left in flight".
+pending() {
+	docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+		| awk '/^oxphp_pending_requests /{print $2; found=1} END{if (!found) print -1}'
+}
 
 say "== queue admission control ($IMAGE) =="
 
@@ -333,8 +345,9 @@ fi
 # — awaiting the wait inside the connection task instead of a detached one is
 # the only thing holding it up.
 #
-# HTTP/2 for the abandoning client, because that is where the departure is
-# visible at all. An HTTP/1.1 close mid-request never reaches the server.
+# HTTP/2 for the abandoning client here; scenario I runs the same timeline over
+# HTTP/1.1, where the departure arrives as an EOF on the socket hyper is still
+# reading.
 if start_container 5000 1; then
 	ok "F: container up (5s budget, waiting set capped at 1)"
 else
@@ -499,6 +512,107 @@ if start_sized_container 64; then
 	fi
 else
 	bad "H: control container failed to start"
+fi
+
+# ── I: the same departure over HTTP/1.1 ──────────────────────────────
+# F rides HTTP/2, where hyper surfaces the departure through the connection
+# future. HTTP/1.1 was long assumed to report nothing at all while a handler
+# is running, which would make an abandoned wait hold the scarcest resource
+# admission has for the rest of its budget — and would make the whole waiting
+# set fill with attempts a timing-out balancer has already given up on.
+#
+# It does report it: with no response written yet, hyper is reading the socket
+# for exactly this, and an EOF mid-message ends the connection and drops the
+# request future with it. Nothing in this repository implements that, which is
+# why it is pinned here: the property is inherited, and an upgrade or a stray
+# `half_close(true)` would remove it silently.
+#
+# Same shape as F, one worker, budget 5 s, one parking spot, every client
+# pinned to HTTP/1.1.
+if start_container 5000 1; then
+	ok "I: container up (5s budget, waiting set capped at 1)"
+else
+	bad "I: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+curl -s -o /dev/null --http1.1 --max-time 40 "http://localhost:${PORT}/pause.php?ms=4000" &
+sleep 0.3
+curl -s -o /dev/null --http1.1 --max-time 40 "http://localhost:${PORT}/pause.php?ms=100" &
+sleep 0.3
+curl -s -o /dev/null --http1.1 --max-time 0.8 \
+	"http://localhost:${PORT}/pause.php?ms=4000" >/dev/null 2>&1 &
+I_PID=$!
+
+# Negative control, as in F: one in the worker, one in the queue, one parked and
+# none of them answered. Without it every check below passes on a run where the
+# third request never reached the waiting set at all.
+sleep 0.4
+I_PARKED="$(pending)"
+if [ "${I_PARKED:-0}" -eq 3 ]; then
+	ok "I: the h1 client really was parked in the waiting set before it left"
+else
+	bad "I: expected 3 requests in flight with one parked, got ${I_PARKED:-0} — the rest of I proves nothing"
+fi
+
+# Its client is gone by now, a good four seconds before the budget would have
+# expired. The same gauge that read 3 above has to have dropped.
+sleep 0.7
+I_AFTER="$(pending)"
+if [ "${I_AFTER:-9}" -eq 2 ]; then
+	ok "I: the departed h1 waiter stopped counting as in flight"
+else
+	bad "I: still ${I_AFTER:-?} in flight after the h1 client left — the wait outlived it"
+fi
+
+# And the freed spot is usable: the queue slot is still held, so this one has to
+# park, and the only place is the one the departed client is no longer using.
+# Backgrounded, because the gauge below has to be read at a moment this file
+# picks and not one the server does: how long this request takes is itself a
+# symptom — milliseconds if it is refused for a place still held by the departed
+# client, seconds if it is served — so anchoring the reading to it would sample
+# the gauge at whatever moment the behaviour under test produced.
+curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 40 \
+	"http://localhost:${PORT}/pause.php?ms=100" > "$TMP/i.late" 2>&1 &
+
+# t ≈ 5.2 s: the worker freed up at 4 s and everything genuinely in flight has
+# been answered, while a 4 s script started on that free worker would still be
+# running until ~8 s. The window is what makes the reading mean something.
+sleep 3.5
+I_LATE="$(pending)"
+wait "$I_PID"; I_RC=$?
+wait
+I_CODE="$(cat "$TMP/i.late")"
+
+if [ "$I_RC" -eq 28 ]; then
+	ok "I: the h1 client left mid-wait, unanswered (curl 28)"
+else
+	bad "I: the abandoning request exited $I_RC, not 28 — it was answered rather than abandoned mid-wait"
+fi
+
+if [ "$I_CODE" = "200" ]; then
+	ok "I: the place a departed h1 client left was reusable"
+else
+	bad "I: the request that had to park got $I_CODE — an h1 client long gone still holds the spot"
+fi
+
+if [ "${I_LATE:-9}" -eq 0 ]; then
+	ok "I: the departed client's script was never run"
+else
+	bad "I: ${I_LATE:-?} still in flight — a worker is executing PHP for a client that is gone"
+fi
+
+# The other shape the same defect takes: the departed waiter keeps its place to
+# the end of the budget and is then shed, which leaves the gauge at zero too but
+# moves a counter. Either reason moving means the wait outlived its client.
+# Counting the two zero lines rather than grepping for a non-zero one: a scrape
+# that returns nothing at all matches no non-zero line either, and would read as
+# "nothing was refused".
+I_ZEROS="$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+	| grep -cE '^oxphp_admission_refused_total\{reason="(waiting_full|wait_timeout)"\} 0$')"
+if [ "${I_ZEROS:-0}" -eq 2 ]; then
+	ok "I: nothing was refused for a place or a budget spent on a departed client"
+else
+	bad "I: a refusal was counted — the abandoned h1 wait was still occupying admission"
 fi
 
 say ""
