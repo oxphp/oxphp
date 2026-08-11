@@ -3189,7 +3189,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 | `500.html` | Internal Server Error | An uncaught or fatal PHP error |
 | `503.html` | Service Unavailable | Graceful draining during shutdown |
 | `504.html` | Gateway Timeout | The request exceeded `REQUEST_TIMEOUT_SECONDS` |
-| `529.html` | Site is overloaded | The request spent its `QUEUE_WAIT_TIMEOUT_MS` budget without reaching a worker — waiting for a queue slot, or waiting in the queue — or `QUEUE_MAX_WAITING` requests were already waiting (`Retry-After` is preserved) |
+| `529.html` | Site is overloaded | The request spent its `QUEUE_WAIT_TIMEOUT_MS` budget without reaching a worker — waiting for a queue slot, or waiting in the queue — or `QUEUE_MAX_WAITING` requests were already waiting, or their bodies already filled `QUEUE_MAX_WAITING_BYTES` (`Retry-After` is preserved) |
 
 Any other 4xx or 5xx works the same way — add a `403.html`, `451.html`, and so on for codes your PHP application returns, or for a custom `PHP_DENY_FALLBACK` status. The one exception is the rate limiter's `429`, which is produced before this handler runs and always uses its default body (see **Notes** below).
 
@@ -4760,6 +4760,7 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
+  "queue_max_waiting_bytes": 67108864,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
@@ -13986,6 +13987,7 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Requests arriving at a full queue wait for a slot (see `QUEUE_WAIT_TIMEOUT_MS`). For dynamic pools (`MIN:MAX`), initial workers = minimum count. `0` = auto |
 | `QUEUE_WAIT_TIMEOUT_MS` | `1000` | How long a request may spend waiting for a PHP worker before it is rejected with 529. One deadline, stamped on arrival, covering both waits a request can face: for a slot in the queue, and inside the queue for a worker. A request reached by a worker after its deadline has passed is refused at pickup rather than executed, so the budget bounds the whole wait and not just its admission half — it does not bound how long the handler then runs. At most `QUEUE_MAX_WAITING` requests wait at once; past that, requests are rejected immediately. `0` = reject immediately whenever the queue is full. Lower it, or set `0`, when the application calls back into this same server over HTTP — the inner call cannot be admitted until the outer one releases its worker, so the wait is spent for nothing — or when a load balancer in front has a shorter timeout of its own. A client that closes the connection mid-wait gives its place back immediately, on HTTP/1.1 as well as HTTP/2, so a balancer that times out and closes does not fill the waiting set with attempts it has already abandoned. What the server cannot see is a client that stops waiting *without* closing — it holds its place until it is admitted or the budget runs out, and if a worker frees up first its script runs for nobody — so keeping the budget below the timeout of anything in front of it is still worth doing |
 | `QUEUE_MAX_WAITING` | Initial workers × 128, capped at `MAX_CONNECTIONS` / 2 | Maximum requests parked waiting for a queue slot at once. Past it, requests are rejected immediately instead of waiting. Each waiter holds a connection and a fully buffered request body for as long as it waits, so this is a bound on resources held, not on waits that will pay off. The `MAX_CONNECTIONS` / 2 cap on the default bounds this part of the backlog only; queued and running requests hold a connection the same way, so the headroom the server actually keeps for accepting and refusing follows from `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING` against `MAX_CONNECTIONS` — see below. Size it from your own handler latency — also below. `0` = auto, never below 1 |
+| `QUEUE_MAX_WAITING_BYTES` | `67108864` (64 MiB) | Maximum request-body bytes the parked requests may hold between them, in bytes. A request whose body would push the total past it is rejected with 529 immediately instead of waiting; a request carrying no body is never rejected for this. `QUEUE_MAX_WAITING` bounds the same set in requests, which says nothing about their size — bodies are buffered in full before a request reaches the queue, so with only a count to stop them the parked set can hold `QUEUE_MAX_WAITING` × 10 MiB. Raise it for an upload-heavy application that should absorb bursts of large bodies rather than shed them; lower it on a memory-capped container. `0` = auto |
 
 ### Sizing the Waiting Set
 
@@ -13998,6 +14000,8 @@ QUEUE_MAX_WAITING=40
 ```
 
 Setting it near `W × B / T` turns the surplus into an immediate 529 rather than a 529 a second later. Shortening `QUEUE_WAIT_TIMEOUT_MS` achieves the same by the other term — the two trade against each other, and on a slow handler the smaller budget is usually the better lever, because it also bounds how long a client waits for the refusal.
+
+The set is bounded a second time, in bytes. Every waiter holds its request body in memory for as long as it waits, so a cap counted in requests leaves the memory they hold to the traffic: the same 1024 waiters cost nothing on bodyless `GET`s and gigabytes on uploads. `QUEUE_MAX_WAITING_BYTES` bounds that sum directly — past it a request carrying a body is refused at once rather than parked, while bodyless ones keep waiting normally. An upload-heavy application that should absorb bursts instead of shedding them wants a larger value; a container with a hard memory limit wants a smaller one. Refusals for either cap are counted separately in `oxphp_admission_refused_total` (`waiting_full` against the count, `waiting_bytes` against the memory), so the metric names the knob to reach for.
 
 ### Keeping Headroom for the Accept Loop
 
@@ -14679,6 +14683,7 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
+  "queue_max_waiting_bytes": 67108864,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
@@ -14836,7 +14841,7 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_active_connections` | gauge | Currently open TCP connections on the main port |
 | `oxphp_pending_requests` | gauge | PHP requests accepted but not yet answered — waiting for a queue slot, queued, or executing. Only requests routed to PHP: a static file, a 404 or a denied path is answered without the queue and never appears here |
 | `oxphp_dropped_requests_total` | counter | Requests where the PHP worker failed after accepting the request |
-| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first three are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those three specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
+| `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `waiting_bytes` (the bodies already parked fill `QUEUE_MAX_WAITING_BYTES`, so this request's body had nowhere to sit — raise that, or lower how much a client may upload), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first four are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those four specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
 
 ## Worker Pool Metrics
 
@@ -14977,7 +14982,7 @@ rate(oxphp_responses_by_status_total{status="5xx"}[5m])
 oxphp_busy_workers / oxphp_workers_current
 ```
 
-This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
+This is a true fraction between `0` and `1`. Sustained values at `1` mean every worker is occupied and further arrivals are queueing; pair it with `rate(oxphp_admission_refused_total{reason=~"queue_full|wait_timeout|waiting_full|waiting_bytes"}[5m])` to see whether that backlog is turning into refusals, and with `oxphp_pending_requests` to see how deep it is.
 
 **Queue saturation (drop rate per second):**
 
@@ -15111,7 +15116,9 @@ The budget bounds how long a request waits to **enter** the queue, not how long 
 
 `QUEUE_MAX_WAITING` caps how many requests may be waiting at once (default: initial workers × 128, capped at half of `MAX_CONNECTIONS`); past it, admission goes back to rejecting immediately. Waiting is not free — a waiting request holds its connection, and its already-buffered body, until it is admitted or the budget runs out — so an uncapped waiting set would consume every connection permit under sustained overload, block the accept loop, and leave the server dropping new connections instead of answering them. The default approximates how many requests the pool can actually admit inside the budget: waiting past that only defers a rejection while holding those resources. The `MAX_CONNECTIONS` / 2 ceiling bounds the waiting set alone, which is not by itself headroom for the accept loop: a queued request holds its connection until a worker reaches it, and a running one holds it too — its queue slot was released at pickup — while `QUEUE_CAPACITY` has no connection-derived ceiling at all. So `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING` has to stay below `MAX_CONNECTIONS`, and once it reaches the budget the accept loop parks with every permit taken — a client arriving then gets no response rather than a 529. The server warns about that at startup. Clearing it is necessary rather than sufficient: connections that never reach PHP hold permits too. Note that the terms are sized in connections while the budget is spent by requests: over HTTP/2 one connection carries many requests, so an h2-heavy deployment reaches the cap from a fraction of its connection budget, should set `QUEUE_MAX_WAITING` explicitly, and can legitimately sit above the sum.
 
-Only when the wait budget runs out does OxPHP return a `529 Site is Overloaded` response with a `Retry-After` header. Status code 529 (non-standard, used by Cloudflare and others) clearly distinguishes overload from application errors (500) and maintenance (503), making it easier to configure alerts and load balancers. Setting `QUEUE_WAIT_TIMEOUT_MS=0` disables the wait and rejects the moment the queue is full.
+The waiting set is bounded twice, because a cap counted in requests says nothing about the memory they hold: the same number of waiters costs nothing on bodyless `GET`s and gigabytes on uploads. `QUEUE_MAX_WAITING_BYTES` (default 64 MiB) bounds the request-body bytes parked at once — past it a request carrying a body is refused immediately rather than parked, while bodyless ones keep waiting normally. Two things it does not cover, both of which predate the wait budget: bodies already handed to the queue, bounded in requests by `QUEUE_CAPACITY` and not in bytes, and the memory a body occupies while it is still being read off the connection, which no aggregate limit bounds at all.
+
+OxPHP returns a `529 Site is Overloaded` response with a `Retry-After` header when a request cannot be served rather than merely delayed: the wait budget ran out, or one of the caps above refused it a place to wait in. Status code 529 (non-standard, used by Cloudflare and others) clearly distinguishes overload from application errors (500) and maintenance (503), making it easier to configure alerts and load balancers. Setting `QUEUE_WAIT_TIMEOUT_MS=0` disables the wait and rejects the moment the queue is full.
 
 Because waiting requests occupy a connection rather than a queue slot, the concurrency ceiling under overload is set by `MAX_CONNECTIONS` rather than `QUEUE_CAPACITY` — and over HTTP/2 by `MAX_CONNECTIONS` multiplied by `H2_MAX_CONCURRENT_STREAMS`, since each stream carries a request of its own. Size the wait budget with that in mind: the request body is already buffered by the time a request reaches the queue, so a longer budget means a genuinely overloaded server holds proportionally more requests — and their bodies — in memory before answering.
 

@@ -111,6 +111,10 @@ pub struct Config {
     pub queue_wait_timeout_ms: u64,
     /// Cap on requests parked waiting for a queue slot.
     pub queue_max_waiting: usize,
+    /// Cap on the request-body bytes those parked requests may hold between
+    /// them. Bodies are buffered in full before dispatch, so the cap above
+    /// bounds the waiting set in requests and this one bounds it in memory.
+    pub queue_max_waiting_bytes: usize,
     /// Trusted reverse proxy networks (CIDR). When set, X-Forwarded-* and
     /// Forwarded headers from these peers are trusted for client IP extraction.
     pub trusted_proxies: Option<TrustedProxyConfig>,
@@ -265,8 +269,18 @@ fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxErro
     }
 }
 
-/// Parse the PHP queue knobs — `QUEUE_CAPACITY`, `QUEUE_WAIT_TIMEOUT_MS` and
-/// `QUEUE_MAX_WAITING`.
+/// Default cap on the bodies parked in the waiting set, in bytes.
+///
+/// Chosen against the places cap rather than against host memory, which is
+/// unknowable here: at the default `QUEUE_MAX_WAITING` of `workers × 128` this
+/// is some tens of kilobytes per waiter — above an ordinary form post, and far
+/// below what the same set of waiters could hold with only a count to stop
+/// them (`QUEUE_MAX_WAITING` × the 10 MiB per-request body limit, which reaches
+/// gigabytes at any pool size worth running).
+const DEFAULT_QUEUE_MAX_WAITING_BYTES: usize = 64 * 1024 * 1024;
+
+/// Parse the PHP queue knobs — `QUEUE_CAPACITY`, `QUEUE_WAIT_TIMEOUT_MS`,
+/// `QUEUE_MAX_WAITING` and `QUEUE_MAX_WAITING_BYTES`.
 ///
 /// `QUEUE_CAPACITY=0` means auto (`worker_count × 128`), matching
 /// `ASYNC_QUEUE_CAPACITY`. Taken literally it would build a zero-capacity
@@ -276,7 +290,7 @@ fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxErro
 pub(crate) fn resolve_queue_env(
     worker_count: usize,
     max_connections: usize,
-) -> Result<(usize, u64, usize), crate::types::BoxError> {
+) -> Result<(usize, u64, usize, usize), crate::types::BoxError> {
     let capacity = match parse_knob("QUEUE_CAPACITY", 0)? {
         0 => worker_count * 128,
         n => n,
@@ -293,6 +307,13 @@ pub(crate) fn resolve_queue_env(
     // only — what keeps the accept loop fed is the check below, over all three.
     let max_waiting = match parse_knob("QUEUE_MAX_WAITING", 0)? {
         0 => (worker_count * 128).min(max_connections / 2).max(1),
+        n => n,
+    };
+    // The other half of the same cap. A place in the waiting set is also a
+    // buffered request body held for the whole budget, and the count says
+    // nothing about how large those bodies are.
+    let max_waiting_bytes = match parse_knob("QUEUE_MAX_WAITING_BYTES", 0)? {
+        0 => DEFAULT_QUEUE_MAX_WAITING_BYTES,
         n => n,
     };
     if let Some(backlog) =
@@ -313,7 +334,7 @@ pub(crate) fn resolve_queue_env(
              requests"
         );
     }
-    Ok((capacity, wait_timeout_ms, max_waiting))
+    Ok((capacity, wait_timeout_ms, max_waiting, max_waiting_bytes))
 }
 
 /// How many requests the PHP path can hold without answering — running in a
@@ -552,7 +573,7 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(default_workers);
 
-        let (queue_capacity, queue_wait_timeout_ms, queue_max_waiting) =
+        let (queue_capacity, queue_wait_timeout_ms, queue_max_waiting, queue_max_waiting_bytes) =
             resolve_queue_env(worker_mode.worker_count(), max_connections)?;
 
         let trusted_proxies = TrustedProxyConfig::from_env()
@@ -597,6 +618,7 @@ impl Config {
             queue_capacity,
             queue_wait_timeout_ms,
             queue_max_waiting,
+            queue_max_waiting_bytes,
             trusted_proxies,
             h2,
         })
@@ -646,6 +668,7 @@ impl Config {
             queue_capacity: 128,
             queue_wait_timeout_ms: 1000,
             queue_max_waiting: 128,
+            queue_max_waiting_bytes: 64 * 1024 * 1024,
             trusted_proxies: None,
             h2: H2Config::default(),
         }
@@ -690,6 +713,7 @@ impl Config {
             "queue_capacity": self.queue_capacity,
             "queue_wait_timeout_ms": self.queue_wait_timeout_ms,
             "queue_max_waiting": self.queue_max_waiting,
+            "queue_max_waiting_bytes": self.queue_max_waiting_bytes,
             "max_connections": self.max_connections,
             "drain_timeout_seconds": self.drain_timeout_seconds,
             "internal_addr": self.internal_addr,
@@ -941,7 +965,10 @@ mod tests {
         let both_unset = [("QUEUE_CAPACITY", None), ("QUEUE_WAIT_TIMEOUT_MS", None)];
 
         test_env::with_env(&both_unset, || {
-            assert_eq!(resolve_queue_env(7, 10_000).unwrap(), (896, 1000, 896));
+            assert_eq!(
+                resolve_queue_env(7, 10_000).unwrap(),
+                (896, 1000, 896, DEFAULT_QUEUE_MAX_WAITING_BYTES)
+            );
         });
         // `0` and exactly-empty both mean auto, not a rendezvous channel.
         test_env::with_env(&[("QUEUE_CAPACITY", Some("0"))], || {
@@ -996,6 +1023,31 @@ mod tests {
             let err = resolve_queue_env(7, 10_000).unwrap_err();
             assert!(err.to_string().contains("QUEUE_MAX_WAITING"), "err: {err}");
         });
+
+        // The byte half of the same cap. Flat rather than pool-derived: what a
+        // host can hold in buffered bodies has nothing to do with how many
+        // threads it runs.
+        test_env::with_env(&[("QUEUE_MAX_WAITING_BYTES", None)], || {
+            assert_eq!(
+                resolve_queue_env(7, 10_000).unwrap().3,
+                DEFAULT_QUEUE_MAX_WAITING_BYTES
+            );
+            assert_eq!(
+                resolve_queue_env(64, 10_000).unwrap().3,
+                DEFAULT_QUEUE_MAX_WAITING_BYTES
+            );
+        });
+        test_env::with_env(&[("QUEUE_MAX_WAITING_BYTES", Some("1048576"))], || {
+            assert_eq!(resolve_queue_env(7, 10_000).unwrap().3, 1024 * 1024);
+        });
+        test_env::with_env(&[("QUEUE_MAX_WAITING_BYTES", Some("64MiB"))], || {
+            let err = resolve_queue_env(7, 10_000).unwrap_err();
+            assert!(
+                err.to_string().contains("QUEUE_MAX_WAITING_BYTES"),
+                "a size suffix is not accepted here, and saying so beats \
+                 falling back to a default the operator did not ask for: {err}"
+            );
+        });
     }
 
     #[test]
@@ -1036,7 +1088,7 @@ mod tests {
                 ("QUEUE_WAIT_TIMEOUT_MS", None),
             ],
             || {
-                let (capacity, _, max_waiting) = resolve_queue_env(7, 1000).unwrap();
+                let (capacity, _, max_waiting, _) = resolve_queue_env(7, 1000).unwrap();
                 assert_eq!(
                     php_backlog_over_connection_budget(7, capacity, max_waiting, 1000),
                     Some(1403)
@@ -1046,7 +1098,7 @@ mod tests {
                 // is half of `MAX_CONNECTIONS` and rises with it. This is why
                 // the warning does not tell an operator to just raise the one
                 // knob.
-                let (capacity, _, max_waiting) = resolve_queue_env(7, 1500).unwrap();
+                let (capacity, _, max_waiting, _) = resolve_queue_env(7, 1500).unwrap();
                 assert_eq!(max_waiting, 750);
                 assert_eq!(
                     php_backlog_over_connection_budget(7, capacity, max_waiting, 1500),
@@ -1058,12 +1110,12 @@ mod tests {
                 // against 10 000 — the warning fires on a configuration nobody
                 // edited, correctly by its own model. An auto-sized pool
                 // reaches it from 39 workers up.
-                let (capacity, _, max_waiting) = resolve_queue_env(7, 10_000).unwrap();
+                let (capacity, _, max_waiting, _) = resolve_queue_env(7, 10_000).unwrap();
                 assert_eq!(
                     php_backlog_over_connection_budget(7, capacity, max_waiting, 10_000),
                     None
                 );
-                let (capacity, _, max_waiting) = resolve_queue_env(40, 10_000).unwrap();
+                let (capacity, _, max_waiting, _) = resolve_queue_env(40, 10_000).unwrap();
                 assert_eq!(
                     php_backlog_over_connection_budget(40, capacity, max_waiting, 10_000),
                     Some(10_160)
@@ -1079,7 +1131,7 @@ mod tests {
                 ("QUEUE_MAX_WAITING", Some("20000")),
             ],
             || {
-                let (capacity, _, max_waiting) = resolve_queue_env(7, 10_000).unwrap();
+                let (capacity, _, max_waiting, _) = resolve_queue_env(7, 10_000).unwrap();
                 assert_eq!(max_waiting, 20_000);
                 assert_eq!(
                     php_backlog_over_connection_budget(7, capacity, max_waiting, 10_000),

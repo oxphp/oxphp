@@ -33,6 +33,10 @@
 #      at startup and by `config --check`, instead of being found under load.
 #   I: F over HTTP/1.1 — a client that closes mid-wait is seen on that protocol
 #      too, so its place comes back and its script is never run.
+#   J: the waiting set is bounded in bytes as well as in places — a request
+#      whose buffered body would push the parked bodies past
+#      QUEUE_MAX_WAITING_BYTES is refused on the spot, while smaller ones go on
+#      waiting out their budget.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -88,7 +92,7 @@ cleanup() {
 trap cleanup EXIT
 
 start_container() {
-	# start_container <queue_wait_timeout_ms> [queue_max_waiting]
+	# start_container <queue_wait_timeout_ms> [queue_max_waiting] [queue_max_waiting_bytes]
 	docker rm -f "$SRV" >/dev/null 2>&1
 	docker run -d --name "$SRV" \
 		-e DOCUMENT_ROOT=/var/www/html \
@@ -96,6 +100,7 @@ start_container() {
 		-e QUEUE_CAPACITY=1 \
 		-e QUEUE_WAIT_TIMEOUT_MS="$1" \
 		-e QUEUE_MAX_WAITING="${2:-0}" \
+		-e QUEUE_MAX_WAITING_BYTES="${3:-0}" \
 		-e INTERNAL_ADDR=0.0.0.0:9090 \
 		-e LOG_LEVEL=error \
 		-p "${PORT}":80 \
@@ -155,7 +160,7 @@ else
 fi
 
 if [ "$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
-	| grep -c '^oxphp_admission_refused_total{[^}]*} 0$')" -eq 5 ]; then
+	| grep -c '^oxphp_admission_refused_total{[^}]*} 0$')" -eq 6 ]; then
 	ok "A: every oxphp_admission_refused_total reason stayed 0"
 else
 	bad "A: oxphp_admission_refused_total moved on a burst that was fully served"
@@ -613,6 +618,131 @@ if [ "${I_ZEROS:-0}" -eq 2 ]; then
 	ok "I: nothing was refused for a place or a budget spent on a departed client"
 else
 	bad "I: a refusal was counted — the abandoned h1 wait was still occupying admission"
+fi
+
+# ── J: the waiting set is bounded in bytes, not only in places ───────
+# A parked request holds its request body, fully buffered, for as long as it
+# waits. Places alone bound that in requests and not in memory, so a waiting set
+# of a few hundred can hold gigabytes of bodies for the whole budget — and the
+# only thing an operator could tune was how many requests wait, which says
+# nothing about how large they are.
+#
+# One worker, capacity 1, three parking places and a 64 KiB byte budget. Two 5 s
+# handlers take the worker and the queue slot, so everything after them has to
+# park — long enough that no waiter here can be admitted by the pool draining
+# instead of by the behaviour under test. Three places for three arrivals: the
+# count cap cannot be what refuses anything, which is what makes the byte budget
+# the only available explanation for a refusal.
+#
+# Both halves are checked. A 1 MiB body is refused on the spot — and the empty
+# body and the 1 KiB body still park and still wait their budget out, so
+# "refuse anything with a body" and "stop waiting altogether" both fail this.
+#
+# Then the aggregate, which the three above cannot see: two 40 KiB bodies, each
+# well inside the budget and over it together. The first must park and wait,
+# the second must be refused for the bytes the first is holding. This is the
+# only check here that fails if the charge does not outlive the wait — release
+# it early and every other check in this file still passes, because a body
+# larger than the whole budget is refused against an empty counter either way.
+if start_container 1000 3 65536; then
+	ok "J: container up (1 s budget, 3 places, 64 KiB of parked bodies)"
+else
+	bad "J: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+python3 -c 'import sys; sys.stdout.write("x" * 1048576)' > "$TMP/big.bin"
+python3 -c 'import sys; sys.stdout.write("x" * 1024)' > "$TMP/small.bin"
+# 40 KiB each: either one parks inside a 64 KiB budget, the two together do not.
+python3 -c 'import sys; sys.stdout.write("x" * 40960)' > "$TMP/half.bin"
+
+# `Expect:` off — curl asks for 100-continue on bodies this size, and the round
+# trip would land in the timings the checks below turn on.
+post() {
+	# post <file> <tag>
+	curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 30 \
+		-H 'Expect:' -H 'Content-Type: application/octet-stream' \
+		--data-binary "@$1" "http://localhost:${PORT}/pause.php?ms=100" \
+		> "$TMP/$2" 2>&1
+}
+
+curl -s -o /dev/null --max-time 40 "http://localhost:${PORT}/pause.php?ms=5000" &
+sleep 0.3
+curl -s -o /dev/null --max-time 40 "http://localhost:${PORT}/pause.php?ms=5000" &
+sleep 0.3
+
+post "$TMP/big.bin" j.big
+read -r J_BIG_CODE J_BIG_TIME < "$TMP/j.big"
+
+# The two that must still wait, in parallel: both park, both outlive nothing.
+post "$TMP/small.bin" j.small &
+J_SMALL_PID=$!
+curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 30 \
+	"http://localhost:${PORT}/pause.php?ms=100" > "$TMP/j.empty" 2>&1 &
+J_EMPTY_PID=$!
+wait "$J_SMALL_PID" "$J_EMPTY_PID"
+read -r J_SMALL_CODE J_SMALL_TIME < "$TMP/j.small"
+read -r J_EMPTY_CODE J_EMPTY_TIME < "$TMP/j.empty"
+
+# The aggregate. The first 40 KiB body parks and is still holding its charge
+# when the second arrives; 40 + 40 is past 64, so the second has nowhere to sit.
+# Sequenced rather than fired together, because which of the two is refused is
+# the whole point and a race would decide it arbitrarily.
+post "$TMP/half.bin" j.half1 &
+J_HALF1_PID=$!
+sleep 0.3
+post "$TMP/half.bin" j.half2
+read -r J_HALF2_CODE J_HALF2_TIME < "$TMP/j.half2"
+wait "$J_HALF1_PID"
+read -r J_HALF1_CODE J_HALF1_TIME < "$TMP/j.half1"
+
+METRICS_J="$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null)"
+wait
+
+if [ "$J_BIG_CODE" = "529" ] && awk -v t="$J_BIG_TIME" 'BEGIN { exit !(t < 0.5) }'; then
+	ok "J: a body past the byte budget is refused on the spot (${J_BIG_TIME}s)"
+else
+	bad "J: expected an immediate 529 for a 1 MiB body, got $J_BIG_CODE after ${J_BIG_TIME}s — it parked and held its body instead"
+fi
+
+if printf '%s' "$METRICS_J" | grep -qE '^oxphp_admission_refused_total\{reason="waiting_bytes"\} [1-9]'; then
+	ok "J: refused for the byte budget, and counted as its own reason"
+else
+	bad "J: oxphp_admission_refused_total{reason=\"waiting_bytes\"} did not move — an operator cannot tell which cap refused this"
+fi
+
+# The other half. Without these two, a build that simply stopped waiting would
+# pass everything above.
+if [ "$J_EMPTY_CODE" = "529" ] && awk -v t="$J_EMPTY_TIME" 'BEGIN { exit !(t > 0.9) }'; then
+	ok "J: a bodyless request still parks and waits its budget out (${J_EMPTY_TIME}s)"
+else
+	bad "J: the bodyless request answered $J_EMPTY_CODE after ${J_EMPTY_TIME}s — the byte budget refuses requests that hold nothing"
+fi
+
+if [ "$J_SMALL_CODE" = "529" ] && awk -v t="$J_SMALL_TIME" 'BEGIN { exit !(t > 0.9) }'; then
+	ok "J: a body inside the budget waits like any other request (${J_SMALL_TIME}s)"
+else
+	bad "J: the 1 KiB body answered $J_SMALL_CODE after ${J_SMALL_TIME}s — carrying a body at all is what lost the wait, not its size"
+fi
+
+if printf '%s' "$METRICS_J" | grep -qE '^oxphp_admission_refused_total\{reason="wait_timeout"\} [2-9]'; then
+	ok "J: the two that waited were refused by the budget, not by the byte cap"
+else
+	bad "J: expected two wait_timeout refusals alongside the byte-budget one"
+fi
+
+# The charge outlives the wait, or it bounds nothing. Neither body is refusable
+# on its own here, so only the first one's charge still being held can explain
+# the second one's refusal.
+if [ "$J_HALF1_CODE" = "529" ] && awk -v t="$J_HALF1_TIME" 'BEGIN { exit !(t > 0.9) }'; then
+	ok "J: the first 40 KiB body parked and waited its budget out (${J_HALF1_TIME}s)"
+else
+	bad "J: the first 40 KiB body answered $J_HALF1_CODE after ${J_HALF1_TIME}s — it never parked, so the next check proves nothing"
+fi
+
+if [ "$J_HALF2_CODE" = "529" ] && awk -v t="$J_HALF2_TIME" 'BEGIN { exit !(t < 0.5) }'; then
+	ok "J: bodies are charged in aggregate — 40 KiB + 40 KiB does not fit 64 KiB (${J_HALF2_TIME}s)"
+else
+	bad "J: the second 40 KiB body answered $J_HALF2_CODE after ${J_HALF2_TIME}s — the first one's charge was not held for its wait, so the budget bounds one body rather than the parked set"
 fi
 
 say ""

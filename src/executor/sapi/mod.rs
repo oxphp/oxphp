@@ -102,6 +102,7 @@ fn build_spawn_strategy(config: &Config, metrics: &Arc<Metrics>) -> SpawnStrateg
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_startup(
     mode: &WorkerMode,
     strategy: &SpawnStrategy,
@@ -109,6 +110,7 @@ fn log_startup(
     queue_capacity: usize,
     queue_wait_timeout_ms: u64,
     queue_max_waiting: usize,
+    queue_max_waiting_bytes: usize,
     idle_timeout_seconds: u64,
 ) {
     if let SpawnStrategy::WorkerMode { config, .. } = strategy {
@@ -118,6 +120,7 @@ fn log_startup(
             queue_capacity,
             queue_wait_timeout_ms,
             queue_max_waiting,
+            queue_max_waiting_bytes,
             idle_timeout_seconds,
             entry_file = %config.entry_file.display(),
             "PHP worker pool started (worker mode)"
@@ -129,6 +132,7 @@ fn log_startup(
             queue_capacity,
             queue_wait_timeout_ms,
             queue_max_waiting,
+            queue_max_waiting_bytes,
             idle_timeout_seconds,
             "PHP worker pool started"
         );
@@ -210,9 +214,10 @@ fn shed_response(reason: ShedReason) -> ScriptResponse {
     match reason {
         ShedReason::ShuttingDown => shutting_down_response(),
         ShedReason::PoolUnavailable => pool_unavailable_response(),
-        ShedReason::QueueFull | ShedReason::WaitTimeout | ShedReason::WaitingFull => {
-            overloaded_response()
-        }
+        ShedReason::QueueFull
+        | ShedReason::WaitTimeout
+        | ShedReason::WaitingFull
+        | ShedReason::WaitingBytes => overloaded_response(),
     }
 }
 
@@ -277,6 +282,7 @@ impl SapiExecutor {
         let initial_count = mode.worker_count();
         let queue_capacity = config.queue_capacity;
         let max_waiting = config.queue_max_waiting;
+        let max_waiting_bytes = config.queue_max_waiting_bytes;
 
         php_startup();
 
@@ -293,6 +299,7 @@ impl SapiExecutor {
             queue_capacity,
             config.queue_wait_timeout_ms,
             max_waiting,
+            max_waiting_bytes,
             idle_timeout_seconds,
         );
 
@@ -303,6 +310,7 @@ impl SapiExecutor {
                 queue_capacity,
                 config.queue_wait_timeout_ms,
                 max_waiting,
+                max_waiting_bytes,
             )),
             workers: Arc::new(Mutex::new(managed_workers)),
             mode,
@@ -376,6 +384,19 @@ impl ScriptExecutor for SapiExecutor {
             }
         };
 
+        // And a claim on the memory it will hold while it waits. The body is
+        // buffered in full before dispatch, so parking is what turns a
+        // transient allocation into one held for the whole budget — a bound in
+        // places says how many wait, and nothing about how much they weigh.
+        // Refused synchronously for the same reason the place is.
+        let charge = match self.admission.try_park_bytes(request.body.len()) {
+            Ok(charge) => charge,
+            Err(reason) => {
+                self.metrics.request_admission_refused(reason);
+                return ExecuteResult::Rejected(shed_response(reason));
+            }
+        };
+
         // With a budget, wait for a slot and shed only if the request can no
         // longer make it. Awaiting the future in the connection task rather
         // than a detached one keeps the wait tied to the request it belongs to.
@@ -383,6 +404,11 @@ impl ScriptExecutor for SapiExecutor {
         let admission = Arc::clone(&self.admission);
         let metrics = Arc::clone(&self.metrics);
         ExecuteResult::Admitting(Box::pin(async move {
+            // Bound by name, not by `_`: `let _ = charge` would give the bytes
+            // back on the spot and leave the budget measuring nothing. Held
+            // here, they come back however this future ends — admitted,
+            // refused, or dropped along with a client that left.
+            let _charge = charge;
             match admission.admit(parked, deadline).await {
                 Admitted::Slot(permit) => {
                     // A client that leaves during the wait needs nothing from
@@ -517,7 +543,7 @@ mod tests {
         SapiExecutor {
             request_tx: Some(tx),
             request_rx: rx,
-            admission: Arc::new(Admission::new(capacity, wait_timeout_ms, 64)),
+            admission: Arc::new(Admission::new(capacity, wait_timeout_ms, 64, usize::MAX)),
             workers: Arc::new(Mutex::new(Vec::new())),
             mode: WorkerMode::Static(1),
             strategy: Arc::new(SpawnStrategy::Traditional {
