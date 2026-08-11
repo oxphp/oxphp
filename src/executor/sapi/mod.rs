@@ -394,9 +394,10 @@ impl ScriptExecutor for SapiExecutor {
                     // queue slot and a pickup that the 499 fast path throws
                     // away, ahead of requests someone is still waiting on.
                     //
-                    // Neither covers an HTTP/1.1 close mid-handler: hyper does
-                    // not report it, so there is nothing to drop and nothing to
-                    // check.
+                    // Neither covers a client that stops waiting without
+                    // closing, nor — while the wait is on — a close on a
+                    // message whose body was never read: no layer is told, so
+                    // there is nothing to drop and nothing to check.
                     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
                         return Err(ScriptResponse::client_closed());
                     }

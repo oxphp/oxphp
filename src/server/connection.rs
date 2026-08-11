@@ -104,9 +104,24 @@ impl Drop for ClientAbortGuard {
 /// `closed_rx` is signalled by the owning connection when hyper's
 /// `serve_connection` returns. Racing the dispatch against it lets us
 /// cancel in-flight workers on HTTP/2 stream resets and HTTP/1.1
-/// between-request closes. HTTP/1.1 mid-handler closes for buffered
-/// responses remain undetectable here — hyper does not poll the socket
-/// while a service handler is running.
+/// between-request closes.
+///
+/// A close that arrives while this handler is still running is not one of
+/// those, and needs nothing from this select: hyper keeps reading the socket
+/// for exactly that case, so an EOF mid-message ends the connection and drops
+/// this future with it, which fires the guard below.
+///
+/// That rests on hyper having nothing pending on the request body — it reads
+/// the socket only once the body is done with. `dispatch_request` collects the
+/// bodies it expects before dispatching, so by then there is nothing left to
+/// read; a message carrying a body this server never reads (a `GET` with one,
+/// or a method it does not buffer) parks hyper on the body channel instead,
+/// and the close is not seen until the handler returns. Nor is it seen while a
+/// pipelined next request sits unread in hyper's buffer.
+///
+/// A client that stops waiting without closing — a dropped route, or a caller
+/// that abandons the response and holds the socket open — sends nothing to
+/// detect on any protocol, and its request runs to completion for nobody.
 pub async fn handle_request(
     req: Request<Incoming>,
     server: &Server,
