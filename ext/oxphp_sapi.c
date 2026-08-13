@@ -3293,6 +3293,30 @@ static uint64_t oxphp_async_sched_drain_output(void) {
     return 0;
 }
 
+/* Whether an entry's handler reads the startup stage as "this is the floor"
+ * instead of "refresh whatever you cached".
+ *
+ * phar.readonly and phar.require_hash are the whole list, in 8.4 and in 8.5.
+ * Their handler keeps the value it is given at startup as the floor and from
+ * then on refuses every change that would relax the directive below it — which
+ * is how a php.ini that forbids writing phars stays in force whatever a script
+ * asks for. A bootstrap value announced at that stage would become the floor,
+ * so an application that tightens the directive at boot over a php.ini which
+ * allows writing would leave every request on that worker unable to relax it
+ * again, and silently: ini_set() returns false and nothing is logged. Under
+ * every other SAPI the floor is the php.ini value and a bootstrap change is an
+ * ordinary runtime one.
+ *
+ * Skipping the announcement costs these two nothing: both are booleans whose
+ * handler copies the parsed value out and keeps no pointer into the string it
+ * was handed, so the copy that replaces it needs no handler run at all.
+ *
+ * SYNC: php-src/ext/phar/phar.c phar_ini_modify_handler() */
+static bool oxphp_ini_handler_reads_startup_as_floor(const zend_ini_entry *entry) {
+    return zend_string_equals_literal(entry->name, "phar.readonly")
+        || zend_string_equals_literal(entry->name, "phar.require_hash");
+}
+
 /* Move an entry's value off the request heap, so that it can be the value the
  * entry keeps for the life of the worker.
  *
@@ -3313,7 +3337,9 @@ static uint64_t oxphp_async_sched_drain_output(void) {
  * stage, which is the stage the engine itself uses when it re-runs handlers to
  * refresh a new thread's cached values (zend_ini_refresh_caches): it asks each
  * handler for its cached state and nothing else, where the runtime stage would
- * also re-arm the execution timer around a worker that has no request yet. */
+ * also re-arm the execution timer around a worker that has no request yet. The
+ * handlers that read that stage as something other than a refresh are the
+ * exception, and are left out of it. */
 static void oxphp_ini_persist_value(zend_ini_entry *entry) {
     zend_string *value = entry->value;
 
@@ -3323,7 +3349,7 @@ static void oxphp_ini_persist_value(zend_ini_entry *entry) {
 
     zend_string *persistent = zend_string_init(ZSTR_VAL(value), ZSTR_LEN(value), 1);
 
-    if (entry->on_modify) {
+    if (entry->on_modify && !oxphp_ini_handler_reads_startup_as_floor(entry)) {
         zend_try {
             entry->on_modify(entry, persistent, entry->mh_arg1, entry->mh_arg2,
                              entry->mh_arg3, ZEND_INI_STAGE_STARTUP);
@@ -3332,6 +3358,37 @@ static void oxphp_ini_persist_value(zend_ini_entry *entry) {
 
     entry->value = persistent;
     zend_string_release(value);
+}
+
+/* Let an entry keep the value it is holding: drop what it would otherwise be
+ * restored to, stop counting it as modified, and give the value itself a life
+ * longer than the request that installed it.
+ *
+ * The release is conditional because of one of the three ways an entry enters
+ * the modified set. zend_alter_ini_entry_ex(), which ini_set() and
+ * set_time_limit() go through, and error_reporting(), which writes the entry
+ * itself, both move the live value into the saved slot and install a new one —
+ * so the saved value holds the reference that was the live value's, and
+ * dropping the slot means releasing it. `@` (ZEND_BEGIN_SILENCE) does neither:
+ * it marks the entry modified and points the saved slot at the live value
+ * without a new reference and without a new value, so there the two are the
+ * same string and releasing it would free what the entry is still using. Hence
+ * the comparison. The engine's own restore guards the mirror of this — it
+ * releases the live value unless it is the saved one, and moves the saved one
+ * back.
+ *
+ * Leaves the entry in the modified set: whether the set is emptied wholesale or
+ * this one entry is taken out of it belongs to the caller.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_restore_ini_entry_cb() */
+static void oxphp_ini_adopt_value(zend_ini_entry *entry) {
+    if (entry->orig_value && entry->orig_value != entry->value) {
+        zend_string_release(entry->orig_value);
+    }
+    entry->orig_value = NULL;
+    entry->orig_modifiable = 0;
+    entry->modified = 0;
+    oxphp_ini_persist_value(entry);
 }
 
 /* Make whatever the worker's boot script configured the baseline that requests
@@ -3350,20 +3407,7 @@ static void oxphp_ini_persist_value(zend_ini_entry *entry) {
  * there the unwind between requests restores exactly what a request changed and
  * nothing the boot script did.
  *
- * The release is conditional because of one of the three ways an entry enters
- * that set. zend_alter_ini_entry_ex(), which ini_set() and set_time_limit() go
- * through, and error_reporting(), which writes the entry itself, both move the
- * live value into the saved slot and install a new one — so the saved value
- * holds the reference that was the live value's, and dropping the slot means
- * releasing it. `@` (ZEND_BEGIN_SILENCE) does neither: it marks the entry
- * modified and points the saved slot at the live value without a new reference
- * and without a new value, so there the two are the same string and releasing it
- * would free what the entry is still using. Hence the comparison. The engine's
- * own restore guards the mirror of this — it releases the live value unless it
- * is the saved one, and moves the saved one back.
- *
- * SYNC: php-src/Zend/zend_ini.c zend_ini_deactivate() /
- *       zend_restore_ini_entry_cb() */
+ * SYNC: php-src/Zend/zend_ini.c zend_ini_deactivate() */
 static void oxphp_ini_take_baseline(void) {
     if (!EG(modified_ini_directives)) {
         return;
@@ -3371,16 +3415,9 @@ static void oxphp_ini_take_baseline(void) {
 
     zend_ini_entry *entry;
     ZEND_HASH_MAP_FOREACH_PTR(EG(modified_ini_directives), entry) {
-        if (!entry->modified) {
-            continue;
+        if (entry->modified) {
+            oxphp_ini_adopt_value(entry);
         }
-        if (entry->orig_value && entry->orig_value != entry->value) {
-            zend_string_release(entry->orig_value);
-        }
-        entry->orig_value = NULL;
-        entry->orig_modifiable = 0;
-        entry->modified = 0;
-        oxphp_ini_persist_value(entry);
     } ZEND_HASH_FOREACH_END();
 
     /* Emptied the way the engine empties it — the set owns neither its keys nor
@@ -3389,6 +3426,74 @@ static void oxphp_ini_take_baseline(void) {
     zend_hash_destroy(EG(modified_ini_directives));
     FREE_HASHTABLE(EG(modified_ini_directives));
     EG(modified_ini_directives) = NULL;
+}
+
+/* Keep opcache.enable where the request left it, because putting it back would
+ * make it a lie.
+ *
+ * Turning OPcache off is the only thing a request can do to it: the handler
+ * refuses to switch it on again mid-request, and when it switches it off it
+ * clears both the directive's flag and the accelerator's own live one. Every
+ * other SAPI raises the live one back in OPcache's request startup — which a
+ * worker runs once, when it boots. So on a worker the accelerator stays down
+ * for the rest of that worker's life whatever happens to the directive
+ * afterwards, and restoring the directive alone would leave ini_get() and
+ * opcache_get_status() reporting a cache that is enabled while every file is
+ * being compiled from source. An application that asks in order to decide
+ * something would be told the opposite of what is happening. Left where the
+ * request put it, the two agree again.
+ *
+ * Re-running the accelerator's request startup instead was considered and left
+ * alone: it also re-enters the preload and JIT activation, drops the cwd string
+ * a previous request left behind, and warns about a usage count no request in
+ * this model ever released — a lot of machinery to revive a cache that the one
+ * request which disabled it did not want.
+ *
+ * The value is read rather than assumed, because being in the set does not mean
+ * the alteration took. An entry is added to it and marked modified before its
+ * handler is called, and the handler refusing does not undo either — so a
+ * request that tried to switch OPcache back on, which is exactly what the
+ * handler refuses, leaves the entry in the set holding the value it already
+ * had. Only a value that reads as off is a switch-off, and only that one is
+ * kept; the refused attempt is left for the ordinary unwind, where restoring a
+ * value to itself is what it is.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_alter_ini_entry_ex() /
+ *       php-src/ext/opcache/zend_accelerator_module.c OnEnable() /
+ *       php-src/ext/opcache/ZendAccelerator.c ZEND_RINIT_FUNCTION(zend_accelerator) */
+static void oxphp_ini_keep_opcache_disabled(void) {
+    if (!EG(modified_ini_directives)) {
+        return;
+    }
+
+    zend_ini_entry *entry = zend_hash_str_find_ptr(
+        EG(modified_ini_directives), "opcache.enable", sizeof("opcache.enable") - 1);
+    if (!entry || !entry->modified || !entry->value
+        || zend_ini_parse_bool(entry->value)) {
+        return;
+    }
+
+    /* Once per worker: the second request to turn OPcache off changes nothing,
+     * and an application that does it on every request would otherwise fill the
+     * log with it. Worth saying at all because the cost is invisible from
+     * outside — one worker in the pool answering slower than its neighbours,
+     * with nothing anywhere to say why. */
+    static __thread bool said = false;
+    if (!said) {
+        said = true;
+        php_log_err("oxphp: opcache.enable was turned off by a request; this worker "
+                    "compiles every file from source for the rest of its life, because "
+                    "only OPcache's own request startup switches it back on and a "
+                    "worker runs that once, at boot");
+    }
+
+    oxphp_ini_adopt_value(entry);
+
+    /* Out of the set, so the unwind that follows leaves it alone. Keyed by the
+     * entry's own name, which is the key it was added under. The set owns
+     * neither its keys nor its values and carries no destructor, so this drops
+     * the bucket and nothing else. */
+    zend_hash_del(EG(modified_ini_directives), entry->name);
 }
 
 /**
@@ -3440,9 +3545,13 @@ static void oxphp_soft_reset(void) {
      * cleaned up by the steps below, which is the same reason the session write
      * above goes first.
      *
+     * One directive is taken out of the set first rather than restored by the
+     * unwind, for a reason given where that is done.
+     *
      * Under zend_try because the hash walk itself runs on the worker's own
      * stack, where an escaping bailout has nothing to land on — the engine
      * wraps its own call for the same reason. */
+    oxphp_ini_keep_opcache_disabled();
     zend_try {
         zend_ini_deactivate();
     } zend_end_try();

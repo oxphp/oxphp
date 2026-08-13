@@ -28,7 +28,14 @@ services:
       PHP_WORKERS: "1"
       ASYNC_WORKERS: 1
       RUNTIME_HOOKS: "1"
+      # Read by the worker entry script and applied to phar.readonly at boot,
+      # over the 0 that hooks.ini puts in php.ini. Through the environment
+      # rather than as a literal in the script: the literal would be interned
+      # and would never reach the code path worker/test_phar_readonly_floor
+      # exercises.
+      OXPHP_TEST_PHAR_READONLY: "1"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
       - ./fixtures/worker:/var/www/html/worker
+      - ./hooks.ini:/usr/local/etc/php/conf.d/zz-hooks.ini:ro
