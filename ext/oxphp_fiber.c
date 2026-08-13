@@ -1222,10 +1222,13 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
             if (EG(exception)) {
                 if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
-                    fiber->handler_failed = true;
+                    fiber->handler_threw = true;
                     /* Normal (non-bailout) unwind of an uncaught handler
                      * exception — the worker's only path to observe it, since
                      * the fiber swallows it before zend_exception_error runs.
+                     * Threw rather than failed: the engine is intact, and the
+                     * consecutive-error breaker must not read an application
+                     * that answers 500 as a worker that has to be replaced.
                      * Capture the live object for the root span before release.
                      * (The zend_catch arm below is the zend_bailout/fatal path:
                      * fatals are already recorded by oxphp_error_cb, and calling
@@ -1238,6 +1241,24 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
         } zend_catch {
             fiber->handler_failed = true;
+            /* max_execution_time does not come through the interrupt handler
+             * that marks every other cancellation. The engine checks
+             * EG(timed_out) itself, ahead of zend_interrupt_function, and calls
+             * zend_timeout() — which reaches the same bailout as a fatal and is
+             * indistinguishable from one here. What tells them apart is the bit
+             * zend_timeout() sets on the way, through the on_timeout hook the
+             * engine calls first: the request that ran out of time is the one
+             * carrying PHP_CONNECTION_TIMEOUT. Both dispatch paths clear
+             * connection_status when a request starts and a suspended fiber
+             * carries its own, so the bit belongs to this request.
+             *
+             * Marked here rather than left to count, because a deadline is the
+             * server ending the request — and it is the shape a slow dependency
+             * gives every request it touches, which is precisely what must not
+             * rotate the pool. */
+            if (PG(connection_status) & PHP_CONNECTION_TIMEOUT) {
+                fiber->cancelled = true;
+            }
             /* A fatal inside the input build jumps over the line that lifts the
              * block, and the counter is the worker's rather than the request's —
              * left up, nothing on this worker would ever park again. */
@@ -1366,6 +1387,8 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * request's own prep has already run (oxphp_scheduler_start_fiber). */
         fiber->completed = false;
         fiber->handler_failed = false;
+        fiber->handler_threw = false;
+        fiber->cancelled = false;
     }
 }
 
@@ -1418,6 +1441,8 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->fcc = fcc;
     oxphp_fiber_clear_suspend(fiber);
     fiber->handler_failed = false;
+    fiber->handler_threw = false;
+    fiber->cancelled = false;
     fiber->completed = false;
     fiber->consecutive_errors = 0;
     fiber->drain_kill = false;
@@ -2173,16 +2198,46 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * real runtime guard instead. */
     ZEND_ASSERT(fiber->completed);
 
-    /* Track per-fiber handler failure in scheduler-level counter. A drain
-     * kill is an administrative unwind, not a handler defect: it must neither
-     * trip the consecutive-error breaker (3+ drain kills would error-exit the
-     * worker mid-drain, destroying still-live ordinary requests) nor reset it
-     * (it says nothing about handler health). Set by the sweep below for
-     * suspended fibers and by the interrupt handler for running ones. */
-    if (fiber->drain_kill) {
+    /* Track per-fiber handler failure in scheduler-level counter. Three
+     * outcomes are neutral for it — neither incrementing nor resetting, because
+     * they say nothing either way about whether this worker can still serve:
+     *
+     * A drain kill is an administrative unwind, not a handler defect (3+ of
+     * them would error-exit the worker mid-drain, destroying still-live
+     * ordinary requests). Set by the sweep below for suspended fibers and by
+     * the interrupt handler for running ones.
+     *
+     * Any other cancellation is the same thing outside a drain: the server
+     * ended the request — the client hung up, the deadline passed, a supervisor
+     * gave up. A dependency gone slow turns every request into one of those,
+     * and rotating the pool through it helps nobody.
+     *
+     * An uncaught exception is an application outcome: it unwound cleanly, the
+     * request has its 500, and the engine is where it was. Counting it would
+     * make a dependency failing on every request rotate the pool three requests
+     * at a time, and would hand any client a way to do the same by posting a
+     * body over max_input_vars to an application whose error handler throws —
+     * that exception reaches the same arm, ahead of the handler call.
+     *
+     * What is left is what the breaker is for: a request that came apart
+     * (bailout, OOM, a fiber that would not start) leaves engine state the next
+     * request on this worker inherits. */
+    if (fiber->drain_kill || fiber->cancelled) {
         /* neutral */
     } else if (fiber->handler_failed) {
+        /* Ahead of the throw: the two are not exclusive. An uncaught exception
+         * raises handler_threw and then keeps running inside the same arm —
+         * capturing the exception for the root span formats its trace in
+         * userland, which can exhaust memory_limit and re-raise, arriving in
+         * the zend_catch below as a bailout on a request that had already
+         * thrown. That is a request that came apart, and reading the throw
+         * first would file it as neutral for as long as the application kept
+         * doing it. drain_kill stays ahead of both: the drain unwind IS a
+         * bailout, so it reaches here with handler_failed up, and it has to
+         * keep winning — and so does a cancellation, for the same reason. */
         sched->consecutive_errors++;
+    } else if (fiber->handler_threw) {
+        /* neutral */
     } else {
         sched->consecutive_errors = 0;
     }
@@ -3383,6 +3438,8 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     oxphp_fiber_clear_suspend(fiber);
     fiber->completed = false;
     fiber->handler_failed = false;
+    fiber->handler_threw = false;
+    fiber->cancelled = false;
     fiber->consecutive_errors = 0;
     fiber->task_args = NULL;
     fiber->task_argc = 0;
