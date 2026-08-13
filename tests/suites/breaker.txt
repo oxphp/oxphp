@@ -52,7 +52,75 @@ breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_neutral_does_not_clear
 
 # And the same conclusion through the other dispatch site: three fatals accepted
-# by the event loop's tick while this request is parked in it. Last in the suite
-# because the request that sets it up is killed by the retire it provokes.
+# by the event loop's tick while this request is parked in it. Anything appended
+# after it starts from the probe below, which settles the state: the request that
+# sets this one up is killed by the retire it provokes, so nothing may be placed
+# between the two lines.
 breaker/test_breaker_eventloop_path | GET | | 503 |
 breaker/test_breaker_eventloop_retired
+
+# A fatal does not have to come from the handler. The engine runs registered
+# shutdown functions under a zend_try of its own, so one that fatals there is
+# swallowed a level below the arm the worker wraps the handler in, and the
+# worker is handed an ordinary return with the wreckage still in place. Three of
+# those retire the worker too.
+breaker/test_breaker_shutdown_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_retires
+
+# And it must not clear somebody else's run. A request read as a success resets
+# the count, so an application alternating between a fatal in the handler and a
+# fatal in its shutdown function would hold the counter at one forever. Fatal,
+# shutdown fatal, fatal: the worker goes.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_does_not_clear
+
+# The second way a shutdown function comes apart: not the call but the free.
+# Destroying the registry runs the destructors of what the entries held, and
+# that bailout is swallowed by a different zend_catch again.
+breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_dtor_retires
+
+# And the boundary of all three: a deadline that expires in the shutdown window
+# is the server ending the request, not the request failing, and stays neutral —
+# though it reaches the same swallowed bailout as the fatals above and is the one
+# cancellation the interrupt handler never sees. Three of them, which is the
+# number that would retire the worker if they counted.
+breaker/test_breaker_shutdown_timeout | GET | | 504 |
+breaker/test_breaker_shutdown_timeout | GET | | 504 |
+breaker/test_breaker_shutdown_timeout | GET | | 504 |
+breaker/test_breaker_shutdown_timeout_neutral
+
+# And the boundary of that boundary. The bit saying a deadline expired is raised
+# once and stands for the rest of the request, so a handler fatal followed by a
+# deadline in the shutdown window would read as a cancellation if the bit were
+# all that was asked. It must still count — otherwise one slow shutdown function
+# keeps a handler that fatals on every request in the pool forever.
+breaker/test_breaker_fatal_then_shutdown_timeout | GET | | 500 |
+breaker/test_breaker_fatal_then_shutdown_timeout | GET | | 500 |
+breaker/test_breaker_fatal_then_shutdown_timeout | GET | | 500 |
+breaker/test_breaker_fatal_then_timeout_still_counts
+
+# An exception from a shutdown function is the other thing that can end one, and
+# it is not a fatal: the loop reports it with a call that asks for no bailout, so
+# no flag is raised by any of the machinery above. It is neutral, like every
+# other uncaught exception — three do not retire the worker.
+breaker/test_breaker_shutdown_throw | GET | | 500 |
+breaker/test_breaker_shutdown_throw | GET | | 500 |
+breaker/test_breaker_shutdown_throw | GET | | 500 |
+breaker/test_breaker_shutdown_throws_do_not_retire
+
+# And neutral in the other direction too, which is the half a request nobody
+# marks silently fails: one of them between fatals must not clear their run, or
+# a single throwing shutdown function keeps a worker that fatals on every other
+# request alive forever. Fatal, shutdown throw, fatal, fatal.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_throw | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_shutdown_throw_does_not_clear

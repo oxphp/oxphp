@@ -1293,13 +1293,62 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * they were holding — a __destruct with both flags still up buffers no
          * possible root, and a generator closed there gives up its frame the
          * short way and loses the rest. That free swallows a bailout of its own
-         * too, so the flag is asked after it as well. */
+         * too, so the flag is asked after it as well.
+         *
+         * And the request is failed on the same witness, for the same reason the
+         * repair is done at all: a request after which frames had to be released
+         * by hand is a request that came apart, which is the whole of what the
+         * consecutive-error breaker counts. Without this the two sites are worse
+         * than blind to it — a request reaching finalize with no flag raised
+         * takes the branch that reads a healthy worker and *clears* the run, so
+         * an application fataling in its shutdown function on every request
+         * looked like proof the worker was fine, and alternating between a fatal
+         * in the handler and one here held the count at one for the life of the
+         * process.
+         *
+         * The deadline is asked about again here, and it has to be. Every other
+         * cancellation is marked before it unwinds — the interrupt handler sets
+         * the flag and then ends the request — so finalize reads it ahead of the
+         * failure whatever swallowed the bailout on the way. max_execution_time
+         * is the one that is not: the engine takes it past the interrupt handler
+         * entirely, and the arm above is what recognises it, by the same bit, for
+         * the deadlines that reach the arm. One that expires in here reaches no
+         * arm at all — the shutdown window is inside the engine's own guard — so
+         * without this it would arrive at finalize as an unqualified failure. It
+         * is the same server-ended request as any other deadline, and it is the
+         * shape a slow dependency gives every request of an application that
+         * defers work to the end of one; counting it would rotate the pool three
+         * requests at a time for something no worker of that pool can fix.
+         *
+         * Only for a request that had not already come apart, though, which is
+         * what `came_apart` carries down. The bit is not the mirror of the flag
+         * beside it: every recovery lowers CG(unclean_shutdown), so that one
+         * witnesses this window and nothing else, while the bit is raised once
+         * and stands for the rest of the request. Read on its own it answers "did
+         * this request's deadline expire at some point", and a request whose
+         * handler fataled and whose shutdown function then outlived the remaining
+         * deadline would answer yes — and be filed as a cancellation, wiping a
+         * failure that had already been established correctly. The engine state
+         * that failure left is not put back by whatever happened afterwards. It
+         * would also be the application's own lever: register one slow shutdown
+         * function and a handler that fatals on every request keeps its worker
+         * forever, which is the very case the breaker exists for. */
+        bool came_apart = fiber->handler_failed;
         php_call_shutdown_functions();
         if (CG(unclean_shutdown)) {
+            if (!came_apart && (PG(connection_status) & PHP_CONNECTION_TIMEOUT)) {
+                fiber->cancelled = true;
+            }
+            fiber->handler_failed = true;
             oxphp_recover_from_bailout(&mark);
         }
+        came_apart = fiber->handler_failed;
         php_free_shutdown_functions();
         if (CG(unclean_shutdown)) {
+            if (!came_apart && (PG(connection_status) & PHP_CONNECTION_TIMEOUT)) {
+                fiber->cancelled = true;
+            }
+            fiber->handler_failed = true;
             oxphp_recover_from_bailout(&mark);
         }
 
@@ -1323,8 +1372,22 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * installed it, so calling it here would run one request's handler for
          * another request's exception. zend_exception_error consumes what it
          * reports and asks for no bailout, but it does call __toString on the
-         * exception, which is user code and can fatal — hence the arm. */
+         * exception, which is user code and can fatal — hence the arm.
+         *
+         * Marked as a throw for the same reason the handler's own is, and it has
+         * to be marked here rather than left to the flags above: the report goes
+         * out with E_DONT_BAIL, so nothing raises CG(unclean_shutdown) and this
+         * request would otherwise reach the breaker with nothing said about it at
+         * all — which is the branch that reads a healthy worker and clears the
+         * run. Neutral is the documented answer for an uncaught exception, and
+         * neutral has two halves: three of these must not retire a worker, and
+         * one between two fatals must not wipe their count either. Unwind and
+         * graceful exit are excluded, as they are in the handler: exit() from a
+         * shutdown function lands here too and is a request that finished. */
         if (EG(exception)) {
+            if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
+                fiber->handler_threw = true;
+            }
             zend_try {
                 zend_exception_error(EG(exception), E_ERROR);
             } zend_catch {
