@@ -48,6 +48,15 @@ worker/test_env_superglobal_persists >> ?mode=expect
 worker/test_ini_reset_between_requests >> ?phase=set
 worker/test_ini_reset_between_requests >> ?phase=check
 
+# The directive that same rebasing must not re-announce: phar.readonly takes
+# whatever it is told at the startup stage as the floor for every later change.
+# Listed twice on purpose — the first run proves a request can still relax it
+# below what the bootstrap set, the second proves the first one's change was
+# rolled back, since its entry assertion is the bootstrap value again. Needs
+# tests/hooks.ini (phar.readonly = 0), which this profile mounts.
+worker/test_phar_readonly_floor
+worker/test_phar_readonly_floor
+
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
 
@@ -118,3 +127,14 @@ hooks/test_parse_diag_tick_path
 # And the worst thing that parse can do to the worker: an error handler that
 # throws rather than returns. One request must end, and only that one.
 hooks/test_parse_throw_ends_only_its_request >> ?probe=outer
+
+# Last in this profile, and it has to stay last. The first of the two lines
+# turns OPcache off, and a worker cannot turn it back on — only OPcache's own
+# per-request startup does that, and a worker runs it once. So from here on this
+# worker compiles every file from source, and anything appended below that
+# depends on OPcache being live (worker/test_request_autoglobal_refresh above is
+# one) would silently stop testing what it was written for. PHP_WORKERS=1 makes
+# both lines land on the worker the first one changed, which is also what makes
+# the second line's reading meaningful.
+worker/test_opcache_enable_stays_off >> ?phase=off
+worker/test_opcache_enable_stays_off >> ?phase=check

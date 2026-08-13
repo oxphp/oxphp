@@ -42,7 +42,33 @@ $iniBoot = [
     'max_execution_time' => ini_get('max_execution_time'),
 ];
 
-oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo, $iniBoot) {
+// A directive whose handler treats the startup stage differently from every
+// other one: it keeps the value it is given there as the floor and afterwards
+// refuses any change that relaxes it. Read first, then tightened, so that
+// worker/test_phar_readonly_floor can tell its own two failure modes apart —
+// a floor of 1 that came from php.ini is the profile missing its ini mount,
+// while a floor of 1 under php.ini's 0 is the bug the test is there for.
+//
+// Tightening at bootstrap and relaxing around the one path that writes a phar
+// is what an application with such a path does. Only the profile that sets the
+// environment variable does it, so no other worker profile is affected.
+//
+// The value comes from the environment rather than from a literal for the same
+// reason the user_agent probe above is computed: a literal is interned and
+// lives outside the request heap, so the copy that carries bootstrap values
+// past their request would skip it and the handler would never run again — the
+// exact step this directive must not take.
+$pharReadonlyPhpIni = ini_get('phar.readonly');
+// An empty variable counts as absent rather than as a value: getenv() answers
+// '' for a variable that is set and empty, and '' parses as 0 — so taking it
+// would have the bootstrap relax the directive instead of tightening it, and
+// the test would then fail saying the bootstrap did not run.
+$pharReadonlyBoot = getenv('OXPHP_TEST_PHAR_READONLY');
+if ($pharReadonlyBoot !== false && $pharReadonlyBoot !== '') {
+    ini_set('phar.readonly', $pharReadonlyBoot);
+}
+
+oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo, $iniBoot, $pharReadonlyPhpIni) {
     $requestCount++;
 
     // If the request targets a test PHP file, include it directly inside
