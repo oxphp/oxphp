@@ -39,6 +39,15 @@ worker/test_env_superglobal_persists >> ?mode=seed
 worker/test_env_superglobal_persists >> ?mode=touch
 worker/test_env_superglobal_persists >> ?mode=expect
 
+# The same split for ini directives: what a request changes must end with that
+# request, what the worker's boot script set must outlive every request. The
+# first line changes four directives, the second demands the boot values back —
+# so both are needed, and adjacent, and on one worker (PHP_WORKERS=1 here). The
+# second line alone proves nothing: with nothing set before it, every value it
+# reads is already the one it wants.
+worker/test_ini_reset_between_requests >> ?phase=set
+worker/test_ini_reset_between_requests >> ?phase=check
+
 hooks/test_sleep_task_multiplex
 hooks/test_sleep_request_multiplex
 

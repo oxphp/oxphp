@@ -1708,13 +1708,18 @@ static int64_t oxphp_claim_budget_ns(void)
          * of a socket *operation*, and waiting for a connection is not one — while
          * ini_set('default_socket_timeout', …) around a single fsockopen() or
          * file_get_contents() is ordinary library practice, and libraries routinely
-         * do not put it back. A worker serves every request inside one
-         * php_request_startup, so nothing deactivates ini values between them: read
-         * as the current value, one library's unrestored setting would shorten this
-         * bound for every later request on that worker, in the direction of giving
-         * up early. zend_ini_long()'s orig flag answers with the value the process
-         * started with once an entry has been modified, which in worker mode it
-         * stays. */
+         * do not put it back. Read as the current value, one library's unrestored
+         * setting would shorten this bound for the request that made it, in the
+         * direction of giving up early. zend_ini_long()'s orig flag answers with
+         * the value the entry held before the request altered it.
+         *
+         * In worker mode that answer is the worker's own baseline rather than the
+         * process default: what the boot script configured is the value entries
+         * start from, and a directive the boot script set reports unmodified until
+         * some request alters it. So a deployment that sets this ini in its
+         * bootstrap gets the bound it asked for, and a library that sets it inside
+         * a request does not move it — which is what the rollback between requests
+         * already guarantees, with this reading holding within a request too. */
         zend_ini_long("default_socket_timeout", sizeof("default_socket_timeout") - 1, 1),
     };
 
@@ -3288,6 +3293,104 @@ static uint64_t oxphp_async_sched_drain_output(void) {
     return 0;
 }
 
+/* Move an entry's value off the request heap, so that it can be the value the
+ * entry keeps for the life of the worker.
+ *
+ * The engine allocates an altered ini value persistently or not by whether the
+ * alteration happens inside a request (zend_alter_ini_entry_chars: persistent =
+ * !IN_REQUEST), because a request-stage value is expected to be given back at
+ * request shutdown and never to outlive the heap it came from. A boot script's
+ * ini_set() is a request-stage alteration by that rule — the worker is inside its
+ * one php_request_startup — but the baseline it becomes has to survive the
+ * request heap: the worker's own shutdown frees that heap, and the entries are
+ * read once more after it, when the thread's ini table is destroyed at process
+ * exit. Left as they were, that read is of freed memory.
+ *
+ * The handler is re-run against the copy before the original is released,
+ * because the string handlers (OnUpdateString and its family) keep the buffer
+ * pointer itself in a global — released first, that global would name freed
+ * memory, and the value the copy carries is identical either way. At the startup
+ * stage, which is the stage the engine itself uses when it re-runs handlers to
+ * refresh a new thread's cached values (zend_ini_refresh_caches): it asks each
+ * handler for its cached state and nothing else, where the runtime stage would
+ * also re-arm the execution timer around a worker that has no request yet. */
+static void oxphp_ini_persist_value(zend_ini_entry *entry) {
+    zend_string *value = entry->value;
+
+    if (!value || (GC_FLAGS(value) & (IS_STR_PERSISTENT | IS_STR_PERMANENT))) {
+        return; /* already outlives the request that installed it */
+    }
+
+    zend_string *persistent = zend_string_init(ZSTR_VAL(value), ZSTR_LEN(value), 1);
+
+    if (entry->on_modify) {
+        zend_try {
+            entry->on_modify(entry, persistent, entry->mh_arg1, entry->mh_arg2,
+                             entry->mh_arg3, ZEND_INI_STAGE_STARTUP);
+        } zend_end_try();
+    }
+
+    entry->value = persistent;
+    zend_string_release(value);
+}
+
+/* Make whatever the worker's boot script configured the baseline that requests
+ * are rolled back to.
+ *
+ * The engine keeps every ini directive that has been altered since startup in
+ * one thread-wide set, each entry holding the value it had before the first
+ * alteration, and unwinds that set at request shutdown. A worker has one request
+ * startup for its whole life, so the boot script's ini_set()s sit in that set
+ * next to the ones each request makes, and an unwind between requests would
+ * discard the application's own configuration along with the request's.
+ *
+ * Called once, after boot has returned and before the first request: every entry
+ * in the set gives up its pre-boot value and stops counting as modified, which
+ * leaves the boot values in place as the values the entries started with. From
+ * there the unwind between requests restores exactly what a request changed and
+ * nothing the boot script did.
+ *
+ * The release is conditional because of one of the three ways an entry enters
+ * that set. zend_alter_ini_entry_ex(), which ini_set() and set_time_limit() go
+ * through, and error_reporting(), which writes the entry itself, both move the
+ * live value into the saved slot and install a new one — so the saved value
+ * holds the reference that was the live value's, and dropping the slot means
+ * releasing it. `@` (ZEND_BEGIN_SILENCE) does neither: it marks the entry
+ * modified and points the saved slot at the live value without a new reference
+ * and without a new value, so there the two are the same string and releasing it
+ * would free what the entry is still using. Hence the comparison. The engine's
+ * own restore guards the mirror of this — it releases the live value unless it
+ * is the saved one, and moves the saved one back.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_ini_deactivate() /
+ *       zend_restore_ini_entry_cb() */
+static void oxphp_ini_take_baseline(void) {
+    if (!EG(modified_ini_directives)) {
+        return;
+    }
+
+    zend_ini_entry *entry;
+    ZEND_HASH_MAP_FOREACH_PTR(EG(modified_ini_directives), entry) {
+        if (!entry->modified) {
+            continue;
+        }
+        if (entry->orig_value && entry->orig_value != entry->value) {
+            zend_string_release(entry->orig_value);
+        }
+        entry->orig_value = NULL;
+        entry->orig_modifiable = 0;
+        entry->modified = 0;
+        oxphp_ini_persist_value(entry);
+    } ZEND_HASH_FOREACH_END();
+
+    /* Emptied the way the engine empties it — the set owns neither its keys nor
+     * its values, and everything that adds to it allocates it again when it
+     * finds it gone. */
+    zend_hash_destroy(EG(modified_ini_directives));
+    FREE_HASHTABLE(EG(modified_ini_directives));
+    EG(modified_ini_directives) = NULL;
+}
+
 /**
  * Reset per-request PHP state without destroying the PHP heap.
  * Called between worker mode requests to prevent response bleed.
@@ -3312,6 +3415,53 @@ static void oxphp_soft_reset(void) {
         zend_string_release(PS(mod_user_class_name));
         PS(mod_user_class_name) = NULL;
     }
+
+    /* Undo the ini directives the last request changed.
+     * ini_set(), set_time_limit(), error_reporting() and `@` all write into one
+     * thread-wide set that the engine unwinds at request shutdown — which a
+     * worker runs once per worker rather than once per request, so without this
+     * a request that turned display_errors on turned it on for every later
+     * request the worker served. What the boot script set is not in that set any
+     * more; oxphp_ini_take_baseline() took it out before the first request.
+     *
+     * Here, next to the session write, rather than further down: both run PHP.
+     * Restoring a directive calls its on_modify handler, and a handler is
+     * allowed to diagnose — session.sid_length and session.use_trans_sid
+     * deprecate any value but their own, and every quantity directive warns on
+     * a malformed one — which reaches an error handler the application
+     * installed at bootstrap and which, in worker mode, is still installed. Run
+     * below the three cleanups that follow, anything such a handler left behind
+     * would be the next request's problem: a throw would sit in EG(exception)
+     * where the fast path never clears it again, and the fiber it is handed to
+     * returns without entering the request at all — a request answered with
+     * nothing, no log line, no status. A fatal would leave CG(unclean_shutdown)
+     * up, and a mere warning would leave PG(last_error_*) for the next
+     * request's error_get_last() to report as its own. Run here, all three are
+     * cleaned up by the steps below, which is the same reason the session write
+     * above goes first.
+     *
+     * Under zend_try because the hash walk itself runs on the worker's own
+     * stack, where an escaping bailout has nothing to land on — the engine
+     * wraps its own call for the same reason. */
+    zend_try {
+        zend_ini_deactivate();
+    } zend_end_try();
+
+    /* memory_limit is the one directive that restore cannot finish on its own.
+     * Lowering the allocator's ceiling is refused outright while more than the
+     * restored value is mapped, and at the deactivate stage that refusal is
+     * swallowed on purpose: the engine repeats the call itself once the
+     * request's memory is gone, at the end of php_request_shutdown, which a
+     * worker does not run per request. Repeated here for the same reason, so
+     * that the ceiling follows the value the request gave back as soon as the
+     * worker's own footprint leaves room for it. Idempotent, and O(1) in the
+     * ordinary case where the limit is already above what is mapped.
+     *
+     * The two can still disagree in between — ini_get() names the restored
+     * value while the allocator is still enforcing the raised one — for a
+     * worker left holding what the request that raised the limit allocated.
+     * SYNC: php-src/main/main.c php_request_shutdown() step 15 */
+    zend_set_memory_limit(PG(memory_limit));
 
     /* 1. Clear stale engine state from previous bailout or exit/die.
      * Without this, a leftover UnwindExit exception or unclean_shutdown flag
@@ -3378,7 +3528,12 @@ static void oxphp_soft_reset(void) {
     PG(last_error_lineno) = 0;
     PG(connection_status) = PHP_CONNECTION_NORMAL;
 
-    /* 5. Reset execution timer (max_execution_time) to prevent timeout across requests */
+    /* 5. Reset execution timer (max_execution_time) to prevent timeout across
+     * requests. After the ini rollback above, which restores the directive this
+     * arms the timer with: OnUpdateTimeout disarms at the deactivate stage and
+     * deliberately does not arm again, so that a restored value is not counting
+     * down while the process sits idle. This is the call that arms it, with the
+     * value the rollback put back. */
     zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
 
     /* Note: the request's own input — its SAPI post state, its body and its
@@ -3463,6 +3618,12 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                     "requests; values written there at bootstrap (.env loaders) are "
                     "replaced by the process environment on every request");
     }
+
+    /* Boot has returned — everything it configured through ini_set() becomes the
+     * baseline the per-request rollback in oxphp_soft_reset() restores to. Both
+     * entry points reach the loop through here, so this is the one place that is
+     * past the whole boot script and ahead of every request. */
+    oxphp_ini_take_baseline();
 
     /* Prevent handler closure from being GC'd during worker lifetime */
     zend_fcc_addref(fcc);
