@@ -3746,8 +3746,6 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
 
-    int consecutive_errors = 0;
-
     while (1) {
         if (sched.fiber_count == 0 && !oxphp_bridge_has_deferred_drains()) {
             /* ── No active fibers and no deferred promise drains: block-wait
@@ -3793,8 +3791,6 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                 break;
             }
 
-            /* Sync scheduler-level counters */
-            consecutive_errors = sched.consecutive_errors;
             /* sched.total_requests_done is now mirrored from bridge state
              * at request entry inside oxphp_scheduler_tick; sync ctx for
              * the exit-condition check below. */
@@ -3814,7 +3810,16 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
         }
 
         /* ── Check exit conditions ───────────────────────────────── */
-        if (consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
+
+        /* Read from the scheduler rather than from a copy of it. Both dispatch
+         * paths finalize through oxphp_scheduler_finalize_fiber(), which is
+         * where the count is kept, but only the event-loop branch below runs
+         * per-iteration bookkeeping — a worker serving requests that never
+         * suspend takes the branch above every time, so a local mirror of this
+         * would stay at its initial value for the life of the worker and the
+         * breaker would never fire for exactly the handler it exists to catch:
+         * one that fatals on every request without ever pausing. */
+        if (sched.consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
             ctx->exit_reason = 3;
             break;
         }
@@ -5514,6 +5519,33 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         if (reason == OXPHP_CANCEL_SHUTDOWN && oxphp_current_fiber != NULL) {
             oxphp_current_fiber->drain_kill = true;
         }
+    }
+
+    /* The request is ending because the server said so and not because the
+     * handler failed, and the unwind below is a bailout — which is what the
+     * consecutive-error breaker counts. Mark it so the breaker stays neutral,
+     * the way the drain already is above: a dependency gone slow makes every
+     * request run into max_execution_time, and a proxy with a short read timeout
+     * makes every request a client abort, and neither is a worker that needs
+     * replacing. Three in a row would otherwise retire it and re-run the whole
+     * bootstrap, over and over, for as long as the incident lasted.
+     *
+     * _STUCK is deliberately excluded and keeps counting. It means a supervisor
+     * gave up on this request, which is a statement about the worker rather than
+     * about the client or the dependency — the one cancellation that IS evidence
+     * the worker should go. Nothing raises it today (the supervisor only
+     * classifies and exports metrics), so this decides what happens when
+     * something does, rather than changing anything now.
+     *
+     * This is the only place a RUNNING request is unwound by a cancellation, and
+     * a worker serving requests one at a time has nothing but running requests.
+     * A suspended fiber is not reached from here at all: the drain sweeps mark
+     * the ones they force-resume themselves, and no other cancellation reaches a
+     * suspended fiber in the first place — client abort and the deadline are
+     * delivered by vm_interrupt, which needs an opcode boundary the fiber is not
+     * at. That gap is a known one and is not this flag's to close. */
+    if (oxphp_current_fiber != NULL && reason != OXPHP_CANCEL_STUCK) {
+        oxphp_current_fiber->cancelled = true;
     }
 
     zend_error_noreturn(E_ERROR,

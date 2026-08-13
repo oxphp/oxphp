@@ -175,13 +175,14 @@ WORKER_STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/stream-boom")"
 echo "worker /stream-boom HTTP $WORKER_STREAM_CODE"
 
-# Reset the worker's consecutive-error breaker before the remaining throwing
-# scenarios. An uncaught handler exception legitimately increments it, and /boom +
-# /stream-boom are two consecutive 500s — with /shadow and /a-fail a third and
-# fourth, WORKER_MAX_CONSECUTIVE_ERRORS (3) would trip and hand a later request a
-# "500 PHP Worker Error" from the restarting worker. A successful request resets
-# the counter (a test-ordering guard, not a behaviour change), keeping /shadow(1)
-# then /a-fail(2, parked) under the limit before /b-ok's success resets again.
+# An ordinary successful request between the throwing scenarios. It was put here
+# to keep the run of 500s from /boom, /stream-boom, /shadow and /a-fail under
+# WORKER_MAX_CONSECUTIVE_ERRORS, back when an uncaught handler exception counted
+# towards that breaker and a trip would have handed a later request a "500 PHP
+# Worker Error" from the restarting worker. Uncaught exceptions no longer count —
+# only a request that comes apart does — so nothing below depends on this any
+# more; it stays so the scenarios keep the request sequence they were written
+# against.
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "worker /ok HTTP %{http_code}\n" "http://$WRK:80/ok"
 

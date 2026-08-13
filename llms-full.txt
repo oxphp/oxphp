@@ -7538,7 +7538,18 @@ Workers are automatically recycled (restarted with a fresh PHP process) when any
 
 - **Max memory exceeded** — the worker's PHP memory usage exceeds `WORKER_MAX_MEMORY_MIB` MiB
 - **Application requested exit** — the handler called [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Useful for app-controlled hot reload, file-mtime-based reload, or per-request bootstrap re-execution
-- **Consecutive errors** — the worker encounters 3 consecutive handler failures (fatal errors, timeouts, or unhandled exceptions). Note that `exit()`/`die()` calls are not counted as failures
+- **Consecutive errors** — the worker took 3 consecutive requests that came apart: a fatal error, an out-of-memory, a stack overflow. What those leave behind is engine state the next request would inherit, which is what the recycle is for — see below for what does and does not count
+
+Not every failed request counts, because not every failure says the worker is unfit to serve:
+
+| Outcome | Effect on the count |
+|---|---|
+| Fatal error, out-of-memory, stack overflow | Counts |
+| Uncaught exception (answered `500`) | Neutral |
+| Cancelled request — the client hung up, `max_execution_time` elapsed, the server is shutting down | Neutral |
+| Request completed, `exit()`/`die()` included | Clears the count |
+
+"Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. Two limits are worth knowing. A fatal raised inside a **shutdown function** is not counted at all — PHP runs those under its own protection and the worker sees the request return normally, so a handler that only ever fatals there is invisible to this and clears the count like any completed request. And nothing here diagnoses a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
@@ -7571,7 +7582,7 @@ The worker memory limit is checked after each request using PHP's reported memor
 
 ### Worker recycles immediately (error limit)
 
-Three consecutive handler failures trigger a recycle. Check your application logs for exceptions or fatal errors occurring in the request callback.
+Three consecutive fatal errors trigger a recycle. Check your application logs for fatals in the request callback — not for uncaught exceptions or cancelled requests, which do not count.
 
 **Check:** Look for errors in the access log or structured log output:
 
@@ -12537,7 +12548,7 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
-- The handler raises 3 consecutive uncaught exceptions or fatal errors
+- The handler hits 3 consecutive fatal errors (an uncaught exception, and a request the server cancelled, are answered and do not count — see [Worker mode → Recycling](../features/worker-mode.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 

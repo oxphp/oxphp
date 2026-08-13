@@ -241,8 +241,40 @@ typedef struct _oxphp_request_fiber {
     void *saved_stack_base;
     void *saved_stack_limit;
 
-    /* Handler result tracking */
+    /* Handler result tracking. The two are kept apart because the
+     * consecutive-error breaker counts one of them and not the other:
+     *
+     * handler_failed — the request came apart: a zend_bailout (uncaught fatal,
+     *   OOM, stack overflow) or a fiber that could not be started at all. The
+     *   engine state it leaves behind is what the breaker exists to retire a
+     *   worker over.
+     * handler_threw — an uncaught exception unwound cleanly to the top. The
+     *   request gets its 500 and the worker is intact, so it says nothing about
+     *   the worker's health. Also the arm an exception raised while building the
+     *   request's input arrives on, which any client can provoke with a body
+     *   over max_input_vars against an application whose error handler throws. */
     bool handler_failed;
+    bool handler_threw;
+    /* The server ended this request rather than the handler finishing it: a
+     * client that hung up, max_execution_time, a shutdown, a userland cancel.
+     * Set by the interrupt handler, which unwinds such a request through
+     * zend_error_noreturn() — so it arrives here as a bailout with
+     * handler_failed up, and it is not a handler defect, so the breaker must not
+     * read it as one. Neutral like drain_kill, which is the same decision for
+     * the one cancellation reason that predates this flag.
+     *
+     * Two writers, because a deadline does not arrive the way the others do:
+     * the interrupt handler for everything delivered as a cancel reason, and the
+     * coroutine's own zend_catch for max_execution_time, which the engine
+     * handles ahead of zend_interrupt_function and which is recognised there by
+     * the connection_status bit zend_timeout() leaves behind.
+     *
+     * Only ever true for a request that was RUNNING when it was cancelled: a
+     * suspended fiber reaches neither writer. What ends a suspended request is the drain sweep, which sets
+     * drain_kill; a client abort or a deadline does not reach one at all today.
+     * A supervisor giving up on a stuck request is deliberately not marked — see
+     * the interrupt handler for why that one still counts. */
+    bool cancelled;
     bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
     int consecutive_errors;
 
@@ -330,7 +362,11 @@ typedef struct _oxphp_fiber_scheduler {
     zend_fcall_info *shared_fci;
     zend_fcall_info_cache *shared_fcc;
 
-    /* Error tracking across fibers (mirrors the outer loop's consecutive_errors) */
+    /* Error tracking across fibers: how many requests in a row came apart on
+     * this worker. Kept here rather than in the serve loop because both dispatch
+     * paths finalize through oxphp_scheduler_finalize_fiber(), which is what
+     * writes it, and only one of them runs per-iteration bookkeeping — the loop
+     * reads this directly so its breaker sees the requests that never suspend. */
     int consecutive_errors;
     uint64_t total_requests_done;
 

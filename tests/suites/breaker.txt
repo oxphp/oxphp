@@ -1,0 +1,58 @@
+# profile: breaker
+# description: Worker-mode consecutive-error breaker — a handler that fatals on every request retires its worker, and only a real fatal counts
+
+# Order is the test. Each line is one request to a single worker, so the number
+# of consecutive fatals ahead of a probe is exactly the number of lines above
+# it, and a probe that reports requestCount() == 1 is reporting a worker that
+# booted after the lines above it ran.
+
+breaker/test_breaker_baseline
+
+# Two fatals is one short of the threshold: the worker must still be the one
+# that answered the baseline. This is the half of the guarantee that a fix
+# tripping on every error would fail.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_holds_below_threshold
+
+# ...and answering that probe was a success, so the run of errors is back to
+# zero. Three more reach the threshold.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_trips_at_threshold
+
+# An uncaught application exception is not a handler defect: the request ends
+# with a clean unwind and a 500, and the worker that served it is healthy. Three
+# in a row must leave it serving.
+breaker/test_breaker_throw | GET | | 500 |
+breaker/test_breaker_throw | GET | | 500 |
+breaker/test_breaker_throw | GET | | 500 |
+breaker/test_breaker_throws_do_not_retire
+
+# Nor is a request the server ended itself. Two deadlines and a client that hung
+# up: each unwinds as a bailout, the same as a fatal, and each must be neutral —
+# a slow dependency makes every request one of these. A deadline is answered
+# 504, not 500. The abort line expects 0 because curl is the one that gives up:
+# --max-time is shorter than the fixture's sleep, so there is no response to
+# read and the runner records no status at all.
+breaker/test_breaker_timeout | GET | | 504 |
+breaker/test_breaker_timeout | GET | | 504 |
+breaker/test_breaker_abort | GET | --max-time 1 | 0 |
+breaker/test_breaker_cancels_do_not_retire
+
+# Neutral is neither of the two things it could be confused with. A cancellation
+# between fatals must not clear the run — otherwise one disconnect every other
+# request keeps a worker that fatals on every one of them alive indefinitely.
+# Two fatals, a deadline, a third fatal: the worker goes.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_timeout | GET | | 504 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_neutral_does_not_clear
+
+# And the same conclusion through the other dispatch site: three fatals accepted
+# by the event loop's tick while this request is parked in it. Last in the suite
+# because the request that sets it up is killed by the retire it provokes.
+breaker/test_breaker_eventloop_path | GET | | 503 |
+breaker/test_breaker_eventloop_retired

@@ -1,0 +1,47 @@
+# Worker mode's consecutive-error breaker: one worker serving one request at a
+# time, so a run of fatals lands on the same worker and the retire it triggers
+# is observable from the request that follows.
+#
+# A profile of its own because the tests here deliberately kill the worker mid
+# suite: in any other worker profile that would reset the persistent state the
+# neighbouring tests are there to assert. Being alone also lets the assertions
+# be absolute — nothing else in this profile recycles a worker, so
+# oxphp_worker_recycles_by_reason_total{reason="error"} is exactly 0 until the
+# breaker trips and exactly 1 after.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.breaker.yml up
+services:
+  oxphp-breaker:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      # One worker, so three fatals in a row are three fatals on the same
+      # worker. With the default pool they would be spread across it and the
+      # breaker's threshold would never be reached by any single one.
+      PHP_WORKERS: "1"
+      # The pool notices a dead worker on the health monitor's next 500 ms tick
+      # and only then spawns the replacement, which still has to boot the entry
+      # file. With one worker there is nobody serving in the meantime, so the
+      # request that follows a retire has to be allowed to wait for it: the 1 s
+      # default refuses it, and a queue refusal in that spot reads exactly like
+      # the breaker having failed.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
