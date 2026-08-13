@@ -68,7 +68,9 @@ extern const struct oxphp_symbol_global_name
  * NEW request restores none of it. Holds no Zend VM state: zend_fiber_switch_context
  * carries that itself, per switching frame. */
 typedef struct {
-    /* Superglobals: saved PG(http_globals) values */
+    /* Superglobals: saved PG(http_globals) values. TRACK_VARS_ENV is indexed but
+     * never written — that slot is the worker's rather than the request's, and a
+     * suspended request must leave it where every other request can read it. */
     zval http_globals[6]; /* TRACK_VARS_POST .. TRACK_VARS_FILES */
 
     /* What userland actually reads: the EG(symbol_table) entries for _POST,

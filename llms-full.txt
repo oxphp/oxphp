@@ -13755,7 +13755,7 @@ oxphp_worker(function () {
 });
 ```
 
-> **Trade-off:** because nothing rebuilds `$_ENV` in worker mode, `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` report no variables there. Read the environment with `getenv()`, or from `$_ENV` directly — it holds both the process values and whatever your bootstrap added. This applies to worker mode only; traditional, framework and SPA modes are unaffected.
+> **What `filter_input(INPUT_ENV, …)` sees.** `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` read the process environment in worker mode. They do not read `$_ENV`, so values your bootstrap wrote there are not among them — that is how PHP behaves everywhere, because writing to `$_ENV` gives the array its own copy and the filter extension goes on reading the environment snapshot the engine took. Worker mode adds one wrinkle to that: the snapshot is the one taken when `$_ENV` was first built on the worker, so a `putenv()` call made afterwards is not in it either. `getenv()` reads the live environment and is unaffected; `$_ENV` holds the process values plus whatever your bootstrap added. All of this is about `INPUT_ENV` alone: `INPUT_GET`, `INPUT_POST` and `INPUT_COOKIE` read storage of their own inside the filter extension, which nothing above describes and which this note makes no claim about.
 
 The pinning relies on PHP's default `auto_globals_jit=1`. With `auto_globals_jit=0`, PHP repopulates `$_ENV` from the process environment on every request before any extension can intervene, and a `.env` loader's values will not survive in worker mode.
 
