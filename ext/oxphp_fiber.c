@@ -1630,8 +1630,19 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* Step 2: Save Rust TLS (RESPONSE, EARLY_TX, REQUEST_DATA, deadline) */
     oxphp_bridge_fiber_save_ctx(fiber->fiber_id);
 
-    /* Step 3: Save superglobals */
+    /* Step 3: Save superglobals.
+     *
+     * TRACK_VARS_ENV stays on the thread — it is the worker's, not this
+     * request's; oxphp_reset_request_context_globals() has the whole of why.
+     * What only this site knows is the shape of getting it wrong: taken along,
+     * the request served in this window reads INPUT_ENV out of an undefined
+     * slot, and a second request suspending while it is undefined saves that
+     * emptiness and hands it back over the array this one restores — after
+     * which no request the worker serves ever sees the environment again. */
     for (int i = 0; i < 6; i++) {
+        if (i == TRACK_VARS_ENV) {
+            continue;
+        }
         ZVAL_COPY_VALUE(&fiber->php_state.http_globals[i], &PG(http_globals)[i]);
         ZVAL_UNDEF(&PG(http_globals)[i]); /* prevent double-free */
     }
@@ -1722,8 +1733,13 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
         SG(request_info).cookie_data = sapi_module.read_cookies();
     }
 
-    /* Restore superglobals */
+    /* Restore superglobals. TRACK_VARS_ENV was never taken (see the save), so
+     * what stands in that slot is the worker's own array, and the free below
+     * would destroy it. */
     for (int i = 0; i < 6; i++) {
+        if (i == TRACK_VARS_ENV) {
+            continue;
+        }
         zval_ptr_dtor_nogc(&PG(http_globals)[i]); /* free current */
         ZVAL_COPY_VALUE(&PG(http_globals)[i], &fiber->php_state.http_globals[i]);
         ZVAL_UNDEF(&fiber->php_state.http_globals[i]);
@@ -1906,8 +1922,24 @@ static void oxphp_refire_auto_global(const char *name, size_t len) {
 void oxphp_reset_request_context_globals(void) {
     /* zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
      * are simple string arrays that never contain cyclic refs, and _nogc avoids
-     * the cycle buffer insertion overhead on every request. */
+     * the cycle buffer insertion overhead on every request.
+     *
+     * TRACK_VARS_ENV is not one of them and is left standing. It describes the
+     * process rather than the request — which is what the disarm below keeps it
+     * as — and with the callback disarmed nothing rebuilds it, so destroying it
+     * here would leave it undefined for the rest of the worker's life. The slot
+     * has a reader: php_filter_get_storage() takes INPUT_ENV from it (the array
+     * it would prefer is written by an input filter that nothing ever invokes
+     * for ENV) and reports "no such variable" for anything that is not an array
+     * there. Kept, filter_input(INPUT_ENV, …), filter_input_array(INPUT_ENV) and
+     * filter_has_var(INPUT_ENV, …) go on answering out of the environment
+     * snapshot $_ENV was first built from — the same answer they give in any
+     * other SAPI, where a userland write to $_ENV separates the array by COW and
+     * leaves this slot holding the engine's own copy either way. */
     for (int i = 0; i < 6; i++) {
+        if (i == TRACK_VARS_ENV) {
+            continue;
+        }
         zval_ptr_dtor_nogc(&PG(http_globals)[i]);
         ZVAL_UNDEF(&PG(http_globals)[i]);
     }
@@ -2343,7 +2375,9 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * $_ENV keeps its entry — it describes the process rather than the request
      * in worker mode, a .env loader writes it at a boot that never runs again —
      * which is what the name list leaving it out is for. Its slot is skipped
-     * below only because the rebuild has already emptied it.
+     * below for the same reason, and the rebuild leaves it alone too: while the
+     * disarm holds nothing would build it again, and ext/filter reads INPUT_ENV
+     * out of it.
      *
      * The slots are emptied rather than undefined. IS_UNDEF is not a resting
      * state for these: it only rewrites the type word, so the value goes on
