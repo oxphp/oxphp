@@ -34,7 +34,6 @@ function curl_internal(string $url, array $opts = [], ?string $auth = null): arr
     $raw = curl_exec($ch);
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $hsize = (int) curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-    curl_close($ch);
     return [
         'code' => $code,
         'head' => substr((string)$raw, 0, $hsize),

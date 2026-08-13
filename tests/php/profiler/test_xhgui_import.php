@@ -14,7 +14,6 @@ curl_setopt($ch, CURLOPT_HTTPHEADER, ['X-OxPHP-Profile: test-token']);
 curl_setopt($ch, CURLOPT_TIMEOUT, 5);
 curl_exec($ch);
 $trigger_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
 $t->assertSame('self-trigger 200', $trigger_code, 200);
 
 // 2) Also exercise the imperative SDK from this request — covers the
@@ -38,7 +37,6 @@ for ($i = 0; $i < 10; $i++) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 2);
     $body = curl_exec($ch);
     $last_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
     $last_body = (string) $body;
     if ($last_code === 200 && strlen($last_body) > 20) {
         $found = true;
@@ -54,7 +52,6 @@ curl_setopt($ch2, CURLOPT_HTTPHEADER, ['Authorization: Bearer test-token']);
 curl_setopt($ch2, CURLOPT_RETURNTRANSFER, true);
 $stats_body = curl_exec($ch2);
 $stats_code = (int) curl_getinfo($ch2, CURLINFO_HTTP_CODE);
-curl_close($ch2);
 $t->assertSame('profiler stats 200', $stats_code, 200);
 $stats = json_decode((string) $stats_body, true);
 $t->assertTrue('profiler captured at least one run',

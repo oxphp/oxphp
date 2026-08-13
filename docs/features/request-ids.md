@@ -54,7 +54,6 @@ curl_setopt($ch, CURLOPT_HTTPHEADER, [
     "X-Request-ID: $requestId",
 ]);
 $response = curl_exec($ch);
-curl_close($ch);
 ```
 
 ## Examples
