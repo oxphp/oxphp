@@ -7544,12 +7544,12 @@ Not every failed request counts, because not every failure says the worker is un
 
 | Outcome | Effect on the count |
 |---|---|
-| Fatal error, out-of-memory, stack overflow | Counts |
-| Uncaught exception (answered `500`) | Neutral |
+| Fatal error, out-of-memory, stack overflow — wherever it is raised, a shutdown function and a destructor run at the end of the request included | Counts |
+| Uncaught exception (answered `500`) — from the request handler or from a shutdown function | Neutral |
 | Cancelled request — the client hung up, `max_execution_time` elapsed, the server is shutting down | Neutral |
 | Request completed, `exit()`/`die()` included | Clears the count |
 
-"Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. Two limits are worth knowing. A fatal raised inside a **shutdown function** is not counted at all — PHP runs those under its own protection and the worker sees the request return normally, so a handler that only ever fatals there is invisible to this and clears the count like any completed request. And nothing here diagnoses a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
+"Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. Where a failure was raised makes no difference to how it is read. PHP runs shutdown functions under protection of its own, so the worker sees a request that failed inside one return normally — but a fatal there leaves the same wreckage the next request on that worker would inherit from any other fatal, so it counts the same, and an exception there unwinds as cleanly as one from the handler, so it is neutral the same way. A deadline is the one thing that is read differently depending on when it lands: expiring while a shutdown function runs is still the server ending the request and stays neutral, unless the request had already failed on its own before that, in which case it stays counted. What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
