@@ -20,7 +20,29 @@ $bootInfo = [
     'request_start_time' => oxphp_http_request()->startTime(true),
 ];
 
-oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo) {
+// An ini directive set during the worker boot phase, for the test that a
+// request's own ini_set() is undone against what boot left rather than against
+// the engine default. user_agent is PHP_INI_ALL and is read only by the http://
+// stream wrapper, so no other test here depends on its value.
+//
+// The value is computed rather than written as a literal on purpose: a literal
+// is interned and lives outside the request heap, while a computed string is
+// allocated in it — and the second is the case a worker has to carry past its
+// own request teardown.
+//
+// The four values are captured rather than hardcoded in the test: what this
+// worker booted with is the only correct baseline, whatever php.ini the image
+// carries. Passed into the closure so included test files can read it directly
+// (PHP `include` runs in the includer's scope).
+ini_set('user_agent', 'oxphp-boot-probe-' . getmypid());
+$iniBoot = [
+    'user_agent'         => ini_get('user_agent'),
+    'precision'          => ini_get('precision'),
+    'display_errors'     => ini_get('display_errors'),
+    'max_execution_time' => ini_get('max_execution_time'),
+];
+
+oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo, $iniBoot) {
     $requestCount++;
 
     // If the request targets a test PHP file, include it directly inside
