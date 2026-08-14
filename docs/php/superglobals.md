@@ -175,6 +175,12 @@ Array syntax works as expected:
 $tags = $_GET['tags'];  // ["php", "async"]
 ```
 
+> **What `filter_input(INPUT_GET, …)` sees.** `filter_input()`, `filter_input_array()` and `filter_has_var()` do not read `$_GET`, `$_POST` or `$_COOKIE`. The filter extension keeps a copy of the parsed input of its own, and in a persistent worker that copy is filled by every request — so it has to be given back by every request too, or one client's query values, session cookies and body fields stay readable to every request the worker serves afterwards. OxPHP gives it back at the start of each request, so these three functions answer for the request asking and for no other.
+>
+> Worker mode adds one limit. If your request pauses — `sleep()`, an `await`, a hooked call — and another request runs on that worker in the window, the storage becomes that request's; reads after the resume answer `null` rather than someone else's input, and the copy your request had is gone by then. It is enough for the other request to start or to resume there — it need not finish. `$_GET`, `$_POST` and `$_COOKIE` travel with the request across a suspension and are unaffected, so read those, or read the filter functions before you suspend.
+>
+> One call is not allowed to pause at all. `filter_input_array()` given a per-field definition array reads the storage once per field, so a `FILTER_CALLBACK` that does I/O runs with the worker held for its duration instead of handing it to another request, and an explicit `Fiber::suspend()` inside such a callback throws. The wait still happens — it is the worker thread that waits rather than the request — so a slow callback shows up as latency for everything queued behind it, and past `QUEUE_WAIT_TIMEOUT_MS` those queued requests are shed. How long it can last is set by whatever the callback is talking to and not by the server: a stream wrapper gives up after `default_socket_timeout`, 60 seconds out of the box, while mysqlnd waits `mysqlnd.net_read_timeout`, a day out of the box. Give such a call an explicit timeout — or, better, run validation that reaches a database or a cache on the value after `filter_input_array()` has returned it.
+
 ---
 
 ## $_POST
@@ -207,6 +213,8 @@ $name  = $data['name'];   // "Alice"
 $email = $data['email'];  // "alice@example.com"
 ```
 
+> **`filter_input(INPUT_POST, …)`** reads the filter extension's own copy of the body rather than `$_POST` — see the note under [`$_GET`](#_get) for what that copy is and how long it lasts.
+
 ---
 
 ## $_COOKIE
@@ -221,6 +229,8 @@ $theme   = $_COOKIE['theme'];    // "dark"
 ```
 
 > **Note:** Cookies with the `__oxp_` prefix are reserved for internal OxPHP plugins. They are stripped from the `Cookie` header before it reaches PHP and will not appear in `$_COOKIE`.
+
+> **`filter_input(INPUT_COOKIE, …)`** reads the filter extension's own copy of the cookies rather than `$_COOKIE` — see the note under [`$_GET`](#_get) for what that copy is and how long it lasts.
 
 ---
 
@@ -278,7 +288,7 @@ oxphp_worker(function () {
 });
 ```
 
-> **What `filter_input(INPUT_ENV, …)` sees.** `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` read the process environment in worker mode. They do not read `$_ENV`, so values your bootstrap wrote there are not among them — that is how PHP behaves everywhere, because writing to `$_ENV` gives the array its own copy and the filter extension goes on reading the environment snapshot the engine took. Worker mode adds one wrinkle to that: the snapshot is the one taken when `$_ENV` was first built on the worker, so a `putenv()` call made afterwards is not in it either. `getenv()` reads the live environment and is unaffected; `$_ENV` holds the process values plus whatever your bootstrap added. All of this is about `INPUT_ENV` alone: `INPUT_GET`, `INPUT_POST` and `INPUT_COOKIE` read storage of their own inside the filter extension, which nothing above describes and which this note makes no claim about.
+> **What `filter_input(INPUT_ENV, …)` sees.** `filter_input(INPUT_ENV, …)`, `filter_input_array(INPUT_ENV)` and `filter_has_var(INPUT_ENV, …)` read the process environment in worker mode. They do not read `$_ENV`, so values your bootstrap wrote there are not among them — that is how PHP behaves everywhere, because writing to `$_ENV` gives the array its own copy and the filter extension goes on reading the environment snapshot the engine took. Worker mode adds one wrinkle to that: the snapshot is the one taken when `$_ENV` was first built on the worker, so a `putenv()` call made afterwards is not in it either. `getenv()` reads the live environment and is unaffected; `$_ENV` holds the process values plus whatever your bootstrap added. All of this is about `INPUT_ENV` alone: `INPUT_GET`, `INPUT_POST` and `INPUT_COOKIE` read storage of their own inside the filter extension, described in the note under `$_GET` above.
 
 The pinning relies on PHP's default `auto_globals_jit=1`. With `auto_globals_jit=0`, PHP repopulates `$_ENV` from the process environment on every request before any extension can intervene, and a `.env` loader's values will not survive in worker mode.
 
