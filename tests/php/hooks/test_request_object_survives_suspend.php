@@ -27,6 +27,17 @@ $request = oxphp_http_request();
 $t->assertSame('outer request has its own probe in the query', $request->query('probe'), 'outer');
 $t->assertKeyMissing('outer request carries no marker header', $request->headers(), 'x-marker');
 
+// The start time is the one piece of this that the intruder does not overwrite
+// but erases: the slot holding it is zeroed when a request answers, so the
+// window below leaves nothing there rather than someone else's reading. Pinned
+// here so the comparison after the resume cannot pass on two zeroes — the value
+// has to be a real clock reading first, and the two views of it, the request
+// object and the superglobal, have to agree before the suspension as well as
+// after it.
+$t->assertGreaterThan('outer request has a start time of its own', $request->startTime(true), 0.0);
+$t->assertSame('startTime() and $_SERVER[REQUEST_TIME] agree before the suspend',
+    $request->startTime(), (int) ($_SERVER['REQUEST_TIME'] ?? -1));
+
 $before = [
     'path'    => $request->path(),
     'probe'   => $request->query('probe'),
@@ -34,6 +45,7 @@ $before = [
     'cookies' => $request->cookies(),
     'body'    => $request->body(),
     'id'      => oxphp_request_id(),
+    'start'   => $request->startTime(true),
 ];
 
 $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
@@ -66,6 +78,7 @@ $t->assertSame('headers() survived the suspend', $request->headers(), $before['h
 $t->assertSame('cookies() survived the suspend', $request->cookies(), $before['cookies']);
 $t->assertSame('body() survived the suspend', $request->body(), $before['body']);
 $t->assertSame('the request id survived the suspend', oxphp_request_id(), $before['id']);
+$t->assertSame('startTime() survived the suspend', $request->startTime(true), $before['start']);
 
 // These are the values the intruder would have left behind, so a failure here
 // says what leaked.
@@ -83,5 +96,19 @@ $t->assertSame('query() and $_GET agree after the suspend',
     $request->query('probe'), $_GET['probe'] ?? null);
 $t->assertSame('path() and $_SERVER[REQUEST_URI] agree after the suspend',
     $request->path(), parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH));
+$t->assertSame('startTime() and $_SERVER[REQUEST_TIME] agree after the suspend',
+    $request->startTime(), (int) ($_SERVER['REQUEST_TIME'] ?? -1));
+
+// The second reader of the same slot, so a fix that only taught the request
+// object to carry its start time across the suspension would still fail here.
+$t->assertSame('oxphp_server_info() reports this request\'s start time after the suspend',
+    oxphp_server_info()['request_time'], $before['start']);
+
+// And the shape an application meets it in: the elapsed time of a request that
+// has paused, which is what the start time is read for. An erased slot makes
+// this the whole Unix epoch rather than the couple of seconds spent parked.
+$elapsed = microtime(true) - $request->startTime(true);
+$t->assertGreaterThan('elapsed since start covers the suspension', $elapsed, 1.0);
+$t->assertLessThan('elapsed since start is seconds, not an epoch', $elapsed, 60.0);
 
 $t->done();

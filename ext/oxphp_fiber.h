@@ -140,6 +140,23 @@ typedef struct {
     bool bridge_headers_sent;   /* ctx.headers_sent: stream headers on the wire */
     bool bridge_finished;       /* ctx.finished: oxphp_finish_request() was called */
 
+    /* When this request was received, from the same __thread ctx as the trio
+     * above and needing the same treatment for a stronger reason: a neighbour's
+     * prep overwrites it, and a neighbour's teardown ZEROES it, so a fiber that
+     * parks across a request the worker serves whole comes back to 0.0 rather
+     * than to a wrong-but-plausible time. Two readers ask it per request —
+     * Request::startTime() and oxphp_server_info()['request_time'] — and both
+     * take the ctx slot itself rather than the per-request data parked on the
+     * Rust side, which is why the slot has to travel with the fiber to reach
+     * them both. (The SAPI's get_request_time hook reads the slot too, but the
+     * engine memoizes what it answers in SG(global_request_time) and clears
+     * that only in sapi_activate(), which a worker runs once, at boot — so that
+     * one is answered from the boot reading either way.) $_SERVER['REQUEST_TIME']
+     * is frozen into the superglobals, which do travel with the fiber, so
+     * without this the two ways of asking a request when it started disagree
+     * from the suspension point on. */
+    double bridge_request_time; /* ctx.request_time: Unix seconds, 0.0 outside a request */
+
     /* Parked unhandled-exception capture (opaque oxphp_unhandled_slot*, owned).
      * The capture is taken in the coroutine's catch arm (oxphp_capture_unhandled,
      * from the live EG(exception)) after the handler returns, before shutdown

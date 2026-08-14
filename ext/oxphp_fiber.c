@@ -1706,10 +1706,12 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
 
     /* The thread-local bridge ctx is still THIS fiber's request here (the
      * fiber just suspended; nothing else ran yet) — capture its per-request
-     * flags before the next multiplexed request's prep wipes them. */
+     * flags before the next multiplexed request's prep wipes them, and its
+     * start time before that request's own end zeroes it. */
     fiber->php_state.bridge_stream_mode = oxphp_bridge_is_streaming();
     fiber->php_state.bridge_headers_sent = oxphp_bridge_get_headers_sent();
     fiber->php_state.bridge_finished = oxphp_bridge_is_finished();
+    fiber->php_state.bridge_request_time = oxphp_bridge_get_request_time();
 
     /* Park any unhandled-exception capture with this fiber. A capture only
      * exists here when the handler already threw and a shutdown function is
@@ -1867,15 +1869,17 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     BG(user_shutdown_function_names) = fiber->php_state.shutdown_functions;
     fiber->php_state.shutdown_functions = NULL;
 
-    /* The bridge's per-request ctx flags are thread-global, reset by every new
+    /* The bridge's per-request ctx fields are thread-global, reset by every new
      * multiplexed request's prep (oxphp_bridge_reset_request_ctx) and not part
      * of the Rust-side fiber ctx save. Re-install this fiber's values so the
-     * streaming flush path, oxphp_finish_request(), ub_write and the next
-     * suspend's capture all see THIS request's state, not whichever request
-     * touched the thread ctx last. */
+     * streaming flush path, oxphp_finish_request(), ub_write, the next
+     * suspend's capture and everything that asks this request when it started
+     * all see THIS request's state, not whichever request touched the thread
+     * ctx last. */
     oxphp_bridge_set_stream_mode(fiber->php_state.bridge_stream_mode);
     oxphp_bridge_set_headers_sent(fiber->php_state.bridge_headers_sent);
     oxphp_bridge_set_finished(fiber->php_state.bridge_finished);
+    oxphp_bridge_set_request_time(fiber->php_state.bridge_request_time);
 
     /* Re-install this fiber's parked exception capture into the thread-active
      * slot (consumes the container). NULL is a no-op. */
