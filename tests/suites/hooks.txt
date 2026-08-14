@@ -92,6 +92,14 @@ hooks/test_superglobals_survive_suspend >> ?probe=outer&secret=outer-only
 # through both views.
 hooks/test_request_object_survives_suspend >> ?probe=outer
 
+# The start time in isolation, for the two windows the test above cannot reach.
+# That one lets its neighbour finish inside the window, which erases the slot the
+# start time lives in, so it only ever proves the resumed request does not read
+# zero. Here a neighbour is still parked at the resume — nothing erased, so a
+# request that does not carry its own start time reads the neighbour's instead —
+# and the request suspends twice, which a fix that restores only once would fail.
+hooks/test_request_start_time_across_suspends
+
 # The third view of the same window: php://input. The request body is load-bearing
 # and asserted by value, so the -d payload here and the literal in each test have
 # to stay in step. Two cases, because the request's own SAPI post state differs
