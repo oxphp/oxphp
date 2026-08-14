@@ -1527,11 +1527,12 @@ static bool oxphp_hooks_category_enabled(const char *category)
 }
 
 /* Hooked sleep(): native argument contract (mirrors ext/standard
- * PHP_FUNCTION(sleep)), cooperative suspend inside a fiber. Returns 0 —
- * the cooperative timer always runs to completion, so the "seconds left
- * on signal interrupt" case of the native builtin does not arise.
- * Cancellation of a task fiber unwinds via AsyncException, matching
- * oxphp_sleep(). */
+ * PHP_FUNCTION(sleep)), cooperative suspend inside a fiber. Returns 0 when it
+ * suspends — the cooperative timer always runs to completion, so the "seconds
+ * left on signal interrupt" case of the native builtin does not arise there;
+ * where the fiber cannot be suspended the call is handed to that builtin and
+ * answers whatever it answers. Cancellation of a task fiber unwinds via
+ * AsyncException, matching oxphp_sleep(). */
 static ZEND_NAMED_FUNCTION(oxphp_hooked_sleep)
 {
     if (oxphp_current_fiber == NULL) {
@@ -1555,6 +1556,17 @@ static ZEND_NAMED_FUNCTION(oxphp_hooked_sleep)
         if (rc < 0) {
             oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                                   "Async task cancelled", 0);
+            return;
+        }
+        if (rc == 0) {
+            /* Nothing was waited for: the fiber could not be suspended here —
+             * switching is blocked (a declare(ticks) handler, pcntl's signal
+             * dispatch, the input build, a guarded filter_input_array) or a
+             * userland scheduler owns the context. That is a "do it the
+             * blocking way" answer, not a "skip it" one, so hand the call to
+             * the native builtin, which is also what makes its signal-interrupt
+             * return value reachable on this path. */
+            oxphp_orig_sleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
             return;
         }
     }
@@ -1584,6 +1596,12 @@ static ZEND_NAMED_FUNCTION(oxphp_hooked_usleep)
         if (rc < 0) {
             oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                                   "Async task cancelled", 0);
+            return;
+        }
+        if (rc == 0) {
+            /* Not suspendable here — see oxphp_hooked_sleep. The wait still has
+             * to happen, so the native builtin does it. */
+            oxphp_orig_usleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         }
     }
 }
@@ -3215,6 +3233,107 @@ static void oxphp_hooks_report_unknown_categories(void)
             php_log_err(msg);
         }
     }
+}
+
+/* ─── filter_input_array() must not park mid-call ────────────
+ * Installed always, unlike the hooks above, and for a reason that has nothing to
+ * do with them: it is what makes the per-request reset of ext/filter's input
+ * storage safe (oxphp_reset_filter_input_storage in oxphp_fiber.c).
+ *
+ * php_filter_array_handler() reads that storage through the module-globals slot
+ * itself — `zval *input = &IF_G(get_array)` — and re-reads Z_ARRVAL_P(input) for
+ * every key of the definition array, with a userland call in between whenever a
+ * key asks for FILTER_CALLBACK. A request that parks inside such a callback
+ * leaves that frame holding the slot, and the next request's reset releases the
+ * array the slot names: the frame comes back either to a value word pointing at
+ * freed memory, or — if the request served in the window filled the storage
+ * itself — to that request's input, which is the leak this whole reset exists to
+ * close, reappearing inside a single call. Neither can be answered from the
+ * reset side: nothing there can see the frame.
+ *
+ * So that form of the call is made unable to park. Every suspend point of ours
+ * checks zend_fiber_switch_blocked() and takes its blocking path
+ * (oxphp_fiber_sleep_us and the three beside it), and a userland
+ * Fiber::suspend() throws under the block, which is the engine's own answer
+ * inside a tick handler. A callback that does I/O therefore holds the worker
+ * thread for its duration instead of multiplexing — the price of doing I/O from
+ * inside a filter callback, paid by the call that does it and by nothing else.
+ *
+ * That every suspend point does check is an invariant no compiler enforces, and
+ * a fifth one added without the check would park this frame silently. So the
+ * call also raises oxphp_filter_storage_readers, which the reset reads: it
+ * cannot make a parked frame safe, but it turns what would be a use-after-free
+ * with no witness into a log line naming the suspend point's omission.
+ *
+ * Every other way in reaches the original untouched, because a block it does not
+ * need is not free: it costs a setjmp, and it takes a suspension point away from
+ * a userland scheduler for the length of the call. filter_has_var() runs no
+ * userland at all. filter_input() and filter_input_array() without a definition
+ * array copy what they read before any filter runs — ZVAL_DUP of the slot is the
+ * only read either makes, so no frame of theirs is holding it when a callback
+ * runs. And outside a fiber there is nothing to park, so no other mode — and no
+ * CLI script — sees the wrapper at all. */
+static zif_handler oxphp_orig_filter_input_array = NULL;
+
+/* True only for filter_input_array($type, [...]) — the one form that re-reads
+ * the storage slot per field. The second argument is array|int and the original
+ * handler validates it; anything else here is simply not the guarded form. */
+static bool oxphp_filter_input_array_has_definition(zend_execute_data *execute_data)
+{
+    if (ZEND_NUM_ARGS() < 2) return false;
+
+    zval *definition = ZEND_CALL_ARG(execute_data, 2);
+    if (definition == NULL) return false;
+    ZVAL_DEREF(definition);
+
+    return Z_TYPE_P(definition) == IS_ARRAY;
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_guarded_filter_input_array)
+{
+    if (oxphp_current_fiber == NULL
+        || !oxphp_filter_input_array_has_definition(execute_data)) {
+        oxphp_orig_filter_input_array(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    /* Both counters belong to the worker thread rather than to the request, so
+     * both have to come back down on every way out — see the catch below. The
+     * second one is not what keeps the storage safe; it is what lets the reset
+     * say so out loud if this ever parks after all. */
+    oxphp_filter_storage_readers++;
+    zend_fiber_switch_block();
+    zend_try {
+        oxphp_orig_filter_input_array(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    } zend_catch {
+        /* A fatal, exit() or the memory limit inside the call jumps over the
+         * unwind below. Left up, the block would keep this worker from ever
+         * parking again and the reader count would make every later request read
+         * stale input. zend_catch has already put the outer bailout target back,
+         * so re-raising here lands where it would have landed. */
+        zend_fiber_switch_unblock();
+        oxphp_filter_storage_readers--;
+        zend_bailout();
+    } zend_end_try();
+    zend_fiber_switch_unblock();
+    oxphp_filter_storage_readers--;
+}
+
+/* Swapped on the startup thread, like the hooks below and for the same ZTS
+ * reason. A build without ext/filter has no such function, the swap reports it,
+ * and the guard is then never installed — which is correct, since there is no
+ * storage to protect either. */
+static void oxphp_filter_guard_install(void)
+{
+    oxphp_hook_swap("filter_input_array", sizeof("filter_input_array") - 1,
+                    oxphp_guarded_filter_input_array, &oxphp_orig_filter_input_array);
+}
+
+static void oxphp_filter_guard_restore(void)
+{
+    oxphp_hook_restore("filter_input_array", sizeof("filter_input_array") - 1,
+                       oxphp_orig_filter_input_array);
+    oxphp_orig_filter_input_array = NULL;
 }
 
 static void oxphp_runtime_hooks_install(void)
@@ -6310,6 +6429,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 
     /* Last: all extensions (standard included) have registered their
      * functions by now; worker threads have not started yet. */
+    oxphp_filter_guard_install();
     oxphp_runtime_hooks_install();
 
     return SUCCESS;
@@ -6320,6 +6440,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 {
     oxphp_runtime_hooks_restore();
+    oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;
 }

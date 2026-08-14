@@ -59,6 +59,35 @@ hooks/test_env_filter_input >> ?mode=warm
 hooks/test_env_filter_input >> ?mode=expect
 hooks/test_env_filter_input >> ?mode=suspend
 
+# The other three INPUT_* constants, whose storage is not a slot of the engine's
+# but three arrays inside ext/filter — one set per worker thread, filled from
+# every request and given back by a function the engine calls where worker mode
+# no longer goes. The first line sends a query value, a cookie and a body and
+# demands they are readable; the second sends none of the three and demands the
+# first line's are not. Both are needed and in this order: the second alone
+# passes on any build that reads no input at all, and one worker is what makes
+# the pair mean anything, which PHP_WORKERS=1 guarantees and a pool does not.
+#
+# The third line is the same claim across a suspension, in both directions — a
+# request that parks must not come back reading what ran in its window, and the
+# request served in that window must not read the parked one's input — plus the
+# half that has nothing to do with leaking: a suspension nobody else ran in must
+# leave a request its own input. It carries its own query and cookie, so it does
+# not depend on the two lines above; it does read the seed's body key, which the
+# second line has already required gone.
+hooks/test_filter_input_not_shared >> ?mode=seed&oxfilter_token=seed-query-value | POST | -H "Cookie: oxfilter_sid=seed-session-id" -H "Content-Type: application/x-www-form-urlencoded" --data "oxfilter_pw=seed-body-secret&oxfilter_user=alice" | |
+hooks/test_filter_input_not_shared >> ?mode=expect
+hooks/test_filter_input_not_shared >> ?mode=suspend&oxfilter_token=suspend-query-value | GET | -H "Cookie: oxfilter_sid=suspend-session-id" | |
+
+# And the case where giving the storage back would pull it out from under a call
+# that is still reading it: filter_input_array() with a definition array re-reads
+# the storage for every key, and a FILTER_CALLBACK between two of them runs
+# userland that can park. This line parks there on purpose, with an inner
+# self-request waiting to be served in exactly that window, and demands both keys
+# come back as this request's own. Stands on its own — its own query, its own
+# inner request — so it needs no neighbour and no fixed position in the block.
+hooks/test_filter_input_not_shared >> ?mode=callback&oxfilter_token=callback-query-value&oxfilter_second=callback-second-value
+
 # The same split for ini directives: what a request changes must end with that
 # request, what the worker's boot script set must outlive every request. The
 # first line changes four directives, the second demands the boot values back —

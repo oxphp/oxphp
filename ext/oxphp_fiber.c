@@ -26,6 +26,7 @@
 #include "Zend/zend_closures.h"   /* ZEND_CLOSURE_OBJECT: a frame a fatal abandons can hold one */
 #include "Zend/zend_generators.h" /* zend_generator: a frame a fatal abandons can be one */
 #include "Zend/zend_gc.h"         /* gc_protect: a bailout raises the collector's guard too */
+#include "Zend/zend_modules.h"    /* module_registry: ext/filter's own RSHUTDOWN resets its input storage */
 #include "main/php_main.h"
 #include "main/php_output.h"
 #include "main/php_streams.h" /* php_stream_close: the request body is a stream */
@@ -1556,6 +1557,84 @@ const struct oxphp_symbol_global_name
         { ZEND_STRL("_FILES") },  { ZEND_STRL("_REQUEST") },
 };
 
+/* ─── The input ext/filter keeps beside the superglobals ─
+ *
+ * filter_input(), filter_input_array() and filter_has_var() do not read $_GET,
+ * $_POST or $_COOKIE. For those three constants ext/filter reads three arrays of
+ * its own, which the SAPI input filter fills every time the engine rebuilds one
+ * of those superglobals — and which one function gives back,
+ * php_sapi_filter_init(), called from sapi_activate(). A worker runs
+ * sapi_activate() once, at boot, and rebuilds the superglobals once per request:
+ * filled per request, emptied per WORKER. Left alone the storage accumulates for
+ * the life of the worker, and every request reads the query values, session
+ * cookies and body fields of every request served before it — through the API
+ * applications reach for precisely because it is the safe way to read input.
+ *
+ * The arrays are fields of another extension's module globals and nothing public
+ * names them. The reset the SAPI does expose, sapi_module.input_filter_init,
+ * only undefines: what RELEASES them is ext/filter's own RSHUTDOWN, which a
+ * worker runs once. Calling the exposed one per request would orphan an array
+ * per input type per request into a request pool that is given back when the
+ * worker exits and not before. So this calls the module's RSHUTDOWN instead — it
+ * undefines AND releases, its whole body is five zval dtors, it runs no PHP and
+ * touches nothing else of the module's, and it is idempotent, which is what lets
+ * the engine call it again at the worker's own end.
+ *
+ * TRACK_VARS_ENV is unaffected: ENV never goes through the input filter
+ * (php_register_variable_quick bypasses it), so ext/filter's env_array is always
+ * undefined, the dtor for it a no-op, and INPUT_ENV goes on falling back to
+ * PG(http_globals)[TRACK_VARS_ENV] — the slot this file keeps for the worker.
+ *
+ * The counter answers the one question a resuming request has: did anyone else
+ * own the storage while I was parked? Every reset bumps it, a suspension records
+ * it, a resume compares. */
+static __thread uint64_t oxphp_filter_storage_gen = 0;
+
+/* Raised for as long as a frame is reading the storage through the slot itself:
+ * the definition-array form of filter_input_array(), which oxphp_sapi.c keeps
+ * from parking for exactly this reason. That guard rests on an invariant this
+ * file cannot check — that every suspend point of ours honours
+ * zend_fiber_switch_blocked() — and a fifth suspend point added without it would
+ * park such a frame silently. The count is what makes that visible: it belongs
+ * to the worker thread, a parked frame never gave it back, and the next request
+ * resets on that same thread. */
+__thread uint32_t oxphp_filter_storage_readers = 0;
+
+static void oxphp_reset_filter_input_storage(void) {
+    static __thread zend_module_entry *filter_module = NULL;
+    static __thread bool filter_module_resolved = false;
+
+    if (oxphp_filter_storage_readers > 0) {
+        /* Unreachable while the invariant holds. Keeping the storage is the
+         * lesser of the two wrongs available here: this request reads input that
+         * is not its own, which is the leak the reset exists to close, but the
+         * frame holding the slot does not come back to freed memory. Not bumping
+         * the generation keeps the resume side consistent with that choice. */
+        php_log_err("oxphp: ext/filter input storage still had a reader when a request "
+                    "started — a fiber parked inside filter_input_array() while fiber "
+                    "switching was blocked, which no suspend point should allow. The "
+                    "storage is left alone, so this request may read another request's "
+                    "query values, cookies or body fields through filter_input()");
+        return;
+    }
+
+    if (!filter_module_resolved) {
+        /* Once per worker thread. The registry is process-wide and a module
+         * never leaves it after startup, so the answer cannot change. NULL for a
+         * PHP built --disable-filter, and then all of this is a no-op — nothing
+         * fills the storage there either. */
+        filter_module = zend_hash_str_find_ptr(&module_registry, ZEND_STRL("filter"));
+        filter_module_resolved = true;
+    }
+
+    if (filter_module != NULL && filter_module->request_shutdown_func != NULL) {
+        filter_module->request_shutdown_func(filter_module->type,
+                                             filter_module->module_number);
+    }
+
+    oxphp_filter_storage_gen++;
+}
+
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* ORDERING IS CRITICAL:
      * 1. Park the output buffers this request has open — before the Rust TLS
@@ -1719,6 +1798,12 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * oxphp_bridge_reset_request_ctx from wiping it. NULL (the common case)
      * leaves php_state.unhandled_exc NULL. */
     fiber->php_state.unhandled_exc = oxphp_bridge_take_unhandled();
+
+    /* And which reset of the input storage ext/filter keeps this request is
+     * leaving behind. Not a take — that storage cannot travel with a fiber, see
+     * oxphp_reset_filter_input_storage() — only a mark, so that the resume can
+     * tell "still mine" from "somebody else's". */
+    fiber->php_state.filter_storage_gen = oxphp_filter_storage_gen;
 }
 
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
@@ -1733,6 +1818,22 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * itself, which owns those strings on the Rust side. */
     if (sapi_module.read_cookies) {
         SG(request_info).cookie_data = sapi_module.read_cookies();
+    }
+
+    /* The input ext/filter keeps is not restored, because it was never taken:
+     * one set of arrays per thread, and nothing public names them, so a fiber
+     * can give that storage back but cannot carry it away and put it back. What
+     * a resuming request can do is refuse to read somebody else's. A counter
+     * that moved means a request started in the window and made the storage its
+     * own — reset it, so that filter_input() answers "no such variable" rather
+     * than a neighbour's session cookie. This request's own input is gone either
+     * way: that neighbour's start reset is what released it.
+     *
+     * A counter that did not move means nobody else ran, the storage is still
+     * this request's own, and it is left alone — so an ordinary sleep() does not
+     * cost a request the input it could read before it. */
+    if (fiber->php_state.filter_storage_gen != oxphp_filter_storage_gen) {
+        oxphp_reset_filter_input_storage();
     }
 
     /* Restore superglobals. TRACK_VARS_ENV was never taken (see the save), so
@@ -1924,6 +2025,14 @@ static void oxphp_refire_auto_global(const char *name, size_t len) {
 }
 
 void oxphp_reset_request_context_globals(void) {
+    /* First, and before the rebuild below fills it again with this request's own
+     * query and cookies: the parsed input ext/filter keeps beside the
+     * superglobals belongs to whoever ran last, and nothing else in a worker
+     * gives it back. oxphp_reset_filter_input_storage() has the whole of why it
+     * is the module's own RSHUTDOWN that does it. Here rather than after
+     * zend_activate_auto_globals(), which is the call that refills it. */
+    oxphp_reset_filter_input_storage();
+
     /* zval_ptr_dtor_nogc skips the cycle collector — intentional: superglobals
      * are simple string arrays that never contain cyclic refs, and _nogc avoids
      * the cycle buffer insertion overhead on every request.

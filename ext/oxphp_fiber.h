@@ -82,6 +82,17 @@ typedef struct {
      * none. */
     zval symbol_globals[6];
 
+    /* Which reset of the input ext/filter keeps — the arrays filter_input(),
+     * filter_input_array() and filter_has_var() read for INPUT_GET, INPUT_POST
+     * and INPUT_COOKIE — this fiber last saw. That storage is one set of arrays
+     * per thread and is the one piece of a request's input that does NOT travel
+     * with the fiber: it lives in another extension's module globals, which
+     * nothing public names, so it can be given back but not parked and put back.
+     * The number is what tells a resuming request whether the storage is still
+     * its own or now holds whatever ran in its window — see
+     * oxphp_reset_filter_input_storage() for what each answer costs. */
+    uint64_t filter_storage_gen;
+
     /* SAPI state */
     zend_llist sapi_headers;
     /* The content type the engine recorded for this response, which output
@@ -424,6 +435,12 @@ typedef struct _oxphp_fiber_scheduler {
  * Used by oxphp_async_await/oxphp_sleep to detect fiber mode. */
 extern __thread oxphp_request_fiber *oxphp_current_fiber;
 
+/* Raised while a frame reads ext/filter's input storage through the module-globals
+ * slot itself, so that the per-request reset of that storage can refuse to run
+ * under such a frame instead of freeing what it is holding. Raised and lowered by
+ * the filter_input_array() guard in oxphp_sapi.c; read by the reset. */
+extern __thread uint32_t oxphp_filter_storage_readers;
+
 /* fiber_id of the currently executing request fiber, 0 outside fiber context.
  * Registered into the bridge at MINIT (oxphp_bridge_set_current_fiber_id_fn)
  * so Rust can tag async promise ownership at creation. */
@@ -553,6 +570,9 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);
  *   2. oxphp_reset_request_context_globals() — $_GET, $_COOKIE and above all
  *      $_SERVER, complete with REQUEST_TIME. $_POST and $_FILES come out of this
  *      empty; step 3 fires them again once there is a body to build them from.
+ *      It also gives back the separate input storage ext/filter keeps for
+ *      INPUT_GET, INPUT_POST and INPUT_COOKIE — refilled for GET and COOKIE by
+ *      the rebuild here, for POST by step 3, both through the input filter.
  *   3. oxphp_reset_request_body_globals()    — read the body, then $_POST,
  *      $_FILES and $_REQUEST. Everything it raises reads step 2's $_SERVER.
  *
