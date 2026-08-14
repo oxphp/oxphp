@@ -5160,10 +5160,17 @@ unsafe extern "C" fn req_port_cb() -> u16 {
 }
 
 unsafe extern "C" fn req_start_time_cb() -> f64 {
-    // ctx.request_time is the single source of truth: 0.0 outside an
-    // active request (enforced by worker_send_callback,
-    // RequestDataGuard::drop and the worker boot reset), now() during
-    // request handling. No REQUEST_DATA borrow needed.
+    // ctx.request_time is the single source of truth: when the request the
+    // thread is serving was received. No REQUEST_DATA borrow needed.
+    //
+    // It reads 0.0 once a request has ended — worker_send_callback,
+    // RequestDataGuard::drop and the worker boot reset each put it back — but
+    // do not read that as "no request exists". Under worker multiplexing a
+    // suspended fiber is a live request, and resuming one re-installs its own
+    // time here, where it then stands for as long as that fiber stays parked.
+    // PHP the worker runs outside any request in that window — a deferred
+    // promise drain, a destructor reached by GC — therefore sees the parked
+    // request's time rather than 0.0.
     bindings::oxphp_bridge_get_request_time()
 }
 
