@@ -184,7 +184,21 @@ fn render_preview(sv: &SharedValue, str_limit: usize, arr_limit: usize) -> Strin
         SharedValue::Double(v) => v.to_string(),
         SharedValue::String(s) => {
             if s.len() > str_limit {
-                format!("\"{}…\" ({} bytes)", &s[..str_limit], s.len())
+                // `str_limit` is a byte budget, so walk back to the nearest
+                // character boundary before slicing: a limit landing inside a
+                // UTF-8 sequence would otherwise panic and kill the handler.
+                // Whether it lands there is arithmetic between the limit and
+                // the character widths — the default 256 divides by 2 and 4
+                // but not by 3, so three-byte scripts (CJK, `€`) always split
+                // while pure Cyrillic or emoji never do at that limit, and
+                // mixed text splits or not by luck. Pick a three-byte
+                // character for any reproducer. The prefix stays within the
+                // budget, up to 3 bytes under it.
+                let mut cut = str_limit;
+                while cut > 0 && !s.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                format!("\"{}…\" ({} bytes)", &s[..cut], s.len())
             } else {
                 format!("\"{s}\"")
             }
@@ -1161,5 +1175,44 @@ mod tests {
 
         drop(entry_a);
         drop(entry_b);
+    }
+
+    #[test]
+    fn preview_truncates_multibyte_string_at_char_boundary() {
+        // 100 × "€" = 300 bytes. Byte 256 lands inside the third byte of a
+        // 3-byte sequence, so cutting at the raw limit is an invalid slice.
+        let s = "€".repeat(100);
+        let out = render_preview(&SharedValue::String(Arc::from(s.as_str())), 256, 20);
+        let shown = out
+            .strip_prefix('"')
+            .and_then(|r| r.strip_suffix("…\" (300 bytes)"))
+            .unwrap_or_else(|| panic!("unexpected preview shape: {out}"));
+        // Floored to the nearest boundary: 85 whole characters = 255 bytes.
+        assert_eq!(shown, "€".repeat(85));
+        assert!(
+            shown.len() <= 256,
+            "prefix must stay inside the byte budget, got {}",
+            shown.len()
+        );
+    }
+
+    #[test]
+    fn preview_string_limit_stays_a_byte_budget() {
+        // ASCII control: there is nothing to floor, so the prefix consumes
+        // the full 256 bytes — the limit must not have become a char count.
+        let out = render_preview(
+            &SharedValue::String(Arc::from("a".repeat(300).as_str())),
+            256,
+            20,
+        );
+        assert_eq!(out, format!("\"{}…\" (300 bytes)", "a".repeat(256)));
+    }
+
+    #[test]
+    fn preview_zero_limit_emits_empty_prefix() {
+        // Lower bound of the boundary walk: a zero budget must stop at 0
+        // rather than run off the front of the string.
+        let out = render_preview(&SharedValue::String(Arc::from("€€")), 0, 20);
+        assert_eq!(out, "\"…\" (6 bytes)");
     }
 }
