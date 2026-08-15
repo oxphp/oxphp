@@ -323,7 +323,7 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 | `SHARED_POISON_STRICT` | `false` | Boolean. When truthy, a panic inside a Mutex/Once closure poisons the primitive permanently instead of best-effort recovery |
 | `SHARED_LOCK_DIAGNOSTICS` | `off` | Lock-contention diagnostics: `off`, `count`, or `trace` |
 | `SHARED_LOCK_POLL_INTERVAL_MS` | `100` | Polling interval used by the lock-diagnostics sampler |
-| `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/entry?id=…` previews |
+| `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/__ox_shared/preview` previews, in bytes (cut at a char boundary) |
 | `SHARED_PREVIEW_ARRAY_LIMIT` | `20` | Entries sampled in `/entry?id=…` previews |
 
 ## Profiling

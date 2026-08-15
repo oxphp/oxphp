@@ -8333,7 +8333,7 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 | `SHARED_CYCLE_DETECT_DEPTH`     | 16      | BFS depth during cycle check. Raise for deep legitimate graphs.       |
 | `SHARED_CYCLE_DETECT_EDGES`     | 10 000  | Edges walked during cycle check. Raise for dense legitimate graphs.   |
 | `SHARED_PREVIEW_ARRAY_LIMIT`    | 20      | Entries sampled in `/entry?id=…` previews.                            |
-| `SHARED_PREVIEW_STRING_LIMIT`   | 256     | Per-string truncation in previews.                                    |
+| `SHARED_PREVIEW_STRING_LIMIT`   | 256     | Per-string truncation in previews, in bytes (cut at a char boundary). |
 | `SHARED_INTROSPECTION_ENABLED`  | true    | Toggles the `/__ox_shared/*` API.                                     |
 | `SHARED_METRICS_ENABLED`        | true    | Toggles the `oxphp_shared_*` Prometheus exposition.                   |
 
@@ -8680,7 +8680,7 @@ Type-specific detail for one entry:
 
 ### `GET /__ox_shared/preview?id=N`
 
-Value-shape preview of scalar and small-array values. String values are truncated to `SHARED_PREVIEW_STRING_LIMIT` (default 256 bytes); arrays show the first `SHARED_PREVIEW_ARRAY_LIMIT` entries (default 20). Gated by `SHARED_INTROSPECTION_PREVIEW_ENABLED`.
+Value-shape preview of scalar and small-array values. String values are truncated to `SHARED_PREVIEW_STRING_LIMIT` (default 256 bytes), rounded down to the nearest character boundary so multibyte text is never cut mid-character; arrays show the first `SHARED_PREVIEW_ARRAY_LIMIT` entries (default 20). Gated by `SHARED_INTROSPECTION_PREVIEW_ENABLED`.
 
 ```json
 { "id": 42, "type": "Counter", "preview": "1420" }
@@ -14296,7 +14296,7 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 | `SHARED_POISON_STRICT` | `false` | Boolean. When truthy, a panic inside a Mutex/Once closure poisons the primitive permanently instead of best-effort recovery |
 | `SHARED_LOCK_DIAGNOSTICS` | `off` | Lock-contention diagnostics: `off`, `count`, or `trace` |
 | `SHARED_LOCK_POLL_INTERVAL_MS` | `100` | Polling interval used by the lock-diagnostics sampler |
-| `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/entry?id=…` previews |
+| `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/__ox_shared/preview` previews, in bytes (cut at a char boundary) |
 | `SHARED_PREVIEW_ARRAY_LIMIT` | `20` | Entries sampled in `/entry?id=…` previews |
 
 ## Profiling

@@ -338,7 +338,7 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 | `SHARED_CYCLE_DETECT_DEPTH`     | 16      | BFS depth during cycle check. Raise for deep legitimate graphs.       |
 | `SHARED_CYCLE_DETECT_EDGES`     | 10 000  | Edges walked during cycle check. Raise for dense legitimate graphs.   |
 | `SHARED_PREVIEW_ARRAY_LIMIT`    | 20      | Entries sampled in `/entry?id=…` previews.                            |
-| `SHARED_PREVIEW_STRING_LIMIT`   | 256     | Per-string truncation in previews.                                    |
+| `SHARED_PREVIEW_STRING_LIMIT`   | 256     | Per-string truncation in previews, in bytes (cut at a char boundary). |
 | `SHARED_INTROSPECTION_ENABLED`  | true    | Toggles the `/__ox_shared/*` API.                                     |
 | `SHARED_METRICS_ENABLED`        | true    | Toggles the `oxphp_shared_*` Prometheus exposition.                   |
 

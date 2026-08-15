@@ -98,7 +98,7 @@ Type-specific detail for one entry:
 
 ### `GET /__ox_shared/preview?id=N`
 
-Value-shape preview of scalar and small-array values. String values are truncated to `SHARED_PREVIEW_STRING_LIMIT` (default 256 bytes); arrays show the first `SHARED_PREVIEW_ARRAY_LIMIT` entries (default 20). Gated by `SHARED_INTROSPECTION_PREVIEW_ENABLED`.
+Value-shape preview of scalar and small-array values. String values are truncated to `SHARED_PREVIEW_STRING_LIMIT` (default 256 bytes), rounded down to the nearest character boundary so multibyte text is never cut mid-character; arrays show the first `SHARED_PREVIEW_ARRAY_LIMIT` entries (default 20). Gated by `SHARED_INTROSPECTION_PREVIEW_ENABLED`.
 
 ```json
 { "id": 42, "type": "Counter", "preview": "1420" }
