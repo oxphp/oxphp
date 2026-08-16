@@ -32,6 +32,7 @@
 #include "main/php_streams.h" /* php_stream_close: the request body is a stream */
 #include "main/rfc1867.h"     /* destroy_uploaded_files_hash: $_FILES temp files */
 #include "ext/standard/basic_functions.h"
+#include "ext/standard/php_fopen_wrappers.h" /* php_stream_php_wrapper: php://input makes bodies */
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
 #include <time.h>   /* clock_gettime/CLOCK_MONOTONIC for per-call await deadlines */
@@ -639,6 +640,242 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
     zend_stack_init(handlers, sizeof(php_output_handler *));
 }
 
+/* ─── Ownership of the request body ────────────────────────────
+ *
+ * Worker mode closes the buffered body by hand where the request ends, because
+ * the resource list that closes it in every other SAPI belongs to the worker
+ * rather than to the request. What it may NOT do is close it by address.
+ *
+ * The body is a registered stream like any other, so `get_resources('stream')`
+ * hands the script a full handle to it — a counted reference of its own
+ * (Z_ADDREF_P on every element it returns, php-src
+ * Zend/zend_builtin_functions.c), which the script may close like any other.
+ * That frees the php_stream while SG(request_info).request_body goes on
+ * naming the block, and the end of the request then closes whatever now lives
+ * there. One fclose() on its own shows nothing: the second free lands in
+ * _php_stream_free()'s in_free guard, which reads freed-but-unreused memory and
+ * returns. It becomes a corrupted heap as soon as the block is reused, and what
+ * is destroyed then is a stream the script opened and is still holding.
+ *
+ * Checking the address against EG(regular_list) does not answer this — measured,
+ * not assumed: after the free and one allocation the address belongs to a NEW
+ * stream, so the check finds it and reports the body as live. Identity by
+ * address is not identity.
+ *
+ * So ownership is held by the resource instead, with a reference of our own.
+ * A resource closed from userland keeps its slot in the list (fclose() passes
+ * PHP_STREAM_FREE_KEEP_RSRC) and is marked closed rather than reused —
+ * zend_resource_dtor() sets type -1 and ptr NULL — so the pair below is a
+ * truthful liveness test whatever userland did to the stream, fclose() and
+ * pclose() alike. The reference is what keeps the zend_resource itself from
+ * being freed and its handle from being recycled underneath the test. */
+
+/* The resource of the body SG(request_info).request_body names, or NULL when
+ * this thread owns no body. Thread-local like SG() itself, and parked with the
+ * fiber (php_state.request_body_res) for the same reason the body pointer is. */
+static __thread zend_resource *oxphp_owned_body_res = NULL;
+
+/* The stream `res` names, or NULL if it no longer names one. */
+static php_stream *oxphp_live_body_of(zend_resource *res) {
+    if (res == NULL || res->type != php_file_le_stream() || res->ptr == NULL) {
+        return NULL;
+    }
+    return (php_stream *) res->ptr;
+}
+
+/* Give back the reference in `slot`. Never closes anything, whatever the state of
+ * the resource: an open stream holds a reference of its own (php_stream::res, the
+ * one it was registered with), so ours is never the last one while there is still
+ * a stream to close, and by the time it is the last one zend_resource_dtor has
+ * already run and only the zend_resource itself is left to free. Closing is the
+ * caller's decision and rests on the liveness test above. */
+static void oxphp_drop_body_res(zend_resource **slot) {
+    if (*slot != NULL) {
+        zend_list_delete(*slot);
+        *slot = NULL;
+    }
+}
+
+/* Take ownership of whatever SG(request_info).request_body names now.
+ *
+ * Called from the points at which a body has just been created and userland has
+ * not run since: the per-request input rebuild, and the two hooks below — the
+ * SAPI's read_post callback and the php:// wrapper's opener. Idempotent, and the
+ * common case is that the body is already the one we hold.
+ *
+ * A body that replaces one we own is adopted in its place, and the one it
+ * replaced is only dropped, not closed. php-src reassigns
+ * SG(request_info).request_body without freeing what stands there
+ * (main/SAPI.c, sapi_read_standard_form_data), which a second parse in one
+ * request — userland request_parse_body() — makes reachable; the stream it
+ * orphans outlives the request either way, and closing it here would be a
+ * different change with a contract of its own to sort out.
+ *
+ * Worker mode only. In the classic mode the engine's own request shutdown
+ * closes the body and destroys the resource list, so there is no hand close to
+ * make safe — and no counterpart to give this reference back.
+ *
+ * The order of the tests below is the whole of the care this needs. Reading
+ * body->res is a dereference, and SG(request_info).request_body is exactly the
+ * pointer that goes stale when userland closes the body: php-src leaves it
+ * standing. So nothing is read through it until the claim already held says it
+ * is still the body's — and when the claim is dead, this returns rather than
+ * asking anything of a pointer it knows to be dangling. Skipping that step is
+ * not academic: the walk that opens php://temp after closing the body would
+ * otherwise read the resource of whichever stream has taken the block and adopt
+ * THAT as the body, and the end of the request would close it. */
+static void oxphp_adopt_request_body(void) {
+    if (!oxphp_bridge_is_worker_mode()) {
+        return;
+    }
+
+    php_stream *body = SG(request_info).request_body;
+    if (body == NULL) {
+        return;
+    }
+
+    if (oxphp_owned_body_res != NULL) {
+        php_stream *owned = oxphp_live_body_of(oxphp_owned_body_res);
+        if (owned == body) {
+            return; /* already ours, and the pointer is sound */
+        }
+        if (owned == NULL) {
+            return; /* our body is gone: `body` names freed memory */
+        }
+        /* Our body is alive and something else is standing in SG(). Only a
+         * second parse in one request does that (userland request_parse_body),
+         * and the stream it put there was made by the call this runs inside. */
+    }
+
+    if (body->res == NULL) {
+        return;
+    }
+    oxphp_drop_body_res(&oxphp_owned_body_res);
+    oxphp_owned_body_res = body->res;
+    GC_ADDREF(oxphp_owned_body_res);
+}
+
+/* The SAPI's own read_post, wrapped so that ownership is taken wherever a body
+ * is created — including the path the extension cannot otherwise see.
+ *
+ * php-src assigns SG(request_info).request_body in exactly two places:
+ * sapi_read_standard_form_data() (main/SAPI.c), which the per-request rebuild
+ * calls itself, and the php://input opener (ext/standard/php_fopen_wrapper.c),
+ * which creates a body behind our back when a request without a parsed one is
+ * asked for its raw input — every PUT, PATCH and DELETE with a body, and every
+ * POST whose Content-Type has no registered reader. Both fill the body through
+ * this callback, and both create it before the first call, so a body that has
+ * ever held a byte has been through here.
+ *
+ * What this callback does not see is a body the opener creates and nothing ever
+ * reads through the SAPI — a multipart POST first of all, where rfc1867 has
+ * already consumed the body and SG(post_read) is set, so php://input answers out
+ * of the empty stream it just made without asking for a byte. The php:// opener
+ * below is what covers that one. */
+static size_t (*oxphp_orig_read_post)(char *buffer, size_t count_bytes) = NULL;
+
+static size_t oxphp_read_post_owning(char *buffer, size_t count_bytes) {
+    /* Installed over a non-NULL read_post and restored before the module goes
+     * away, so the original is always there to call. The claim is taken per block
+     * rather than once after the read, because a callback is all there is to hook
+     * — and once held it costs a pointer compare. */
+    size_t read_bytes = oxphp_orig_read_post(buffer, count_bytes);
+    oxphp_adopt_request_body();
+    return read_bytes;
+}
+
+/* And the other creation site: the php:// wrapper's own opener, which is where
+ * php://input makes a body for a request that has none
+ * (ext/standard/php_fopen_wrapper.c). Taken here rather than left to the read
+ * above because the two are not the same moment: the opener creates the stream,
+ * and a request may never read a byte through it — every multipart POST that
+ * touches php://input is exactly that, and without this the body it makes would
+ * be owned by nobody and released by nothing, one leaked stream pair per request
+ * for the life of the worker.
+ *
+ * Wrapped by standing in for it rather than by patching it: the wrapper php-src
+ * exports is const, but the registry holds a pointer to it, so a copy with one
+ * entry replaced can take its place. Swapped inside the table's own slot rather
+ * than unregistered and registered again — the latter appends, which would move
+ * php:// to the end of the table and with it the order stream_get_wrappers()
+ * reports, in every mode including the ones this has nothing to do with. Every
+ * other php:// path — temp, memory, output, filter, stdin — passes straight
+ * through and pays one pointer compare inside the claim. */
+static const php_stream_wrapper_ops *oxphp_orig_php_wops = NULL;
+static php_stream_wrapper_ops oxphp_php_wops;
+static php_stream_wrapper oxphp_php_wrapper;
+
+static php_stream *oxphp_php_wrapper_opener(
+        php_stream_wrapper *wrapper, const char *path, const char *mode,
+        int options, zend_string **opened_path,
+        php_stream_context *context STREAMS_DC) {
+    /* Only the transition is interesting, and asking for it costs a compare:
+     * the opener creates a body exactly when the request has none, and a claim
+     * taken on any other opening of php:// would be one taken on whatever
+     * SG(request_info).request_body happens to be pointing at — which after a
+     * body closed from userland is freed memory. */
+    bool had_body = SG(request_info).request_body != NULL;
+
+    php_stream *stream = oxphp_orig_php_wops->stream_opener(
+        wrapper, path, mode, options, opened_path, context STREAMS_REL_CC);
+
+    if (!had_body && SG(request_info).request_body != NULL) {
+        oxphp_adopt_request_body();
+    }
+    return stream;
+}
+
+/* The table's entry for php://, or NULL where there is none. The global table
+ * rather than the per-request one: this runs at MINIT, before any request has had
+ * the chance to clone it, and a clone is taken from here. */
+static zval *oxphp_php_wrapper_slot(void) {
+    HashTable *wrappers = php_stream_get_url_stream_wrappers_hash_global();
+
+    return wrappers != NULL ? zend_hash_str_find(wrappers, "php", sizeof("php") - 1) : NULL;
+}
+
+void oxphp_request_body_hook_install(void) {
+    if (sapi_module.read_post != NULL
+        && sapi_module.read_post != oxphp_read_post_owning) {
+        oxphp_orig_read_post = sapi_module.read_post;
+        sapi_module.read_post = oxphp_read_post_owning;
+    }
+
+    if (oxphp_orig_php_wops == NULL) {
+        zval *slot = oxphp_php_wrapper_slot();
+
+        /* Only ever stands in for the wrapper php-src itself registered. A build
+         * where php:// is missing, or already answered by someone else, is left
+         * exactly as it is and keeps the read_post claim. */
+        if (slot != NULL && Z_PTR_P(slot) == (const void *) &php_stream_php_wrapper) {
+            oxphp_php_wrapper = php_stream_php_wrapper;
+            oxphp_php_wops = *php_stream_php_wrapper.wops;
+            oxphp_php_wops.stream_opener = oxphp_php_wrapper_opener;
+            oxphp_php_wrapper.wops = &oxphp_php_wops;
+
+            oxphp_orig_php_wops = php_stream_php_wrapper.wops;
+            Z_PTR_P(slot) = &oxphp_php_wrapper;
+        }
+    }
+}
+
+void oxphp_request_body_hook_restore(void) {
+    /* MSHUTDOWN runs from zend_shutdown(), which php_module_shutdown() calls
+     * before php_shutdown_stream_wrappers() — the registry is still there. */
+    if (oxphp_orig_php_wops != NULL) {
+        zval *slot = oxphp_php_wrapper_slot();
+
+        if (slot != NULL && Z_PTR_P(slot) == (void *) &oxphp_php_wrapper) {
+            Z_PTR_P(slot) = (void *) &php_stream_php_wrapper;
+        }
+        oxphp_orig_php_wops = NULL;
+    }
+    if (sapi_module.read_post == oxphp_read_post_owning) {
+        sapi_module.read_post = oxphp_orig_read_post;
+    }
+    oxphp_orig_read_post = NULL;
+}
+
 /* Close every php://input handle that reads through `body`, before `body` is
  * closed.
  *
@@ -852,8 +1089,18 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     }
     if (fiber->php_state.request_body) {
         oxphp_close_input_wrappers_for(fiber->php_state.request_body);
-        php_stream_close(fiber->php_state.request_body);
         fiber->php_state.request_body = NULL;
+    }
+    {
+        /* Closed through the resource, not through the pointer above: userland
+         * can reach the body and close it, and then the pointer names whatever
+         * has taken the block since. Same test and same order as the end of a
+         * request — see oxphp_release_request_post_state(). */
+        php_stream *body = oxphp_live_body_of(fiber->php_state.request_body_res);
+        if (body != NULL) {
+            php_stream_close(body);
+        }
+        oxphp_drop_body_res(&fiber->php_state.request_body_res);
     }
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
@@ -1773,12 +2020,19 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * The uploaded-file hash travels for the same reason and by the same move —
      * left standing, this request's temp files are unlinked by the end of
      * whichever request the worker takes in the window, and is_uploaded_file()
-     * on resume answers about that request's uploads instead of its own. */
+     * on resume answers about that request's uploads instead of its own.
+     *
+     * The body's resource travels with the pointer and by the same move: it is
+     * the request's claim on the stream, the reference behind it is the
+     * request's to give back, and a claim left standing here would have the next
+     * request answering for a body that is not its own. */
     fiber->php_state.request_body = SG(request_info).request_body;
+    fiber->php_state.request_body_res = oxphp_owned_body_res;
     fiber->php_state.read_post_bytes = SG(read_post_bytes);
     fiber->php_state.post_read = SG(post_read);
     fiber->php_state.rfc1867_uploaded_files = SG(rfc1867_uploaded_files);
     SG(request_info).request_body = NULL;
+    oxphp_owned_body_res = NULL;
     SG(read_post_bytes) = 0;
     SG(post_read) = 0;
     SG(rfc1867_uploaded_files) = NULL;
@@ -1905,8 +2159,17 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * than released: it belongs to a request that has already ended — one still
      * running would have parked its own on the way out — and ending is what
      * closed the body and unlinked the temp files. Dropping the pointers is
-     * exactly what a new request's init does with them. */
+     * exactly what a new request's init does with them.
+     *
+     * The one thing that cannot merely be dropped is the claim on a body: a
+     * reference is held behind it, so a claim standing here is given back rather
+     * than overwritten. It should never be standing — the request that ended
+     * gave its own back, and one still running parked its own — and the call is
+     * a no-op then. */
+    oxphp_drop_body_res(&oxphp_owned_body_res);
     SG(request_info).request_body = fiber->php_state.request_body;
+    oxphp_owned_body_res = fiber->php_state.request_body_res;
+    fiber->php_state.request_body_res = NULL;
     SG(read_post_bytes) = fiber->php_state.read_post_bytes;
     SG(post_read) = fiber->php_state.post_read;
     SG(rfc1867_uploaded_files) = fiber->php_state.rfc1867_uploaded_files;
@@ -2154,6 +2417,13 @@ void oxphp_reset_request_body_globals(void) {
          * just created. */
         sapi_read_post_data();
 
+        /* And the claim on what it produced, taken here rather than left to the
+         * read_post hook alone: this is the point at which the body is known to
+         * exist and to be untouched, without depending on how many times php-src
+         * happens to call the SAPI back while filling it. Idempotent, so the
+         * usual case — the hook got there first — costs a pointer compare. */
+        oxphp_adopt_request_body();
+
         /* And then the two arrays the body produces. _POST is where the parse of
          * a urlencoded body and of a multipart one both actually happen —
          * sapi_handle_post() runs from this callback rather than from the read
@@ -2206,6 +2476,11 @@ void oxphp_reset_request_post_state(void) {
     SG(post_read) = 0;
     SG(request_info).request_body = NULL;
     SG(rfc1867_uploaded_files) = NULL;
+    /* And the claim on a body that goes with that pointer. The end of a request
+     * gives it back, so there should be nothing here; giving it back again
+     * rather than overwriting it is what keeps a path that skipped the end of a
+     * request from leaking the zend_resource for the life of the worker. */
+    oxphp_drop_body_res(&oxphp_owned_body_res);
 
     /* The context request_parse_body() runs the parse under, reset the way
      * sapi_activate() resets it. That function restores both fields itself when
@@ -2245,11 +2520,30 @@ void oxphp_release_request_post_state(void) {
     if (SG(request_info).request_body) {
         /* Before the close rather than after it: the match is on this pointer,
          * and after the close it names freed memory. php_stream_input_close()
-         * does not touch the body, so the wrappers going first costs nothing. */
+         * does not touch the body, so the wrappers going first costs nothing.
+         *
+         * Run whatever became of the body, including when userland has already
+         * closed it. The walk only compares this address, never reads through
+         * it, and the handles it is looking for are exactly the ones that would
+         * otherwise go on naming freed memory into the next request. (A body
+         * closed from userland can have had its block taken by a stream opened
+         * since, and a php://input handle on THAT one would then match. Losing a
+         * handle to a body the request no longer has is the lesser of the two,
+         * and it takes a request that closed its own body to reach at all.) */
         oxphp_close_input_wrappers_for(SG(request_info).request_body);
-        php_stream_close(SG(request_info).request_body);
         SG(request_info).request_body = NULL;
     }
+    /* The body itself is closed through the claim rather than through the
+     * pointer above — the whole point of holding one. Three outcomes: the claim
+     * names a live stream, which is the ordinary case and is closed; it names
+     * one userland has closed, and there is nothing left to close; or there is
+     * no claim, which is a request that never had a body at all, since both
+     * places php-src can make one are claimed as they make it. */
+    php_stream *body = oxphp_live_body_of(oxphp_owned_body_res);
+    if (body != NULL) {
+        php_stream_close(body);
+    }
+    oxphp_drop_body_res(&oxphp_owned_body_res);
 }
 
 /* ─── Targeted per-fiber request init ──────────────────── */

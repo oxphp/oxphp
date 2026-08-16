@@ -6431,6 +6431,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
     oxphp_runtime_hooks_install();
+    oxphp_request_body_hook_install();
 
     return SUCCESS;
 }
@@ -6439,6 +6440,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 /* {{{ MSHUTDOWN — clear ox_shared class_entry cache */
 PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 {
+    oxphp_request_body_hook_restore();
     oxphp_runtime_hooks_restore();
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
