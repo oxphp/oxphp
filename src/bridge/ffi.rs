@@ -448,6 +448,10 @@ extern "C" {
         args: *mut c_void,
         cancel_cell: *mut c_void,
     ) -> i64;
+    /// 1 when the tick resumed a fiber whose wait was answered (settled
+    /// promise, elapsed await deadline, fired timer, ready descriptor or one
+    /// whose read/write deadline elapsed), 0 when it moved nothing, -1 when no
+    /// scheduler is registered. Not a fiber count.
     pub fn oxphp_bridge_async_tick() -> c_int;
     pub fn oxphp_bridge_async_poll_completed(
         out_retval: *mut *mut c_void,
@@ -562,6 +566,10 @@ extern "C" {
     /// back off on its own. Waiting on the descriptors is what keeps a hooked
     /// socket round trip from paying the driver's whole idle interval.
     pub fn oxphp_bridge_async_io_backoff(ns: u64) -> c_int;
+    /// Nanoseconds until the earliest deadline the task scheduler is holding —
+    /// a per-call await timeout or a hooked socket's read/write deadline. 0
+    /// when no parked fiber has one, 1 when one has already elapsed.
+    pub fn oxphp_bridge_async_next_deadline_ns() -> u64;
 
     // ── Fiber TLS context callbacks ──
     pub fn oxphp_bridge_set_fiber_ctx_callbacks(

@@ -74,6 +74,24 @@ pub fn poll_ready_timers() -> Vec<u64> {
     })
 }
 
+/// The earliest deadline among this thread's registered timers, or `None` when
+/// none are registered.
+///
+/// The async-pool driver bounds its idle wait by this. Its backoff widens for
+/// events only another thread can announce, and a sleeping fiber's wake-up time
+/// is not one of those — it was decided here, so waiting past it would be
+/// oversleeping on purpose.
+pub fn next_timer_deadline() -> Option<Instant> {
+    TIMER_STATE.with(|state| {
+        state
+            .borrow()
+            .timers
+            .iter()
+            .map(|(_, deadline)| *deadline)
+            .min()
+    })
+}
+
 /// Remove a timer without firing it.
 pub fn remove_timer(id: u64) {
     TIMER_STATE.with(|state| {
@@ -347,6 +365,33 @@ mod tests {
 
         // After poll, the fired timer is removed
         assert!(!is_timer_ready(short), "polled timer should be removed");
+    }
+
+    #[test]
+    fn next_deadline_is_the_earliest_registered() {
+        init_timer_state();
+        assert!(
+            next_timer_deadline().is_none(),
+            "no timers registered, no deadline to report"
+        );
+
+        let before = Instant::now();
+        register_timer(10_000);
+        register_timer(50); // the one the driver must not sleep past
+        register_timer(20_000);
+
+        let deadline = next_timer_deadline().expect("three timers registered");
+        assert!(
+            deadline.duration_since(before) < Duration::from_millis(5_000),
+            "earliest of 50ms / 10s / 20s must be the 50ms one"
+        );
+        // Bounded from below as well: `Some(Instant::now())` — a stub, or a
+        // reduction that lost the deadlines and kept only the call — passes the
+        // upper bound on its own.
+        assert!(
+            deadline.duration_since(before) >= Duration::from_millis(50),
+            "the deadline reported must be the 50ms timer's, not the current instant"
+        );
     }
 
     #[test]

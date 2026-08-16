@@ -2721,6 +2721,20 @@ int oxphp_bridge_async_io_backoff(uint64_t ns) {
     return 0;
 }
 
+/* ─── Async Task Scheduler: nearest deadline it is holding ───── */
+static oxphp_async_next_deadline_fn_t ext_async_next_deadline = NULL;
+
+void oxphp_bridge_set_async_next_deadline_fn(oxphp_async_next_deadline_fn_t fn) {
+    ext_async_next_deadline = fn;
+}
+
+uint64_t oxphp_bridge_async_next_deadline_ns(void) {
+    if (ext_async_next_deadline != NULL) {
+        return ext_async_next_deadline();
+    }
+    return 0; /* no extension: nothing to bound the driver's pause with */
+}
+
 /* === Async Promise: Freeze/Unfreeze === */
 
 static void oxphp_freeze_zval_recursive(zval *zv);

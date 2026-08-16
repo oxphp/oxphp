@@ -1415,6 +1415,18 @@ typedef int (*oxphp_async_io_backoff_fn_t)(uint64_t ns);
 void oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_fn_t fn);
 int  oxphp_bridge_async_io_backoff(uint64_t ns);
 
+/* ─── Async Task Scheduler: nearest deadline it is holding ────
+ * Registered by the PHP extension (not Rust). Nanoseconds until the earliest
+ * deadline carried by a parked task fiber — a per-call await timeout or a
+ * hooked socket's read/write deadline. 0 when no parked fiber has one (or the
+ * extension is absent), 1 when one has already elapsed. The driver's idle pause
+ * widens over time for events only another thread can announce; a deadline set
+ * on the driver's own thread is not one of those, so the pause is cut short at
+ * this value and such a deadline is honoured to its own precision. */
+typedef uint64_t (*oxphp_async_next_deadline_fn_t)(void);
+void     oxphp_bridge_set_async_next_deadline_fn(oxphp_async_next_deadline_fn_t fn);
+uint64_t oxphp_bridge_async_next_deadline_ns(void);
+
 /* ─── Current Request Fiber Identity ─────────────────────────
  * Registered by the PHP extension (not Rust): returns the fiber_id of the
  * request fiber currently executing on this thread, or 0 outside fiber
@@ -1990,11 +2002,19 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  *   spawn()   create a task fiber for one reconstructed closure + args
  *             and enqueue it. Returns the fiber_id (>= 0) or -1 (at
  *             capacity / reconstruction failed).
- *   tick()    advance the scheduler one iteration (start new fibers,
- *             resume ready ones, run each to its next suspend or
- *             completion). Returns the number of fibers still in-flight
- *             (queued + suspended + completed-but-undrained), or -1 if
- *             no scheduler is registered.
+ *   tick()    advance the scheduler one iteration (resume ready fibers,
+ *             run each to its next suspend or completion; new fibers are
+ *             started by spawn(), not here). Returns 1 if some fiber was
+ *             resumed because what it waited for arrived — a settled
+ *             promise, an elapsed await deadline, a fired sleep timer, a
+ *             ready descriptor or one whose read/write deadline elapsed —
+ *             and 0 if the tick moved nothing. A resume that only a
+ *             cancellation asked for reports 0: the driver re-issues
+ *             cancellations every iteration, so counting them would let a
+ *             task that catches the unwind hold the driver at full speed.
+ *             -1 if no scheduler is registered. The driver reads this as
+ *             "the tick did work" and restarts its idle backoff, so it
+ *             must not be read as a fiber count.
  *   poll()    report one completed-but-undrained task fiber. Returns its
  *             fiber_id (>= 0) and fills the out-params with pointers into
  *             the fiber's owned storage (*out_retval is ZVAL_UNDEF if the

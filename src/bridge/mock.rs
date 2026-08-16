@@ -648,6 +648,11 @@ pub unsafe fn oxphp_bridge_async_io_backoff(_ns: u64) -> std::os::raw::c_int {
     0
 }
 
+/// No extension present, so no task scheduler is holding a deadline.
+pub unsafe fn oxphp_bridge_async_next_deadline_ns() -> u64 {
+    0
+}
+
 // ── Fiber TLS context callbacks ──
 pub unsafe fn oxphp_bridge_set_fiber_ctx_callbacks(
     _save_fn: Option<unsafe extern "C" fn(u64)>,

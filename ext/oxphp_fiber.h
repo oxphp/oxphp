@@ -567,6 +567,15 @@ bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns);
  * parked on a descriptor (or no task scheduler exists yet). */
 bool oxphp_async_sched_io_backoff(int64_t ns);
 
+/* Nanoseconds until the earliest deadline this thread's task scheduler is
+ * holding — a per-call await timeout or a hooked socket's read/write deadline.
+ * Returns 0 when no parked fiber has one, and 1 when one has already elapsed
+ * (the next tick will act on it). The driver bounds its idle wait by this, so
+ * a deadline set on this thread is honoured to its own precision rather than
+ * to the driver's backoff. Sleep timers are not here: those live in the Rust
+ * timer registry, which the driver reads directly. */
+uint64_t oxphp_async_sched_next_deadline_ns(void);
+
 /* Save/restore PHP state around context switches. */
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber);
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber);

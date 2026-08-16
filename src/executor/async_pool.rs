@@ -211,6 +211,32 @@ fn async_worker_thread(
     // until this instant to finish before stragglers are abandoned.
     let mut shutdown_drain_deadline: Option<std::time::Instant> = None;
 
+    // How long the driver waits when a turn of the loop moved nothing. It
+    // starts short, so a fiber that another thread made ready is picked up
+    // close to the moment it became ready, and doubles up to a ceiling, so a
+    // fiber parked on a half-second timer does not cost a wakeup every
+    // millisecond for the whole park. Any progress puts it back at the floor.
+    const BACKOFF_MIN: std::time::Duration = std::time::Duration::from_micros(50);
+    const BACKOFF_MAX: std::time::Duration = std::time::Duration::from_millis(10);
+    // The ceiling is what the driver is prepared to wait before looking again
+    // for something only another thread can tell it: a promise settled on
+    // another worker, or an awaiter that has given up and wants its task
+    // unwound. Neither announces itself, so both are found by looking, and the
+    // ceiling is how late they can be found. Deadlines this thread set itself
+    // are not in that class — a sleep timer, a per-call await timeout, a hooked
+    // socket's read deadline — so the wait below is cut short at the earliest
+    // of them and the ceiling never applies to any of them.
+    //
+    // The shutdown drain keeps a fixed interval: it is bounded by a deadline of
+    // its own, and widening the gap between its cancel-and-tick rounds would
+    // only spend that budget on waiting.
+    const BACKOFF_SHUTDOWN: std::time::Duration = std::time::Duration::from_millis(1);
+    let mut backoff = BACKOFF_MIN;
+
+    // A task the idle wait below took off the queue, to be run on the next
+    // turn of the loop.
+    let mut carried: Option<AsyncTask> = None;
+
     loop {
         let shutting_down = shutdown.load(Ordering::Relaxed);
 
@@ -221,7 +247,12 @@ fn async_worker_thread(
         // fibers. Bounded by a short deadline so a task that refuses to unwind
         // (e.g. heavy work in a finally block) can't hang shutdown forever.
         if shutting_down {
-            if in_flight.is_empty() {
+            // A task the idle wait carried over has already left the queue, so
+            // it leaves through the drain like any other: spawned below and
+            // unwound by the cancellation this block issues. Breaking with it
+            // still in hand would drop its result channel under an awaiter that
+            // is still waiting, and lose the in-flight permit it holds.
+            if in_flight.is_empty() && carried.is_none() {
                 break;
             }
             let deadline = *shutdown_drain_deadline.get_or_insert_with(|| {
@@ -245,7 +276,12 @@ fn async_worker_thread(
 
         // Block for new work only when idle; when fibers are in flight, poll
         // non-blocking so we keep driving them to completion.
-        let maybe_task = if shutting_down {
+        let maybe_task = if let Some(task) = carried.take() {
+            // Already off the queue, so it is this worker's to run even if
+            // shutdown was signalled in between: dropping it here would close
+            // its result channel and answer an awaiter that is still waiting.
+            Some(task)
+        } else if shutting_down {
             None
         } else if in_flight.is_empty() {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
@@ -463,7 +499,13 @@ fn async_worker_thread(
                 }
             }
 
-            unsafe { ffi::oxphp_bridge_async_tick() };
+            // A tick that resumed someone is work done, not an empty turn:
+            // without it the driver would follow a cross-thread wakeup with a
+            // wait that has nothing left to wait for. `> 0` and not `!= 0`
+            // because -1 is the no-scheduler-registered sentinel.
+            if unsafe { ffi::oxphp_bridge_async_tick() } > 0 {
+                progressed = true;
+            }
             if drain_completed(&mut in_flight, &metrics, &mut tasks_executed) {
                 progressed = true;
             }
@@ -492,20 +534,62 @@ fn async_worker_thread(
         }
 
         // When fibers are suspended but nothing was ready and no new task
-        // arrived, back off briefly to avoid a busy spin (timers are ms-grained).
+        // arrived, back off to avoid a busy spin (timers are ms-grained).
         //
         // A fiber parked on a socket is different from one parked on a timer:
         // its wake-up time is chosen by the peer, so a blind sleep adds up to a
         // full interval of latency to every round trip. When the extension
         // reports parked descriptors it spends the same interval waiting on
-        // them and returns non-zero, and this sleep is skipped — the wait
+        // them and returns non-zero, and this wait is skipped — the wait
         // already happened, and it ended the moment the peer replied.
         if !progressed && !in_flight.is_empty() {
+            let wait = if shutting_down {
+                BACKOFF_SHUTDOWN
+            } else {
+                // Never past a deadline this thread itself set. Two places hold
+                // them: the timer registry, which is this thread's and answers
+                // for `oxphp_sleep()`, and the fibers themselves, which carry a
+                // per-call await timeout or a hooked socket's read/write
+                // deadline. Both are read here so the wait ends when the
+                // earliest of them does. Kept at the floor at minimum — a zero
+                // wait would spin, and the extension rejects a zero budget.
+                let mut wait = backoff;
+                if let Some(deadline) = crate::php::fiber::next_timer_deadline() {
+                    wait = wait.min(deadline.saturating_duration_since(std::time::Instant::now()));
+                }
+                let sched_ns = unsafe { ffi::oxphp_bridge_async_next_deadline_ns() };
+                if sched_ns > 0 {
+                    wait = wait.min(std::time::Duration::from_nanos(sched_ns));
+                }
+                wait.max(BACKOFF_MIN)
+            };
             let waited_on_descriptors =
-                unsafe { ffi::oxphp_bridge_async_io_backoff(1_000_000) } != 0;
+                unsafe { ffi::oxphp_bridge_async_io_backoff(wait.as_nanos() as u64) } != 0;
             if !waited_on_descriptors {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                if shutting_down {
+                    // No new work is accepted during the drain, so there is
+                    // nothing to wait on the queue for.
+                    std::thread::sleep(wait);
+                } else {
+                    // Wait on the queue rather than sleeping blind: a worker
+                    // whose fibers are all parked is still a worker a new task
+                    // can be handed to, and with the ceiling above, a sleep
+                    // would leave that task queued for the rest of the interval.
+                    match rx.recv_timeout(wait) {
+                        Ok(t) => carried = Some(t),
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                        // Every sender is gone, so recv_timeout returns at once
+                        // and would turn this wait into the spin it exists to
+                        // prevent — the in-flight fibers still need driving.
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                            std::thread::sleep(wait)
+                        }
+                    }
+                }
             }
+            backoff = (backoff * 2).min(BACKOFF_MAX);
+        } else {
+            backoff = BACKOFF_MIN;
         }
     }
 
