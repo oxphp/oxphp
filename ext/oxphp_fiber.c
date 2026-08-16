@@ -3379,11 +3379,18 @@ static bool oxphp_io_any_parked(const oxphp_fiber_scheduler *sched) {
  * fibers parked on, and report whether there was anything to wait for.
  *
  * This exists so an idle worker sleeps *on the sockets* instead of sleeping a
- * fixed interval and noticing readiness on the following tick. With a fixed
+ * fixed interval and noticing readiness on the following tick. With a blind
  * backoff every socket round trip pays up to a full interval of latency, which
  * on a chatty protocol is the dominant cost of the hook; waiting on the
- * descriptors ends the pause the moment the peer answers. The interval is
- * unchanged, so a newly queued request waits no longer than it did before. */
+ * descriptors ends the pause the moment the peer answers.
+ *
+ * `ns` is the caller's own idle interval and is spent here rather than in a
+ * sleep, so nothing waits longer for having called this instead of sleeping.
+ * How long that is belongs to the caller: the worker-mode loop passes a fixed
+ * 100 µs, while the async-task driver passes an interval that widens while it
+ * has nothing to do — and shortens itself to any deadline it is holding, this
+ * scheduler's socket deadlines among them, so a wait armed here never runs
+ * past one. */
 bool oxphp_scheduler_io_backoff(oxphp_fiber_scheduler *sched, int64_t ns) {
     /* Zero is rejected alongside negative: it would arm nothing, and a wait with
      * nothing to bound it blocks until a socket happens to fire — the worker
@@ -3997,11 +4004,58 @@ bool oxphp_async_sched_io_backoff(int64_t ns) {
     return oxphp_scheduler_io_backoff(&oxphp_task_sched, ns);
 }
 
+uint64_t oxphp_async_sched_next_deadline_ns(void) {
+    if (!oxphp_task_sched_inited) {
+        return 0;
+    }
+    oxphp_fiber_scheduler *sched = &oxphp_task_sched;
+
+    uint64_t earliest = 0;
+    for (oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if (fiber->completed) {
+            continue;
+        }
+        uint64_t deadline = 0;
+        if (fiber->suspend_reason == OXPHP_SUSPEND_AWAIT) {
+            deadline = fiber->await_deadline_ns; /* per-call await timeout */
+        } else if (fiber->suspend_reason == OXPHP_SUSPEND_IO_WAIT) {
+            deadline = fiber->suspend_data.io.deadline_ns; /* socket read/write */
+        }
+        if (deadline != 0 && (earliest == 0 || deadline < earliest)) {
+            earliest = deadline;
+        }
+    }
+    if (earliest == 0) {
+        return 0;
+    }
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    /* Already elapsed reports 1 rather than 0: zero is how the caller is told
+     * there is no deadline at all, and the difference decides whether it waits
+     * out its backoff or comes straight back for the tick that acts on it. */
+    return earliest > now_ns ? earliest - now_ns : 1;
+}
+
 int oxphp_async_sched_tick(void) {
     if (!oxphp_task_sched_inited) {
         return 0;
     }
     oxphp_fiber_scheduler *sched = &oxphp_task_sched;
+
+    /* Set by every resume a readiness decided: an awaited promise that
+     * settled, an await deadline that elapsed, a sleep timer that fired, a
+     * descriptor that became readable or one whose read/write deadline ran
+     * out. The driver reads it as "this tick did
+     * work" and restarts its idle backoff from the floor, so a fiber woken by
+     * another thread is not followed by a wait that has nothing to wait for.
+     *
+     * A resume that only cancellation asked for is deliberately not counted.
+     * The driver re-issues the cancellation on every iteration for as long as
+     * the awaiter's flag is set, so a task that catches the unwind and parks
+     * again would report progress forever and hold the driver at its floor. */
+    int resumed = 0;
 
     /* Resume fibers whose awaited promise is ready */
     {
@@ -4013,11 +4067,17 @@ int oxphp_async_sched_tick(void) {
                  * was cancelled — the suspend point unwinds on cancellation
                  * regardless of whether a result has arrived. A ready result or
                  * a cancellation takes precedence over the deadline so a promise
-                 * that settles on the same tick still delivers its value. */
-                if (fiber->cancel_requested
-                    || oxphp_bridge_await_poll(fiber->suspend_data.promise_id)) {
+                 * that settles on the same tick still delivers its value.
+                 * Cancellation is read first so a cancelled fiber does not
+                 * consume a result the poll would hand it. */
+                bool ready = !fiber->cancel_requested
+                             && oxphp_bridge_await_poll(fiber->suspend_data.promise_id);
+                if (fiber->cancel_requested || ready) {
                     oxphp_fiber_clear_suspend(fiber);
                     oxphp_task_resume_fiber(sched, fiber, NULL);
+                    if (ready) {
+                        resumed = 1;
+                    }
                 } else if (fiber->await_deadline_ns != 0) {
                     /* Per-call await timeout: unwind the await once the deadline
                      * elapses so the cooperative fiber path honours the timeout
@@ -4030,6 +4090,7 @@ int oxphp_async_sched_tick(void) {
                         fiber->timed_out = true;
                         oxphp_fiber_clear_suspend(fiber);
                         oxphp_task_resume_fiber(sched, fiber, NULL);
+                        resumed = 1;
                     }
                 }
             }
@@ -4069,6 +4130,7 @@ int oxphp_async_sched_tick(void) {
                     && fiber->suspend_data.timer_id == ready_ids[i]) {
                     oxphp_fiber_clear_suspend(fiber);
                     oxphp_task_resume_fiber(sched, fiber, NULL);
+                    resumed = 1;
                     break;
                 }
                 fiber = next;
@@ -4092,10 +4154,11 @@ int oxphp_async_sched_tick(void) {
             }
             oxphp_fiber_clear_suspend(ready[i]);
             oxphp_task_resume_fiber(sched, ready[i], NULL);
+            resumed = 1;
         }
     }
 
-    return (int)sched->fiber_count;
+    return resumed;
 }
 
 int64_t oxphp_async_sched_poll_completed(void **out_retval,
