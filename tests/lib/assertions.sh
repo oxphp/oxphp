@@ -54,8 +54,35 @@ run_php_test() {
     else
         local status
         status=$(printf '%s' "$response" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',0))" 2>/dev/null)
-        printf '{"test":"%s","group":"%s","pass":false,"assertions":[],"error":"HTTP %s: non-JSON response","meta":{}}\n' \
-            "$test_name" "$group" "$status"
+        # An unreadable response is the one case where the body is the whole
+        # account of what happened — a PHP fatal, a rendered error page, or
+        # nothing at all when the request never came back. Reported as a bare
+        # status it has to be re-fetched by hand with curl, after the run that
+        # produced it is over. The body goes in through stdin, never into the
+        # python source: it is whatever the server chose to send.
+        local err_msg
+        err_msg=$(printf '%s' "$body" | python3 -c "
+import sys, json
+status = sys.argv[1] or '0'
+body = sys.stdin.read().strip()
+limit = 500
+if not body:
+    msg = 'HTTP %s: empty response body' % status
+else:
+    # The report prints this straight to a terminal, and the body is whatever
+    # the server sent: an escape sequence in it would repaint the run summary
+    # around it. Spelled as its codepoint it still says what arrived.
+    def shown(c):
+        if c in ('\n', '\t') or ' ' <= c <= '~' or c >= chr(160):
+            return c
+        return json.dumps(c)[1:-1]
+    excerpt = ''.join(shown(c) for c in body[:limit])
+    if len(body) > limit:
+        excerpt += '… (+%d chars)' % (len(body) - limit)
+    msg = 'HTTP %s: non-JSON response: %s' % (status, excerpt)
+print(json.dumps(msg))" "$status")
+        printf '{"test":"%s","group":"%s","pass":false,"assertions":[],"error":%s,"meta":{}}\n' \
+            "$test_name" "$group" "$err_msg"
     fi
 }
 
