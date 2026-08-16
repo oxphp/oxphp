@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('php_still_executes', 'routing');
 // In SPA mode PHP files should still execute normally.
 // The fact this file runs and produces a response proves PHP execution

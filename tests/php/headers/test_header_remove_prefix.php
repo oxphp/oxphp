@@ -17,7 +17,7 @@
 // a PHP_VERSION_ID < 80506 check — robust to any patch where the
 // signature first lands.
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('header_remove_prefix', 'headers');
 
 $rf = new ReflectionFunction('header_remove');

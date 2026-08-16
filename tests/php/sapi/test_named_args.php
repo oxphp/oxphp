@@ -1,6 +1,6 @@
 <?php
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('named_args', 'sapi');
 

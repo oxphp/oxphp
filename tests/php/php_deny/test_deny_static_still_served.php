@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('deny_static_still_served', 'php_deny');
 // Placeholder — runner hits /uploads/image.png and expects HTTP 200.

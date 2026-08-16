@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('path_info_split', 'pathinfo');
 // Runner hits: /tests/pathinfo/test_path_info_split.php/extra/path
 $t->assertKeyExists('PATH_INFO key exists', $_SERVER, 'PATH_INFO');

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('retry_after_header', 'ratelimit');
 // The runner verifies the Retry-After header on the 429 response.

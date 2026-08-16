@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('no_path_info', 'pathinfo');
 // Runner hits this file normally, with no extra path segments.
 // PATH_INFO must be absent from $_SERVER when there is no path info.

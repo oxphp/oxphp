@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('static_still_served', 'routing');
 // Runner-side test: the runner requests a static asset in framework mode
 // and verifies it is served correctly. This PHP file is a placeholder.

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('deny_status_403', 'php_deny');
 // Placeholder — runner hits /uploads/shell.php with PHP_DENY_FALLBACK=403

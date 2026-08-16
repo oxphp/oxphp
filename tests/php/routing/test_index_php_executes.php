@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('index_php_executes', 'routing');
 // Runner-side test: in framework mode a direct request to /index.php
 // is now rewritten onto the front controller (no longer 404). The

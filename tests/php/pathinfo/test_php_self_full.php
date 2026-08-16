@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('php_self_full', 'pathinfo');
 // Runner hits: /tests/pathinfo/test_php_self_full.php/extra/path
 // PHP_SELF should combine the script name with the path info.

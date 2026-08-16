@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('body_not_php', 'ratelimit');
 // The runner verifies that the 429 response body is not PHP output.

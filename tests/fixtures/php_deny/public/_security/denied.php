@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../tests/test_helper.php';
+require_once __DIR__ . '/../tests/test_helper.php';
 
 http_response_code(404);
 

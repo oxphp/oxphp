@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('deny_blocks_upload_shell', 'php_deny');
 // Placeholder — runner hits /uploads/shell.php and expects HTTP 404.

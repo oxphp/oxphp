@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 // A file input present in the form but with no file chosen (empty filename)
 // still produces a $_FILES entry — error=UPLOAD_ERR_NO_FILE, tmp_name="",

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 // Initial budget: 1 second. set_time_limit(10) re-arms SIGALRM to 10s, so
 // the 1.5-second sleep below — which would have busted the original budget —
