@@ -120,8 +120,20 @@ typedef struct {
      * worker. The close happens where the request ends
      * (oxphp_release_request_post_state), which is why the restore may drop
      * whatever stands in its place — that pointer belongs to a request that has
-     * already been ended, and ending it is what set this one's field to NULL. */
+     * already been ended, and ending it is what set this one's field to NULL.
+     *
+     * The two body fields travel as a pair and say different things. The pointer
+     * is what the engine reads and what the php://input handles opened on this
+     * body are matched against — an address comparison that never dereferences
+     * it. The resource is what says whether that address is still the body's:
+     * userland can reach the body through get_resources('stream') and close it,
+     * and the request must not then close it a second time. Held with a
+     * reference of its own while set, so the zend_resource cannot be freed or
+     * its handle recycled while a parked request still names it; the reference
+     * is given back where the body is released. See the ownership block above
+     * oxphp_close_input_wrappers_for() in ext/oxphp_fiber.c. */
     struct _php_stream *request_body;
+    zend_resource *request_body_res;
     int64_t read_post_bytes;
     unsigned char post_read;
 
@@ -589,6 +601,14 @@ void oxphp_reset_request_body_globals(void);
  * request rather than the start, because that is the only point at which the
  * fields in SG() are known to describe the request being ended. */
 void oxphp_release_request_post_state(void);
+
+/* Wrap and unwrap the two places a request body comes into being outside the
+ * rebuild above — sapi_module.read_post and the php:// wrapper's opener — so
+ * that every body is owned by the request that will have to release it.
+ * Installed once at MINIT on the startup thread, before any worker exists, and
+ * put back at MSHUTDOWN, like the runtime hooks. */
+void oxphp_request_body_hook_install(void);
+void oxphp_request_body_hook_restore(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
