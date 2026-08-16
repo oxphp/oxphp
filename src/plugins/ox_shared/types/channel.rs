@@ -281,6 +281,38 @@ pub enum TryRecvErr {
     WouldBlockEmpty,
 }
 
+/// Parked fiber send-waiters, together with the free slots that had nobody
+/// to hand themselves to.
+///
+/// Both live under one lock on purpose. Freeing a slot is an edge, and an
+/// edge signalled only to whoever is already parked is lost to a sender
+/// that is at that very moment on its way to park (its `try_send` failed
+/// while the channel was full, and it has not pushed its id yet). Every
+/// lost edge strands one sender permanently: the wake it needed is never
+/// re-issued, because the next wake belongs to the next freed slot. Banking
+/// the edge as a credit under the same lock leaves no window — either the
+/// freeing side finds the id, or the parking side finds the credit.
+///
+/// `close()` sweeps this list through the same lock, which is the third
+/// writer and the reason `register_send_waiter` decides on closure while
+/// holding it: the sweep happens once, so a sender that parked just after it
+/// would hold an id nobody resolves.
+#[derive(Default)]
+struct SendWaiters {
+    /// Synthetic-promise ids of parked senders, oldest first.
+    ids: SmallVec<[i64; 4]>,
+    /// Slots freed while `ids` was empty, each redeemable by the next
+    /// sender to park. This counts unclaimed frees, not free slots: a
+    /// credit is not spent when the room that produced it is taken again,
+    /// because the sender the room is owed to may park long after that —
+    /// which is the whole point of banking it. The channel's capacity is a
+    /// ceiling on the counter rather than a running total of anything; an
+    /// unbounded one would grow by one per recv on a workload with no
+    /// parked senders at all and then hand that entire backlog out as
+    /// stale retries.
+    credits: usize,
+}
+
 /// MPMC bounded channel state. Producers push via `tx`; consumers
 /// lock `rx` and pop. `pending` tracks queue depth for gauges and
 /// for `debug_snapshot`. Notify handles are plumbed so the fiber
@@ -299,7 +331,7 @@ pub struct ChannelInner {
     // consuming / closing thread. SmallVec inline cap 4 matches the
     // expected common case (a handful of fibers awaiting one channel).
     recv_waiters: Mutex<SmallVec<[i64; 4]>>,
-    send_waiters: Mutex<SmallVec<[i64; 4]>>,
+    send_waiters: Mutex<SendWaiters>,
     /// Front-stash for items popped from the buffer for a recv-waiter that
     /// turned out dead (cancelled mid-delivery). Every recv path drains
     /// this before the crossbeam buffer, so a re-parked item is preferred
@@ -353,7 +385,7 @@ impl ChannelInner {
             notify_recv: Arc::new(Notify::new()),
             notify_send: Arc::new(Notify::new()),
             recv_waiters: Mutex::new(SmallVec::new()),
-            send_waiters: Mutex::new(SmallVec::new()),
+            send_waiters: Mutex::new(SendWaiters::default()),
             recv_front: Mutex::new(SmallVec::new()),
             in_flight: Mutex::new(Vec::new()),
             senders_blocked: AtomicU32::new(0),
@@ -696,6 +728,14 @@ impl ChannelInner {
                 // woken receiver would find nothing and loop. Waking
                 // is reserved for actual buffer arrivals.
                 self.items_sent_total.fetch_add(1, Ordering::Relaxed);
+                // This send took no slot, so the room it found is still
+                // there — and a parked send-waiter is waiting for exactly
+                // that room. It is woken by slots being freed, and no slot
+                // was taken here, so nothing frees one on its behalf: for as
+                // long as the consumer stays parked, every further send
+                // reaches it directly and the buffer never fills. Hand the
+                // room on now.
+                self.wake_send_waiter_if_room();
                 return Ok(());
             }
             Some(p) => p,
@@ -1169,39 +1209,45 @@ impl ChannelInner {
     /// channel is closed, fail fast with a ClosedException rather than
     /// park (the sender would never be able to deposit the payload).
     pub fn register_send_waiter(&self, promise_id: i64) {
-        if self.is_closed() {
-            synthetic::resolve(
-                promise_id,
-                PromisePayload::Exception(
-                    "OxPHP\\Shared\\ClosedException".into(),
-                    "channel closed".into(),
-                ),
-            );
-            return;
-        }
+        // Everything that decides between parking and not parking happens
+        // under the waiter lock, because both events this id can miss are
+        // published under it:
+        //
+        // * a slot freed with nobody parked, banked as a credit — redeem it
+        //   and retry instead of parking on room that is already there. That
+        //   is the caller's own race: its `try_send` found the channel full
+        //   and a consumer emptied it in the window before the push below.
+        //   Redeeming carries the same contract a wake does, "retry your
+        //   try_send", so a channel that filled up again simply sends the
+        //   sender back here to park properly.
+        // * `close()`, which sweeps this list once and never again — a
+        //   sender that pushed after the sweep would hold an id nobody will
+        //   ever resolve, and `send()` arms no timer to fall back on.
+        //
+        // Whichever side runs second sees what the first left.
         {
             let mut waiters = self.send_waiters.lock();
-            waiters.push(promise_id);
+            if !self.is_closed() {
+                if waiters.credits > 0 {
+                    waiters.credits -= 1;
+                    drop(waiters);
+                    synthetic::resolve(promise_id, PromisePayload::Value(Vec::new(), None));
+                } else {
+                    waiters.ids.push(promise_id);
+                }
+                return;
+            }
         }
-        // Race cover, symmetric to the re-drain `register_recv_waiter` performs
-        // after its own push. A consumer that freed a slot between the caller's
-        // failed `try_send` and the push above ran
-        // `drain_one_send_waiter_on_slot_free` while this list was still empty,
-        // so nothing is left to wake this id: it would park until its timeout,
-        // and `send()` passes none, so for good. Re-check now that it is
-        // parked. Waking on a slot that is taken again before the sender
-        // retries is safe — the contract is "retry your try_send", and a
-        // sender that finds the channel full re-parks.
-        //
-        // The occupancy test is `pending` against capacity, not the crossbeam
-        // buffer's own fullness: a front-stashed item frees a buffer slot while
-        // remaining in the channel, and refilling that slot would put cap+1
-        // items in a channel of cap (see the bounce-overshoot tests). An item
-        // in the stash instead wakes the sender when it is genuinely consumed,
-        // from `pop_front_stash`.
-        if self.pending() < self.capacity() {
-            self.drain_one_send_waiter_on_slot_free();
-        }
+        // Closed. Either the sweep has already run — in which case parking
+        // would wait on a list nobody sweeps again — or it is queued behind
+        // this lock and will find the id absent. Tell the sender instead.
+        synthetic::resolve(
+            promise_id,
+            PromisePayload::Exception(
+                "OxPHP\\Shared\\ClosedException".into(),
+                "channel closed".into(),
+            ),
+        );
     }
 
     /// Pop one live recv-waiter and resolve it with `payload`. Returns
@@ -1258,17 +1304,52 @@ impl ChannelInner {
         }
     }
 
-    /// Pop one live send-waiter and wake it with an empty payload,
-    /// meaning "a slot freed; retry your send". Returns silently if no
-    /// live waiter exists.
+    /// Occupancy as the senders see it: buffered items plus front-stashed
+    /// ones. A stashed item frees a crossbeam slot while still counting as
+    /// being in the channel, so refilling that slot would put `cap + 1`
+    /// items in a channel of `cap`. Read from the containers themselves
+    /// rather than from `pending`, whose deposit-then-increment ordering
+    /// makes it briefly wrong in both directions.
+    fn occupancy(&self) -> usize {
+        self.tx.len() + self.recv_front.lock().len()
+    }
+
+    /// Hand the channel's free room to one parked send-waiter, for the
+    /// paths where room is left behind rather than freed: a send that
+    /// reached a parked receiver directly never occupied a slot, so the
+    /// "slot freed" edge those waiters wait on never fires.
+    ///
+    /// Room found with nobody parked is banked exactly as a freed slot is,
+    /// and for the same reason: the sender this room belongs to may be
+    /// mid-park — its `try_send` already failed against a channel that was
+    /// full at the time, and it has not pushed its id yet. Skipping the
+    /// bank because the list looks empty is what strands that sender, since
+    /// the parking side no longer re-tests occupancy either. The cost is a
+    /// wasted retry whenever the credit turns out stale — the sender is
+    /// resolved, finds the channel full again and parks anew — and a
+    /// channel can owe up to `capacity` of them at once.
+    fn wake_send_waiter_if_room(&self) {
+        if self.occupancy() < self.capacity {
+            self.drain_one_send_waiter_on_slot_free();
+        }
+    }
+
+    /// Pop one live send-waiter and wake it with an empty payload, meaning
+    /// "there is room; retry your send". Called both for a slot that was just
+    /// freed and, through [`wake_send_waiter_if_room`], for room a send left
+    /// untouched. With nobody parked to take it, the room is banked as a
+    /// credit for the next sender to park (see [`SendWaiters`]) — dropping it
+    /// there is what strands a sender that is mid-park, since the next wake
+    /// belongs to the next freed slot and never repays this one.
     fn drain_one_send_waiter_on_slot_free(&self) {
         loop {
             let id = {
                 let mut waiters = self.send_waiters.lock();
-                if waiters.is_empty() {
+                if waiters.ids.is_empty() {
+                    waiters.credits = (waiters.credits + 1).min(self.capacity);
                     return;
                 }
-                waiters.remove(0)
+                waiters.ids.remove(0)
             };
             if synthetic::resolve(id, PromisePayload::Value(Vec::new(), None)) {
                 return;
@@ -1374,7 +1455,15 @@ impl ChannelInner {
     fn cancel_all_send_waiters_with_closed(&self) {
         let drained: SmallVec<[i64; 4]> = {
             let mut waiters = self.send_waiters.lock();
-            std::mem::take(&mut *waiters)
+            // Only the ids need taking. Banked credits are left as they are,
+            // including any a `try_recv` draining the closed channel banks
+            // after this sweep: the one place that redeems them takes its
+            // closed decision under this same lock, and closure wins there,
+            // so nothing can spend one. That is also what makes this sweep
+            // enough despite running exactly once — a sender arriving later
+            // is told the channel is closed rather than parking on a list
+            // nobody will visit again.
+            std::mem::take(&mut waiters.ids)
         };
         for id in drained {
             synthetic::resolve(
@@ -3706,6 +3795,128 @@ mod tests {
         assert_eq!(ch.pending(), 0);
     }
 
+    /// Both fiber peers of a channel — senders that park on
+    /// `register_send_waiter`, a consumer that parks on
+    /// `register_recv_waiter` — driven at full speed over `cap = 1`, each
+    /// blocking on its synthetic promise the way a suspended fiber does.
+    ///
+    /// Guards two ways a parked sender used to be stranded for good, both
+    /// of which need contention to appear and neither of which loses a
+    /// message (the tell is a channel that ends up empty with senders still
+    /// parked on it):
+    ///
+    /// 1. A slot freed while the send-waiter list was momentarily empty —
+    ///    the sender's `try_send` had failed but its id was not pushed yet
+    ///    — signalled nobody, and nothing re-issued that wake afterwards.
+    ///    Now the freeing side banks a credit under the waiter lock and the
+    ///    parking side redeems it.
+    /// 2. A woken sender that then reached a parked *receiver* directly
+    ///    took no slot, so the room it was woken for was left behind with
+    ///    no further "slot freed" edge to pass it on. With the consumer
+    ///    parked from then on, every later send went straight to it and the
+    ///    buffer never filled again, so the remaining senders waited for an
+    ///    event that could no longer happen.
+    ///
+    /// A contention guard rather than a deterministic one — it caught the
+    /// second defect in 8 runs out of 10 before the fix, where
+    /// `register_send_waiter_fires_when_the_freed_slot_was_taken_again` and
+    /// `send_straight_to_a_receiver_passes_its_room_to_a_parked_sender`
+    /// further down pin one mechanism each every time. A stuck run reports
+    /// the channel's state instead of hanging the suite.
+    #[test]
+    fn fiber_senders_are_never_stranded_on_an_empty_channel() {
+        use crate::plugins::ox_async::synthetic;
+        use std::sync::atomic::AtomicUsize;
+
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        let producers = 4usize;
+        let per = 5000usize;
+        let n = producers * per;
+        // Every completed send and recv bumps this; the deadlock this test
+        // guards freezes it while threads are still alive.
+        let progress = std::sync::Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..producers {
+            let ch = ch.clone();
+            let progress = progress.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut sent = 0usize;
+                while sent < per {
+                    match ch.try_send(Payload::bytes_only(vec![7u8])) {
+                        Ok(()) => {
+                            sent += 1;
+                            progress.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(TrySendErr::Full(_)) => {
+                            // Park exactly as `invoke_channel_send` does.
+                            let (id, rx) = synthetic::alloc();
+                            ch.register_send_waiter(id);
+                            let r = rx.blocking_recv().expect("send waiter dropped");
+                            assert!(r.success, "send waiter rejected: {:?}", r.exception_message);
+                        }
+                        Err(TrySendErr::Closed(_)) => panic!("channel closed mid-run"),
+                    }
+                }
+            }));
+        }
+        {
+            let ch = ch.clone();
+            let progress = progress.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut got = 0usize;
+                while got < n {
+                    match ch.try_recv() {
+                        Ok(Some(_)) => {
+                            got += 1;
+                            progress.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(None) => panic!("channel closed mid-run"),
+                        Err(TryRecvErr::WouldBlockEmpty) => {
+                            // Park exactly as `invoke_channel_recv` does.
+                            let (id, rx) = synthetic::alloc();
+                            ch.register_recv_waiter(id);
+                            let r = rx.blocking_recv().expect("recv waiter dropped");
+                            assert!(r.success, "recv waiter rejected: {:?}", r.exception_message);
+                            // A recv-waiter is only ever resolved with the item
+                            // itself, never with the senders' empty "retry".
+                            assert!(r.serialized_value_len > 0, "empty recv payload");
+                            got += 1;
+                            progress.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }));
+        }
+
+        // Bounded join: a stranded waiter blocks its thread for good, so a
+        // plain `join` would hang the suite instead of reporting.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while handles.iter().any(|h| !h.is_finished()) {
+            if Instant::now() >= deadline {
+                let waiters = ch.send_waiters.lock();
+                panic!(
+                    "stranded after {} of {} events: pending={} buffered={} stashed={} \
+                     send_waiters={} send_credits={} recv_waiters={} closed={}",
+                    progress.load(Ordering::Relaxed),
+                    2 * n,
+                    ch.pending(),
+                    ch.tx.len(),
+                    ch.recv_front.lock().len(),
+                    waiters.ids.len(),
+                    waiters.credits,
+                    ch.recv_waiters.lock().len(),
+                    ch.is_closed(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        for h in handles {
+            h.join().expect("worker thread");
+        }
+        assert_eq!(progress.load(Ordering::Relaxed), 2 * n);
+    }
+
     #[tokio::test]
     async fn register_send_waiter_fires_on_try_recv() {
         use crate::plugins::ox_async::synthetic;
@@ -3794,6 +4005,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn register_send_waiter_fires_when_the_freed_slot_was_taken_again() {
+        // Same park-vs-slot-free race as the test above, but with the freed
+        // slot already taken again by the time the sender parks — the shape
+        // several producers on one channel produce constantly.
+        //
+        // Testing the channel for room at park time cannot see this: the
+        // channel is legitimately full again. The wake is still owed, though,
+        // because the slot that freed reached nobody, and the item now
+        // occupying it will free exactly one slot and hand it to exactly one
+        // waiter — never two. Every such swallowed edge strands one sender.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+
+        // The sender's own try_send fails — the channel is full.
+        assert!(matches!(
+            ch.try_send(Payload::bytes_only(vec![2])),
+            Err(TrySendErr::Full(_))
+        ));
+
+        // A consumer frees the slot inside the window, before the sender has
+        // parked, and a second producer takes it straight away.
+        let _ = ch.try_recv().unwrap();
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
+        assert_eq!(ch.pending(), 1, "the channel is full again");
+
+        let (id, rx) = synthetic::alloc();
+        ch.register_send_waiter(id);
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("send-waiter was never repaid the slot that freed while it parked")
+            .unwrap();
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 0);
+    }
+
+    #[tokio::test]
+    async fn send_straight_to_a_receiver_passes_its_room_to_a_parked_sender() {
+        // A send that reaches a parked receiver directly never occupies a
+        // slot. The room it was given therefore stays free — and the senders
+        // parked on that room wait for a "slot freed" edge that can no longer
+        // happen, because nothing is in the buffer to free. With a consumer
+        // that stays parked (it outruns the producers), every later send takes
+        // the same direct route and the stranding is permanent.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+
+        // Two senders park on the full channel.
+        let (s1, rx1) = synthetic::alloc();
+        let (s2, rx2) = synthetic::alloc();
+        ch.register_send_waiter(s1);
+        ch.register_send_waiter(s2);
+
+        // The consumer frees the slot: one wake, to the first parked sender.
+        let _ = ch.try_recv().unwrap();
+        assert!(rx1.await.unwrap().success, "first sender takes the slot");
+
+        // The consumer now parks — from here on it is always the fastest.
+        let (r1, rrx) = synthetic::alloc();
+        ch.register_recv_waiter(r1);
+
+        // The woken sender retries and reaches the parked receiver directly,
+        // so the buffer stays empty and no slot is consumed.
+        ch.try_send(Payload::bytes_only(vec![2])).unwrap();
+        assert!(rrx.await.unwrap().success, "receiver got the item directly");
+        assert_eq!(ch.pending(), 0, "nothing landed in the buffer");
+
+        // The second sender must be handed that untouched room.
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx2)
+            .await
+            .expect("sender left parked on a channel that is empty and open")
+            .unwrap();
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 0);
+    }
+
+    #[tokio::test]
+    async fn room_left_behind_reaches_a_sender_that_was_still_on_its_way_to_park() {
+        // The two ways room appears — a slot freed, and a slot left unused by
+        // a send that went straight to a receiver — must both be remembered
+        // when they find nobody parked. A sender is only "not parked" for the
+        // few instructions between its failed `try_send` and its push, and
+        // that is exactly the sender the room belongs to: it asked, was told
+        // the channel was full, and everything after that happens behind its
+        // back.
+        //
+        // Unlike its two neighbours this shape did not strand anyone before
+        // the fix: parking used to re-test the channel for room, and here the
+        // room is still there to be found. It guards the rule that replaced
+        // that re-test — room that finds an empty list is banked rather than
+        // dropped. Peeking at the list first and skipping the bank, which
+        // saves a wasted retry whenever nobody is on their way, strands this
+        // sender for good.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+
+        let (s1, rx1) = synthetic::alloc();
+        ch.register_send_waiter(s1);
+
+        // The second sender's own try_send fails here. From now until its
+        // push it is invisible to every wake.
+        assert!(matches!(
+            ch.try_send(Payload::bytes_only(vec![2])),
+            Err(TrySendErr::Full(_))
+        ));
+
+        // A consumer frees the slot. The first sender is parked, so it takes
+        // the wake and nothing is banked.
+        let _ = ch.try_recv().unwrap();
+        assert!(rx1.await.unwrap().success, "parked sender takes the wake");
+
+        // The consumer parks; from here it is always the faster side.
+        let (r, rrx) = synthetic::alloc();
+        ch.register_recv_waiter(r);
+
+        // The woken sender retries and reaches the receiver directly, using
+        // no slot — so the room is still free, and this is the last event the
+        // channel will produce on its own.
+        ch.try_send(Payload::bytes_only(vec![3])).unwrap();
+        assert!(rrx.await.unwrap().success, "receiver got the item directly");
+        assert_eq!(ch.occupancy(), 0, "the room was never taken");
+
+        // Only now does the second sender park. It must find that room.
+        let (s2, rx2) = synthetic::alloc();
+        ch.register_send_waiter(s2);
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx2)
+            .await
+            .expect("sender that parked after the room appeared was never told")
+            .unwrap();
+        assert!(got.success);
+        assert_eq!(got.serialized_value_len, 0);
+    }
+
+    #[tokio::test]
     async fn register_send_waiter_cancelled_with_closed_on_close() {
         use crate::plugins::ox_async::synthetic;
         let ch = std::sync::Arc::new(ChannelInner::new(1));
@@ -3806,6 +4155,61 @@ mod tests {
         assert_eq!(
             got.exception_class.as_deref(),
             Some("OxPHP\\Shared\\ClosedException")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sender_parking_as_the_channel_closes_is_told_that_it_closed() {
+        // `close()` sweeps the send-waiter list exactly once. An id pushed
+        // after that sweep is one nobody will ever resolve, and `send()` arms
+        // no timer to fall back on — the fiber waits for the life of the
+        // process on a channel that will never take its value. The test above
+        // parks before the close and so never enters that window.
+        //
+        // The window is the sender's own: between deciding to park and being
+        // on the list. The waiter lock is the last thing it takes on that
+        // path, so holding the lock holds the sender exactly there, whatever
+        // it read before reaching for it. Closure is then performed inline —
+        // the flag, then the single sweep of this list, in the order `close()`
+        // does them — because `close()` itself would block on the lock that is
+        // holding the sender.
+        use crate::plugins::ox_async::synthetic;
+        let ch = std::sync::Arc::new(ChannelInner::new(1));
+        ch.try_send(Payload::bytes_only(vec![1])).unwrap();
+
+        let (id, rx) = synthetic::alloc();
+        let parking = {
+            let mut waiters = ch.send_waiters.lock();
+            let parking = {
+                let ch = ch.clone();
+                std::thread::spawn(move || ch.register_send_waiter(id))
+            };
+            // Give it time to reach the lock: whatever it reads before taking
+            // it, it has read by now.
+            std::thread::sleep(Duration::from_millis(50));
+
+            ch.closed.store(true, Ordering::Release);
+            let swept = std::mem::take(&mut waiters.ids);
+            assert!(
+                swept.is_empty(),
+                "the sweep must find nobody — the sender has not pushed its id yet"
+            );
+            parking
+        };
+
+        parking.join().expect("parking thread");
+        let got = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("sender that parked after the close sweep was never resolved")
+            .unwrap();
+        assert!(!got.success);
+        assert_eq!(
+            got.exception_class.as_deref(),
+            Some("OxPHP\\Shared\\ClosedException")
+        );
+        assert!(
+            ch.send_waiters.lock().ids.is_empty(),
+            "nothing may be left on a list that is never swept again"
         );
     }
 
@@ -3967,8 +4371,9 @@ mod tests {
         ch.bump_pending();
         // Only now park the send-waiter, which is the order production
         // produces: a sender parks because its `try_send` found the channel
-        // full. Parking against a full channel also makes `register_send_waiter`
-        // leave it parked, so what the drain below does is observable.
+        // full. It stays parked because no free slot has been banked for it —
+        // nothing has been taken out of this channel yet — which is what makes
+        // the drain below the only thing that could wake it.
         let (sid, mut srx) = synthetic::alloc();
         ch.register_send_waiter(sid);
         // Drain: the item bounces to the front-stash. The send-waiter must
@@ -4009,9 +4414,10 @@ mod tests {
         ch.push_front_stash(Payload::bytes_only(vec![0xAA]));
         assert_eq!(ch.pending(), 1);
         // Park the send-waiter against the now-occupied channel, the order
-        // production produces — a stashed item counts towards occupancy, so
-        // `register_send_waiter` leaves it parked and the drain below is what
-        // the assertions observe.
+        // production produces. It stays parked because no free slot has been
+        // banked for it — the item was stashed directly and nothing has been
+        // taken out of this channel — so the drain below is what the
+        // assertions observe.
         let (sid, mut srx) = synthetic::alloc();
         ch.register_send_waiter(sid);
         // Drain: stash item is taken for the dead waiter and re-stashed. The
