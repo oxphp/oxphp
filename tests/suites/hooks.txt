@@ -200,6 +200,16 @@ hooks/test_parse_diag_tick_path
 # throws rather than returns. One request must end, and only that one.
 hooks/test_parse_throw_ends_only_its_request >> ?probe=outer
 
+# What a fatal costs the worker it happened on. A pair, in order: the first line
+# seeds the worker's shared state and then fatals repeatedly, the second reads
+# the state back from a request of its own — which is the only place the loss
+# shows, since the request doing the fatals holds the value up while it runs.
+# Deliberately after the tests above rather than before them: on a build that
+# gets this wrong the state is gone from here on, which would then read as a
+# failure of whatever ran next.
+hooks/test_shared_state_survives_fatals >> ?phase=drain
+hooks/test_shared_state_survives_fatals >> ?phase=check
+
 # Last in this profile, and it has to stay last. The first of the two lines
 # turns OPcache off, and a worker cannot turn it back on — only OPcache's own
 # per-request startup does that, and a worker runs it once. So from here on this

@@ -25,6 +25,7 @@
 
 struct _oxphp_fiber_scheduler;
 struct oxphp_io_reg;
+struct _php_stream;
 
 /* Which fiber, and which of its descriptors, a readiness registration belongs
  * to — so an event can be scattered back into that fiber's own descriptor
@@ -280,6 +281,25 @@ typedef struct _oxphp_request_fiber {
         } io;
     } suspend_data;
 
+    /* The socket stream this fiber is parked inside an operation on, and whether
+     * anything freed it while it waited.
+     *
+     * A read that parks holds the php_stream and its php_netstream_data_t in a C
+     * frame across the suspension, and the worker goes on running other fibers on
+     * the same thread — one of which can close that very stream when the
+     * connection is shared, which is the ordinary shape in worker mode. PHP then
+     * frees both structs, and everything the resumed frame would do next, its
+     * return to php_stream_read() included, reads memory that is gone.
+     *
+     * Kept on the fiber rather than in the parked frame on purpose: an unwind out
+     * of the wait (a drain kill bails uncatchably) walks past that frame without
+     * running anything in it, so a registration living there could not be taken
+     * back. The fiber outlives every such exit and is cleared at the end of its
+     * request. Borrowed, never dereferenced — only compared, so a stale value can
+     * name freed memory without reading it. */
+    struct _php_stream *io_stream;
+    bool io_stream_closed;
+
     /* The zend_fcall_info/cache for the handler closure (shared, not owned) */
     zend_fcall_info *fci;
     zend_fcall_info_cache *fcc;
@@ -529,6 +549,14 @@ bool oxphp_io_park(oxphp_request_fiber *fiber, struct pollfd *fds,
 /* Stop watching them. Reads the set off the fiber, so it must run before the
  * suspension data is cleared. */
 void oxphp_io_unpark(oxphp_request_fiber *fiber);
+
+/* Report every descriptor an IO_WAIT-suspended fiber holds as unusable, so the
+ * next tick resumes it instead of leaving it to its deadline. For the one event
+ * readiness cannot deliver: closing a descriptor removes it from the readiness
+ * instance without a word, so a fiber parked on a stream someone else closed
+ * would otherwise wait out a timeout its connection will never answer — a day,
+ * with mysqlnd's default. A no-op on a fiber suspended for any other reason. */
+void oxphp_fiber_wake_io(oxphp_request_fiber *fiber);
 
 /* ─── Which fiber a connection belongs to ─────────────────
  * Keeps one fiber's exchange on a connection out of another's while the first is

@@ -34,6 +34,7 @@
 #include <stdatomic.h>
 #include <time.h>
 #include <poll.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
@@ -1630,8 +1631,11 @@ static void oxphp_hook_restore(const char *name, size_t name_len, zif_handler or
 /* ─── Hooked socket reads (category "streams") ───────────────
  * php_sockop_read() parks the calling thread inside php_pollfd_for() whenever a
  * blocking socket stream has no data yet. It is reached through
- * php_stream_socket_ops — the ops table every tcp:// stream carries — so
- * replacing that one entry is enough to make fsockopen(),
+ * php_stream_socket_ops — PHP's own socket table, which is what a tcp:// stream
+ * ends up reading through whether or not it carries that table itself: with
+ * ext/openssl loaded the tcp transport is openssl's, and its read and write ops
+ * delegate straight into this one. So replacing that one entry is enough to make
+ * fsockopen(),
  * stream_socket_client() and everything layered on php_streams (mysqlnd and
  * phpredis included) suspend the current fiber instead of pinning the worker
  * thread while waiting for an answer.
@@ -1809,13 +1813,13 @@ static bool oxphp_sock_would_wait(const php_netstream_data_t *sock)
  * `php_stream` and lives until its owner's request ends, while the stream itself
  * can be closed long before that: PHP frees the struct, the allocator hands the
  * same address to the next stream, and the entry would then answer for a
- * connection it has nothing to do with. There is no reliable moment to erase it —
- * the close op of the table these streams actually carry is not ours to see, since
- * with ext/openssl loaded (and it always is) the tcp transport is openssl's and
- * its close never delegates to PHP's own. So the question is asked of the owner
- * rather than of the entry, and a stale entry cannot pass it: whatever the old
- * owner is doing, it is not waiting on the descriptor of a stream that no longer
- * exists.
+ * connection it has nothing to do with. The close hook does erase the entry, and
+ * on every table these streams really carry, but it is not the whole answer: a
+ * table first seen after a stream was already opened on it, or a free that never
+ * reaches an ops->close at all, would still leave one behind. So the question is
+ * asked of the owner rather than of the entry, and a stale entry cannot pass it:
+ * whatever the old owner is doing, it is not waiting on the descriptor of a
+ * stream that no longer exists.
  *
  * Read off the fiber itself rather than the scheduler's descriptor registry: a
  * parked fiber's suspension data is filled in by the frame it is parked in, so it
@@ -1879,6 +1883,12 @@ static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
     return OXPHP_CLAIM_OK;
 }
 
+/* Defined below, with the rest of the ops-table patching: make sure the close
+ * hook is installed on the table this stream really carries, and find the
+ * original close for a table it was installed on. */
+static void oxphp_note_stream_ops(php_stream *stream);
+static int (*oxphp_orig_close_for(const php_stream_ops *table))(php_stream *, int);
+
 static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t count)
 {
     php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
@@ -1888,6 +1898,11 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
      * fiber's exchange put them there, so handing them to another one is the
      * same defect as reading them off the wire. */
     if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+        /* Whichever table this stream carries has to route its close through the
+         * hook before the read below can park on it — the close is the only
+         * warning a parked fiber gets that the stream is being freed. */
+        oxphp_note_stream_ops(stream);
+
         oxphp_stream_claim_result claim =
             oxphp_stream_claim(stream, sock, oxphp_current_fiber);
         if (claim == OXPHP_CLAIM_BUSY) {
@@ -1927,7 +1942,40 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
             .revents = 0,
         };
         struct oxphp_io_owner owner;
+
+        /* Say which stream this fiber is about to be parked inside an operation
+         * on, so the close hook can find it. Kept on the fiber and not here
+         * because this frame is not run again on every way out of the wait: a
+         * drain kill bails past it. */
+        oxphp_request_fiber *self = oxphp_current_fiber;
+        self->io_stream = stream;
+        self->io_stream_closed = false;
+
         int rc = oxphp_fiber_io_wait(&pfd, &owner, 1, budget_ns);
+
+        /* First, before rc, before `sock`, and before returning anywhere: if the
+         * stream was closed while this fiber waited, both it and its
+         * php_netstream_data_t have been freed, and so has everything the frames
+         * above would go on to read. Returning a value is not an option —
+         * php_stream_read() reads the stream again after this hook hands control
+         * back — so the only safe exit is the one that does not pass through
+         * those frames at all. E_ERROR unwinds to the coroutine's own zend_try:
+         * this request ends with a 500, the worker keeps serving.
+         *
+         * Checked even for an unwind that already has an exception pending, since
+         * that one would return through the same freed frames. */
+        bool stream_gone = self->io_stream_closed;
+        self->io_stream = NULL;
+        self->io_stream_closed = false;
+        if (stream_gone) {
+            zend_error(E_ERROR,
+                       "oxphp: the connection this request was reading from was closed by "
+                       "another fiber while this one waited for its reply. One connection "
+                       "is shared between concurrent fibers, and the read cannot be "
+                       "completed or reported on a connection that no longer exists");
+            /* not reached */
+        }
+
         if (rc == OXPHP_FIBER_UNWIND) {
             /* Unwinding with an exception already pending — return the read's
              * error value and add nothing of our own. */
@@ -2015,6 +2063,11 @@ static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, si
     php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
 
     if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+        /* Here as well as in the read hook: a command written on a connection is
+         * normally the first thing a fiber does with it, so this is where a
+         * transport's table is usually seen first. */
+        oxphp_note_stream_ops(stream);
+
         oxphp_stream_claim_result claim =
             oxphp_stream_claim(stream, sock, oxphp_current_fiber);
         if (claim == OXPHP_CLAIM_BUSY) {
@@ -2033,28 +2086,45 @@ static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, si
     return oxphp_orig_sockop_write(stream, buf, count);
 }
 
-/* Hooked socket close: bookkeeping only. A claim names the php_stream, and the
- * allocator is free to hand that address to the next stream, so the entry has to
- * go when the stream it names does. Forgotten before delegating, so that an early
- * return inside the original handler cannot skip it. */
-static int (*oxphp_orig_sockop_close)(php_stream *, int) = NULL;
-
+/* Hooked socket close, and the one place a fiber parked inside a read on this
+ * stream can be told that the memory it is parked on is about to be freed.
+ *
+ * Two things happen here, and both are about a php_stream address outliving the
+ * stream: the claim naming it has to go, because the allocator hands that address
+ * to the next stream; and a fiber suspended inside a read on it has to be woken
+ * and marked, because everything it would do on resuming — its own frame, and
+ * php_stream_read() above it — reads the struct this call is about to free.
+ *
+ * Delegation goes through the table the stream carries rather than one saved
+ * pointer: this hook is installed on more than one ops table (see the capture
+ * below), and each has its own original. */
 static int oxphp_hooked_sockop_close(php_stream *stream, int close_handle)
 {
-    /* Before delegating, so an early return inside the original handler cannot skip
-     * it. Best-effort only: in any build with ext/openssl the tcp transport is
-     * openssl's and its close does not delegate here, so this fires for streams
-     * that do carry PHP's own table (an accepted connection inherits its
-     * listener's ops) and not for a mysqlnd or phpredis connection. Nothing
-     * depends on it — a claim outliving its stream is answered by asking the owner
-     * what it is waiting for, not by trusting the entry. */
+    /* Before delegating, so an early return inside the original handler cannot
+     * skip either of them. */
+    oxphp_request_fiber *owner = oxphp_claim_owner(stream);
+    if (owner != NULL && owner->io_stream == stream) {
+        owner->io_stream_closed = true;
+        /* Closing a descriptor drops it from the readiness instance silently, so
+         * nothing else will ever release this fiber: without this it would sit
+         * out its stream's timeout — a day, at mysqlnd's default — on a
+         * connection that cannot answer. The owner is on this thread by
+         * construction: the claim table is thread-local. */
+        oxphp_fiber_wake_io(owner);
+    }
     oxphp_claim_forget(stream);
-    return oxphp_orig_sockop_close(stream, close_handle);
-}
 
-/* Protection the page holding php_stream_socket_ops carried before the patch,
- * so it can be put back exactly. -1 = not captured. */
-static int oxphp_socket_ops_prot = -1;
+    int (*orig)(php_stream *, int) = oxphp_orig_close_for(stream->ops);
+    if (orig == NULL) {
+        /* Unreachable: this handler only sits in tables the capture recorded an
+         * original for. Returning "closed" without closing would leak the
+         * descriptor, so say what happened instead of pretending. */
+        php_log_err("oxphp: no original close handler recorded for a socket stream ops "
+                    "table; the connection is left open");
+        return EOF;
+    }
+    return orig(stream, close_handle);
+}
 
 /* Read a mapping's current protection out of /proc/self/maps. The table is
  * const and normally lands in .data.rel.ro, which the loader maps read-only
@@ -2086,47 +2156,206 @@ static int oxphp_page_protection(uintptr_t addr)
     return prot;
 }
 
-static bool oxphp_socket_ops_protect(int prot)
+static bool oxphp_ops_protect(const php_stream_ops *table, int prot)
 {
     long page_size = sysconf(_SC_PAGESIZE);
     if (page_size <= 0) return false;
 
-    uintptr_t addr = (uintptr_t) &php_stream_socket_ops;
+    uintptr_t addr = (uintptr_t) table;
     uintptr_t start = addr & ~((uintptr_t) page_size - 1);
     size_t len = (addr + sizeof(php_stream_ops)) - start;
 
     return mprotect((void *) start, len, prot) == 0;
 }
 
+/* Restore the protection a table's page was found with. If it could not be read,
+ * leave the page writable rather than guess: the patch itself has already
+ * succeeded and nothing about correctness depends on the page being read-only
+ * again. Both outcomes are logged — a page of function pointers staying writable
+ * weakens RELRO, which an operator should learn from the log and not from a
+ * memory dump. */
+static void oxphp_ops_reprotect(const php_stream_ops *table, int prot)
+{
+    if (prot < 0) {
+        php_log_err("oxphp: could not read the original memory protection of a stream "
+                    "ops table (/proc/self/maps unavailable); the page stays writable "
+                    "after installing the socket hooks");
+    } else if (!oxphp_ops_protect(table, prot)) {
+        php_log_err("oxphp: could not restore memory protection on a stream ops "
+                    "table after installing the socket hooks; the page stays writable");
+    }
+}
+
+/* Install the close hook wherever the streams being read actually carry it.
+ *
+ * PHP's own php_stream_socket_ops is patched at startup, but with ext/openssl
+ * loaded — and it always is — the tcp transport belongs to openssl, and a plain
+ * tcp:// stream carries openssl's table instead. That table delegates read and
+ * write back into php_stream_socket_ops, which is why the read hook is reached at
+ * all, but its close does not delegate: it frees the socket itself. So a hook that
+ * only sits in PHP's table never learns that any real connection was closed.
+ *
+ * Openssl's table is `static const` in its own object, so it cannot be named at
+ * startup. It can be seen, though, from inside the read and write hooks, where
+ * `stream->ops` is whatever the stream really carries — and that is where it is
+ * captured, once per table, and patched the same way PHP's own was.
+ *
+ * The array is fixed and tiny because the set is: PHP's table, and one per
+ * transport implementation that delegates into it. */
+#define OXPHP_MAX_PATCHED_OPS 4
+
+static struct {
+    php_stream_ops *table;
+    int (*orig_close)(php_stream *, int);
+    int prot;
+} oxphp_patched_ops[OXPHP_MAX_PATCHED_OPS];
+
+/* Written under the mutex, read without one. A reader either sees a table this
+ * has not reached yet — the close is then the original, and a parked fiber goes
+ * unmarked exactly as it did before any of this existed — or one it has, in which
+ * case the entry it needs was published before the slot that leads to it. */
+static _Atomic(uint32_t) oxphp_patched_ops_count = 0;
+static pthread_mutex_t oxphp_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Raised once the array is full, and never lowered: a transport that did not fit
+ * will not fit later either. Read on the hot path so those streams stop asking. */
+static atomic_bool oxphp_patch_ops_full = false;
+
+/* Look `table` up in the part of the registry the caller has already acquired.
+ * The count is passed in rather than read here because that read is what makes
+ * the entries below it safe to look at at all: a capture fills its entry before
+ * releasing the count, so whoever acquired the count sees a finished entry.
+ * Entries at or above it may still be under construction and are not touched. */
+static int oxphp_patched_ops_find(const php_stream_ops *table, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (oxphp_patched_ops[i].table == table) return (int) i;
+    }
+    return -1;
+}
+
+static int (*oxphp_orig_close_for(const php_stream_ops *table))(php_stream *, int)
+{
+    uint32_t n = atomic_load_explicit(&oxphp_patched_ops_count, memory_order_acquire);
+    int found = oxphp_patched_ops_find(table, n);
+    if (found >= 0) return oxphp_patched_ops[found].orig_close;
+
+    /* Nothing yet — which can mean a table nothing ever patched, or one being
+     * patched on another thread at this instant: the slot that routes calls here
+     * is written inside the lock, so a close arriving between that write and the
+     * count that publishes it would find nothing and have to answer without
+     * knowing how to close anything. Taking the lock settles which of the two it
+     * is, and only ever on this path. */
+    pthread_mutex_lock(&oxphp_patch_lock);
+    n = atomic_load_explicit(&oxphp_patched_ops_count, memory_order_relaxed);
+    found = oxphp_patched_ops_find(table, n);
+    int (*orig)(php_stream *, int) = found >= 0 ? oxphp_patched_ops[found].orig_close : NULL;
+    pthread_mutex_unlock(&oxphp_patch_lock);
+
+    return orig;
+}
+
+/* Take over `table`'s close slot. Idempotent, and safe to call from any worker
+ * thread: the table is shared by every one of them, so the whole read-modify-write
+ * runs under the mutex and the count — the only thing a reader consults without
+ * it — is published last. */
+static void oxphp_capture_close_ops(const php_stream_ops *table)
+{
+    php_stream_ops *writable = (php_stream_ops *) (uintptr_t) table;
+
+    pthread_mutex_lock(&oxphp_patch_lock);
+
+    uint32_t n = atomic_load_explicit(&oxphp_patched_ops_count, memory_order_relaxed);
+    if (oxphp_patched_ops_find(writable, n) >= 0) {
+        pthread_mutex_unlock(&oxphp_patch_lock); /* another thread was first */
+        return;
+    }
+
+    /* Both failures below are said once for the life of the process, from under
+     * the lock: they are reached at most once each, and a log line on a path
+     * taken once is not worth a second pair of flags outside it. */
+    if (n == OXPHP_MAX_PATCHED_OPS) {
+        atomic_store_explicit(&oxphp_patch_ops_full, true, memory_order_relaxed);
+        static atomic_flag warned_full = ATOMIC_FLAG_INIT;
+        if (!atomic_flag_test_and_set(&warned_full)) {
+            php_log_err("oxphp: more socket transports are in use than the close hook has "
+                        "room for; on the streams of the transport that did not fit, a "
+                        "connection closed while another request is parked reading it frees "
+                        "memory that request goes on to use");
+        }
+    } else {
+        int prot = oxphp_page_protection((uintptr_t) writable);
+        if (oxphp_ops_protect(writable, PROT_READ | PROT_WRITE)) {
+            oxphp_patched_ops[n].table = writable;
+            oxphp_patched_ops[n].orig_close = writable->close;
+            oxphp_patched_ops[n].prot = prot;
+            /* The entry is complete before anything can be routed to it, and the
+             * slot is published before the count that makes it visible. */
+            writable->close = oxphp_hooked_sockop_close;
+            atomic_store_explicit(&oxphp_patched_ops_count, n + 1, memory_order_release);
+
+            oxphp_ops_reprotect(writable, prot);
+        } else {
+            static atomic_flag warned_ro = ATOMIC_FLAG_INIT;
+            if (!atomic_flag_test_and_set(&warned_ro)) {
+                php_log_err("oxphp: a socket transport's stream ops table could not be made "
+                            "writable; on its streams, a connection closed while another "
+                            "request is parked reading it frees memory that request goes on "
+                            "to use");
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&oxphp_patch_lock);
+}
+
+/* Called from the read and write hooks for a stream whose table has not been
+ * seen. Split from the capture so the hot path is a load and a walk of at most
+ * four pointers, with no lock on it.
+ *
+ * "Has been seen" is asked of the registry rather than of the table's own close
+ * slot, which would be the shorter question: that slot is written on whichever
+ * thread captures the table, and reading it here without synchronisation is a
+ * data race by the letter of the standard even where no machine reorders an
+ * aligned pointer. The registry answers the same question through the count,
+ * which is published for exactly this.
+ *
+ * Once the registry is full it stays full, and the streams of whatever transport
+ * did not fit would otherwise take the process-wide patch lock on every read and
+ * write for the life of the process — turning a capacity that was exceeded into
+ * a point every worker thread queues at. */
+static void oxphp_note_stream_ops(php_stream *stream)
+{
+    uint32_t n = atomic_load_explicit(&oxphp_patched_ops_count, memory_order_acquire);
+    if (oxphp_patched_ops_find(stream->ops, n) >= 0) return;
+    if (atomic_load_explicit(&oxphp_patch_ops_full, memory_order_relaxed)) return;
+    oxphp_capture_close_ops(stream->ops);
+}
+
 static bool oxphp_hook_socket_ops(void)
 {
     php_stream_ops *ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
 
-    oxphp_socket_ops_prot = oxphp_page_protection((uintptr_t) ops);
-    if (!oxphp_socket_ops_protect(PROT_READ | PROT_WRITE)) {
+    int prot = oxphp_page_protection((uintptr_t) ops);
+    if (!oxphp_ops_protect(ops, PROT_READ | PROT_WRITE)) {
         return false;
     }
     oxphp_orig_sockop_read = ops->read;
     ops->read = oxphp_hooked_sockop_read;
     oxphp_orig_sockop_write = ops->write;
     ops->write = oxphp_hooked_sockop_write;
-    oxphp_orig_sockop_close = ops->close;
-    ops->close = oxphp_hooked_sockop_close;
 
-    /* Restore the protection we found. If it could not be read, leave the page
-     * writable rather than guess: the patch itself has already succeeded and
-     * nothing about correctness depends on the page being read-only again. Both
-     * outcomes are logged — a page of function pointers staying writable weakens
-     * RELRO, which an operator should learn from the log and not from a memory
-     * dump. */
-    if (oxphp_socket_ops_prot < 0) {
-        php_log_err("oxphp: could not read the original memory protection of the stream "
-                    "ops table (/proc/self/maps unavailable); the page stays writable "
-                    "after installing the socket hooks");
-    } else if (!oxphp_socket_ops_protect(oxphp_socket_ops_prot)) {
-        php_log_err("oxphp: could not restore memory protection on the stream ops "
-                    "table after installing the socket hooks; the page stays writable");
-    }
+    /* Through the same table as every later capture, so close has one route out
+     * whichever table the call arrived on. Startup is single-threaded, but the
+     * count is still published with a release store: the worker threads that read
+     * it are started afterwards and only ever see it through this. */
+    oxphp_patched_ops[0].table = ops;
+    oxphp_patched_ops[0].orig_close = ops->close;
+    oxphp_patched_ops[0].prot = prot;
+    ops->close = oxphp_hooked_sockop_close;
+    atomic_store_explicit(&oxphp_patched_ops_count, 1, memory_order_release);
+
+    oxphp_ops_reprotect(ops, prot);
     return true;
 }
 
@@ -2134,19 +2363,41 @@ static void oxphp_restore_socket_ops(void)
 {
     if (oxphp_orig_sockop_read == NULL) return;
 
-    php_stream_ops *ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
-    if (oxphp_socket_ops_protect(PROT_READ | PROT_WRITE)) {
-        ops->read = oxphp_orig_sockop_read;
-        ops->write = oxphp_orig_sockop_write;
-        ops->close = oxphp_orig_sockop_close;
-        if (oxphp_socket_ops_prot >= 0) {
-            oxphp_socket_ops_protect(oxphp_socket_ops_prot);
+    php_stream_ops *php_ops = (php_stream_ops *) (uintptr_t) &php_stream_socket_ops;
+
+    /* Every table this took a close slot from, PHP's own included — and PHP's own
+     * is in there like any other, so the read and write slots it is the only
+     * table to have lost go back inside the same visit rather than through a
+     * second round of mprotect over the same page. Module shutdown runs before
+     * any extension is unloaded, so the pages captured from other extensions are
+     * still mapped here.
+     *
+     * Under the same lock the capture holds, because emptying the registry is the
+     * one write to it that is not a capture, and the close hook consults it under
+     * that lock when its own lock-free scan comes up empty. */
+    pthread_mutex_lock(&oxphp_patch_lock);
+    uint32_t n = atomic_load_explicit(&oxphp_patched_ops_count, memory_order_relaxed);
+    for (uint32_t i = 0; i < n; i++) {
+        php_stream_ops *table = oxphp_patched_ops[i].table;
+        if (oxphp_ops_protect(table, PROT_READ | PROT_WRITE)) {
+            table->close = oxphp_patched_ops[i].orig_close;
+            if (table == php_ops) {
+                table->read = oxphp_orig_sockop_read;
+                table->write = oxphp_orig_sockop_write;
+            }
+            if (oxphp_patched_ops[i].prot >= 0) {
+                oxphp_ops_protect(table, oxphp_patched_ops[i].prot);
+            }
         }
+        oxphp_patched_ops[i].table = NULL;
+        oxphp_patched_ops[i].orig_close = NULL;
+        oxphp_patched_ops[i].prot = -1;
     }
+    atomic_store_explicit(&oxphp_patched_ops_count, 0, memory_order_release);
+    pthread_mutex_unlock(&oxphp_patch_lock);
+
     oxphp_orig_sockop_read = NULL;
     oxphp_orig_sockop_write = NULL;
-    oxphp_orig_sockop_close = NULL;
-    oxphp_socket_ops_prot = -1;
 }
 
 /* ─── Claiming a database connection (category "streams") ────
