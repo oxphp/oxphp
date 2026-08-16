@@ -39,3 +39,11 @@ hooksdb/test_shared_pdo_attribute_filter
 
 # The other half of the guarantee: what a fiber gets when the wait does not win.
 hooksdb/test_shared_redis_wait_gives_up
+
+# Last, because both of these end by destroying the connection they hold: a fiber
+# parked inside a socket read holds the stream across the suspension, and another
+# fiber closing that same stream frees it under the reader. Once through a raw
+# resource, where nothing serialises the close at all, and once through the client
+# call that does wait but is bounded and eventually delegates.
+hooksdb/test_stream_closed_under_parked_reader
+hooksdb/test_shared_mysqli_close_under_parked_reader

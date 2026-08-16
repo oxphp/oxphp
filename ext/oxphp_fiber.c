@@ -138,7 +138,7 @@ void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
 /* ─── Forward declarations ─────────────────────────────── */
 
-static void oxphp_claim_release_fiber(const oxphp_request_fiber *fiber);
+static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber);
 static void oxphp_claim_reset_if_empty(void);
 
 /* ─── VM stack rewind after a bailout ─────────────────── */
@@ -192,10 +192,11 @@ static inline void oxphp_release_frame_owner(zend_execute_data *ex, uint32_t inf
  *     allocated alongside it. Both are freed when an include returns, so
  *     without this a fatal keeps a copy per request — kilobytes for a script of
  *     a few hundred statements, since the cache carries a slot per call site.
- *   - entering the script hangs a symbol table off the frame that included it.
- *     The include gives its variables back to that table on the way out and the
- *     frame that owns the table then releases it, so the two are done here in
- *     that same order.
+ *   - entering the script hangs a symbol table off the frame that included it
+ *     and moves that frame's variables into the script's own slots. Both halves
+ *     are undone here, in the order the engine undoes them: the script gives the
+ *     variables back to the table, the table gives them back to the frame that
+ *     owns it, and that frame is then the one release they get.
  *   - the variables of the functions the fatal was inside, which are the whole
  *     cost when a request fatals holding something large.
  *   - the arguments of the internal calls it was inside, and the objects those
@@ -282,11 +283,52 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
 
         if ((info & ZEND_CALL_CODE) && !(info & ZEND_CALL_TOP)) {
             /* An include: code rather than a function, nested rather than the
-             * top-level script. Detaching first hands the script's variables
-             * back to the symbol table, which the frame that owns it releases
-             * below — the order the engine unwinds them in. */
+             * top-level script. Its variables are not its own — an include runs
+             * on the symbol table of the frame that included it, and entering
+             * one points that table's entries at this frame's slots while
+             * leaving the including frame holding copies of the values it has
+             * just stopped owning (zend_attach_symbol_table copies the value
+             * without a reference and moves the entry).
+             *
+             * So detaching alone is only half of it: it hands the values to the
+             * table, and the release below then gives up both the table's copy
+             * and the including frame's, which is one release too many for every
+             * variable the two share by name. What the engine pairs the detach
+             * with, and this does too, is handing the table back to that frame —
+             * which turns its copies into the one owner again and the table's
+             * entries back into references to them.
+             *
+             * Which frame that is need not be the one below. A script with no
+             * variables of its own is never given the table to hold (the engine
+             * skips the attach for it), so it has nothing to hand back and the
+             * handing-back has to carry on past it — `require 'bootstrap.php';`
+             * is a whole file of exactly that shape. The engine carries it by
+             * marking the frame below and letting that frame's own exit pass it
+             * on; the same mark is honoured here, so a chain of such scripts
+             * ends where the variables actually came from. */
+            zend_array *symbol_table = ex->symbol_table;
+            bool hand_table_down = (info & ZEND_CALL_NEEDS_REATTACH) != 0;
             if (ex->func->op_array.last_var > 0) {
                 zend_detach_symbol_table(ex);
+                hand_table_down = true;
+            }
+            /* Only to a frame the table is actually shared with. The engine
+             * hands a nested include's table to the frame below without asking,
+             * because that frame is the one that included it and so always has
+             * the table; asked here because a chain a bailout abandoned is not
+             * one this code built. */
+            if (hand_table_down && prev != NULL && prev->func != NULL && ZEND_USER_CODE(prev->func->type) &&
+                (ZEND_CALL_INFO(prev) & ZEND_CALL_HAS_SYMBOL_TABLE) && prev->symbol_table == symbol_table) {
+                if (prev->func->op_array.last_var > 0) {
+                    zend_attach_symbol_table(prev);
+                } else {
+                    /* Nothing to hand back into here, so the mark goes on to
+                     * whoever leaves this frame — this walk when the frame is one
+                     * of these, and the engine itself when it is above the mark.
+                     * Either way the table keeps the values until it reaches a
+                     * frame that can take them, or gives them up itself. */
+                    ZEND_ADD_CALL_FLAG(prev, ZEND_CALL_NEEDS_REATTACH);
+                }
             }
             zend_destroy_static_vars(&ex->func->op_array);
             destroy_op_array(&ex->func->op_array);
@@ -3163,6 +3205,20 @@ void oxphp_io_unpark(oxphp_request_fiber *fiber) {
     }
 }
 
+void oxphp_fiber_wake_io(oxphp_request_fiber *fiber) {
+    if (fiber == NULL || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) return;
+    if (fiber->suspend_data.io.fds == NULL) return;
+
+    /* The pair the interest mask always lets through, so a waiter that asked only
+     * about out-of-band data is released too — the same marking the readiness
+     * pass writes when it has to release every waiter at once. Muted entries
+     * (fd < 0) are left alone: their readiness has already been settled. */
+    for (uint32_t i = 0; i < fiber->suspend_data.io.nfds; i++) {
+        if (fiber->suspend_data.io.fds[i].fd < 0) continue;
+        fiber->suspend_data.io.fds[i].revents = POLLERR | POLLNVAL;
+    }
+}
+
 /* ─── Which fiber a connection belongs to ─────────────────
  *
  * A client protocol on a socket is a sequence of exchanges — write a command,
@@ -3334,7 +3390,15 @@ void oxphp_claim_forget(void *key) {
 
 /* Give up every stream this fiber holds. Called where a request or task ends,
  * which is the release point the claim is defined against. */
-static void oxphp_claim_release_fiber(const oxphp_request_fiber *fiber) {
+static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber) {
+    /* The stream it was last parked inside an operation on goes with them, and
+     * ahead of the early return below, because a fiber can be parked on a stream
+     * without holding a claim on anything. An unwind out of the wait leaves the
+     * pointer behind — the frame that set it is walked past, not run — and the end
+     * of the request is the first moment it is certainly meaningless. */
+    fiber->io_stream = NULL;
+    fiber->io_stream_closed = false;
+
     if (oxphp_claim_slots == NULL || oxphp_claim_count == 0) return;
 
     uint32_t i = 0;
