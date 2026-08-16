@@ -2,7 +2,7 @@
 // In the framework test profile this file is mounted at the document root
 // (/var/www/html/public/index.php) and ./php is mounted at ./tests, so the
 // shared helper lives at __DIR__/tests/test_helper.php.
-require __DIR__ . '/tests/test_helper.php';
+require_once __DIR__ . '/tests/test_helper.php';
 
 // Front controller for the Framework-mode test profile. Every request is
 // rewritten here, so this fixture validates the standard server-var contract

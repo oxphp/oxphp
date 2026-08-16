@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('pathinfo_encoded', 'pathinfo');
 // Runner hits: /tests/pathinfo/test_pathinfo_encoded.php/u%20ser
 // PATH_INFO must be percent-decoded; SCRIPT_NAME must be the clean script path

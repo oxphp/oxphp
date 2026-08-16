@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 
 // Associative array file field: name="docs[passport]" / name="docs[license]".
 // PHP keys the parallel $_FILES sub-arrays (name/tmp_name/error/size) by the

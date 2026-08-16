@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('missing_to_html', 'routing');
 // Runner-side test: in SPA mode a request for a nonexistent path should
 // return the SPA fallback HTML page. The runner hits a nonexistent URL and

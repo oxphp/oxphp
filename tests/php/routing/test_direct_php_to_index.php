@@ -1,5 +1,5 @@
 <?php
-require __DIR__ . '/../test_helper.php';
+require_once __DIR__ . '/../test_helper.php';
 $t = new TestCase('direct_php_to_index', 'routing');
 // In framework mode any *.php request is rewritten onto the front
 // controller (index.php). A direct .php URI does not name the entry
