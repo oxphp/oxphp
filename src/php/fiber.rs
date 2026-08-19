@@ -56,14 +56,19 @@ pub fn is_timer_ready(id: u64) -> bool {
     })
 }
 
-/// Return all fired timer IDs and remove them from the list.
-pub fn poll_ready_timers() -> Vec<u64> {
+/// Return up to `max_count` fired timer IDs and remove them from the list.
+///
+/// Fired timers beyond `max_count` stay registered and are returned by
+/// subsequent calls — a caller with a fixed buffer must be able to poll
+/// again for the rest rather than lose it. Their deadlines are in the past,
+/// so they also keep `next_timer_deadline()` at "due now" until drained.
+pub fn poll_ready_timers(max_count: usize) -> Vec<u64> {
     TIMER_STATE.with(|state| {
         let mut s = state.borrow_mut();
         let now = Instant::now();
         let mut ready = Vec::new();
         s.timers.retain(|(id, deadline)| {
-            if now >= *deadline {
+            if ready.len() < max_count && now >= *deadline {
                 ready.push(*id);
                 false
             } else {
@@ -112,13 +117,17 @@ pub unsafe extern "C" fn timer_register_callback(duration_ms: u64) -> u64 {
 }
 
 /// FFI callback: write ready timer IDs into a C buffer.
-/// Returns the number of IDs written (up to `max_count`).
+/// Returns the number of IDs written (up to `max_count`). Fired timers that
+/// do not fit stay registered and are returned by subsequent polls.
 ///
 /// # Safety
 /// `out_ids` must point to a buffer of at least `max_count` u64 elements.
 #[no_mangle]
 pub unsafe extern "C" fn timer_poll_callback(out_ids: *mut u64, max_count: u32) -> u32 {
-    let ready = poll_ready_timers();
+    let ready = poll_ready_timers(max_count as usize);
+    // poll_ready_timers already bounds its result, but the raw writes below
+    // must not depend on an invariant held in another function: clamp locally
+    // so a future change to the extraction cannot overrun the caller's buffer.
     let count = ready.len().min(max_count as usize);
     for (i, id) in ready.iter().take(count).enumerate() {
         unsafe { *out_ids.add(i) = *id };
@@ -353,7 +362,7 @@ mod tests {
         let long = register_timer(10_000); // 10s — will not fire
         thread::sleep(Duration::from_millis(10));
 
-        let ready = poll_ready_timers();
+        let ready = poll_ready_timers(usize::MAX);
         assert!(
             ready.contains(&short),
             "short timer should be in ready list"
@@ -395,6 +404,38 @@ mod tests {
     }
 
     #[test]
+    fn poll_callback_delivers_expired_tail_beyond_max_count() {
+        init_timer_state();
+        let mut expected: Vec<u64> = (0..64).map(|_| register_timer(1)).collect();
+        thread::sleep(Duration::from_millis(10));
+
+        let mut buf = [0u64; 32];
+        let mut delivered = Vec::new();
+
+        let n1 = unsafe { timer_poll_callback(buf.as_mut_ptr(), 32) };
+        assert_eq!(n1, 32, "first poll fills the whole 32-slot buffer");
+        delivered.extend_from_slice(&buf[..n1 as usize]);
+
+        let n2 = unsafe { timer_poll_callback(buf.as_mut_ptr(), 32) };
+        assert_eq!(
+            n2, 32,
+            "the expired tail beyond the buffer must stay registered and be \
+             delivered by the next poll, not silently dropped"
+        );
+        delivered.extend_from_slice(&buf[..n2 as usize]);
+
+        delivered.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            delivered, expected,
+            "all 64 expired timers delivered exactly once across both polls"
+        );
+
+        let n3 = unsafe { timer_poll_callback(buf.as_mut_ptr(), 32) };
+        assert_eq!(n3, 0, "nothing left once both batches are delivered");
+    }
+
+    #[test]
     fn remove_timer_cleans_up() {
         init_timer_state();
         let id = register_timer(1); // 1ms
@@ -403,7 +444,7 @@ mod tests {
 
         // Timer was removed, so it should not appear as ready
         assert!(!is_timer_ready(id), "removed timer should not be found");
-        let ready = poll_ready_timers();
+        let ready = poll_ready_timers(usize::MAX);
         assert!(
             !ready.contains(&id),
             "removed timer should not appear in poll"

@@ -1258,6 +1258,9 @@ typedef void     (*oxphp_timer_remove_fn_t)(uint64_t timer_id);
 
 void oxphp_bridge_set_timer_callbacks(oxphp_timer_register_fn_t, oxphp_timer_poll_fn_t, oxphp_timer_remove_fn_t);
 uint64_t oxphp_bridge_timer_register(uint64_t duration_ms);
+/** Write up to max_count expired timer ids into out_ids; returns how many.
+ *  Expired timers beyond max_count stay registered and come out of the
+ *  following polls — a full buffer means poll again, not that this was all. */
 uint32_t oxphp_bridge_timer_poll(uint64_t *out_ids, uint32_t max_count);
 void     oxphp_bridge_timer_remove(uint64_t timer_id);
 
