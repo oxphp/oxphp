@@ -12,3 +12,7 @@ async/test_cancel_cpu_bound
 # off the queue by the wait rather than lost with it.
 async/test_task_sleep_precision
 async/test_task_dispatched_into_idle_wait
+
+# Timer poll delivers at most 32 ids per call; more sleepers than that expiring
+# in one window must all still wake — the tail stays registered for the next poll.
+async/test_timer_poll_beyond_32
