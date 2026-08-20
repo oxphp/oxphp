@@ -34,7 +34,7 @@ OxPHP ships a ready PHP runtime as `ghcr.io/oxphp/oxphp` (PHP 8.5 by default; a 
    ```dockerfile
    FROM php:8.4-zts-alpine3.23 AS php-base       # your app's PHP extensions
    FROM composer:2            AS composer        # the Composer binary
-   FROM ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23 AS oxphp   # OxPHP artifacts
+   FROM ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23 AS oxphp   # OxPHP artifacts
    FROM php-base AS dev                          # final image
    # ... copy the oxphp binary, bridge library, and SAPI extension across:
    COPY --from=oxphp /usr/local/bin/oxphp              /usr/local/bin/oxphp

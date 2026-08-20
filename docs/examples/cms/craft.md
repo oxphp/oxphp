@@ -9,7 +9,7 @@ Craft CMS uses `web/index.php` as its front controller and serves control-panel 
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/web` overrides the default `…/public`)
 - **Extensions added:** `bcmath`, `gd`, `intl`, `pdo_mysql`, `mbstring`, `zip`
 - **Services:** OxPHP + MySQL (8.4 LTS)
@@ -33,7 +33,7 @@ Craft reads its database connection from the environment, so no `.env` editing i
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

@@ -373,7 +373,7 @@ Enable W3C trace propagation without an external backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -388,7 +388,7 @@ Full observability stack with Jaeger as the tracing backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -411,7 +411,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -437,7 +437,7 @@ Full observability with automatic instrumentation of database queries, HTTP call
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:

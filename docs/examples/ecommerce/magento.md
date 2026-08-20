@@ -9,7 +9,7 @@ Magento is the heaviest recipe here: it mandates a search engine (OpenSearch), a
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/pub` overrides the default `…/public`)
 - **Extensions added:** `bcmath`, `gd`, `intl`, `pdo_mysql`, `soap`, `xsl`, `zip`, `mbstring`, `ftp`, `pcntl`, `sockets`
 - **Services:** OxPHP + MySQL 8.0 + OpenSearch 2.x
@@ -35,7 +35,7 @@ docker compose run --rm --no-deps -e COMPOSER_MEMORY_LIMIT=-1 app \
 `src/Dockerfile.oxphp` (named to avoid colliding with Magento's own docker assets):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 

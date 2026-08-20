@@ -13,7 +13,7 @@
  * per-request execution timer to N seconds from now.
  *
  * @package OxPHP
- * @version 0.10.0
+ * @version 0.11.0
  * @link https://github.com/oxphp/oxphp
  */
 

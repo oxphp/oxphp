@@ -23,7 +23,7 @@
 # musl/PHP version behind the precompiled libphp.so and the Rust-compiled
 # oxphp binary can cause musl TLS corruption or undefined-symbol errors at
 # startup. Override any of them with --build-arg at build time.
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
@@ -65,7 +65,7 @@ FROM composer:2 AS composer
 # The tag is derived from the ARGs above, so its Alpine/PHP versions match the
 # php-base stage by construction. For production hardening, pin by digest
 # instead of tag (tags are mutable, digests are not):
-#   FROM ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23@sha256:<digest> AS oxphp
+#   FROM ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23@sha256:<digest> AS oxphp
 # The same applies to php:*-zts-alpine* and composer:2 above.
 # ══════════════════════════════════════════════════════════════
 FROM ghcr.io/oxphp/oxphp:${OXPHP_VERSION}-php${PHP_VERSION}-alpine${ALPINE_VERSION} AS oxphp
