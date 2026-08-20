@@ -185,7 +185,7 @@ OxPHP is designed to run as a container. This guide covers everything you need t
 The simplest way to containerize your application:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -226,7 +226,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.10.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.11.0 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -341,7 +341,7 @@ Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`p
 The shortest useful example:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 RUN docker-php-ext-install mysqli pdo_mysql
 
@@ -356,7 +356,7 @@ The container starts as root, and `oxphp serve` then drops to `www-data` by defa
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.10.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.11.0 AS prod` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 
@@ -372,13 +372,13 @@ The same prod image can run `php` CLI commands for migrations, Composer, or ad-h
 # root-owned mounted volumes.
 docker run --rm \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.10.0 \
+    ghcr.io/oxphp/oxphp:0.11.0 \
     php artisan migrate
 
 # If the mounted volume is owned by www-data, pass Docker's --user:
 docker run --rm --user www-data \
     -v "$(pwd):/var/www/html" \
-    ghcr.io/oxphp/oxphp:0.10.0 \
+    ghcr.io/oxphp/oxphp:0.11.0 \
     php artisan migrate
 ```
 
@@ -390,12 +390,12 @@ The prod image has no `USER` directive, so the container **starts** as root (mat
 
 You can still pin the runtime identity explicitly at the orchestrator level — recommended when you want a specific uid, extra defense-in-depth, or a non-`www-data` user:
 
-- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.10.0`
+- **Docker:** `docker run --user www-data ghcr.io/oxphp/oxphp:0.11.0`
 - **Compose:**
   ```yaml
   services:
     oxphp:
-      image: ghcr.io/oxphp/oxphp:0.10.0
+      image: ghcr.io/oxphp/oxphp:0.11.0
       user: www-data
   ```
 - **Kubernetes:**
@@ -424,7 +424,7 @@ Start the container **as root** — do not also set `user:`, because the bind ne
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     command: ["oxphp", "serve", "--user=www-data"]
     ports:
       - "80:80"
@@ -590,14 +590,14 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.10.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.10.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.11.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.11.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
 
 ## Docker (Recommended)
 
 Pull the official image from the GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/oxphp/oxphp:0.10.0
+docker pull ghcr.io/oxphp/oxphp:0.11.0
 ```
 
 The image includes:
@@ -608,7 +608,7 @@ The image includes:
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint
 - **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
-  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.10.0`
+  - `docker run --user www-data ghcr.io/oxphp/oxphp:0.11.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
 
@@ -665,9 +665,9 @@ The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already co
 ```dockerfile
 FROM php:8.4-zts-alpine3.23
 
-COPY --from=ghcr.io/oxphp/oxphp:0.10.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.10.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.10.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+COPY --from=ghcr.io/oxphp/oxphp:0.11.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.11.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.11.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -692,7 +692,7 @@ RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 # Runtime dependencies for extensions
 USER root
@@ -717,7 +717,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 If your application does not need additional extensions, this is sufficient:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -815,7 +815,7 @@ A healthy server returns `200` with JSON status. A degraded server returns `503`
 If you already have a PHP project with a `public/` directory:
 
 ```bash
-docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.10.0
+docker run -p 80:80 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.11.0
 ```
 
 Open `http://localhost/` — your application is running.
@@ -823,7 +823,7 @@ Open `http://localhost/` — your application is running.
 To enable the internal server (health, metrics, config):
 
 ```bash
-docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.10.0
+docker run -p 80:80 -p 9090:9090 -e INTERNAL_ADDR=0.0.0.0:9090 -v .:/var/www/html ghcr.io/oxphp/oxphp:0.11.0
 ```
 
 ---
@@ -841,12 +841,12 @@ mkdir my-oxphp-app && cd my-oxphp-app
 ### 2. Create a Dockerfile
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 COPY --chown=www-data:www-data . /var/www/html
 ```
 
-The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.10.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
+The official image includes the server binary, PHP 8.4 or 8.5 ZTS (8.5 by default; pull 8.4 with `:0.11.0-php8.4` or any `*-php8.4*` tag), the OxPHP PHP extension, and all runtime dependencies.
 
 > **Tip:** If your application needs custom PHP extensions (pdo_pgsql, intl, xdebug, etc.), see [`examples/dockerfile/Dockerfile`](../../examples/dockerfile/Dockerfile) in the repository — a ready-to-use multi-stage Dockerfile with separate `dev` and `prod` targets.
 
@@ -912,7 +912,7 @@ Expected output:
 <p>Request ID: 67a4b3c11a2b00000001</p>
 <p>Worker: 0</p>
 <p>SAPI: cli-server</p>
-<p>Version: 0.10.0</p>
+<p>Version: 0.11.0</p>
 <p>Time: 2026-03-23T12:00:00+00:00</p>
 ```
 
@@ -958,7 +958,7 @@ Craft CMS uses `web/index.php` as its front controller and serves control-panel 
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/web` overrides the default `…/public`)
 - **Extensions added:** `bcmath`, `gd`, `intl`, `pdo_mysql`, `mbstring`, `zip`
 - **Services:** OxPHP + MySQL (8.4 LTS)
@@ -982,7 +982,7 @@ Craft reads its database connection from the environment, so no `.env` editing i
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
@@ -1134,7 +1134,7 @@ Drupal 11 uses `web/index.php` as a front controller with clean URLs (every non-
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/web` overrides the default `…/public`)
 - **Extensions added:** `gd`, `pdo_mysql`, `zip`, `mbstring`
 - **Services:** OxPHP + MySQL
@@ -1162,7 +1162,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
@@ -1307,7 +1307,7 @@ Laravel is the canonical framework-mode application: a single front controller a
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `pdo_mysql`, `intl`
 - **Services:** OxPHP + MySQL
@@ -1348,7 +1348,7 @@ DB_PASSWORD=laravel
 `src/Dockerfile` — copies OxPHP into a `php:8.5-zts-alpine` base that carries Laravel's runtime extensions:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
@@ -1483,7 +1483,7 @@ Magento is the heaviest recipe here: it mandates a search engine (OpenSearch), a
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT=/var/www/html/pub` overrides the default `…/public`)
 - **Extensions added:** `bcmath`, `gd`, `intl`, `pdo_mysql`, `soap`, `xsl`, `zip`, `mbstring`, `ftp`, `pcntl`, `sockets`
 - **Services:** OxPHP + MySQL 8.0 + OpenSearch 2.x
@@ -1509,7 +1509,7 @@ docker compose run --rm --no-deps -e COMPOSER_MEMORY_LIMIT=-1 app \
 `src/Dockerfile.oxphp` (named to avoid colliding with Magento's own docker assets):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
@@ -1711,7 +1711,7 @@ This is the recipe that exercises OxPHP's [`SYMLINK_ALLOW_PATHS`](../../security
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `gd`, `pdo_mysql`, `mbstring`, `zip`
 - **Services:** OxPHP + MySQL
@@ -1735,7 +1735,7 @@ Then point `src/.env` at the database service (`DB_HOST=db`, `DB_DATABASE=octobe
 `src/Dockerfile.oxphp` (named to avoid colliding with October's own assets):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
@@ -1901,7 +1901,7 @@ OpenCart is a **traditional-mode** application with two physical front controlle
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Traditional (no `ENTRY_FILE`; `DOCUMENT_ROOT` = project root, overrides the default `…/public`)
 - **Extensions added:** `gd`, `mysqli`, `zip`, `mbstring`
 - **Services:** OxPHP + MySQL
@@ -1928,7 +1928,7 @@ cp -a /tmp/oc/upload/. opencart-oxphp/src/
 `src/Dockerfile.oxphp` (named to avoid colliding with OpenCart's bundled Dockerfile):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
@@ -2080,7 +2080,7 @@ Symfony's `public/index.php` front controller fits OxPHP's [framework routing mo
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `intl`, `mbstring` (Symfony's recommended baseline; the runtime strictly needs only core extensions)
 - **Services:** OxPHP only
@@ -2106,7 +2106,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
@@ -2215,7 +2215,7 @@ This recipe also demonstrates the second build shape: instead of copying OxPHP i
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5) — extended in place
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5) — extended in place
 - **Routing mode:** Traditional (no `ENTRY_FILE`)
 - **Extensions added:** `mysqli`, `pdo_mysql`, `gd`, `zip`, `intl`, `exif`, `bcmath`
 - **Services:** OxPHP + MySQL + a WP-CLI sidecar (`cli` profile)
@@ -2262,7 +2262,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && mkdir -p /ext-out \
           "$EXT_DIR"/bcmath.so   /ext-out/
 
 # ── Stage 2: OxPHP runtime with WordPress extensions ─────────────
-FROM ghcr.io/oxphp/oxphp:0.10.0 AS runtime
+FROM ghcr.io/oxphp/oxphp:0.11.0 AS runtime
 USER root
 RUN apk add --no-cache icu-libs libzip libpng libjpeg-turbo freetype oniguruma
 # Drop the compiled extensions into OxPHP's PHP 8.5 extension dir
@@ -2407,7 +2407,7 @@ Yii3 is the leanest recipe here. The `yiisoft/app` template has a `public/index.
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `mbstring` (native, for speed — the runtime otherwise polyfills it)
 - **Services:** OxPHP only
@@ -2429,7 +2429,7 @@ cp yii3-oxphp/src/.env.example yii3-oxphp/src/.env
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 
@@ -2653,7 +2653,7 @@ And ensure your upstream client or load balancer sends a `traceparent` header on
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -2924,7 +2924,7 @@ Additional constraints:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -3113,7 +3113,7 @@ If your build pipeline generates `.br` files and sets the `Content-Encoding: br`
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     volumes:
@@ -3259,7 +3259,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.10.0
+  ghcr.io/oxphp/oxphp:0.11.0
 ```
 
 ### A 429 response still shows the default body
@@ -3271,7 +3271,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:8080"
     volumes:
@@ -4087,7 +4087,7 @@ Enable W3C trace propagation without an external backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4102,7 +4102,7 @@ Full observability stack with Jaeger as the tracing backend:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4125,7 +4125,7 @@ services:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4151,7 +4151,7 @@ Full observability with automatic instrumentation of database queries, HTTP call
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4572,7 +4572,7 @@ PHP VM stacks (used for function call frames) are allocated fresh per request an
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4855,7 +4855,7 @@ The `/config` endpoint reveals operational details (document root, rate limits, 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
       - "9090:9090"
@@ -4869,7 +4869,7 @@ For production, bind the internal server to localhost and use Kubernetes probes:
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     environment:
@@ -4936,7 +4936,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -5494,7 +5494,7 @@ back to the `gethostname(2)` syscall when that variable is not set.
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.10.0",
+  "oxphp_version": "0.11.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
@@ -6282,7 +6282,7 @@ OxPHP tracks up to 100,000 unique IP addresses. When this limit is reached, expi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     environment:
@@ -6653,7 +6653,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     volumes:
@@ -6853,7 +6853,7 @@ SSE endpoints require PHP's execution timer to be disabled or set high. Each act
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:8080"
     volumes:
@@ -7051,7 +7051,7 @@ A 304 means the client already has the current version. This is correct behavior
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     volumes:
@@ -7196,7 +7196,7 @@ OPcache recompilation adds latency on the first request after a file change. Thi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:8080"
     environment:
@@ -7426,7 +7426,7 @@ OxPHP listens on a single port. To support both protocols simultaneously, use a 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "443:443"
     environment:
@@ -7599,7 +7599,7 @@ If your database server closes idle connections, reconnect attempts in the next 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     volumes:
@@ -12241,13 +12241,13 @@ OxPHP reads PHP configuration from the standard `conf.d` directory. Use a Docker
 ```bash
 docker run -p 80:80 \
   -v ./custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro \
-  ghcr.io/oxphp/oxphp:0.10.0
+  ghcr.io/oxphp/oxphp:0.11.0
 ```
 
 **Dockerfile:**
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.10.0
+FROM ghcr.io/oxphp/oxphp:0.11.0
 
 COPY custom.ini /usr/local/etc/php/conf.d/custom.ini
 COPY --chown=www-data:www-data . /var/www/html
@@ -12258,7 +12258,7 @@ COPY --chown=www-data:www-data . /var/www/html
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "80:80"
     volumes:
@@ -12458,7 +12458,7 @@ Returns an associative array with server and request metadata.
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `version` | `string` | Server version (e.g. `"0.10.0"`) |
+| `version` | `string` | Server version (e.g. `"0.11.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
@@ -12469,7 +12469,7 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.10.0",
+//     "version"      => "0.11.0",
 //     "worker_id"    => 3,
 //     "request_time" => 1738800000.123456,
 //     "worker_mode"  => true,
@@ -13494,7 +13494,7 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.10.0` |
+| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.11.0` |
 | `SERVER_PROTOCOL` | Negotiated HTTP protocol version | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |
@@ -14518,7 +14518,7 @@ spec:
       terminationGracePeriodSeconds: 45
       containers:
         - name: oxphp
-          image: ghcr.io/oxphp/oxphp:0.10.0
+          image: ghcr.io/oxphp/oxphp:0.11.0
           env:
             - name: DRAIN_TIMEOUT_SECONDS
               value: "30"
@@ -14552,7 +14552,7 @@ Or set it in your Compose file:
 ```yaml
 services:
   oxphp:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     stop_grace_period: 45s
     environment:
       DRAIN_TIMEOUT_SECONDS: "30"

@@ -145,7 +145,7 @@ If your database server closes idle connections, reconnect attempts in the next 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.10.0
+    image: ghcr.io/oxphp/oxphp:0.11.0
     ports:
       - "8080:80"
     volumes:

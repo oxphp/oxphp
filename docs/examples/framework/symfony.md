@@ -9,7 +9,7 @@ Symfony's `public/index.php` front controller fits OxPHP's [framework routing mo
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0` (PHP 8.5)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0` (PHP 8.5)
 - **Routing mode:** Framework (`ENTRY_FILE=index.php`; `DOCUMENT_ROOT` left at the default `/var/www/html/public`)
 - **Extensions added:** `intl`, `mbstring` (Symfony's recommended baseline; the runtime strictly needs only core extensions)
 - **Services:** OxPHP only
@@ -35,7 +35,7 @@ docker run --rm -e COMPOSER_ALLOW_SUPERUSER=1 \
 `src/Dockerfile`:
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.5
 ARG ALPINE_VERSION=3.23
 

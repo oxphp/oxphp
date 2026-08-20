@@ -17,7 +17,7 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
 | `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
-| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.10.0` |
+| `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.11.0` |
 | `SERVER_PROTOCOL` | Negotiated HTTP protocol version | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
 | `REQUEST_URI` | Full URI with query string | `/app?page=2` |

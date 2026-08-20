@@ -9,7 +9,7 @@ OpenCart is a **traditional-mode** application with two physical front controlle
 
 ## Stack at a glance
 
-- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.10.0-php8.4-alpine3.23` (PHP 8.4)
+- **OxPHP image:** `ghcr.io/oxphp/oxphp:0.11.0-php8.4-alpine3.23` (PHP 8.4)
 - **Routing mode:** Traditional (no `ENTRY_FILE`; `DOCUMENT_ROOT` = project root, overrides the default `…/public`)
 - **Extensions added:** `gd`, `mysqli`, `zip`, `mbstring`
 - **Services:** OxPHP + MySQL
@@ -36,7 +36,7 @@ cp -a /tmp/oc/upload/. opencart-oxphp/src/
 `src/Dockerfile.oxphp` (named to avoid colliding with OpenCart's bundled Dockerfile):
 
 ```dockerfile
-ARG OXPHP_VERSION=0.10.0
+ARG OXPHP_VERSION=0.11.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
 
