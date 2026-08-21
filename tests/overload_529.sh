@@ -37,6 +37,14 @@
 #      whose buffered body would push the parked bodies past
 #      QUEUE_MAX_WAITING_BYTES is refused on the spot, while smaller ones go on
 #      waiting out their budget.
+#   K: an exhausted connection budget is visible while it lasts — the parked
+#      accept loop logs its entry and its exit and moves a gauge and a
+#      counter, instead of the silence that left the state indistinguishable
+#      from a dead node.
+#   L: the rate limit on those reports does not outlive the stall it
+#      suppresses — a stall beginning right after a reported one is still
+#      reported, once the window closes, rather than staying silent for as
+#      long as it lasts.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -744,6 +752,229 @@ if [ "$J_HALF2_CODE" = "529" ] && awk -v t="$J_HALF2_TIME" 'BEGIN { exit !(t < 0
 else
 	bad "J: the second 40 KiB body answered $J_HALF2_CODE after ${J_HALF2_TIME}s — the first one's charge was not held for its wait, so the budget bounds one body rather than the parked set"
 fi
+
+# ── K: an exhausted connection budget is visible while it lasts ──────
+# Once the PHP path holds every MAX_CONNECTIONS permit, the accept loop parks
+# with a connection already accepted and nothing being served — the state H
+# warns about at startup, reached at runtime. Parking is the designed
+# behaviour (a parked loop spends nothing on load it cannot serve, and the
+# listen backlog keeps late clients queued); what is under test is that the
+# state is visible while it lasts: a WARN when the loop first has to wait, a
+# gauge an alert can read without knowing the budget, a counter that survives
+# the scrape interval, and an INFO when accepting resumes. The probe that
+# gets no answer is the precondition, not the defect — it pins that the loop
+# really was parked when the log and the gauge said so, and that visibility
+# did not quietly change parking into refusal.
+#
+# 1 worker + 4 queue slots + 4 parking places against MAX_CONNECTIONS=8: nine
+# 4 s requests fill all three populations and the ninth connection takes the
+# loop past the budget. LOG_LEVEL=info because the resume line is the INFO
+# half of the pair under test.
+docker rm -f "$SRV" >/dev/null 2>&1
+docker run -d --name "$SRV" \
+	-e DOCUMENT_ROOT=/var/www/html -e PHP_WORKERS=1 \
+	-e QUEUE_CAPACITY=4 -e QUEUE_MAX_WAITING=4 -e QUEUE_WAIT_TIMEOUT_MS=6000 \
+	-e MAX_CONNECTIONS=8 -e INTERNAL_ADDR=0.0.0.0:9090 -e LOG_LEVEL=info \
+	-p "${PORT}":80 -v "$FIX:/var/www/html:ro" \
+	"$IMAGE" >/dev/null
+K_UP=""
+for _ in $(seq 1 30); do
+	curl -fsS "http://localhost:${PORT}/pause.php?ms=0" >/dev/null 2>&1 && { K_UP=1; break; }
+	sleep 1
+done
+if [ -n "$K_UP" ]; then
+	ok "K: container up (MAX_CONNECTIONS=8 against 1 worker + 4 queued + 4 parked)"
+else
+	bad "K: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+for _ in $(seq 1 9); do
+	curl -s -o /dev/null --max-time 40 \
+		"http://localhost:${PORT}/pause.php?ms=4000" >/dev/null 2>&1 &
+done
+
+# Negative control: every check below is vacuous unless the budget really is
+# exhausted. 8 dispatched requests (one running, four queued, three parked in
+# admission) is the whole budget; the ninth connection is then in the accept
+# loop's hands, waiting for a permit that does not exist.
+K_PENDING=-1
+for _ in $(seq 1 20); do
+	K_PENDING="$(pending)"
+	[ "$K_PENDING" = "8" ] && break
+	sleep 0.25
+done
+if [ "$K_PENDING" = "8" ]; then
+	ok "K: every permit is spoken for (pending=8)"
+else
+	bad "K: expected 8 dispatched requests, got $K_PENDING — the budget was never exhausted and the rest of K proves nothing"
+fi
+
+# The gauge, read through the internal listener — which serves during the
+# stall precisely because it does not go through MAX_CONNECTIONS. Retried
+# briefly: the ninth connection has to reach the loop before the gauge moves.
+K_STALLED=""
+for _ in $(seq 1 8); do
+	if docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+		| grep -q '^oxphp_accept_stalled 1$'; then K_STALLED=1; break; fi
+	sleep 0.25
+done
+if [ -n "$K_STALLED" ]; then
+	ok "K: oxphp_accept_stalled reads 1 while the loop is parked"
+else
+	bad "K: oxphp_accept_stalled never read 1 during the stall"
+fi
+
+if docker logs "$SRV" 2>&1 | grep -q 'accept loop parked'; then
+	ok "K: the stall is in the log the moment it starts"
+else
+	bad "K: the loop parked without a line in the log"
+fi
+
+# Parking stayed parking: a client arriving now gets no answer at all, and
+# times out on its own — visibility must not have turned the stall into a
+# refusal. Nothing can answer it inside its window: no handler finishes for
+# another two seconds, and the permit that first one does release goes to the
+# connection already parked in the loop — the only waiter on the semaphore — so
+# this probe is either still in the kernel's backlog or accepted and parked in
+# its turn, and unanswered on both.
+K_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+	"http://localhost:${PORT}/pause.php?ms=0")"
+K_RC=$?
+if [ "$K_RC" -eq 28 ] && [ "$K_CODE" = "000" ]; then
+	ok "K: a client past the budget still gets no answer, not a refusal (curl 28)"
+else
+	bad "K: the probe got code $K_CODE rc $K_RC — the loop was not parked, or parking became something else"
+fi
+
+wait
+
+# Checked before anything else is sent, which is the whole point: an overload
+# ends because the load went away, so there may be no next connection for
+# minutes — or none before the instance is stopped. A resume line written by
+# the next accept instead of by the end of the stall would date the recovery
+# to whenever traffic happened to return, and a post-mortem on a quiet
+# instance would read "parked until it died".
+if docker logs "$SRV" 2>&1 | grep -q 'accept loop resumed'; then
+	ok "K: the exit from the stall is in the log without waiting for more traffic"
+else
+	bad "K: the loop resumed accepting without a line in the log"
+fi
+
+K_AFTER="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+	"http://localhost:${PORT}/pause.php?ms=0")"
+if [ "$K_AFTER" = "200" ]; then
+	ok "K: served again once the load subsided"
+else
+	bad "K: got $K_AFTER after the stall cleared"
+fi
+
+K_METRICS="$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null)"
+if printf '%s' "$K_METRICS" | grep -q '^oxphp_accept_stalled 0$'; then
+	ok "K: the gauge is back to 0 with the stall over"
+else
+	bad "K: oxphp_accept_stalled did not return to 0"
+fi
+if printf '%s' "$K_METRICS" | grep -qE '^oxphp_accept_stalls_total [1-9]'; then
+	ok "K: the connections that had to wait were counted"
+else
+	bad "K: oxphp_accept_stalls_total never moved — a stall between two scrapes leaves no trace"
+fi
+
+# ── L: the rate limit does not outlive the stall it suppresses ───────
+# One report per waiting connection would make the log its own outage, so a
+# recent report holds the next one back. Nothing re-enters the loop's waiting
+# branch while it is parked, though: a suppression decided on entry and never
+# revisited leaves a stall that started inside the window silent for its whole
+# life — an hour of an unanswering node under one stale line, which is the
+# state this file's K scenario exists to remove.
+#
+# Two stalls, deliberately close together. The first is brief and reported at
+# once. The second starts about a second later, inside the window, and lasts:
+# 12 s handlers against a 30 s admission budget mean nothing frees a permit
+# while it is being checked. Both halves are asserted — silent while the
+# window is open, reported once it closes — because a build that simply
+# stopped rate-limiting would pass the second half alone.
+docker rm -f "$SRV" >/dev/null 2>&1
+docker run -d --name "$SRV" \
+	-e DOCUMENT_ROOT=/var/www/html -e PHP_WORKERS=1 \
+	-e QUEUE_CAPACITY=4 -e QUEUE_MAX_WAITING=4 -e QUEUE_WAIT_TIMEOUT_MS=30000 \
+	-e MAX_CONNECTIONS=8 -e INTERNAL_ADDR=0.0.0.0:9090 -e LOG_LEVEL=info \
+	-p "${PORT}":80 -v "$FIX:/var/www/html:ro" \
+	"$IMAGE" >/dev/null
+L_UP=""
+for _ in $(seq 1 30); do
+	curl -fsS "http://localhost:${PORT}/pause.php?ms=0" >/dev/null 2>&1 && { L_UP=1; break; }
+	sleep 1
+done
+if [ -n "$L_UP" ]; then
+	ok "L: container up (same budget as K, 30 s admission budget)"
+else
+	bad "L: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+warns() { docker logs "$SRV" 2>&1 | grep -c 'accept loop parked'; }
+
+# First stall: nine short requests take the budget, the ninth connection has
+# to wait, and with no report behind it that wait is reported immediately.
+for _ in $(seq 1 9); do
+	curl -s -o /dev/null --max-time 30 \
+		"http://localhost:${PORT}/pause.php?ms=100" >/dev/null 2>&1 &
+done
+wait
+if [ "$(warns)" -eq 1 ]; then
+	ok "L: the first stall was reported when it began"
+else
+	bad "L: expected exactly 1 report from the first stall, got $(warns) — the rest of L proves nothing"
+fi
+
+# Second stall, seconds after the first and far longer.
+for _ in $(seq 1 9); do
+	curl -s -o /dev/null --max-time 60 \
+		"http://localhost:${PORT}/pause.php?ms=12000" >/dev/null 2>&1 &
+done
+
+L_STALLED=""
+for _ in $(seq 1 12); do
+	if docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+		| grep -q '^oxphp_accept_stalled 1$'; then L_STALLED=1; break; fi
+	sleep 0.25
+done
+if [ -n "$L_STALLED" ]; then
+	ok "L: the second stall has the loop parked again"
+else
+	bad "L: the loop never parked a second time — the rest of L proves nothing"
+fi
+
+# Still inside the window opened by the first report: the second stall is
+# under way and deliberately unreported. Without this half, a build that
+# dropped rate limiting entirely would look correct.
+if [ "$(warns)" -eq 1 ]; then
+	ok "L: a stall arriving right after a reported one is held back at first"
+else
+	bad "L: got $(warns) reports while the window was still open — the rate limit is not holding anything back"
+fi
+
+# Past the window, with the stall still going: this is the line a build that
+# decides suppression once and never revisits it never writes.
+sleep 5
+L_AFTER_WARNS="$(warns)"
+L_STILL="$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+	| awk '/^oxphp_accept_stalled /{print $2}')"
+if [ "${L_STILL:-0}" = "1" ]; then
+	ok "L: the stall is still going when the window closes"
+else
+	bad "L: the loop unparked before the window closed (gauge ${L_STILL:-?}) — the check below proves nothing"
+fi
+if [ "$L_AFTER_WARNS" -ge 2 ]; then
+	ok "L: the ongoing stall is reported once the window closes ($L_AFTER_WARNS reports)"
+else
+	bad "L: still $L_AFTER_WARNS report(s) — a stall that began inside the window stays silent for as long as it lasts"
+fi
+
+# The handlers outlive the checks by design; drop the container rather than
+# waiting out twelve seconds of sleeps that have nothing left to prove.
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
 
 say ""
 say "passed: $PASS, failed: $FAIL"
