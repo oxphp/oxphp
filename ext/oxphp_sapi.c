@@ -5676,22 +5676,38 @@ static int oxphp_rt_to_zend(int rt) {
     }
 }
 
-static const zend_internal_arg_info *oxphp_build_return_arginfo(int rt, int nullable) {
-    if (rt == OXPHP_RT_NONE) return NULL;
-
-    int zend_type = oxphp_rt_to_zend(rt);
-    if (zend_type < 0) return NULL;
-
-    /* Compute type_mask the same way ZEND_TYPE_INIT_CODE does */
+/* Compute the return type_mask the same way ZEND_TYPE_INIT_CODE does,
+ * special cases included. The special cases are load-bearing: a declared
+ * internal return type is a contract the engine trusts, and encoding
+ * `mixed` as a raw `1u << IS_MIXED` yields a bit that belongs to no
+ * MAY_BE_* type — the optimizer derives an empty type set from it, so
+ * JIT-compiled traces skip freeing the returned value (hot await loops
+ * then leak one result allocation per iteration) and Reflection
+ * segfaults materializing the type. */
+static uint32_t oxphp_return_type_mask(int zend_type, int nullable) {
     uint32_t mask;
     if (zend_type == _IS_BOOL) {
         mask = MAY_BE_FALSE | MAY_BE_TRUE;
+    } else if (zend_type == IS_ITERABLE) {
+        mask = _ZEND_TYPE_ITERABLE_BIT;
+    } else if (zend_type == IS_MIXED) {
+        mask = MAY_BE_ANY;
     } else {
         mask = (1u << zend_type);
     }
     if (nullable) {
         mask |= MAY_BE_NULL;
     }
+    return mask;
+}
+
+static const zend_internal_arg_info *oxphp_build_return_arginfo(int rt, int nullable) {
+    if (rt == OXPHP_RT_NONE) return NULL;
+
+    int zend_type = oxphp_rt_to_zend(rt);
+    if (zend_type < 0) return NULL;
+
+    uint32_t mask = oxphp_return_type_mask(zend_type, nullable);
 
     /* Allocate one entry: the return type info (element [0] of arginfo array).
      * Uses calloc (module-level allocation, not request-level). */
@@ -5736,14 +5752,7 @@ static const zend_internal_arg_info *oxphp_build_method_arginfo(
     uint32_t return_mask = 0;
     int return_zend_type = oxphp_rt_to_zend(return_type);
     if (return_type != OXPHP_RT_NONE && return_zend_type >= 0) {
-        if (return_zend_type == _IS_BOOL) {
-            return_mask = MAY_BE_FALSE | MAY_BE_TRUE;
-        } else {
-            return_mask = (1u << return_zend_type);
-        }
-        if (return_nullable) {
-            return_mask |= MAY_BE_NULL;
-        }
+        return_mask = oxphp_return_type_mask(return_zend_type, return_nullable);
     }
     info[0].type.type_mask = return_mask;
 
