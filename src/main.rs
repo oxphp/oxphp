@@ -551,6 +551,17 @@ async fn async_main(
         shutdown_ref.notify_one();
     });
 
+    // Accept-stall log state. A reported stall is bracketed by two lines — a
+    // WARN when the loop parks, an INFO when the permit arrives — and both are
+    // written from inside the park, so the pair is complete whether or not any
+    // connection ever arrives afterwards. The WARN is held back when a recent
+    // stall was already reported, so flapping around the ceiling cannot flood
+    // the log; a stall passed over in silence gets no INFO either, and is
+    // accounted for by `oxphp_accept_stalls_total` instead.
+    const STALL_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+    let mut stall_warned = false;
+    let mut last_stall_warn: Option<std::time::Instant> = None;
+
     // Accept loop
     loop {
         if server.is_shutdown() {
@@ -570,9 +581,75 @@ async fn async_main(
             }
         };
 
-        let permit = match semaphore.clone().acquire_owned().await {
+        // Fast path first: one non-atomic branch while permits are free. When
+        // they are not, the loop is about to park with `stream` already
+        // accepted and nothing new being served — from the outside that is
+        // indistinguishable from a dead node (the health probe on
+        // INTERNAL_ADDR does not go through this budget), so the state is
+        // logged and counted before parking.
+        let permit = match semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
-            Err(_) => break, // semaphore closed — shutting down
+            Err(tokio::sync::TryAcquireError::Closed) => break, // shutting down
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                metrics.accept_stall_begin();
+                let parked_at = std::time::Instant::now();
+                // A line per waiting connection would make the log its own
+                // outage at high connection rates, so a recent report holds
+                // the next one back. That suppression cannot be decided here
+                // and then forgotten, though: nothing re-enters this branch
+                // while the loop is parked, so a stall starting inside the
+                // window would stay unreported for as long as it lasts — the
+                // very silence this reports on. Wait out what is left of the
+                // window against the permit instead, and report the stall if
+                // it is still going when the window closes.
+                let suppressed_for = last_stall_warn
+                    .map(|warned_at| {
+                        STALL_LOG_INTERVAL
+                            .saturating_sub(parked_at.saturating_duration_since(warned_at))
+                    })
+                    .filter(|remaining| !remaining.is_zero());
+                let acquire = semaphore.clone().acquire_owned();
+                tokio::pin!(acquire);
+                let acquired = match suppressed_for {
+                    Some(remaining) => tokio::select! {
+                        permit = &mut acquire => Some(permit),
+                        _ = tokio::time::sleep(remaining) => None,
+                    },
+                    None => None,
+                };
+                let permit = match acquired {
+                    Some(permit) => permit,
+                    None => {
+                        tracing::warn!(
+                            max_connections = config.max_connections,
+                            "MAX_CONNECTIONS exhausted, accept loop parked until a connection closes"
+                        );
+                        last_stall_warn = Some(std::time::Instant::now());
+                        stall_warned = true;
+                        acquire.await
+                    }
+                };
+                metrics.accept_stall_end();
+                let permit = match permit {
+                    Ok(permit) => permit,
+                    Err(_) => break, // semaphore closed — shutting down
+                };
+                // Written where the stall ends rather than on the next accept.
+                // An overload usually subsides because the load went away, so
+                // the next connection may be minutes later or never — a line
+                // waiting for one would date the end of the stall to whenever
+                // traffic happened to return, and on an instance stopped while
+                // quiet it would never be written at all, leaving the log
+                // saying the loop was parked until the process died.
+                if stall_warned {
+                    tracing::info!(
+                        stalled_secs = parked_at.elapsed().as_secs_f64(),
+                        "connection permits available again, accept loop resumed"
+                    );
+                    stall_warned = false;
+                }
+                permit
+            }
         };
 
         let server_clone = Arc::clone(&server);

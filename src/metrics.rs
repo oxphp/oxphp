@@ -160,6 +160,10 @@ pub struct Metrics {
     start_time: Instant,
     total_requests: AtomicU64,
     active_connections: AtomicUsize,
+    /// 1 while the accept loop is parked waiting for a MAX_CONNECTIONS permit.
+    accept_stalled: AtomicUsize,
+    /// Connections accepted but made to wait for a MAX_CONNECTIONS permit.
+    accept_stalls_total: AtomicU64,
     pending_requests: AtomicUsize,
     dropped_requests: AtomicU64,
     /// One slot per [`ShedReason`], indexed by its position in
@@ -306,6 +310,8 @@ impl Metrics {
             start_time: Instant::now(),
             total_requests: AtomicU64::new(0),
             active_connections: AtomicUsize::new(0),
+            accept_stalled: AtomicUsize::new(0),
+            accept_stalls_total: AtomicU64::new(0),
             pending_requests: AtomicUsize::new(0),
             dropped_requests: AtomicU64::new(0),
             admission_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -428,6 +434,20 @@ impl Metrics {
 
     pub fn connection_closed(&self) {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// The accept loop found no MAX_CONNECTIONS permit free and is about to
+    /// park until one comes back. Counted as well as gauged because the gauge
+    /// alone misses a stall that starts and ends between two scrapes — the
+    /// loop parks on exactly one accepted connection at a time, so this is
+    /// one increment per stall and per connection made to wait alike.
+    pub fn accept_stall_begin(&self) {
+        self.accept_stalls_total.fetch_add(1, Ordering::Relaxed);
+        self.accept_stalled.store(1, Ordering::Relaxed);
+    }
+
+    pub fn accept_stall_end(&self) {
+        self.accept_stalled.store(0, Ordering::Relaxed);
     }
 
     /// Count a request as in flight and hand back the guard that discounts it.
@@ -629,6 +649,28 @@ impl Metrics {
             out,
             "oxphp_active_connections {}",
             self.active_connections.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_accept_stalled Set to 1 while the accept loop is parked waiting for a free MAX_CONNECTIONS permit: connections are accepted but nothing new is served."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_accept_stalled gauge");
+        let _ = writeln!(
+            out,
+            "oxphp_accept_stalled {}",
+            self.accept_stalled.load(Ordering::Relaxed)
+        );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_accept_stalls_total Connections that had to wait for a MAX_CONNECTIONS permit after being accepted."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_accept_stalls_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_accept_stalls_total {}",
+            self.accept_stalls_total.load(Ordering::Relaxed)
         );
 
         let _ = writeln!(
@@ -1293,6 +1335,28 @@ mod tests {
         assert_eq!(m.active_connections(), 2);
         m.connection_closed();
         assert_eq!(m.active_connections(), 1);
+    }
+
+    #[test]
+    fn accept_stall_gauge_clears_while_the_counter_keeps_every_wait() {
+        let m = Metrics::new();
+        let out = m.to_prometheus();
+        // Both series are rendered at zero: an absent line is what the old
+        // build looks like, so absence must never be the healthy reading.
+        assert!(out.contains("\noxphp_accept_stalled 0\n"));
+        assert!(out.contains("\noxphp_accept_stalls_total 0\n"));
+
+        m.accept_stall_begin();
+        let out = m.to_prometheus();
+        assert!(out.contains("\noxphp_accept_stalled 1\n"));
+        assert!(out.contains("\noxphp_accept_stalls_total 1\n"));
+
+        m.accept_stall_end();
+        m.accept_stall_begin();
+        m.accept_stall_end();
+        let out = m.to_prometheus();
+        assert!(out.contains("\noxphp_accept_stalled 0\n"));
+        assert!(out.contains("\noxphp_accept_stalls_total 2\n"));
     }
 
     #[test]
