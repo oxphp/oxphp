@@ -38,3 +38,5 @@ async/test_async_jit_suspend_resume
 async/test_await_all_cancel_cpu_bound
 async/test_await_all_reject_member
 async/test_await_result_refcount
+async/test_await_jit_hot_loop_leak
+async/test_async_declared_return_types

@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A hot loop awaiting async results no longer leaks every delivered value under the tracing JIT, and reflecting on those functions' return types no longer crashes the worker.** Every function and method the server registers with a `mixed` return type — `oxphp_async_await()`, `Shared\Map::get()`, `Shared\Once::get()`, `Shared\Mutex::withLock()`, the pool and channel accessors — declared it with a malformed engine encoding. A declared internal return type is a contract the engine's optimizer trusts, and the malformed one read as "returns nothing at all": once a loop calling such a function crossed `opcache.jit_hot_loop` (64 back-edges) and was trace-compiled, the compiled code stopped freeing the returned value, so every further iteration leaked its full result — with 64 KiB strings, ~9.5 MB per 200-iteration request, never reclaimed within the request. The same encoding made reading any of these declared types back through Reflection — `ReflectionFunction` and `ReflectionMethod` `getReturnType()` alike — segfault the worker outright, JIT or no JIT. The declared types are now encoded the way the engine itself encodes `mixed`: compiled traces free delivered results, hot await loops hold steady memory, and Reflection prints the type. `opcache.jit=off` worked around only the leak — the Reflection crash had no workaround — and is no longer needed.
+
 ## [0.11.0] - 2026-08-20
 
 ### Migration from 0.10.0
