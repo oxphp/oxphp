@@ -624,51 +624,74 @@ mod tests {
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
 
-    fn init_apm_plugin(plugin: &mut ApmPlugin) -> HashMap<String, serde_json::Value> {
-        let mut dispatcher = EventDispatcher::new();
-        let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
-        let mut config_values = HashMap::new();
-        let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
-        let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
-        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
-        let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
-        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
-        let mut php_classes = Vec::new();
-        let mut php_interfaces = Vec::new();
-        let mut php_enums = Vec::new();
-        let mut php_attributes = Vec::new();
-        let mut php_functions = Vec::new();
-        let mut core_flags = HashMap::new();
+    /// Initialise the plugin with `vars` applied to the environment for the
+    /// duration of `init`, under the crate-wide env lock. Plugin init is the
+    /// only step in these tests that reads the environment, so scoping the
+    /// lock to this call is enough. The setup lives inside the closure rather
+    /// than in a helper of its own so that this module has no callable path
+    /// that runs `init` outside the lock — running it outside is how these
+    /// tests used to see each other's `APM_ENABLED` / `OTEL_APM_*` writes when
+    /// the harness ran them in parallel.
+    fn init_apm_plugin(
+        plugin: &mut ApmPlugin,
+        vars: &[(&str, Option<&str>)],
+    ) -> HashMap<String, serde_json::Value> {
+        // `PluginContext::config` falls back to the unprefixed key, so an
+        // ambient `ENABLED=1` would turn the plugin on in the tests that
+        // assert it stays off. Pinned ahead of the caller's own variables,
+        // which still win if a test ever needs to set it.
+        let mut pinned: Vec<(&str, Option<&str>)> = vec![("ENABLED", None)];
+        pinned.extend_from_slice(vars);
+        crate::config::test_env::with_env(&pinned, || {
+            let mut dispatcher = EventDispatcher::new();
+            let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> =
+                HashMap::new();
+            let mut config_values = HashMap::new();
+            let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
+            let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> =
+                HashMap::new();
+            let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> =
+                Vec::new();
+            let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+            let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+            let mut php_classes = Vec::new();
+            let mut php_interfaces = Vec::new();
+            let mut php_enums = Vec::new();
+            let mut php_attributes = Vec::new();
+            let mut php_functions = Vec::new();
+            let mut core_flags = HashMap::new();
 
-        let mut ctx = PluginContext::new(
-            "apm".into(),
-            "__oxp_apm_".into(),
-            &mut dispatcher,
-            &mut services,
-            &mut config_values,
-            &mut metrics_collectors,
-            &mut internal_routes,
-            &mut internal_route_prefixes,
-            &mut native_php_functions,
-            &mut decorators,
-            &mut php_classes,
-            &mut php_interfaces,
-            &mut php_enums,
-            &mut php_attributes,
-            &mut php_functions,
-            &mut core_flags,
-        );
-        plugin.init(&mut ctx).unwrap();
-        drop(ctx);
-        config_values
+            let mut ctx = PluginContext::new(
+                "apm".into(),
+                "__oxp_apm_".into(),
+                &mut dispatcher,
+                &mut services,
+                &mut config_values,
+                &mut metrics_collectors,
+                &mut internal_routes,
+                &mut internal_route_prefixes,
+                &mut native_php_functions,
+                &mut decorators,
+                &mut php_classes,
+                &mut php_interfaces,
+                &mut php_enums,
+                &mut php_attributes,
+                &mut php_functions,
+                &mut core_flags,
+            );
+            plugin.init(&mut ctx).unwrap();
+            drop(ctx);
+            config_values
+        })
     }
 
     #[test]
     fn test_apm_plugin_disabled_by_default() {
-        std::env::remove_var("APM_ENABLED");
-        std::env::remove_var("OTEL_APM_ENABLED");
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(&mut plugin);
+        let config = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", None)],
+        );
 
         assert_eq!(plugin.name(), "apm");
         assert_eq!(plugin.version(), "0.1.0");
@@ -701,25 +724,26 @@ mod tests {
 
     #[test]
     fn test_apm_plugin_enabled_via_env() {
-        std::env::set_var("OTEL_APM_ENABLED", "true");
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(&mut plugin);
+        let config = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
 
         assert!(plugin.enabled);
         assert_eq!(config.get("enabled"), Some(&serde_json::json!(true)));
-        std::env::remove_var("OTEL_APM_ENABLED");
     }
 
     #[test]
     fn test_apm_plugin_enabled_via_prefixed_env() {
-        std::env::remove_var("OTEL_APM_ENABLED");
-        std::env::set_var("APM_ENABLED", "1");
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(&mut plugin);
+        let config = init_apm_plugin(
+            &mut plugin,
+            &[("OTEL_APM_ENABLED", None), ("APM_ENABLED", Some("1"))],
+        );
 
         assert!(plugin.enabled);
         assert_eq!(config.get("enabled"), Some(&serde_json::json!(true)));
-        std::env::remove_var("APM_ENABLED");
     }
 
     #[test]
@@ -730,11 +754,12 @@ mod tests {
 
     #[test]
     fn test_apm_plugin_shutdown_enabled() {
-        std::env::set_var("OTEL_APM_ENABLED", "true");
         let mut plugin = ApmPlugin::new();
-        init_apm_plugin(&mut plugin);
+        init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
         plugin.shutdown(); // should not panic
-        std::env::remove_var("OTEL_APM_ENABLED");
     }
 
     #[test]
@@ -746,12 +771,16 @@ mod tests {
 
     #[test]
     fn test_custom_config() {
-        std::env::set_var("OTEL_APM_ENABLED", "true");
-        std::env::set_var("OTEL_APM_SLOW_QUERY_MS", "250");
-        std::env::set_var("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED", "true");
-
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(&mut plugin);
+        let config = init_apm_plugin(
+            &mut plugin,
+            &[
+                ("APM_ENABLED", None),
+                ("OTEL_APM_ENABLED", Some("true")),
+                ("OTEL_APM_SLOW_QUERY_MS", Some("250")),
+                ("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED", Some("true")),
+            ],
+        );
 
         assert_eq!(plugin.config.slow_query_ms, 250);
         assert!(plugin.config.db_capture_params);
@@ -760,10 +789,6 @@ mod tests {
             config.get("db_capture_params"),
             Some(&serde_json::json!(true))
         );
-
-        std::env::remove_var("OTEL_APM_ENABLED");
-        std::env::remove_var("OTEL_APM_SLOW_QUERY_MS");
-        std::env::remove_var("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED");
     }
 
     #[test]
@@ -898,12 +923,16 @@ mod tests {
 
     #[test]
     fn test_default_config_values() {
-        std::env::set_var("OTEL_APM_ENABLED", "true");
-        std::env::remove_var("OTEL_APM_SLOW_QUERY_MS");
-        std::env::remove_var("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED");
-
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(&mut plugin);
+        let config = init_apm_plugin(
+            &mut plugin,
+            &[
+                ("APM_ENABLED", None),
+                ("OTEL_APM_ENABLED", Some("true")),
+                ("OTEL_APM_SLOW_QUERY_MS", None),
+                ("OTEL_APM_DB_CAPTURE_PARAMS_ENABLED", None),
+            ],
+        );
 
         assert_eq!(plugin.config.slow_query_ms, 100);
         assert!(!plugin.config.db_capture_params);
@@ -912,8 +941,6 @@ mod tests {
             config.get("db_capture_params"),
             Some(&serde_json::json!(false))
         );
-
-        std::env::remove_var("OTEL_APM_ENABLED");
     }
 
     // -----------------------------------------------------------------------

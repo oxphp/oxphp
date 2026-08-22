@@ -886,8 +886,17 @@ mod tests {
         assert!(get("exception.line").is_none());
     }
 
-    // Mutex to serialize tests that manipulate env vars
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// The crate-wide env lock (see `config::test_env`), not a local one:
+    /// these tests write process-global variables that other modules read —
+    /// `LISTEN_ADDR` is also read by `config::ServerConfig::from_env` — so
+    /// serializing them only against each other is not enough. Poison is
+    /// recovered rather than unwrapped, so a failing assert in one env test
+    /// does not cascade panics through every other one.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::config::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     fn init_otel_plugin(plugin: &mut OtelPlugin) -> HashMap<String, serde_json::Value> {
         let mut dispatcher = EventDispatcher::new();
@@ -930,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_otel_plugin_disabled_by_default() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::remove_var("OTEL_ENABLED");
         let mut plugin = OtelPlugin::new();
         let config = init_otel_plugin(&mut plugin);
@@ -1090,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_defaults() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::remove_var("OTEL_TRACES_SAMPLER");
         std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
         let sampler = OtelPlugin::build_sampler();
@@ -1100,7 +1109,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_always_on() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "always_on");
         let sampler = OtelPlugin::build_sampler();
         assert!(matches!(sampler, Sampler::AlwaysOn));
@@ -1109,7 +1118,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_always_off() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "always_off");
         let sampler = OtelPlugin::build_sampler();
         assert!(matches!(sampler, Sampler::AlwaysOff));
@@ -1118,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_ratio() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "0.5");
         let sampler = OtelPlugin::build_sampler();
@@ -1129,7 +1138,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_parse_error_falls_back_to_one() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "not-a-number");
         let sampler = OtelPlugin::build_sampler();
@@ -1140,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_above_one_is_clamped() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "2.5");
         let sampler = OtelPlugin::build_sampler();
@@ -1151,7 +1160,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_below_zero_is_clamped() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "-0.5");
         let sampler = OtelPlugin::build_sampler();
@@ -1162,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_nan_falls_back_to_one() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "NaN");
         let sampler = OtelPlugin::build_sampler();
@@ -1173,7 +1182,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_zero_passes_through() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "0.0");
         let sampler = OtelPlugin::build_sampler();
@@ -1184,7 +1193,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_arg_one_passes_through() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
         std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "1.0");
         let sampler = OtelPlugin::build_sampler();
@@ -1195,7 +1204,7 @@ mod tests {
 
     #[test]
     fn test_build_sampler_unknown_name_falls_back() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_TRACES_SAMPLER", "garbage_value_xyz");
         std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
         let sampler = OtelPlugin::build_sampler();
@@ -1209,7 +1218,7 @@ mod tests {
 
     #[test]
     fn test_build_resource_defaults() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::remove_var("OTEL_SERVICE_NAME");
         std::env::remove_var("OTEL_SERVICE_VERSION");
         std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
@@ -1220,7 +1229,7 @@ mod tests {
 
     #[test]
     fn test_build_resource_custom() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_SERVICE_NAME", "my-app");
         std::env::set_var("OTEL_SERVICE_VERSION", "2.0.0");
         std::env::set_var("OTEL_RESOURCE_ATTRIBUTES", "env=prod,region=us-east-1");
@@ -1269,7 +1278,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_empty() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
         let headers = OtelPlugin::parse_headers();
         assert!(headers.is_empty());
@@ -1277,7 +1286,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_single() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var(
             "OTEL_EXPORTER_OTLP_HEADERS",
             "Authorization=Bearer token123",
@@ -1290,7 +1299,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_multiple() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var(
             "OTEL_EXPORTER_OTLP_HEADERS",
             "Authorization=Bearer tok,X-Custom=value42",
@@ -1304,7 +1313,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_whitespace_trimming() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", " key = val , k2 = v2 ");
         let headers = OtelPlugin::parse_headers();
         assert_eq!(headers.len(), 2);
@@ -1315,7 +1324,7 @@ mod tests {
 
     #[test]
     fn test_parse_headers_empty_key_skipped() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", "=bad,good=val");
         let headers = OtelPlugin::parse_headers();
         assert_eq!(headers.len(), 1);
@@ -1325,7 +1334,7 @@ mod tests {
 
     #[test]
     fn test_server_address_stored() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = env_lock();
         std::env::remove_var("OTEL_ENABLED");
         std::env::set_var("LISTEN_ADDR", "0.0.0.0:8080");
         let mut plugin = OtelPlugin::new();
@@ -1381,11 +1390,11 @@ mod tests {
 
         let plugin = OtelPlugin::new();
 
-        // Capture the result and clean up env inside the locked scope, then release
-        // ENV_MUTEX BEFORE asserting: a failing assert must not poison the mutex
-        // (which would cascade panics through every other test that locks it).
+        // Capture the result and clean up env inside the locked scope, then
+        // release the env lock BEFORE asserting: a failing assert must not
+        // unwind while still holding a lock the whole crate's env tests share.
         let http = {
-            let _lock = ENV_MUTEX.lock().unwrap();
+            let _lock = env_lock();
             std::env::set_var("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc");
             std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
             let http = plugin.init_provider();

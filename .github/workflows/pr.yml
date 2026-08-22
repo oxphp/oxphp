@@ -25,8 +25,15 @@ jobs:
           - name: no-default
             flags: "--no-default-features --all-targets"
             php_id: ""
+          # decorator-test rides along here because nothing else builds it:
+          # it is deliberately not part of `php` (only the decorators test
+          # image enables it), it gates no Rust tests of its own, and the
+          # code it does gate — the repeatable ALL-target test decorator and
+          # its attribute registration — would otherwise stay uncompiled
+          # until someone builds that image by hand. The php8.5 row below
+          # still covers the plain default set.
           - name: default-php8.4
-            flags: "--all-targets"
+            flags: "--all-targets --features decorator-test"
             php_id: "80400"
           - name: default-php8.5
             flags: "--all-targets"
@@ -52,9 +59,34 @@ jobs:
           PHP_VERSION_ID: ${{ matrix.php_id }}
         run: cargo clippy $CLIPPY_FLAGS -- -D warnings
 
-  # Tests run with --no-default-features because default features link against
-  # libphp.so, which isn't installed on the CI runner. The clippy "default" job
-  # above type-checks the plugin-apm / plugin-async paths that this omits.
+  # Two runs, because one feature set cannot cover both ends.
+  #
+  # `--no-default-features` is the only configuration that links without
+  # libphp.so, which isn't installed on the runner — but `php` is also what
+  # pulls in plugin-apm / plugin-async / plugin-profiler / plugin-shared, and
+  # nothing else in a default build does, so dropping it silently drops their
+  # tests too. Silently: a name filter over a module that was never built
+  # reports "0 passed; N filtered out" and exits 0. None of the four links
+  # anything of its own, so the second run enables them explicitly and picks
+  # up several hundred tests the bare run never builds.
+  #
+  # The bare run stays because it is the only one that *executes* tests
+  # against the no-plugin build — the `cfg(not(feature = "plugin-apm"))`
+  # fallback in src/server/connection.rs is compiled by the no-default clippy
+  # row too, but nothing there runs.
+  #
+  # Out of reach of both runs: src/php/{bindings,bootstrap,sapi} and
+  # executor::sapi — 26 tests, all of them in sapi.rs. The rest of src/php/
+  # (fiber, header_match, heartbeat, request_decode, supervisor,
+  # unhandled_exception, worker_registry) is NOT php-gated and already runs
+  # in both. Closing the remaining 26 needs libphp.so, i.e. a container job;
+  # the clippy matrix above type-checks that code in the meantime — though
+  # not the `cfg(not(feature = "plugin-*"))` arms nested inside it, which no
+  # buildable feature combination reaches at all.
+  #
+  # decorator-test is not here either — it gates no Rust tests and is
+  # deliberately not part of `php`, so it is type-checked by a clippy row
+  # instead of changing what these runs test against.
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -73,7 +105,22 @@ jobs:
             target
           key: test-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: test-${{ steps.rust.outputs.hash }}-
-      - run: cargo test --no-default-features
+      - name: Test (no features)
+        run: cargo test --no-default-features
+      # The feature list is checked against Cargo.toml rather than just
+      # documented: a fifth plugin added to `php = [...]` and not added here
+      # would silently stop being tested, which is the exact defect this step
+      # exists to prevent. A prose comment does not fail a build; this does.
+      - name: Test (host-buildable plugin features)
+        run: |
+          HOST_FEATURES=plugin-apm,plugin-async,plugin-profiler,plugin-shared
+          php_enables=$(sed -n 's/^php = \[\(.*\)\]$/\1/p' Cargo.toml | tr -d ' "')
+          if [ "$php_enables" != "$HOST_FEATURES" ]; then
+            echo "::error::the php feature enables [$php_enables]; this step runs [$HOST_FEATURES]"
+            echo "::error::add the new feature here if it builds without libphp.so, or record why it cannot"
+            exit 1
+          fi
+          cargo test --no-default-features --features "$HOST_FEATURES"
 
   # Always runs so the required status check is always reported, but the
   # expensive steps are gated on changes to license-relevant files. PRs that

@@ -25,10 +25,15 @@ fn cache_round_trip() {
     assert!(Arc::ptr_eq(&t, &got));
 }
 
+/// Capacity is deliberately larger than the 16×10 working set: with a smaller
+/// cache another thread's `put` can evict an entry between this thread's `put`
+/// and its read-back, which makes the assertion a coin flip rather than a
+/// statement about thread safety. Eviction has its own deterministic coverage
+/// in the unit tests next to `ProfileCache`.
 #[test]
 fn cache_concurrent_access() {
     use std::thread;
-    let c = Arc::new(ProfileCache::new(64));
+    let c = Arc::new(ProfileCache::new(256));
     let mut handles = vec![];
     for i in 0..16 {
         let c = Arc::clone(&c);
@@ -43,5 +48,5 @@ fn cache_concurrent_access() {
     for h in handles {
         h.join().unwrap();
     }
-    assert!(c.len() <= 64);
+    assert_eq!(c.len(), 160, "every concurrent put must survive");
 }
