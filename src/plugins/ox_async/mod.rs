@@ -224,43 +224,66 @@ mod tests {
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
 
-    fn init_async_plugin(plugin: &mut AsyncPlugin) -> HashMap<String, serde_json::Value> {
-        let mut dispatcher = EventDispatcher::new();
-        let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
-        let mut config_values = HashMap::new();
-        let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
-        let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> = HashMap::new();
-        let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> = Vec::new();
-        let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
-        let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
-        let mut php_classes = Vec::new();
-        let mut php_interfaces = Vec::new();
-        let mut php_enums = Vec::new();
-        let mut php_attributes = Vec::new();
-        let mut php_functions = Vec::new();
-        let mut core_flags = HashMap::new();
+    /// Run `f` with `ASYNC_WORKERS` set to `workers` (or unset for `None`),
+    /// under the crate-wide env lock. Plugin init is the only step in these
+    /// tests that reads the environment, so scoping the lock to that call is
+    /// enough — without it the tests that need the variable absent raced
+    /// `test_plugin_enabled_via_env`, which sets it, and intermittently came
+    /// up with an enabled plugin.
+    ///
+    /// The bare `WORKERS` is pinned unset as well: `PluginContext::config`
+    /// falls back to the unprefixed key, so an ambient `WORKERS=4` on a
+    /// developer machine or a runner would enable the plugin in the tests
+    /// that assert it stays off.
+    fn with_async_workers<R>(workers: Option<&str>, f: impl FnOnce() -> R) -> R {
+        crate::config::test_env::with_env(&[("WORKERS", None), ("ASYNC_WORKERS", workers)], f)
+    }
 
-        let mut ctx = PluginContext::new(
-            "async".into(),
-            "__oxp_async_".into(),
-            &mut dispatcher,
-            &mut services,
-            &mut config_values,
-            &mut metrics_collectors,
-            &mut internal_routes,
-            &mut internal_route_prefixes,
-            &mut native_php_functions,
-            &mut decorators,
-            &mut php_classes,
-            &mut php_interfaces,
-            &mut php_enums,
-            &mut php_attributes,
-            &mut php_functions,
-            &mut core_flags,
-        );
-        plugin.init(&mut ctx).unwrap();
-        drop(ctx);
-        config_values
+    fn init_async_plugin(
+        plugin: &mut AsyncPlugin,
+        workers: Option<&str>,
+    ) -> HashMap<String, serde_json::Value> {
+        with_async_workers(workers, || {
+            let mut dispatcher = EventDispatcher::new();
+            let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> =
+                HashMap::new();
+            let mut config_values = HashMap::new();
+            let mut metrics_collectors: Vec<Box<dyn PluginMetricsCollector>> = Vec::new();
+            let mut internal_routes: HashMap<String, Box<dyn PluginInternalHandler>> =
+                HashMap::new();
+            let mut internal_route_prefixes: Vec<(String, Box<dyn PluginInternalHandler>)> =
+                Vec::new();
+            let mut native_php_functions: Vec<PluginNativeFunctionDef> = Vec::new();
+            let mut decorators: Vec<PluginDecoratorDef> = Vec::new();
+            let mut php_classes = Vec::new();
+            let mut php_interfaces = Vec::new();
+            let mut php_enums = Vec::new();
+            let mut php_attributes = Vec::new();
+            let mut php_functions = Vec::new();
+            let mut core_flags = HashMap::new();
+
+            let mut ctx = PluginContext::new(
+                "async".into(),
+                "__oxp_async_".into(),
+                &mut dispatcher,
+                &mut services,
+                &mut config_values,
+                &mut metrics_collectors,
+                &mut internal_routes,
+                &mut internal_route_prefixes,
+                &mut native_php_functions,
+                &mut decorators,
+                &mut php_classes,
+                &mut php_interfaces,
+                &mut php_enums,
+                &mut php_attributes,
+                &mut php_functions,
+                &mut core_flags,
+            );
+            plugin.init(&mut ctx).unwrap();
+            drop(ctx);
+            config_values
+        })
     }
 
     #[test]
@@ -296,9 +319,8 @@ mod tests {
 
     #[test]
     fn test_plugin_disabled_by_default() {
-        std::env::remove_var("ASYNC_WORKERS");
         let mut plugin = AsyncPlugin::new();
-        let config = init_async_plugin(&mut plugin);
+        let config = init_async_plugin(&mut plugin, None);
 
         assert!(!plugin.enabled);
         assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
@@ -307,14 +329,12 @@ mod tests {
 
     #[test]
     fn test_plugin_enabled_via_env() {
-        std::env::set_var("ASYNC_WORKERS", "4");
         let mut plugin = AsyncPlugin::new();
-        let config = init_async_plugin(&mut plugin);
+        let config = init_async_plugin(&mut plugin, Some("4"));
 
         assert!(plugin.enabled);
         assert_eq!(config.get("enabled"), Some(&serde_json::json!(true)));
         assert_eq!(config.get("workers"), Some(&serde_json::json!(4u64)));
-        std::env::remove_var("ASYNC_WORKERS");
     }
 
     #[test]
@@ -326,8 +346,6 @@ mod tests {
 
     #[test]
     fn test_exception_classes_registered() {
-        std::env::remove_var("ASYNC_WORKERS");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -363,7 +381,7 @@ mod tests {
         );
 
         let mut plugin = AsyncPlugin::new();
-        plugin.init(&mut ctx).unwrap();
+        with_async_workers(None, || plugin.init(&mut ctx).unwrap());
         drop(ctx);
 
         // Should register 5 classes: AsyncException, TimeoutException,
@@ -380,8 +398,6 @@ mod tests {
 
     #[test]
     fn aggregate_async_exception_methods_registered() {
-        std::env::remove_var("ASYNC_WORKERS");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -417,7 +433,7 @@ mod tests {
         );
 
         let mut plugin = AsyncPlugin::new();
-        plugin.init(&mut ctx).unwrap();
+        with_async_workers(None, || plugin.init(&mut ctx).unwrap());
         drop(ctx);
 
         let agg = php_classes
@@ -448,8 +464,6 @@ mod tests {
 
     #[test]
     fn timeout_exception_has_partial_errors_methods() {
-        std::env::remove_var("ASYNC_WORKERS");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -485,7 +499,7 @@ mod tests {
         );
 
         let mut plugin = AsyncPlugin::new();
-        plugin.init(&mut ctx).unwrap();
+        with_async_workers(None, || plugin.init(&mut ctx).unwrap());
         drop(ctx);
 
         let to = php_classes
@@ -516,8 +530,6 @@ mod tests {
     fn test_borrowed_proxy_json_serialize_return_type() {
         use crate::plugin::types::{PhpType, BRIDGE_RT_MIXED};
 
-        std::env::remove_var("ASYNC_WORKERS");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -553,7 +565,7 @@ mod tests {
         );
 
         let mut plugin = AsyncPlugin::new();
-        plugin.init(&mut ctx).unwrap();
+        with_async_workers(None, || plugin.init(&mut ctx).unwrap());
         drop(ctx);
 
         // Find BorrowedProxy class
@@ -588,8 +600,6 @@ mod tests {
 
     #[test]
     fn test_borrowed_proxy_all_methods_have_handlers() {
-        std::env::remove_var("ASYNC_WORKERS");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -625,7 +635,7 @@ mod tests {
         );
 
         let mut plugin = AsyncPlugin::new();
-        plugin.init(&mut ctx).unwrap();
+        with_async_workers(None, || plugin.init(&mut ctx).unwrap());
         drop(ctx);
 
         let proxy = php_classes
