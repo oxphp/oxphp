@@ -52,10 +52,10 @@ Because the two preferences above differ, a client that accepts both Brotli and 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Which codings the server offers, comma-separated. Accepts `br` (or `brotli`), `zstd`, `gzip`, and `off` to switch compression off entirely. The order written here is ignored — the server picks per response, see [Choosing a coding](#choosing-a-coding) |
-| `BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
-| `ZSTD_LEVEL` | `6` | Zstandard level (0–19) |
-| `GZIP_LEVEL` | `6` | Gzip level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup, and an explicit `BROTLI_LEVEL` overrides it |
+| `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
+| `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard level (0–19) |
+| `COMPRESSION_GZIP_LEVEL` | `6` | Gzip level (0–9) |
+| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup, and an explicit `COMPRESSION_BROTLI_LEVEL` overrides it |
 
 A coding is offered when it is listed in `COMPRESSION_ENCODINGS` **and** its level is not `0`; either one alone withdraws it. An unknown name in the list is a startup error rather than a silently dropped coding.
 
@@ -147,7 +147,7 @@ For very small responses (under a few hundred bytes), framing overhead occasiona
 
 Higher quality levels (8–11) compress significantly better but use much more CPU. If you observe high CPU consumption from compression:
 
-**Fix:** Lower `ZSTD_LEVEL` to `3` and `GZIP_LEVEL` to `4`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost. Brotli is the expensive coding of the three, but lowering `BROTLI_LEVEL` to `4` is not the way to save that CPU — at 4 it produces more bytes than gzip does at its own default while still costing more than gzip. Drop `br` from `COMPRESSION_ENCODINGS` instead: clients that accept Brotli then get gzip, which on real bodies is 2–6% larger for roughly half the CPU. Static files cost nothing per request whichever codings remain, since their compressed copies are built once in the background.
+**Fix:** Lower `COMPRESSION_ZSTD_LEVEL` to `3` and `COMPRESSION_GZIP_LEVEL` to `4`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost. Brotli is the expensive coding of the three, but lowering `COMPRESSION_BROTLI_LEVEL` to `4` is not the way to save that CPU — at 4 it produces more bytes than gzip does at its own default while still costing more than gzip. Drop `br` from `COMPRESSION_ENCODINGS` instead: clients that accept Brotli then get gzip, which on real bodies is 2–6% larger for roughly half the CPU. Static files cost nothing per request whichever codings remain, since their compressed copies are built once in the background.
 
 ### Pre-compressed assets are being compressed again
 
@@ -167,9 +167,9 @@ services:
       - DOCUMENT_ROOT=/var/www/html/public
       - ENTRY_FILE=index.php
       - COMPRESSION_ENCODINGS=br,zstd,gzip
-      - BROTLI_LEVEL=5
-      - ZSTD_LEVEL=6
-      - GZIP_LEVEL=6
+      - COMPRESSION_BROTLI_LEVEL=5
+      - COMPRESSION_ZSTD_LEVEL=6
+      - COMPRESSION_GZIP_LEVEL=6
 ```
 
 ## See Also

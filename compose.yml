@@ -145,9 +145,9 @@ services:
 
       # Per-coding effort. A coding is offered only when it is listed above
       # and its level is not 0.
-      # - BROTLI_LEVEL=5
-      # - ZSTD_LEVEL=6
-      # - GZIP_LEVEL=6
+      # - COMPRESSION_BROTLI_LEVEL=5
+      # - COMPRESSION_ZSTD_LEVEL=6
+      # - COMPRESSION_GZIP_LEVEL=6
 
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).
       # - ERROR_PAGES_DIR=/var/www/errors

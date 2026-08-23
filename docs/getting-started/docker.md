@@ -298,7 +298,7 @@ services:
       - ACCESS_LOG=error
       - PHP_WORKERS=4
       - DRAIN_TIMEOUT_SECONDS=25
-      - BROTLI_LEVEL=5
+      - COMPRESSION_BROTLI_LEVEL=5
     restart: unless-stopped
 ```
 
